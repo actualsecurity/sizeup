@@ -486,7 +486,8 @@ GROUND_LEVEL_FPM = 200.0
 GROUND_AGL_FT = 50.0
 ROLLOUT_MAX_KT = 80.0
 TAXI_KT = 35.0
-# A helicopter (or anything ROTOR_LIKE) flies slow and low: on the ground by inference only when all but still, this low
+# A helicopter (or anything ROTOR_LIKE) flies slow and low: on the ground by inference only when all but still, and
+# this low by GNSS height (by the pressure altitude, within its error: LOW_SLOW_AGL_FT; parked on the ramp with no flag)
 HOVER_KT = 5.0
 HOVER_AGL_FT = 15.0
 # GNSS height (readsb's alt_geom) is above the WGS84 ellipsoid; the geoid (MSL) is about 32.6 m below it at HPN (EGM96)
@@ -551,17 +552,17 @@ def _ground_by_inference(ac: Plane) -> bool:
     gs, vr, agl = ac.gs, ac.vertical_rate, ground_agl(ac)
     if not _level(vr) or agl is None:
         return False
-    if ac.category in ROTOR_LIKE:
-        return gs is not None and gs < HOVER_KT and agl < HOVER_AGL_FT
+    if ac.category in ROTOR_LIKE:                       # by pressure altitude, parked can't be told from a low hover
+        return gs is not None and gs < HOVER_KT and agl < (HOVER_AGL_FT if ac.alt_geom is not None else LOW_SLOW_AGL_FT)
     if gs is not None and gs < TAXI_KT:                 # too slow to fly: within the pressure altitude's error
         return agl < (RUNWAY_AGL_FT if ac.category in FIXED_WING else LOW_SLOW_AGL_FT)
     return agl < GROUND_AGL_FT and (gs is None or gs < ROLLOUT_MAX_KT)
 
 
 def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float = CEILING_FT,
-             radius_nm: float = RADIUS_NM) -> Phase:
-    """One snapshot's reading: shortfinal's rules, but on the ground only by the flag or GROUND_LEVEL_FPM's inference.
-    PhaseMemory.phase() confirms it from the recent reports."""
+             radius_nm: float = RADIUS_NM, infer_ground: bool = True) -> Phase:
+    """One snapshot's reading: shortfinal's rules, but on the ground only by the flag or GROUND_LEVEL_FPM's inference
+    (infer_ground=False: by the flag only). PhaseMemory.phase() confirms it from the recent reports."""
     if not ac.has_position:
         return Phase(OVERFLIGHT)
     d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
@@ -570,10 +571,10 @@ def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float 
     gs, trk, vr = ac.gs, ac.track, ac.vertical_rate
     if ac.alt_baro == "ground":                         # the transponder's own air/ground state: authoritative
         return Phase(GROUND if d <= GROUND_RADIUS_NM else OTHER_GROUND, dist_nm=d)
-    if d <= GROUND_RADIUS_NM and _ground_by_inference(ac):
+    if infer_ground and d <= GROUND_RADIUS_NM and _ground_by_inference(ac):
         return Phase(GROUND, dist_nm=d)
-    if d > GROUND_RADIUS_NM and _level(vr) and gs is not None and gs < TAXI_KT and ac.category not in ROTOR_LIKE \
-            and agl is not None and agl < 150:
+    if infer_ground and d > GROUND_RADIUS_NM and _level(vr) and gs is not None and gs < TAXI_KT \
+            and ac.category not in ROTOR_LIKE and agl is not None and agl < 150:
         return Phase(OTHER_GROUND, dist_nm=d)           # taxiing elsewhere (HPN's elevation says little there)
     if procedures is not None and agl is not None and ac.category != "A7":     # A7: rotorcraft
         m = procedures.match(ac.lat, ac.lon, trk, agl, vr)
@@ -727,7 +728,8 @@ class PhaseMemory:
          but flown onto a runway's final at FIXED_WING_ARRIVAL_KT (band: RUNWAY_AGL_FT, else LOW_SLOW_AGL_FT).
       1. p is other_ground, or no position: p.
       2. p is ground (the ground flag, or level and low or slow on the field: classify()): ground; landed (arrival
-         memory cleared).
+         memory cleared). Not by inference alone for a descended arrival at LANDED_KT or more (a float, a low
+         approach): p is read again without the inference, and rule 5 decides.
       3. Arrived before but never seen descending, now climbing hard (STRONG_CLIMB_FPM) and opening: the arrival
          memory is cleared (a departure misread).
       4. p is arriving, not climbing: arriving, when descending or getting closer (to the field, or along its
@@ -915,9 +917,14 @@ class PhaseMemory:
         p = classify(smooth, self.procedures, self.ceiling_ft, self.radius_nm)     # the snapshot, on the smoothed rate
         if p.kind == OTHER_GROUND:
             return p
+        was_inbound = now - self._inbound.get(h, -1e9) < INBOUND_KEEP_S
+        if p.kind == GROUND and ac.alt_baro != "ground" and was_inbound and self._descended.get(h) \
+                and (ac.gs is None or ac.gs >= LANDED_KT):
+            # an arrival read on the ground by inference alone at flying speed: a float or a low approach (level a
+            # few feet up, or a few hundred on a high-pressure day) is not down; rule 5 decides, below LANDED_KT
+            p = classify(smooth, self.procedures, self.ceiling_ft, self.radius_nm, infer_ground=False)
         trend = self._trend(hist, now, fd, trail)
         to_go_dec = self._approaching(h, now, p)
-        was_inbound = now - self._inbound.get(h, -1e9) < INBOUND_KEEP_S
         if p.kind == GROUND:
             self._inbound.pop(h, None)          # landed: whatever it does next is a departure
             self._descended.pop(h, None)

@@ -512,6 +512,9 @@ def test_a_c172_rolling_out_after_touchdown_with_no_ground_flag_reads_ground(bar
     roll = Plane(hex=HEX, lat=END["29"][0], lon=END["29"][1], track=HDG["29"], gs=65.0, category="A1",
                  alt_baro=round(ELEV), baro_rate=0.0)
     assert classify(roll, PROC).kind == GROUND
+    # ... but a descended arrival is down by inference only below LANDED_KT (a float at 65 kt may yet climb away)
+    phases, _ = phases_of(final_29() + [roll, Plane(**{**roll.__dict__, "gs": 45.0})])
+    assert kinds(phases)[-2] != GROUND and kinds(phases)[-1] == GROUND, kinds(phases)
 
 
 def test_geometric_height_is_preferred_for_the_ground_test():
@@ -550,11 +553,16 @@ def test_an_aircraft_climbing_off_the_runway_at_140_ft_is_never_on_the_ground(ca
 
 @pytest.mark.parametrize("category", ["A7", "B4"])
 def test_a_hovering_helicopter_is_on_the_ground_only_by_its_flag_or_all_but_still_on_it(category):
-    """Rotorcraft fly slow and low: hovering at 40 ft by the field is flying (an alarm saying "on the ground" of an
-    airborne helicopter in trouble would mislead); only under HOVER_KT and HOVER_AGL_FT, or with the flag, on the ground."""
+    """Rotorcraft fly slow and low: hovering at 40 ft by the field (by GNSS height) is flying; only under HOVER_KT and
+    HOVER_AGL_FT, or with the flag, on the ground. By the pressure altitude alone (off by a few hundred feet) a hover
+    can't be told from parked on the ramp: under HOVER_KT within LOW_SLOW_AGL_FT is on the ground (HPN Ground's)."""
     hover = Plane(hex=HEX, lat=A.ARP[0], lon=A.ARP[1], track=0.0, gs=3.0, category=category, alt_baro=round(ELEV + 40),
-                  baro_rate=0.0)
+                  alt_geom=ELEV + A.GEOID_FT + 40, baro_rate=0.0)
     assert classify(hover, PROC).kind != GROUND
     assert classify(Plane(**{**hover.__dict__, "gs": 20.0}), PROC).kind != GROUND
-    assert classify(Plane(**{**hover.__dict__, "alt_baro": round(ELEV + 10), "gs": 2.0}), PROC).kind == GROUND
+    assert classify(Plane(**{**hover.__dict__, "alt_geom": ELEV + A.GEOID_FT + 10, "gs": 2.0}), PROC).kind == GROUND
     assert classify(Plane(**{**hover.__dict__, "alt_baro": "ground"}), PROC).kind == GROUND
+    by_baro = Plane(**{**hover.__dict__, "alt_geom": None})
+    assert classify(by_baro, PROC).kind == GROUND
+    assert classify(Plane(**{**by_baro.__dict__, "alt_baro": round(ELEV + 200)}), PROC).kind != GROUND
+    assert classify(Plane(**{**by_baro.__dict__, "gs": 20.0}), PROC).kind != GROUND
