@@ -238,6 +238,27 @@
   @media (max-width: 40rem) { .sdrs .sdr-row { grid-template-columns: minmax(0, 1fr); } .sdr-row > .sdr-err { grid-column: 1; } }
   .sdr-err { color: var(--warn); font-size: var(--fs-xs); margin-inline-start: var(--s-2); }
   .sdr-err:empty { display: none; }
+  /* antenna groups (radio-controls.js renderGroups): a lock badge on a grouped dongle's row; one line per group,
+     the editor inline */
+  .sdr-name { overflow-wrap: anywhere; }
+  .sdr-label > .sdr-grp { margin-inline-start: var(--s-1); color: var(--text-2); white-space: nowrap; }
+  .sdr-grp > .ico { margin-inline-end: var(--s-0); vertical-align: -0.125em; }
+  .ag { display: flex; flex-direction: column; gap: var(--s-1); margin-block-start: var(--s-2); font-size: var(--fs-sm); }
+  .ag:empty { display: none; }
+  .ag-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+  .ag-sdrs { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ag-jobs { overflow-wrap: anywhere; }
+  .ag-add { align-self: flex-start; }
+  .ag-edit { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2); border: var(--bw) solid var(--line);
+             border-radius: var(--radius); max-inline-size: 36rem; }
+  .ag-name { max-inline-size: 14rem; }
+  .ag-pick { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); }
+  .ag-chk { display: inline-flex; align-items: center; gap: var(--s-1); white-space: nowrap; }
+  .ag-order { margin: 0; padding-inline-start: var(--s-5); display: flex; flex-direction: column; gap: var(--s-1); }
+  .ag-order:empty { display: none; }
+  .ag-job { display: flex; align-items: center; gap: var(--s-1); }
+  .ag-job > span { min-inline-size: 8rem; }
+  .ag-addjob { align-self: flex-start; }
   /* the ADS-B receiver (reserved, #235): its dongle and its decoder; "Use for ADS-B" on a dongle's row */
   .adsb-box { margin-block-start: var(--s-2); }
   .adsb-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }

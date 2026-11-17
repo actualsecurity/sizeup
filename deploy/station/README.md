@@ -33,7 +33,7 @@ Three ways to run it:
 |---|---|
 | Install | [Quick start](#quick-start) · [Where the station is](#where-the-station-is) · [Windows](#windows-quick-start) · [Raspberry Pi / Linux](#raspberry-pi--linux-quick-start) · [Where things are](#where-things-are) · [On a Mac](#on-a-mac) |
 | Operate | [The `sizeup-station` command](#the-sizeup-station-command) · [Updating](#updating) · [The station page](#the-station-page) · [Station logs](#station-logs) · [Switching over from the Mac](#switching-over-from-the-mac) |
-| Radios | [Dongles get a job by themselves](#dongles-get-a-job-by-themselves) · [trunk-recorder](#trunk-recorder-its-own-service) · [More P25 systems](#more-p25-systems-mta-mrrs) · [Squelch](#squelch) · [ADS-B receiver](#ads-b-receiver) · [AIS receiver](#ais-receiver) · [HPN ATC](#hpn-atc-the-airband-dongle) · [NY Approach and HPN Ground](#ny-approach-and-hpn-ground) · [Two dongles, one serial](#two-dongles-one-serial) |
+| Radios | [Dongles get a job by themselves](#dongles-get-a-job-by-themselves) · [Antenna groups](#antenna-groups) · [trunk-recorder](#trunk-recorder-its-own-service) · [More P25 systems](#more-p25-systems-mta-mrrs) · [Squelch](#squelch) · [ADS-B receiver](#ads-b-receiver) · [AIS receiver](#ais-receiver) · [HPN ATC](#hpn-atc-the-airband-dongle) · [NY Approach and HPN Ground](#ny-approach-and-hpn-ground) · [Two dongles, one serial](#two-dongles-one-serial) |
 | Other parts | [Incident-source adapter](#incident-source-adapter-station-only) · [Speech-to-text and CPU](#speech-to-text-and-cpu) · [The voice](#the-voice) |
 | When it breaks | [It comes back by itself](#when-things-go-wrong-it-comes-back-by-itself) · [Troubleshooting](#troubleshooting) |
 
@@ -648,6 +648,25 @@ and the station page and the hub's monitor show the row as "· FG1 · auto".
   "_set_by": {serial: "person" | "auto"}}`. Entries saved before this (no `"_set_by"`) count as not
   set by a person, so an Off left over from the old "new dongles start Off" is filled.
 * `auto_assign = false`: new dongles start Off until someone picks a job (the old behaviour).
+
+## Antenna groups
+
+Each dongle sits on one antenna feed, and a dongle on the wrong feed hears nothing useful (MRRS on the UHF antenna
+decodes nothing; UHF channels on the 700/800 MHz antenna overload). An **antenna group** locks the dongles on one feed
+to the jobs that feed carries. Settings > Radios > Receivers (admins; the hub sends it to the station like a dongle's
+job): **+ Antenna group**, a name, its dongles, its jobs in priority order (highest first).
+
+| | |
+|---|---|
+| Locked | A grouped dongle offers and runs only its group's jobs (and Off). A group's jobs run only on its dongles: never picked for, moved to or auto-assigned to a dongle outside it. A dongle (or job) in no group behaves as it always did. |
+| Mapping | Which dongle runs which job is still picked per dongle, as before: the admin's mapping. While every dongle of the group can run, nothing else happens. |
+| One gone | A dongle unplugged, held by another app or with its serial shared, for 10 s: the group's other dongles run the **highest-priority** jobs of the mapping. A spare dongle of the group (Off, not switched Off by a person, `auto_assign` on) stands in first; otherwise the lowest-priority job gives its dongle up. Log: `sdr: group UHF: SDR V3 #3: FG1 -> South 2 (for SDR V4; its own FG1 until then)`. |
+| Back | Back for 10 s: each dongle runs its own job again (`... (its own job again)`). `sdr_modes.json` always keeps the mapping, so a restart or a switch back to an older release starts the mapping. |
+| Never | A fallback never turns on a dongle a person switched Off (how a dongle is handed to shortfinal), never gives a fire job's dongle (Fire/EMS 15, paging, a fireground) to a job that isn't one, never touches a dongle outside the group: the county's trunk-recorder moves only if Fire/EMS 15 is in that group and a higher job took its place. A dongle lent to a reception test is left out. |
+| Two-dongle systems | MRRS 770 and MRRS 773 are two jobs, one per dongle. With one dongle left the higher side runs and MRRS decodes the control channels that side covers (`1 of 2 dongles`). A side that alone would cover none of the system's control channels is never given a dongle by a fallback. |
+| Saving | Refused while what is picked now doesn't fit (a grouped dongle on a job outside its group, a group's job on a dongle outside it): switch that dongle first. A save never stops a job. The ADS-B and AIS dongles are never in a group. A dongle or job is in one group at most. |
+| Shown | A lock badge with the group's name on each grouped dongle; one line per group: dongles running / in the group, its jobs in order, a job not running in amber. A stand-in's row says `for <SDR>`, the missing dongle's `on <SDR>`. Settings > Station > Health: the dongles' Group column and an Antenna groups table; the alert **Antenna group UHF short** (warning, after 60 s) lists the jobs not running. |
+| File | `antenna_groups.json` (`{"groups": [{"name", "sdrs", "jobs"}]}`), next to `sdr_modes.json` (beside `captures/clips`). No groups: no file, and nothing changes. |
 
 ## trunk-recorder, its own service
 
