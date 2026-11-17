@@ -1,0 +1,48 @@
+get:
+  operationId: getIncident
+  summary: One incident
+  description: >
+    The incident with its chronology, dispatches and, for the signed-in person's role, the notes and points on its
+    building and the call's radio rows (see the schema). `ETag` is its rev, which differs by role.
+  parameters:
+    - name: id
+      in: path
+      required: true
+      description: The incident's id.
+      schema: {type: string, pattern: "^[0-9]{1,12}$"}
+    - $ref: ../parameters/IfNoneMatch.yaml
+  responses:
+    "200":
+      description: The incident.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/IncidentDetail.yaml
+          example:
+            $ref: ../examples/IncidentDetail.yaml
+    "304":
+      description: Not modified (the `If-None-Match` rev is current). No body.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+    "401":
+      description: Not signed in.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "404":
+      description: No such incident (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

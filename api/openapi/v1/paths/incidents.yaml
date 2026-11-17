@@ -1,0 +1,56 @@
+get:
+  operationId: listIncidents
+  summary: Incidents, active and recent
+  description: >
+    Every open incident (however old) and those closed or dismissed in the last day, newest first by creation, in
+    cursor pages: `after` takes the previous page's `next`, `limit` the page size (50 by default, at most 200).
+    `state` narrows to `open` or `recent`. The cursor is a position, so a call added meanwhile never repeats or skips
+    a row already sent. `ETag` is the page's rev (a hash of its items' revs and `next`).
+  parameters:
+    - $ref: ../parameters/After.yaml
+    - $ref: ../parameters/Limit.yaml
+    - name: state
+      in: query
+      required: false
+      description: "open: queued, pending and active; recent: closed or dismissed. Anything else is a 400 `bad_request`."
+      schema: {type: string, enum: [open, recent]}
+    - $ref: ../parameters/IfNoneMatch.yaml
+  responses:
+    "200":
+      description: A page.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/IncidentPage.yaml
+          example:
+            items:
+              - $ref: ../examples/Incident.yaml
+            next: eyJ2IjoxLCJ0IjoiaW5jaWRlbnRzIiwiayI6WzE3NjcyMjU2MDAuNSwxMDQyXX0
+            server_time: 1767225800.0
+            rev: 5d4c3b2a19080706
+    "304":
+      description: Not modified (the `If-None-Match` rev is current). No body.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+    "400":
+      description: A bad cursor (`bad_cursor`) or query (`bad_request`).
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "401":
+      description: Not signed in.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

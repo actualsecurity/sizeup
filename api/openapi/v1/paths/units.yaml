@@ -1,0 +1,49 @@
+get:
+  operationId: listUnits
+  summary: The units
+  description: >
+    Every unit on the board, in board order, in cursor pages (`after`, `limit`: 100 by default, at most 500).
+    `ETag` is the page's rev.
+  parameters:
+    - $ref: ../parameters/After.yaml
+    - $ref: ../parameters/Limit.yaml
+    - $ref: ../parameters/IfNoneMatch.yaml
+  responses:
+    "200":
+      description: A page.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/UnitPage.yaml
+          example:
+            items:
+              - $ref: ../examples/Unit.yaml
+            next: null
+            server_time: 1767225800.0
+            rev: 5d4c3b2a19080706
+    "304":
+      description: Not modified (the `If-None-Match` rev is current). No body.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+    "400":
+      description: A bad cursor (`bad_cursor`) or query (`bad_request`).
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "401":
+      description: Not signed in.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

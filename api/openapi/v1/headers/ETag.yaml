@@ -1,0 +1,2 @@
+description: The rev of what this answers, quoted (`"0123456789abcdef"`). Send it back as If-None-Match.
+schema: {type: string}

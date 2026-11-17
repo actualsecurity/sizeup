@@ -24,6 +24,7 @@ from sizeup.fence import FencedWrite
 
 from .errors import JSON, error
 from .limits import Limits
+from . import reads
 from .principal import Resolver, none_yet, person
 from .routes import ROUTES, Ctx, Route
 from .switches import Switches
@@ -42,12 +43,14 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, cad=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
+        self.reads = reads.Reads(cad) if cad is not None else None
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -111,8 +114,10 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
-            status, obj = route.handler(ctx)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads)
+            # a handler answers (status, object) or (status, object, headers); object None is no body (a 304, #560)
+            status, obj, *extra = route.handler(ctx)
+            body = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
+            return status, body, JSON, {"Cache-Control": "no-store", **(extra[0] if extra else {})}
         finally:
             self.limits.leave()

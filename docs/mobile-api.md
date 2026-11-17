@@ -633,6 +633,30 @@ native client (private repo). **Both** = needs work or inputs from each side.
 
 The app consumes each platform PR as it lands: regenerate the client from the merged spec, then build the screen.
 
+### 10.1 Read resources as built (#560)
+
+`GET /api/v1/{snapshot, incidents, incidents/{id}, units, alarms}` (`sizeup/api/v1/reads.py`, `serialize.py`,
+`paging.py`, `rev.py`; the spec is `api/openapi/v1/`). Each needs a device, the `reads` flag and the `read` role; none
+writes. `/me` is PR 2's.
+
+- **rev and ETag, no schema change.** `rev = sha256(json(obj without rev, sorted keys, compact, ensure_ascii=False))[:16]`
+  (`rev_of`), per object; the ETag is that rev (a list's: a hash of its item revs and `next`; the snapshot's: of the
+  three lists' revs). `If-None-Match` (weak, quoted, a list or `*`) answers 304 with no body. A role's detail has its own
+  rev, because what a role may not see is not in what is hashed.
+- **Cursor.** `?after=<next>&limit=`, response `{items, next}`. The cursor is opaque (a version, the list's name and the
+  last row's sort key: `(created_at, id)` newest first for incidents, `(sort, id)` for units), a keyset and not an
+  offset, so rows added or changed between pages move nothing already sent. A cursor of another list, or a malformed
+  one, is 400 `bad_cursor`; a bad `limit` is 400 `bad_request`. Caps: incidents 50 by default and at most 200, units 100
+  and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
+- **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
+  category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
+  (a device is a signed-in person), the caller's name/address/phone, operators' sign-in emails and every radio ID are
+  never sent (the chronology's "Edited ..." lines lose the caller's segments). Site documents and the radio log are not
+  served by these routes.
+- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
+  by one request at a time; role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+  only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
+
 ---
 
 ## 11. Decisions

@@ -1,0 +1,21 @@
+type: object
+description: A unit on the board.
+required: [id, name, kind, status, incident_ids, rev]
+properties:
+  id: {type: string}
+  name: {type: string, description: "The board code, E60."}
+  kind: {type: string, description: "engine | ladder | rescue | chief ... (an unknown value is \"other\")."}
+  title: {type: string}
+  station: {type: string}
+  department: {type: string}
+  board: {type: string, description: "main | other | \"\" (no longer on a board)."}
+  response: {type: string, description: "fire | mutual_aid | agency."}
+  status: {type: string, description: "The status code now."}
+  status_at: {type: [number, "null"]}
+  out_of_service: {type: string, description: "Why, while out of service."}
+  spare: {type: boolean}
+  mutual_aid: {type: boolean}
+  incident_ids: {type: array, items: {type: string}, description: "The open calls it is on."}
+  incident_number: {type: [string, "null"]}
+  rev:
+    $ref: ./Rev.yaml
