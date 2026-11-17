@@ -2550,7 +2550,7 @@ function suggestNote() {
       else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
     } else {
       const p = x.place;
-      li.append(el("b", "", p.label));
+      li.append(...suggestionHead(p));
       if (p.sub) li.append(el("span", "town" + (ours.includes(p.sub) ? " ours" : ""), p.sub));
       li.append(el("span", "dim small", PLACE_KIND[p.kind] || p.category || "place"));
     }
@@ -3032,6 +3032,18 @@ function locationText(m) {             // what the location field says for a sug
   if (m && m.place) return m.street_address ? `${m.street_address} @ ${m.place}` : `@ ${m.place}`;
   return (m && m.label) || "";
 }
+// A suggestion's words (the location box, a note's "@" list): a name at the address typed, "120 Example Ave @ Sample
+// Fitness" (the server's at_address / at); a place by its name, "Sample Market · 40 Example Rd" (the address from the
+// data, or none); else its label ("N Main St & Westchester Ave": meet, two streets typed, where they meet).
+function suggestionHead(m, meet) {
+  const at = m.at_address || m.at;
+  if (at) return [el("b", "", m.street_address || at), el("span", "sg-at", `@ ${m.place || m.label}`)];
+  if (m.place) {
+    return [el("b", "", m.place),
+      el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address")];
+  }
+  return [el("b", "", meet ? m.name : m.label)];
+}
 function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Sample Market")?
   const p = box.picked && box.picked.place;
   return !!p && value.trim().toLowerCase().endsWith(`@ ${p}`.toLowerCase());
@@ -3069,10 +3081,7 @@ function addressBox(input, geoNote, list, opts = {}) {
       li.setAttribute("role", "option");
       li.setAttribute("aria-selected", String(i === box.idx));
       const meet = m.kind === "intersection" && m.name && m.exact != null;   // two streets typed (#213): where they meet
-      if (m.place) {                    // "Sample Market · 40 Example Rd" (the address from the data, or none)
-        li.append(el("b", "", m.place));
-        li.append(el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address"));
-      } else li.append(el("b", "", meet ? m.name : m.label));         // "N Main St & Westchester Ave" · its town
+      li.append(...suggestionHead(m, meet));
       if (m.town) li.append(el("span", "town" + (ours().includes(m.town) ? " ours" : ""), m.town));
       li.append(el("span", "dim small", meet ? "intersection" : `${m.kind} ${Math.round(m.confidence * 100)}%`));
       if (m.cross && !meet) li.append(el("span", "dim small sg-cross", `x ${m.cross}`));

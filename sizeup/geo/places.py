@@ -12,12 +12,18 @@ One ranked list across every kind of place the gazetteer knows, for typed (not s
     exit          places (OSM motorway junctions)                 hutch sb exit 30           Hutch SB exit 30
     place         the department's own names (Settings, cad.sqlite: Cad.search_places passes them in), the county's
                   common place names among them (sizeup/cad/commonplaces.py: a name whose address was not found has
-                  no point and is not offered)
+                  no point and is not offered); typed by its address too ("at": the address)
 
 Ranking: how well the text matches (every typed word must start a word of the name, in any order;
 whole words and the start of the name count more), then our area (Port Chester, Rye Brook, then the
 neighbours: gazetteer.TOWN_PRIORITY), then how close it is to the event (``near``). A highway query
 ("I-95 NB exit 21", "287 eb mm 10") puts that highway's markers first.
+
+An address typed ("12 example ave") that has the department's names at it (the county's common places, a hand-made
+name pinned at that address): each is a suggestion of its own right before the address ("12 Example Ave @ Sample
+Fitness", then "12 Example Ave"), alphabetical (``places_at``). Matched on the address (house number with its letter
+and fraction, the street's words), any of a site's addresses, and only near the address's own point (the same number
+on that street in another town is not it).
 
 ``PlaceIndex(gazetteer)`` builds everything in memory once (a fraction of a second); ``search`` is pure.
 """
@@ -229,6 +235,80 @@ def near_bonus(lat: float, lon: float, near: tuple[float, float] | None) -> floa
     return 0.1 * max(0.0, 1.0 - dist_km(lat, lon, near[0], near[1]) / 8.0)
 
 
+# ----------------------------------------------------------------------------------- places at an address
+
+SAME_ADDRESS_KM = 0.5           # a name at "12 Example Ave" is the typed one only this close to its point: the same
+                                # number on a same-named street in another town is farther off
+_RANGE = re.compile(r"\s*(\d{1,6})\s*-\s*(\d{1,6})(?=\s+[a-z])", re.I)    # "149-151 EXAMPLE AVE" (not "189-1/2")
+
+
+def address_keys(text: str) -> list[tuple]:
+    """An address as the keys it is found by: '12 Example Avenue, Sample Town' -> [(12, '', '', ('example', 'ave'))];
+    '189-1/2 Example St' -> [(189, '', '1/2', ...)]; a range '149-151 EXAMPLE AVE' -> 149 and 151 (and the same side's
+    numbers between, a short range only). Nothing without a house number and a street."""
+    t = " ".join((text or "").split(",")[0].split())
+    m = _RANGE.match(t)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        street = tuple(norm_tokens(t[m.end():]))
+        if not lo or not street:
+            return []
+        nums = range(lo, hi + 1, 2) if lo < hi <= lo + 20 and (hi - lo) % 2 == 0 else \
+            ([lo, hi] if lo < hi <= lo + 20 else [lo])
+        return [(n, "", "", street) for n in nums]
+    sp = split_address(t)
+    if not sp:
+        return []
+    hn, rest, _written = sp
+    street = tuple(norm_tokens(rest))
+    return [(hn.num, hn.letter, hn.frac, street)] if street and not street[0].isdigit() else []
+
+
+class AddressPlaces:
+    """The department's names with a point, by the address they are at: a county entry's address, the gazetteer's
+    spelling of it (``at``) and, for a site's primary, each of its addresses (``site_addresses``); a hand-made name's
+    location when that is an address (its label: "12 Example Ave")."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+        self.by_key: dict[tuple, list[int]] = {}
+        for i, r in enumerate(rows):
+            texts = [r.get("address"), r.get("at"), *(r.get("site_addresses") or [])]
+            if not (r.get("address") or r.get("at")):
+                texts.append(r.get("label"))                   # made by hand: picked at an address
+            for k in {k for t in texts if t for k in address_keys(t)}:
+                self.by_key.setdefault(k, []).append(i)
+
+    def at(self, address: str, lat: float, lon: float) -> list[tuple[dict, str]]:
+        """The names at an address (its point: lat, lon), one per place (a site once: the entry at that very address,
+        else its primary), alphabetical -> [(row, its name as shown)]."""
+        found: dict[str, tuple[int, dict]] = {}        # the place (its site, else the entry) -> (rank, row)
+        for k in address_keys(address):
+            for i in self.by_key.get(k, ()):
+                r = self.rows[i]
+                if dist_km(lat, lon, r["lat"], r["lon"]) > SAME_ADDRESS_KM:
+                    continue
+                own = k in {x for t in (r.get("address"), r.get("at"), r.get("label")) if t for x in address_keys(t)}
+                place = r.get("site") or r.get("key") or f"{r['name']}|{i}"
+                rank = 0 if own else 1
+                if place not in found or rank < found[place][0]:
+                    found[place] = (rank, r)
+        out, seen = [], set()
+        for _rank, r in found.values():
+            name = self.name_of(r)
+            if name.lower() not in seen:               # one name twice at one address (made by hand and the county's)
+                seen.add(name.lower())
+                out.append((r, name))
+        return sorted(out, key=lambda x: x[1].lower())
+
+    @staticmethod
+    def name_of(r: dict) -> str:
+        """A county entry's name as shown (its label); a hand-made name pinned at an address: the name itself."""
+        if not (r.get("address") or r.get("at")) and address_keys(r.get("label") or ""):
+            return r["name"]
+        return r.get("label") or r["name"]
+
+
 def _dedupe(ranked: list[dict]) -> list[dict]:
     """One of each: the same label at the same spot, or two names for one place (a county landmark
     and its OSM twin: "Capitol Theater" / "The Capitol Theatre", one name inside the other) within 400 m;
@@ -377,7 +457,7 @@ class PlaceIndex:
         ranked = _dedupe(sorted(out, key=lambda r: (-r["score"], KIND_ORDER.get(r["kind"], 9), r["label"])))
         for r in ranked:
             r["score"] = round(r["score"], 3)
-        return ranked[:limit]
+        return self._with_places_at(ranked, extra, near, limit)
 
     @staticmethod
     def _item(kind: str, label: str, muni: str, lat: float, lon: float, source: str, quality: float,
@@ -543,11 +623,12 @@ class PlaceIndex:
                                   route=r["route"], dir=r["dir"], value=r["value"], detail=r["address"]))
         return out
 
-    def _local_index(self, extra) -> tuple[list[dict], NameIndex, set]:
-        """The department's names with a point, their word index and their whole names: built again only when they
-        change (the county's list is ~1,000 names, searched at every keystroke)."""
+    def _local_index(self, extra) -> tuple[list[dict], NameIndex, set, AddressPlaces]:
+        """The department's names with a point, their word index, their whole names and their addresses: built again
+        only when they change (the county's list is ~1,000 names, searched at every keystroke)."""
         rows = [r for r in (extra or ()) if r.get("lat") is not None and r.get("lon") is not None]
-        sig = tuple((r["name"], tuple(r.get("aliases") or ()), r["lat"], r["lon"], r.get("label"), r.get("muni"))
+        sig = tuple((r["name"], tuple(r.get("aliases") or ()), r["lat"], r["lon"], r.get("label"), r.get("muni"),
+                     r.get("address"), r.get("at"), r.get("site"), tuple(r.get("site_addresses") or ()), r.get("key"))
                     for r in rows)
         got = getattr(self, "_local_cache", None)
         if got is None or got[0] != sig:
@@ -564,12 +645,43 @@ class PlaceIndex:
                         if k is not None and len(toks) > len(t):
                             aliases.append((toks[:k] + toks[k + len(t):], i))
                             break
-            got = (sig, rows, NameIndex(aliases), {a for a, _i in aliases})
+            got = (sig, rows, NameIndex(aliases), {a for a, _i in aliases}, AddressPlaces(rows))
             self._local_cache = got
-        return got[1], got[2], got[3]
+        return got[1], got[2], got[3], got[4]
+
+    def places_at(self, address: str, lat: float, lon: float, extra=(), near=None, score: float = 0.0) -> list[dict]:
+        """The department's names at an address ("12 Example Ave" at its point): each a place suggestion (kind "place",
+        source "local", its name, its point; at: the address it was found at), alphabetical. Picked, it is that place
+        as by its name, at the address typed."""
+        _rows, _ix, _names, by_address = self._local_index(extra)
+        ctx = near if isinstance(near, _Ctx) else _Ctx(near, self.priority)
+        out = []
+        for r, name in by_address.at(address, lat, lon):
+            h = self._item("place", name, r.get("muni") or "", r["lat"], r["lon"], "local", 1.0, ctx,
+                           category="local name", detail=address, address=address, at=address)
+            h["score"] = score
+            out.append(h)
+        return out
+
+    def _with_places_at(self, ranked: list[dict], extra, near, limit: int) -> list[dict]:
+        """Each address with names at it: those names first, right before it; the rest in their order, limit in all
+        (an address keeps its place in the list: at most limit - 1 names before it)."""
+        out: list[dict] = []
+        for r in ranked:
+            if r["kind"] == "address" and len(out) < limit - 1:
+                have = {(o["label"].lower(), o["lat"], o["lon"]) for o in out}
+                at = [h for h in self.places_at(r["label"], r["lat"], r["lon"], extra, near, r["score"])
+                      if (h["label"].lower(), h["lat"], h["lon"]) not in have]
+                for h in at[:limit - 1 - len(out)]:
+                    h["sub"] = h["sub"] or r["sub"]
+                    out.append(h)
+            out.append(r)
+        mine = {(o["label"].lower(), o["lat"], o["lon"]) for o in out if o.get("at")}
+        out = [o for o in out if o.get("at") or (o["label"].lower(), o["lat"], o["lon"]) not in mine]
+        return out[:limit]
 
     def _local(self, q: list[str], near, extra) -> list[dict]:
-        rows, ix, _names = self._local_index(extra)
+        rows, ix, _names, _addr = self._local_index(extra)
         if not rows:
             return []
         out = []

@@ -408,6 +408,7 @@
   .nc-lab { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
   .nc-gap { display: block; }
   .sugg .sg-addr { color: var(--text-2); }
+  .sugg .sg-at { color: var(--text); }
   .sugg .sg-cross { flex-basis: 100%; }
   /* the map's own marks: the pin (drag to move the point), where a click asked, and the "here" box */
   .nc-pin { inline-size: var(--s-5); block-size: var(--s-5); border-radius: 50% 50% 50% 0; transform: rotate(-45deg); cursor: grab;
