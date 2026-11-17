@@ -236,6 +236,22 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**The speech-to-text input** (`sizeup/cloud/sttinput.py`). A `traffic` or `page` event also carries `stt`: the exact
+audio the station's whisper transcribes (`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis
+already applied; a page's voice without its tones), as lossless FLAC (`sizeup/cloud/flac.py`, numpy only):
+
+```json
+"stt": {"v": 1, "format": "flac", "input": "stt-src", "rate": 16000, "samples": 48000,
+        "voice_offset_s": 4.2, "audio": "<base64 FLAC>"}
+```
+
+`voice_offset_s` is a page's only (where the voice starts in its listening clip). The outbox keeps it in its own
+column with its own budget (30 % of `outbox_max_mb`) and drops it before any clip (`stt_dropped: true` on the event;
+counted, Health → Outbox: "STT inputs dropped"). The hub stores it as clip `<id>.src` (S3 key
+`audio/clip/<yyyy>/<mm>/<dd>/<id>.src.flac`, the clip's channel and retention; never served by `/api/audio`), and its
+engines read it with `HubApp.read_stt_audio(id)`: `input` is `stt-src`, or `listening-8k` when only the listening clip
+is there (an older station, or the outbox dropped it). An older hub ignores `stt`; an older station never sends it.
+
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
 built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
@@ -309,7 +325,7 @@ pages of its own ([the station page](#the-station-page)).
 | what fails | what happens |
 |---|---|
 | Internet / hub down | The station runs on as all-in-one. Events wait in `state/outbox.sqlite` (committed as they happen) and go up in order when the hub is back, also after either side restarts. The hub shows "Station offline since ...". |
-| Outbox grows huge | Over `outbox_max_mb` of queued audio, the oldest clips are dropped (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
+| Outbox grows huge | Over `outbox_max_mb` of queued audio, the speech-to-text inputs go first (the hub transcribes the listening clip instead), then the oldest clips (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
 | A batch is delivered twice | Applied once (seq per epoch, ids). |
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
