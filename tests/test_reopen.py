@@ -1,4 +1,4 @@
-"""Reopen a closed or dismissed event, and the queue's Closed 12h folded to start (#89).
+"""Reopen a closed or dismissed event, and the queue's Closed 24h folded to start (#89).
 
 user, 2026-10-13: "closed should be minimized to start, and we might need to 'reopen' old incidents too"
 """
@@ -130,14 +130,15 @@ def test_reopen_is_a_dispatcher_write_audited_and_refused_to_a_viewer(api):  # n
     assert api.cad.activity.rows()[0]["summary"] == "Reopened a 60 Control page: queued"
 
 
-def test_the_page_folds_closed_12h_with_its_count_and_offers_reopen():
+def test_the_page_folds_closed_24h_with_its_count_and_offers_reopen():
     html = (STATIC / "cad.html").read_text()
     js = (STATIC / "cad.js").read_text()
     css = (STATIC / "cad.css").read_text()
     # the section starts folded: a real button, aria-expanded, the list hidden, the count next to the name
     sec = re.search(r'<section id="q-closed-sec"[^>]*>(.*?)</section>', html, re.S).group(1)
     assert re.search(r'<button id="q-closed-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="q-closed"', sec)
-    assert 'Closed 12h</span><span id="q-closed-n"' in sec and '<ol id="q-closed" class="list q closed" hidden>' in sec
+    assert 'Closed 24h</span><span id="q-closed-n"' in sec and '<ol id="q-closed" class="list q closed" hidden>' in sec
+    assert 'setText(tog.querySelector(".h2"), `Closed ${hrs}h`)' in js        # the hours from the hub's closed_hours
     assert ':is(.other-section, .q-fold).open .sec-toggle .caret' in css
     # the choice is remembered per browser, through the try/catch store() like the operator name
     assert 'store("sizeup.cad.closedOpen")' in js and 'store("sizeup.cad.closedOpen", open ? "1" : "0")' in js

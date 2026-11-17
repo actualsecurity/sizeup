@@ -1388,10 +1388,11 @@ class Editor:
     # Kept as overrides (section "places", key: the name in lower case) so they are audited, exported and
     # imported with the rest; the place search (Cad.search_places, the location box) offers them first.
 
-    def local_places(self) -> list[dict]:
+    def _places_cached(self) -> tuple:
+        """(store rev, the names' version, the names): read again only when they changed (the county's are ~1,000)."""
         rev = self.store.rev
         got = getattr(self, "_places_cache", (None, None, []))
-        if got[0] != rev:        # any write: read the names again only when they changed (the county's are ~1,000)
+        if got[0] != rev:        # any write: the version asked again, the names read again only when it moved
             r = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at, TOTAL(LENGTH(value)) AS size "
                                "FROM settings_overrides WHERE section = 'places'")
             ver = (r["n"], r["at"], r["size"]) if r else None
@@ -1401,7 +1402,15 @@ class Editor:
             else:
                 got = (rev, ver, got[2])
             self._places_cache = got
-        return [dict(r) for r in got[2]]
+        return got
+
+    def local_places(self) -> list[dict]:
+        return [dict(r) for r in self._places_cached()[2]]
+
+    def places_rev(self) -> str:
+        """The place names' version (how many, the last change, their size): moves with every change to them. Nothing
+        copied (the state asks at every build)."""
+        return json.dumps(self._places_cached()[1])
 
     def _places_op(self, action: str, body: dict, op: str) -> dict:
         cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
