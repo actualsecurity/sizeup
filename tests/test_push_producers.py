@@ -93,9 +93,10 @@ def test_the_cads_unit_codes_still_appear(rig, fake, tmp_path):
     assert "Jane" not in title and "P1" not in title
 
 
-LEGIT = ["100 S Ridge St", "100 N Ridge St", "12 O'Brien Ave", "2210 Boston Post Rd, Port Chester", "45A Elm Street",
+LEGIT = ["100 Main St, Rye", "100 Main St, White Plains", "100 S Ridge St", "100 N Ridge St", "12 O'Brien Ave", "2210 Boston Post Rd, Port Chester", "45A Elm Street",
          "1 Park Ave", "100 Example Ave", "9 Old Kings Hwy", "300 W. Main St"]
-JUNK = ["John Smith St", "Casey Rivera Ave", "Mary Jones Road", "Main St Jane Doe", "123 Elm St Casey Rivera",
+JUNK = ["100 Main St, Jane Doe", "100 Main St, Casey Rivera", "100 Main St, Jane Doe Jr", "100 Main St, Nowhere",
+        "John Smith St", "Casey Rivera Ave", "Mary Jones Road", "Main St Jane Doe", "123 Elm St Casey Rivera",
         "123 Main St and Jane Doe", "100 Main St 41228", "100 Main St 555 0147", "100 Main St (call 914-555-0123)",
         "call John Smith at 100 Main", "call John Smith at 100 Main St", "caller says 914-555-0123 100 Example Ave",
         "Rt 22 & Example Ave", "I-95 NB Exit 8", "Example Ave, 100 blk", "123456 Main St", "100 Main", "",
@@ -143,6 +144,14 @@ def test_a_units_display_name_is_sent_only_when_it_is_plain_and_short(rig, fake,
     rig.service.deliver("alerts", "MAYDAY", "x", 5, {"units": [("X9", "")]})
     title = fake.published()[0]["message"]["APNS_SANDBOX"]["aps"]["alert"]["title"]
     assert title == f"MAYDAY \u00b7 {sent}" and "@" not in title and len(title) < 80
+
+
+def test_a_caller_supplied_ref_is_a_plain_reference_too():
+    assert content.message_id("alerts", ref="inc-9") == "inc-9"
+    for bad in ("x y\n", "../../etc", "a/b", "x" * 65, "jane@example.com"):
+        mid = content.message_id("alerts", who={"incident": "26-000015"}, ref=bad)
+        assert mid == "26-000015"                                    # falls through to the event number
+        assert content.message_id("alerts", ref=bad).startswith("alerts:")
 
 
 def test_an_event_number_that_is_not_a_reference_becomes_a_random_one():

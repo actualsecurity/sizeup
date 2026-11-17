@@ -33,7 +33,7 @@ def rig(tmp_path):
     service = svc.PushService(PushDevices(tmp_path / "hub.sqlite"), APPS, client,
                               role_of=lambda e: "viewer", log=lambda m: None)
     svc.install(service)
-    switches = Switches(lambda: True, lambda: flags)
+    switches = Switches(lambda: True, lambda: flags, max_requests=2)       # v1 may serve two at once
     who = lambda h: ME if h.get("Authorization") == BEARER["Authorization"] else None      # noqa: E731
     srv, url = serve(role="hub", mobile=switches, mobile_resolver=who)
     yield type("Rig", (), {"url": url, "fake": fake, "service": service, "flags": flags, "db": tmp_path / "hub.sqlite"})
@@ -219,6 +219,26 @@ def test_a_content_length_that_is_not_plain_digits_is_a_400(rig, length):
 def test_a_duplicate_content_length_is_a_400(rig):
     out = raw_put(rig, "Content-Length: 5\r\nContent-Length: 5\r\n")
     assert out.startswith("HTTP/1.1 400") and "bad_body" in out
+
+
+def test_a_body_that_stops_short_and_closes_is_a_400_and_frees_the_slot(rig):
+    import socket
+    host, port = rig.url.rsplit("//", 1)[1].split(":")
+    for _ in range(5):                                           # more than v1's 2 slots here: none may leak
+        s = socket.create_connection((host, int(port)), timeout=5)
+        s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n"
+                  f"Content-Length: 60\r\n\r\n0123456789".encode())
+        s.shutdown(socket.SHUT_WR)                               # the FIN: 10 of 60 bytes, then nothing
+        out = b""
+        while True:                                              # until the server closes the connection
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            out += chunk
+        s.close()
+        assert out.startswith(b"HTTP/1.1 400") and b"bad_body" in out
+    assert rig.fake.calls == [] and not rig.db.exists()
+    assert call(rig, "DELETE")[0] == 200                         # the next request is served: no 503 busy
 
 
 def test_a_put_without_a_length_or_chunked_is_a_411(rig):

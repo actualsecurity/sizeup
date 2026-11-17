@@ -184,9 +184,16 @@ def place_ok(address: str) -> bool:
     street-name words, a street type, an optional ", Town"; at most 50 characters; nothing after the street type but the
     town, so no digits (no radio ID or split phone number), no parentheses, no trailing words. An address of any other
     shape ("Main St Jane Doe", "John Smith St" with no house number, an intersection) is the generic body: the app
-    fetches the place after unlock."""
+    fetches the place after unlock. The ", Town" tail must be a town of the county's list (data/westchester_towns.txt, read
+    once by sizeup/cad/sources.py county_towns; the lookup is a dict of about 50 names). The street name is checked by
+    shape only: a name-shaped street WITH a house number ("123 Casey Rivera Ave") can pass (a stated residual)."""
     a = (address or "").strip()
-    return 0 < len(a) <= ADDRESS_MAX and ADDRESS.fullmatch(a) is not None
+    if not 0 < len(a) <= ADDRESS_MAX or ADDRESS.fullmatch(a) is None:
+        return False
+    if ", " in a:
+        from sizeup.intel.rules import town_names
+        return a.rsplit(", ", 1)[1].strip().lower() in town_names()
+    return True
 
 
 def unit_name_ok(name: str) -> bool:
@@ -244,8 +251,8 @@ def device_text(kind: str, title: str, body: str, who=None, unit_of=None, intel_
 def message_id(kind: str, click: str = "", who=None, ref: str = "") -> str:
     """The reference the app fetches the details with: the caller's, else the CAD event number, else the intel event in
     the click link, else a random one (a status alert has none)."""
-    if ref:
-        return str(ref)[:64]
+    if ID_OK.fullmatch(str(ref or "")):
+        return str(ref)
     w = notify.Who.of(who)
     if w is not None and ID_OK.fullmatch(w.incident.strip()):
         return w.incident.strip()
