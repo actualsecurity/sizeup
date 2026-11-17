@@ -310,3 +310,18 @@ def any_hour(request, monkeypatch):
 # Private real-data replay (#283, tests/replay.py): the "replay" marker and the replay_sets fixture; a replay test is
 # skipped, with the reason, when the local cache (~/.cache/sizeup-replay or $SIZEUP_REPLAY_DIR) has no data of its kind.
 from tests.replay import pytest_collection_modifyitems, pytest_configure, replay_sets  # noqa: E402,F401
+
+
+def pytest_configure(config):            # replay's markers (imported above) and this one
+    from tests import replay
+    replay.pytest_configure(config)
+    config.addinivalue_line("markers", "hand_dispatch_gate: keep the 60 Control refusal of a dispatch by hand (automode)")
+
+
+@pytest.fixture(autouse=True)
+def _dispatch_by_hand_as_pcfd(request, monkeypatch):
+    """A dispatch or an upgrade by hand is refused in 60 Control mode, the default (automode.hand_dispatch). Tests of the
+    dispatch itself send it as PCFD would, whatever the mode; a test of that refusal: @pytest.mark.hand_dispatch_gate."""
+    if request.node.get_closest_marker("hand_dispatch_gate") is None:
+        from sizeup.cad.automode import AutoDispatch
+        monkeypatch.setattr(AutoDispatch, "hand_dispatch", lambda self: None)

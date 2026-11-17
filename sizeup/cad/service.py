@@ -1425,6 +1425,7 @@ class Cad:
     def dispatch(self, iid: int, body: dict) -> dict:
         """Dispatch the ticked units (full: 'full department response' instead of their names).
         An event that already had a dispatch: 'Engine 61, added to the assignment...'."""
+        self.auto.hand_dispatch()                      # 60 Control dispatching: the county's, never from here
         inc = self.store.incident(iid)
         self._dispatchable(inc)
         operator = _text(body, "operator", OPERATOR_MAX, required=True)
@@ -1445,6 +1446,7 @@ class Cad:
         optional extra units, full department response. {"preview": true}: its text, nothing sent or logged.
         'Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in the
         structure. Now a structure fire, full department response. Time out 15:20.'"""
+        self.auto.hand_dispatch()                      # 60 Control dispatching: the county's, never from here
         inc = self.store.incident(iid)
         L = self.lists
         if inc["status"] not in ("pending", "active"):
