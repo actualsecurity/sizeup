@@ -8,10 +8,12 @@ incoming call").
                             title "STATION PHONE RINGING" (a commissioning test: "[TEST] STATION PHONE RINGING"),
                             message "Incoming call on the station line at 2026-06-26 14:03:21 EDT."
                             or, delivered late, "Phone rang ~45s ago at ... (alert delayed by network)."
-    status topic "Tapout heartbeat" hourly ("Ring detector still online
-                            (hourly check-in, seq 12). ..."), "Tapout restarted" at boot, warnings
-                            ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
-                            OTA lifecycle. The heartbeat is the silent-failure canary.
+    status topic "Tapout heartbeat" every 6 h ([prealert] heartbeat_every_min; it was hourly)
+                            ("Ring detector still online (... seq 12). ..."), "Tapout restarted" at boot,
+                            warnings ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
+                            OTA lifecycle. The heartbeat is the silent-failure canary; any message there
+                            proves Tapout is alive. Nothing for heartbeat_stale_min (default: the period
+                            + 10 % + 15 min, 411 min) -> "Tapout: no heartbeat for ..." in warning.
 
 The topics' names are not in the repo: they come from Settings > System > Push notifications (the CAD settings, the
 DB), overridden by SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC, else [prealert] ring_topic / status_topic
@@ -28,7 +30,10 @@ object per line: "open", "keepalive" about every 45 s, "message"). A dropped str
 backoff (1 s doubling to 60 s; a 429 rate limit waits at least 2 min, or what Retry-After says) and
 resumes with since=<last message id>, so nothing is missed or repeated; the first connection asks
 since=10m (a ring just before a restart is not lost; old ones are not news). The database dedupes by
-ntfy id as well.
+ntfy id as well. The status topic's first connection looks back further (status_since(): a heartbeat period and a
+half, 9 h, and at least heartbeat_stale_min), so a fresh start finds the last heartbeat. ntfy.sh keeps messages
+about 12 h (its cache-duration); asking further back is harmless (ntfy returns what it still has), and Tapout's last
+heartbeat is also kept in the CAD database (meta tapout_status), so a restart shows it before ntfy answers.
 
 A ring -> a pre-alert {at, source "Tapout HQ phone", message, ntfy id} (table prealerts in the CAD
 SQLite, so the hub's Litestream keeps them; listed 24 h, kept 90 days) and a line in the CAD event
@@ -61,6 +66,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from sizeup.cad.store import TZ, CadError, OPERATOR_MAX
+from sizeup.config import HEARTBEAT_EVERY_MIN, heartbeat_stale_min as derive_stale_min
 from sizeup.netcut import cut, socket_of
 
 SOURCE = "Tapout HQ phone"
@@ -93,6 +99,14 @@ CREATE INDEX IF NOT EXISTS prealerts_at ON prealerts(at);
 """
 CSV_COLUMNS = ["Rang", "Received", "Source", "Title", "Message", "Test", "Outcome", "Outcome at", "Seconds to outcome",
                "Incident #", "Operator", "Note", "ntfy id"]
+
+
+def status_since(every_min: float, stale_min: float) -> str:
+    """The status feed's first look back, as ntfy's since=: a heartbeat period and a half (6 h -> 540m), and at least
+    the stale threshold, so the last heartbeat (on time or overdue) is in it and a fresh start shows "ok, heartbeat
+    5 h ago", not "no heartbeat yet" until the next one. Past ntfy's cache (ntfy.sh: 12 h) ntfy just returns what
+    it has: nothing heard -> "no heartbeat yet" (unknown, not a warning)."""
+    return f"{max(1, int(round(max(1.5 * every_min, stale_min))))}m"
 
 
 def _get(url: str, timeout: float):
@@ -351,14 +365,17 @@ class PreAlerts:
     (App: all-in-one or hub), attached as cad.prealert."""
 
     def __init__(self, cad, server: str = "https://ntfy.sh", ring_topic: str = "", status_topic: str = "",
-                 expire_min: float = 5.0, heartbeat_stale_min: float = 90.0, log: Callable[[str], None] = print,
-                 topics: Callable[[], tuple[str, str]] | None = None):
+                 expire_min: float = 5.0, heartbeat_stale_min: float | None = None, log: Callable[[str], None] = print,
+                 topics: Callable[[], tuple[str, str]] | None = None, heartbeat_every_min: float = HEARTBEAT_EVERY_MIN):
         """ring_topic / status_topic: fixed ("" = that feed off); topics(): (ring, status) asked every few seconds instead
-        (the app: env over Settings over the config), so Settings can set or change them with no restart."""
+        (the app: env over Settings over the config), so Settings can set or change them with no restart.
+        heartbeat_every_min: Tapout's heartbeat period; heartbeat_stale_min None: derived from it (config.py)."""
         self.cad, self.store, self.log = cad, cad.store, log
         self.clock = cad.clock
         self.expire_s = float(expire_min) * 60
-        self.stale_s = float(heartbeat_stale_min) * 60
+        self.every_s = float(heartbeat_every_min) * 60
+        self.stale_s = float(derive_stale_min(heartbeat_every_min) if heartbeat_stale_min is None
+                             else heartbeat_stale_min) * 60
         self.server = server.rstrip("/")
         self._lock = threading.RLock()
         self._stopping = threading.Event()
@@ -386,7 +403,8 @@ class PreAlerts:
 
     def _feed(self, which: str, topic: str, last_id: str = ""):
         """The stream for a topic ("" = none set: NoFeed). The status feed's first look goes back a heartbeat period and a
-        half: the last heartbeat is still there, so "heartbeat 40 min ago" survives a restart without waiting an hour."""
+        half (status_since): the last heartbeat is still there, so "heartbeat 5 h ago" survives a restart without
+        waiting up to 6 h for the next one."""
         if not topic:
             return NoFeed(which)
         if off := _outbound_off(self.server):    # a hub on a restored copy: not the department's real feed (logged by
@@ -395,7 +413,7 @@ class PreAlerts:
             f = NtfyStream(self.server, topic, self.ring, self.log, label=which)
         else:
             f = NtfyStream(self.server, topic, self.status, self.log, label=which,
-                           first_since=f"{max(1, int(round(self.stale_s / 60)))}m")
+                           first_since=status_since(self.every_s / 60, self.stale_s / 60))
         f.last_id = last_id
         return f
 
@@ -645,10 +663,11 @@ class PreAlerts:
 
     def tapout(self, now: float | None = None) -> dict:
         """{state: ok | warn | unknown, word, detail}: "Tapout: ok, heartbeat 12 min ago" and the like.
-        Only what was heard: never heard -> "no heartbeat yet"."""
+        Only what was heard: never heard -> "no heartbeat yet". Any message on the status topic (a heartbeat, a restart,
+        a warning, OTA) proves Tapout is alive: the newest of them is what goes stale."""
         now = self.clock() if now is None else now
         h = self.health
-        alive = [x for x in (h.get("heartbeat"), h.get("boot")) if x]
+        alive = [x for x in (h.get("heartbeat"), h.get("boot"), h.get("last")) if x]
         last = max(alive, key=lambda x: x["at"]) if alive else None
         hb = h.get("heartbeat")
         parts = []
@@ -678,7 +697,9 @@ class PreAlerts:
                     "detail": detail or ("nothing heard from Tapout yet" if feed.topic
                                                   else "status topic not set: no heartbeat to watch")}
         age = now - last["at"]
-        what = "heartbeat" if last["kind"] == "heartbeat" else "restarted"
+        what = {"heartbeat": "heartbeat", "boot": "restarted"}.get(last["kind"], "heard")
+        if last["kind"] == "other" and not (w and w.get("id") == last.get("id") and now - w["at"] < LIST_S):
+            detail = "; ".join([f"last message {_ts(last['at'])}: {last['title']}", *parts])
         if age > self.stale_s:
             return {"state": "warn", "word": f"no heartbeat for {_ago(age)}", "at": last["at"], "detail": detail}
         if self.ring_stream.topic and not self.ring_stream.connected and self.ring_stream.down_since is not None:

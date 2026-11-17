@@ -1176,7 +1176,7 @@ request, no retry), the 60 Control header says "Tapout: not configured" and Heal
 | topic | Tapout sends | sizeup does |
 |---|---|---|
 | `ring_topic` | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
-| `status_topic` | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+| `status_topic` | `Tapout heartbeat` every 6 h (`heartbeat_every_min`; it was hourly) (`... seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago" (any status message proves it is alive: "ok, heard 3 min ago"); nothing for `heartbeat_stale_min` (left out: the period + 10 % + 15 min, 411) "no heartbeat for 7 h" in warning; never heard: "no heartbeat yet" |
 
 **Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to a hub it doesn't
 subscribe (logged): the hub does on its own, so it works whether or not the station is connected, and nobody gets two
@@ -1187,7 +1187,10 @@ once (`App.prealert_sync`; a restart resumes after the last message).
 `open`, `keepalive` about every 45 s, `message`). A dropped stream reconnects with backoff (1 s
 doubling to 60 s; a `429` waits at least 2 min, or `Retry-After`, up to 10) and resumes with
 `since=<last message id>`. The first connection asks `since=10m` for rings (a ring just before a
-restart isn't lost, old ones aren't news) and `since=90m` for the status topic (the last heartbeat).
+restart isn't lost, old ones aren't news) and `since=540m` for the status topic: a heartbeat period and a half, at
+least `heartbeat_stale_min`, so a fresh start finds the last heartbeat ("ok, heartbeat 5 h ago", not "no heartbeat
+yet" for up to 6 h). ntfy.sh keeps messages about 12 h; a longer look-back just gets what it still has. Tapout's last
+heartbeat is also kept in the CAD database, so a restart or deploy shows it at once.
 Rings are deduplicated by ntfy id in the database; one received more than `expire_min` after it rang
 is recorded as expired ("received late"), never shown as live.
 
@@ -1218,7 +1221,8 @@ server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local tes
 ring_topic = ""                  # set in Settings > System > Push notifications (or env)
 status_topic = ""
 expire_min = 5
-heartbeat_stale_min = 90
+heartbeat_every_min = 360        # Tapout's heartbeat period (6 h)
+# heartbeat_stale_min = 411      # left out: the period + 10 % + 15 min
 ```
 
 ## Incident sources: external CAD feeds, paging as the backup (#297)

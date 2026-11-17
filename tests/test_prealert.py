@@ -243,7 +243,7 @@ def test_a_ring_is_a_pre_alert_in_the_cad_within_a_second_and_keepalives_are_ign
     app.prealert.start()
     try:
         assert wait(lambda: len(ntfy.gets(RING)) == 1 and len(ntfy.gets(STATUS)) == 1)
-        assert ntfy.gets(RING)[0]["since"] == ["10m"] and ntfy.gets(STATUS)[0]["since"] == ["90m"]
+        assert ntfy.gets(RING)[0]["since"] == ["10m"] and ntfy.gets(STATUS)[0]["since"] == ["540m"]
         assert wait(lambda: ntfy.keepalives >= 4)              # keepalives flow ...
         assert app.cad.state()["prealert"]["items"] == [] and pushed == []     # ... and make nothing
         t0 = time.time()
@@ -454,7 +454,62 @@ def test_tapout_health_from_the_heartbeat(tmp_path):
     t = pa.state()["tapout"]
     assert (t["state"], t["word"]) == ("warn", "no heartbeat for 2 h")
     # kept across a restart (the CAD SQLite)
-    assert offline(cad).tapout()["word"] == "no heartbeat for 2 h"
+    assert offline(cad, heartbeat_stale_min=90).tapout()["word"] == "no heartbeat for 2 h"
+
+
+def test_a_6_hour_heartbeat_warns_only_once_one_is_missed(tmp_path):
+    # Tapout's heartbeat went from hourly to every 6 h: "no heartbeat for 1.6 h" was a false alarm
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)                                                       # the defaults: every 6 h, stale after 411 min
+    assert (pa.every_s, pa.stale_s) == (360 * 60, 411 * 60)
+    pa.status(status_msg("h1", clock.t))
+    clock.t += 5 * 3600
+    t = pa.state()["tapout"]
+    assert (t["state"], t["word"]) == ("ok", "ok, heartbeat 5 h ago")
+    clock.t += 3600 + 50 * 60                                               # 6 h 50 min: the next one is late, not missing
+    assert pa.state()["tapout"]["state"] == "ok"
+    clock.t += 10 * 60                                                      # 7 h: missed
+    t = pa.state()["tapout"]
+    assert (t["state"], t["word"]) == ("warn", "no heartbeat for 7 h")
+    assert offline(cad, heartbeat_every_min=60).tapout()["state"] == "warn"  # hourly still works: stale after 81 min
+    assert offline(cad, heartbeat_every_min=60).stale_s == 81 * 60
+
+
+def test_any_status_message_proves_tapout_is_alive(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("h1", clock.t - 7 * 3600))
+    assert pa.tapout()["word"] == "no heartbeat for 7 h"
+    pa.status(status_msg("o1", clock.t - 10 * 60, "OTA update applied", "Now running v2.4.0.", ("arrows_counterclockwise",), 3))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heard 10 min ago")
+    assert "OTA update applied" in t["detail"] and "last heartbeat" in t["detail"]
+    pa.status(status_msg("w1", clock.t - 60, "Low memory", "Free heap 9000 B.", ("warning",), 4))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heard 60 s ago") and t["detail"].count("Low memory") == 1
+    pa.status(status_msg("h2", clock.t - 30))                               # a heartbeat says so by name again
+    assert pa.tapout()["word"] == "ok, heartbeat 30 s ago"
+    assert offline(cad).tapout()["word"] == "ok, heartbeat 30 s ago"        # kept across a restart
+
+
+def test_a_fresh_start_finds_a_heartbeat_5_h_old(tmp_path, ntfy):
+    # a new hub (empty database: nothing kept) after a deploy: the first look reaches back a period and a half (9 h,
+    # inside ntfy.sh's 12 h cache), so the heartbeat 5 h ago is found: ok, not "no heartbeat yet" until the next one
+    ntfy.add(STATUS, "Tapout heartbeat", HB_TEXT, ("green_heart",), 1, at=time.time() - 10 * 3600)   # outside the look-back
+    hb = ntfy.add(STATUS, "Tapout heartbeat", HB_TEXT, ("green_heart",), 1, at=time.time() - 5 * 3600)
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_ring_topic=RING,
+                   prealert_status_topic=STATUS, prealert_server=ntfy.url))
+    assert app.prealert.health == {}                                        # nothing kept: a new database
+    app.prealert.start()
+    try:
+        assert wait(lambda: app.prealert.health.get("heartbeat", {}).get("id") == hb)
+        assert ntfy.gets(STATUS)[0]["since"] == ["540m"]
+        t = app.prealert.state()["tapout"]
+        assert (t["state"], t["word"]) == ("ok", "ok, heartbeat 5 h ago")
+    finally:
+        app.prealert.stop()
 
 
 # -- no topic in the repo: Settings (the DB) sets them, env overrides, none = off ----------------------------------------
@@ -567,7 +622,8 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     p.write_text("[prealert]\n")
     c = load(p)
     assert (c.prealert_enabled, c.prealert_server, c.prealert_ring_topic, c.prealert_status_topic, c.prealert_expire_min,
-            c.prealert_heartbeat_stale_min) == (True, "https://ntfy.sh", "", "", 5.0, 90.0)     # no default topic: Settings sets it
+            c.prealert_heartbeat_every_min, c.prealert_heartbeat_stale_min) == (
+        True, "https://ntfy.sh", "", "", 5.0, 360.0, 411.0)                  # no default topic: Settings sets it
     p.write_text(f'[prealert]\nring_topic = "{RING}"\nstatus_topic = "{STATUS}"\n')
     c = load(p)
     assert (c.prealert_ring_topic, c.prealert_ring_source, c.prealert_status_topic) == (RING, "config", STATUS)
@@ -577,11 +633,18 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     monkeypatch.delenv("SIZEUP_PREALERT_RING_TOPIC")
     for bad, why in (('server = "http://ntfy.sh"', "server"), (f'ring_topic = "{RING}"\nstatus_topic = "{RING.upper()}"', "two different"),
                      ('ring_topic = "a/b"', "topic"), ("expire_min = 0", "expire_min"), ("enabled = 1", "enabled"),
+                     ("heartbeat_every_min = 0", "heartbeat_every_min"), ('heartbeat_every_min = "6h"', "minutes"),
+                     ("heartbeat_stale_min = 90", "heartbeat_stale_min"),           # below the 6 h period: always warning
+                     ("heartbeat_every_min = 60\nheartbeat_stale_min = 3000", "heartbeat_stale_min"),
                      ("topic = 1", "unknown key")):
         p.write_text(f"[prealert]\n{bad}\n")
         with pytest.raises(ConfigError, match=why):
             load(p)
     monkeypatch.setenv("SIZEUP_PREALERT_SERVER", "http://127.0.0.1:8999/")
+    p.write_text("[prealert]\nheartbeat_every_min = 60\n")
+    assert (load(p).prealert_heartbeat_every_min, load(p).prealert_heartbeat_stale_min) == (60.0, 81.0)
+    p.write_text("[prealert]\nheartbeat_every_min = 60\nheartbeat_stale_min = 90\n")
+    assert load(p).prealert_heartbeat_stale_min == 90.0                    # set: as given
     p.write_text("[prealert]\nenabled = false\n")
     c = load(p)
     assert (c.prealert_enabled, c.prealert_server) == (False, "http://127.0.0.1:8999")
@@ -622,6 +685,7 @@ def test_the_hub_config_has_no_prealert_topic_and_says_never_to_publish():
     sec = text[text.index("[prealert]"):]
     c = load(ROOT / "deploy/hub/config.hub.toml")
     assert c.prealert_enabled and c.prealert_ring_topic == "" and c.prealert_status_topic == ""
+    assert (c.prealert_heartbeat_every_min, c.prealert_heartbeat_stale_min) == (360.0, 411.0)   # Tapout: every 6 h
     assert "Settings > System" in sec and "never publishes" in text[text.index("[prealert]"):].lower()
 
 
