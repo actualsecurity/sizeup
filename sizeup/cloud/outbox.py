@@ -16,12 +16,16 @@ lane of their own: the stt_inputs table, sent by their own thread to POST /api/s
 here, so a page or a transmission never queues behind one. They are not events (no seq, never in the hub's cursor:
 the hub keeps each one by its clip id, whenever it comes, so the order doesn't matter and a resend is harmless).
 
-    add_stt(data, flac, meta)  one, committed at once
-    stt_batch()                the oldest, up to a size; stt_ack(ns) deletes the ones the hub answered for
+    add_stt(data, flac, meta, prio)  one, committed at once
+    stt_batch()                the highest priority first, the oldest first within it, up to a size; stt_ack(ns) deletes
+                               the ones the hub answered for
 
-They have their own budget (STT_SHARE of max_audio_bytes) and count toward the limit with the clips, and go before any
-of them: over their budget, or the whole over the limit, the oldest STT inputs are dropped first (dropped_stt counts
-them), only then context audio, then our clips. The hub then transcribes the listening clip and says so.
+Each has a priority (#677, sttinput.PRE / NORMAL / LOW): the pre-alert channels' (pages, the airband, a talkgroup of
+the alert tier) go up before other traffic, and a context talkgroup's last. They have their own budget (STT_SHARE of
+max_audio_bytes) and count toward the limit with the clips, and go before any of them: over their budget, or the whole
+over the limit, STT inputs are dropped first, the lowest priority first and the oldest first within it (dropped_stt
+counts them, dropped_stt_pre the pre-alert ones), only then context audio, then our clips. The hub then transcribes the
+listening clip and says so.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from pathlib import Path
 
 CONTEXT_SHARE = 0.2
 STT_SHARE = 0.3
+STT_PRE = 2                     # an STT input's priority (sizeup/cloud/sttinput.py PRE / NORMAL / LOW): pre-alert ...
+STT_NORMAL = 1                  # ... other traffic (and every row from before #677)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -51,7 +57,8 @@ CREATE TABLE IF NOT EXISTS stt_inputs (
     at REAL NOT NULL,
     data TEXT NOT NULL,
     flac BLOB NOT NULL,
-    meta TEXT NOT NULL
+    meta TEXT NOT NULL,
+    prio INTEGER NOT NULL DEFAULT 1
 );
 """
 
@@ -74,6 +81,8 @@ class Outbox:
         self.db.executescript(SCHEMA)
         if "context" not in {r[1] for r in self.db.execute("PRAGMA table_info(outbox)")}:
             self.db.execute("ALTER TABLE outbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0")
+        if "prio" not in {r[1] for r in self.db.execute("PRAGMA table_info(stt_inputs)")}:    # (a lane before #677)
+            self.db.execute(f"ALTER TABLE stt_inputs ADD COLUMN prio INTEGER NOT NULL DEFAULT {STT_NORMAL}")
         row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
         if row is None:
             self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?)", (secrets.token_hex(8),))
@@ -84,43 +93,49 @@ class Outbox:
         self.context_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox WHERE context = 1").fetchone()[0])
         self.stt_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()[0])
         self.dropped_stt = 0            # this run: STT inputs dropped to stay under the limit (their clips kept)
+        self.dropped_stt_pre = 0        # ... of them, the pre-alert channels' (only once nothing lower was left)
 
     def _drop_stt(self) -> None:
-        """STT inputs, oldest first, until they are inside their own budget and the whole is inside the limit."""
+        """STT inputs, the lowest priority first and the oldest first within it, until they are inside their own budget
+        and the whole is inside the limit."""
         limit = int(self.max_audio_bytes * STT_SHARE)
         while self.stt_bytes > limit or (self.stt_bytes > 0 and self.audio_bytes + self.stt_bytes > self.max_audio_bytes):
-            old = self.db.execute("SELECT n, LENGTH(flac) FROM stt_inputs ORDER BY n LIMIT 20").fetchall()
+            old = self.db.execute("SELECT n, LENGTH(flac), prio FROM stt_inputs ORDER BY prio, n LIMIT 20").fetchall()
             if not old:
                 self.stt_bytes = 0
                 return
-            for n, size in old:
+            for n, size, prio in old:
                 self.db.execute("DELETE FROM stt_inputs WHERE n = ?", (n,))
                 self.stt_bytes -= size
                 self.dropped_stt += 1
+                self.dropped_stt_pre += int(prio >= STT_PRE)
                 if self.stt_bytes <= limit and self.audio_bytes + self.stt_bytes <= self.max_audio_bytes:
                     return
 
-    def add_stt(self, data: dict, flac: bytes, meta: dict, at: float | None = None) -> int:
-        """One clip's STT input (data: its id and where it was heard, sizeup/cloud/sttinput.py)."""
+    def add_stt(self, data: dict, flac: bytes, meta: dict, at: float | None = None, prio: int = STT_NORMAL) -> int:
+        """One clip's STT input (data: its id and where it was heard, sizeup/cloud/sttinput.py; prio: its channel's,
+        sizeup/app.py App._stt_lane)."""
         with self._lock:
-            cur = self.db.execute("INSERT INTO stt_inputs (at, data, flac, meta) VALUES (?, ?, ?, ?)",
+            cur = self.db.execute("INSERT INTO stt_inputs (at, data, flac, meta, prio) VALUES (?, ?, ?, ?, ?)",
                                   (time.time() if at is None else at, json.dumps(data, separators=(",", ":"), default=_plain),
-                                   flac, json.dumps(meta, separators=(",", ":"), default=_plain)))
+                                   flac, json.dumps(meta, separators=(",", ":"), default=_plain), int(prio)))
             self.stt_bytes += len(flac)
             self._drop_stt()
             return int(cur.lastrowid)
 
     def stt_batch(self, max_bytes: int = 256 * 1024, max_items: int = 50) -> list[dict]:
-        """The oldest STT inputs, at least one, up to max_bytes of FLAC (small: a post already on its way when a page
-        starts shares the uplink with it)."""
+        """The STT inputs to send next, at least one, up to max_bytes of FLAC (small: a post already on its way when a
+        page starts shares the uplink with it): the highest priority first (the pre-alert channels'), the oldest first
+        within it."""
         out, size = [], 0
         with self._lock:
-            rows = self.db.execute("SELECT n, at, data, flac, meta FROM stt_inputs ORDER BY n LIMIT ?",
+            rows = self.db.execute("SELECT n, at, data, flac, meta, prio FROM stt_inputs ORDER BY prio DESC, n LIMIT ?",
                                    (max_items,)).fetchall()
-        for n, at, data, flac, meta in rows:
+        for n, at, data, flac, meta, prio in rows:
             if out and size + len(flac) > max_bytes:
                 break
-            out.append({"n": n, "at": at, "data": json.loads(data), "flac": bytes(flac), "meta": json.loads(meta)})
+            out.append({"n": n, "at": at, "data": json.loads(data), "flac": bytes(flac), "meta": json.loads(meta),
+                        "prio": prio})
             size += len(flac)
         return out
 

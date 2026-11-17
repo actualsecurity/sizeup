@@ -248,6 +248,11 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   counted.
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
   before any clip.
+- **Priority** (#677, `App._stt_lane`). The pre-alert channels go first: pages, the airband, and another system's
+  talkgroups of the `alert` tier (PD dispatch). Then other traffic. Last, a context talkgroup of another tier. The
+  encoder makes the highest first, and the lane sends the highest first, oldest first within it. Under pressure (a
+  full encoder queue, the lane over its budget) the lowest goes first; a pre-alert one goes only when nothing lower
+  is left, counted as `dropped_pre` ("· N pre-alert" on Health). The wire is unchanged.
 - The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
   event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
   `stt_input` in its caps; an older hub never gets them.
@@ -271,6 +276,13 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   only the listening clip is there.
 - Drops are counted by reason (`queue`, `too_big`, `failed`, `outbox`, `refused`). Health shows them under Outbox:
   "STT inputs dropped".
+- **Arrival delay** (#677, `sizeup/cloud/sttarrival.py`). The hub measures each STT input against its event, on its own
+  clock: stored minus applied, in seconds. It is negative when the STT input came first. Each clip counts once; one
+  whose other half never comes within an hour gives no sample. The samples go into the station metrics as kind `stt`
+  (the subject is the channel, with `delay` and `kind`), rolled up hourly as `stt_delay`, with p95. They are written
+  on the metrics-backup thread every 30 s, never in a station's request; a standby drops them. Health has "STT input
+  arrival (hub)": p50 / p95 over 1 h and 24 h per kind and per channel. The Signal tab graphs it under each channel.
+  A talkgroup with no signal metrics of its own gets a card with that chart only.
 
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
@@ -3540,7 +3552,7 @@ stay exactly as they were (they still go to CloudWatch); this adds numbers besid
 | Station | `sizeup/cloud/metrics.py`. A thread looks at each running channel's squelch once a second (attributes the receivers keep anyway: never a dongle) and at what changed every 5 s; each transmission's numbers are handed over as its squelch closes it (`App._segment`: a dict queued, no I/O) |
 | Records | `floor` a channel a minute: idle quieting p50 / p90 / max, the FM hiss (relative dB) or the AM floor (dBFS), seconds open, noise opens, and its squelch, dongle, gain (sent when they change and every 15 min). `tx` each transmission: kind (voice, page, burst, noise), length, quieting / carrier, at open and close, the hiss or floor, carrier dBFS and voice SNR (airband), why it ended. `cc` each P25 system a minute: decode rate (avg, low, high), retunes, grants on uncovered frequencies. `ev` what explains a shift: start, sdr, squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped |
 | Path | `POST /api/station/metrics` (gzipped, every minute, at most 2,000 records, at most 4 MB unpacked), on its own thread and connection: never the outbox, so pages and transmissions never queue behind it. Never counted as the station being seen (a second station's, or a wedged primary's, metrics don't keep "connected" up). A malformed batch is a 400, which the station drops; a hub that isn't the leader answers 503 and the batch is sent again. While the hub is away records wait in memory, at most 20,000 (about a day and a half): past that the oldest go, counted, and one `dropped` event says so when the hub is back. Taken from any authenticated station, under its own id |
-| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, max per metric) and events a year. Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
+| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, p95, max per metric; p95 since #677) and events a year. The hub adds its own `stt` records, each STT input's arrival delay (#677). Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
 | Durability | Not in Litestream (nothing added to a drain or a takeover). Copies in the backups bucket (`sizeup/cloud/metricsbackup.py`): `metrics/copy-0..7.sqlite.gz`, round-robin over the oldest, so the last 8 are always there and one bad copy can't take the history with it. A new leader first *settles*: it lists the copies and merges the newest (and the largest) in, or sees, from a listing that succeeded, that there are none; a failed listing or download is retried (30 s doubling to 30 min) and nothing is uploaded until it settles. Then a copy 15 min later and every 3 h (SQLite's backup API: the ingest isn't held up). Once settled its answer to each station carries `resend_from` (when the merged copy was made) and the station sends again what was acked since (kept 6 h; duplicates are ignored). Lost at worst: what the old task took after its last copy, when the station was away for that whole time or settling took longer than 6 h; never what a copy already holds. A copy that can't be read (torn, another release's schema without a key column) is skipped for the next older one; one with a column more or less merges column by column. Settings > Station > Health shows a Metrics warning when it hasn't settled in 6 h or kept no copy in 12 h. Each copy is made in memory (~80 MB at steady state, briefly) |
 | Size | Measured (tests/test_station_metrics.py): a day of 6 channels, 2 P25 systems and 2,000 transmissions is ~13,500 records, ~1.7 MB; ~50 MB at 30 days of raw and ~30 MB for a year of rollups |
 | Reading | `GET /api/cad/metrics?subject=FG1&from=&to=&res=raw\|hour\|auto&station=&kind=&metric=`: raw (a week at most) or hourly, with the events, the station's and the Settings audit's changes to that channel; no subject: the series there are. A signed-in admin only, on the hub only: closed without a verified sign-in |

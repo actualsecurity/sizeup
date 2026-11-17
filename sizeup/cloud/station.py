@@ -49,7 +49,8 @@ halving the rate halves the upload and changes nothing you can hear.
     stt-input threads  each transmission's / page's speech-to-text input (the exact audio the station's whisper
                        transcribes, FLAC at 16 kHz, sizeup/cloud/sttinput.py): made by one low-priority thread
                        ("hub-stt-input") off the radio path, kept in the outbox's own lane, and sent by "hub-stt"
-                       to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them
+                       to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them;
+                       the pre-alert channels' first (pages, the airband, alert-tier talkgroups: #677)
 """
 
 from __future__ import annotations
@@ -246,15 +247,16 @@ class StationLink:
         self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
-    def stt_input(self, item, audio) -> None:
+    def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
         made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own.
-        Not even queued for a hub that doesn't take them (an older one): no encoding for nothing."""
+        Not even queued for a hub that doesn't take them (an older one): no encoding for nothing. prio: its channel's
+        (#677, App._stt_lane): the pre-alert channels' go first and are dropped last."""
         if sttinput.CAP in self.hub_caps:
-            self.stt_encoder.submit(item, audio)
+            self.stt_encoder.submit(item, audio, prio)
 
-    def _stt_made(self, data: dict, flac: bytes, meta: dict) -> None:
-        self.outbox.add_stt(data, flac, meta)
+    def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
+        self.outbox.add_stt(data, flac, meta, prio=prio)
         self._stt_wake.set()
 
     def stt_stats(self) -> dict:
@@ -263,7 +265,9 @@ class StationLink:
         n, b = self.outbox.stt_pending()
         dropped = dict(enc["dropped"], outbox=self.outbox.dropped_stt, refused=self.stt_refused)
         return {"queued": enc["queued"], "waiting": n, "bytes": b, "made": enc["made"], "sent": self.stt_sent,
-                "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps}
+                "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps,
+                # (#677) of the dropped, the pre-alert channels' (only once nothing of a lower priority was left)
+                "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre}
 
     def live_changed(self) -> None:
         self._live_wake.set()

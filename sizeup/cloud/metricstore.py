@@ -28,7 +28,8 @@ Tables (made on first use, never at the hub's start):
              RAW_DAYS (30) days. One B-tree (WITHOUT ROWID): a series' range is one seek
     events   (station, subject, at, ev) -> detail: what explains a shift (the station's; the Settings audit's squelch and
              channel changes are joined in when read, from cad.sqlite), EVENT_DAYS (365)
-    hourly   (station, subject, metric, hour) -> n, lo, p50, p90, hi: the rollups, HOURLY_DAYS (365)
+    hourly   (station, subject, metric, hour) -> n, lo, p50, p90, hi, p95 (p95 since #677: NULL in older rows), the
+             rollups, HOURLY_DAYS (365)
     series   (station, subject, kind) -> first, last: what there is (the API's index, the retention's list)
     meta     snapshot_at (when this copy was made), settled
 
@@ -68,7 +69,7 @@ RENAME_CHUNK = 20000            # a station renamed: its rows moved this many a 
 UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
 COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
-KINDS = ("floor", "tx", "cc")
+KINDS = ("floor", "tx", "cc", "stt")    # (stt: each STT input's arrival delay on the hub, sizeup/cloud/sttarrival.py)
 MAX_RECORDS = 5000              # a post
 MAX_DOC = 2048                  # one record's numbers, as JSON
 MAX_FUTURE_S = 86400.0          # a station clock this far ahead: refused
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS events (station TEXT NOT NULL, subject TEXT NOT NULL,
                                    detail TEXT NOT NULL DEFAULT '', PRIMARY KEY (station, subject, at, ev)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hourly (station TEXT NOT NULL, subject TEXT NOT NULL, metric TEXT NOT NULL,
                                    hour INTEGER NOT NULL, n INTEGER NOT NULL, lo REAL, p50 REAL, p90 REAL, hi REAL,
-                                   PRIMARY KEY (station, subject, metric, hour)) WITHOUT ROWID;
+                                   p95 REAL, PRIMARY KEY (station, subject, metric, hour)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS series (station TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL, first REAL NOT NULL,
                                    last REAL NOT NULL, PRIMARY KEY (station, subject, kind)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -113,6 +114,9 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "cc_lo":        ("cc", lambda d: True, lambda d: d.get("lo")),
     "cc_uncovered": ("cc", lambda d: True, lambda d: sum((d.get("unc") or {}).values()) if d.get("n") or d.get("unc")
                      else None),
+    # #677: each STT input's arrival on the hub after its event (s; negative: it came first). Recorded by the hub
+    # itself (sizeup/cloud/sttarrival.py), the subject its channel
+    "stt_delay":    ("stt", lambda d: True, lambda d: d.get("delay")),
 }
 
 
@@ -221,6 +225,8 @@ class MetricStore:
         db.execute("PRAGMA synchronous = NORMAL")
         db.execute("PRAGMA busy_timeout = 5000")
         db.executescript(SCHEMA)
+        if "p95" not in {r[1] for r in db.execute("PRAGMA table_info(hourly)")}:       # (a file from before #677)
+            db.execute("ALTER TABLE hourly ADD COLUMN p95 REAL")
         self._db = db
         if self.path == ":memory:":
             self._ro, self._rlock = db, self._lock
@@ -272,10 +278,11 @@ class MetricStore:
 
     # -- in ---------------------------------------------------------------------------------------------------------
 
-    def ingest(self, station: str, records: list) -> dict:
+    def ingest(self, station: str, records: list, tell: bool = True) -> dict:
         """POST /api/station/metrics from `station` (the authenticated id). What can't be read is skipped and counted,
         never refused whole: {ok, accepted, skipped, resend_from?}. MetricsError for a body that isn't one (the station
-        drops it); fence.FencedWrite when this task isn't the leader (a 503: the station sends it again)."""
+        drops it); fence.FencedWrite when this task isn't the leader (a 503: the station sends it again). tell=False:
+        the hub's own records for the station (#677's STT input arrival), never the answer that asks it to resend."""
         if not isinstance(records, list):
             raise MetricsError("records: a list")
         if len(records) > MAX_RECORDS:
@@ -335,7 +342,7 @@ class MetricStore:
                 self._dirty.add((st, s, int(at // 3600)))
         self.ingested += n
         out = {"ok": True, "accepted": n, "skipped": skipped}
-        if self.settled and self.resend_from is not None and station not in self._told:
+        if tell and self.settled and self.resend_from is not None and station not in self._told:
             self._told.add(station)
             out["resend_from"] = self.resend_from          # this store lost what came after: again, please
         return out
@@ -437,8 +444,9 @@ class MetricStore:
         """Each (station, subject, hour) rolled up again from raw. The rows written."""
         out = 0
         for st, s, hour in sorted(keys):
-            rows = self._read("SELECT kind, doc FROM raw WHERE station = ? AND subject = ? AND kind IN ('floor', 'tx', "
-                              "'cc') AND at >= ? AND at < ?", (st, s, hour * 3600.0, hour * 3600.0 + 3600.0))
+            rows = self._read(f"SELECT kind, doc FROM raw WHERE station = ? AND subject = ? AND kind IN "
+                              f"({', '.join('?' * len(KINDS))}) AND at >= ? AND at < ?",
+                              (st, s, *KINDS, hour * 3600.0, hour * 3600.0 + 3600.0))
             docs: dict[str, list[dict]] = {}
             for kind, doc in rows:
                 try:
@@ -460,9 +468,9 @@ class MetricStore:
                 try:
                     db.execute("DELETE FROM hourly WHERE station = ? AND subject = ? AND hour = ?", (st, s, hour))
                     for metric, v in vals.items():
-                        db.execute("INSERT INTO hourly (station, subject, metric, hour, n, lo, p50, p90, hi) "
-                                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                   (st, s, metric, hour, len(v), min(v), _pct(v, 50), _pct(v, 90), max(v)))
+                        db.execute("INSERT INTO hourly (station, subject, metric, hour, n, lo, p50, p90, hi, p95) "
+                                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   (st, s, metric, hour, len(v), min(v), _pct(v, 50), _pct(v, 90), max(v), _pct(v, 95)))
                         out += 1
                     db.execute("COMMIT")
                 except Exception:
@@ -693,7 +701,7 @@ class MetricStore:
                            self._read("SELECT station, subject, kind, first, last FROM series ORDER BY station, subject, kind")]}
 
     def query(self, q: dict) -> dict:
-        """?subject=FG1 [&station=] [&from=&to= (epoch s; default the last 24 h)] [&res=raw|hour|auto] [&kind=floor|tx|cc]
+        """?subject=FG1 [&station=] [&from=&to= (epoch s; default the last 24 h)] [&res=raw|hour|auto] [&kind=<KINDS>]
         [&metric=...]: the subject's series and its events (the station's and the Settings audit's). No subject: the
         index. MetricsError for a bad one."""
         def one(name: str, default=None):
@@ -727,7 +735,7 @@ class MetricStore:
             raise MetricsError(f"station: one of {', '.join(stations)}")
         kind = one("kind")
         if kind is not None and kind not in KINDS:
-            raise MetricsError("kind: floor, tx or cc")
+            raise MetricsError(f"kind: {', '.join(KINDS)}")
         out: dict = {"station": station, "subject": subject, "from": t0, "to": t1, "res": res, "stations": stations}
         if res == "raw":
             kinds = [kind] if kind else list(KINDS)
@@ -757,10 +765,10 @@ class MetricStore:
             ms = list(dict.fromkeys(picked)) if picked else [m for m, (k, _w, _v) in METRICS.items() if not kind or k == kind]
             rows = []
             for m in ms:
-                rows += [{"metric": m, "at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi}
-                         for h, n, lo, p50, p90, hi in self._read(
-                             "SELECT hour, n, lo, p50, p90, hi FROM hourly WHERE station = ? AND subject = ? AND metric = ? "
-                             "AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, m, int(t0 // 3600),
+                rows += [{"metric": m, "at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi, "p95": p95}
+                         for h, n, lo, p50, p90, hi, p95 in self._read(
+                             "SELECT hour, n, lo, p50, p90, hi, p95 FROM hourly WHERE station = ? AND subject = ? "
+                             "AND metric = ? AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, m, int(t0 // 3600),
                                                                           int(math.ceil(t1 / 3600))))]
             out["truncated"] = len(rows) > MAX_ROWS
             out["rows"] = rows[:MAX_ROWS]
@@ -784,10 +792,11 @@ class MetricStore:
         return out[::-1] if newest else out
 
     def hours(self, station: str, subject: str, metric: str, t0: float, t1: float) -> list[dict]:
-        """One metric's hourly rollups in [t0, t1): [{at, n, lo, p50, p90, hi}] (the drift check)."""
-        return [{"at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi} for h, n, lo, p50, p90, hi in self._read(
-            "SELECT hour, n, lo, p50, p90, hi FROM hourly WHERE station = ? AND subject = ? AND metric = ? AND hour >= ? "
-            "AND hour < ? ORDER BY hour", (station, subject, metric, int(t0 // 3600), int(math.ceil(t1 / 3600))))]
+        """One metric's hourly rollups in [t0, t1): [{at, n, lo, p50, p90, hi, p95}] (the drift check)."""
+        return [{"at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi, "p95": p95}
+                for h, n, lo, p50, p90, hi, p95 in self._read(
+            "SELECT hour, n, lo, p50, p90, hi, p95 FROM hourly WHERE station = ? AND subject = ? AND metric = ? "
+            "AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, metric, int(t0 // 3600), int(math.ceil(t1 / 3600))))]
 
     def _settings_before(self, station: str, subject: str, t0: float) -> dict:
         """The settings of the last floor record before t0 that had them (the station sends them every 15 min)."""

@@ -15,6 +15,10 @@ Station (StationLink):
                               radio threads never wait); ONE low-priority thread makes the FLAC (sizeup/cloud/flac.py)
                               and puts it in the outbox's own lane (outbox.py add_stt). Bounded (QUEUE_ITEMS, QUEUE_S
                               of audio): when full it drops and counts. Never part of the page / traffic event.
+    priority (#677)           each has its channel's (App._stt_lane): PRE for the pre-alert channels (pages, the
+                              airband, a talkgroup of the alert tier: PD dispatch), NORMAL for other traffic, LOW for a
+                              context talkgroup of no alert tier. The encoder makes the highest first; the outbox
+                              sends the highest first; under pressure both drop the lowest first (the oldest within it)
     StationLink._stt_forward  POST /api/station/stt, gzipped, only while no event waits in the outbox and only to a
                               hub that says it takes them ("stt_input" in its caps)
 
@@ -72,6 +76,7 @@ QUEUE_S = 600.0                 # ... and this much audio (~38 MB of float32): o
 NICE = 10                       # the encoder thread's niceness (Linux: per thread), under the radio threads
 WHISPER_PAD = 8000              # WhisperClient's silence each side (0.5 s at 16 kHz)
 DROP_REASONS = ("queue", "too_big", "failed", "outbox", "refused")
+PRE, NORMAL, LOW = 2, 1, 0      # an STT input's priority in the lane (#677; outbox.py STT_PRE / STT_NORMAL)
 
 
 def stt_pcm(audio: np.ndarray, fm: bool) -> np.ndarray:
@@ -119,38 +124,69 @@ def _lower_priority() -> None:
 
 class Encoder:
     """The station's STT inputs, made off the radio path: submit() only queues a reference to the audio; one
-    low-priority thread makes each FLAC and hands it to sink(data, flac, meta) (the outbox's lane)."""
+    low-priority thread makes each FLAC and hands it to sink(data, flac, meta, prio) (the outbox's lane). The highest
+    priority is made first; when the queue is full a new one takes the place of lower-priority ones (the oldest of the
+    lowest first), else it is dropped."""
 
-    def __init__(self, sink: Callable[[dict, bytes, dict], None], log: Callable[[str], None] = print,
+    def __init__(self, sink: Callable[..., None], log: Callable[[str], None] = print,
                  max_items: int = QUEUE_ITEMS, max_s: float = QUEUE_S):
         self.sink, self.log, self.max_items, self.max_s = sink, log, max_items, max_s
         self._cond = threading.Condition()
-        self._q: deque = deque()
+        self._q: dict[int, deque] = {PRE: deque(), NORMAL: deque(), LOW: deque()}
         self._queued_s = 0.0
         self._thread: threading.Thread | None = None
         self._stop = False
         self.made = 0
         self.dropped = {"queue": 0, "too_big": 0, "failed": 0}
+        self.dropped_pre = 0            # ... of them, the pre-alert channels'
         self._said = ""
 
-    def submit(self, item, audio) -> bool:
+    def _queued(self) -> int:
+        return sum(len(q) for q in self._q.values())
+
+    def _drop(self, why: str, prio: int) -> None:
+        self.dropped[why] += 1
+        self.dropped_pre += int(prio >= PRE)
+
+    def _room(self, prio: int, secs: float) -> bool:
+        """(under the lock) Room for one more of this priority: lower-priority ones queued give it their place, the
+        oldest of the lowest first, but only when that makes room (nothing is dropped for nothing)."""
+        n, s = self._queued(), self._queued_s
+        if n < self.max_items and s + secs <= self.max_s:
+            return True
+        lower = [(p, x) for p in sorted(self._q) if p < prio for x in self._q[p]]
+        k = 0
+        while k < len(lower) and not (n - k < self.max_items and s + secs <= self.max_s):
+            s -= lower[k][1][2]
+            k += 1
+        if not (n - k < self.max_items and s + secs <= self.max_s):
+            return False
+        for p, _x in lower[:k]:
+            _desc, _audio, gone = self._q[p].popleft()
+            self._queued_s -= gone
+            self._drop("queue", p)
+        return True
+
+    def submit(self, item, audio, prio: int = NORMAL) -> bool:
         """Queue one transmission / page (never blocks, never encodes). False: dropped (counted)."""
         if audio is None or not len(audio):
             return False
+        prio = prio if prio in self._q else NORMAL
         secs = len(audio) / RATE
         if len(audio) > MAX_SECONDS * RATE:
             with self._cond:
-                self.dropped["too_big"] += 1
+                self._drop("too_big", prio)
             return False
         with self._cond:
             if self._stop:
                 return False
-            if len(self._q) >= self.max_items or self._queued_s + secs > self.max_s:
-                self.dropped["queue"] += 1
+            if not self._room(prio, secs):
+                self._drop("queue", prio)
                 return False
             # what it is, taken now (the item goes on changing on other threads); getattr(item, "fm", True) is
             # Transcriber._run's very expression for de-emphasis
-            self._q.append(((describe(item), getattr(item, "fm", True), getattr(item, "voice_offset_s", 0.0)), audio, secs))
+            what = (describe(item), getattr(item, "fm", True), getattr(item, "voice_offset_s", 0.0))
+            self._q[prio].append((what, audio, secs))
             self._queued_s += secs
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="hub-stt-input", daemon=True)
@@ -162,40 +198,42 @@ class Encoder:
         _lower_priority()
         while True:
             with self._cond:
-                self._cond.wait_for(lambda: self._stop or bool(self._q))
+                self._cond.wait_for(lambda: self._stop or bool(self._queued()))
                 if self._stop:
                     return
-                (desc, fm, offset), audio, secs = self._q.popleft()
+                prio = max(p for p, q in self._q.items() if q)
+                (desc, fm, offset), audio, secs = self._q[prio].popleft()
                 self._queued_s -= secs
             try:
                 got = _blob(desc, fm, offset, audio)
                 if got is None:
                     with self._cond:
-                        self.dropped["too_big"] += 1
+                        self._drop("too_big", prio)
                     continue
-                self.sink(desc, *got)
+                self.sink(desc, *got, prio=prio)
                 self.made += 1
             except Exception as e:  # noqa: BLE001 - one bad clip never stops the next (the hub uses its clip)
                 with self._cond:
-                    self.dropped["failed"] += 1
+                    self._drop("failed", prio)
                 if self._said != type(e).__name__:
                     self._said = type(e).__name__
                     self.log(f"hub link: speech-to-text input not made: {type(e).__name__}: {e}")
 
     def idle(self) -> bool:
         with self._cond:
-            return not self._q
+            return not self._queued()
 
     def stop(self) -> None:
         with self._cond:
             self._stop = True
-            self._q.clear()
+            for q in self._q.values():
+                q.clear()
             self._queued_s = 0.0
             self._cond.notify_all()
 
     def stats(self) -> dict:
         with self._cond:
-            return {"queued": len(self._q), "made": self.made, "dropped": dict(self.dropped)}
+            return {"queued": self._queued(), "made": self.made, "dropped": dict(self.dropped)}
 
 
 # -- the wire ---------------------------------------------------------------------------------------------------------

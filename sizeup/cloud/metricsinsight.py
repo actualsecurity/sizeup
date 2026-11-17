@@ -646,7 +646,7 @@ class Insight:
         n = int(SPARK_S // SPARK_BIN_S)
         rows = []
         for (station, subject), kinds in sorted(self._series().items()):
-            if subject == "station":
+            if subject == "station" or not kinds & {"floor", "cc"}:      # (a channel's STT input arrival only: #677)
                 continue
             row: dict = {"subject": subject, "station": station}
             if "floor" in kinds:

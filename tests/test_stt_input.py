@@ -356,7 +356,7 @@ def test_the_radio_path_never_waits_on_the_encoding(tmp_path, monkeypatch):
 def test_the_encoder_is_bounded_and_counts_every_drop_by_reason():
     made, gate = [], __import__("threading").Event()
 
-    def sink(d, data, meta):
+    def sink(d, data, meta, **kw):
         gate.wait(10)
         if d["id"] == "FG1-bad":
             raise OSError("disk full")
@@ -728,10 +728,10 @@ def test_the_stt_post_claims_its_station_and_one_bad_item_never_fails_it(tmp_pat
         assert code in (401, 409) and not hub.app.audio.has("FG1-1790000000031.src")      # another station's id: refused
         real, woke = hub.app.put_stt_input, []
 
-        def flaky(it):
+        def flaky(it, **kw):
             if it["id"] == "FG1-1790000000032":
                 raise KeyError("boom")
-            return real(it)
+            return real(it, **kw)
         monkeypatch.setattr(hub.app, "put_stt_input", flaky)
         monkeypatch.setattr(hub.app, "stt_stored", lambda: woke.append(1))
         items = [_item(1, "FG1-1790000000031", a), _item(2, "FG1-1790000000032", a), _item(3, "FG1-1790000000033", a)]

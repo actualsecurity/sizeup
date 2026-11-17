@@ -242,7 +242,8 @@ const StationHealth = (() => {
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
-      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")],
+      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")
+        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : ""), ob.dropped_stt_pre ? "hl-warn" : ""],
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],
@@ -309,6 +310,18 @@ const StationHealth = (() => {
       ]));
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
+    }
+    const sa = h.stt_arrival;
+    if (sa) {             // #677: each STT input's arrival on the hub after its event (sizeup/cloud/sttarrival.py)
+      const q = (w) => (w ? `${w.p50} / ${w.p95} s` : "");
+      const n = (w) => [String(w ? w.n : 0), "", w && w.early ? `${w.early} before their event` : ""];
+      const hd = el("h3", "hl-sub", "STT input arrival (hub)");
+      hd.title = "Event applied → its STT input stored, p50 / p95. Negative: the STT input came first";
+      kids.push(hd, table(["Channel", "Kind", "1 h", "24 h", "n 24 h"], [
+        ...Object.entries(sa.kinds || {}).map(([k, w]) => [["All", "dim"], k, q(w.h1), q(w.d1), n(w.d1)]),
+        ...(sa.channels || []).map((c) => [c.channel, c.kind, q(c.h1), q(c.d1), n(c.d1)]),
+      ], ""));
+      if (sa.more) kids.push(el("p", "dim small", `+${sa.more} more channels`));
     }
     const er = d.errors;
     if (er) {             // the hub's own error lines (#285, sizeup/errwatch.py): the rate and the top errors
