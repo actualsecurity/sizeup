@@ -22,6 +22,10 @@ default 6 GB) and a floor of free disk (FREE_FLOOR_BYTES), both made room for be
 first, whichever camera; when nothing more can go and the floor still isn't met, recording stops and says so
 (status "stopped") until there is room again. Measured
 2026-11-07 on the 511NY cameras: about 200 kbit/s, so 175 MB per camera per 2 h; 12 cameras at once, about 2.1 GB.
+Each camera's index keeps its byte total and its segments in time order as it changes (_Segs, #446): the window and
+the cap take the oldest from its head, never a pass over every kept segment (12 h of 19 cameras: ~128,000, several
+times a second), and the free disk is read at most every FREE_EVERY_S. A camera's own session fetches over kept-alive
+connections (sizeup/httpkeep.py).
 
 Where a segment came from: the camera's own HLS session (fetched, checked and repaired here, never in the live
 viewers' cache), or the live stream's when one is open (Roads._streams: the same segments, fetched once). A few
@@ -65,6 +69,7 @@ import re
 import shutil
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,7 +77,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
 
-from sizeup import hlsseg
+from sizeup import hlsseg, httpkeep
 
 WINDOW_S = 7200.0
 MAX_BYTES = 6 * 1024 ** 3
@@ -100,6 +105,8 @@ RESCAN_S = 30.0                       # shared storage: the folder read again th
 RESCAN_FOR_S = 300.0                  # ... for this long after the start (the old leader draining)
 MAX_WORKERS = 24
 AREA_EVERY_S = 60.0                   # the response area's cameras: worked out again this often
+FREE_EVERY_S = 30.0                   # the disk's free space (statvfs: on EFS a call over the network) read this often ...
+FREE_SLACK = 512 * 1024 ** 2          # ... and at once when what was written since may bring it this near the floor
 
 
 def shared_mount(path: str | Path, mounts: str = "/proc/self/mounts") -> str:
@@ -138,6 +145,93 @@ def in_area(poly, lat: float, lon: float) -> bool:
         if (y1 > lat) != (y2 > lat) and lon < (x2 - x1) * (lat - y1) / (y2 - y1) + x1:
             inside = not inside
     return inside
+
+
+class _Segs(dict):
+    """A camera's index, key -> (start, duration, bytes), that keeps its own byte total and its keys in time order
+    (oldest first) as it changes (#446): the total without a pass over every segment, the oldest at its head (the
+    window and the cap take from there). An entry of the order whose segment went, or now starts at another time, is
+    dropped when it reaches the head; the order is sorted again only after one came in out of time (a scan)."""
+    __slots__ = ("bytes", "_order", "_sorted")
+
+    def __init__(self, items=()):
+        super().__init__()
+        self.bytes, self._order, self._sorted = 0, deque(), True
+        self.update(items)
+
+    def __setitem__(self, key, seg) -> None:
+        old = dict.get(self, key)
+        dict.__setitem__(self, key, seg)
+        self.bytes += seg[2] - (old[2] if old is not None else 0)
+        if old is None or old[0] != seg[0]:
+            e = (seg[0], key)
+            if self._order and e < self._order[-1]:
+                self._sorted = False
+            self._order.append(e)
+            if len(self._order) > 2 * len(self) + 64:
+                self._resort()
+
+    def __delitem__(self, key) -> None:
+        self.bytes -= dict.pop(self, key)[2]
+
+    def pop(self, key, *default):
+        if key in self:
+            seg = dict.pop(self, key)
+            self.bytes -= seg[2]
+            return seg
+        if default:
+            return default[0]
+        raise KeyError(key)
+
+    def popitem(self):
+        key, seg = dict.popitem(self)
+        self.bytes -= seg[2]
+        return key, seg
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return dict.__getitem__(self, key)
+
+    def update(self, *a, **kw) -> None:
+        for key, seg in dict(*a, **kw).items():
+            self[key] = seg
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def clear(self) -> None:
+        dict.clear(self)
+        self.bytes, self._order, self._sorted = 0, deque(), True
+
+    def _resort(self) -> None:
+        self._order, self._sorted = deque(sorted((s[0], k) for k, s in dict.items(self))), True
+
+    def _live(self, e: tuple) -> bool:
+        s = dict.get(self, e[1])
+        return s is not None and s[0] == e[0]
+
+    def head(self) -> tuple | None:
+        """(start, key) of the oldest segment, None when there is none (what went before it: dropped from the order)."""
+        if not self._sorted:
+            self._resort()
+        o = self._order
+        while o and not self._live(o[0]):
+            o.popleft()
+        return o[0] if o else None
+
+    def older(self, before: float) -> list:
+        """The keys of the segments that start before this, oldest first."""
+        out = []
+        if self.head() is None:
+            return out
+        for e in self._order:
+            if e[0] >= before:
+                break
+            if self._live(e):
+                out.append(e[1])
+        return out
 
 
 def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
@@ -190,7 +284,7 @@ class Dvr:
         self.may_move: Callable[[str, str], bool] = lambda old, new: self._may_move(old, new)
         self._lock = threading.RLock()            # _cams, _opened, _wanted, pins
         self._disk = threading.RLock()            # making room and writing: one at a time
-        self._cams: dict[str, dict] = {}          # cid -> {segs: {key: (t0, dur, bytes)}, last, end, offset, chunk, ...}
+        self._cams: dict[str, dict] = {}          # cid -> {segs: _Segs {key: (t0, dur, bytes)}, last, end, offset, ...}
         self._opened: dict[str, float] = {}       # cid -> last time someone watched it live
         self._wanted: dict[str, list[str]] = {}
         self.stopped = ""                         # why recording stopped (the disk), "" when it records
@@ -200,6 +294,8 @@ class Dvr:
         self._busy: set[str] = set()              # cameras with a round under way (pool mode)
         self._next: dict[str, float] = {}         # cid -> when its next round is due
         self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
+        self.mono: Callable[[], float] = time.monotonic
+        self._free_read: tuple[float, int, int] | None = None   # (when, free bytes, total_bytes() then): _free_after
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
             self._scanned.set()
@@ -213,7 +309,7 @@ class Dvr:
 
     def _cam(self, cid: str) -> dict:
         with self._lock:
-            return self._cams.setdefault(cid, {"segs": {}, "last": None, "end": None, "offset": 0, "breaks": set()})
+            return self._cams.setdefault(cid, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "breaks": set()})
 
     def _read_dir(self, d: Path) -> dict[int, list[tuple[float, float, int, str, bool]]] | None:
         """A camera's folder: key -> its files [(start, duration, bytes, file name, a new stream)], usually one; two when
@@ -274,7 +370,7 @@ class Dvr:
                 if c is None:
                     if not found:
                         continue
-                    c = self._cams.setdefault(d.name, {"segs": {}, "last": None, "end": None, "offset": 0, "names": {},
+                    c = self._cams.setdefault(d.name, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "names": {},
                                                         "breaks": set()})
                 names = c.setdefault("names", {})
                 breaks = c.setdefault("breaks", set())
@@ -326,18 +422,39 @@ class Dvr:
         except OSError:
             return 0
 
+    def _free_after(self, need: int) -> int:
+        """Free bytes on the recordings' disk once need more are written. The disk is read at most every FREE_EVERY_S
+        (#446); in between: that reading less what the recordings grew by since (what went is never counted back). Read
+        again at once whenever that comes within FREE_SLACK of the floor, so a write is never refused, nor the floor
+        passed, on an old reading."""
+        now, total, seen = self.mono(), self.total_bytes(), self._free_read
+        if seen is not None and now - seen[0] < FREE_EVERY_S:
+            free = seen[1] - max(0, total - seen[2]) - need
+            if free >= self.free_floor + FREE_SLACK:
+                return free
+        free = self._free()
+        self._free_read = (now, free, total)
+        return free - need
+
+    def _segs(self, c: dict) -> _Segs:
+        """A camera's index (under _lock), made a _Segs if it was handed in as a plain dict."""
+        s = c["segs"]
+        if not isinstance(s, _Segs):
+            s = c["segs"] = _Segs(s)
+        return s
+
     def _room(self, need: int) -> bool:
         """Room for need more bytes: under max_bytes, and the disk's free floor kept after it, the oldest going
         first (whichever camera) until there is. False when nothing more can go and there still isn't."""
         with self._disk:
             while True:
-                if self.total_bytes() + need <= self.max_bytes and self._free() - need >= self.free_floor:
+                if self.total_bytes() + need <= self.max_bytes and self._free_after(need) >= self.free_floor:
                     return True
                 with self._lock:
-                    every = [(s[0], cid, key) for cid, c in self._cams.items() for key, s in c["segs"].items()]
-                if not every:
+                    heads = [(h[0], cid, h[1]) for cid, c in self._cams.items() if (h := self._segs(c).head())]
+                if not heads:
                     return False
-                _, cid, key = min(every)
+                _, cid, key = min(heads)
                 self._remove(cid, key)
 
     def _write(self, cid: str, key: int, t0: float, dur: float, body: bytes, brk: bool = False) -> bool:
@@ -394,8 +511,9 @@ class Dvr:
         return s[2] if s else 0
 
     def total_bytes(self) -> int:
+        """Every camera's recording together: each camera's running total (#446), never a pass over the segments."""
         with self._lock:
-            return sum(s[2] for c in self._cams.values() for s in c["segs"].values())
+            return sum(self._segs(c).bytes for c in self._cams.values())
 
     def evict(self) -> int:
         """Older than the window: gone; then over max_bytes or under the free floor: the oldest first (_room)."""
@@ -403,7 +521,7 @@ class Dvr:
         freed = 0
         with self._disk:
             with self._lock:
-                old = [(cid, key) for cid, c in self._cams.items() for key, s in c["segs"].items() if s[0] < now - self.window_s]
+                old = [(cid, key) for cid, c in self._cams.items() for key in self._segs(c).older(now - self.window_s)]
             for cid, key in old:
                 freed += self._remove(cid, key)
             self._room(0)
@@ -619,12 +737,12 @@ class Dvr:
         for attempt in (1, 2):                            # the second: a new session at once
             try:
                 if not c.get("chunk") or attempt == 2:
-                    code, _, body = self.roads.fetch(cam["video"], 6.0, 1 << 20)
+                    code, _, body = self._get(cam["video"], 6.0, 1 << 20)
                     lines = [t.strip() for t in body.decode(errors="replace").splitlines()] if code == 200 else []
                     c["chunk"] = next((t for t in lines if t and not t.startswith("#")), "")
                     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}\.m3u8", c["chunk"] or ""):
                         raise ValueError("no chunklist named")
-                code, _, body = self.roads.fetch(base + c["chunk"], 10.0, 1 << 20)
+                code, _, body = self._get(base + c["chunk"], 10.0, 1 << 20)
                 if code != 200:
                     raise ValueError(f"HTTP {code}")
                 c["fails"], c["retry_at"] = 0, 0.0
@@ -638,6 +756,13 @@ class Dvr:
             c["retry_at"] = now + wait_s
             self.log(f"dvr: {cid}: no stream ({why}); {c['fails']} failures, trying again in {wait_s:.0f} s")
         return None
+
+    def _get(self, url: str, timeout: float, limit: int) -> tuple[int, dict, bytes]:
+        """This recorder's own session's fetches: over kept-alive connections (#446, sizeup/httpkeep.py) when the
+        roads fetch with the plain client, else through the roads' own fetch (whatever was handed in: a test's)."""
+        from sizeup.roads import http_get
+        fetch = self.roads.fetch
+        return httpkeep.get(url, timeout, limit) if fetch is http_get else fetch(url, timeout, limit)
 
     def _list(self, cid: str, cam: dict, c: dict) -> tuple[str, str, bool] | None:
         """(the stream's folder, its chunklist text, live): the live stream's when one is open (the pump's copy),
@@ -654,7 +779,7 @@ class Dvr:
         the one before), repaired; None when it isn't MPEG-TS twice or has no picture left (a hole, never a bad copy)."""
         for attempt in (1, 2):
             try:
-                code, _, body = self.roads.fetch(base + name, 10.0, 4 * 1024 * 1024)
+                code, _, body = self._get(base + name, 10.0, 4 * 1024 * 1024)
                 if code != 200 or not body:
                     raise ValueError(f"HTTP {code}")
                 prev = c.get("hstate")
