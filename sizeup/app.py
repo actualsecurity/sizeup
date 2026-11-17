@@ -3019,21 +3019,43 @@ class App:
         return "" if is_context(channel) else self.cfg.stt_aws_vocabulary
 
     def _own_vocab_phrases(self, base: str) -> list[str]:
-        """An own vocabulary's phrases as they are now: Settings > Radios > Vocabulary's list (edits included), the ATC
-        list with the operators seen (#257), the police one."""
+        """An own vocabulary's phrases: Settings > Radios > Vocabulary's list as it is (edits included), the ATC list as
+        sizeup-atc last got it (_atc_pushed_phrases), the police one."""
         if not base:
             return []
         if getattr(self, "atc_vocab", None) is not None and base == self.atc_vocab.name:
-            r = getattr(self, "atc_refresh", None)
-            if r is not None:
-                return list(r.phrases())
-            from sizeup import atc
-            return list(atc.vocabulary()["phrases"])
+            return self._atc_pushed_phrases()
         if getattr(self, "pd_vocab", None) is not None and base == self.pd_vocab.name:
             return self.police_vocabulary()
         if base == self.cfg.stt_aws_vocabulary:
             return list(self.cad.settings.vocabulary())
         return []
+
+    ATC_PUSHED = "stt_terms_atc_base"
+
+    def _atc_pushed_phrases(self) -> list[str]:
+        """sizeup-atc's phrases as AWS last got them (#257's refresher pushes the operators seen when they change), so the
+        airband term vocabulary changes only when sizeup-atc does, never with every operator seen or gone. The refresher
+        keeps no copy: the list now is kept (in the CAD's meta, by the leader) when its signature is sizeup-atc's; until
+        one is, the copy kept before, else the fixed list."""
+        import hashlib
+        from sizeup import atc
+        from sizeup.transcribe import build_vocabulary
+        store = self.cad.store
+        try:
+            kept = json.loads(store.meta_get(self.ATC_PUSHED) or "{}")
+        except ValueError:
+            kept = {}
+        sig = self.atc_vocab.state().get("sig") or ""
+        if sig and kept.get("sig") == sig:
+            return [str(p) for p in kept.get("phrases") or ()]
+        r = getattr(self, "atc_refresh", None)
+        now = list(r.phrases()) if r is not None else list(atc.vocabulary()["phrases"])
+        if sig and hashlib.sha1(json.dumps(build_vocabulary(now)["phrases"]).encode()).hexdigest()[:12] == sig:
+            if self._atc_leader():
+                store.meta_put(self.ATC_PUSHED, json.dumps({"sig": sig, "phrases": now}))
+            return now
+        return [str(p) for p in kept.get("phrases") or ()] or list(atc.vocabulary()["phrases"])
 
     def _term_vocab_for(self, channel: str) -> str:
         """The AWS vocabulary of a channel's term list and own vocabulary once READY ("" for none: it keeps its own);

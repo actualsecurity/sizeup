@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from sizeup import stt_terms
+from sizeup import stt
 from sizeup.stt import Transcriber, prompt_echo, prompt_only
 from sizeup.stt_terms import (DirFiles, Pushed, S3Files, StationPush, TermSet, TermStore, TermVocabularies, aws_phrases,
                               build_sets, est_tokens, merge, own_for, parse, prompt_terms, version, vocab_v_of, with_terms,
@@ -171,7 +172,10 @@ def test_a_silent_clip_with_a_prompt_never_gets_the_prompt_as_its_text():
     assert _run_one(p, None, s(3), **terms).status == "no_speech"          # the whole prompt, read back: too fast
     assert _run_one(p, None, s(8), **terms).status == "no_speech"
     assert _run_one(p, "working fire, second alarm, all hands.", s(1), **terms).status == "no_speech"   # short
-    assert _run_one(p, "Quillbrook, Zephyrton.", s(1), **terms).status == "no_speech"   # nothing but its items
+    assert _run_one(p, "Quillbrook, Zephyrton, Larkspire Lane.", s(1), **terms).status == "no_speech"   # its items only
+    assert _run_one(p, "Quillbrook, Zephyrton.", s(1), **terms).status == "done"        # two may be said
+    hail = "Larkspire Lane, Port Chester, Zephyrton. Engine 61."                        # a town and the talker: a hail
+    assert _run_one(hail, "Engine 61, Port Chester.", s(1.3), **terms).status == "done"
     assert _run_one(p, "We'll be right back.", s(1), **terms).status == "no_speech"     # turbo's, with a list
     # never on the energy alone (P25 has none; a re-run's and the FM fixture's are unreliable): real speech is kept
     assert _run_one(p, "Quillbrook, Zephyrton.", s(3), low_energy=True, **terms).status == "done"
@@ -188,6 +192,7 @@ def test_a_silent_clip_with_a_prompt_never_gets_the_prompt_as_its_text():
     assert _run_one(p, None, s(3)).status == "done"
     assert _run_one(p, "Quillbrook, Zephyrton.", s(1)).status == "done"
     assert prompt_only("Quillbrook and Zephyrton", p) == 2 and prompt_only("Quillbrook, five", p) == 0
+    assert stt.PROMPT_ONLY_ITEMS == 3
 
 
 # -- where the lists are read from ---------------------------------------------------------------------------------
@@ -632,12 +637,29 @@ def test_the_hub_makes_each_channels_term_vocabulary_on_its_own_vocabulary(tmp_p
         api.close()
 
 
-def test_airband_keeps_the_atc_vocabulary_with_the_operators_seen():
-    """#257's refresher adds the operators seen near HPN: the airband term vocabulary starts from that list."""
+def test_airband_keeps_the_atc_vocabulary_as_it_was_last_pushed():
+    """The airband term vocabulary starts from sizeup-atc's phrases as AWS last got them (#257's refresher pushes the
+    operators seen when they change): it changes only when sizeup-atc does, never with every operator seen or gone."""
+    import hashlib
     from sizeup.app import App
-    stub = SimpleNamespace(_kind={"HPN Tower": "airband"}, atc_vocab=SimpleNamespace(name="sizeup-atc"),
-                           atc_refresh=SimpleNamespace(phrases=lambda: ["Westchester Tower", "Examplejet"]),
-                           pd_vocab=None, pd_sources=(), cfg=SimpleNamespace(stt_aws_vocabulary="sizeup-pcfd"))
+    from sizeup.transcribe import build_vocabulary
+    sig_of = lambda ph: hashlib.sha1(json.dumps(build_vocabulary(ph)["phrases"]).encode()).hexdigest()[:12]
+    pushed = ["Westchester Tower", "Examplejet"]
+    now = {"phrases": list(pushed)}
+    state = {"sig": sig_of(pushed)}
+    kv = {}
+    stub = SimpleNamespace(_kind={"HPN Tower": "airband"}, ATC_PUSHED=App.ATC_PUSHED,
+                           atc_vocab=SimpleNamespace(name="sizeup-atc", state=lambda: dict(state)),
+                           atc_refresh=SimpleNamespace(phrases=lambda: list(now["phrases"])), pd_vocab=None, pd_sources=(),
+                           cad=SimpleNamespace(store=SimpleNamespace(meta_get=kv.get, meta_put=kv.__setitem__)),
+                           _atc_leader=lambda: True, cfg=SimpleNamespace(stt_aws_vocabulary="sizeup-pcfd"))
+    stub._atc_pushed_phrases = lambda: App._atc_pushed_phrases(stub)
     assert App._own_vocab(stub, "HPN Tower") == "sizeup-atc"
-    assert App._own_vocab_phrases(stub, "sizeup-atc") == ["Westchester Tower", "Examplejet"]
+    assert App._own_vocab_phrases(stub, "sizeup-atc") == pushed                      # what AWS has: kept
+    now["phrases"] = [*pushed, "Otherair"]                                          # an operator seen, not pushed yet
+    assert App._own_vocab_phrases(stub, "sizeup-atc") == pushed                      # unchanged: no new vocabulary
+    state["sig"] = sig_of(now["phrases"])                                           # the refresher pushed it
+    assert App._own_vocab_phrases(stub, "sizeup-atc") == [*pushed, "Otherair"]
+    now["phrases"] = list(pushed)                                                   # gone again, not pushed yet
+    assert App._own_vocab_phrases(stub, "sizeup-atc") == [*pushed, "Otherair"]
     assert App._own_vocab_phrases(stub, "") == []

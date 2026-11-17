@@ -40,7 +40,7 @@ PROMPT_ECHO_TERMS = 3
 PROMPT_ECHO_COVER = 0.7
 PROMPT_ECHO_WPS = 4.5
 PROMPT_ECHO_LONG = 6              # ... and a run this long that is nearly all the text, at any length or pace
-PROMPT_ONLY_ITEMS = 2
+PROMPT_ONLY_ITEMS = 3            # (2 dropped a real "Engine 61, Port Chester." at 1.3 s: a talker and a town)
 PROMPT_ONLY_FILLER = {"and", "the", "a", "to", "on", "of", "uh", "um"}
 PROMPT_HALLUCINATIONS = {"well be right back", "and well see you next time", "well see you next time", "see you next time"}
 # Queue priority (SttQueue), strict: a class is served only when every class above it is empty (#300). Pages,

@@ -168,7 +168,7 @@ whisper can read its prompt back on dead air. `stt.prompt_noise()` checks for it
 
 - mostly a run of three or more of the prompt's items in the prompt's order, on a clip under 1.5 s or faster than
   4.5 words a second; or six or more of them, at any pace;
-- nothing but two or more of the prompt's items on a clip under 1.5 s;
+- nothing but three or more of the prompt's items on a clip under 1.5 s (two can be a real hail: a unit and a town);
 - only a number of the prompt or a piece of it (the talker's ID) on a clip with no voice energy;
 - one of `PROMPT_HALLUCINATIONS` ("we'll be right back") on a short or quiet clip.
 
@@ -210,7 +210,7 @@ leader makes one per list and own vocabulary, the first time a channel of that p
 | Channels | Own phrases first | Then |
 |---|---|---|
 | South 2, FG1, FG2, `tg:307`, our talkgroups | `sizeup-pcfd` as Settings > Radios > Vocabulary has it (edits included) | `county_fire` |
-| HPN Tower / Approach / Ground | `sizeup-atc` with the operators seen near HPN (#257) | `airband` |
+| HPN Tower / Approach / Ground | `sizeup-atc` as AWS last got it, operators seen near HPN included (#257) | `airband` |
 | `p25:mrrs:9211` | `sizeup-pd` (`police_phrases()`) | `pd_dispatch` |
 | another system's source with no vocabulary (`p25:mrrs:9570`) | none | its list |
 
@@ -218,7 +218,12 @@ leader makes one per list and own vocabulary, the first time a channel of that p
 - It holds phrases up to AWS's limits (1,500 phrases, 50 KB, 256 characters a phrase, letters only:
   `build_vocabulary()`). The list's terms are written in digits, so `build_vocabulary` spells them for AWS and keeps
   the respelling back to digits, as for the own phrases.
-- It is made again when anything in it changes: the list, an admin's edit, a new operator.
+- It is made again when anything in it changes: the list, an admin's edit, a new push of `sizeup-atc`.
+- An admin's edit to Settings > Radios > Vocabulary reaches the term vocabularies at the next read of the lists
+  (within about 5 minutes), plus the time AWS takes to build them. It doesn't wait for Push: Push only sends
+  `sizeup-pcfd` itself, which the channels use until their term vocabulary is READY.
+- The airband one follows `sizeup-atc` as AWS last got it, so it changes only when that vocabulary does, not with
+  every operator seen or gone.
 - Until it is READY, the channel keeps its own vocabulary. While the next version is PENDING, the one before stays in
   use. If AWS refuses it, the channel keeps its own; a FAILED one is tried again after 1 h, 6 h, then every 24 h.
 - A READY one is checked once an hour and made again if it was deleted.
