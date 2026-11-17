@@ -2682,6 +2682,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
+        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2696,6 +2697,18 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
+
+    def _stt_input(self, item, audio: np.ndarray | None) -> None:
+        """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
+        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
+        link = self.link
+        if link is None or audio is None or not hasattr(link, "stt_input"):
+            return
+        try:
+            link.stt_input(item, audio)
+        except Exception as e:  # never in the radio path's way (the hub falls back to the clip)
+            log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_priority(self, item, key: str) -> int:
         """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first

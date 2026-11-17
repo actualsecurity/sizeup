@@ -3,6 +3,9 @@ AudioDb), so the database (and with it Litestream's replica and a handover's res
 
     s3://<SIZEUP_AUDIO_BUCKET>/audio/<kind>/<yyyy>/<mm>/<dd>/<id>.wav     kind: clip | dispatch; the date is the clip's
                                                                           own (UTC), so a key never changes
+    s3://<SIZEUP_AUDIO_BUCKET>/audio/clip/<yyyy>/<mm>/<dd>/<id>.src.flac  a clip's speech-to-text input, as the station's
+                                                                          whisper got it (sizeup/cloud/sttinput.py): FLAC,
+                                                                          beside its clip, with the clip's retention
 
 The bytes are the WAV as the station sent it (8 kHz mono 16-bit PCM: 57.6 MB per hour of speech, ~16 MB per hour of
 the day at our traffic, measured 2026-11-10). Nothing is re-encoded: the transcription, Replay and the attachments
@@ -42,6 +45,7 @@ from sizeup import aws
 
 PREFIX = "audio"
 KINDS = ("clip", "dispatch")
+STT_SRC = ".src"                      # "<clip id>.src": the clip's speech-to-text input (FLAC, sizeup/cloud/sttinput.py)
 DELETE_MAX = 1000                     # keys per DeleteObjects call (S3's limit)
 TIMEOUTS = {"PUT": 15.0, "GET": 15.0, "POST": 30.0}   # s: the uploader's PUT, the players' GET, a DeleteObjects
 SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,160}")
@@ -147,13 +151,19 @@ def keep_days(ov: dict, channel: str, talkgroup: int | None, default_days: float
 
 
 def object_key(kind: str, at: float, aid: str, prefix: str = PREFIX) -> str:
-    """audio/<kind>/<yyyy>/<mm>/<dd>/<id>.wav (the clip's own UTC date)."""
+    """audio/<kind>/<yyyy>/<mm>/<dd>/<id>.wav (the clip's own UTC date); a clip's speech-to-text input <id>.src.flac."""
     if kind not in KINDS:
         raise ValueError(f"kind: {kind!r}")
     if not SAFE.fullmatch(aid) or ".." in aid:
         raise ValueError(f"bad audio id {aid[:40]!r}")
     d = datetime.fromtimestamp(float(at or 0), timezone.utc)
-    return f"{prefix}/{kind}/{d:%Y/%m/%d}/{aid}.wav"
+    return f"{prefix}/{kind}/{d:%Y/%m/%d}/{aid}{'.flac' if aid.endswith(STT_SRC) else '.wav'}"
+
+
+def key_id(key: str) -> str:
+    """An object key's audio id (object_key's last part without its extension)."""
+    name = key.rsplit("/", 1)[-1]
+    return name.removesuffix(".flac") if name.endswith(STT_SRC + ".flac") else name.removesuffix(".wav")
 
 
 class AudioStore:
@@ -214,7 +224,7 @@ class FsAudioStore(AudioStore):
     def pages(self, prefix: str) -> Iterator[list[tuple[str, float]]]:
         page: list[tuple[str, float]] = []
         base = self.root.resolve()
-        for p in sorted((self.root / prefix).rglob("*.wav")):
+        for p in sorted(x for x in (self.root / prefix).rglob("*") if x.suffix in (".wav", ".flac")):
             try:
                 page.append((p.resolve().relative_to(base).as_posix(), p.stat().st_mtime))
             except (OSError, ValueError):
@@ -245,7 +255,7 @@ class S3AudioStore(AudioStore):
 
     def put(self, key: str, body: bytes) -> str:
         try:
-            self.s3.put(key, body, "audio/wav")
+            self.s3.put(key, body, "audio/flac" if key.endswith(".flac") else "audio/wav")
         except aws.AwsError as e:
             raise StoreError(str(e)) from None
         return '"' + hashlib.md5(body).hexdigest() + '"'     # a single PUT's ETag (SSE-S3): its MD5, checked by S3 (Content-MD5)

@@ -643,6 +643,11 @@ class StationHealth:
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,
                          "age_s": round(snow - oldest, 1) if oldest and ob.get("pending") else None,
                          "dropped_audio": int(ob.get("dropped_audio") or 0)}
+        si = st.get("stt_input") if isinstance(st.get("stt_input"), dict) else {}
+        why = si.get("dropped") if isinstance(si.get("dropped"), dict) else {}
+        why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+        out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
+        out["outbox"]["dropped_stt_why"] = why
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
