@@ -29,8 +29,9 @@
 // On a phone the rail is a sheet behind Sources (Escape closes it).
 // Its width: dragged at its right edge (Panels.separator: the pointer, the arrow keys; a double-click or Home: the
 // layout's own), remembered per viewer (st.p.w px, 0: the layout's own). At least the layout's own minimum (17.5rem),
-// at most 60% of the window, the list never under 20rem: cad.css clamps the same, so a narrower window reflows. No
-// handle while the rail is folded or a sheet.
+// at most 60% of the window, the list never under 16rem: cad.css clamps the same, so a narrower window reflows (and
+// narrower queue / units columns leave it more room). A click that moves nothing keeps nothing. No handle while the
+// rail is folded or a sheet.
 //
 // Folders (#607): the tree is headings and folders. By default the automatic grouping: a heading per system (County,
 // another P25 system, Analog, Airband), a folder per group (the talkgroup's Tag; Analog, Airband), the hub's order.
@@ -62,7 +63,7 @@ window.RadioNav = (() => {
   const KEPT = ["event", "unit", "q", "channel", "emergency", "type", "pcfd", "since", "until"];   // in the address
   const EXTRA = ["channel", "emergency", "type", "pcfd", "since", "until"];   // an old link's: a chip each, gone with the view
   const FOLD_MAX = 300;                                  // folded folders remembered (their ids)
-  const W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 20, W_CAP = 4000;   // the rail's width: rem, the window's share, rem, px
+  const W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 16, W_CAP = 4000;   // the rail's width: rem, the window's share, rem, px
   const BLANK = () => ({ view: "ours", source: "", event: "", unit: "", q: "", channel: "", emergency: "", type: "", pcfd: "", since: "", until: "" });
 
   // ---- pure: what the rail shows -----------------------------------------------------------------------
@@ -259,7 +260,7 @@ window.RadioNav = (() => {
   const st = { open: false, p: prefs(null), src: [], srcRev: "", srcLive: [], srcAt: 0, clock: null, rows: [], cursor: 0, next: "",
                older: false, deep: false, rev: "", busy: false, want: "", timer: 0, error: "", f: BLANK(), ours: [], railSig: "",
                flagSig: "", sheet: false, qTimer: 0, facets: "", shown: null, hash: null, offered: [],
-               layout: null, layoutAsked: null, edit: null, drag: null, sizer: null };
+               layout: null, layoutAsked: null, edit: null, drag: null, sizer: null, moved: false };
   const dom = typeof document !== "undefined" && typeof $ === "function";
   const load = () => { try { st.p = prefs(localStorage.getItem(KEY)); } catch (_) { st.p = prefs(null); } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st.p)); } catch (_) { /* not remembered */ } };
@@ -528,7 +529,7 @@ window.RadioNav = (() => {
     b.type = "button";
     b.dataset.fold = g.id;
     b.setAttribute("aria-expanded", String(!shut));
-    b.title = `${g.name} · ${shut ? "Show all" : "Minimize"}`;      // its name in full: a narrow rail cuts it short
+    b.title = [g.name, shut ? "Show all" : "Minimize"].filter(Boolean).join(" · ");    // its name in full: a narrow rail cuts it short
     b.append(el("span", "caret", shut ? "▸" : "▾"));
     if (!solo) {
       const mk = mark(g.service);
@@ -978,17 +979,21 @@ window.RadioNav = (() => {
   }
   function sizer() {                                  // panels.js loads after this file: made on the first open, or once loaded
     if (st.sizer || !dom || !window.Panels || !Panels.separator) return;
+    $("#rn-size").title = "Resize the rail: drag, or arrow keys; double-click to reset. More room: narrow the queue or units column";
     st.sizer = Panels.separator($("#rn-size"), {
       orient: "vertical", grow: 1, label: "Resize the rail", controls: "rn-rail",
       min: () => limits()[0], max: () => limits()[1], value: () => Math.round($("#rn-rail").getBoundingClientRect().width),
       enabled: () => st.open && st.p.rail && !st.sheet && !phone(),
       set: (px, done) => {
-        const [lo, hi] = limits();
-        st.p.w = clampW(px, lo, hi);
+        const [lo, hi] = limits(), w = clampW(px, lo, hi), cur = Math.round($("#rn-rail").getBoundingClientRect().width);
+        // a click that moved nothing, or a key against a limit at the layout's own width: nothing to keep
+        if (w === cur && (!st.p.w || (done && !st.moved))) { st.moved = false; return; }
+        st.moved = !done;
+        st.p.w = w;
         sizeRail();
         if (done) save();
       },
-      reset: () => { st.p.w = 0; sizeRail(); save(); },
+      reset: () => { st.moved = false; st.p.w = 0; sizeRail(); save(); },
     });
   }
 

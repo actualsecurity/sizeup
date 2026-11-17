@@ -17,7 +17,7 @@ from tests.test_radio_emergency import NODE, STATIC
 
 HARNESS = r"""
 const fs = require("fs");
-const stored = { v: process.argv[3] === "-" ? null : process.argv[3] };
+const stored = { v: process.argv[3] === "-" ? null : process.argv[3], sets: 0 };
 class El {
   constructor(tag, cls, text) { this.tagName = String(tag || "div").toUpperCase(); this.className = cls || "";
     this.textContent = text === undefined || text === null ? "" : String(text); this.children = []; this.dataset = {}; this.attrs = {};
@@ -55,7 +55,7 @@ global.location = { hash: "#radio" };
 global.history = { replaceState(a, b, h) { location.hash = h; } };
 // "THROW": storage refused (a private window, site data blocked)
 global.localStorage = { getItem: () => { if (stored.v === "THROW") throw new Error("denied"); return stored.v; },
-                        setItem: (k, v) => { if (stored.v === "THROW") throw new Error("denied"); stored.v = v; } };
+                        setItem: (k, v) => { stored.sets++; if (stored.v === "THROW") throw new Error("denied"); stored.v = v; } };
 global.setTimeout = () => 1; global.clearTimeout = () => {};
 global.syncList = (box, items, o) => { box.replaceChildren(...items.map((it) => { const n = o.make(it); n.dataset.key = o.key(it); o.fill(n, it); return n; })); };
 global.setText = (n, t) => { n.textContent = t; };
@@ -147,7 +147,8 @@ const ids = () => st.rows.map((t) => t.id);
   if (process.argv[4] === "size") {                 // the rail's width: panels.js's separator stood in for
     const seps = [], rn = $("#rn"), rail = $("#rn-rail");
     global.Panels = { separator(hd, o) { seps.push([hd, o]); return { sync() { o.synced = (o.synced || 0) + 1; } }; } };
-    rn.clientWidth = 1200; rail.rectW = 280;        // the middle column, the rail at the layout's own width
+    rn.clientWidth = 1200;                          // the middle column; the rail: its width dragged, else the layout's own
+    Object.defineProperty(rail, "rectW", { get: () => parseInt(rn.style.props["--rn-w"], 10) || 280 });
     const w = () => (stored.v === "THROW" ? st.p.w : N.prefs(stored.v).w);
     const looks = () => [rn.style.props["--rn-w"] || null, rn.classList.contains("sized")];
     N.open(""); await drain();
@@ -155,10 +156,12 @@ const ids = () => st.rows.map((t) => t.id);
     N.open(""); N.close(); N.open(""); await drain();
     const [hd, o] = seps[0];
     Object.assign(r, { seps: seps.length, handle: hd === $("#rn-size"), opts: [o.orient, o.grow, o.label, o.controls],
-                       limits: [o.min(), o.max()], value: o.value(), enabled: o.enabled() });
+                       limits: [o.min(), o.max()], value: o.value(), enabled: o.enabled(), title: hd.title });
+    { const n = stored.sets; o.set(o.value(), true); r.click = [...looks(), stored.sets - n]; }   // pressed and let go: nothing kept
+    { const n = stored.sets; o.set(o.value() - 16, true); r.keyAtMin = [...looks(), stored.sets - n]; }   // ArrowLeft at the minimum
     o.set(500.4, false); r.dragging = [...looks(), w()];       // during the drag: on the layout, not yet remembered
     o.set(500.4, true); r.dropped = [...looks(), w()];
-    o.set(5000, true); r.wide = w();                          // 60% of 1600 = 960; the list's 20rem: 1200 - 12 - 320 = 868
+    o.set(5000, true); r.wide = w();                          // 60% of 1600 = 960; the list's 16rem: 1200 - 12 - 256 = 932
     rn.clientWidth = 2400; r.wider = o.max();                 // a wider middle: 60% of the window
     rn.clientWidth = 1200;
     o.set(10, true); r.narrow = w();                          // 17.5rem
@@ -167,6 +170,11 @@ const ids = () => st.rows.map((t) => t.id);
     global.PHONE = true; r.phone = o.enabled(); global.PHONE = false;
     o.reset(); r.reset = [...looks(), w()];
     N.close(); r.closed = o.enabled();
+    // a folder with no name (a stored layout): its hover is only what it does
+    st.layout = { rev: "x", folders: [{ id: "u:e", name: "", section: "", items: ["fm:FG1"] }] };
+    N.open(""); await drain(); st.railSig = ""; T.render();
+    const walk = (n) => [n, ...n.children.flatMap(walk)];
+    r.unnamed = walk($("#rn-tree")).find((c) => c.dataset && c.dataset.fold === "u:e").title;
     return console.log(JSON.stringify(r));
   }
 
@@ -458,18 +466,21 @@ def test_someone_elses_emergency_off_the_prominent_services_is_quiet(out):
 def test_the_rail_is_dragged_wider_and_remembered_per_viewer(tmp_path):
     """Admin, 2026-11-17: "we also need to be able to drag the radio rail out to the right if we want" (channel names
     were cut short beside their badges). panels.js's separator on the rail's right edge: at least the layout's own
-    minimum (17.5rem), at most 60% of the window and never the list under 20rem; this viewer's width remembered in
-    this browser only; a double-click (or Home) back to the layout's own."""
+    minimum (17.5rem), at most 60% of the window and never the list under 16rem; this viewer's width remembered in
+    this browser only; a double-click (or Home) back to the layout's own; a click that moves nothing keeps nothing."""
     r = run(tmp_path, scenario="size")
     assert r["opened"] == [None, False]                                      # nothing dragged: the layout's own width
     assert r["seps"] == 1 and r["handle"] is True                            # made once, on the handle in the page
     assert r["opts"] == ["vertical", 1, "Resize the rail", "rn-rail"]
-    assert r["limits"] == [280, 868] and r["value"] == 280 and r["enabled"] is True
+    assert r["limits"] == [280, 932] and r["value"] == 280 and r["enabled"] is True
+    assert r["title"].startswith("Resize the rail: drag") and "narrow the queue or units column" in r["title"]
+    assert r["click"] == [None, False, 0] and r["keyAtMin"] == [None, False, 0]   # nothing stored, the layout's own kept
     assert r["dragging"] == ["500px", True, 0]                              # follows the pointer, kept once let go
     assert r["dropped"] == ["500px", True, 500]
-    assert r["wide"] == 868 and r["wider"] == 960 and r["narrow"] == 280
+    assert r["wide"] == 932 and r["wider"] == 960 and r["narrow"] == 280
     assert r["folded"] is False and r["sheet"] is False and r["phone"] is False   # no side column: no drag
     assert r["reset"] == [None, False, 0] and r["closed"] is False
+    assert r["unnamed"] == "Minimize"                                       # no empty part, no stray separator
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -493,8 +504,8 @@ def test_width_limits_and_a_stored_width_checked(tmp_path):
       }}));"""], capture_output=True, text=True, timeout=30)
     assert lim.returncode == 0, lim.stderr
     out = json.loads(lim.stdout)
-    # [min, max]: 17.5rem; 60% of the window or what leaves the list 20rem, whichever is less; never under the min
-    assert out["limits"] == [[280, 868], [280, 280], [350, 1536]]
+    # [min, max]: 17.5rem; 60% of the window or what leaves the list 16rem, whichever is less; never under the min
+    assert out["limits"] == [[280, 932], [280, 280], [350, 1536]]
     assert out["clamp"] == [500, 868, 280, 0, 0]                            # 0: the layout's own
     assert out["stored"] == [513, 0, 0, 4000]
 
@@ -508,12 +519,18 @@ def test_the_handle_is_in_the_page_and_only_beside_a_side_rail():
     assert ".rn-size { display: none; }" in css                              # folded, a sheet, a phone: no handle
     wide = css[css.index("@media (min-width: 641px) {"):]
     wide = wide[:wide.index("\n  }\n")]
-    assert ".rn.sized:not(.mini) { grid-template-columns: max(17.5rem, min(var(--rn-w), 60vw, 100% - 20rem - var(--gutter))) minmax(0, 1fr); }" in wide
+    assert ".rn.sized:not(.mini) { grid-template-columns: max(17.5rem, min(var(--rn-w), 60vw, 100% - 16rem - var(--rn-gap))) minmax(0, 1fr); }" in wide
+    assert ".rn:not(.mini) { column-gap: var(--rn-gap); }" in wide                 # the handle is the gap: never over the list
+    # the rail's own default: never --rail-w (the queue column's width, which may be dragged under the rail's minimum)
+    rn = re.search(r"^  \.rn \{(.*?)\}", css, re.S | re.M).group(1)
+    assert "grid-template-columns: minmax(17.5rem, 20%) minmax(0, 1fr)" in rn and "--rail-w" not in rn
+    assert "--rn-gap: calc(var(--gutter) + var(--s-2))" in rn
     handle_rule = re.search(r"\.rn:not\(\.mini\) > \.rn-size \{(.*?)\}", wide, re.S).group(1)
-    for d in ("cursor: col-resize", "touch-action: none", "pointer-events: auto", "inline-size: var(--s-6)", "align-self: stretch"):
+    for d in ("cursor: col-resize", "touch-action: none", "pointer-events: auto", "inline-size: var(--rn-gap)",
+              "margin-inline-end: calc(-1 * var(--rn-gap))", "align-self: stretch"):
         assert d in handle_rule, d
     phone = css[css.index("@media (max-width: 640px) {", css.index(".rn-size")):]
     assert ".rn > .rn-main { grid-area: 1 / 1; }" in phone[:phone.index("\n  }\n")]
     nav = (STATIC / "radio-nav.js").read_text()
-    assert "W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 20" in nav                  # the same limits as the CSS
+    assert "W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 16" in nav                  # the same limits as the CSS
     assert 'document.addEventListener("DOMContentLoaded", sizer)' in nav
