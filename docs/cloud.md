@@ -101,6 +101,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [Tiers](#tiers)
   - [Who sees it](#who-sees-it)
   - [Source keys (#415)](#source-keys-415)
+  - [Settings > Radios > Channels by system](#settings--radios--channels-by-system)
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
   - [The rail's folders (#607)](#the-rails-folders-607)
@@ -2641,6 +2642,26 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
 - Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
   transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
 
+### Settings > Radios > Channels by system
+
+`static/radio-controls.js`, `sizeup/talkgroups.py`, `sizeup/cloud/hub.py`.
+
+The Channels tab lists **Analog FM** (FG1, FG2, South 2...), **Airband**, **County P25**, then each other P25 system
+by its label (**MRRS P25**), each with its groups (the talkgroups file's `Tag`) under it.
+
+| | |
+|---|---|
+| A talkgroup's switches | sent and kept by its source: `POST /api/talkgroup {source: "p25:mrrs:9211", ...}`. The county's are still saved under the bare number (`talkgroups.json`, `tg:307`), so switching back is safe. Another system's talkgroup has its **tier**, never Record / Main / Transcribe |
+| A bare number | always the county's. One the county neither lists nor has heard, but another system lists, is refused (`App.set_talkgroup`) |
+| Old orphans | a county choice saved under another system's number (the bug below) is dropped when the station loads, and logged |
+| A section's Record switch | the county's section only, never another system's section with the same name |
+| The hub's rows | the station's `TalkgroupPrefs.state()`. The hub adds `tier_set` from each row's tier as they arrive |
+| **Rename** (pencil, admins) | the channel's display name, up to 40 characters, blank for its own. Stored with the rail's names (`radio_folders`, `layout.names`, `POST /api/cad/settings/radio_folders {action: name, key, name}`), audited as Radios (`radio_folders/names/<key>`). A name set here shows on the rail and the other way round. Display only, like the rail's. The hover shows the real name and its TG number or frequency. Not on the station's own page |
+
+The bug this fixed: the hub's rows had no `tier_set`, so the page showed MRRS "PD Dispatch" (TG 9211) with the
+county's switches. Main sent `{"tg": 9211}`, which wrote a county talkgroup 9211 that doesn't exist. That showed up as
+an "Unknown — TG 9211 · MAIN" card, and PD Dispatch stayed as it was. Tests: `tests/test_channels_by_system.py`.
+
 ### The Radio page's views and its change log (#415, #441, #484)
 
 `sizeup/cad/comms.py` (`Cad.comms_query`, `Cad.comms_sources`), `static/radio-nav.js`, `static/radio-view.js`.
@@ -2694,7 +2715,7 @@ order (ours first, then by name). A heading with one folder of its own name (Ana
 |---|---|
 | **Edit** (on the rail, admins) | rename, add (**+ Folder**), delete an empty folder, the **heading** over a folder (folders in a row with the same heading share it; blank: none), drag a folder or a channel by its ⠿ (desktop), or ▲ ▼ and **Move to** (touch, keyboard). **Reset**: the automatic grouping. Nothing changes until **Save**; **Cancel** drops the draft |
 | Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written |
-| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept |
+| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept. Also set one at a time from Settings > Radios > Channels (`{action: name}`, [above](#settings--radios--channels-by-system)) |
 | Stored | `{folders: [{id, name, section, items: [source keys]}], names?: {source key: name}}`. `id`: `d:<system>:<group>` (a default folder, renamed or moved) or `u:<random>` (made by an admin) |
 | A channel in no folder | a talkgroup heard for the first time, one never placed: its default folder (`d:<system>:<group>`) if listed, else that folder made again after the last folder under its heading. **Nothing ever drops off the rail** |
 | A key with no source now | kept, not shown (a talkgroup not heard lately comes back where it was); one that isn't a source key, or a channel listed twice: dropped (the first folder wins), not an error |

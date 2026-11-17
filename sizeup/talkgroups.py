@@ -14,6 +14,13 @@ another system (`others`: {system: {tg: info}}, from sizeup/radio/systems.py) ha
 context, never our incident's). The county's choices stay in talkgroups.json under the bare number, as a release from
 before this reads them; the other systems' are in talkgroups_systems.json under "p25:<system>:<tg>". A talkgroup
 granted on another system that isn't in its file is counted as unknown (unknown()).
+
+A bare number is always the county's. A county choice saved under a number the county doesn't list but another system
+does (Settings > Radios sent Main / Record on another system's talkgroup by its number alone, before the page sent the
+source: an "Unknown — TG 9211" card under the county) is dropped on loading (`migrated`): it never reached the other
+system's talkgroup (its tier) and the county has no such talkgroup. Talkgroup numbers are unique across the systems
+here (systems.discover refuses a number twice), so that number was clearly the other system's. elsewhere() is what
+App.set_talkgroup refuses such a bare number by.
 """
 
 from __future__ import annotations
@@ -65,10 +72,29 @@ class TalkgroupPrefs:
             self._unknown = {str(x): {int(k): dict(v) for k, v in d.items()} for x, d in raw.items()}
         except (OSError, ValueError, AttributeError, TypeError):
             self._unknown = {}
+        # county choices under another system's number (see above): dropped, and the file written without them
+        self.migrated: list[tuple[int, str, dict]] = []      # (number, the system that lists it, what was dropped)
+        for k in [k for k in self._prefs if not isinstance(k, tuple) and k not in self.info]:
+            if owners := self._owners(k):
+                self.migrated.append((k, owners[0], self._prefs.pop(k)))
+        if self.migrated:
+            self.save()
 
     def _k(self, tg: int, system: str = ""):
         """The key a talkgroup is held under: its number for the county's, (system, number) for another system's."""
         return int(tg) if not system or system == self.county else (system, int(tg))
+
+    def _owners(self, tg: int) -> list[str]:
+        """The other systems whose files list this number."""
+        return sorted(k[0] for k in self.info if isinstance(k, tuple) and k[1] == int(tg))
+
+    def elsewhere(self, tg: int) -> list[str]:
+        """A bare number the county neither lists nor has heard, that another system lists: those systems ([] for a
+        county talkgroup). A choice sent by that number alone was meant for the other system's talkgroup."""
+        tg = int(tg)
+        with self._lock:
+            ours = tg in self.info or tg in self._seen
+        return [] if ours else self._owners(tg)
 
     @staticmethod
     def _parts(k) -> tuple[str, int]:
@@ -205,10 +231,13 @@ class TalkgroupPrefs:
     def group_of(self, tg: int, system: str = "") -> str:
         return self.info.get(self._k(tg, system), {}).get("group") or "Unknown"
 
-    def set_group(self, group: str, record: bool | None = None, main: bool | None = None) -> int:
-        """A whole section (e.g. 'County Police') on or off. Turning recording on skips encrypted
-        talkgroups (they can't be decoded). Saved per talkgroup, so it survives restarts."""
-        tgs = {tg for tg in set(self.info) | set(self._seen) | set(self._prefs) if self.group_of(*self._parts(tg)[::-1]) == group}
+    def set_group(self, group: str, record: bool | None = None, main: bool | None = None, system: str = "") -> int:
+        """A whole section (e.g. 'County Police') of one system (`system`: "" or the county's name = the county's) on
+        or off. Turning recording on skips encrypted talkgroups (they can't be decoded). Saved per talkgroup, so it
+        survives restarts. Never another system's section of the same name (an "Unknown" under each)."""
+        which = "" if system == self.county else str(system or "")
+        tgs = {tg for tg in set(self.info) | set(self._seen) | set(self._prefs)
+               if self._parts(tg)[0] == which and self.group_of(*self._parts(tg)[::-1]) == group}
         for sysname, tg in [tg for tg in tgs if isinstance(tg, tuple)]:
             self.set(tg, record=record, system=sysname)       # by its tier
         with self._lock:

@@ -577,7 +577,10 @@ class Hub:
                 st["id"] = sid                     # the authenticated id (what Health shows), never only the claimed one
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
-                self.talkgroups = tgs
+                # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
+                # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
+                self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
+                                   else r for r in tgs]
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints

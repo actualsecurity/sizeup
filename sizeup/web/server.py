@@ -10,8 +10,9 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
-POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
@@ -935,8 +936,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         if got is None:
                             raise ValueError("source: p25:<system>:<talkgroup>")
                         tier = body.get("tier")
-                        err = set_talkgroup(got[1], body.get("record"), body.get("main"),
-                                            None if tier is None else str(tier), got[0])
+                        if tier is None and got[0] in ("", _sources.COUNTY):    # the county's: as it always went
+                            err = set_talkgroup(got[1], body.get("record"), body.get("main"))
+                        else:
+                            err = set_talkgroup(got[1], body.get("record"), body.get("main"),
+                                                None if tier is None else str(tier), got[0])
                     else:
                         err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
                 except (ValueError, KeyError, TypeError) as e:

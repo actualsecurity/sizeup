@@ -457,6 +457,9 @@ class App:
                                  set(cfg.p25_incident_talkgroups),
                                  (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None,
                                  others={x.name: x.talkgroups for x in cfg.p25_systems})   # (#409: MTA MRRS)
+        for tg, owner, was in self.tg.migrated:      # Settings > Radios saved these under the county by number alone
+            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}): "
+                f"{tg} is {owner}'s talkgroup, not the county's")
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
@@ -4304,6 +4307,10 @@ class App:
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if not system and (owners := self.tg.elsewhere(int(tg))):
+            # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
+            # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
+            return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"
         self.tg.set(int(tg), record, main, system)
         if system:
             log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
@@ -4317,7 +4324,8 @@ class App:
         return "; ".join(on) if on else ("SDRs released (Off)" if many else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup-group: a whole section on/off in one go."""
+        """POST /api/talkgroup-group: a whole section of the county's on/off in one go (never another system's section
+        of the same name: those have a tier each)."""
         if not self.p25:
             return "no P25 configured"
         n = self.tg.set_group(str(group), record, main)
