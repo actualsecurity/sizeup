@@ -2439,7 +2439,9 @@ class Sources:
     def _vetoed(self, inc: dict, location: str, rec: dict) -> bool:
         """A strict rules' match a page's own words say is another call (never joined, noted). Always: a town the page
         says the call is in or goes to ("in Sample Village", "to the Town of Sample, ...", "412 Sample Rd, Sample")
-        that isn't the event's (nor, when the event names none, one of our tones' towns), whatever else matches.
+        that isn't the event's (nor, when the event names none, one of our tones' towns), whatever else matches; but
+        two of our own tones' towns are one for our exact (or doubled) house number (a second municipality of ours
+        often shares the first's postal town: the county's town field and the spoken one differ for one building).
         Unless the house number is ours exactly or the county lists a unit the page names that isn't one of our own
         (ours are on both for any call of ours: no proof; another department's is, the county may keep the other
         town's type when it adds ours): a mutual-aid page ("mutual aid") with no town stated against an event that
@@ -2452,8 +2454,9 @@ class Sources:
         e = self._evidence(inc, json.loads(r["data"] or "{}"), location, rec, cross=False)
         # mutual aid: never over our own number, nor when the county lists a unit the page names (it may keep the
         # other town's type when it adds ours)
-        if e.town == "differ":                               # the page says another town: whatever else matches
-            return True
+        if e.town == "differ" and not (e.town_ours and e.number in ("exact", "doubled")):
+            return True                                      # another town said: whatever else matches (two of our
+        #                                                      own towns for our exact number: the same building)
         proof = e.number == "exact" or e.units == "common"   # (a unit of ours on both proves nothing: "own")
         return not proof and (e.mutual == "differ" or bool(e.other_place) or e.elsewhere_near)
 
@@ -2471,11 +2474,13 @@ class Sources:
                                                                                          inc["type"]):
             e.mutual = "differ"
         ft = _town(raw) or _town(match_address(inc)) or _town(inc["address"] or "")
-        where, named = self._said_towns(text)                # only where the call is ("in / to <town>"): a town
-        said = {*where, *([_town(location)] if _town(location) else [])}   # named as a landmark is no evidence
-        home = {ft} if ft else {str(t).lower() for t in towns}
+        ours = {str(t).lower() for t in towns}
+        where, named = self._said_towns(text, [*towns, *([ft] if ft else [])])   # only where the call is ("in / to
+        said = {*where, *([_town(location)] if _town(location) else [])}         # <town>"): a landmark is no evidence
+        home = {ft} if ft else ours
         if said and home and said - home:
             e.town = "differ"
+            e.town_ours = bool(ours) and said | home <= ours     # both ours: one building, two municipalities' names
         theirs = [x for x in dict.fromkeys([match_address(inc), inc["place_address"] or "", inc["geo_label"] or "", raw,
                                             self._match_location(raw, d) if raw else ""])
                   if x and (place_key(x) or (None,))[0] == "addr"]
@@ -2526,7 +2531,7 @@ class Sources:
     WHO = {"fire", "department", "departments", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac"}
 
     @staticmethod
-    def _said_towns(text: str) -> tuple[set, set]:
+    def _said_towns(text: str, longer=()) -> tuple[set, set]:
         """(the known towns a page's words say the call is in or goes to; every known town it names anywhere else).
         Where: "in / to (the) (city / town / village of) <town>", or a street then ", <town>" ("412 Sample Rd,
         Sample", "Sample Rd, City of Sample"), with the town ending the phrase: then a comma, a
@@ -2535,8 +2540,12 @@ class Sources:
         Sample Brook side of the building", "by the Sample border"): named only. Never who ("Sample Village Fire
         Department", "Sample and Other Village fire departments": a department word right after it, or after "and
         <town>"; never "..., structure fire" past a comma), nor
-        a street of that name ("Sample Village Road")."""
+        a street of that name ("Sample Village Road"). longer: town names (our tones' towns, the feed's) a town
+        read here may be the first part of, its rest heard after a stop or a comma ("Sample. Brook." / "Sample,
+        Brook" for Sample Brook): read as that longer town."""
         toks = re.findall(r"[a-z0-9]+|[.,;:!?]", (text or "").lower())
+        longs = sorted({tuple(re.findall(r"[a-z0-9]+", str(x).lower())) for x in longer or ()} - {()}, key=len,
+                       reverse=True)
         street = {*ABBR, *SUFFIXES, "lane", "terrace", "plaza", "square", "way", "turnpike", "crescent"}
         where, named = set(), set()
         i = 0
@@ -2546,6 +2555,20 @@ class Sources:
                 i += 1
                 continue
             j = i + len(t)
+            for big in longs:                                # a longer town of ours split by speech-to-text
+                if len(big) > len(t) and big[:len(t)] == t:
+                    rest, m = list(big[len(t):]), j
+                    while rest and m < len(toks):
+                        if not toks[m].isalnum():
+                            m += 1
+                        elif toks[m] == rest[0]:
+                            rest.pop(0)
+                            m += 1
+                        else:
+                            break
+                    if not rest and m > j:
+                        t, j = big, m
+                        break
             nxt = toks[j] if j < len(toks) else ""
             seq = []                                         # the words after it, to the next stop or comma
             for w in toks[j:j + 4]:
@@ -2562,7 +2585,7 @@ class Sources:
                 ends = nxt == "" or not nxt.isalnum() or nxt.isdigit() or nxt == "for" or toks[j:j + 2] == ["mutual", "aid"]
                 lead = toks[k - 1] if k >= 1 else ""
                 after_street = lead == "," and k >= 2 and toks[k - 2] in street   # "412 Sample Rd, Sample"
-                (where if (lead in ("in", "to") or after_street) and ends else named).add(TOWN_OF[t])
+                (where if (lead in ("in", "to") or after_street) and ends else named).add(TOWN_OF.get(t, " ".join(t)))
             i = j
         return where, named
 

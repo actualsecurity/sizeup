@@ -659,6 +659,58 @@ def test_only_our_own_unit_shared_proves_nothing(tmp_path):
     assert not src._vetoed(inc, "Sample Post Road", dict(rec, units=["Engine 60", "2661"]))
 
 
+@pytest.mark.parametrize("words, joins", [
+    ("9 Model Street, Rye Brook", True),                                       # our two towns: one building
+    ("9 Model Street in Rye Brook", True),
+    ("9 Model Street, Rye", False),                                            # a town not ours: always another call
+])
+def test_our_own_towns_are_one_for_our_exact_number(tmp_path, words, joins):
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "9 MODEL ST, PORT CHESTER", ("PCFD",), typ="ALARM/COMM")
+    rig.at(60)
+    p = rig.page("p1", f"Port Chester Fire Department, full response, fire alarm, {words}. Time out 1431.")["id"]
+    assert (p == a) is joins
+
+
+def test_our_own_towns_still_differ_without_our_number(tmp_path):
+    """The street alone, "in Rye Brook", the event in Port Chester: no number to say it is the same building."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "9 MODEL ST, PORT CHESTER", ("PCFD",), typ="ALARM/COMM")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, full response, fire alarm, Model Street in Rye Brook. "
+                       "Time out 1431.")["id"]
+    assert p != a
+
+
+def test_a_town_split_by_speech_to_text_is_read_whole(tmp_path):
+    """"Rye. Brook." is Rye Brook (the feed's town): joined. "Rye." then "Engine 60" is Rye: another call."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD, RYE BROOK", ("PCFD",), typ="STRU/COMM")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, full response, structure fire, 412 Sample Post Road, Rye. Brook. "
+                       "Sample Fitness in Example Avenue and Specimen Street. Time out 1431.")["id"]
+    assert p == a
+    rig2 = AutoRig(tmp_path / "pc")
+    b = feed_event(rig2, "A1", "412 SAMPLE POST RD, PORT CHESTER", ("PCFD",), typ="STRU/COMM")
+    rig2.at(60)
+    q = rig2.page("p1", "Port Chester Fire Department, full response, structure fire, 412 Sample Post Road, Rye. "
+                        "Engine 60 respond. Time out 1431.")["id"]
+    assert q != b
+
+
+def test_said_towns_reads_a_split_town_of_ours(monkeypatch):
+    from sizeup.cad import sources
+    for name in ("TOWN_OF", "TOWN_NAME", "LISTED", "TOWNS"):
+        monkeypatch.setattr(sources, name, getattr(sources, name))
+    sources.set_towns(["Port Chester", "Rye Brook", "Rye"], {})
+    said = sources.Sources._said_towns
+    ours = ["Port Chester", "Rye Brook"]
+    assert said("412 sample post road, rye. brook. sample fitness", ours) == ({"rye brook"}, set())
+    assert said("412 sample post road, rye, brook", ours) == ({"rye brook"}, set())
+    assert said("412 sample post road, rye. engine 60", ours) == ({"rye"}, set())
+    assert said("412 sample post road, rye. brook.") == ({"rye"}, set())                     # not ours: as said
+
+
 def test_the_cross_street_cache_is_bounded(tmp_path, monkeypatch):
     from sizeup.cad import sources
     monkeypatch.setattr(sources, "CROSS_CACHE", 3)

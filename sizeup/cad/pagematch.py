@@ -136,6 +136,7 @@ class Evidence:
     family: str = ""                                  # "" | "same" | "differ"
     units: str = ""                                   # "" | "common" (one not ours) | "own" (only ours) | "differ"
     town: str = ""                                    # "" | "differ"
+    town_ours: bool = False                           # ... both the page's and the event's among our tones' towns
     mutual: str = ""                                  # "" | "differ" (a mutual-aid page, an event that isn't)
     fresh: bool = False                               # the feed's last report ok and recent
     taken: bool = False                               # a page is on it already
