@@ -17,8 +17,10 @@ Phrases: words in order, case and punctuation aside; "..." a gap of up to GAP_WO
 when any of its phrases is in it and none of its "not" phrases is. "re:" in front: a regular expression instead
 (at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d"). An expression must not backtrack
 without bound: its separator and word classes share no character ("[^\\w'.?!]+" beside "[\\w']+"; never "\\W+"
-beside "[\\w']+", which both take an apostrophe). tests/test_intel_packs.py times every pack's expressions on hostile
-texts, and an expression reads only the first RE_TEXT_MAX characters.
+beside "[\\w']+", which both take an apostrophe), and each character of a run is taken by one alternative only (the
+police pack's ellipsis, "\\.(?=\\.)|(?<=\\.)\\.(?!\\.)": a dot beside a dot, never a sentence's end).
+tests/test_intel_packs.py times every pack's expressions on hostile texts, and an expression reads only the first
+RE_TEXT_MAX characters.
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
 
@@ -72,7 +74,7 @@ GAP = "..."
 GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
-RE_MAX = 200
+RE_MAX = 300
 RE_TEXT_MAX = 4000              # a "re:" expression reads at most this many characters of a transmission (minutes of
                                 # speech): bounds the time an expression with backtracking can take on a freak text
 PHRASE_MAX = 120

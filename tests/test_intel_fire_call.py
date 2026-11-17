@@ -482,9 +482,14 @@ def test_known_gap_a_bare_next_address_in_the_window_reads_as_a_read_back(gaz):
     assert ev.label_full.startswith("21 Sample St") and ev.suppressed == ""
 
 
-def complaint(e):
-    [r] = [r for r in e.pack("police").rules if r.id == "pd.fire_complaint"]
+def complaint(e, rid="pd.appliance_smoking"):
+    [r] = [r for r in e.pack("police").rules if r.id == rid]
     return lambda text: r.hit(text, rules_mod.words(text))
+
+
+def fire_call_hits(e, text):
+    """The fire_call complaint rules (not the FD cue) the text hits."""
+    return {rid for rid in ("pd.fire_complaint", "pd.appliance_smoking") if complaint(e, rid)(text)}
 
 
 @pytest.mark.parametrize("text", [
@@ -507,6 +512,15 @@ def complaint(e):
     "the guy's dryer is smoking",
     "someone left the stove on, it's smoking",
     "the man in apartment 3 says his dryer is smoking",
+    "the kids left the toaster smoking",                           # an object between the person and the smoke
+    "the guy downstairs has his dryer smoking.",
+    "male caller says his outlet is sparking",
+    "a man reports the outlet in his bedroom is smoking",
+    "the man's dryer is smoking",
+    "the outlet... it's sparking",                                 # an ellipsis (a hesitation) is no sentence's end
+    "the dryer.... smoking",
+    "the man by the stove was smoking",                            # contrived: accepted as a fire call (test topic)
+    "the woman at the toaster oven is smoking",
 ])
 def test_appliance_and_panel_phrases_still_hit(gaz, text):
     e, _sink = engine(gaz)
@@ -521,12 +535,12 @@ def test_appliance_and_panel_phrases_still_hit(gaz, text):
     "the outlet is not sparking",
     "the dryer isn't smoking anymore",                             # a contraction is a negator
     "the outlet wasn't sparking when the officer got there",
-    "the man by the stove was smoking",                            # a person (and where) before the smoking
-    "the woman at the toaster oven is smoking",
-    "two males in the panel truck are smoking",
+    "two males in the panel truck are smoking",                    # a panel truck is no panel
     "the dryer, a man is smoking",
     "the outlet near the guy who was smoking",
     "the stove. Smoking",                                          # never across a sentence
+    "the stove? Smoking",
+    "the oven! smoking",
     "the toaster was fine. Kids smoking out back",
     "the man is smoking out front, a smell of smoke",
     "a female smoking on the porch, smells like smoke",
@@ -534,13 +548,17 @@ def test_appliance_and_panel_phrases_still_hit(gaz, text):
 ])
 def test_appliance_and_panel_phrases_need_the_object_close_to_the_smoke(gaz, text):
     e, _sink = engine(gaz)
-    assert not complaint(e)(text)
+    assert fire_call_hits(e, text) == set()
 
 
 @pytest.mark.parametrize("text, fires", [
     ("Respond to 40 Example Place, the dryer is smoking, notifying the FD.", True),
     ("Respond to 40 Example Place, the electrical panel is sparking, FD notified.", True),
     ("Respond to 40 Example Place, a panel van parked, the driver is smoking in it, notifying the FD.", False),
+    # the person exclusion is the appliance rule's own: a person near "smoking" never turns the burning smell off
+    ("Respond to 40 Example Place, the kids left the toaster smoking, smell of something burning, notifying the FD.",
+     True),
+    ("Respond to 40 Example Place, the guy downstairs has his dryer smoking.", True),
 ])
 def test_a_panel_van_with_a_smoking_driver_is_no_fire_call(gaz, text, fires):
     e, sink = engine(gaz)
@@ -567,5 +585,22 @@ def test_an_apartment_number_never_lets_another_jobs_words_through(gaz):
     e, sink = held(gaz, clock)
     clock.t += 40
     e.feed(row("c1-t2", "21 Sample Street, apartment 3, a noise complaint.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and not any(d.would_push for _p, d in sink.pushes)
+
+
+def test_the_person_exclusion_never_turns_the_burning_smell_rule_off(gaz):
+    e, _sink = engine(gaz)
+    text = "the kids left the toaster smoking, smell of something burning"
+    assert fire_call_hits(e, text) == {"pd.fire_complaint", "pd.appliance_smoking"}
+    assert fire_call_hits(e, "the guy downstairs has his dryer smoking.") == {"pd.appliance_smoking"}
+
+
+def test_unit_and_a_number_is_a_police_unit_not_an_apartment(gaz):
+    """"Unit 3" is read as a police unit (one the call never named), never as the address's apartment."""
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 40
+    e.feed(row("c1-t2", "That's 40 Example Place, unit 3.", clock(), **TALK))
     [ev] = e.events.open_events()
     assert ev.suppressed == "unplaced" and not any(d.would_push for _p, d in sink.pushes)

@@ -114,7 +114,7 @@ READBACK_WORDS = frozenset({"copy", "copied", "that's", "thats", "that", "that'l
                             "on", "in", "dispatch", "advised",
                             "house", "home", "apartment", "apt", "residence", "building", "caller", "caller's",
                             "callers"})
-APT_WORDS = frozenset({"apartment", "apt", "unit"})    # ... and the number right after one of these
+APT_WORDS = frozenset({"apartment", "apt"})    # ... and the number right after one ("unit 3" is a police unit's)
 APT_NUMBER = re.compile(r"\d{1,4}[a-z]?|[a-z]\d{0,3}")
 STOP_JOIN_S = 1.0                      # stop(): how long the thread may take to finish the row in hand
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
@@ -884,7 +884,7 @@ class IntelEngine:
         ok = set(rules_mod.words(entry.place.label)) | STREET_WORDS | READBACK_WORDS
         ok |= {w for u in entry.units for w in u.split()}
         ws = rules_mod.words(entry.text)
-        # "apartment 3", "apt 2b", "unit 4": the address's own apartment, read back with it
+        # "apartment 3", "apt 2b": the address's own apartment, read back with it
         apt = {i + d for i in range(len(ws) - 1) if ws[i] in APT_WORDS and APT_NUMBER.fullmatch(ws[i + 1]) for d in (0, 1)}
         return all(w in ok or i in apt for i, w in enumerate(ws))
 
