@@ -3763,6 +3763,10 @@ function onState(data) {
     cad.trainsRev = data.trains_rev;
     window.dispatchEvent(new CustomEvent("sizeup:trains", { detail: data.trains_rev }));
   }
+  if (data.places_rev != null && data.places_rev !== cad.placesRev) {   // the place names changed: the Common places layer asks again
+    if (cad.placesRev !== undefined) window.dispatchEvent(new CustomEvent("sizeup:places", { detail: data.places_rev }));
+    cad.placesRev = data.places_rev;
+  }
   renderConn();
   renderCloud();
   renderTalking();
