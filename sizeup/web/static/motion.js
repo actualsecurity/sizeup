@@ -62,7 +62,8 @@ window.Motion = (() => {
     }
     target(it, now) {
       const age = (now - it.fix.at) / 1000;
-      it.stale = age > this.staleS;
+      // (a fix may carry its own stale age: a train's SIGNAL location, a minute or more old as a matter of course)
+      it.stale = age > (typeof it.fix.staleS === "number" ? it.fix.staleS : this.staleS);
       // snapped to its last fix by hand (snapToFix): drawn there, not predicted, until a different fix comes
       // (by the fix itself: its time and place; `at` moves by the answer's latency on every answer)
       const pinned = !!it.pin && it.pin.fixAt === it.fix.fixAt && it.pin.s === it.fix.s;

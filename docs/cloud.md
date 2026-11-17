@@ -2376,7 +2376,20 @@ Merged into the GTFS-realtime trains by **train number and run date**: the posit
 gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
-is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+is good: Amtrak's trains on the New Haven Line (TrainTime's branch `AM`; never in Metro-North's GTFS-realtime), whose
+box says *Amtrak*, not *Metro-North*, and whose next stop and its limit are TrainTime's own.
+
+**SIGNAL locations.** TrainTime's `SIGNAL` location (Amtrak's trains, or a Metro-North train whose GPS is out) is
+where Metro-North's signal system has the train: the block it entered, timed when it entered it, unchanged until it
+enters the next one 1 to 3 km on (a minute or more; minutes at a red signal). It is taken as it is, not filtered (the
+GPS filter drew it halfway between two signals); the same signal again is the train still in that block (its time
+stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
+allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
+just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on as a GPS fix is, but no further than 1.5 km and
+never past its next stop. Stale (faded) only after 3 min with no new signal; a train TrainTime alone has keeps its
+signal location 10 min (a GPS location: 40 s, as before), so it no longer drops off the map 40 s after each signal
+(#589's GPS rules are unchanged; signal fixes add nothing to the prediction residuals). The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
