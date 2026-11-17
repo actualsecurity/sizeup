@@ -28,7 +28,7 @@ PARK_BY = PARK_AFTER_S + 3 * SESSION_RETRY_S + 60     # the hour, its tries at t
 
 class Upstream:
     """The origin as the DVR sees it: Origin's stream, except the cameras made to fail (by their stream folder).
-    how: "timeout", "404", "probe" (only a 5 s request times out: the probe's), or the share of 30 s spans in which
+    how: "timeout", "404", "probe" (only a 5 s request times out: the probe's), "ts" (only the segments), or the share of 30 s spans in which
     it times out (a flaky camera: each round or check either answers or doesn't)."""
 
     def __init__(self, r, f, rnd=None):
@@ -47,7 +47,7 @@ class Upstream:
     def __call__(self, url, timeout, limit):
         for cid, how in self.down.items():
             if url.startswith(self.stream(cid)):
-                if how == "probe" and timeout != dvr_mod.PROBE_TIMEOUT_S:
+                if how == "probe" and timeout != dvr_mod.PROBE_TIMEOUT_S or how == "ts" and not url.endswith(".ts"):
                     break
                 self.asked.append((cid, url, self.r.clock()))
                 if isinstance(how, float) and not self.span_down(cid, how):
@@ -231,7 +231,7 @@ def test_a_hub_outage_parks_nothing(tmp_path):
     run(d, f, clock, 3 * 3600, dt=30.0)
     assert d.parked == {} and parked_lines(d) == []
     up.down.pop(OK)
-    until_parked(d, f, clock, limit=2 * SESSION_RETRY_S + 60)
+    until_parked(d, f, clock, limit=(dvr_mod.PARK_MIN_FAILS + 2) * SESSION_RETRY_S)   # its own tries from there
     assert OK not in d.parked
 
 
@@ -473,3 +473,31 @@ def test_back_from_parked_takes_its_slot_on_the_next_tick_with_an_open_event(tmp
     clock.t += 4
     d.tick()
     assert list(d._wanted) == [OK, DEAD] and d.status(DEAD)["recording"]
+
+
+def test_an_outage_does_not_count_toward_a_cameras_hour(tmp_path):
+    # (review) 2 h with every camera failing (the hub's network): the streak starts again at each failure, so a camera
+    # still restarting a few minutes after the others are back is not parked at once as "no answer for 123 min"
+    r, d, f, clock, up = rig(tmp_path)
+    d.pins = {DEAD, OK}
+    up.down.update({DEAD: "timeout", OK: "timeout"})
+    run(d, f, clock, 2 * 3600, dt=30.0)
+    up.down.pop(OK)
+    run(d, f, clock, 15 * 60)                                                      # the others back; it still fails
+    assert DEAD not in d.parked and parked_lines(d) == []
+    assert d._cams[DEAD]["streak"] <= 4
+    up.down.pop(DEAD)
+    run(d, f, clock, SESSION_RETRY_S + 30)
+    assert d.status(DEAD)["recording"] and d._cams[DEAD]["fails"] == 0 and "streak" not in d._cams[DEAD]
+    up.down[DEAD] = "timeout"                                                      # dead for real now: its own hour
+    until_parked(d, f, clock)
+    (line,) = parked_lines(d)
+    assert "for 6" in line and "(2" in line                                        # ~1 h, ~20 tries: its own
+
+
+def test_a_trial_round_that_fails_says_nothing(tmp_path):
+    r, d, f, clock, up = park(tmp_path)
+    up.down[DEAD] = "ts"                                                           # chunklists fine, segments time out
+    n = len(d.logs)
+    assert d._check(DEAD, r.camera(DEAD), trial=True) is False
+    assert DEAD in d.parked and d.logs[n:] == []

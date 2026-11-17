@@ -795,17 +795,23 @@ class Dvr:
                 short = _short(e, code)
         if cid in self.parked:                            # (#550) a parked camera's trial round: quietly, as it was
             return None
-        # (#550) failing since (monotonic); a master playlist that is a 404 every time since: gone, parked sooner; only
-        # while another camera records (else it is the hub's own network, or the whole provider)
+        # (#550) failing since (monotonic; streak: its rounds); a master playlist that is a 404 every time since: gone,
+        # parked sooner. Counted only while another camera records: in the hub's own outage (its network, or the whole
+        # provider) the streak starts again at each failure, so a camera still failing once the others are back has
+        # its own hour (fails, the wait between tries, counts on as before)
         m = self.mono()
         c["fails"] = c.get("fails", 0) + 1
+        if not self._others_recording(cid):
+            c["streak"], c["fail_since"] = 0, m
+            c.pop("gone_since", None)
+        c["streak"] = c.get("streak", 0) + 1
         since = c.setdefault("fail_since", m)
         if gone:
             c.setdefault("gone_since", m)
         else:
             c.pop("gone_since", None)
-        if ((c["fails"] >= PARK_MIN_FAILS and m - since >= PARK_AFTER_S
-             or c["fails"] >= PARK_404_FAILS and m - c.get("gone_since", m) >= PARK_404_S) and self._others_recording(cid)):
+        if ((c["streak"] >= PARK_MIN_FAILS and m - since >= PARK_AFTER_S
+             or c["streak"] >= PARK_404_FAILS and m - c.get("gone_since", m) >= PARK_404_S) and self._others_recording(cid)):
             self._park(cid, c, short, now - (m - since), now)
             return None
         if c["fails"] >= FAILS_BEFORE_WAIT:
@@ -847,14 +853,17 @@ class Dvr:
                 return hlsseg.repair(body, info)
             except hlsseg.Bad as e:
                 if "no picture" in str(e):
-                    self.log(f"dvr: {cid}: {name}: nothing to show, a hole")
+                    if cid not in self.parked:            # (#550: a parked camera's trial round, quietly)
+                        self.log(f"dvr: {cid}: {name}: nothing to show, a hole")
                     return None
                 if attempt == 2:
-                    self.log(f"dvr: {cid}: {name} not kept ({e})")
+                    if cid not in self.parked:
+                        self.log(f"dvr: {cid}: {name} not kept ({e})")
                     return None
             except (HTTPError, URLError, OSError, ValueError) as e:
                 if attempt == 2:
-                    self.log(f"dvr: {cid}: {name} not kept ({type(e).__name__}: {e})")
+                    if cid not in self.parked:
+                        self.log(f"dvr: {cid}: {name} not kept ({type(e).__name__}: {e})")
                     return None
         return None
 
@@ -915,7 +924,8 @@ class Dvr:
                 try:
                     hit = self.roads._segment(cid, base, name)    # the viewers' copy: fetched once for both
                 except (HTTPError, URLError, OSError, ValueError) as e:
-                    self.log(f"dvr: {cid}: {name} not kept ({type(e).__name__}: {e})")
+                    if not trial:                                 # (#550: a parked camera's trial round, quietly)
+                        self.log(f"dvr: {cid}: {name} not kept ({type(e).__name__}: {e})")
                     continue
                 body = None if hit.get("noplay") else hit["body"]
             else:
@@ -1061,8 +1071,8 @@ class Dvr:
     def _good(self, c: dict) -> None:
         """A round that worked (its own chunklist, the live viewers' copy, or a segment kept): failing no more."""
         c["fails"], c["retry_at"] = 0, 0.0
-        c.pop("fail_since", None)
-        c.pop("gone_since", None)
+        for k in ("streak", "fail_since", "gone_since"):
+            c.pop(k, None)
 
     def _others_recording(self, cid: str) -> bool:
         """Another camera kept a segment within PARK_OTHERS_S: the hub's own network and DNS work, so this one's
@@ -1088,12 +1098,12 @@ class Dvr:
         often up to every PARK_CHECK_S. One line (no exception's name in it: errwatch counts those, and a parked camera
         is not a hub fault)."""
         with self._lock:
-            n = c.get("fails", 0)
+            n = c.get("streak", 0)
             p = self.parked[cid] = {"why": why or "no stream", "since": since, "at": now, "checked": now,
                                     "round": now + PARK_ROUND_S, "round_due": self.mono() + PARK_ROUND_S}
             self._due(p, SESSION_RETRY_S)
             self._back.discard(cid)
-            for k in ("chunk", "retry_at", "fails", "fail_since", "gone_since"):
+            for k in ("chunk", "retry_at", "fails", "streak", "fail_since", "gone_since"):
                 c.pop(k, None)
         self.log(f"dvr: {cid} parked: {why or 'no stream'} for {(now - since) / 60:.0f} min ({n} tries); looked at "
                  f"again in {SESSION_RETRY_S / 60:.0f} min, then up to every {PARK_CHECK_S / 60:.0f} min, its slot free meanwhile")
