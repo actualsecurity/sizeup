@@ -509,7 +509,7 @@
   .sec-toggle:hover .h2 { color: var(--text); }
   .sec-toggle .caret { color: var(--dim); inline-size: var(--s-3); transition: transform var(--dur-1) var(--ease); }
   :is(.other-section, .q-fold).open .sec-toggle .caret { transform: rotate(90deg); }
-  /* the queue's Closed 12h, folded to start with its count (#89); a closed row's foot: the disposition and its "⋯" */
+  /* the queue's Closed 24h, folded to start with its count (#89); a closed row's foot: the disposition and its "⋯" */
   .q-fold .q-head { align-items: center; }
   .q-fold .sec-toggle .sum { flex: none; }
   .closed-foot { display: flex; align-items: center; gap: var(--s-1); }
