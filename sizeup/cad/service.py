@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, runcards
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
@@ -73,7 +73,7 @@ VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
 PLACE_KINDS = ("address", "intersection", "street", "place", "milemarker", "exit")     # a note's "@" places
 PLACE_FIELDS = ("kind", "label", "sub", "lat", "lon", "source", "category", "detail", "route", "dir", "value",
-                "precision", "score")
+                "precision", "score", "at")
 
 
 @dataclass
@@ -224,6 +224,7 @@ class Cad:
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
+        self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -302,6 +303,7 @@ class Cad:
         # hub: the station's), and each P25 system's label ({name: label}). Without them: what the log itself says.
         self.source_rows: Callable[[], list[dict]] = lambda: []
         self.source_systems: Callable[[], dict[str, str]] = lambda: {}
+        self.source_freqs: Callable[[], dict[str, str]] = lambda: {}      # an FM / airband channel's MHz, by its label
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at, heading?, speed?, source?}}
         # from a future AVL feed (IamResponding, Red Alert, an iPad app; #358). The single input: no provider sets
         # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
@@ -461,6 +463,9 @@ class Cad:
                         "channels": sorted(self.atc_talkers.channels)},
                 # Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page
                 "radio_emergencies": {"prominent": list(self.em_prominent)},
+                # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
+                # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
+                "radio_folders": radiofolders.rev(self.radio_folders),
             })
         st = self._state[1]
         now = self.clock()
@@ -1854,8 +1859,9 @@ class Cad:
     def comms_sources(self, q: dict | None = None) -> dict:
         """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
         [{key, system, system_label, group, name, service, tier, ours, mutable, encrypted, department, talkgroup, last,
-        counts, emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
-        the same (the page asks every few seconds).
+        counts, emergency, stuck, mhz}], folders: {rev, folders, names?} | null}. mhz: an FM / airband channel's
+        frequency (its hover, #607), null for a talkgroup. ?rev= a tree's rev: {unchanged: true, rev, live}
+        while nothing was logged and the minute is the same (the page asks every few seconds).
 
         A source: every one in the log or the activity table, and every known talkgroup that is ours, was heard, or is
         another system's with a tier that isn't off. last: when it was last heard (unix). live: the sources transmitting
@@ -1863,11 +1869,13 @@ class Cad:
         counts and the time bar come from these: no per-viewer state here). emergency: "ours" | "other": an emergency
         on it not yet cleared (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
         was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
-        sources."""
+        sources. folders: the admins' folders for the tree (#607, sizeup/cad/radiofolders.py; null: the automatic
+        grouping), without another system's keys for such a reader."""
         context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
-        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}"
+        folders = self.radio_folders
+        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{radiofolders.rev(folders)}"
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -1884,6 +1892,10 @@ class Cad:
             county = sourcekeys.COUNTY
             labels = {"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}}
             info = {str(r.get("source")): r for r in self.source_rows() if r.get("source")}
+            try:
+                freqs = self.source_freqs()
+            except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the tree
+                freqs = {}
             seen = {r["source"]: r for r in self.comms.sources_seen()}
             counts = self.comms.minute_counts(now)
             ems = self.comms.emergencies(now)
@@ -1914,7 +1926,8 @@ class Cad:
                             "mutable": not (ours or (svc == "fire" and system in sourcekeys.OURS_SYSTEMS)),
                             "department": str(i.get("department") or ""), "talkgroup": got[1] if got else None,
                             "last": last, "counts": counts.get(key) or [], "emergency": em.get("emergency", ""),
-                            "stuck": em.get("stuck", "")})
+                            "stuck": em.get("stuck", ""),
+                            "mhz": None if got else freqs.get(key.split(":", 1)[-1])})
             order = {"analog": 1, "airband": 3}
             out.sort(key=lambda r: (0 if r["system"] == county else order.get(r["system"], 2), r["system"],
                                     not r["ours"], r["group"], r["name"]))
@@ -1923,7 +1936,16 @@ class Cad:
         live_keys = sorted(live & shown)
         if q and (q.get("rev") or [""])[0] == rev:
             return {"unchanged": True, "rev": rev, "live": live_keys}
-        return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1]}
+        return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1],
+                "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
+                                                   hidden_labels=self.context_labels())}
+
+    def context_labels(self) -> list[str]:
+        """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""
+        try:
+            return [str(v) for k, v in self.source_systems().items() if k not in sourcekeys.OURS_SYSTEMS]
+        except Exception:  # noqa: BLE001 - a heading's name, never in the way of the tree
+            return []
 
     def feed_query(self, q: dict) -> dict:
         """GET /api/cad/feed?limit=&tg=307,333: the 60 Control feed (default: the data file's talkgroups)."""
@@ -2006,7 +2028,8 @@ class Cad:
 
     def geocode(self, q: str) -> dict:
         """The location box. The gazetteer's readings, plus the place search's highway mile markers and
-        exits (first: the gazetteer has none) and named places it doesn't know (#67)."""
+        exits (first: the gazetteer has none) and named places it doesn't know (#67); an address with the department's
+        names at it: each name first ("12 Example Ave @ Sample Fitness"), then the address (``_places_at``)."""
         q = (q or "").strip()
         if not q or len(q) > 200:
             raise CadError("q: 1 to 200 characters")
@@ -2019,9 +2042,37 @@ class Cad:
         hits = self._place_hits(q, limit=8) if len(q) <= 120 else []
         highway = [self._as_match(h) for h in hits if h["kind"] in ("milemarker", "exit")]
         known = {(m["label"].split(",")[0].strip().lower()) for m in ms}
-        named = [self._as_match(h) for h in hits if h["kind"] == "place" and h["label"].lower() not in known]
+        named = [self._as_match(h) for h in hits if h["kind"] == "place" and not h.get("at")
+                 and h["label"].lower() not in known]
         rest = sorted(ms + named, key=lambda m: -m["confidence"]) if named else ms
-        return {"matches": [self._detailed(m) for m in (highway + rest)[:6]]}
+        return {"matches": [self._detailed(m) for m in self._places_at(highway + rest, 6)]}
+
+    def _places_at(self, ms: list[dict], limit: int) -> list[dict]:
+        """Location suggestions with the department's names at each address right before it (the county's common
+        places, a hand-made name pinned at an address: PlaceIndex.places_at), alphabetical; the rest in their order,
+        limit in all. Each name: a place suggestion as by its name (place, place_address: the address typed, its point),
+        at_address: that address."""
+        ix = self.place_index()
+        if ix is None or not hasattr(ix, "places_at"):
+            return ms[:limit]
+        extra, out = None, []
+        for m in ms:
+            if m.get("kind") == "address" and m.get("house_number") and m.get("street") and len(out) < limit - 1 \
+                    and m.get("lat") is not None:
+                if extra is None:
+                    extra = self.local_places()
+                address = f"{m['house_number']} {m['street']}"
+                have = {((o.get("place") or "").lower(), o["lat"], o["lon"]) for o in out}
+                for h in ix.places_at(address, m["lat"], m["lon"], extra, town=m.get("town") or "",
+                                      town_of=self.lists.town_of)[:limit - 1 - len(out)]:
+                    h["sub"] = self.lists.town_of(h["sub"]) or m.get("town") or ""
+                    pm = dict(self._as_match(h), confidence=m["confidence"], at_address=address)
+                    if (pm["place"].lower(), pm["lat"], pm["lon"]) not in have:
+                        out.append(pm)
+            out.append(m)
+        mine = {(o["place"].lower(), o["lat"], o["lon"]) for o in out if o.get("at_address")}
+        return [o for o in out if o.get("at_address") or not o.get("place")
+                or ((o.get("place") or "").lower(), o["lat"], o["lon"]) not in mine][:limit]
 
     def _crossings(self, q: str) -> dict | None:
         """Two streets typed ("N Main St / Westchester Ave", "n main & west": #213): where they meet in our area,
@@ -2118,6 +2169,17 @@ class Cad:
             if m:
                 m["town"] = L.town_of(m.get("municipality") or "")
                 got[k] = self._detailed(m)
+        # the department's names at that address point (the county's common places): each a choice of its own
+        a, got["at_address"] = got.get("address"), []
+        if a and a.get("house_number") and a.get("street") and ix is not None and hasattr(ix, "places_at"):
+            address = f"{a['house_number']} {a['street']}"
+            for h in ix.places_at(address, a["lat"], a["lon"], self.local_places(), town=a.get("town") or "",
+                                  town_of=L.town_of):
+                h["sub"] = L.town_of(h["sub"]) or a.get("town") or ""
+                got["at_address"].append(self._detailed(dict(self._as_match(h), at_address=address)))
+            p = got.get("place")
+            if p and (p.get("place") or "").lower() in {x["place"].lower() for x in got["at_address"]}:
+                got["place"] = None                   # the nearest named place is one of them: listed there
         return got
 
     # -- the place search: a note's "@", the location box (#67) -------------------------------------
@@ -2143,12 +2205,15 @@ class Cad:
         gazetteer: the same tuple while they don't change."""
         return self.settings.local_addresses()
 
-    def _place_hits(self, q: str, near=None, limit: int = 8) -> list[dict]:
+    def _place_hits(self, q: str, near=None, limit: int = 8, at_address: bool = False) -> list[dict]:
+        """The place search's hits, towns as the CAD names them. at_address: the names at an address typed before it
+        (the place search's own answer only: GET /api/cad/places; the location box puts its own, _places_at)."""
         ix = self.place_index()
         if ix is None:
             return []
         L = self.lists
-        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order))
+        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order),
+                         **({"at_address": True, "town_of": L.town_of} if at_address else {}))
         for h in hits:
             h["sub"] = L.town_of(h["sub"])
         return hits
@@ -2208,7 +2273,7 @@ class Cad:
             raise CadError("limit: a number") from None
         if self.place_index() is None:
             return {"places": [], "error": "place search unavailable"}
-        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit)]}
+        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit, at_address=True)]}
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 

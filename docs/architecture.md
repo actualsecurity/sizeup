@@ -330,6 +330,17 @@ A name whose address is not found is kept, flagged ("not found" in the card): th
 place it, but a county feed location naming it still gets its address. The imported names are used:
 
 - by the place search (a note's "@", the location box: the name, its address filled in),
+- by an address typed (the place search, the location box) or clicked on the new call's map: each name at that address
+  is its own suggestion, alphabetical, right before the plain address ("120 Example Ave @ Example Burger", "120
+  Example Ave @ Sample Fitness", "120 Example Ave"). Picked, it is the place as by its name, at the address typed. The
+  address is matched by its house number (letter and fraction too: `localaddr`) and its street's words (the
+  gazetteer's spelling of an entry's address only for that very number: "189 Example St" is not "189-1/2"), then by
+  its point (within 500 m) and its town (the same street across a town line is not it; a name at the very point,
+  within 50 m, counts whatever its town: the import may place a row at a neighbour's point). A site is offered at any
+  of its addresses, once; a range ("132-136", "136-132", "132-36", "199-01") at each number of it on that side of the
+  street when its ends are at most 20 apart (`RANGE_SPAN`), else at its two ends. A name made by hand counts when it
+  was pinned at an address. Only the place search's own answer and the location box get them, never a location typed
+  and not picked (`PlaceIndex.places_at`),
 - on the maps: **Common places** in every map's Layers box (`static/common-places.js`, off by default, remembered like
   the other layers). One point per spot from `GET /api/cad/places/map` (GeoJSON, `commonplaces.map_points`, cached
   until the names change, ETag; read only, viewers too): a site once, at its primary; names at one address together

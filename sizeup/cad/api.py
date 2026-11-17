@@ -25,13 +25,15 @@ GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / R
                                           each with place, street_address, cross (the streets at each end of its block)
                                           and block (for the map), #204; two streets typed ("N Main St / Westchester
                                           Ave", "n main & west", #213): where they meet in our towns, at most 25 (total,
-                                          more), cross = both streets; a street under two letters: error
+                                          more), cross = both streets; a street under two letters: error; an address
+                                          with the department's names at it: each name first (place, at_address)
 GET  /api/cad/geocode/here?lat=&lon=      the new call's map (#204): the address point, intersection and named place
-                                          nearest a click (each a suggestion as above), and the street under it; read only
+                                          nearest a click (each a suggestion as above), the names at that address
+                                          (at_address: [...]) and the street under it; read only
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           place search (#67: a note's "@"): {places: [{kind (address | intersection |
                                           street | place | milemarker | exit), label, sub (town), lat, lon, source,
-                                          category?, detail?, route?, dir?, value?, score}]}, our towns first, then
+                                          category?, detail?, route?, dir?, value?, at?, score}]}, our towns first, then
                                           nearest to near (else the event iid's point); read only: viewers too
 GET  /api/cad/places/map                  the maps' Common places layer: the department's located place names as
                                           GeoJSON, one point per spot (a site at its primary, all its addresses);
@@ -204,7 +206,8 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
-                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}]} (Cad.comms_sources)
+                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
+                                          admins' folders (#607) | null} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -289,6 +292,8 @@ POST /api/cad/settings/department_units  {action: set {key: a feed's department 
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
+POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, section, items}], base?} | reset {base?}}: the
+                                          Radio page rail's folders for everyone (#607, sizeup/cad/radiofolders.py); admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins

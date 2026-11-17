@@ -1235,7 +1235,7 @@ function sPlaceNames() {
       list.replaceChildren(...hits.map((p) => {
         const li = el("li", "");
         li.setAttribute("role", "option");
-        li.append(el("b", "", p.label));
+        li.append(...suggestionHead(p));                 // cad.js: a name at the address typed "120 Example Ave @ ..."
         if (p.sub) li.append(el("span", "town", p.sub));
         li.addEventListener("mousedown", (e) => {
           e.preventDefault();

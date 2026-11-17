@@ -597,6 +597,8 @@ class App:
         # system's label (the county's is its name: it has none of its own)
         self.cad.source_rows = self.talkgroups_state
         self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
+        # ... and each FM / airband channel's frequency, for its hover there (#607)
+        self.cad.source_freqs = lambda: {c.label: f"{c.mhz:g}" for c in self.cfg.channels}
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
@@ -774,8 +776,11 @@ class App:
                 p = getattr(self, "pushes", None)          # built just below: no topic until then
                 t = p.prealert_topics() if p is not None else {"ring": {"topic": ""}, "status": {"topic": ""}}
                 return t["ring"]["topic"], t["status"]["topic"]
+            if cfg.prealert_config_note:
+                log(f"prealert: config: {cfg.prealert_config_note}")
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, "", "", cfg.prealert_expire_min,
-                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics)
+                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics,
+                                      heartbeat_every_min=cfg.prealert_heartbeat_every_min)
             self.prealert_sync()
         # Pushes (sizeup/notify.py Pushes, [alerts]): our own ntfy topics by kind: the emergency alarms
         # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon

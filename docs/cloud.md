@@ -103,6 +103,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [Source keys (#415)](#source-keys-415)
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
+  - [The rail's folders (#607)](#the-rails-folders-607)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -1176,7 +1177,7 @@ request, no retry), the 60 Control header says "Tapout: not configured" and Heal
 | topic | Tapout sends | sizeup does |
 |---|---|---|
 | `ring_topic` | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
-| `status_topic` | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+| `status_topic` | `Tapout heartbeat` every 6 h (`heartbeat_every_min`; it was hourly) (`... seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago" (any status message proves it is alive: "ok, heard 3 min ago"); a device fault (priority 4+, e.g. "ALERT DELIVERY FAILED, 3 min ago"; not `OTA REJECTED` for an image no newer than the running one) or `Tapout restarted UNEXPECTEDLY` ("restarted unexpectedly 2 min ago") in warning until the next heartbeat or restart, its recovery (`Detector line recovered`, `... armed`) or the stale window (a heartbeat doesn't prove the detector is armed: the tooltip says so); header order: no heartbeat, ring feed offline, device fault; nothing for `heartbeat_stale_min` (left out: the period + 10 % + 15 min, 411; set: at least 1.05 × the period, else logged and derived) "no heartbeat for 7 h" in warning; never heard: "no heartbeat yet" |
 
 **Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to a hub it doesn't
 subscribe (logged): the hub does on its own, so it works whether or not the station is connected, and nobody gets two
@@ -1187,7 +1188,10 @@ once (`App.prealert_sync`; a restart resumes after the last message).
 `open`, `keepalive` about every 45 s, `message`). A dropped stream reconnects with backoff (1 s
 doubling to 60 s; a `429` waits at least 2 min, or `Retry-After`, up to 10) and resumes with
 `since=<last message id>`. The first connection asks `since=10m` for rings (a ring just before a
-restart isn't lost, old ones aren't news) and `since=90m` for the status topic (the last heartbeat).
+restart isn't lost, old ones aren't news) and `since=540m` for the status topic: a heartbeat period and a half, at
+least `heartbeat_stale_min`, so a fresh start finds the last heartbeat ("ok, heartbeat 5 h ago", not "no heartbeat
+yet" for up to 6 h). ntfy.sh keeps messages about 12 h; a longer look-back just gets what it still has. Tapout's last
+heartbeat is also kept in the CAD database, so a restart or deploy shows it at once.
 Rings are deduplicated by ntfy id in the database; one received more than `expire_min` after it rang
 is recorded as expired ("received late"), never shown as live.
 
@@ -1218,7 +1222,8 @@ server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local tes
 ring_topic = ""                  # set in Settings > System > Push notifications (or env)
 status_topic = ""
 expire_min = 5
-heartbeat_stale_min = 90
+heartbeat_every_min = 360        # Tapout's heartbeat period (6 h)
+# heartbeat_stale_min = 411      # left out: the period + 10 % + 15 min
 ```
 
 ## Incident sources: external CAD feeds, paging as the backup (#297)
@@ -2615,6 +2620,33 @@ An emergency button on someone else's talkgroup is recorded, kept, alarmed and p
 | Never quiet | ours (our fire channels, our rigs, scene safety); a full alarm's window; a window one of our rigs keyed; a row or source whose service isn't known |
 
 Presentation only. Tests: `tests/test_radio_emergency.py`.
+
+### The rail's folders (#607)
+
+> "the radio rail grouping, id like those to be editable by the user, so we can group them in specific ways? or edit
+> the names of folders/etc? we can leave the initial, but the rest should be customizable. and order etc. and also the
+> folders should be able to tab to show all or minimize"
+
+`sizeup/cad/radiofolders.py`, `static/radio-nav.js`.
+
+The rail's channel tree is headings and folders. **Default (the automatic grouping):** a heading per system (County,
+another P25 system such as Metro, Analog, Airband), a folder per group under it (a talkgroup's `Tag` in its
+trunk-recorder `talkgroups.csv`; `Analog` and `Airband` for the FM and airband channels), the channels in the hub's
+order (ours first, then by name). A heading with one folder of its own name (Analog, Airband) is shown once.
+
+| | |
+|---|---|
+| **Edit** (on the rail, admins) | rename, add (**+ Folder**), delete an empty folder, the **heading** over a folder (folders in a row with the same heading share it; blank: none), drag a folder or a channel by its ⠿ (desktop), or ▲ ▼ and **Move to** (touch, keyboard). **Reset**: the automatic grouping. Nothing changes until **Save**; **Cancel** drops the draft |
+| Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written |
+| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept |
+| Stored | `{folders: [{id, name, section, items: [source keys]}], names?: {source key: name}}`. `id`: `d:<system>:<group>` (a default folder, renamed or moved) or `u:<random>` (made by an admin) |
+| A channel in no folder | a talkgroup heard for the first time, one never placed: its default folder (`d:<system>:<group>`) if listed, else that folder made again after the last folder under its heading. **Nothing ever drops off the rail** |
+| A key with no source now | kept, not shown (a talkgroup not heard lately comes back where it was); one that isn't a source key, or a channel listed twice: dropped (the first folder wins), not an error |
+| Who sees it | everyone with the rail on. The folders come with the tree (`GET /api/cad/comms/sources`: `folders`, null for the default); a reader who may not see another system's traffic ([Who sees it](#who-sees-it)) gets none of its keys, and no folder that held only those. The state push carries their rev (`radio_folders`): every open rail asks for the tree again when an admin saves |
+| **Fold** (every viewer) | a folder's head shows all / minimizes it; ⊟ / ⊞ minimizes / shows them all. Folded: its name, how many channels, the new calls, an emergency (as its channels show one) and a live dot (not for a muted channel). The channel on screen stays under its folded folder. Remembered per browser (`localStorage` `sizeup.cad.radio.nav`, `folds`), never on the hub |
+
+Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
+folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 
