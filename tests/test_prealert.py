@@ -522,6 +522,73 @@ def test_a_device_fault_warns_with_its_title_until_a_heartbeat_or_restart(tmp_pa
     assert len(pa.tapout()["word"]) < 80                                          # the header stays one short line
 
 
+def test_a_fault_ends_after_the_stale_window(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)                                                           # stale window: 411 min
+    t0 = clock.t
+    pa.status(status_msg("h1", t0 - 60))
+    pa.status(status_msg("w1", t0, "ALERT DELIVERY FAILED", "", ("warning",), 4))
+    pa.status(status_msg("o1", t0 + 400 * 60, "OTA check", "Up to date.", (), 3))   # alive, nothing ends the fault
+    clock.t = t0 + 410 * 60
+    assert pa.tapout()["word"] == "ALERT DELIVERY FAILED, 6.8 h ago"
+    clock.t = t0 + 412 * 60                                                     # never a warning for ever
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heard 12 min ago") and pa.fault() is None
+    pa.status(status_msg("b1", clock.t, "Tapout restarted UNEXPECTEDLY", "Boot #9.", (), 4))
+    assert pa.tapout()["word"] == "restarted unexpectedly 0 s ago"
+    pa.status(status_msg("o2", clock.t + 400 * 60, "OTA check", "Up to date.", (), 3))
+    clock.t += 412 * 60
+    assert pa.tapout()["state"] == "ok"
+
+
+def test_a_recovery_message_ends_its_own_fault_only(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("h1", clock.t - 3600))
+    pa.status(status_msg("r0", clock.t - 600, "Detector line recovered", "", (), 3))   # before the fault: not its end
+    pa.status(status_msg("w1", clock.t - 300, "Detector line STUCK active", "D4 low for 10 min.", ("warning",), 4))
+    pa.status(status_msg("a1", clock.t - 240, "Ring detector armed", "", (), 3))      # another fault's recovery
+    assert pa.tapout()["word"] == "Detector line STUCK active, 5 min ago"
+    pa.status(status_msg("r1", clock.t - 120, "Detector line recovered", "D4 high again.", ("white_check_mark",), 3))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heard 2 min ago") and "Detector line recovered" in t["detail"]
+    pa.status(status_msg("w2", clock.t - 60, "Ring detector NOT armed", "", ("warning",), 4))
+    assert pa.tapout()["word"] == "Ring detector NOT armed, 60 s ago"
+    pa.status(status_msg("a2", clock.t - 30, "Ring detector armed", "", (), 3))
+    assert pa.tapout()["state"] == "ok" and offline(cad).tapout()["state"] == "ok"     # kept across a restart
+    pa.status(status_msg("w3", clock.t - 20, "ALERT DELIVERY FAILED", "", ("warning",), 4))
+    pa.status(status_msg("h2", clock.t - 10))                                    # a heartbeat still ends any fault ...
+    t = pa.tapout()
+    assert t["state"] == "ok" and "doesn't prove the detector is armed" in t["detail"]   # ... and says so
+
+
+def test_the_ring_feed_offline_outranks_a_device_fault(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("w1", clock.t - 60, "ALERT DELIVERY FAILED", "", ("warning",), 4))
+    assert pa.tapout()["word"] == "ALERT DELIVERY FAILED, 60 s ago"
+    pa.ring_stream.down_since = clock.t - 30                                     # rings can't reach us: that first
+    assert pa.tapout()["word"].startswith("ring feed offline since")
+    clock.t += 7 * 3600                                                          # and no heartbeat above both
+    assert pa.tapout()["word"] == "no heartbeat for 7 h"
+
+
+def test_an_ota_image_no_newer_than_running_is_not_a_fault(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("h1", clock.t - 3600))
+    pa.status(status_msg("o1", clock.t - 60, "OTA REJECTED", "Image v2.4.0 is not newer than running v2.4.0.",
+                         ("warning",), 4))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heard 60 s ago") and "warning" not in pa.health
+    pa.status(status_msg("o2", clock.t - 30, "OTA REJECTED", "Signature check failed.", ("warning",), 4))
+    assert pa.tapout()["word"] == "OTA REJECTED, 30 s ago"                       # a real rejection still is
+
+
 def test_an_unexpected_restart_is_a_restart_shown_as_a_warning(tmp_path):
     clock = Clock()
     cad = make_cad(tmp_path, clock=clock)
@@ -682,6 +749,8 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
                      ('ring_topic = "a/b"', "topic"), ("expire_min = 0", "expire_min"), ("enabled = 1", "enabled"),
                      ("heartbeat_every_min = 0", "heartbeat_every_min"), ('heartbeat_every_min = "6h"', "minutes"),
                      ("heartbeat_every_min = 60\nheartbeat_stale_min = 3000", "heartbeat_stale_min"),
+                     ("heartbeat_stale_min = nan", "finite"), ("heartbeat_stale_min = inf", "finite"),
+                     ("heartbeat_every_min = nan", "finite"), ("expire_min = nan", "finite"),
                      ("topic = 1", "unknown key")):
         p.write_text(f"[prealert]\n{bad}\n")
         with pytest.raises(ConfigError, match=why):

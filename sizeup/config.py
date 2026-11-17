@@ -3,6 +3,7 @@ See config.example.toml for every option with comments."""
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -564,7 +565,10 @@ def _prealert(data: dict) -> dict:
         expire, every = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_every_min", HEARTBEAT_EVERY_MIN))
         stale = float(pa["heartbeat_stale_min"]) if "heartbeat_stale_min" in pa else heartbeat_stale_min(every)
     except (TypeError, ValueError):
-        raise ConfigError("prealert.expire_min / heartbeat_every_min / heartbeat_stale_min: minutes") from None
+        raise ConfigError("prealert.expire_min / heartbeat_every_min / heartbeat_stale_min: minutes, "
+                          "a finite number") from None
+    if not all(math.isfinite(x) for x in (expire, every, stale)):          # nan would turn the no-heartbeat warning off
+        raise ConfigError("prealert.expire_min / heartbeat_every_min / heartbeat_stale_min: minutes, a finite number")
     if not 0.5 <= expire <= 60:
         raise ConfigError("prealert.expire_min: 0.5 to 60")
     if not 5 <= every <= 24 * 60:

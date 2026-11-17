@@ -15,7 +15,9 @@ incoming call").
                             proves Tapout is alive. Nothing for heartbeat_stale_min (default: the period
                             + 10 % + 15 min, 411 min) -> "Tapout: no heartbeat for ..." in warning. A
                             fault (priority 4+) or "Tapout restarted UNEXPECTEDLY" warns with its title
-                            until the next heartbeat or restart (PreAlerts.fault).
+                            until the next heartbeat or restart, its recovery ("Detector line recovered")
+                            or the stale window (PreAlerts.fault). Header order: no heartbeat, ring feed
+                            offline, device fault.
 
 The topics' names are not in the repo: they come from Settings > System > Push notifications (the CAD settings, the
 DB), overridden by SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC, else [prealert] ring_topic / status_topic
@@ -77,6 +79,14 @@ FIRST_SINCE = "10m"            # the first connection's window (later ones: sinc
 LIST_S = 24 * 3600             # shown and in the state
 KEEP_S = 90 * 24 * 3600        # kept in the database (the CSV export)
 MATCH_BEFORE_S = 120           # an event made this long before the ring still matches it
+# Tapout's high-priority status messages that are not faults (it is fine): an OTA image no newer than what runs
+NOT_A_FAULT = re.compile(r"\bOTA REJECTED\b.*\bnot newer than\b.*\brunning\b", re.I | re.S)
+# A fault -> the message that ends it: (the fault's title, the recovery's title). A recovery never matches its fault.
+# A heartbeat or a restart also ends any fault, though a heartbeat doesn't (yet) say the detector is armed.
+RECOVERIES = (
+    (re.compile(r"\bdetector line\b.*\bstuck\b", re.I), re.compile(r"\bdetector line\b.*\brecovered\b", re.I)),
+    (re.compile(r"\bnot armed\b", re.I), re.compile(r"\barmed\b", re.I)),
+)
 from sizeup import USER_AGENT
 UA = USER_AGENT + " ntfy read-only subscriber"
 
@@ -123,6 +133,11 @@ def _hms(at: float | None) -> str:
 
 def _ts(at: float | None) -> str:
     return datetime.fromtimestamp(at, TZ).strftime("%m/%d/%Y %H:%M:%S") if at else ""
+
+
+def _recovers(title: str, fault: str) -> bool:
+    """Does a status message with this title end that fault (RECOVERIES)?"""
+    return any(f.search(fault) and r.search(title) and not f.search(title) for f, r in RECOVERIES)
 
 
 def _short(text: str, n: int = 60) -> str:
@@ -664,7 +679,12 @@ class PreAlerts:
                     h[s["kind"]] = s
             if not h.get("last") or s["at"] >= h["last"].get("at", 0):
                 h["last"] = s
-            if s["kind"] == "other" and s["priority"] >= 4 and (not h.get("warning") or s["at"] >= h["warning"].get("at", 0)):
+            w = h.get("warning")
+            if s["kind"] == "other" and w and s["at"] > w.get("at", 0) and _recovers(s["title"], w["title"]):
+                h["recovered"] = dict(s, of=w.get("id"))   # "Detector line recovered" ends "Detector line STUCK active"
+            elif (s["kind"] == "other" and s["priority"] >= 4
+                    and not NOT_A_FAULT.search(f"{s['title']}\n{s['message']}")
+                    and (not w or s["at"] >= w.get("at", 0))):
                 h["warning"] = s                    # the firmware's "high" status: a device fault (fault())
             self.health = h
             with self.store.lock:
@@ -672,17 +692,22 @@ class PreAlerts:
                                       "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (json.dumps(h),))
         self.on_change()
 
-    def fault(self) -> dict | None:
+    def fault(self, now: float | None = None) -> dict | None:
         """The device fault in effect: the newest high-priority status message ("ALERT DELIVERY FAILED", "Detector line
-        STUCK active", "Ring detector NOT armed", ...) or an unexpected restart, when no heartbeat or restart came after
-        it. Only those clear it: the heartbeat is the firmware's periodic all-clear and a restart starts afresh, while a
-        normal-priority message (an OTA step) says nothing about the fault."""
+        STUCK active", "Ring detector NOT armed", ...; not NOT_A_FAULT) or an unexpected restart, when nothing ended it:
+        a later heartbeat or restart, or its recovery ("Detector line recovered", RECOVERIES). A normal-priority message
+        (an OTA step) says nothing about it. One older than the stale window is over too (the heartbeat would have
+        ended it): never a warning for ever."""
+        now = self.clock() if now is None else now
         h = self.health
-        hb, boot, w = h.get("heartbeat"), h.get("boot"), h.get("warning")
-        cleared = max([x["at"] for x in (hb, boot) if x], default=None)
-        if w and (cleared is None or w["at"] > cleared):
+        hb, boot, w, rec = h.get("heartbeat"), h.get("boot"), h.get("warning"), h.get("recovered")
+        ends = [x["at"] for x in (hb, boot) if x]
+        if w and rec and rec.get("of") == w.get("id"):
+            ends.append(rec["at"])
+        if w and now - w["at"] <= self.stale_s and not any(t > w["at"] for t in ends):
             return w
-        if boot and boot.get("unexpected") and (not hb or boot["at"] > hb["at"]):
+        if (boot and boot.get("unexpected") and now - boot["at"] <= self.stale_s
+                and (not hb or boot["at"] > hb["at"])):
             return boot
         return None
 
@@ -705,6 +730,12 @@ class PreAlerts:
         w = h.get("warning")
         if w and now - w["at"] < LIST_S:
             parts.append(f"warning {_ts(w['at'])}: {w['title']}" + (f": {w['message']}" if w["message"] else ""))
+            rec = h.get("recovered")
+            if rec and rec.get("of") == w.get("id"):
+                parts.append(f"{rec['title']} {_ts(rec['at'])}")
+            elif hb and hb["at"] > w["at"] and not (h.get("boot") and w["at"] < h["boot"]["at"] < hb["at"]):
+                parts.append(f"cleared by the heartbeat {_ts(hb['at'])} "
+                             "(a heartbeat doesn't prove the detector is armed)")
         feed = self.status_stream
         if not self.ring_stream.topic and not feed.topic:
             return {"state": "unconfigured", "word": "not configured", "at": None,
@@ -732,13 +763,13 @@ class PreAlerts:
             detail = "; ".join([f"last message {_ts(last['at'])}: {last['title']}", *parts])
         if age > self.stale_s:
             return {"state": "warn", "word": f"no heartbeat for {_ago(age)}", "at": last["at"], "detail": detail}
-        if f := self.fault():
-            word = (f"restarted unexpectedly {_ago(now - f['at'])} ago" if f["kind"] == "boot"
-                    else f"{_short(f['title']) or 'warning'}, {_ago(now - f['at'])} ago")
-            return {"state": "warn", "word": word, "at": last["at"], "detail": detail, "fault": True}
         if self.ring_stream.topic and not self.ring_stream.connected and self.ring_stream.down_since is not None:
             return {"state": "warn", "word": f"ring feed offline since {_hms(self.ring_stream.down_since)}",
                     "at": last["at"], "detail": detail}
+        if f := self.fault(now):
+            word = (f"restarted unexpectedly {_ago(now - f['at'])} ago" if f["kind"] == "boot"
+                    else f"{_short(f['title']) or 'warning'}, {_ago(now - f['at'])} ago")
+            return {"state": "warn", "word": word, "at": last["at"], "detail": detail, "fault": True}
         return {"state": "ok", "word": f"ok, {what} {_ago(age)} ago", "at": last["at"], "detail": detail}
 
     # -- what the screens get --------------------------------------------------------------------------
