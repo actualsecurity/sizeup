@@ -1388,10 +1388,11 @@ class Editor:
     # Kept as overrides (section "places", key: the name in lower case) so they are audited, exported and
     # imported with the rest; the place search (Cad.search_places, the location box) offers them first.
 
-    def local_places(self) -> list[dict]:
+    def _places_cached(self) -> tuple:
+        """(store rev, the names' version, the names): read again only when they changed (the county's are ~1,000)."""
         rev = self.store.rev
         got = getattr(self, "_places_cache", (None, None, []))
-        if got[0] != rev:        # any write: read the names again only when they changed (the county's are ~1,000)
+        if got[0] != rev:        # any write: the version asked again, the names read again only when it moved
             r = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at, TOTAL(LENGTH(value)) AS size "
                                "FROM settings_overrides WHERE section = 'places'")
             ver = (r["n"], r["at"], r["size"]) if r else None
@@ -1401,7 +1402,15 @@ class Editor:
             else:
                 got = (rev, ver, got[2])
             self._places_cache = got
-        return [dict(r) for r in got[2]]
+        return got
+
+    def local_places(self) -> list[dict]:
+        return [dict(r) for r in self._places_cached()[2]]
+
+    def places_rev(self) -> str:
+        """The place names' version (how many, the last change, their size): moves with every change to them. Nothing
+        copied (the state asks at every build)."""
+        return json.dumps(self._places_cached()[1])
 
     def _places_op(self, action: str, body: dict, op: str) -> dict:
         cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
@@ -3115,6 +3124,13 @@ class Editor:
         self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
+        from sizeup.intel.admin import clean_value
+        intel = ov.get("intel") or {}
+        for k, v in list(intel.items()):  # as Settings > System > Intel takes it: a bad value refuses the whole file
+            try:                          # (policy.settings() would read it as the default without a word)
+                intel[k] = clean_value(k, v, intel)
+            except CadError as e:
+                raise CadError(f"overrides.intel.{k}: {str(e).split(': ', 1)[-1]}") from None
         if ADDR_SECTION in ov:            # sizeup/geo/localaddr.py: a point that can't be placed is skipped, in the notes
             ov[ADDR_SECTION], more = self._import_addresses(ov[ADDR_SECTION])
             self._import_notes = list(getattr(self, "_import_notes", None) or []) + more
@@ -3360,4 +3376,6 @@ class Editor:
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
+        if getattr(self.cad, "intel", None) is not None and any(c["store"] in INTEL_SECTIONS for c in changes):
+            self.cad.intel.reload()          # the intel switches (push, push_pii, the caps) live now, as after their own op
         return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

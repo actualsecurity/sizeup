@@ -2383,7 +2383,26 @@ Merged into the GTFS-realtime trains by **train number and run date**: the posit
 gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
-is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+is good: Amtrak's trains on the New Haven Line (TrainTime's branch `AM`; never in Metro-North's GTFS-realtime), whose
+box says *Amtrak*, not *Metro-North*, and whose next stop and its limit are TrainTime's own.
+
+**SIGNAL locations.** TrainTime's `SIGNAL` location (Amtrak's trains, or a Metro-North train whose GPS is out) is
+where Metro-North's signal system has the train: the block it entered, timed when it entered it, unchanged until it
+enters the next one 1 to 3 km on (a minute or more; minutes at a red signal). It is taken as it is, not filtered (the
+GPS filter drew it halfway between two signals); the same signal again is the train still in that block (its time
+stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
+allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
+just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on at that speed with no "no news" ease, to the end
+of its block (as long as the block it just ran, plus 10 s of its travel for the next fix's lateness; 1.5 km before a
+block is known), never past its next stop, and not braked for the block's end: the next signal's fix normally comes as
+it gets there, and is closed smoothly, never snapped back. Held at a red signal, it is drawn on through the block's end
+by about that slack and a hard stop, then glided back. After 3 min with no new signal it is drawn dimmed, *At signal ·
+4 min ago* (not the feed's *Stale*). A train TrainTime alone has keeps its signal location 10 min from when it first
+had that signal (however often TrainTime re-stamps it; a GPS location: 40 s, as before), so it no longer drops off the
+map 40 s after each signal. A Metro-North train reporting SIGNAL takes the same path while its TrainTime position is
+used (under 40 s old and as new as GTFS-realtime's), which is rare. #589's GPS rules are unchanged; signal fixes add
+nothing to the prediction residuals. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
@@ -3104,7 +3123,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
-| Push | `push.py` | composed from an allow-list of fields, then scrubbed, failing closed |
+| Push | `push.py` | composed from an allow-list of fields; with `push_pii` off, then scrubbed, failing closed |
 | Listen | `listen.py` | a link in the push to the audio around it ([below](#listen-links-and-inference-intel)) |
 | Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
@@ -3182,6 +3201,7 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 |---|---|---|
 | `enabled` | on | the whole pipeline |
 | `push` | on | the kill switch: off, detection goes on, nothing is pushed |
+| `push_pii` | on | "PII": intel pushes skip the PII scrub (admin decision, 2026-11-17: access to the output is limited instead). Off: the scrub withholds a push as before. The INTEL kind only; ntfy topics are readable by anyone who knows the name |
 | `per_hour` / `per_day` / `per_category_hour` | 30 / 200 / 10 | push caps. Over one: the event is kept with suppressed "rate"; a digest (counts only, priority 2) goes every `digest_min` (15) |
 | `repush_min`, `max_repush` | 10, 2 | an escalation (a higher level, a place found or confirmed) pushes again at most this often, this many times |
 | `place_repush_min` | 5 | the place first heard this soon after the first push pushes once more |
@@ -3193,8 +3213,11 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 **The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
 no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
-high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
-fails the scrub is not sent (suppressed "scrub", logged without the text). It opens
+high). Not among its fields: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With
+`push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
+fails the scrub is not sent (suppressed "scrub", logged without the text). Nothing scrubs what is stored or shown:
+transcripts are kept and shown as heard; only the model's input (`infer.py` `clean_text`) has plates and IDs taken out.
+It opens
 `<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
 `Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
 

@@ -842,6 +842,8 @@ class HubApp(App):
         from sizeup.cloud.health import MUTE_SECTION
         self.health.mutes = lambda: self.cad.settings.section(MUTE_SECTION)
         self.health.errors = self.error_watch
+        # the camera DVR (#550): Health's Camera DVR lines (how many record, the cameras parked as dead upstream)
+        self.health.dvr = lambda: self.roads.dvr.panel() if getattr(self.roads, "dvr", None) is not None else None
         # the replicas as the supervisor last verified them (sizeup/replicawatch.py): Health's Replicas row and alert
         if os.environ.get("LITESTREAM_BUCKET", "").strip():
             from sizeup import replicawatch
@@ -1540,6 +1542,14 @@ class HubApp(App):
     def set_adsb_receiver(self, serial: str | None) -> str | None:
         """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""
         return self._switch("set_adsb_receiver", serial or "")
+
+    def set_antenna_groups(self, groups, confirm: str = "") -> str | None:
+        """Settings > Radios > Receivers here: the station's antenna groups, kept and applied on the station like a
+        dongle's job (sizeup/radio/groups.py); what it runs comes back in its sdr state. confirm: the station's ask,
+        word for word, as the person confirmed it (a save that stops a running fire job, or ranks fire jobs against
+        the pinned order); the station refuses it if its ask has changed since."""
+        return self._switch("set_antenna_groups", groups, str(confirm)) if confirm else \
+            self._switch("set_antenna_groups", groups)
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:
