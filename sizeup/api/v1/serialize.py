@@ -18,7 +18,8 @@ from outside the CAD); an alarm's `text`, `what`, `who` and `subject`; the radio
 a premise note's `text`; a pre-plan point's `note`. The CAD does not write the caller's details into these fields
 itself, but a human or a transcript can. Every free text goes through scrub(): an operator's sign-in email never
 leaves (any "<...>" part is dropped, anywhere in the text: a "<5 min>" in a note loses it,
-deliberately; any other token holding an "@" becomes "an operator"). The radio-ID mask ("radio 41228", "rid 41228", ...) applies to an alarm's `what`/`text`/`subject`, the
+deliberately; any other token holding an "@" becomes "an operator"). The radio-ID mask ("radio 41228", "rid
+41228", ...) applies to an alarm's `what`/`text`/`subject`, the
 `alarm`-kind chronology lines and the identity fields only (an alarm's `who`, a radio row's `unit`, which also lose any
 standalone number of 4+ digits): a "radio 41228" in `status`/`tones` events, radio-row transcripts, notes, addresses and
 remarks is NOT masked (they are sent as written). Not scrubbed at all: unit names, pre-plan `label`, `geo_label`,
