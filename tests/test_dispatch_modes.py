@@ -15,6 +15,7 @@ from tests.test_incident_sources import T0, Rig
 from tests.test_radios import tx
 
 ADDR = "12 Example Ave"
+pytestmark = pytest.mark.hand_dispatch_gate     # the real gate: a dispatch by hand only in PCFD mode (automode.hand_dispatch)
 
 
 class AutoRig(Rig):
@@ -65,6 +66,11 @@ class AutoRig(Rig):
 
     def mode(self, m: str) -> None:
         self.cad.dispatch_mode({"mode": m, "operator": "Lt. Test"})
+
+    def put_on(self, iid: int, name: str, status: str = "DP") -> None:
+        """A person putting a unit on a call in 60 Control mode (no dispatch from here): the board's status with its
+        "which call?" answer (Cad.unit_status incident_id), a person's for automation like a dispatch."""
+        self.cad.unit_status(self.uid(name), {"status": status, "incident_id": iid, "operator": "Lt. Test"})
 
     def created(self, **kw) -> None:
         """The feed's event as first reported: dispatched now with E60 and L31 at 12 Example Ave."""
@@ -144,7 +150,7 @@ def test_incident_times_move_a_unit_only_when_it_is_the_only_one(rig):
 def test_a_unit_on_another_call_is_not_moved_and_one_out_of_service_is_not_sent(rig):
     rig.clock.t = T0 - 3600                                                        # an hour before: not a duplicate
     other = rig.cad.create({"type": "STRU", "address": "400 Sample St", "operator": "Lt. Test"})
-    rig.cad.dispatch(other["id"], {"unit_ids": [rig.uid("L31")], "operator": "Lt. Test"})
+    rig.put_on(other["id"], "L31")
     rig.cad.unit_status(rig.uid("E60"), {"status": "OS", "note": "pump", "operator": "Lt. Test"})
     rig.at(0)
     rig.created()
@@ -224,7 +230,7 @@ def test_pcfd_mode_leaves_a_radio_status_as_a_suggestion(rig):
 def test_a_person_wins_over_the_feed_for_that_unit(rig):
     rig.created()
     rig.cad.unit_status(rig.uid("E60"), {"status": "AV", "operator": "Lt. Test"})  # a person cleared E60 off it
-    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})   # and sent E62 by hand
+    rig.put_on(rig.iid(), "E62")                                                   # and put E62 on it by hand
     rig.at(60)
     rig.change(units=("E60", "L31", "E62"), unit_times={"E60": {"responding": T0 + 50}, "E62": {"responding": T0 + 55},
                                                         "L31": {"responding": T0 + 58}})

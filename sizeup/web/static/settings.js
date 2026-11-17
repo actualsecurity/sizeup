@@ -2433,7 +2433,7 @@ function sHealth(panel) {
 // server shows them to nobody else. Empty = the default (SSM / the config); Turn off = no pushes of that kind.
 
 const S_PUSH_FROM = { settings: "Settings", ssm: "SSM", env: "Environment", config: "Config file", default: "Default",
-  fallback: "Shared", off: "Turned off", none: "Not set" };
+  fallback: "Shared", off: "Turned off", none: "Not set", same: "Refused" };
 // A refusal goes under its field and stays until that field is edited or saved again (S.pushErr); what was typed stays.
 function sPushErr(card, key, text) {
   if (text) S.pushErr[key] = text; else delete S.pushErr[key];
@@ -2505,7 +2505,9 @@ async function sPushes(card) {
     const head = el("div", "row");
     head.append(el("b", "s-eta-l", k.label), el("span", `chip s-state ${k.topic ? "edited" : "default"}`, S_PUSH_FROM[k.source] || k.source));
     const now = el("div", "dim small");
-    now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", "", k.source === "off" ? "Off" : "Not set"), { title: "No pushes of this kind" }),
+    now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", k.kind === "intel" && k.source !== "off" ? "warn" : "",
+      k.source === "off" ? "Off" : k.source === "same" ? "Refused: same as alerts / status" : "Not set"),
+      { title: k.kind === "intel" ? "No intel pushes: they need a topic of their own, never the alerts or status topic" : "No pushes of this kind" }),
       ...(k.topic ? [el("span", "mono", k.topic), el("span", "", ` (${k.source_text})`)] : []));
     const input = sPushField(card, k.kind, sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono"));
     input.minLength = d.min_len;
@@ -2570,8 +2572,9 @@ async function sPushes(card) {
   next.append(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
-    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
-    + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter), on their own topic only: never the alerts "
+    + "or status topic (refused); not set: no intel pushes. "
+    + "Only one of alerts / status set: both go to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never a protected topic (the ones read for pre-alerts, and the extras listed): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
   sStamp(next);

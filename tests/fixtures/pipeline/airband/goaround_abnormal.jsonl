@@ -1,0 +1,13 @@
+{"do": "scenario", "t0": "day", "why": "The airport watch's story: a go-around and a (misheard) flap problem from one aircraft is a pre-alert (subject acft:N123AB, pushed once, the county feed polled now); the pilot's next words with no callsign (the exchange) escalate it; a hand-off to NY Approach is its Where; ADS-B keeps it open and ends it on landing."}
+{"do": "picture", "t": 0, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": 1400, "gs": 130, "trk": 340, "vr": -700, "phase": "arriving", "rwy": "34", "dist": 3.1, "age": 1.0}]}
+{"do": "air", "t": 10, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "November one two three alpha bravo, RNAV yankee three four, cleared to land"}
+{"do": "picture", "t": 55, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": 1400, "gs": 130, "trk": 340, "vr": -700, "phase": "arriving", "rwy": "34", "dist": 3.1, "age": 1.0}]}
+{"do": "air", "t": 60, "id": "twr-2", "ch": "HPN Tower", "dur": 4, "text": "November one two three alpha bravo is going around, we have a flat problem"}
+{"do": "air", "t": 75, "id": "twr-3", "ch": "HPN Tower", "dur": 4, "text": "November one two three alpha bravo, fly runway heading, climb and maintain three thousand"}
+{"do": "air", "t": 100, "id": "twr-4", "ch": "HPN Tower", "dur": 4, "text": "yeah we just had a flat fail indication, we have to run a checklist, we may go to a different airport"}
+{"do": "picture", "t": 110, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": 2200, "gs": 130, "trk": 340, "vr": 1500, "phase": "departing", "rwy": "34", "dist": 4.0, "age": 1.0}]}
+{"do": "air", "t": 130, "id": "twr-5", "ch": "HPN Tower", "dur": 4, "text": "November one two three alpha bravo, contact New York approach one two six point four"}
+{"do": "air", "t": 135, "id": "twr-6", "ch": "HPN Tower", "dur": 4, "text": "twenty six point four, November one two three alpha bravo"}
+{"do": "picture", "t": 400, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": 3000, "gs": 130, "trk": 340, "vr": -500, "phase": "near", "rwy": "34", "dist": 8.0, "age": 1.0}]}
+{"do": "air", "t": 410, "id": "app-1", "ch": "NY App 126.4/120.8", "dur": 4, "text": "New York approach, November one two three alpha bravo, we would like vectors back to Westchester"}
+{"do": "picture", "t": 900, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": "ground", "gs": 20, "trk": 340, "vr": 0, "phase": "ground", "rwy": "34", "dist": 0.5, "age": 1.0}]}

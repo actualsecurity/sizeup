@@ -36,8 +36,8 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
                "feed_unit_aliases" {feed code: board code}; codes that match none are listed on the timeline, never
-               dispatched. Never a unit out of service, on another open call (noted), or that was on this incident
-               before (a cleared assignment stays cleared)
+               dispatched. Never a unit out of service (the store refuses it: a notice instead, sizeup/cad/oos.py), on
+               another open call (noted), or that was on this incident before (a cleared assignment stays cleared)
       statuses per unit, only for a unit on this incident now: the feed's unit_times (responding, on location, in
                service) move it, forward only against this assignment's own times and its status; the feed's
                incident times only when the feed lists one unit and it is ours (an incident time doesn't say which
@@ -63,6 +63,10 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident a person reopened ("close"), are left alone by automation from then on. A person can always
                work the call by hand in either mode
     PCFD       nothing automatic: feed incidents arrive queued (sources.py), as before
+    by hand    a dispatch or an upgrade sent from this CAD (tones and voice: POST .../dispatch, .../upgrade) only in PCFD
+               mode: in 60 Control mode the county dispatches, the page hides the Dispatch card and the server refuses
+               them (hand_dispatch(); fails closed: a mode that can't be read is 60 Control's). The rest of working the
+               call by hand stays: accepting, notes, units' statuses, Add unit (heard responding), attaching
 """
 
 from __future__ import annotations
@@ -75,11 +79,14 @@ from datetime import datetime
 import re
 
 from sizeup.cad.sources import FEED_SOURCE, PAGING, is_placeholder
-from sizeup.cad.store import OPEN, TZ, CadError
+from sizeup.cad.oos import cause as oos_cause
+from sizeup.cad.store import OPEN, PERSON, TZ, CadError, OosLocked
 
 MODES = {"60control": "60 Control dispatching", "pcfd": "PCFD dispatching"}
 SHORT = {"60control": "60 Control", "pcfd": "PCFD"}
 DEFAULT = "60control"
+HAND_DISPATCH = "pcfd"            # the one mode a person dispatches in from this CAD
+NOT_HERE = "60 Control dispatching: switch to PCFD to dispatch"
 SECTION, KEY = "dispatch_mode", "mode"
 ASSIGN_WINDOW_S = 20 * 60.0
 SOURCES = ("county", "radio")
@@ -178,6 +185,11 @@ class AutoDispatch:
             raise CadError(f"mode: {' or '.join(MODES)}")
         with self._lock:
             return self._set_mode(mode, operator)
+
+    def hand_dispatch(self) -> None:
+        """A dispatch or an upgrade by hand: refused unless in PCFD mode (CadError, the operator's 400)."""
+        if self.mode() != HAND_DISPATCH:
+            raise CadError(NOT_HERE)
 
     def _set_mode(self, mode: str, operator: str) -> dict:
         old = self.mode()
@@ -576,15 +588,20 @@ class AutoDispatch:
         if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
             if not (ph and again):                       # a placeholder re-listed (dept_signed_on checked above)
                 return False                             # was on it and cleared: never put back by automation (H1)
-        if L.role(u["status"]) == "oos":
-            return False
         if u["incident_id"]:
             other = self.store.incident(u["incident_id"])
             if other["status"] in OPEN:
                 with self.store.tx() as db:
                     self.store._event(db, iid, "auto", f"{u['name']} on {other['number'] or '#' + str(other['id'])}: not moved", op)
                 return False
-        self.store.assign(iid, [u["id"]], op, verb=verb)
+        page = op.startswith("Paging")
+        try:                                             # out of service: refused, a notice instead (sizeup/cad/oos.py)
+            self.store.assign(iid, [u["id"]], op, verb=verb, by="page" if page else "county",
+                              cause=oos_cause("page" if page else "county",
+                                              "named on the page" if page else f"{op.removesuffix(' · auto')} lists it",
+                                              "dispatched", incident_id=iid))
+        except OosLocked:
+            return False
         a = self._on_here(iid, u["id"])
         if a is not None and t:
             with self.store.tx() as db:
@@ -626,7 +643,12 @@ class AutoDispatch:
         fresh = bool(col) and a.get(col) is None
         if self._manual(iid, f"unit:{u['name']}"):
             return                                       # re-checked just before the write (L4)
-        self.store.set_unit_status(u["id"], code, op, why=f"County {_hm(t)}")
+        try:
+            self.store.set_unit_status(u["id"], code, op, why=f"County {_hm(t)}", by=source,
+                                       cause=oos_cause(source, f"{op.removesuffix(' · auto')}: {L.status_phrase(code)} {_hm(t)}",
+                                                       intent, incident_id=iid))
+        except OosLocked:
+            return None                                  # out of service: a notice instead (sizeup/cad/oos.py)
         if fresh:
             with self.store.tx() as db:
                 db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (t, a["id"]))
@@ -774,7 +796,7 @@ class AutoDispatch:
         if self._manual(iid, f"unit:{u['name']}"):
             return                                       # re-checked just before the write (L4)
         try:
-            self.cad.hints.accept(h["id"], "Radio · auto")
+            self.cad.hints.accept(h["id"], "Radio · auto", by="radio")   # out of service: OosLocked, a notice
         except CadError:
             return
         if h["intent"] in ("free", "quarters"):
@@ -839,22 +861,24 @@ class AutoDispatch:
                     if inc["status"] in ("closed", "dismissed"):
                         raise CadError("the call is closed: undo the close first")
                     if a is None:
-                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator)
+                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator, by=PERSON)
                 elif L.role(s["status"]) == "free":      # cleared by the feed / the radio: back on it as it was
                     if inc["status"] in ("closed", "dismissed"):
                         raise CadError("the call is closed: undo the close first")
                     if u["incident_id"] is not None:
                         raise CadError(f"{u['name']} is on another call now")
+                    if L.role(u["status"]) == "oos":         # put out of service since: a person sets its status
+                        raise CadError(f"{u['name']} is {L.status_phrase(u['status'])} now: set its status")
                     if s["prev"] in self.store.return_statuses():
-                        self.store.return_to_incident(iid, u["id"], s["prev"], operator)
+                        self.store.return_to_incident(iid, u["id"], s["prev"], operator, by=PERSON)
                     else:
-                        self.store.set_unit_status_on(u["id"], s["prev"], iid, operator)
+                        self.store.set_unit_status_on(u["id"], s["prev"], iid, operator, by=PERSON)
                 else:
                     if a is None:
                         raise CadError(f"{u['name']} is no longer on this event")
                     if u["status"] != s["status"]:
                         raise CadError(f"{u['name']} has moved on since: set its status")
-                    self.store.set_unit_status(u["id"], s["prev"], operator, why="Automatic status undone")
+                    self.store.set_unit_status(u["id"], s["prev"], operator, why="Automatic status undone", by=PERSON)
                     if s["col"]:
                         with self.store.tx() as db:
                             db.execute(f"UPDATE assignments SET {s['col']} = NULL WHERE id = ?", (a["id"],))
@@ -888,7 +912,7 @@ class AutoDispatch:
             if L.placeholder(u["name"]):                 # a placeholder: back on this call, Dispatched (other calls kept)
                 if not self._on_here(iid, u["id"]):
                     try:
-                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator)
+                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator, by=PERSON)
                     except CadError:
                         continue
                 with self.store.tx() as db:

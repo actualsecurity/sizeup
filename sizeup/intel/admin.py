@@ -3,8 +3,9 @@ layer's, PR 5), the console card's state, Dismiss and feedback.
 
 Settings sections (audited as "system", exported like any setting):
 
-    intel         {enabled, push (the kill switch), per_hour, per_day, per_category_hour, repush_min, max_repush,
-                   quiet_from, quiet_to, digest_min}  (sizeup/intel/policy.py DEFAULTS)
+    intel         {enabled, push (the kill switch), push_pii (no PII scrub on intel pushes), per_hour, per_day,
+                   per_category_hour, repush_min, max_repush, quiet_from, quiet_to, digest_min}
+                   (sizeup/intel/policy.py DEFAULTS)
     intel_packs   pack -> {mode, threshold, window_s, categories: {category: {mode, priority, ttl_min}}}
     intel_rules   rule id -> {mode, w, enabled}; "local.<name>": an admin's own rule {pack, category, any, not?, w, mode}
 
@@ -50,6 +51,47 @@ def _mode(v, what: str) -> str:
     return v
 
 
+def clean_value(key: str, v, section: dict):
+    """One key of the "intel" section as Settings > System > Intel takes it (a policy key, policy.py DEFAULTS, or the
+    model's, infer.py DEFAULTS): the value to store, or CadError "<key>: why". section: the rest of the section (the
+    model's price is checked against its infer_usd_in / _out). The settings import checks a file's section with this
+    too (sizeup/cad/settings.py _check_import): policy.settings() would otherwise read a bad value as the default
+    without a word (an imported "push": "false" left the kill switch on)."""
+    if key in policy_mod.DEFAULTS:
+        if key in policy_mod.BOOLS:
+            if not isinstance(v, bool):
+                raise CadError(f"{key}: true or false")
+        elif key in ("quiet_from", "quiet_to"):
+            if not isinstance(v, str) or (v and policy_mod._hm(v) is None):
+                raise CadError(f"{key}: HH:MM, or empty")
+        else:
+            lo, hi = policy_mod.LIMITS[key]
+            v = int(_f(v, lo, hi, key))
+        return v
+    from sizeup.intel import infer as infer_mod
+    if key not in infer_mod.DEFAULTS:
+        raise CadError(f"{key}: not an intel setting")
+    if key in ("infer", "infer_agree_push"):
+        if not isinstance(v, bool):
+            raise CadError(f"{key}: true or false")
+    elif key == "infer_provider":
+        if v not in infer_mod.PROVIDERS:
+            raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
+    elif key in ("infer_mode", "infer_alone_mode"):
+        v = _mode(v, key)
+    elif key in ("infer_model", "infer_region"):
+        if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
+            raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
+        cur = {**infer_mod.DEFAULTS, **(section or {})}
+        if key == "infer_model" and infer_mod.price({**cur, "infer_model": v}) is None:
+            raise CadError(f"infer_model: no known price for {v}: set infer_usd_in and infer_usd_out first "
+                           f"(known: {', '.join(sorted(infer_mod.PRICES))})")
+    else:
+        lo, hi = infer_mod.LIMITS[key]
+        v = _f(v, lo, hi, key)
+    return v
+
+
 class IntelAdmin:
     def __init__(self, cad, engine):
         self.cad, self.engine = cad, engine
@@ -92,7 +134,20 @@ class IntelAdmin:
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
-                "may_edit": True}
+                "push_topic": self._push_topic(), "may_edit": True}
+
+    def _push_topic(self) -> dict | None:
+        """Whether intel pushes have a topic in effect (sizeup/notify.py: their own only), never its name: {set, source}.
+        None: no pushes here (no Pushes, or Settings unreadable)."""
+        p = getattr(self.cad, "pushes", None)
+        if p is None:
+            return None
+        try:
+            from sizeup.notify import INTEL
+            e = p.effective(INTEL)
+        except Exception:  # noqa: BLE001 - never keeps the card from showing
+            return None
+        return {"set": bool(e["topic"]), "source": e["source"]}
 
     def events(self, q: dict, admin: bool = False) -> dict:
         """GET /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=: the map layer's. The
@@ -192,43 +247,17 @@ class IntelAdmin:
         audit_key, old, new = "", None, None
         if action == "set" and str(body.get("key") or "").startswith("infer"):
             from sizeup.intel import infer as infer_mod
-            key, v = str(body.get("key")), body.get("value")
+            key = str(body.get("key"))
             if key not in infer_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(infer_mod.DEFAULTS)}")
-            if key in ("infer", "infer_agree_push"):
-                if not isinstance(v, bool):
-                    raise CadError(f"{key}: true or false")
-            elif key == "infer_provider":
-                if v not in infer_mod.PROVIDERS:
-                    raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
-            elif key in ("infer_mode", "infer_alone_mode"):
-                v = _mode(v, key)
-            elif key in ("infer_model", "infer_region"):
-                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
-                    raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
-                cur = {**infer_mod.DEFAULTS, **ov["intel"]}
-                if key == "infer_model" and infer_mod.price({**cur, "infer_model": v}) is None:
-                    raise CadError(f"infer_model: no known price for {v}: set infer_usd_in and infer_usd_out first "
-                                   f"(known: {', '.join(sorted(infer_mod.PRICES))})")
-            else:
-                lo, hi = infer_mod.LIMITS[key]
-                v = _f(v, lo, hi, key)
+            v = clean_value(key, body.get("value"), ov["intel"])
             changes = [("intel", key, REMOVE if v == infer_mod.DEFAULTS[key] else v)]
             audit_key, old, new = f"intel/{key}", ov["intel"].get(key, infer_mod.DEFAULTS[key]), v
         elif action == "set":
             key = body.get("key")
             if key not in policy_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(policy_mod.DEFAULTS)}")
-            v = body.get("value")
-            if key in policy_mod.BOOLS:
-                if not isinstance(v, bool):
-                    raise CadError(f"{key}: true or false")
-            elif key in ("quiet_from", "quiet_to"):
-                if not isinstance(v, str) or (v and policy_mod._hm(v) is None):
-                    raise CadError(f"{key}: HH:MM, or empty")
-            else:
-                lo, hi = policy_mod.LIMITS[key]
-                v = int(_f(v, lo, hi, key))
+            v = clean_value(key, body.get("value"), ov["intel"])
             changes = [("intel", key, REMOVE if v == policy_mod.DEFAULTS[key] else v)]
             audit_key, old, new = f"intel/{key}", ov["intel"].get(key, policy_mod.DEFAULTS[key]), v
         elif action in ("pack", "category"):

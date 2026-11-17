@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, dispatcher, eta, export, mapview, radiofolders, runcards
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
@@ -37,6 +37,7 @@ from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
+from sizeup.cad.oos import OosNotices
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
@@ -46,7 +47,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -267,6 +268,9 @@ class Cad:
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
+        # Out of service is a person's to end (sizeup/cad/oos.py): what automation was refused on such a unit, with
+        # "In service?" for a person.
+        self.oos = OosNotices(self)
         self.comms.on_text = self._on_text
         self.comms.fix = self.hints.decorate             # the Radio rows: misheard status words put back, heard on hover
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
@@ -350,6 +354,7 @@ class Cad:
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
         self._place_ix = None
+        self._places_map = None                # (the names' version, the GeoJSON, its ETag): places_map
         # A new call's location (#204), set by the app over the same gazetteer (sizeup/geo/pagegeo.py):
         # detail_source(suggestion) -> {place, street_address, address_checked, cross, block} (location_detail) and
         # here_source(lat, lon, places) -> what is at a point on the map (what_is_here). None: not here.
@@ -438,6 +443,7 @@ class Cad:
                 "lists": self.lists.public(),
                 "units": self.store.units(),
                 "incidents": incs,
+                "closed_hours": CLOSED_HOURS,             # the queue's "Closed 24h" header
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,
                 "run_cards_default": any(c["is_default"] for c in cards),
@@ -455,6 +461,7 @@ class Cad:
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
+                "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -474,7 +481,7 @@ class Cad:
                     comms_rev=self.comms.rev_for(),
                     talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
-                    status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
+                    status_hints=self.status_hints(), oos_notices=self.oos_notices(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
                     sources=self.sources_state(now), trains_rev=self._trains_rev())
 
     def _trains_rev(self) -> int | None:
@@ -606,15 +613,36 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         if action != "accept":
             return self.hints.dismiss(hid, op)
-        h = self.store.one("SELECT unit_id, incident_id FROM status_hints WHERE id = ?", (hid,))
+        h = self.store.one("SELECT unit_id, incident_id, status FROM status_hints WHERE id = ?", (hid,))
+        if h is not None:                                # out of service: only once the person said so (sizeup/cad/oos.py)
+            u = self.store.unit(h["unit_id"])
+            if self.lists.role(u["status"]) == "oos" and not _bool(body, "confirm"):
+                L = self.lists
+                onto = h["incident_id"] and u["incident_id"] != h["incident_id"] and L.role(h["status"]) not in ("free", "oos")
+                raise CadError(f"{u['name']} is {L.status_phrase(u['status'])}: "
+                               + ("put it on the call anyway?" if onto else f"set it {L.status_phrase(h['status'])} anyway?")
+                               + " (confirm: true)")
         if h is not None:                                # a person's, before the write (#311 L4): where it was and goes
             was = self.store.unit(h["unit_id"])["incident_id"]
             for i in {was, h["incident_id"]}:
                 self._by_hand(i, [h["unit_id"]], op)
-        out = self.hints.accept(hid, op)
+        out = self.hints.accept(hid, op, by=PERSON)
         self._by_hand(out.get("incident_id"), [out["id"]], op)
         self.auto.recheck_close([was] if h is not None else [])   # a unit off a call that waits to close (#311 N1)
         return out
+
+    def oos_notices(self) -> list[dict]:
+        """Automation refused on out-of-service units (sizeup/cad/oos.py); a fault never breaks the console."""
+        try:
+            return self.oos.active()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: out-of-service notices: {type(e).__name__}: {e}")
+            return []
+
+    def oos_notice(self, nid: int, action: str, body: dict) -> dict:
+        """POST /api/cad/oos-notice/<id>/service | dismiss {operator}: the unit back in service (a person's), or left
+        out of service."""
+        return self.oos.act(nid, action, _text(body, "operator", OPERATOR_MAX))
 
     def alarms_state(self, now: float | None = None) -> dict | None:
         """Open alarms, notices and the just acknowledged (sizeup/cad/alarms.py; a fault never breaks the console)."""
@@ -1422,6 +1450,7 @@ class Cad:
     def dispatch(self, iid: int, body: dict) -> dict:
         """Dispatch the ticked units (full: 'full department response' instead of their names).
         An event that already had a dispatch: 'Engine 61, added to the assignment...'."""
+        self.auto.hand_dispatch()                      # 60 Control dispatching: the county's, never from here
         inc = self.store.incident(iid)
         self._dispatchable(inc)
         operator = _text(body, "operator", OPERATOR_MAX, required=True)
@@ -1432,7 +1461,7 @@ class Cad:
         text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
         self._by_hand(iid, [u["id"] for u in units], operator)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
-                                  verb="added to the assignment" if kind == "add_on" else "")
+                                  verb="added to the assignment" if kind == "add_on" else "", by=PERSON)
         self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
                           remarks, plan)
@@ -1442,6 +1471,7 @@ class Cad:
         optional extra units, full department response. {"preview": true}: its text, nothing sent or logged.
         'Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in the
         structure. Now a structure fire, full department response. Time out 15:20.'"""
+        self.auto.hand_dispatch()                      # 60 Control dispatching: the county's, never from here
         inc = self.store.incident(iid)
         L = self.lists
         if inc["status"] not in ("pending", "active"):
@@ -1480,7 +1510,7 @@ class Cad:
             what.append(L.wording["full_response"])
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
         self._by_hand(iid, [u["id"] for u in units], operator)
-        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
+        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)", by=PERSON) if units else []
         self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
@@ -1499,12 +1529,12 @@ class Cad:
         self._by_hand(iid, [u["id"] for u in units], op)
         ours = [u["id"] for u in units if u["response"] != "agency"]
         agency = [u["id"] for u in units if u["response"] == "agency"]
-        moved = self.store.assign(iid, ours, op, attach=True) if ours else []
+        moved = self.store.assign(iid, ours, op, attach=True, by=PERSON) if ours else []
         if agency:          # another agency's unit: on the event assigned, not yet responding (#219: never
-            moved += self.store.assign(iid, agency, op, attach=True)    # straight to On location), then its statuses
+            moved += self.store.assign(iid, agency, op, attach=True, by=PERSON)    # straight to On location), then its statuses
             by = {u["id"]: u for u in units}
             for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
-                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op)
+                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op, by=PERSON)
         self._recheck_from(iid, units)
         return {"ok": True, "moved": moved}
 
@@ -1527,7 +1557,7 @@ class Cad:
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
         self._by_hand(iid, [u["id"] for u in units], op)
-        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
+        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status, by=PERSON)
         self._recheck_from(iid, units)
         return {"ok": True, "moved": moved, "status": status}
 
@@ -1573,7 +1603,7 @@ class Cad:
             raise CadError("unit_id: required") from None
         op = _text(body, "operator", OPERATOR_MAX)
         self._by_hand(iid, [uid], op)
-        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op)
+        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op, by=PERSON)
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
@@ -1589,9 +1619,9 @@ class Cad:
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number (0 = no call)") from None
             self._by_hand(iid, [uid], op)
-            out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200))
+            out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200), by=PERSON)
         else:
-            out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200))
+            out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200), by=PERSON)
         for i in {was, out.get("incident_id")}:          # a person's: automation leaves the unit alone there (#311)
             self._by_hand(i, [uid], op)
         if was and out.get("incident_id") != was:
@@ -1616,7 +1646,7 @@ class Cad:
         ids = [call] if call else list(u["incident_ids"])
         for i in ids:                                    # a person's, before the write (#311 L4)
             self._by_hand(i, [u["id"]], op)
-        out = self.store.set_unit_status(u["id"], status, op, call=call)
+        out = self.store.set_unit_status(u["id"], status, op, call=call, by=PERSON)
         self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
@@ -2228,6 +2258,18 @@ class Cad:
             out["place_address"] = (proper_case(h.get("address") or "") if h.get("source") == "local"
                                     else (h.get("detail") or ""))
         return out
+
+    def places_map(self) -> tuple[bytes, str]:
+        """GET /api/cad/places/map: the department's located place names (the county's common places, hand-made ones) as
+        GeoJSON for the maps' "Common places" layer (commonplaces.map_points) -> (body, ETag). Built again only when the
+        names change (the state's places_rev moves with them); read only, like the place search."""
+        rev = self.settings.places_rev()
+        got = self._places_map
+        if got is None or got[0] != rev:
+            body = json.dumps(commonplaces.map_points(self.local_places()), separators=(",", ":")).encode()
+            got = (rev, body, f'"cp-{hashlib.sha1(body).hexdigest()[:20]}"')
+            self._places_map = got
+        return got[1], got[2]
 
     def search_places(self, query: dict) -> dict:
         """GET /api/cad/places?q=&near=lat,lon&iid=: ranked places of every kind (addresses, intersections,

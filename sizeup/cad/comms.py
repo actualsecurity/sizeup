@@ -1553,12 +1553,15 @@ class Comms:
     def _sees_context(self) -> bool:
         return sources.may_see_context(self.context_broadcast)
 
-    def _fetch(self, where, args, limit) -> list[dict]:
+    def _fetch(self, where, args, limit, order: str = "DESC") -> list[dict]:
+        """Rows by start, newest first (order "ASC": oldest first), behind the one context gate."""
+        if order not in ("ASC", "DESC"):
+            raise ValueError("order: ASC | DESC")
         if not self._sees_context():
             where = list(where) + [f"+t.system IN {sources.OURS_SQL}"]     # (+: the walk stays on its index)
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
                             + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
-                            + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
+                            + f" ORDER BY t.start {order} LIMIT ?", (*args, limit))
 
     def _decorate(self, rows) -> None:
         """Each row's events, its page kind and its alarm (in place)."""
