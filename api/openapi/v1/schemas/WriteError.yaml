@@ -1,0 +1,14 @@
+allOf:
+  - $ref: ./Error.yaml
+  - type: object
+    description: A write refused. On a 409 `error.reason` is machine-readable and `current` is the object as it is now (the app shows "not applied" and why).
+    properties:
+      error:
+        type: object
+        properties:
+          reason:
+            type: string
+            description: "incident_closed, unit_changed, already_acknowledged, in_progress (an unknown value is other)."
+      current:
+        description: Unit, Alarm or IncidentRef, as it is now.
+        type: object

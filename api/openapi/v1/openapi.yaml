@@ -14,6 +14,12 @@ security:
 paths:
   /api/v1/meta:
     $ref: ./paths/meta.yaml
+  /api/v1/units/{code}/status:
+    $ref: ./paths/units_status.yaml
+  /api/v1/alarms/{id}/ack:
+    $ref: ./paths/alarms_ack.yaml
+  /api/v1/incidents/{id}/notes:
+    $ref: ./paths/incidents_notes.yaml
 components:
   securitySchemes:
     deviceToken:

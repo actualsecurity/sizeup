@@ -1,0 +1,12 @@
+name: Idempotency-Key
+in: header
+required: true
+description: >
+  A UUID the app makes once per action and sends again, unchanged, on every retry (a flaky network, its offline queue).
+  The hub keeps the first answer 24 hours per device and replays it (header `Idempotent-Replayed: true`) without
+  applying the action twice. The same key with another path or body is a 422 `idempotency_key_reused`; the same key
+  while the first request still runs is a 409 `in_progress` with Retry-After. 8 to 128 letters, digits and `- _ . :`.
+schema:
+  type: string
+  pattern: "^[A-Za-z0-9_.:-]{8,128}$"
+  example: 7c1f3a52-0b7d-4f43-9a6e-3d1f5b2a9c10

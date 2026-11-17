@@ -177,6 +177,8 @@ def test_path_templates_match_one_segment():
 def test_the_package_never_touches_a_database():
     """No startup database writes: nothing in sizeup/api reads or writes a store."""
     for f in PKG.rglob("*.py"):
+        if f.name in ("writes.py", "idempotency.py"):     # the write path (#562): it has to use the CAD; opens it on a request
+            continue
         src = f.read_text()
         assert not re.search(r"^\s*(import|from)\s+\S*(sqlite3|store|sizeup\.cad)", src, re.M), f
 

@@ -1,0 +1,37 @@
+post:
+  operationId: acknowledgeAlarm
+  summary: Acknowledge an alarm
+  description: >
+    The console's own acknowledge, as the signed-in person: dispatchers and admins. Needs the `writes` feature. An alarm
+    somebody already acknowledged is a 409 `already_acknowledged` with the alarm as it is.
+  parameters:
+    - $ref: ../parameters/IdempotencyKey.yaml
+    - {name: id, in: path, required: true, schema: {type: string}}
+  requestBody:
+    required: false
+    content:
+      application/json:
+        schema: {$ref: ../schemas/AckRequest.yaml}
+        example: {client_at: 1767225590.2}
+  responses:
+    "200":
+      description: Acknowledged (or the first answer, replayed).
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: ../schemas/ClientAt.yaml}
+              - type: object
+                required: [alarm]
+                properties: {alarm: {$ref: ../schemas/Alarm.yaml}}
+          example:
+            alarm: {id: 31, level: alarm, created_at: 1767225595.0, incident_id: null, ack_by: Lt. Example, ack_at: 1767225600.5, clear_at: null, rev: 4be7a0c912d83f10}
+    "409":
+      description: Not applied (already_acknowledged, in_progress). `current` is the alarm as it is now.
+      content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
+    "422":
+      description: The Idempotency-Key was used for another request.
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
+    default:
+      description: An error (400, 401, 403 forbidden, 404 no_such_alarm, 413, 429, 503).
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}

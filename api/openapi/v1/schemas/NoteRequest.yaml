@@ -1,0 +1,7 @@
+type: object
+required: [text]
+properties:
+  text: {type: string, maxLength: 2000}
+  units: {type: array, maxItems: 10, items: {type: string}, description: "Unit codes on the boards the note is from."}
+  places: {type: array, maxItems: 10, items: {type: object}, description: "Places picked after an @, as the console takes them."}
+  client_at: {type: number, description: "The app's own time (unix seconds). A note more than a minute behind says when it was written."}

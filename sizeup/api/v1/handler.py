@@ -23,6 +23,7 @@ from urllib.parse import parse_qs
 from sizeup.fence import FencedWrite
 
 from .errors import JSON, error
+from .gateway import Gateway
 from .limits import Limits
 from .principal import Resolver, none_yet, person
 from .routes import ROUTES, Ctx, Route
@@ -30,6 +31,7 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
+MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
 
 
 def _pattern(template: str) -> re.Pattern:
@@ -42,21 +44,25 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, cad=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        self.gateway = Gateway(cad) if cad is not None else None    # a write's one way to the CAD, as a person (gateway.py)
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
 
-    def respond(self, method: str, path: str, query: str, headers, peer: str = "") -> tuple[int, bytes, str, dict]:
+    def respond(self, method: str, path: str, query: str, headers, peer: str = "",
+                body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
-        raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
+        raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
+        request body up to a limit (None: missing or too big); called only for a POST that got past the token, the
+        limits and the busy check."""
         try:
-            return self._respond(method, path, query, headers, peer)
+            return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
             raise                             # the handover signal: the server answers it as a 503
         except Exception as e:                # a v1 failure is v1's: the class only, never a token, header or body
@@ -66,7 +72,7 @@ class V1:
                 pass
             return error(500, "internal", "something went wrong: try again")
 
-    def _respond(self, method, path, query, headers, peer) -> tuple[int, bytes, str, dict]:
+    def _respond(self, method, path, query, headers, peer, body=None) -> tuple[int, bytes, str, dict]:
         if len(path) > MAX_PATH:
             return error(414, "uri_too_long", "path too long")
         if not self.switches.enabled() and not (method in ("GET", "HEAD") and path == "/api/v1/meta"):
@@ -81,7 +87,7 @@ class V1:
                 continue
             if not self.switches.allows(route.flag):
                 return self._absent()
-            return self._serve(route, m.groupdict(), query, headers, peer)
+            return self._serve(route, m.groupdict(), query, headers, peer, body)
         if allowed:
             return error(405, "method_not_allowed", f"{method} is not allowed here",
                          headers={"Allow": ", ".join(sorted(set(allowed)))})
@@ -95,7 +101,8 @@ class V1:
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
 
-    def _serve(self, route: Route, params: dict, query: str, headers, peer: str) -> tuple[int, bytes, str, dict]:
+    def _serve(self, route: Route, params: dict, query: str, headers, peer: str,
+               body=None) -> tuple[int, bytes, str, dict]:
         principal = None
         if route.need == "device":
             principal = self.resolver(headers)
@@ -111,8 +118,14 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
-            status, obj = route.handler(ctx)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            raw = b""
+            if route.method == "POST" and body is not None:      # a write's body: bounded, read only now (#562)
+                raw = body(MAX_BODY)
+                if raw is None:
+                    return error(413, "body_too_large", f"the body is missing a length or over {MAX_BODY // 1024} KB")
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw, self.gateway, peer)
+            status, obj, *extra = route.handler(ctx)             # extra: optional response headers (writes.py)
+            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, \
+                {"Cache-Control": "no-store", **(extra[0] if extra else {})}
         finally:
             self.limits.leave()

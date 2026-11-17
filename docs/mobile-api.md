@@ -551,6 +551,18 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Distribution | TestFlight (internal: up to 100 team members without review; external: beta review) and Play internal testing (up to 100 testers). Then a public listing, or Apple Business Manager custom apps for a private listing (**unverified** fit for volunteers' own phones) (D10) |
 | Repos | The hub, the spec and the contract tests stay in this **public** repo. The app goes in a **private** repo (proposed, D10). The app binary holds no secrets: only the hub URL; everything else comes from enrollment |
 
+**Writes (#562, built, behind the `writes` flag).** `POST /api/v1/units/{code}/status`, `/alarms/{id}/ack` and
+`/incidents/{id}/notes` go through the console's own code (`CadApi.post`, so its role check, validation, operator name and
+activity row), as the device's person: the handler gets a `Gateway` (`sizeup/api/v1/gateway.py`), never a `CadApi`, and
+no person is a 503. They need the least role the console needs ("dispatch"; a viewer is a 403). `Idempotency-Key` is
+required (table `v1_idempotency` in hub.sqlite, made on the first write, kept 24 h per device, at most 1000 per device;
+a 400, 403 or 404 is not kept so a corrected request can reuse the key). `If-Match` takes the unit's `rev`
+(`api/v1/rev.py`). `client_at` is recorded in the activity row's browser column with the device id, app version and `via`
+(`via=ios app=1.4.2 device=<id> client_at=<unix>`, `clamped` when more than 5 minutes ahead), and a queued action more than a
+minute late says so in the incident's chronology. 409 answers carry `error.reason` (`incident_closed`, `unit_changed`,
+`already_acknowledged`, `in_progress`) and the current object. A race between the check and the write is narrow but
+not closed (the console's own methods do the write); a dispatch is never offered here.
+
 ---
 
 ## Sharing the production hub

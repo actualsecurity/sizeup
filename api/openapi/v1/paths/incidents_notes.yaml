@@ -1,0 +1,40 @@
+post:
+  operationId: addIncidentNote
+  summary: Add a note to an incident
+  description: >
+    A chronology entry by the signed-in person (dispatchers and admins), through the console's own note. Notes are
+    append-only: no `If-Match`. A note on an incident that closed is a 409 `incident_closed` with the incident as it is.
+    Needs the `writes` feature.
+  parameters:
+    - $ref: ../parameters/IdempotencyKey.yaml
+    - {name: id, in: path, required: true, schema: {type: string}}
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema: {$ref: ../schemas/NoteRequest.yaml}
+        example: {text: E60 stated the hydrant is out of service, units: [E60], client_at: 1767225590.2}
+  responses:
+    "201":
+      description: Added (or the first answer, replayed).
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: ../schemas/ClientAt.yaml}
+              - type: object
+                required: [incident_id, units, places]
+                properties:
+                  incident_id: {type: integer}
+                  units: {type: array, items: {type: string}}
+                  places: {type: array, items: {type: object}}
+          example: {incident_id: 4812, units: [E60], places: [], client_at: 1767225590.2, client_at_clamped: false, received_at: 1767225600.5}
+    "409":
+      description: Not applied (incident_closed, in_progress). `current` is the incident as it is now.
+      content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
+    "422":
+      description: The Idempotency-Key was used for another request.
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
+    default:
+      description: An error (400, 401, 403 forbidden, 404 no_such_incident, 413, 429, 503).
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}

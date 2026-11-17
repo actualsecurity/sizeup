@@ -1,0 +1,9 @@
+name: If-Match
+in: header
+required: false
+description: >
+  The `rev` of the object as the app last read it (quotes allowed). A stale rev is a 412 `precondition_failed` with the
+  current object; on a queued action (the body has `client_at`) it is a 409 `unit_changed` instead ("not applied").
+schema:
+  type: string
+  example: 9f2c41d7a03be655

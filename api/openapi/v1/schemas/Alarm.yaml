@@ -1,0 +1,12 @@
+type: object
+required: [id, level, created_at, incident_id, ack_by, ack_at, clear_at, rev]
+description: An emergency alarm or notice, as an acknowledge answers with it, and as a 409 shows it. `rev` as for Unit.
+properties:
+  id: {type: integer}
+  level: {type: string, description: "alarm or notice (an unknown value is other)."}
+  created_at: {type: number}
+  incident_id: {type: [integer, "null"]}
+  ack_by: {type: string, description: "The name of whoever acknowledged it, empty until then."}
+  ack_at: {type: [number, "null"]}
+  clear_at: {type: [number, "null"]}
+  rev: {type: string}

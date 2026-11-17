@@ -1,0 +1,6 @@
+type: object
+description: What an answer says about the request's `client_at`, present only when the app sent one.
+properties:
+  client_at: {type: number, description: "The app's own time of the action, as sent (unix seconds)."}
+  client_at_clamped: {type: boolean, description: "True when it was more than 5 minutes ahead of the server's clock: the action is recorded at received_at."}
+  received_at: {type: number, description: "The server's time of receipt: actions are ordered by this."}

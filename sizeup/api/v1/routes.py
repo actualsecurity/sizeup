@@ -45,6 +45,9 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
+    body: bytes = b""          # a POST's body (at most handler.MAX_BODY), read after the token and the limits (#562)
+    gateway: object = None     # gateway.Gateway: how a write reaches the CAD, as a person (None with no CAD). Never a CadApi
+    peer: str = ""             # the client address (Cf-Connecting-Ip), for the audit
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -57,3 +60,5 @@ def meta(ctx: Ctx) -> tuple[int, dict]:
 ROUTES: list[Route] = [
     Route("GET", "/api/v1/meta", meta, "public"),
 ]
+
+from . import writes as _writes  # noqa: E402,F401  (adds its routes to ROUTES when it loads: writes.py, #562)

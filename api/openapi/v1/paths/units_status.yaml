@@ -1,0 +1,45 @@
+post:
+  operationId: setUnitStatus
+  summary: Set a unit's status
+  description: >
+    The console's own unit status (every rule, validation and audit line of it), as the signed-in person: dispatchers and
+    admins (a viewer is a 403 `forbidden`). Needs the `writes` feature (else 404). `If-Match` is optional (see the
+    header). The audit has the device, the app version and `via` (ios, android, web, api) from `X-Client`.
+  parameters:
+    - $ref: ../parameters/IdempotencyKey.yaml
+    - $ref: ../parameters/IfMatch.yaml
+    - {name: code, in: path, required: true, schema: {type: string}, description: "The unit's code, any case."}
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema: {$ref: ../schemas/UnitStatusRequest.yaml}
+        example: {status: OL, incident_id: 4812, client_at: 1767225590.2}
+  responses:
+    "200":
+      description: Applied (or the first answer, replayed).
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: ../schemas/ClientAt.yaml}
+              - type: object
+                required: [unit]
+                properties: {unit: {$ref: ../schemas/Unit.yaml}}
+          example:
+            unit: {code: E60, status: OL, status_at: 1767225600.5, incident_id: 4812, incident_number: 26-000014, board: fire, rev: 9f2c41d7a03be655}
+            client_at: 1767225590.2
+            client_at_clamped: false
+            received_at: 1767225600.5
+    "409":
+      description: Not applied (incident_closed, unit_changed, in_progress). `current` is the unit as it is now.
+      content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
+    "412":
+      description: A stale `If-Match`. `current` is the unit as it is now.
+      content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
+    "422":
+      description: The Idempotency-Key was used for another request.
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
+    default:
+      description: An error (400 invalid or idempotency_key_required, 401, 403 forbidden, 404 no_such_unit or no_such_incident, 413, 429, 503).
+      content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}

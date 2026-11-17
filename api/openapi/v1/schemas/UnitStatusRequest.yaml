@@ -1,0 +1,7 @@
+type: object
+required: [status]
+properties:
+  status: {type: string, description: "A status code of Settings > Unit statuses; the console's validation applies."}
+  note: {type: string, maxLength: 200, description: "The out-of-service reason."}
+  incident_id: {type: integer, minimum: 0, description: "Which call the status is for (0 = none). A closed call is a 409 `incident_closed`."}
+  client_at: {type: number, description: "The app's own time of the action (unix seconds): recorded in the audit; more than 5 minutes ahead of the server it is clamped."}

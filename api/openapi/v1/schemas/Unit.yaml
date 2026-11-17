@@ -1,0 +1,11 @@
+type: object
+required: [code, status, status_at, incident_id, incident_number, board, rev]
+description: A unit as a write answers with it, and as a 409 / 412 shows it. `rev` is the content hash (sha256 of the object without `rev`, as sorted compact JSON, first 16 hex digits).
+properties:
+  code: {type: string, description: "The unit's code, as the console shows it."}
+  status: {type: string, description: "The unit's status code (Settings > Unit statuses)."}
+  status_at: {type: number, description: "Unix seconds the status was set."}
+  incident_id: {type: [integer, "null"], description: "The call the unit is on, null for none."}
+  incident_number: {type: [string, "null"]}
+  board: {type: string, description: "The board the unit is on, empty for none."}
+  rev: {type: string}

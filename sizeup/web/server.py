@@ -439,7 +439,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
-    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log)
+    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log, cad=cad)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -524,8 +524,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if station_ui:
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
-            return self._send(*v1.respond(self.command, path, query, self.headers,
-                                          self._client()[0] or self.client_address[0]))
+            out = v1.respond(self.command, path, query, self.headers, self._client()[0] or self.client_address[0],
+                             self._body)
+            if self.command == "POST" and out[0] >= 400:
+                self.close_connection = True     # the body may be unread (refused before it was read)
+            return self._send(*out)
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -904,8 +907,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.close_connection = True
                 return self._send(code, body, ctype)
             if v1.handles(path):
-                self.close_connection = True     # no POST is served yet: the body is left unread
-                return self._v1(path, urlsplit(self.path).query)
+                return self._v1(path, urlsplit(self.path).query)       # reads its own body, or closes (_v1)
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread
                 return self._send(409, station_says(), "application/json")
