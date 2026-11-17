@@ -1042,7 +1042,9 @@ class HubApp(App):
             d = {**d, "source": RENAMED[d["source"]]}
         if kind in ("page", "traffic"):
             (self._apply_page if kind == "page" else self._apply_traffic)(d, audio)
-            self.stt_arrival.event(self._id(d))      # (#677: its STT input's arrival is measured from now)
+            arrival = getattr(self, "stt_arrival", None)
+            if arrival is not None:                  # (#677: its STT input's arrival is measured from now)
+                arrival.event(str(d.get("id") or ""))
         elif kind == "page_text":
             self._apply_page_text(d)
         elif kind == "retext":
