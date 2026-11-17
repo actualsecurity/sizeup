@@ -143,7 +143,8 @@ It prints `whisper-server: ok (...)`, `hub: ok (worker ...)` and the GPU. If som
 
 ### 8. Run it at logon (Task Scheduler)
 
-Run this in PowerShell as administrator, signed in as the user who games on the PC:
+Run this in an ordinary (not elevated) PowerShell window, signed in as the user who games on the PC. The task runs as
+that user, with an interactive logon and no admin rights (`-RunLevel Limited`):
 
 ```powershell
 $d   = "$env:LOCALAPPDATA\sizeup-stt"
@@ -152,22 +153,28 @@ $py  = py -3 -c "import sys, pathlib; print(pathlib.Path(sys.executable).with_na
 $act = New-ScheduledTaskAction -Execute $py -Argument "`"$d\worker.py`" run -c `"$d\worker.toml`"" -WorkingDirectory $d
 $trg = @(
   New-ScheduledTaskTrigger -AtLogOn -User $me
-  New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)   # starts it again if it died
+  New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)                                                 # starts it again if it died
 )
 $set = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
          -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 $who = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName 'sizeup-stt-worker' -Action $act -Trigger $trg -Settings $set -Principal $who
 Start-ScheduledTask -TaskName 'sizeup-stt-worker'
+(Get-ScheduledTask sizeup-stt-worker).Triggers[1].Repetition      # Interval PT5M, Duration P3650D
 ```
+
+If Windows refuses to register it (`Access is denied`), run the same commands from an elevated window. The task
+still runs as you, `Limited`.
 
 How the task behaves:
 
 - **Errors:** the worker itself never exits on hub or whisper-server errors, or on a bug of its own. It logs the
   error to `worker.log`, waits (1, 2, 5, 10, 30 s) and carries on. It also restarts whisper-server.
 - **If the process dies anyway:** Task Scheduler's restart-on-failure doesn't always fire for a process that exits.
-  The 5-minute trigger starts the worker again in that case. While it runs, `IgnoreNew` skips those starts, and the
-  worker also refuses to run a second copy.
+  The 5-minute trigger starts the worker again in that case. While it runs, `IgnoreNew` skips those starts.
+- **One copy at a time:** the worker holds a lock on `state\worker.lock` and refuses to run a second copy. Windows
+  lets go of the lock when the process ends, even when `schtasks /End` kills it, so the next start isn't blocked.
 - **No time limit:** `ExecutionTimeLimit` zero turns off Task Scheduler's 72-hour default.
 - **No schtasks:** `schtasks /Create` can't set any of this, so use the PowerShell commands above to create the task.
 

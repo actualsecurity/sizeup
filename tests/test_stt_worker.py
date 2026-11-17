@@ -1243,14 +1243,72 @@ def test_whisper_server_must_stay_on_loopback(tmp_path, doc, msg):
         W.validate(W.load_config(p, env={"SIZEUP_STT_WORKER_TOKEN": TOKEN}))
 
 
-def test_one_worker_per_state_dir(tmp_path, capsys):
-    cfg = W.Config(state_dir=str(tmp_path))
-    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 3, "state": "online"})
-    assert W.another_worker(cfg) == os.getpid() + 1
-    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 3, "state": "stopped"})
-    assert W.another_worker(cfg) == 0
-    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 60, "state": "online"})
-    assert W.another_worker(cfg) == 0
+def test_a_killed_worker_never_blocks_the_next_and_a_live_one_is_refused(tmp_path):
+    """`schtasks /End` kills the worker without a word: its stale status file and its lock file are left, and the next
+    worker must start at once. A second worker while one lives is refused."""
+    import subprocess
+    state = tmp_path / "state"
+    holder = ("import sys, time; sys.path.insert(0, sys.argv[1]); import worker as W; "
+              "lock = W.InstanceLock(sys.argv[2]); print(lock.acquire(), flush=True); time.sleep(60)")
+    child = subprocess.Popen([sys.executable, "-c", holder, str(WORKER_PY.parent), str(state)],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "True"
+        W.write_json(state / "status.json", {"pid": child.pid, "updated": time.time(), "state": "online"})
+        second = W.InstanceLock(str(state))
+        assert not second.acquire()                          # the live one holds it
+        assert second.holder() == str(child.pid)
+    finally:
+        child.kill()                                         # no "stopped", nothing cleaned up
+        child.wait(10)
+    assert (state / "worker.lock").exists() and W.read_json(state / "status.json")["state"] == "online"
+    third = W.InstanceLock(str(state))
+    assert third.acquire()                                   # the OS let go of the dead one's lock
+    again = W.InstanceLock(str(state))
+    assert not again.acquire()                               # and this process's lock refuses another
+    third.release()
+    assert again.acquire()
+    again.release()
+
+
+def test_cli_run_refuses_a_second_worker(tmp_path, monkeypatch):
+    lock = W.InstanceLock(str(tmp_path / "state"))
+    assert lock.acquire()
+    p = tmp_path / "worker.json"
+    p.write_text(json.dumps({"hub_url": "https://hub.example.org", "state_dir": str(tmp_path / "state"), "log_file": "-"}))
+    monkeypatch.setenv("SIZEUP_STT_WORKER_TOKEN", TOKEN)
+    try:
+        assert W.main(["run", "-c", str(p)]) == 3
+    finally:
+        lock.release()
+        for h in list(W.log.handlers):
+            W.log.removeHandler(h)
+        for f in list(W.log.filters):
+            W.log.removeFilter(f)
+
+
+def test_fast_jobs_are_handed_back_at_once_on_gaming(tmp_path, hub, whisper):
+    """A pre-alert job (fast) with only 2 s of lease left still goes back at once: the hub takes it back on the
+    gaming heartbeat anyway, and waiting would only keep the GPU busy."""
+    cfg = make_cfg(tmp_path, hub, whisper)
+    whisper.delay = 1.5
+    whisper.before = lambda f: W.Control(cfg.control_path).set(gaming=True) if len(f["file"]) > 40000 else None
+    hub.add_job("clip-fast-g", tone_wav(1.5), lease_s=2.0, fast=True)
+    w = W.Worker(cfg, run=no_smi)
+    with running(w):
+        wait_for(lambda: hub.calls("/release"), timeout=0.8, what="released at once")
+        wait_for(lambda: whisper.aborted == 1, what="the inference aborted")
+    assert not hub.calls("/complete")
+
+
+def test_heartbeat_times_out_within_the_hubs_window(tmp_path, hub, whisper):
+    seen = []
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+    real = w.hb_hub.request
+    w.hb_hub.request = lambda *a, **kw: seen.append(kw.get("timeout")) or real(*a, **kw)
+    w.connected = True
+    w.heartbeat()
+    assert seen == [4.0] and W.HEARTBEAT_TIMEOUT_S < 12 - W.MAX_HEARTBEAT_S
 
 
 def test_tasklist_parsing():
@@ -1291,3 +1349,11 @@ def test_the_readme_pins_this_worker_py():
     assert m, "the README downloads worker.py from a pinned commit"
     digest = hashlib.sha256(WORKER_PY.read_bytes()).hexdigest().upper()
     assert digest in readme, f"README: worker.py's SHA256 is now {digest} (pin the commit that has it)"
+
+
+def test_the_readme_task_runs_as_the_user_and_can_be_checked():
+    readme = (WORKER_PY.parent / "README.md").read_text()
+    step8 = readme[readme.index("### 8."):readme.index("### Updating")]
+    assert "as administrator" not in step8 and "-RunLevel Limited" in step8 and "-LogonType Interactive" in step8
+    assert "-RepetitionDuration (New-TimeSpan -Days 3650)" in step8
+    assert "(Get-ScheduledTask sizeup-stt-worker).Triggers[1].Repetition" in step8

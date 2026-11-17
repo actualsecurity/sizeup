@@ -44,6 +44,7 @@ API = "/api/station/stt"
 TOKEN = re.compile(r"sw1\.([a-z0-9][a-z0-9_-]{0,39})\.([A-Za-z0-9_-]+)")
 BACKOFF = (1, 2, 5, 10, 30)                # hub unreachable / 5xx: waits in a row, then the last one
 MAX_CLAIM_WAIT_S = 25
+HEARTBEAT_TIMEOUT_S = 4.0                 # a slow answer mustn't hold the next heartbeat past the hub's 12 s
 MAX_HEARTBEAT_S = 5                       # the hub takes back a silent worker's leases after 12 s
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 LONG_CLASSES = {"RERUN", "LOW", "CATCHUP"}  # long leases: gaming hands these back at once
@@ -326,15 +327,46 @@ class Control:
         return doc
 
 
-def another_worker(cfg: Config, now: float | None = None) -> int:
-    """The pid of another worker on this state_dir that wrote its status in the last 15 s, else 0."""
-    st = read_json(cfg.status_path)
-    now = time.time() if now is None else now
-    pid, updated = st.get("pid"), st.get("updated")
-    if isinstance(pid, int) and pid != os.getpid() and isinstance(updated, (int, float)) and now - updated < 15 \
-            and st.get("state") != "stopped":
-        return pid
-    return 0
+class InstanceLock:
+    """state_dir/worker.lock, locked for the life of the process (msvcrt.locking on Windows, flock elsewhere): the
+    OS lets go of it when the process ends, however it ends (`schtasks /End` kills without a word), so a worker
+    killed a moment ago never blocks the next one, and a second live one on the same state_dir is refused."""
+
+    def __init__(self, state_dir: str):
+        self.path = Path(state_dir) / "worker.lock"
+        self._f = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self.path, "a+b")
+        try:
+            f.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        f.seek(0)
+        f.truncate()
+        f.write(str(os.getpid()).encode())
+        f.flush()
+        self._f = f
+        return True
+
+    def holder(self) -> str:
+        try:
+            return self.path.read_text(encoding="ascii", errors="replace").strip() or "?"
+        except OSError:
+            return "?"
+
+    def release(self) -> None:
+        if self._f is not None:
+            self._f.close()                # closing the file lets go of the lock
+            self._f = None
 
 
 # --- the hub -----------------------------------------------------------------------------------------------------
@@ -957,7 +989,7 @@ class Worker:
         self.connected, self.link = True, "ok"
 
     def heartbeat(self) -> None:
-        ans = self.hb_hub.request("POST", f"{API}/state", self._state_body())
+        ans = self.hb_hub.request("POST", f"{API}/state", self._state_body(), timeout=HEARTBEAT_TIMEOUT_S)
         if "pool_on" in ans:
             if self.pool_on is not None and bool(ans["pool_on"]) != self.pool_on:
                 log.info("hub: the pool is %s", "on" if ans["pool_on"] else "off")
@@ -1234,7 +1266,8 @@ class Worker:
             why = f"{state}: {reason}" if reason else state
             if state != "online" and extending:
                 extending = False
-                if expires - now > self.cfg.finish_s or cls in LONG_CLASSES:
+                # a pre-alert (fast) job: the hub takes it back on the gaming heartbeat anyway
+                if expires - now > self.cfg.finish_s or cls in LONG_CLASSES or job.get("fast") is True:
                     call.abort()           # whisper-server stops: the GPU is the game's now
                     self._release(lease, why)
                     log.info("job %s: %s: handed back", jid, state)
@@ -1432,9 +1465,10 @@ def main(argv: list | None = None) -> int:
         return _check(cfg)
     elif args.cmd == "run":
         setup_logging(cfg)
-        other = another_worker(cfg)
-        if other:
-            log.error("another worker (pid %s) is running on %s: not starting a second one", other, cfg.state_dir)
+        lock = InstanceLock(cfg.state_dir)
+        if not lock.acquire():
+            log.error("another worker (pid %s) is running on %s: not starting a second one", lock.holder(),
+                      cfg.state_dir)
             return 3
         worker = Worker(cfg)
 
