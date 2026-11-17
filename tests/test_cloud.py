@@ -81,7 +81,11 @@ class HubRun:
         self.app = make_app(cfg).start()
         assert isinstance(self.app, HubApp)
         self.server = make_server(self.app)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.serve()
+
+    def serve(self) -> None:
+        """self.server, on its own thread."""
+        threading.Thread(target=self.server.serve_forever, name="hubrun-serve", daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.httpd.server_address[1]}"
 
     def get(self, path):
@@ -90,7 +94,11 @@ class HubRun:
         return body
 
     def close(self):
+        """Nothing of this hub answers after the test: the station's 25 s long poll ends now (WebServer.shutdown; what
+        comes after gets 503) and the requests in flight finish. Left waiting, a request thread answered the poll up
+        to 25 s later, inside the next test in this process (#665: the intel replay's network guard caught it)."""
         self.server.shutdown()
+        self.server.gate.wait_idle(5.0)
         self.app.stop()
 
 
@@ -205,6 +213,29 @@ def test_station_traffic_shows_on_the_hub_with_its_audio_and_on_the_cad_event(tm
     assert again.has_clip(tid) and again.clip(tid)[:4] == b"RIFF"
     assert [x["id"] for x in again.cad.full(inc["id"])["radio"]] == [tid]
     assert not list((tmp_path / "hub").glob("*.json")) and not (tmp_path / "hub" / "captures").exists()
+
+
+def test_a_closed_hub_answers_no_late_poll_and_a_station_left_running_backs_off(tmp_path):
+    """HubRun.close() (#665): the station's long poll in flight is answered at close, not 25 s later, and a station
+    still running afterwards gets 503s and backs off. Not an empty answer at once, again and again, on its kept-alive
+    connection (thousands of requests a second before the gate was set)."""
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    try:
+        assert wait(lambda: hub.app.hub.polling > 0, 10)            # the station's long poll is waiting on the hub
+        t0 = time.monotonic()
+        hub.close()
+        assert time.monotonic() - t0 < 5.0 and hub.app.hub.polling == 0 and hub.server.gate.inflight == 0
+        n, refuse = [0], hub.server.gate.refuse
+
+        def counted(write):
+            n[0] += 1
+            return refuse(write)
+        hub.server.gate.refuse = counted                            # every request the hub is sent from now on
+        time.sleep(2.0)
+        assert n[0] < 50, n[0]                                      # a few retries from the link's threads, backing off
+    finally:
+        st.link.stop()
 
 
 def test_talking_now_reaches_the_hub_in_well_under_a_second(tmp_path):

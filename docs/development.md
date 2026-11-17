@@ -161,6 +161,8 @@ dongles plugged in:
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
   select()` (#457).
 - The only custom marker is `replay` (private captures; [below](#replay-tests)). Everything else is plain pytest.
+- `SIZEUP_TEST_THREAD_REPORT=1` lists, at the end, the threads each test left running into the next one (#665: a
+  leftover thread can trip a later test's process-wide fake). A report, never a failure.
 
 **On a Mac, keep it awake and bounded.** A sleeping Mac stalls the run. `caffeinate -i` stops that, and `perl alarm`
 is the timeout (macOS has no `timeout`):
@@ -231,7 +233,7 @@ There is no Python linter or formatter in CI. Don't reformat files or reorder im
 |---|---|---|
 | 19 failures in `tests/test_preplan_docs.py` | the venv lacks pypdf / Pillow | `pip install -e '.[dev]'` |
 | 2 failures, `filedescriptor out of range in select()` (`test_squelch_stuck`, `test_vessels`) | a serial run on macOS passes 1024 open descriptors (#457) | run with `-n auto` |
-| Marked `@pytest.mark.flaky(issue=NNN)`: `test_cloud` page pair by pair (#513), `test_channels` AWS-refused fallback (#610, #630), `test_atc_stt` marginal transmission (#616), `test_intel_replay` sends nothing (#665), `test_handoff` lease file fresh (#668) | known flakes, each with its open issue | they are retried once when they fail (`tests/conftest.py`): "R" in the progress line, "N rerun" in the totals, a list at the end and a warning annotation in CI. Any other failure is final. Mark a new flake only with its issue; remove the mark when the issue is fixed |
+| Marked `@pytest.mark.flaky(issue=NNN)`: `test_cloud` page pair by pair (#513), `test_channels` AWS-refused fallback (#610, #630), `test_atc_stt` marginal transmission (#616), `test_handoff` lease file fresh (#668) | known flakes, each with its open issue | they are retried once when they fail (`tests/conftest.py`): "R" in the progress line, "N rerun" in the totals, a list at the end and a warning annotation in CI. Any other failure is final. Mark a new flake only with its issue; remove the mark when the issue is fixed |
 | Timing asserts under load: `test_transcribe` idle stream (#449), `test_roads` probe timeout (#468), `test_unit_follow` frame loop (#480), `test_perf` ratio (#481), `test_reception` / `test_fg2` (#500), reception history race (#503) | a slow or busy machine | rerun the file on its own. If it passes alone and on main, it is the known flake: name the issue in your PR. A failure not on this list is yours until shown otherwise; a new flake gets its own issue. |
 
 ## Making a change
