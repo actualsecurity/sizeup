@@ -221,9 +221,13 @@ def test_said_towns(monkeypatch):
     assert said("port chester fire department, respond to 9 model street") == (set(), set())     # who, not where
     assert said("port chester and rye brook fire departments, 9 model street") == (set(), set())
     assert said("sample fitness in rye brook avenue and specimen street") == (set(), set())     # a street of that name
-    assert said("9 model street, rye brook, smoke showing") == (set(), {"rye brook"})           # named elsewhere
+    assert said("9 model street, rye brook, smoke showing") == ({"rye brook"}, set())           # street, then town
+    assert said("smoke seen from rye brook, units checking") == (set(), {"rye brook"})         # named elsewhere
+    assert said("mutual aid to the city of rye, structure fire") == ({"rye"}, set())            # "fire" is the call's
     assert said("to rye 412 sample post road") == ({"rye"}, set())                             # a number after it
     assert said("to the city of rye mutual aid") == ({"rye"}, set())
+    assert said("412 sample post road, rye.") == ({"rye"}, set())                               # street, then town
+    assert said("412 sample post road, city of rye") == ({"rye"}, set())
     for landmark in ("respond to the rye example plaza", "respond to the rye brook side of the building",
                      "go to the rye side", "in rye hospital lot", "by the rye border"):
         assert said(landmark)[0] == set(), landmark                                             # a noun after it
@@ -539,13 +543,13 @@ def test_mutual_aid_with_our_unit_on_the_county_event_joins_as_on_main(tmp_path)
     assert p == a and paging_on(rig) == a
 
 
-def test_mutual_aid_sharing_a_unit_without_our_number_joins_too(tmp_path):
-    """No house number said (a street only), E60 on both: the mutual-aid words never veto it."""
+def test_mutual_aid_sharing_another_departments_unit_without_our_number_joins_too(tmp_path):
+    """No house number said (a street only), 2661 (another department's) on both: the mutual-aid words never veto it."""
     rig = Rig(tmp_path)
-    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("E60",), typ="STRU/COMM")
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("2661",), typ="STRU/COMM")
     rig.at(60)
     src = rig.cad.sources
-    rec = {"f": {"type": "MA"}, "lines": ["Engine 60, mutual aid, structure fire, Sample Post Road"], "units": ["Engine 60"],
+    rec = {"f": {"type": "MA"}, "lines": ["mutual aid, structure fire, Sample Post Road"], "units": ["2661"],
            "towns": ["Port Chester", "Rye Brook"]}
     assert not src._vetoed(rig.cad.store.incident(a), "Sample Post Road", rec)
     assert src._vetoed(rig.cad.store.incident(a), "Sample Post Road", dict(rec, units=["Engine 62"]))
@@ -563,10 +567,10 @@ def test_a_town_named_as_a_landmark_is_no_evidence(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("words", ["respond to the Rye Example plaza", "respond to the Rye Brook side of the building",
-                                   "go to the Rye side", "mutual aid to the City of Rye", "respond to the Village of Port Chester"])
-def test_our_exact_number_joins_whatever_town_the_page_mentions(tmp_path, words):
-    """412 Sample Post Road said: a town as a landmark, or even "mutual aid to ...", never overrides our number (main
-    joins these; the county may keep another town's type)."""
+                                   "go to the Rye side", "respond to the Village of Port Chester",
+                                   "respond to the City of Port Chester"])
+def test_our_exact_number_joins_whatever_landmark_the_page_mentions(tmp_path, words):
+    """412 Sample Post Road said: a town as a landmark, or our own town, never overrides our number (main joins these)."""
     rig = AutoRig(tmp_path)
     a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("PCFD",), typ="HAZARD/GAS")
     rig.at(60)
@@ -602,6 +606,57 @@ def test_a_chains_store_on_another_street_in_another_town_leaves_main_s_join(tmp
                                      {"f": {"type": "ALARM"}, "lines": [page.replace("Sample Pharmacy.", "Sample Pharmacy, "
                                                                                      "Rye Brook.")]})
     assert near.elsewhere_near                                                   # the page names the other's town
+
+
+@pytest.mark.parametrize("words", [
+    "mutual aid to the City of Rye, structure fire, 412 Sample Post Road",
+    "structure fire, 412 Sample Post Road, Rye",
+    "structure fire, 412 Sample Post Road in Rye",
+    "structure fire, 412 Sample Post Road, City of Rye",
+    "respond to the City of Rye for a structure fire, 412 Sample Post Road",
+])
+def test_another_town_said_vetoes_even_our_number_and_unit(tmp_path, words):
+    """The county's call at 412 in Port Chester lists E60; the page sends Engine 60 to 412 in another town: another
+    call (our number and our own unit on both prove nothing against the town said)."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD, PORT CHESTER", ("E60",), typ="HAZARD/GAS")
+    rig.at(60)
+    p = rig.page("p1", f"Port Chester Fire Department, Engine 60, {words}. Time out 1431.")["id"]
+    assert p != a and paging_on(rig) == p and possibly(rig, p, a)
+    assert "merge_offer" not in state_inc(rig, p)
+
+
+@pytest.mark.parametrize("words", ["Engine 60, mutual aid to the City of Rye, fire alarm, Sample Post Road",
+                                   "Engine 60, fire alarm, Sample Post Road in Rye"])
+def test_another_town_said_vetoes_the_street_only_join(tmp_path, words):
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD, PORT CHESTER", ("E60",), typ="ALARM/COMM")
+    rig.at(60)
+    p = rig.page("p1", f"Port Chester Fire Department, {words}. Time out 1431.")["id"]
+    assert p != a and paging_on(rig) == p and "merge_offer" not in state_inc(rig, p)
+
+
+def test_mutual_aid_into_the_county_event_of_that_town_joins(tmp_path):
+    """The county added our engine to its event in the town the page names: the same call."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD, RYE", ("E60",), typ="STRU/COMM")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, Engine 60, mutual aid to the City of Rye, structure fire, "
+                       "412 Sample Post Road. Time out 1431.")["id"]
+    assert p == a and paging_on(rig) == a
+
+
+def test_only_our_own_unit_shared_proves_nothing(tmp_path):
+    """Mutual aid on our street, no number, no town: E60 on both is no proof (vetoed); another department's unit on
+    both is (the county kept the other town's type when it added ours)."""
+    rig = Rig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("E60", "2661"), typ="STRU/COMM")
+    rig.at(60)
+    src, inc = rig.cad.sources, rig.cad.store.incident(a)
+    rec = {"f": {"type": "MA"}, "lines": ["Engine 60, mutual aid, structure fire, Sample Post Road"],
+           "towns": ["Port Chester", "Rye Brook"]}
+    assert src._vetoed(inc, "Sample Post Road", dict(rec, units=["Engine 60"]))
+    assert not src._vetoed(inc, "Sample Post Road", dict(rec, units=["Engine 60", "2661"]))
 
 
 def test_the_cross_street_cache_is_bounded(tmp_path, monkeypatch):

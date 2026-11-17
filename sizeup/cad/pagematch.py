@@ -134,7 +134,7 @@ class Evidence:
     elsewhere_near: bool = False                      # ... on that street, or in a town the page names
     cross: str = ""                                   # "" | "match" | "differ"
     family: str = ""                                  # "" | "same" | "differ"
-    units: str = ""                                   # "" | "common" | "differ" (both name apparatus, none in common)
+    units: str = ""                                   # "" | "common" (one not ours) | "own" (only ours) | "differ"
     town: str = ""                                    # "" | "differ"
     mutual: str = ""                                  # "" | "differ" (a mutual-aid page, an event that isn't)
     fresh: bool = False                               # the feed's last report ok and recent
