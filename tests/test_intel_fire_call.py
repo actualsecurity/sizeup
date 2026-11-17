@@ -496,6 +496,17 @@ def complaint(e):
     "a toaster on fire",
     "the dryer, it's smoking",
     "the stove was on fire",
+    "the dryer in the basement is smoking",                        # a gap of up to 5 words
+    "the outlet behind the couch is sparking",
+    "wires in the wall are sparking",
+    "the electrical panel in the basement is now smoking",
+    "the oven in apartment 3 is smoking",
+    "the outlet that's behind it is sparking",
+    "female caller states the dryer is smoking",                   # a person who reports it: no exclusion
+    "a man says his dryer is smoking",
+    "the guy's dryer is smoking",
+    "someone left the stove on, it's smoking",
+    "the man in apartment 3 says his dryer is smoking",
 ])
 def test_appliance_and_panel_phrases_still_hit(gaz, text):
     e, _sink = engine(gaz)
@@ -505,9 +516,18 @@ def test_appliance_and_panel_phrases_still_hit(gaz, text):
 @pytest.mark.parametrize("text", [
     "panel van parked, the driver is smoking in it",
     "panel van, driver smoking",                                  # the gap is short: the person exclusion
-    "a panel van parked by the hydrant, smoking",                  # the gap is too long
+    "a panel van parked by the hydrant on the corner, smoking",    # the gap is too long (7 words)
     "the dryer vent was cleaned last week, nobody is smoking",
     "the outlet is not sparking",
+    "the dryer isn't smoking anymore",                             # a contraction is a negator
+    "the outlet wasn't sparking when the officer got there",
+    "the man by the stove was smoking",                            # a person (and where) before the smoking
+    "the woman at the toaster oven is smoking",
+    "two males in the panel truck are smoking",
+    "the dryer, a man is smoking",
+    "the outlet near the guy who was smoking",
+    "the stove. Smoking",                                          # never across a sentence
+    "the toaster was fine. Kids smoking out back",
     "the man is smoking out front, a smell of smoke",
     "a female smoking on the porch, smells like smoke",
     "the subject was smoking in the car, odor of smoke",
@@ -526,3 +546,26 @@ def test_a_panel_van_with_a_smoking_driver_is_no_fire_call(gaz, text, fires):
     e, sink = engine(gaz)
     e.feed(row("c1-t1", text, e.clock(), **TALK))
     assert [p.category for p, d in sink.pushes if d.would_push] == (["fire_call"] if fires else [])
+
+
+@pytest.mark.parametrize("text", [
+    "The caller's building, 40 Example Place, apartment 3.",
+    "That's 40 Example Place, apt 2B.",
+])
+def test_a_read_back_with_the_apartment_number_places_and_pushes_it(gaz, text):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 40
+    e.feed(row("c1-t2", text, clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full.startswith("40 Example Pl") and ev.suppressed == ""
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
+def test_an_apartment_number_never_lets_another_jobs_words_through(gaz):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 40
+    e.feed(row("c1-t2", "21 Sample Street, apartment 3, a noise complaint.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and not any(d.would_push for _p, d in sink.pushes)

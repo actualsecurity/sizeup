@@ -15,7 +15,10 @@ A pack says which radio sources it reads (scope), what its categories are and th
 Phrases: words in order, case and punctuation aside; "..." a gap of up to GAP_WORDS words with no "no" / "not" in it
 (sizeup/cad/alarms.py's grammar); "(a|b|c d)" one of the alternatives, each one or more words. A rule hits a text
 when any of its phrases is in it and none of its "not" phrases is. "re:" in front: a regular expression instead
-(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d").
+(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d"). An expression must not backtrack
+without bound: its separator and word classes share no character ("[^\\w'.?!]+" beside "[\\w']+"; never "\\W+"
+beside "[\\w']+", which both take an apostrophe). tests/test_intel_packs.py times every pack's expressions on hostile
+texts, and an expression reads only the first RE_TEXT_MAX characters.
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
 
@@ -70,6 +73,8 @@ GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 RE_MAX = 200
+RE_TEXT_MAX = 4000              # a "re:" expression reads at most this many characters of a transmission (minutes of
+                                # speech): bounds the time an expression with backtracking can take on a freak text
 PHRASE_MAX = 120
 RULES_MAX = 400
 WILD = "*"                      # a rule for every category (a dispatch cue): counts only beside a real hit
@@ -238,7 +243,7 @@ class Phrase:
 
     def found(self, text: str, ws: list[str]) -> bool:
         if self.rx is not None:
-            return self.rx.search(text or "") is not None
+            return self.rx.search((text or "")[:RE_TEXT_MAX]) is not None
         return any(_match_at(ws, i, self.items) for i in range(len(ws)))
 
 

@@ -17,6 +17,7 @@ Synthetic only (this repository is public): invented, short, fragmentary radio t
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -986,3 +987,36 @@ def test_one_bad_override_never_drops_the_others():
     assert e.pack("police").threshold == 0.7 and next(r for r in e.pack("police").rules if r.id == "pd.shots").mode == "map"
     assert e.pack("ems").area == rules_mod.load_packs()[2].area                # the file's area
     assert any("intel_packs/ems not applied" in m for m in logged)
+
+
+# -- every "re:" expression of every pack runs in linear time on hostile texts (#670's review) ----------------------------
+
+HOSTILE_TEXTS = [
+    "dryer" + "'" * 20000 + " x",                    # a run of apostrophes: once both a separator and a word
+    "outlet" + " " * 20000 + "x",
+    "man" + " ," * 10000 + " x",
+    "panel " + "a " * 25000,
+    "the dryer " + "it's " * 10000,
+    "the man " + "a' " * 10000,
+    "x" * 50000,
+    "the dryer in the ' basement is, " * 1600,     # a 50k-character transcript of near misses
+    "!?.'-, " * 8000,
+]
+
+
+def test_every_re_expression_runs_fast_on_hostile_texts():
+    exprs = {p.src for pack in rules_mod.load_packs() for r in pack.rules for p in [*r.any, *r.nots] if p.rx is not None}
+    assert exprs                                                   # the police pack has some
+    for src in sorted(exprs):
+        p = rules_mod.Phrase(src)
+        for text in HOSTILE_TEXTS:
+            t0 = time.perf_counter()
+            p.found(text, [])
+            took = time.perf_counter() - t0
+            assert took < 0.05, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
+
+
+def test_an_expression_reads_at_most_re_text_max_characters():
+    p = rules_mod.Phrase("re:smoking")
+    assert p.found("x " * 100 + "smoking", [])
+    assert not p.found("x" * rules_mod.RE_TEXT_MAX + " smoking", [])
