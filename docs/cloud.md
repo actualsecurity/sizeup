@@ -2376,7 +2376,26 @@ Merged into the GTFS-realtime trains by **train number and run date**: the posit
 gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
-is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+is good: Amtrak's trains on the New Haven Line (TrainTime's branch `AM`; never in Metro-North's GTFS-realtime), whose
+box says *Amtrak*, not *Metro-North*, and whose next stop and its limit are TrainTime's own.
+
+**SIGNAL locations.** TrainTime's `SIGNAL` location (Amtrak's trains, or a Metro-North train whose GPS is out) is
+where Metro-North's signal system has the train: the block it entered, timed when it entered it, unchanged until it
+enters the next one 1 to 3 km on (a minute or more; minutes at a red signal). It is taken as it is, not filtered (the
+GPS filter drew it halfway between two signals); the same signal again is the train still in that block (its time
+stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
+allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
+just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on at that speed with no "no news" ease, to the end
+of its block (as long as the block it just ran, plus 10 s of its travel for the next fix's lateness; 1.5 km before a
+block is known), never past its next stop, and not braked for the block's end: the next signal's fix normally comes as
+it gets there, and is closed smoothly, never snapped back. Held at a red signal, it is drawn on through the block's end
+by about that slack and a hard stop, then glided back. After 3 min with no new signal it is drawn dimmed, *At signal ·
+4 min ago* (not the feed's *Stale*). A train TrainTime alone has keeps its signal location 10 min from when it first
+had that signal (however often TrainTime re-stamps it; a GPS location: 40 s, as before), so it no longer drops off the
+map 40 s after each signal. A Metro-North train reporting SIGNAL takes the same path while its TrainTime position is
+used (under 40 s old and as new as GTFS-realtime's), which is rare. #589's GPS rules are unchanged; signal fixes add
+nothing to the prediction residuals. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
