@@ -22,6 +22,7 @@ from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
+from . import reads
 from .errors import JSON, error
 from .gateway import Gateway
 from .limits import Limits
@@ -63,7 +64,11 @@ class V1:
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
-        self.gateway = Gateway(cad) if cad is not None else None    # a write's way to the CAD, as a person
+        # `cad` is the hub's Cad service (the server passes getattr(CadApi, "cad", None)): the read resources' data is a
+        # read-only facade over it (#560), a write's way in is the Gateway, which acts as the device's person (#562).
+        # A handler gets those two, never the Cad or a CadApi.
+        self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
+        self.gateway = Gateway(cad) if cad is not None else None
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -139,9 +144,15 @@ class V1:
                     return error(e.status, e.code, e.message)
                 if raw is None:
                     return error(413, "body_too_large", f"the body is over {MAX_BODY // 1024} KB")
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw, self.gateway, peer)
-            status, obj, *extra = route.handler(ctx)             # extra: optional response headers (writes.py)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, \
-                {"Cache-Control": "no-store", **(extra[0] if extra else {})}
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), body=raw,
+                      gateway=self.gateway, peer=peer, reads=self.reads)
+            # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
+            # finished (status, body, content type, headers), which is what errors.error() makes
+            res = route.handler(ctx)
+            if len(res) == 4:
+                return res
+            status, obj, extra = (*res, {})[:3]
+            payload = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
+            return status, payload, JSON, {"Cache-Control": "no-store", **extra}
         finally:
             self.limits.leave()

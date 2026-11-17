@@ -10,5 +10,5 @@ allOf:
             type: string
             description: "incident_closed, unit_changed, already_acknowledged, in_progress (an unknown value is other)."
       current:
-        description: Unit, Alarm or IncidentRef, as it is now.
+        description: The Unit, Alarm or Incident (summary) as GET serves it now, so its `rev` is the one `If-Match` checks.
         type: object

@@ -569,7 +569,8 @@ answers 200.
   is a 409 `in_progress` with `Retry-After: 1`; a running claim older than 120 s is taken over (its owner token stops the
   slow original from overwriting). Only 200, 201, 409 and 412 are kept: a 400, 403 or 404 can be corrected under the
   same key.
-- **If-Match** takes the unit's `rev` (`api/v1/rev.py`) and is for unit status only (412 with the current unit). A queued
+- **If-Match** takes the unit's `rev`: the rev `GET /units` serves (`serialize.with_rev(serialize.unit(...))`, one
+  `rev.py`), and is for unit status only (412 with the current unit). A queued
   action (`client_at`) must send it (428 `precondition_required`), and a stale one is a 409 `unit_changed`, so an old
   queued status never overrides a newer one. The check and the write are two steps (the console's methods do the write
   and take no expected rev): a change between them is not caught.
@@ -579,7 +580,10 @@ answers 200.
   android or web from `X-Client`, else `api`. A queued action more than a minute late adds a chronology note through the
   console's note path (so it has an activity row of its own).
 - 409 answers carry `error.reason` (`incident_closed`, `unit_changed`, `already_acknowledged`, `in_progress`) and the
-  current object. An alarm's `ack_by` is the name only: the console's operator string has the e-mail address, which no
+  current object. The unit, alarm and incident (summary) in an answer or a `current` are the objects the reads serve,
+  built by the same serializers, so the object is what the next GET returns (once reads' cache, up to 1 s, rebuilds);
+  a note answers `{incident_id, units, places}` (the id a string). Every text goes through reads' `scrub`. An alarm's
+  `ack_by` is the name only: the console's operator string has the e-mail address, which no
   v1 answer carries. A dispatch is never offered here.
 
 ---
@@ -663,6 +667,49 @@ native client (private repo). **Both** = needs work or inputs from each side.
 | — | In parallel: #446 item 1 (no-op rev bumps) before a mobile beta; then measure, then DVR out (E) or 1 vCPU (F) (D9) | Platform | headroom | #446 |
 
 The app consumes each platform PR as it lands: regenerate the client from the merged spec, then build the screen.
+
+### 10.1 Read resources as built (#560)
+
+`GET /api/v1/{snapshot, incidents, incidents/{id}, units, alarms}` (`sizeup/api/v1/reads.py`, `serialize.py`,
+`paging.py`, `rev.py`; the spec is `api/openapi/v1/`). Each needs a device, the `reads` flag and the `read` role; none
+writes. `/me` is PR 2's.
+
+- **rev and ETag, no schema change.** `rev = sha256(json(obj without rev, sorted keys, compact, ensure_ascii=False))[:16]`
+  (`rev_of`), per object; the ETag is that rev (a list's: a hash of its item revs and `next`; the snapshot's: of the
+  three lists' revs). `If-None-Match` (weak, quoted, a list or `*`) answers 304 with no body. A role's detail has its own
+  rev, because what a role may not see is not in what is hashed.
+- **Cursor.** `?after=<next>&limit=`, response `{items, next}`. The cursor is opaque (a version, the list's name and the
+  last row's sort key: `(created_at, id)` newest first for incidents, `(sort, id)` for units), a keyset and not an
+  offset, so rows added or changed between pages move nothing already sent. A cursor of another list, or a malformed
+  one, is 400 `bad_cursor`; a bad `limit` is 400 `bad_request`. Caps: incidents 50 by default and at most 200, units 100
+  and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
+- **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
+  category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
+  (a device is a signed-in person). **Never sent:** the caller's name, address and phone as fields, nor in the
+  chronology (the "Caller info: ..." line is dropped; an "Edited ..." line that names a caller field is dropped whole,
+  and the match is deliberately broad: any edit line containing "caller" or "phone" becomes "Edited caller details",
+  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (an "<email>" is dropped, a bare
+  email becomes "an operator", in every free text); every radio ID, rig and talker beyond a row's alias (a bare
+  "radio 41228" in an alarm becomes "an unidentified radio"). **Chronology text is an allow-list:** only the kinds in
+  `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
+  kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,
+  `place` and address; the dispatches' text; operators' notes; `status` events (a unit's radio transcript, "E60 on
+  scene: <said>"); `tones` events (paging-feed lines up to 2000 characters from outside the CAD); an alarm's `text`,
+  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`. ANY of these
+  can contain a name, address or phone number that a human or a transcript put there, and the server does not filter
+  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Site
+  documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
+  premise, pre-plan and radio are only in an incident's detail.
+- **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
+  the `rev` key itself excluded; `with_rev` adds it). The stream's `(kind, id, rev)` (PR 5) and the write answers and
+  `If-Match` (PR 6) must reuse `rev_of` and `with_rev` on these same shapes. `epoch` stays null until PR 5.
+- **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
+  read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
+  incident read is uncached.
+- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
+  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
+  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+  only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---
 

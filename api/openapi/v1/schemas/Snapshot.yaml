@@ -1,0 +1,23 @@
+type: object
+description: >
+  The screens' first load: the open incidents (at most 200), the units, the alarms, the hub's clock and the change
+  log's epoch (null until there is one). `rev` is a hash of the three lists' item revs: if it is unchanged, so is
+  everything here.
+required: [incidents, units, alarms, server_time, epoch, rev]
+properties:
+  incidents:
+    type: array
+    items:
+      $ref: ./Incident.yaml
+  units:
+    type: array
+    items:
+      $ref: ./Unit.yaml
+  alarms:
+    type: array
+    items:
+      $ref: ./Alarm.yaml
+  server_time: {type: number}
+  epoch: {type: [string, "null"]}
+  rev:
+    $ref: ./Rev.yaml

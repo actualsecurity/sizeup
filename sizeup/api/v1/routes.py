@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Callable, NamedTuple
 
-from . import API_VERSION
+from . import API_VERSION, reads
 
 # The oldest app each platform may run (forced upgrades, #566 enforces it). 0.0.0: nothing is refused yet.
 MIN_APP = {"ios": "0.0.0", "android": "0.0.0"}
@@ -45,9 +45,11 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
+    # the read-only facade over the CAD (#560) and the write gateway (#562): never the Cad or a CadApi
     body: bytes = b""          # a POST's body (at most handler.MAX_BODY), read after the token and the limits (#562)
-    gateway: object = None     # gateway.Gateway: a write's way to the CAD, as a person (None: no CAD). Never a CadApi
+    gateway: object = None     # gateway.Gateway: a write's way to the CAD, as a person (None: no CAD)
     peer: str = ""             # the client address (Cf-Connecting-Ip), for the audit
+    reads: "reads.Reads | None" = None
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -59,6 +61,12 @@ def meta(ctx: Ctx) -> tuple[int, dict]:
 
 ROUTES: list[Route] = [
     Route("GET", "/api/v1/meta", meta, "public"),
+    # the read resources (#560): a signed-in device, the "reads" flag, the least role
+    Route("GET", "/api/v1/snapshot", reads.snapshot, "device", "reads", "read"),
+    Route("GET", "/api/v1/incidents", reads.incidents, "device", "reads", "read"),
+    Route("GET", "/api/v1/incidents/{id}", reads.incident, "device", "reads", "read"),
+    Route("GET", "/api/v1/units", reads.units, "device", "reads", "read"),
+    Route("GET", "/api/v1/alarms", reads.alarms, "device", "reads", "read"),
 ]
 
 from . import writes as _writes  # noqa: E402,F401  (adds its routes to ROUTES when it loads: writes.py, #562)

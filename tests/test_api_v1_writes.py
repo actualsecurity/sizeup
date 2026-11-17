@@ -16,12 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from sizeup.api.v1 import writes
+from sizeup.api.v1 import serialize, writes
 from sizeup.api.v1.handler import V1
 from sizeup.api.v1.idempotency import (KEEP_S, MAX_PER_PRINCIPAL, MAX_STORED_BODY, STALE_RUNNING_S, Idempotency,
                                        fingerprint)
 from sizeup.api.v1.principal import Principal
 from sizeup.api.v1.rev import rev_of
+from sizeup.api.v1.serialize import with_rev
 from sizeup.api.v1.switches import Switches
 from sizeup.cad.api import CadApi
 from sizeup.fence import FencedWrite
@@ -63,7 +64,7 @@ class Rig:
                                                    at=self.clock.t - 5))
         who = {"Bearer jordan": DISPATCHER, "Bearer val": VIEWER}
         self.v1 = V1(switches=Switches(lambda: True, lambda: features if features is not None else {"writes": True}),
-                     resolver=lambda h: who.get(h.get("Authorization")), cad=self.api)
+                     resolver=lambda h: who.get(h.get("Authorization")), cad=self.cad)
 
     def post(self, path, body=None, key=UUID, token="jordan", headers=None, raw=None):
         raw = raw if raw is not None else json.dumps(body if body is not None else {}).encode()
@@ -87,8 +88,13 @@ def rig(tmp_path):
     return Rig(tmp_path)
 
 
+def get_unit(rig, code):
+    """The unit as reads serves it (GET /units): the object whose rev is the rev If-Match checks."""
+    return with_rev(serialize.unit(rig.unit(code)))
+
+
 def if_match(rig, code):
-    return {"If-Match": writes.unit_obj(rig.unit(code))["rev"]}
+    return {"If-Match": get_unit(rig, code)["rev"]}
 
 
 def status_path(code="E60"):
@@ -103,8 +109,8 @@ def note_path(iid):
 
 def test_unit_status_goes_through_the_console_and_is_audited(rig):
     status, out, _ = rig.post(status_path(), {"status": "OL"})
-    assert status == 200 and out["unit"]["code"] == "E60" and out["unit"]["status"] == "OL"
-    assert out["unit"]["incident_id"] == rig.open["id"] and out["unit"]["rev"] == rev_of(
+    assert status == 200 and out["unit"]["name"] == "E60" and out["unit"]["status"] == "OL"
+    assert out["unit"]["incident_ids"] == [str(rig.open["id"])] and out["unit"]["rev"] == rev_of(
         {k: v for k, v in out["unit"].items() if k != "rev"})
     assert rig.unit("E60")["status"] == "OL"
     assert any("E60" in t for t in [e["text"] for e in rig.cad.store.full(rig.open["id"])["events"]][-1:])
@@ -118,13 +124,13 @@ def test_unit_status_goes_through_the_console_and_is_audited(rig):
 def test_the_unit_code_is_case_insensitive_and_may_name_a_call(rig):
     status, out, _ = rig.post(status_path("e63"),
                               {"status": "OL", "incident_id": rig.open["id"], "note": "at the hydrant"})
-    assert status == 200 and out["unit"]["code"] == "E63" and out["unit"]["incident_number"] == rig.open["number"]
+    assert status == 200 and out["unit"]["name"] == "E63" and out["unit"]["incident_number"] == rig.open["number"]
 
 
 def test_alarm_ack_goes_through_the_console_and_is_audited(rig):
     aid = rig.alarm["id"]
     status, out, _ = rig.post(f"/api/v1/alarms/{aid}/ack", key="b" * 16)
-    assert status == 200 and out["alarm"]["id"] == aid and out["alarm"]["ack_at"] is not None
+    assert status == 200 and out["alarm"]["id"] == str(aid) and out["alarm"]["ack_at"] is not None
     # the name: the console's operator string has the e-mail
     assert out["alarm"]["ack_by"] == "Jordan"
     assert rig.cad.alarms.get(aid)["ack_at"] == out["alarm"]["ack_at"]
@@ -135,7 +141,7 @@ def test_alarm_ack_goes_through_the_console_and_is_audited(rig):
 def test_a_note_is_a_chronology_entry_by_the_person(rig):
     status, out, _ = rig.post(note_path(rig.open["id"]), {"text": "E60 stated the hydrant is out of service",
                                                            "units": ["E60"]})
-    assert status == 201 and out == {"incident_id": rig.open["id"], "units": ["E60"], "places": []}
+    assert status == 201 and out == {"incident_id": str(rig.open["id"]), "units": ["E60"], "places": []}
     ev = [e for e in rig.cad.store.full(rig.open["id"])["events"] if e["kind"] == "note"][-1]
     assert ev["text"] == "E60 stated the hydrant is out of service"
     assert ev["operator"] == rig.cad.settings.standing(JORDAN)["operator"]
@@ -196,7 +202,7 @@ def test_the_token_and_the_flag_gate_everything(rig):
     assert rig.post(status_path(), {"status": "OL"}, token="nobody")[0] == 401
     off = Rig.__new__(Rig)
     off.__dict__ = rig.__dict__ | {"v1": V1(switches=Switches(lambda: True, lambda: {"reads": True}),
-                                            resolver=lambda h: DISPATCHER, cad=rig.api)}
+                                            resolver=lambda h: DISPATCHER, cad=rig.cad)}
     for path in (status_path(), f"/api/v1/alarms/{rig.alarm['id']}/ack", note_path(rig.open["id"])):
         s, out, _ = off.post(path, {"status": "OL", "text": "x"})
         assert (s, out["error"]["code"]) == (404, "not_found")
@@ -234,7 +240,7 @@ def test_a_note_on_a_closed_incident_is_a_409_with_the_current_incident(rig):
 def test_a_status_on_a_closed_incident_is_a_409_with_the_current_unit(rig):
     before = rig.unit("E61")["status"]
     status, out, _ = rig.post(status_path("E61"), {"status": "RS", "incident_id": rig.shut["id"]})
-    assert status == 409 and out["error"]["reason"] == "incident_closed" and out["current"]["code"] == "E61"
+    assert status == 409 and out["error"]["reason"] == "incident_closed" and out["current"]["name"] == "E61"
     assert rig.unit("E61")["status"] == before
 
 
@@ -353,18 +359,18 @@ def test_the_table_is_made_on_the_first_write_in_hub_sqlite_only(tmp_path):
 # -- If-Match ----------------------------------------------------------------------------------------------------
 
 def test_if_match_the_current_rev_applies(rig):
-    cur = writes.unit_obj(rig.unit("E60"))
+    cur = get_unit(rig, "E60")
     status, out, _ = rig.post(status_path(), {"status": "OL"}, headers={"If-Match": f'"{cur["rev"]}"'})
     assert status == 200 and out["unit"]["rev"] != cur["rev"]
 
 
 def test_a_stale_if_match_is_a_412_with_the_current_unit(rig):
-    stale = writes.unit_obj(rig.unit("E60"))["rev"]
+    stale = get_unit(rig, "E60")["rev"]
     # moved on since the app read it
     rig.cad.unit_status(uid(rig.cad, "E60"), {"status": "RS", "operator": "Lt. Ruiz"})
     status, out, _ = rig.post(status_path(), {"status": "OL"}, headers={"If-Match": stale})
     assert status == 412 and out["error"]["code"] == "precondition_failed"
-    assert out["current"]["status"] == "RS" and out["current"]["rev"] == writes.unit_obj(rig.unit("E60"))["rev"]
+    assert out["current"]["status"] == "RS" and out["current"]["rev"] == get_unit(rig, "E60")["rev"]
     assert rig.unit("E60")["status"] == "RS"
     assert rig.post(status_path(), {"status": "OL"}, headers={"If-Match": out["current"]["rev"]},
                     key="c" * 12)[0] == 200
@@ -387,7 +393,7 @@ def test_the_rev_is_the_content_hash_exactly():
 # -- queued actions and client_at ----------------------------------------------------------------------------------
 
 def test_a_queued_status_on_a_unit_that_moved_on_is_a_409_not_applied(rig):
-    rev = writes.unit_obj(rig.unit("E60"))["rev"]
+    rev = get_unit(rig, "E60")["rev"]
     rig.cad.unit_status(uid(rig.cad, "E60"), {"status": "AV", "operator": "Lt. Ruiz"})
     status, out, _ = rig.post(status_path(), {"status": "OL", "client_at": rig.clock.t - 90}, headers={"If-Match": rev})
     assert status == 409 and out["error"]["reason"] == "unit_changed"
@@ -768,3 +774,102 @@ def test_a_fenced_write_answers_the_envelope_and_leaves_no_key(served):
     r.cad.store.may_write = lambda: True
     assert out.startswith(b"HTTP/1.1 503") and b'"error"' in out and b'"code"' in out
     assert keys_stored(r) == 0 and r.notes() == []
+
+
+# -- one object, one rev: what a GET serves is what a write answers with and checks (reads: the source of truth) ----
+
+@pytest.fixture
+def both(tmp_path):
+    """A real hub with the reads and writes flags on (the Rig's CAD, its resolver)."""
+    r = Rig(tmp_path)
+    srv, url = serve(cad=r.api, role="hub", mobile=Switches(lambda: True, lambda: {"reads": True, "writes": True}),
+                     mobile_resolver=r.v1.resolver)
+    yield r, url
+    srv.shutdown()
+
+
+def get(r, url, path, token="jordan"):
+    """GET after the reads' 1 s rebuild floor (the CAD's clock is the test's: moved on)."""
+    r.clock.t += 2
+    req = urllib.request.Request(url + path, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def write(url, path, body=None, key=UUID, headers=None):
+    req = urllib.request.Request(url + path, method="POST", data=json.dumps(body or {}).encode(),
+                                 headers={"Authorization": "Bearer jordan", "Idempotency-Key": key, **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def item(page, **match):
+    return next(i for i in page["items"] if all(i[k] == v for k, v in match.items()))
+
+
+def test_the_rev_a_get_serves_is_the_rev_if_match_accepts(both):
+    r, url = both
+    unit = item(get(r, url, "/api/v1/units?limit=500"), name="E60")
+    status, out = write(url, status_path(), {"status": "OL"}, headers={"If-Match": f'"{unit["rev"]}"'})
+    assert status == 200                                        # not a 412: the GET's rev is the one checked
+    assert out["unit"]["rev"] != unit["rev"] and out["unit"]["name"] == "E60"
+    unit2 = item(get(r, url, "/api/v1/units?limit=500"), name="E60")
+    assert unit2 == out["unit"]                                 # (b) the answer is the object GET /units serves
+    assert json.dumps(unit2, sort_keys=True) == json.dumps(out["unit"], sort_keys=True)
+
+
+def test_an_alarm_answer_is_the_object_get_alarms_serves(both):
+    r, url = both
+    before = item(get(r, url, "/api/v1/alarms"), id=str(r.alarm["id"]))
+    status, out = write(url, f"/api/v1/alarms/{r.alarm['id']}/ack", key="alarm-ack-0001")
+    assert status == 200 and out["alarm"]["rev"] != before["rev"] and out["alarm"]["ack_by"] == "Jordan"
+    assert item(get(r, url, "/api/v1/alarms"), id=str(r.alarm["id"])) == out["alarm"]
+    status, again = write(url, f"/api/v1/alarms/{r.alarm['id']}/ack", key="alarm-ack-0002")
+    assert status == 409 and again["current"] == out["alarm"]    # a 409's `current` is the same object
+
+
+def test_a_closed_incidents_409_current_is_the_summary_the_list_serves(both):
+    r, url = both
+    status, out = write(url, note_path(r.shut["id"]), {"text": "late"})
+    assert status == 409 and out["error"]["reason"] == "incident_closed"
+    assert item(get(r, url, "/api/v1/incidents"), id=str(r.shut["id"])) == out["current"]
+    status, out = write(url, note_path(r.open["id"]), {"text": "on the open one"}, key="note-open-0001")
+    assert status == 201 and out["incident_id"] == str(r.open["id"])
+
+
+def test_a_stale_rev_is_a_412_whose_current_is_the_get_object(both):
+    r, url = both
+    stale = item(get(r, url, "/api/v1/units?limit=500"), name="E60")["rev"]
+    r.cad.unit_status(uid(r.cad, "E60"), {"status": "RS", "operator": "Lt. Ruiz"})        # another write moves it on
+    status, out = write(url, status_path(), {"status": "OL"}, headers={"If-Match": stale})
+    assert status == 412
+    live = item(get(r, url, "/api/v1/units?limit=500"), name="E60")
+    assert out["current"] == live and live["rev"] != stale and live["status"] == "RS"
+    fresh = {"If-Match": live["rev"]}
+    assert write(url, status_path(), {"status": "OL"}, key="retry-fresh-001", headers=fresh)[0] == 200
+
+
+def test_no_address_is_in_a_write_answer_even_when_the_console_wrote_one(both):
+    """The console records a person without a name by their e-mail: a bare address as the operator of an acknowledge or
+    of an all clear, and `Name <address>` elsewhere. Reads' scrub is on every answer."""
+    r, url = both
+    aid = r.alarm["id"]
+    r.cad.alarm_clear(aid, {"operator": "pat@example.org"})
+    status, out = write(url, f"/api/v1/alarms/{aid}/ack", key="bare-addr-0001")
+    assert status == 409 and out["error"]["reason"] == "already_acknowledged"
+    assert "@" not in json.dumps(out) and "<" not in json.dumps(out)
+    assert out["current"]["ack_by"] == "" and out["current"]["clear_by"] == ""              # a bare address is no name
+    second = r.cad.alarms.on_traffic(tx("FG1-2", text="Engine 64 mayday", rig="E64", radio_id="6401", at=r.clock.t - 3))
+    r.cad.alarm_ack(second["id"], {"operator": "Casey <casey@example.org>"})
+    status, out = write(url, f"/api/v1/alarms/{second['id']}/ack", key="bare-addr-0002")
+    assert status == 409 and "casey@" not in json.dumps(out) and out["current"]["ack_by"] == "Casey"
+    r.cad.close(r.open["id"], {"disposition": "FALSE", "operator": "pat@example.org"})
+    r.cad.reopen(r.open["id"], {"operator": "pat@example.org"})
+    status, out = write(url, note_path(r.open["id"]), {"text": "after the reopen"}, key="bare-addr-0003")
+    assert status == 201 and "@" not in json.dumps(out)
+    r.cad.close(r.open["id"], {"disposition": "FALSE", "operator": "pat@example.org"})
+    status, out = write(url, note_path(r.open["id"]), {"text": "x"}, key="bare-addr-0004")
+    assert status == 409 and "@" not in json.dumps(out) and out["current"]["status"] == "closed"

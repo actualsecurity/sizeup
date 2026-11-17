@@ -29,7 +29,7 @@ post:
                 required: [alarm]
                 properties: {alarm: {$ref: ../schemas/Alarm.yaml}}
           example:
-            alarm: {id: 31, level: alarm, created_at: 1767225595.0, incident_id: null, ack_by: Lt. Example, ack_at: 1767225600.5, clear_at: null, rev: 4be7a0c912d83f10}
+            alarm: {$ref: ../examples/Alarm.yaml}
     "409":
       description: Not applied (already_acknowledged, in_progress). `current` is the alarm as it is now.
       headers:

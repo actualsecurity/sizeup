@@ -1,0 +1,6 @@
+type: string
+pattern: "^[0-9a-f]{16}$"
+description: >
+  The object's revision: the first 16 hex digits of the SHA-256 of its JSON (every other field, keys sorted, compact,
+  UTF-8). The same object always has the same rev and a changed one never does; it is also the ETag. A list's rev
+  hashes its items' revs and its `next`.

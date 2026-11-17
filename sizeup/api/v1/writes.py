@@ -34,7 +34,7 @@ from urllib.parse import unquote
 from . import routes
 from .errors import envelope
 from .idempotency import BUSY, KEY, MISMATCH, REPLAY, fingerprint
-from .rev import rev_of
+from .serialize import scrub
 from .routes import Ctx, Route
 
 FUTURE_S = 300.0            # a client_at further ahead than this is clamped (docs/mobile-api.md section 8)
@@ -42,7 +42,6 @@ PAST_S = 7 * 86400.0        # ... and one older than this is refused (a 0 would 
 LATE_S = 60.0               # a queued action this far behind is said so in the chronology
 STORED = (200, 201, 409, 412)    # the answers a key keeps: decisions. A 400 / 403 / 404 is corrected and sent again
 PLATFORMS = ("ios", "android", "web")     # X-Client's platforms, as `via`; anything else (curl, no header) is "api"
-EMAIL = re.compile(r"[^\s<>()]+@[^\s<>()]+")
 
 
 def fail(status: int, code: str, message: str, reason: str = "", current=None, retry_after_s: int | None = None,
@@ -53,27 +52,6 @@ def fail(status: int, code: str, message: str, reason: str = "", current=None, r
     if retry_after_s is not None:
         h["Retry-After"] = str(retry_after_s)
     return status, envelope(code, message, retry_after_s, reason, current), h
-
-
-# -- the objects a write answers with (and a 409 / 412 shows): small, with the rev of their content --------------------
-
-def unit_obj(u: dict) -> dict:
-    o = {"code": u["name"], "status": u["status"], "status_at": u["status_at"], "incident_id": u["incident_id"],
-         "incident_number": u["incident_number"], "board": u["board"]}
-    return o | {"rev": rev_of(o)}
-
-
-def incident_obj(i: dict) -> dict:
-    o = {"id": i["id"], "number": i["number"], "status": i["status"], "closed_at": i["closed_at"],
-         "disposition": i["disposition"]}
-    return o | {"rev": rev_of(o)}
-
-
-def alarm_obj(a: dict, ack_by: str) -> dict:
-    """ack_by: the name only (Acting.ack_name): the console's operator string carries the e-mail address."""
-    o = {"id": a["id"], "level": a["level"], "created_at": a["created_at"], "incident_id": a["incident_id"],
-         "ack_by": ack_by, "ack_at": a["ack_at"], "clear_at": a.get("clear_at")}
-    return o | {"rev": rev_of(o)}
 
 
 # -- the request -----------------------------------------------------------------------------------------------------
@@ -88,10 +66,10 @@ def _via(headers) -> tuple[str, str]:
 
 
 def _message(obj) -> str:
-    """The console's error text for the app: never an e-mail address (a deactivated account's "ask <admins>"), at most
-    300 characters (the console's texts are short; this bounds one that is not)."""
+    """The console's error text for the app, through reads' scrub (never an operator's e-mail address: a deactivated
+    account's "ask <admins>"), at most 300 characters (the console's texts are short; this bounds one that is not)."""
     e = obj.get("error") if isinstance(obj, dict) else None
-    return EMAIL.sub("an admin", e)[:300] if isinstance(e, str) else "refused"
+    return scrub(e)[:300] if isinstance(e, str) else "refused"
 
 
 class Req:
@@ -221,6 +199,17 @@ def _once(req: Req, work):
     return out
 
 
+def _id(v):
+    """An incident id from a body: reads serves ids as strings, a number is accepted too. None: none given; False:
+    bad."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        return False
+    s = str(v).strip() or "0"
+    return int(s) if s.isdigit() and len(s) <= 9 else False
+
+
 def _int(s: str) -> int | None:
     return int(s) if s.isdigit() and len(s) <= 9 else None
 
@@ -267,12 +256,12 @@ def unit_status(ctx: Ctx):
 
     def work():
         u = req.act.unit_by_id(req.target["id"])
-        current = unit_obj(u)
-        status, iid = req.body.get("status"), req.body.get("incident_id")
+        current = req.act.unit_object(u["id"])           # the object GET /units serves: its rev is what If-Match checks
+        status, iid = req.body.get("status"), _id(req.body.get("incident_id"))
         if not isinstance(status, str) or not status.strip():
             return fail(400, "invalid", "status: required")
-        if iid is not None and (isinstance(iid, bool) or not isinstance(iid, int) or iid < 0):
-            return fail(400, "invalid", "incident_id: a number (0 = no call)")
+        if iid is False:
+            return fail(400, "invalid", "incident_id: an incident id (0 = no call)")
         refusal = _if_match_conflict(req, ctx, current) or _check_incident(req, iid, current)
         if refusal:
             return refusal
@@ -286,7 +275,7 @@ def unit_status(ctx: Ctx):
             return refusal
         after = req.act.unit_by_id(u["id"])
         req.say_late(after["incident_id"] or u["incident_id"], f"{u['name']} set to {status.strip()}")
-        return 200, {"unit": unit_obj(after)} | req.extra(), {}
+        return 200, {"unit": req.act.unit_object(u["id"])} | req.extra(), {}
     return _once(req, work)
 
 
@@ -303,8 +292,8 @@ def alarm_ack(ctx: Ctx):
         return req.refusal
 
     def already(a: dict):
-        mine = alarm_obj(a, req.act.ack_name(a))
-        return fail(409, "conflict", f"not applied: already acknowledged by {mine['ack_by'] or 'someone'}",
+        mine = req.act.alarm_object(aid)             # the object GET /alarms serves (the name only, scrubbed)
+        return fail(409, "conflict", scrub(f"not applied: already acknowledged by {mine['ack_by'] or 'someone'}"),
                     reason="already_acknowledged", current=mine)
 
     def work():
@@ -317,7 +306,7 @@ def alarm_ack(ctx: Ctx):
             return already(a) if a["ack_at"] is not None else refusal     # another dispatcher got there first
         a = req.act.alarm(aid)
         req.say_late(a["incident_id"], f"Alarm {aid} acknowledged")
-        return 200, {"alarm": alarm_obj(a, req.act.ack_name(a))} | req.extra(), {}
+        return 200, {"alarm": req.act.alarm_object(aid)} | req.extra(), {}
     return _once(req, work)
 
 
@@ -337,7 +326,7 @@ def incident_note(ctx: Ctx):
         inc = req.act.incident(iid)
         if not req.act.is_open(inc):                    # a note on a call that closed while the app was away
             return fail(409, "conflict", f"not applied: the incident is {inc['status']}", reason="incident_closed",
-                        current=incident_obj(inc))
+                        current=req.act.incident_object(iid))
         text = req.body.get("text")
         if not isinstance(text, str):
             return fail(400, "invalid", "text: required")
@@ -349,7 +338,7 @@ def incident_note(ctx: Ctx):
         if refusal:
             return refusal
         # 201 (a created entry), where the console answers 200
-        return 201, {"incident_id": iid, "units": out.get("units", []), "places": out.get("places", [])} \
+        return 201, {"incident_id": str(iid), "units": out.get("units", []), "places": out.get("places", [])} \
             | req.extra(), {}
     return _once(req, work)
 

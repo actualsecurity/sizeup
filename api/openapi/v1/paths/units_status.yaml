@@ -16,7 +16,7 @@ post:
     content:
       application/json:
         schema: {$ref: ../schemas/UnitStatusRequest.yaml}
-        example: {status: OL, incident_id: 4812, client_at: 1767225590.2}
+        example: {status: OL, incident_id: "1042", client_at: 1767225590.2}
   responses:
     "200":
       description: Applied (or the first answer, replayed).
@@ -33,12 +33,12 @@ post:
                 required: [unit]
                 properties: {unit: {$ref: ../schemas/Unit.yaml}}
           example:
-            unit: {code: E60, status: OL, status_at: 1767225600.5, incident_id: 4812, incident_number: 26-000014, board: fire, rev: 9f2c41d7a03be655}
+            unit: {$ref: ../examples/Unit.yaml}
             client_at: 1767225590.2
             client_at_clamped: false
             received_at: 1767225600.5
     "409":
-      description: Not applied (incident_closed, unit_changed, in_progress). `current` is the unit as it is now.
+      description: Not applied (incident_closed, unit_changed, in_progress). `current` is the unit as GET /units serves it.
       headers:
         Retry-After:
           description: Seconds to wait (only for in_progress).

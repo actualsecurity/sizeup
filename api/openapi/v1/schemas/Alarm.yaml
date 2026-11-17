@@ -1,12 +1,30 @@
 type: object
-required: [id, level, created_at, incident_id, ack_by, ack_at, clear_at, rev]
-description: An emergency alarm or notice, as an acknowledge answers with it, and as a 409 shows it. `rev` as for Unit.
+description: >
+  An emergency alarm or notice (an emergency button, a mayday heard, an aircraft emergency). `who` is the talker as the
+  console labels it; no separate radio ID is sent.
+required: [id, state, level, at, created_at, what, who, channel, text, emergency, drill, source, subject, incident_id,
+  incident_number, has_clip, quiet, ack_by, ack_at, clear_by, clear_at, rev]
 properties:
-  id: {type: integer}
-  level: {type: string, description: "alarm or notice (an unknown value is other)."}
-  created_at: {type: number}
-  incident_id: {type: [integer, "null"]}
-  ack_by: {type: string, description: "The name of whoever acknowledged it, empty until then."}
+  id: {type: string}
+  state: {type: string, description: "open (not acknowledged) | notice | recent (just acknowledged)."}
+  level: {type: string, description: "alarm | notice."}
+  at: {type: [number, "null"]}
+  created_at: {type: [number, "null"]}
+  what: {type: string}
+  who: {type: string}
+  channel: {type: string}
+  text: {type: string}
+  emergency: {type: boolean}
+  drill: {type: boolean}
+  source: {type: string}
+  subject: {type: string}
+  incident_id: {type: [string, "null"]}
+  incident_number: {type: [string, "null"]}
+  has_clip: {type: boolean}
+  quiet: {type: boolean, description: "Someone else's emergency on a service the department does not list: no toast."}
+  ack_by: {type: string}
   ack_at: {type: [number, "null"]}
+  clear_by: {type: string}
   clear_at: {type: [number, "null"]}
-  rev: {type: string}
+  rev:
+    $ref: ./Rev.yaml

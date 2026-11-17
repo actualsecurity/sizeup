@@ -1,11 +1,22 @@
 type: object
-required: [code, status, status_at, incident_id, incident_number, board, rev]
-description: A unit as a write answers with it, and as a 409 / 412 shows it. `rev` is the content hash (sha256 of the object without `rev`, as sorted compact JSON, first 16 hex digits).
+description: A unit on the board.
+required: [id, name, kind, title, station, department, board, response, status, status_at, out_of_service, spare,
+  mutual_aid, incident_ids, incident_number, rev]
 properties:
-  code: {type: string, description: "The unit's code, as the console shows it."}
-  status: {type: string, description: "The unit's status code (Settings > Unit statuses)."}
-  status_at: {type: number, description: "Unix seconds the status was set."}
-  incident_id: {type: [integer, "null"], description: "The call the unit is on, null for none."}
+  id: {type: string}
+  name: {type: string, description: "The board code, E60."}
+  kind: {type: string, description: "engine | ladder | rescue | chief ...; clients must tolerate a value they do not know."}
+  title: {type: string}
+  station: {type: string}
+  department: {type: string}
+  board: {type: string, description: "main | other | \"\" (no longer on a board)."}
+  response: {type: string, description: "fire | mutual_aid | agency."}
+  status: {type: string, description: "The status code now."}
+  status_at: {type: [number, "null"]}
+  out_of_service: {type: string, description: "Why, while out of service."}
+  spare: {type: boolean}
+  mutual_aid: {type: boolean}
+  incident_ids: {type: array, items: {type: string}, description: "The open calls it is on."}
   incident_number: {type: [string, "null"]}
-  board: {type: string, description: "The board the unit is on, empty for none."}
-  rev: {type: string}
+  rev:
+    $ref: ./Rev.yaml

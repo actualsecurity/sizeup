@@ -29,10 +29,10 @@ post:
               - type: object
                 required: [incident_id, units, places]
                 properties:
-                  incident_id: {type: integer}
+                  incident_id: {type: string}
                   units: {type: array, items: {type: string}}
                   places: {type: array, items: {type: object}}
-          example: {incident_id: 4812, units: [E60], places: [], client_at: 1767225590.2, client_at_clamped: false, received_at: 1767225600.5}
+          example: {incident_id: "1042", units: [E60], places: [], client_at: 1767225590.2, client_at_clamped: false, received_at: 1767225600.5}
     "409":
       description: Not applied (incident_closed, in_progress). `current` is the incident as it is now.
       headers:

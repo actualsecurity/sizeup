@@ -1,0 +1,33 @@
+type: object
+description: >
+  An incident as a list shows it. Left out on purpose: the caller's name, address and phone, radio IDs, the console's
+  draw hints. Additive within v1 (clients ignore fields they do not know).
+required: [id, number, status, type, subtype, emergency, received_via, priority, address, cross_street, place, lat, lon,
+  remarks, disposition, source, created_at, accepted_at, closed_at, until_at, units, rev]
+properties:
+  id: {type: string}
+  number: {type: [string, "null"], description: "The incident number (26-000123); null while queued."}
+  status: {type: string, description: "queued | pending | active | closed | dismissed; clients must tolerate a value they do not know."}
+  type: {type: string, description: "The event type code (STRU)."}
+  subtype: {type: string}
+  emergency: {type: boolean}
+  received_via: {type: string}
+  priority: {type: [integer, "null"]}
+  address: {type: string}
+  cross_street: {type: string}
+  place: {type: string}
+  lat: {type: [number, "null"]}
+  lon: {type: [number, "null"]}
+  remarks: {type: string}
+  disposition: {type: string}
+  source: {type: string}
+  created_at: {type: number}
+  accepted_at: {type: [number, "null"]}
+  closed_at: {type: [number, "null"]}
+  until_at: {type: [number, "null"]}
+  units:
+    type: array
+    items:
+      $ref: ./Assignment.yaml
+  rev:
+    $ref: ./Rev.yaml

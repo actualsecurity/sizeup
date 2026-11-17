@@ -12,13 +12,14 @@ properties:
           unauthorized (401), not_found (404), method_not_allowed (405, with Allow), uri_too_long (414),
           station (409: this host is a station, not the hub), updating (503 during a deploy handover, with
           Retry-After), internal (500: the handler failed), busy (503: v1's share of concurrent requests is used
-          up, with Retry-After), rate_limited (429, with Retry-After). Writes (#562): invalid (400),
-          forbidden (403: the console's role), no_such_unit / no_such_incident / no_such_alarm (404),
-          idempotency_key_required and invalid_idempotency_key (400), idempotency_key_reused (422), conflict (409,
-          with `reason`), in_progress (409: the first request with this Idempotency-Key still runs, with
-          Retry-After), precondition_failed (412), precondition_required (428), request_timeout (408: the body did
-          not arrive), length_required (411: no Content-Length, or a chunked body), bad_body (400: shorter than its
-          Content-Length), body_too_large (413), unavailable (503: no CAD here). Planned with sign-in (#558):
+          up, with Retry-After), rate_limited (429, with Retry-After), bad_cursor and bad_request (400: a
+          bad `after`, `limit` or query), unavailable (503: the CAD could not answer, with Retry-After; or no CAD
+          here). Writes (#562): invalid (400), forbidden (403: the console's role), no_such_unit / no_such_incident /
+          no_such_alarm (404), idempotency_key_required and invalid_idempotency_key (400), idempotency_key_reused
+          (422), conflict (409, with `reason`), in_progress (409: the first request with this Idempotency-Key
+          still runs, with Retry-After), precondition_failed (412), precondition_required (428), request_timeout
+          (408: the body did not arrive), length_required (411: no Content-Length, or a chunked body), bad_body
+          (400: shorter than its Content-Length), body_too_large (413). Planned with sign-in (#558):
           token_expired, device_revoked, user_inactive, invalid_grant, upgrade_required.
       message:
         type: string

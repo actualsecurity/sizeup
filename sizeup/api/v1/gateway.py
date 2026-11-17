@@ -12,11 +12,15 @@ import threading
 from datetime import datetime
 
 from sizeup.cad.activity import client_tag
+from sizeup.cad.api import CadApi
 from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.cloud.access import Identity
 
 from .idempotency import Idempotency
 from .principal import person
+from .serialize import alarm as alarm_shape
+from .serialize import incident_summary, with_rev
+from .serialize import unit as unit_shape
 
 
 class Acting:
@@ -58,9 +62,31 @@ class Acting:
         except CadError:
             return None
 
-    def ack_name(self, alarm: dict) -> str:
-        """Who acknowledged it, without the e-mail address (the alarms' own helper)."""
-        return self._cad.alarms.ack_name(alarm)
+    # -- the objects reads serves (serialize.py), built fresh: a write's answer and a 409 / 412 `current` ----------
+    # The same functions reads.py builds its lists with, so the object is byte-identical to what GET /units, /alarms and
+    # /incidents then serves for it (once reads' cache, up to 1 s old, has rebuilt), and its `rev` is the one If-Match
+    # checks.
+
+    def unit_object(self, uid: int) -> dict | None:
+        u = self.unit_by_id(uid)
+        return None if u is None else with_rev(unit_shape(u))
+
+    def incident_object(self, iid: int) -> dict | None:
+        """The incident as the lists show it (the summary), not the detail."""
+        try:
+            return with_rev(incident_summary(self._cad.store.full(iid)))
+        except CadError:
+            return None
+
+    def alarm_object(self, aid: int) -> dict | None:
+        """The alarm in the state the lists show it (open, notice or recent); one that has aged out of those: recent."""
+        st = self._cad.alarms_state() or {}
+        for key, name in (("open", "open"), ("notices", "notice"), ("recent", "recent")):
+            for a in st.get(key) or []:
+                if a["id"] == aid:
+                    return with_rev(alarm_shape(a, name))
+        a = self.alarm(aid)
+        return None if a is None else with_rev(alarm_shape(a, "recent"))
 
     def incident(self, iid: int | None) -> dict | None:
         try:
@@ -93,8 +119,10 @@ class Acting:
 
 
 class Gateway:
-    def __init__(self, api):
-        self._api = api
+    def __init__(self, cad):
+        """cad: the hub's Cad service. The console's CadApi (stateless: it only holds the Cad) is built here, so its
+        permit / post (the console's role check, validation and activity row) are the ones a write goes through."""
+        self._api = CadApi(cad)
         self._idem: Idempotency | None = None
         self._lock = threading.Lock()
 
