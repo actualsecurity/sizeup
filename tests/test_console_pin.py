@@ -1,0 +1,87 @@
+"""The console is unchanged (#619, safeguard 2): the route tables of /api/cad, /api/station and /healthz and a sample
+of their responses (status, body, headers) are pinned in tests/fixtures/console_pin.json, written from main before
+any mobile change. A later mobile change that alters one of them fails here; an intended console change re-pins:
+
+    SIZEUP_PIN_WRITE=1 .venv/bin/python -m pytest tests/test_console_pin.py
+
+Routes are the string literals in the three files that serve them (the server's if-chain, the CAD's and the station
+hub's tables), so a route added, removed or renamed shows up too. The responses come from a real hub run in this
+process with an empty database (nothing here is a real incident), the clock-dependent parts normalised."""
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from tests.test_cloud import HubRun, hub_cfg
+
+ROOT = Path(__file__).resolve().parent.parent
+PIN = ROOT / "tests" / "fixtures" / "console_pin.json"
+SERVING = ("sizeup/web/server.py", "sizeup/cad/api.py", "sizeup/cloud/hub.py")
+VOLATILE_HEADERS = {"date", "server-timing", "x-request-id"}
+
+SAMPLE = [("GET", "/healthz"), ("GET", "/api/cad/whoami"), ("GET", "/api/cad/nope"), ("POST", "/api/cad/nope"),
+          ("GET", "/api/station/status"), ("GET", "/api/station/nope"),
+          ("POST", "/api/station/events"), ("GET", "/api/cad/search?q=")]
+
+
+def route_table() -> list[str]:
+    out = set()
+    for f in SERVING:
+        for node in ast.walk(ast.parse((ROOT / f).read_text())):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str) and not re.search(r"\s", node.value)
+                    and (node.value.startswith(("/api/cad", "/api/station")) or node.value == "/healthz")):
+                out.add(f"{f}: {node.value}")
+    return sorted(out)
+
+
+def normal(b: bytes) -> str:
+    s = b.decode("utf-8", "replace")
+    s = re.sub(r'("(?:at|ts|time|server_time|now|started|built|uptime_s|since)":\s*)[0-9.eE+-]+', r"\1T", s)
+    return re.sub(r'"(?:build|sha|git)":\s*"[^"]*"', '"build":"B"', s)
+
+
+def fetch(url, method, path):
+    req = urllib.request.Request(url + path, method=method, data=b"{}" if method == "POST" else None,
+                                 headers={"Content-Type": "application/json"} if method == "POST" else {})
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        r = e
+    h = {k.lower(): v for k, v in r.headers.items() if k.lower() not in VOLATILE_HEADERS}
+    h["server"] = re.sub(r"[0-9][0-9.]*", "N", h.get("server", ""))      # the Python version differs by machine
+    return {"status": r.status if hasattr(r, "status") else r.code, "headers": dict(sorted(h.items())),
+            "body": normal(r.read())}
+
+
+@pytest.fixture(scope="module")
+def hub(tmp_path_factory):
+    h = HubRun(hub_cfg(tmp_path_factory.mktemp("pin")))
+    yield h
+    h.close()
+
+
+def sample(hub) -> dict:
+    return {f"{m} {p}": fetch(hub.url, m, p) for m, p in SAMPLE}
+
+
+def test_the_consoles_routes_and_responses_are_pinned(hub):
+    now = {"routes": route_table(), "responses": sample(hub)}
+    if os.environ.get("SIZEUP_PIN_WRITE"):
+        PIN.write_text(json.dumps(now, indent=1, sort_keys=True) + "\n")
+    pinned = json.loads(PIN.read_text())
+    assert now["routes"] == pinned["routes"]
+    for k, v in pinned["responses"].items():
+        assert now["responses"][k] == v, k
+
+
+def test_the_pin_has_teeth():
+    pinned = json.loads(PIN.read_text())
+    assert len(pinned["routes"]) > 100 and len(pinned["responses"]) == len(SAMPLE)
+    assert any(r.endswith(": /healthz") for r in pinned["routes"])
