@@ -38,7 +38,9 @@
                        alarm's All clear: the emergency window here, App._call's keep decision) here
 
 Clips go as 8 kHz WAV: they are already band-limited to 300-3300 Hz (stt.radio_voice), so
-halving the rate halves the upload and changes nothing you can hear.
+halving the rate halves the upload and changes nothing you can hear. A transmission's or a page's event also carries
+its speech-to-text input ("stt": the exact audio the station's whisper transcribes, FLAC at 16 kHz,
+sizeup/cloud/sttinput.py), so the hub's engines transcribe what whisper does; the outbox drops it before any clip.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.metrics import MetricsLink
+from sizeup.cloud import sttinput
 from sizeup.cloud.outbox import Outbox
 from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
@@ -162,6 +165,8 @@ class StationLink:
         self.logs = LogShipper(cfg, self._client, log, app=app)
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
         self.metrics_link = MetricsLink(app, cfg, self._client, log)
+        # each transmission's / page's speech-to-text input, from App._stt until its event takes it (sttinput.py)
+        self.stt_stash = sttinput.Stash()
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -186,11 +191,28 @@ class StationLink:
         # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
         # number, so it is not sent there (the station's own page still has it); its audio waits in its own budget.
         context = kind == "activity" or (kind in ("traffic", "alarm") and bool(data.get("system")))
+        stt = self.stt_stash.take(clip) if clip and kind in sttinput.STT_KINDS else None
         if context and "p25_systems" not in self.hub_caps:
             return
         audio = clip_8k(self.app.clip(clip)) if clip else None
-        self.outbox.add(kind, data, audio, context=context)
+        self.outbox.add(kind, data, audio, context=context, stt=stt)
         self._wake.set()
+
+    def stt_input(self, item, audio) -> None:
+        """App: this transmission / page goes to speech-to-text now with `audio` (App._stt's): its exact whisper input
+        is kept for the event that carries its clip (once per id: a page's, made before its event, isn't made again)."""
+        if self.stt_stash.has(item.id):
+            return
+        try:
+            got = sttinput.blob(item, audio)
+        except Exception as e:  # noqa: BLE001 - never in the radio path's way: the hub falls back to the clip
+            self.stt_stash.failed += 1
+            if getattr(self, "_stt_said", "") != type(e).__name__:
+                self._stt_said = type(e).__name__
+                self.log(f"hub link: speech-to-text input not made: {type(e).__name__}: {e}")
+            return
+        if got is not None:
+            self.stt_stash.put(item.id, got)
 
     def live_changed(self) -> None:
         self._live_wake.set()
@@ -270,6 +292,8 @@ class StationLink:
                       "it goes up when the hub is back")
         if self.outbox.dropped_audio:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
+        if self.outbox.dropped_stt:
+            detail += f" · {self.outbox.dropped_stt} STT input(s) dropped (the hub used the clip)"
         v = self.updates.status()
         detail += f" · version: {v['text']}"
         ad = self.adapter(v)
@@ -327,6 +351,7 @@ class StationLink:
                 continue
             body = {"epoch": self.outbox.epoch, "station": self.cfg.station_id,
                     "events": [dict(r, audio=base64.b64encode(r["audio"]).decode() if r["audio"] else None)
+                               | ({"stt": sttinput.to_wire(*r["stt"])} if r.get("stt") else {})
                                for r in rows]}
             try:
                 r = client.request("POST", "/api/station/events", body, timeout=60.0)
@@ -352,7 +377,8 @@ class StationLink:
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
-               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
+               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio,
+                          "dropped_stt": self.outbox.dropped_stt, "stt": self.stt_stash.stats()},
                "version": self.version()}
         try:
             out["logship"] = self.logs.stats()

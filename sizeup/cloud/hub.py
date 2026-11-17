@@ -2,11 +2,13 @@
 trunk-recorder, no whisper, no voice server: nothing here opens an SDR or starts a program, so it
 runs on a bare Linux box with Python + numpy.
 
-    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?}]} -> {acked}
+    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?, stt?}]} -> {acked}
                                   applied in order through the same App code as on the station
                                   (_page_heard, _transcribed, _retext, the radio registry); each
                                   event once: the hub remembers the last seq per outbox epoch
-                                  (hub.sqlite), and pages / transmissions are keyed by their ids
+                                  (hub.sqlite), and pages / transmissions are keyed by their ids.
+                                  stt: a page's / transmission's speech-to-text input (FLAC), stored as
+                                  clip "<id>.src" (sizeup/cloud/sttinput.py; read_stt_audio reads it)
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
@@ -100,6 +102,8 @@ from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALL
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
+from sizeup.audiostore import STT_SRC
+from sizeup.cloud import sttinput
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -711,7 +715,10 @@ class Hub:
                 refused = fence_mod.refused()
                 try:
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
-                    self.app.apply(kind, ev.get("data") or {}, audio)
+                    if ev.get("stt") and kind in sttinput.STT_KINDS:     # its speech-to-text input (sttinput.py)
+                        self.app.apply(kind, ev.get("data") or {}, audio, stt=ev["stt"])
+                    else:
+                        self.app.apply(kind, ev.get("data") or {}, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
                     if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
@@ -932,12 +939,16 @@ class HubApp(App):
 
     # -- the station's events ----------------------------------------------------------------------
 
-    def apply(self, kind: str, d: dict, audio: bytes | None) -> None:
+    def apply(self, kind: str, d: dict, audio: bytes | None, stt: dict | None = None) -> None:
+        """stt: the event's speech-to-text input (sizeup/cloud/sttinput.py), stored beside the clip before the event
+        is applied, so whatever transcribes it from here on (read_stt_audio) finds it."""
         if kind in ("traffic", "alarm") and d.get("source") in RENAMED and d["source"] not in self._kind \
                 and RENAMED[d["source"]] in self._kind:
             # #275: a station whose config isn't renamed yet (its update is deferred once) sends the old name: its
             # transmissions are the renamed channel's here (airband, the pre-alerts, AWS); the id stays the station's
             d = {**d, "source": RENAMED[d["source"]]}
+        if stt is not None and kind in sttinput.STT_KINDS:
+            self._put_stt_input(kind, d, stt)
         if kind == "page":
             self._apply_page(d, audio)
         elif kind == "page_text":
@@ -1444,12 +1455,41 @@ class HubApp(App):
     # -- what App does with local radios -----------------------------------------------------------------
 
     def clip(self, cid: str) -> bytes | None:
-        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+        if not CLIP_ID.fullmatch(cid) or ".." in cid or cid.endswith(STT_SRC):   # (an STT input is no clip to play)
             return None
         return self.audio.get(cid)
 
     def has_clip(self, cid: str) -> bool:
-        return self.audio.has(cid)
+        return not cid.endswith(STT_SRC) and self.audio.has(cid)
+
+    # -- the speech-to-text input (sizeup/cloud/sttinput.py) -------------------------------------------------------
+
+    def _put_stt_input(self, kind: str, d: dict, stt: dict) -> None:
+        """A transmission's or page's STT input, as the station sent it, beside its clip (the same channel, talkgroup
+        and time: the same retention). One that can't be read is logged and skipped: the event itself still applies,
+        and its STT consumers get the listening clip."""
+        try:
+            cid = self._id(d)
+            data, meta = sttinput.from_wire(stt)
+        except ValueError as e:
+            self.hub.log(f"hub: speech-to-text input not stored: {str(e)[:120]}")
+            return
+        end = d.get("end")
+        at = float(end) if isinstance(end, (int, float)) and not isinstance(end, bool) else time.time()
+        where = _where(d) if kind == "traffic" else {"channel": str(d.get("label") or "")}
+        sttinput.store(self.audio, cid, data, meta, at, **where)
+
+    def read_stt_audio(self, cid: str, voice_offset_s: float | None = None) -> sttinput.SttAudio | None:
+        """The audio a speech-to-text engine on the hub should take for this transmission or page (Amazon Transcribe,
+        a GPU worker): the station's own whisper input ("stt-src") when it came, else the listening clip ("listening-8k",
+        a page's from its voice on), else None. voice_offset_s: a page's (None: looked up among the pages here)."""
+        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+            return None
+        if voice_offset_s is None:
+            with self._lock:
+                page = next((p for p in self.pages if p.id == cid), None)
+            voice_offset_s = float(page.voice_offset_s) if page is not None else 0.0
+        return sttinput.read(self.audio, cid, voice_offset_s, log=self.hub.log)
 
     def radio_status(self) -> list[dict]:
         return self.hub.radio_rows()

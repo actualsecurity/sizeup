@@ -631,7 +631,8 @@ class StationHealth:
         oldest = ob.get("oldest") if isinstance(ob.get("oldest"), (int, float)) else None
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,
                          "age_s": round(snow - oldest, 1) if oldest and ob.get("pending") else None,
-                         "dropped_audio": int(ob.get("dropped_audio") or 0)}
+                         "dropped_audio": int(ob.get("dropped_audio") or 0),
+                         "dropped_stt": int(ob.get("dropped_stt") or 0)}
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
