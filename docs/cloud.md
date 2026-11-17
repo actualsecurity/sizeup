@@ -103,6 +103,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [Source keys (#415)](#source-keys-415)
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
+  - [The rail's folders (#607)](#the-rails-folders-607)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -115,6 +116,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 - [Radio pre-alerts (intel)](#radio-pre-alerts-intel)
 - [Pre-plan points and site documents (#456, #459)](#pre-plan-points-and-site-documents-456-459)
 - [Station logs (CloudWatch)](#station-logs-cloudwatch)
+- [Station metrics: signal over time](#station-metrics-signal-over-time)
 - [Where the hub's CPU goes (#425)](#where-the-hubs-cpu-goes-425)
 - [The hub's storage](#the-hubs-storage)
   - [How often the replica is written](#how-often-the-replica-is-written)
@@ -1176,7 +1178,7 @@ request, no retry), the 60 Control header says "Tapout: not configured" and Heal
 | topic | Tapout sends | sizeup does |
 |---|---|---|
 | `ring_topic` | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
-| `status_topic` | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+| `status_topic` | `Tapout heartbeat` every 6 h (`heartbeat_every_min`; it was hourly) (`... seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago" (any status message proves it is alive: "ok, heard 3 min ago"); a device fault (priority 4+, e.g. "ALERT DELIVERY FAILED, 3 min ago"; not `OTA REJECTED` for an image no newer than the running one) or `Tapout restarted UNEXPECTEDLY` ("restarted unexpectedly 2 min ago") in warning until the next heartbeat or restart, its recovery (`Detector line recovered`, `... armed`) or the stale window (a heartbeat doesn't prove the detector is armed: the tooltip says so); header order: no heartbeat, ring feed offline, device fault; nothing for `heartbeat_stale_min` (left out: the period + 10 % + 15 min, 411; set: at least 1.05 × the period, else logged and derived) "no heartbeat for 7 h" in warning; never heard: "no heartbeat yet" |
 
 **Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to a hub it doesn't
 subscribe (logged): the hub does on its own, so it works whether or not the station is connected, and nobody gets two
@@ -1187,7 +1189,10 @@ once (`App.prealert_sync`; a restart resumes after the last message).
 `open`, `keepalive` about every 45 s, `message`). A dropped stream reconnects with backoff (1 s
 doubling to 60 s; a `429` waits at least 2 min, or `Retry-After`, up to 10) and resumes with
 `since=<last message id>`. The first connection asks `since=10m` for rings (a ring just before a
-restart isn't lost, old ones aren't news) and `since=90m` for the status topic (the last heartbeat).
+restart isn't lost, old ones aren't news) and `since=540m` for the status topic: a heartbeat period and a half, at
+least `heartbeat_stale_min`, so a fresh start finds the last heartbeat ("ok, heartbeat 5 h ago", not "no heartbeat
+yet" for up to 6 h). ntfy.sh keeps messages about 12 h; a longer look-back just gets what it still has. Tapout's last
+heartbeat is also kept in the CAD database, so a restart or deploy shows it at once.
 Rings are deduplicated by ntfy id in the database; one received more than `expire_min` after it rang
 is recorded as expired ("received late"), never shown as live.
 
@@ -1218,7 +1223,8 @@ server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local tes
 ring_topic = ""                  # set in Settings > System > Push notifications (or env)
 status_topic = ""
 expire_min = 5
-heartbeat_stale_min = 90
+heartbeat_every_min = 360        # Tapout's heartbeat period (6 h)
+# heartbeat_stale_min = 411      # left out: the period + 10 % + 15 min
 ```
 
 ## Incident sources: external CAD feeds, paging as the backup (#297)
@@ -2482,18 +2488,25 @@ incident by a rule, never an incident source.
 | System | Metro-25 / MTA MRRS, P25 Phase II (TDMA), 700 MHz, system IDs 26D and 26E, WACN 91FE8 |
 | Site | Zone 3 Simulcast (southern Westchester), RFSS 81, site 81, NAC 051 |
 | Frequencies | 769.90625, 770.18125, 770.46875, 770.71875, 772.48125, 773.03125, 773.68125 MHz. Which are control channels is not confirmed (769.90625 was the last one reported): trunk-recorder tries the list |
-| Span | ~3.8 MHz: two 2.4 MHz RTL-SDRs (jobs `MRRS 770` and `MRRS 773`), or one wider SDR |
+| Span | ~3.8 MHz: two 2.4 MHz RTL-SDRs (jobs `MRRS 770` and `MRRS 773`, centers 770.521875 and 772.721875 MHz), or one wider SDR |
+| Voice heard | 771.13, 771.23, ~771.78, 772.03, 772.48, 772.97, 773.22 MHz (measured; not listed). Covered too, see below |
 
 All of it is data, in `deploy/trunk-recorder/systems/mrrs/`: `config.json` (trunk-recorder's config plus a `"sizeup"`
 block with the label, one job name per source and the site facts) and `talkgroups.csv`. Another system is another
 directory. Adding a talkgroup is one line.
 
 **Hardware**: two more RTL-SDRs and a 700 MHz antenna. The site is simulcast, so `modulation: qpsk` (CQPSK/LSM) as on
-the county system, and Phase II (TDMA). Port Chester is a known weak spot for this site (the nearest subsite is in
-Harrison, beside the railroad): a directional 700 MHz antenna aimed at the Harrison subsite is the fix being
-bought, and an LNA near the
-700 MHz cell bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first
-(#410).
+the county system, and Phase II (TDMA). Reception of this site is marginal at the station: a 700/800 MHz antenna on
+its own feed (no shared UHF splitting) put the control channel about +20 dB over the floor at gain 40 and decoded
+reliably; the shared antenna through splitters gave about +12 dB and did not decode. An LNA near the 700 MHz cell
+bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first (#410).
+
+**Tuning**: trunk-recorder records a channel on the first source (in `config.json` order) whose window takes it in,
+center ± (rate/2 − 50 kHz) at 2.4 MS/s. The two centers are chosen so every listed and heard frequency lands on a
+source at least 150 kHz in from that dongle's edge (the RTL-SDR roll-off) and over 25 kHz from its center (the DC
+spike); the one 100 kHz band where source 0 hands over (771.57–771.67 MHz) sits in the gap between 771.23 and 771.78.
+`tests/test_p25_systems.py` checks it. The job names keep their old "770" / "773" (claims and assignments on the
+station carry them).
 
 ### How it runs
 
@@ -2616,6 +2629,33 @@ An emergency button on someone else's talkgroup is recorded, kept, alarmed and p
 | Never quiet | ours (our fire channels, our rigs, scene safety); a full alarm's window; a window one of our rigs keyed; a row or source whose service isn't known |
 
 Presentation only. Tests: `tests/test_radio_emergency.py`.
+
+### The rail's folders (#607)
+
+> "the radio rail grouping, id like those to be editable by the user, so we can group them in specific ways? or edit
+> the names of folders/etc? we can leave the initial, but the rest should be customizable. and order etc. and also the
+> folders should be able to tab to show all or minimize"
+
+`sizeup/cad/radiofolders.py`, `static/radio-nav.js`.
+
+The rail's channel tree is headings and folders. **Default (the automatic grouping):** a heading per system (County,
+another P25 system such as Metro, Analog, Airband), a folder per group under it (a talkgroup's `Tag` in its
+trunk-recorder `talkgroups.csv`; `Analog` and `Airband` for the FM and airband channels), the channels in the hub's
+order (ours first, then by name). A heading with one folder of its own name (Analog, Airband) is shown once.
+
+| | |
+|---|---|
+| **Edit** (on the rail, admins) | rename, add (**+ Folder**), delete an empty folder, the **heading** over a folder (folders in a row with the same heading share it; blank: none), drag a folder or a channel by its ⠿ (desktop), or ▲ ▼ and **Move to** (touch, keyboard). **Reset**: the automatic grouping. Nothing changes until **Save**; **Cancel** drops the draft |
+| Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written |
+| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept |
+| Stored | `{folders: [{id, name, section, items: [source keys]}], names?: {source key: name}}`. `id`: `d:<system>:<group>` (a default folder, renamed or moved) or `u:<random>` (made by an admin) |
+| A channel in no folder | a talkgroup heard for the first time, one never placed: its default folder (`d:<system>:<group>`) if listed, else that folder made again after the last folder under its heading. **Nothing ever drops off the rail** |
+| A key with no source now | kept, not shown (a talkgroup not heard lately comes back where it was); one that isn't a source key, or a channel listed twice: dropped (the first folder wins), not an error |
+| Who sees it | everyone with the rail on. The folders come with the tree (`GET /api/cad/comms/sources`: `folders`, null for the default); a reader who may not see another system's traffic ([Who sees it](#who-sees-it)) gets none of its keys, and no folder that held only those. The state push carries their rev (`radio_folders`): every open rail asks for the tree again when an admin saves |
+| **Fold** (every viewer) | a folder's head shows all / minimizes it; ⊟ / ⊞ minimizes / shows them all. Folded: its name, how many channels, the new calls, an emergency (as its channels show one) and a live dot (not for a muted channel). The channel on screen stays under its folded folder. Remembered per browser (`localStorage` `sizeup.cad.radio.nav`, `folds`), never on the hub |
+
+Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
+folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 
@@ -3257,6 +3297,26 @@ The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the
 | Reading | Settings > Station > Logs (admins, #493): `GET /api/cad/logs?source=station\|hub\|all&unit=&level=&q=&start=&end=&limit=`, a bounded Logs Insights query, one at a time |
 | Settings | Settings > Station > Logs (section `station_logs`, audited as System): on / off, the least level, units, retention (7 days to a year), and whether the adapter's own lines are shipped (off by default) |
 | Off | `SIZEUP_LOG_SHIP=off` in the station's `station.env`, or the Settings switch |
+
+## Station metrics: signal over time
+
+So the squelch and the gain of each channel can be tuned from weeks of numbers instead of one log line (a rewire that
+raises a channel's noise floor, a splitter that costs a paging channel its quieting, a P25 system decoding fewer
+control messages a second than it should). The station measures; the hub keeps and serves. The station's log lines
+stay exactly as they were (they still go to CloudWatch); this adds numbers beside them.
+
+| | |
+|---|---|
+| Station | `sizeup/cloud/metrics.py`. A thread looks at each running channel's squelch once a second (attributes the receivers keep anyway: never a dongle) and at what changed every 5 s; each transmission's numbers are handed over as its squelch closes it (`App._segment`: a dict queued, no I/O) |
+| Records | `floor` a channel a minute: idle quieting p50 / p90 / max, the FM hiss (relative dB) or the AM floor (dBFS), seconds open, noise opens, and its squelch, dongle, gain (sent when they change and every 15 min). `tx` each transmission: kind (voice, page, burst, noise), length, quieting / carrier, at open and close, the hiss or floor, carrier dBFS and voice SNR (airband), why it ended. `cc` each P25 system a minute: decode rate (avg, low, high), retunes, grants on uncovered frequencies. `ev` what explains a shift: start, sdr, squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped |
+| Path | `POST /api/station/metrics` (gzipped, every minute, at most 2,000 records, at most 4 MB unpacked), on its own thread and connection: never the outbox, so pages and transmissions never queue behind it. Never counted as the station being seen (a second station's, or a wedged primary's, metrics don't keep "connected" up). A malformed batch is a 400, which the station drops; a hub that isn't the leader answers 503 and the batch is sent again. While the hub is away records wait in memory, at most 20,000 (about a day and a half): past that the oldest go, counted, and one `dropped` event says so when the hub is back. Taken from any authenticated station, under its own id |
+| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, max per metric) and events a year. Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
+| Durability | Not in Litestream (nothing added to a drain or a takeover). Copies in the backups bucket (`sizeup/cloud/metricsbackup.py`): `metrics/copy-0..7.sqlite.gz`, round-robin over the oldest, so the last 8 are always there and one bad copy can't take the history with it. A new leader first *settles*: it lists the copies and merges the newest (and the largest) in, or sees, from a listing that succeeded, that there are none; a failed listing or download is retried (30 s doubling to 30 min) and nothing is uploaded until it settles. Then a copy 15 min later and every 3 h (SQLite's backup API: the ingest isn't held up). Once settled its answer to each station carries `resend_from` (when the merged copy was made) and the station sends again what was acked since (kept 6 h; duplicates are ignored). Lost at worst: what the old task took after its last copy, when the station was away for that whole time or settling took longer than 6 h; never what a copy already holds. A copy that can't be read (torn, another release's schema without a key column) is skipped for the next older one; one with a column more or less merges column by column. Settings > Station > Health shows a Metrics warning when it hasn't settled in 6 h or kept no copy in 12 h. Each copy is made in memory (~80 MB at steady state, briefly) |
+| Size | Measured (tests/test_station_metrics.py): a day of 6 channels, 2 P25 systems and 2,000 transmissions is ~13,500 records, ~1.7 MB; ~50 MB at 30 days of raw and ~30 MB for a year of rollups |
+| Reading | `GET /api/cad/metrics?subject=FG1&from=&to=&res=raw\|hour\|auto&station=&kind=&metric=`: raw (a week at most) or hourly, with the events, the station's and the Settings audit's changes to that channel; no subject: the series there are. A signed-in admin only, on the hub only: closed without a verified sign-in |
+
+Why the hub and not CloudWatch metrics: the graphs and the suggested squelch (#606) need fast range queries joined with
+the Settings audit, per-transmission detail, several stations, and nothing to pay.
 
 ## Where the hub's CPU goes (#425)
 

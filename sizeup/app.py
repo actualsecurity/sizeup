@@ -571,6 +571,8 @@ class App:
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
+        # the signal metrics for the hub (sizeup/cloud/metrics.py Collector, set by the hub link): None = not collected
+        self.metrics = None
         # Settings > Station > Hub link turns that link on and off while running (sizeup/cloud/stationmode.py).
         self.station = None
         self._heard_sent: dict[tuple[str, str, str], float] = {}
@@ -597,6 +599,8 @@ class App:
         # system's label (the county's is its name: it has none of its own)
         self.cad.source_rows = self.talkgroups_state
         self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
+        # ... and each FM / airband channel's frequency, for its hover there (#607)
+        self.cad.source_freqs = lambda: {c.label: f"{c.mhz:g}" for c in self.cfg.channels}
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
@@ -774,8 +778,11 @@ class App:
                 p = getattr(self, "pushes", None)          # built just below: no topic until then
                 t = p.prealert_topics() if p is not None else {"ring": {"topic": ""}, "status": {"topic": ""}}
                 return t["ring"]["topic"], t["status"]["topic"]
+            if cfg.prealert_config_note:
+                log(f"prealert: config: {cfg.prealert_config_note}")
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, "", "", cfg.prealert_expire_min,
-                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics)
+                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics,
+                                      heartbeat_every_min=cfg.prealert_heartbeat_every_min)
             self.prealert_sync()
         # Pushes (sizeup/notify.py Pushes, [alerts]): our own ntfy topics by kind: the emergency alarms
         # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon
@@ -1259,6 +1266,17 @@ class App:
         except OSError:
             pass
 
+    def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False) -> None:
+        """A transmission's numbers for the hub's signal metrics (sizeup/cloud/metrics.py): a dict queued, nothing else;
+        never in the way of the transmission."""
+        m = self.metrics
+        if m is None:
+            return
+        try:
+            m.tx(label, kind, seg, ids=ids, am=am)
+        except Exception:  # noqa: BLE001 - a metric, never the radio path's problem
+            pass
+
     def _segment(self, ch: Channel, seg: Segment) -> None:
         if self._kind.get(ch.label) == "paging":
             return self._page_segment(ch, seg)
@@ -1278,6 +1296,8 @@ class App:
         # mic click (stt.Transcriber), dropped in _transcribed.
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         ids = list(dict.fromkeys(h for h, _e in found))
+        self._metric_tx(ch.label, "burst" if seg.bursts and not np.any(seg.audio) else
+                        "noise" if low_energy and not ids else "voice", seg, ids=bool(ids))
         for h in ids:
             self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
@@ -1314,6 +1334,7 @@ class App:
         like traffic (Settings > Radios: AWS by default). A weak carrier (sizeup/radio/am.py MIN_CARRIER_DB, 3 dB) is kept
         and playable but not transcribed: speech-to-text invents words from noise (shortfinal's rule); Re-transcribe can.
         A marginal one (under MARGINAL_DB, 6 dB) is transcribed and flagged (#257)."""
+        self._metric_tx(ch.label, "voice", seg, am=True)
         if not self.channel_pref(ch.label)["record"]:
             return
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end, "", status="pending")
@@ -1351,6 +1372,7 @@ class App:
         """A transmission on a paging channel: a new page, or (after a fade) more of the one before.
         A page shows as pending at once; it is finalised (_page_done) when the squelch's continuation
         window has passed (PageHold, GitHub #61), or at once when there is none."""
+        self._metric_tx(ch.label, "page", seg)
         if not self.channel_pref(ch.label)["record"]:   # Settings > Radios: not recorded (receiver keeps running)
             log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan).kind} not recorded "
                 "(Record is off in Settings > Radios)")

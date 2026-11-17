@@ -35,6 +35,7 @@ STATE_FILE = ".dvr-state.json"     # (a dot: never taken for a camera's folder)
 VERSION = 1
 EVERY_S = 5.0                      # written at most this often while anything changes (and on a clean stop)
 MAX_AGE_S = 600.0                  # older than this: not trusted (the index is read first, as before)
+REFRESH_S = 60.0                   # written again at least this often, changed or not (a quiet DVR's isn't stale)
 TOKEN = f"{os.getpid()}-{secrets.token_hex(4)}"   # this process's temp files (never another writer's)
 
 
@@ -45,6 +46,7 @@ class DvrState:
         self.path, self.clock, self.may_write, self.log = Path(path), clock, may_write, log
         self.every_s, self.max_age_s = float(every_s), float(max_age_s)
         self._lock = threading.Lock()
+        self._wlock = threading.Lock()             # one write at a time (a stop's and a tick's)
         self._cams: dict[str, dict] = {}
         self._dirty = False
         self.written_at = -1e18
@@ -91,24 +93,44 @@ class DvrState:
                     rec[k] = v
                     self._dirty = True
 
+    def drop(self, cid: str) -> None:
+        """A camera's record gone (its recording moved to another id)."""
+        with self._lock:
+            if self._cams.pop(cid, None) is not None:
+                self._dirty = True
+
     def due(self) -> bool:
         with self._lock:
-            return self._dirty and self.clock() - self.written_at >= self.every_s
+            age = self.clock() - self.written_at
+            return (self._dirty and age >= self.every_s) or age >= REFRESH_S
 
     def checkpoint(self, force: bool = False) -> bool:
-        if not (force and self._dirty) and not self.due():
+        if not force and not self.due():
             return False
         if not self.may_write():
             return False
-        with self._lock:
-            now = self.clock()
-            body = json.dumps({"v": VERSION, "at": now, "cameras": self._cams}, separators=(",", ":")).encode()
-            self._dirty, self.written_at = False, now
-        if self._write(body):
-            return True
-        with self._lock:
-            self._dirty = True                   # (asked again at the next one)
-        return False
+        with self._wlock:
+            with self._lock:
+                now = self.clock()
+                body = json.dumps({"v": VERSION, "at": now, "cameras": self._cams}, separators=(",", ":")).encode()
+                self._dirty, self.written_at = False, now
+            if self._write(body):
+                return True
+            with self._lock:
+                self._dirty = True               # (asked again at the next one)
+            return False
+
+    def clean(self, stale_s: float) -> None:
+        """Another writer's temp file of this one, cut short (a writer killed while writing it), once stale_s old."""
+        if not self.may_write():
+            return
+        try:
+            for f in os.scandir(self.path.parent):
+                if (f.name.startswith(f".{self.path.name}.") and f.name.endswith(".tmp") and TOKEN not in f.name
+                        and time.time() - f.stat().st_mtime > stale_s):
+                    Path(f.path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _write(self, body: bytes) -> bool:
         tmp = self.path.with_name(f".{self.path.name}.{TOKEN}.tmp")

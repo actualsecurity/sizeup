@@ -8,10 +8,16 @@ incoming call").
                             title "STATION PHONE RINGING" (a commissioning test: "[TEST] STATION PHONE RINGING"),
                             message "Incoming call on the station line at 2026-06-26 14:03:21 EDT."
                             or, delivered late, "Phone rang ~45s ago at ... (alert delayed by network)."
-    status topic "Tapout heartbeat" hourly ("Ring detector still online
-                            (hourly check-in, seq 12). ..."), "Tapout restarted" at boot, warnings
-                            ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
-                            OTA lifecycle. The heartbeat is the silent-failure canary.
+    status topic "Tapout heartbeat" every 6 h ([prealert] heartbeat_every_min; it was hourly)
+                            ("Ring detector still online (... seq 12). ..."), "Tapout restarted" at boot,
+                            warnings ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
+                            OTA lifecycle. The heartbeat is the silent-failure canary; any message there
+                            proves Tapout is alive. Nothing for heartbeat_stale_min (default: the period
+                            + 10 % + 15 min, 411 min) -> "Tapout: no heartbeat for ..." in warning. A
+                            fault (priority 4+) or "Tapout restarted UNEXPECTEDLY" warns with its title
+                            until the next heartbeat or restart, its recovery ("Detector line recovered")
+                            or the stale window (PreAlerts.fault). Header order: no heartbeat, ring feed
+                            offline, device fault.
 
 The topics' names are not in the repo: they come from Settings > System > Push notifications (the CAD settings, the
 DB), overridden by SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC, else [prealert] ring_topic / status_topic
@@ -28,7 +34,10 @@ object per line: "open", "keepalive" about every 45 s, "message"). A dropped str
 backoff (1 s doubling to 60 s; a 429 rate limit waits at least 2 min, or what Retry-After says) and
 resumes with since=<last message id>, so nothing is missed or repeated; the first connection asks
 since=10m (a ring just before a restart is not lost; old ones are not news). The database dedupes by
-ntfy id as well.
+ntfy id as well. The status topic's first connection looks back further (status_since(): a heartbeat period and a
+half, 9 h, and at least heartbeat_stale_min), so a fresh start finds the last heartbeat. ntfy.sh keeps messages
+about 12 h (its cache-duration); asking further back is harmless (ntfy returns what it still has), and Tapout's last
+heartbeat is also kept in the CAD database (meta tapout_status), so a restart shows it before ntfy answers.
 
 A ring -> a pre-alert {at, source "Tapout HQ phone", message, ntfy id} (table prealerts in the CAD
 SQLite, so the hub's Litestream keeps them; listed 24 h, kept 90 days) and a line in the CAD event
@@ -61,6 +70,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from sizeup.cad.store import TZ, CadError, OPERATOR_MAX
+from sizeup.config import HEARTBEAT_EVERY_MIN, heartbeat_stale_min as derive_stale_min
 from sizeup.netcut import cut, socket_of
 
 SOURCE = "Tapout HQ phone"
@@ -69,6 +79,17 @@ FIRST_SINCE = "10m"            # the first connection's window (later ones: sinc
 LIST_S = 24 * 3600             # shown and in the state
 KEEP_S = 90 * 24 * 3600        # kept in the database (the CSV export)
 MATCH_BEFORE_S = 120           # an event made this long before the ring still matches it
+# Tapout's high-priority status messages that are not faults (it is fine): an OTA image no newer than what runs
+NOT_A_FAULT = re.compile(r"\bOTA REJECTED\b.*\bnot newer than\b.*\brunning\b", re.I | re.S)
+# A fault -> the message that ends it: (the fault's title, searched; the recovery's title, matched whole). Titles are
+# compared case-insensitively with their whitespace collapsed, and a recovery is exactly the firmware's title (a full
+# stop allowed), so "Detector line not recovered" or "Ring detector un-armed" never ends a fault. A title that matches
+# any fault pattern is a fault, never a recovery (the safer reading). A heartbeat or a restart also ends any fault,
+# though a heartbeat doesn't (yet) say the detector is armed (#608).
+RECOVERIES = (
+    (re.compile(r"\bdetector line\b.*\bstuck\b", re.I), re.compile(r"detector line recovered\.?", re.I)),
+    (re.compile(r"\b(?:not\s+|un-?|dis)armed\b", re.I), re.compile(r"ring detector armed\.?", re.I)),
+)
 from sizeup import USER_AGENT
 UA = USER_AGENT + " ntfy read-only subscriber"
 
@@ -95,6 +116,14 @@ CSV_COLUMNS = ["Rang", "Received", "Source", "Title", "Message", "Test", "Outcom
                "Incident #", "Operator", "Note", "ntfy id"]
 
 
+def status_since(every_min: float, stale_min: float) -> str:
+    """The status feed's first look back, as ntfy's since=: a heartbeat period and a half (6 h -> 540m), and at least
+    the stale threshold, so the last heartbeat (on time or overdue) is in it and a fresh start shows "ok, heartbeat
+    5 h ago", not "no heartbeat yet" until the next one. Past ntfy's cache (ntfy.sh: 12 h) ntfy just returns what
+    it has: nothing heard -> "no heartbeat yet" (unknown, not a warning)."""
+    return f"{max(1, int(round(max(1.5 * every_min, stale_min))))}m"
+
+
 def _get(url: str, timeout: float):
     """The one request this module makes: a GET (never a POST / PUT: the ring topic pages the crew)."""
     return urlopen(Request(url, method="GET", headers={"User-Agent": UA, "Accept": "application/x-ndjson"}),
@@ -107,6 +136,21 @@ def _hms(at: float | None) -> str:
 
 def _ts(at: float | None) -> str:
     return datetime.fromtimestamp(at, TZ).strftime("%m/%d/%Y %H:%M:%S") if at else ""
+
+
+def _recovers(title: str, fault: str) -> bool:
+    """Does a status message with this title end that fault (RECOVERIES)? Only the exact recovery title, and never a
+    title that also reads as a fault."""
+    title, fault = " ".join(title.split()), " ".join(fault.split())
+    if any(f.search(title) for f, _ in RECOVERIES):
+        return False
+    return any(f.search(fault) and r.fullmatch(title) for f, r in RECOVERIES)
+
+
+def _short(text: str, n: int = 60) -> str:
+    """A title for the header: one line, at most n characters."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
 
 
 def _ago(s: float) -> str:
@@ -329,14 +373,17 @@ def parse_ring(msg: dict) -> dict:
 
 
 def parse_status(msg: dict) -> dict:
-    """A message on the status topic -> {kind: heartbeat | boot | other, at, title, message, priority, seq?}."""
+    """A message on the status topic -> {kind: heartbeat | boot | other, at, title, message, priority, seq?,
+    unexpected?}. "Tapout restarted UNEXPECTEDLY" (newer firmware: a crash or watchdog reset) is a boot, unexpected."""
     title = str(msg.get("title") or "")[:200]
     text = str(msg.get("message") or "")[:1000]
     tags = msg.get("tags") if isinstance(msg.get("tags"), list) else []
     kind = ("heartbeat" if title == "Tapout heartbeat" or "green_heart" in tags
-            else "boot" if title == "Tapout restarted" else "other")
+            else "boot" if re.fullmatch(r"Tapout restarted(\s+unexpectedly)?[.!]?", title.strip(), re.I) else "other")
     out = {"kind": kind, "at": float(msg.get("time") or time.time()), "title": title, "message": text,
            "priority": int(msg.get("priority") or 3), "id": str(msg.get("id") or "")}
+    if kind == "boot" and "unexpectedly" in title.lower():
+        out["unexpected"] = True
     m = re.search(r"\bseq (\d+)", text) if kind == "heartbeat" else re.search(r"Boot #(\d+)", text)
     if m:
         out["seq"] = int(m.group(1))
@@ -351,14 +398,17 @@ class PreAlerts:
     (App: all-in-one or hub), attached as cad.prealert."""
 
     def __init__(self, cad, server: str = "https://ntfy.sh", ring_topic: str = "", status_topic: str = "",
-                 expire_min: float = 5.0, heartbeat_stale_min: float = 90.0, log: Callable[[str], None] = print,
-                 topics: Callable[[], tuple[str, str]] | None = None):
+                 expire_min: float = 5.0, heartbeat_stale_min: float | None = None, log: Callable[[str], None] = print,
+                 topics: Callable[[], tuple[str, str]] | None = None, heartbeat_every_min: float = HEARTBEAT_EVERY_MIN):
         """ring_topic / status_topic: fixed ("" = that feed off); topics(): (ring, status) asked every few seconds instead
-        (the app: env over Settings over the config), so Settings can set or change them with no restart."""
+        (the app: env over Settings over the config), so Settings can set or change them with no restart.
+        heartbeat_every_min: Tapout's heartbeat period; heartbeat_stale_min None: derived from it (config.py)."""
         self.cad, self.store, self.log = cad, cad.store, log
         self.clock = cad.clock
         self.expire_s = float(expire_min) * 60
-        self.stale_s = float(heartbeat_stale_min) * 60
+        self.every_s = float(heartbeat_every_min) * 60
+        self.stale_s = float(derive_stale_min(heartbeat_every_min) if heartbeat_stale_min is None
+                             else heartbeat_stale_min) * 60
         self.server = server.rstrip("/")
         self._lock = threading.RLock()
         self._stopping = threading.Event()
@@ -386,7 +436,8 @@ class PreAlerts:
 
     def _feed(self, which: str, topic: str, last_id: str = ""):
         """The stream for a topic ("" = none set: NoFeed). The status feed's first look goes back a heartbeat period and a
-        half: the last heartbeat is still there, so "heartbeat 40 min ago" survives a restart without waiting an hour."""
+        half (status_since): the last heartbeat is still there, so "heartbeat 5 h ago" survives a restart without
+        waiting up to 6 h for the next one."""
         if not topic:
             return NoFeed(which)
         if off := _outbound_off(self.server):    # a hub on a restored copy: not the department's real feed (logged by
@@ -395,7 +446,7 @@ class PreAlerts:
             f = NtfyStream(self.server, topic, self.ring, self.log, label=which)
         else:
             f = NtfyStream(self.server, topic, self.status, self.log, label=which,
-                           first_since=f"{max(1, int(round(self.stale_s / 60)))}m")
+                           first_since=status_since(self.every_s / 60, self.stale_s / 60))
         f.last_id = last_id
         return f
 
@@ -635,20 +686,46 @@ class PreAlerts:
                     h[s["kind"]] = s
             if not h.get("last") or s["at"] >= h["last"].get("at", 0):
                 h["last"] = s
-            if s["kind"] == "other" and s["priority"] >= 4:
-                h["warning"] = s
+            w = h.get("warning")
+            if s["kind"] == "other" and w and s["at"] > w.get("at", 0) and _recovers(s["title"], w["title"]):
+                h["recovered"] = dict(s, of=w.get("id"))   # "Detector line recovered" ends "Detector line STUCK active"
+            elif (s["kind"] == "other" and s["priority"] >= 4
+                    and not NOT_A_FAULT.search(f"{s['title']}\n{s['message']}")
+                    and (not w or s["at"] >= w.get("at", 0))):
+                h["warning"] = s                    # the firmware's "high" status: a device fault (fault())
             self.health = h
             with self.store.lock:
                 self.store.db.execute("INSERT INTO meta (key, value) VALUES ('tapout_status', ?) "
                                       "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (json.dumps(h),))
         self.on_change()
 
-    def tapout(self, now: float | None = None) -> dict:
-        """{state: ok | warn | unknown, word, detail}: "Tapout: ok, heartbeat 12 min ago" and the like.
-        Only what was heard: never heard -> "no heartbeat yet"."""
+    def fault(self, now: float | None = None) -> dict | None:
+        """The device fault in effect: the newest high-priority status message ("ALERT DELIVERY FAILED", "Detector line
+        STUCK active", "Ring detector NOT armed", ...; not NOT_A_FAULT) or an unexpected restart, when nothing ended it:
+        a later heartbeat or restart, or its recovery ("Detector line recovered", RECOVERIES). A normal-priority message
+        (an OTA step) says nothing about it. One older than the stale window is over too (the heartbeat would have
+        ended it): never a warning for ever."""
         now = self.clock() if now is None else now
         h = self.health
-        alive = [x for x in (h.get("heartbeat"), h.get("boot")) if x]
+        hb, boot, w, rec = h.get("heartbeat"), h.get("boot"), h.get("warning"), h.get("recovered")
+        ends = [x["at"] for x in (hb, boot) if x]
+        if w and rec and rec.get("of") == w.get("id"):
+            ends.append(rec["at"])
+        if w and now - w["at"] <= self.stale_s and not any(t > w["at"] for t in ends):
+            return w
+        if (boot and boot.get("unexpected") and now - boot["at"] <= self.stale_s
+                and (not hb or boot["at"] > hb["at"])):
+            return boot
+        return None
+
+    def tapout(self, now: float | None = None) -> dict:
+        """{state: ok | warn | unknown, word, detail}: "Tapout: ok, heartbeat 12 min ago" and the like.
+        Only what was heard: never heard -> "no heartbeat yet". Any message on the status topic (a heartbeat, a restart,
+        a warning, OTA) proves Tapout is alive: the newest of them is what goes stale. A device fault (fault()) warns
+        with its title: "Tapout: ALERT DELIVERY FAILED, 3 min ago", "Tapout: restarted unexpectedly 2 min ago"."""
+        now = self.clock() if now is None else now
+        h = self.health
+        alive = [x for x in (h.get("heartbeat"), h.get("boot"), h.get("last")) if x]
         last = max(alive, key=lambda x: x["at"]) if alive else None
         hb = h.get("heartbeat")
         parts = []
@@ -660,6 +737,12 @@ class PreAlerts:
         w = h.get("warning")
         if w and now - w["at"] < LIST_S:
             parts.append(f"warning {_ts(w['at'])}: {w['title']}" + (f": {w['message']}" if w["message"] else ""))
+            rec = h.get("recovered")
+            if rec and rec.get("of") == w.get("id"):
+                parts.append(f"{rec['title']} {_ts(rec['at'])}")
+            elif hb and hb["at"] > w["at"] and not (h.get("boot") and w["at"] < h["boot"]["at"] < hb["at"]):
+                parts.append(f"cleared by the heartbeat {_ts(hb['at'])} "
+                             "(a heartbeat doesn't prove the detector is armed)")
         feed = self.status_stream
         if not self.ring_stream.topic and not feed.topic:
             return {"state": "unconfigured", "word": "not configured", "at": None,
@@ -678,12 +761,22 @@ class PreAlerts:
                     "detail": detail or ("nothing heard from Tapout yet" if feed.topic
                                                   else "status topic not set: no heartbeat to watch")}
         age = now - last["at"]
-        what = "heartbeat" if last["kind"] == "heartbeat" else "restarted"
+        what = {"heartbeat": "heartbeat", "boot": "restarted"}.get(last["kind"], "heard")
+        b = h.get("boot")
+        if b and b.get("unexpected") and now - b["at"] < LIST_S:
+            detail = "; ".join(["restarted unexpectedly " + _ts(b["at"]) + (f": {b['message']}" if b["message"] else ""),
+                                *([detail] if detail else [])])
+        if last["kind"] == "other" and not (w and w.get("id") == last.get("id") and now - w["at"] < LIST_S):
+            detail = "; ".join([f"last message {_ts(last['at'])}: {last['title']}", *parts])
         if age > self.stale_s:
             return {"state": "warn", "word": f"no heartbeat for {_ago(age)}", "at": last["at"], "detail": detail}
         if self.ring_stream.topic and not self.ring_stream.connected and self.ring_stream.down_since is not None:
             return {"state": "warn", "word": f"ring feed offline since {_hms(self.ring_stream.down_since)}",
                     "at": last["at"], "detail": detail}
+        if f := self.fault(now):
+            word = (f"restarted unexpectedly {_ago(now - f['at'])} ago" if f["kind"] == "boot"
+                    else f"{_short(f['title']) or 'warning'}, {_ago(now - f['at'])} ago")
+            return {"state": "warn", "word": word, "at": last["at"], "detail": detail, "fault": True}
         return {"state": "ok", "word": f"ok, {what} {_ago(age)} ago", "at": last["at"], "detail": detail}
 
     # -- what the screens get --------------------------------------------------------------------------

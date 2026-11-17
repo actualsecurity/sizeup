@@ -25,13 +25,15 @@ GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / R
                                           each with place, street_address, cross (the streets at each end of its block)
                                           and block (for the map), #204; two streets typed ("N Main St / Westchester
                                           Ave", "n main & west", #213): where they meet in our towns, at most 25 (total,
-                                          more), cross = both streets; a street under two letters: error
+                                          more), cross = both streets; a street under two letters: error; an address
+                                          with the department's names at it: each name first (place, at_address)
 GET  /api/cad/geocode/here?lat=&lon=      the new call's map (#204): the address point, intersection and named place
-                                          nearest a click (each a suggestion as above), and the street under it; read only
+                                          nearest a click (each a suggestion as above), the names at that address
+                                          (at_address: [...]) and the street under it; read only
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           place search (#67: a note's "@"): {places: [{kind (address | intersection |
                                           street | place | milemarker | exit), label, sub (town), lat, lon, source,
-                                          category?, detail?, route?, dir?, value?, score}]}, our towns first, then
+                                          category?, detail?, route?, dir?, value?, at?, score}]}, our towns first, then
                                           nearest to near (else the event iid's point); read only: viewers too
 GET  /api/cad/runcards                    run cards
 GET  /api/cad/airport                     the Airport map layer (#87): data/khpn_airport.geojson, with "airport" (where the
@@ -201,7 +203,8 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
-                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}]} (Cad.comms_sources)
+                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
+                                          admins' folders (#607) | null} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -264,6 +267,12 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           a signed-in admin only. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
+GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
+                                          the station's signal metrics (sizeup/cloud/metricstore.py): a channel's ("FG1")
+                                          or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
+                                          most) or hourly (n, lo, p50, p90, hi), with the events that explain a shift (the
+                                          station's and the Settings audit's); no subject: what series there are. The
+                                          hub's only; a signed-in admin only (never without a verified sign-in)
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -286,6 +295,8 @@ POST /api/cad/settings/department_units  {action: set {key: a feed's department 
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
+POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, section, items}], base?} | reset {base?}}: the
+                                          Radio page rail's folders for everyone (#607, sizeup/cad/radiofolders.py); admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins
@@ -381,6 +392,7 @@ ADMIN_READS = {
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/stations": "stations and their tokens are for admins (Settings > Station > Stations)",
+    "/api/cad/metrics": "the station's signal metrics are for admins (Settings > Radios)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
@@ -1050,6 +1062,20 @@ class CadApi:
             return _json(403, {"error": why})
         return _json(200, reg.panel())
 
+    def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/metrics: the station's signal metrics (sizeup/cloud/metricstore.py). The hub's only, and only for
+        an admin with a verified sign-in, like Settings > Station > Stations: closed without one."""
+        store = getattr(self.cad, "station_metrics", None)
+        if store is None:
+            return _json(404, {"error": "station metrics are the hub's"})
+        if (why := self._signed_admin(who)) is not None:
+            return _json(403, {"error": why})
+        from sizeup.cloud.metricstore import MetricsError
+        try:
+            return _json(200, store.query(parse_qs(query)))
+        except MetricsError as e:
+            return _json(400, {"error": str(e)})
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -1062,6 +1088,8 @@ class CadApi:
                 return self._logs(path, query, who)
             if path == "/api/cad/stations":
                 return self._stations(who)
+            if path == "/api/cad/metrics":
+                return self._metrics(query, who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":
