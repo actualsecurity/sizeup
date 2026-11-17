@@ -23,6 +23,27 @@ Noise openings: one frame at open_db opens the squelch and the hang holds it 0.4
 the live "talking" indicator waits for, radio/tap.py) and is counted (short_per_min: the squelch chattering on noise).
 open_db, close_db and min_open_s are per channel, set live (NfmReceiver.set_squelch; Settings > Radios > Squelch).
 
+Key-ups (keyups = "traffic" | "paging", by the channel's kind: config.ChannelCfg). The hang bridges any drop under it,
+so two units talking back to back (A unkeys, B keys 0.1-0.45 s later) came out as one transmission: one clip, one
+transcript, A's and B's IDs on one row (FG1 2026-10-08 to 11-17: 16 of 809 transmissions carried two radios' IDs, all
+1.3-7.7 s long). With keyups set, an open transmission is cut where its carrier dropped, without waiting out the hang,
+once what came back is a new key-up rather than a fade:
+
+    gap      under close_db for at least split_s (traffic 0.2 s), then back RETURN_FRAMES (0.15 s) at close_db with a
+             frame at open_db (a carrier that would open the squelch by itself). Of the 110 drops found inside FG1's
+             clips, 107 were under 0.2 s (picket-fencing, a body turning): those stay one key-up, as before.
+    id       under close_db SHORT_GAP_FRAMES (0.1 s) or more, and an MDC-1200 / FleetSync burst at the start of what
+             came back (a pre-ID, nothing said before it) or just before the drop (a post-ID, nothing said after it).
+    level    under close_db 0.1 s or more, and the carrier back jump_db (traffic 10, = drop_db) away from this
+             transmission's own quieting: another transmitter.
+
+Paging (South 2) is a simulcast that fades to hiss in the middle of a page, so a gap alone never cuts a page
+(split_s 0), the level only cuts it upward (a unit near the station; jump_db 12 over the page's own, pages run
+14-31 dB 10th-90th percentile), and an ID only when the page didn't open with one (no ID in 404 page recordings: the
+console sends none). The same tests make what comes back in the continuation window a transmission of its own instead
+of more of the page (Segment.cont stays False). Every piece is its own Segment; Segment.split / prev_start /
+first_start link it to the piece before and to the first piece of the recording, which ends with reason "key-up".
+
 One rtl_fm per channel; if it dies, stalls or the dongle is unplugged, the loop restarts it
 with backoff, forever (same pattern as shortfinal's receivers).
 """
@@ -103,6 +124,11 @@ STEADY_DB = 3.0                # content: voice-band energy this far over the fr
                                # weak carrier (8 dB of quieting, test_long_page_with_quieting_dips) 2-8 dB.
 DENSE_FRAMES = 3               # content in 3 of the last 20 frames (an MDC burst is ~3.5): not a stray frame
 BUSY_GAP_FRAMES = 20           # closed this briefly (a max-length split, a flicker): still "open continuously"
+# Key-ups (module doc): a transmission cut where a new key-up came in under the hang
+SHORT_GAP_FRAMES = 2           # an ID or a level jump: at least 0.1 s under close_db before it
+RETURN_FRAMES = 3              # the carrier back 0.15 s, every frame at close_db, one at open_db: a new carrier
+ID_RUN = 2                     # an ID burst: 2 id_burst_frames in a row (75 ms; a FleetSync burst is 45-90 ms)
+KEYUP_MODES = ("", "traffic", "paging")
 
 
 @dataclass
@@ -123,6 +149,11 @@ class Segment:
     q_close: float | None = None
     hiss_db: float | None = None   # the idle hiss level (noise floor) it was measured against
     floor_db: float | None = None  # a background carrier's quieting, if one was on the channel
+    # Key-ups (module doc): a piece cut from the transmission before it ("gap" | "id" | "level"; "" not cut), that
+    # piece's start, and the start of the first piece of the recording (the first piece: its own; None: not split)
+    split: str = ""
+    prev_start: float | None = None
+    first_start: float | None = None
 
 def data_frames(frames: list[np.ndarray]) -> list[bool]:
     """Which 50 ms frames are an MDC-1200 burst (1200 baud MSK, 1200/1800 Hz: Motorola PTT-ID, sent
@@ -238,8 +269,19 @@ class NoiseSquelch:
     def __init__(self, open_db: float = OPEN_DB, close_db: float = CLOSE_DB,
                  clock: Callable[[], float] = time.time, drop_db: float | None = None,
                  hang_s: float | None = None, continue_s: float = 0.0, min_open_s: float | None = None,
-                 shorts: deque | None = None):
+                 shorts: deque | None = None, keyups: str = "", split_s: float = 0.0, jump_db: float | None = None):
         self.open_db, self.close_db, self.clock, self.drop_db = open_db, close_db, clock, drop_db
+        # Key-ups (module doc): "" (off: the hang bridges everything under it, as before), "traffic" or "paging"
+        if keyups not in KEYUP_MODES:
+            raise ValueError(f"keyups: one of {KEYUP_MODES}")
+        self.keyups = keyups
+        self._split_frames = max(SHORT_GAP_FRAMES, round(split_s * RATE / FRAME)) if split_s and split_s > 0 else 0
+        self.jump_db = jump_db if jump_db and jump_db > 0 else None
+        self._cands: list[list] = []        # [first frame under close_db, frame it came back, return checked]
+        self._piece: tuple[float | None, float | None, str] | None = None   # this piece: (first start, prev, why)
+        self._open_id: bool | None = None   # this transmission opened with an ID burst (None: not looked yet)
+        # the last one closed: (start, its recording's first piece's start, quieting, opened with an ID)
+        self._last: tuple[float, float | None, float, bool] | None = None
         self.min_frames = min_frames(min_open_s)
         # set_params(): (open_db, close_db, min_frames) as one tuple, taken by feed() at a frame's start (_applied:
         # the one it took), so a frame never sees a mixed set
@@ -379,24 +421,11 @@ class NoiseSquelch:
                 if window:
                     self._resume()
             return None
-        self._frames.append(frame)
-        self._qs.append(q)
-        if not self._keyed and q >= self.close_db and len(self._qs) >= self.min_frames:
-            self._keyed = True
-        if q >= self.close_db and self._quiet_run > HANG_FRAMES:
-            k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
-            self._breaks.append((k - self._quiet_run, k))
-        self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
-        vband = float(spec[self._vb].mean())
-        self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
-        if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
-            self._last_content = len(self._frames) - 1
-        if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
-            # (counted on a continuation too, which starts live: only one with tones or speech of its own
-            # may open another window, so noise at the close threshold can't chain them, #116)
-            if vband >= lvl * 10 ** (CONTENT_DB / 10):
-                self._content += 1
-                self._live = self._live or self._content >= CONTENT_FRAMES
+        self._track(frame, q, spec, lvl)
+        if self._cands:
+            cut, seg = self._keyup_check()
+            if cut:
+                return seg
         if self.drop_db is not None:
             if self._level is None and len(self._qs) >= LEVEL_FRAMES:
                 self._level = float(np.median(self._qs[:LEVEL_FRAMES]))
@@ -437,6 +466,163 @@ class NoiseSquelch:
             return self._close(len(self._frames), "quiet")
         return None
 
+    def _track(self, frame: np.ndarray, q: float, spec: np.ndarray | None = None, lvl: float | None = None) -> None:
+        """One more frame of the open transmission: its carrier, hang, content and key-up bookkeeping."""
+        if spec is None:
+            spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
+            lvl = float(spec[self._hf].mean()) + 1e-12
+        self._frames.append(frame)
+        self._qs.append(q)
+        if not self._keyed and q >= self.close_db and len(self._qs) >= self.min_frames:
+            self._keyed = True
+        if q >= self.close_db and self._quiet_run > HANG_FRAMES:
+            k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
+            self._breaks.append((k - self._quiet_run, k))
+        if self.keyups and q >= self.close_db and self._quiet_run >= SHORT_GAP_FRAMES:
+            k = len(self._frames) - 1                       # the carrier back after a drop: a new key-up? (_keyup_check)
+            self._cands.append([k - self._quiet_run, k, False, None])
+        self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
+        vband = float(spec[self._vb].mean())
+        self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
+        if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
+            self._last_content = len(self._frames) - 1
+        if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
+            # (counted on a continuation too, which starts live: only one with tones or speech of its own
+            # may open another window, so noise at the close threshold can't chain them, #116)
+            if vband >= lvl * 10 ** (CONTENT_DB / 10):
+                self._content += 1
+                self._live = self._live or self._content >= CONTENT_FRAMES
+
+    # -- key-ups (module doc) ---------------------------------------------------------------------------------------
+
+    def _keyup_check(self) -> tuple[bool, Segment | None]:
+        """Each drop the carrier came back from (self._cands), as the frames after it come in: a new key-up there (gap,
+        level, id: the module doc) cuts the transmission at the drop. -> (cut, the piece before it or None)."""
+        k = len(self._frames)
+        for c in list(self._cands):
+            g0, g1, checked, level = c
+            if k - g1 > EDGE_SEARCH:
+                self._cands.remove(c)
+                continue
+            if k - g1 < RETURN_FRAMES:
+                continue
+            if not checked:
+                c[2] = True
+                ret = self._qs[g1:g1 + RETURN_FRAMES]
+                if min(ret) < self.close_db:            # a flicker, not a carrier back
+                    self._cands.remove(c)
+                    continue
+                why = ""
+                if self._split_frames and g1 - g0 >= self._split_frames and max(ret) >= self.open_db:
+                    why = "gap"
+                elif self.jump_db is not None:
+                    if level is None:
+                        before = [v for v in self._qs[:g0] if v >= self.close_db]
+                        level = float(np.median(before)) if before else None
+                    if level is not None:
+                        d = float(np.median(ret)) - level
+                        if d >= self.jump_db or (self.keyups == "traffic" and -d >= self.jump_db):
+                            why = "level"
+                if not why and self.keyups == "traffic" and g1 > 0 and self._post_id(g0):
+                    why = "id"
+                if why:
+                    return True, self._split(g0, g1, why)
+            if self._pre_id(g1, k, g1 == 0):
+                return True, self._split(g0, g1, "id")
+        return False, None
+
+    def _id_runs(self, frames: list[np.ndarray]) -> list[tuple[int, int]]:
+        """The ID bursts in these frames: (first, last frame), ID_RUN id_burst_frames in a row or more."""
+        if len(frames) < 2:
+            return []
+        flags = id_burst_frames(np.concatenate(frames))
+        out, i, hop = [], 0, FRAME // 2
+        while i < len(flags):
+            if not flags[i]:
+                i += 1
+                continue
+            e = i
+            while e + 1 < len(flags) and flags[e + 1]:
+                e += 1
+            if e - i + 1 >= ID_RUN:
+                out.append((i * hop // FRAME, min(len(frames) - 1, (e * hop + FRAME - 1) // FRAME)))
+            i = e + 1
+        return out
+
+    def _pre_id(self, g1: int, k: int, cont: bool = False) -> bool:
+        """An ID burst at the start of what came back at frame g1, nothing said before it: a radio keyed there. On a
+        paging channel only when the page didn't open with one itself (the console sends none). cont: what came back is
+        a continuation (g1 = 0), the page the last transmission."""
+        if k - g1 < ID_RUN:
+            return False
+        if self.keyups == "paging" and ((self._last is not None and self._last[3]) if cont else self._opened_with_id(g1)):
+            return False
+        body = self._frames[g1:k]
+        runs = self._id_runs(body)
+        if not runs:
+            return False
+        talk = speech_frames(body)
+        return sum(talk[:max(0, runs[0][0] - 1)]) < EDGE_SPEECH_FRAMES
+
+    def _post_id(self, g0: int) -> bool:
+        """An ID burst just before the drop at frame g0, nothing said after it: a radio unkeyed there."""
+        body = self._frames[max(0, g0 - EDGE_SEARCH):g0]
+        runs = self._id_runs(body)
+        if not runs:
+            return False
+        talk = speech_frames(body)
+        return sum(talk[runs[-1][1] + 2:]) < EDGE_SPEECH_FRAMES
+
+    def _opened_with_id(self, upto: int) -> bool:
+        if self._open_id is None:
+            self._open_id = bool(self._id_runs(self._frames[:min(upto, EDGE_SEARCH)]))
+        return self._open_id
+
+    def _split(self, g0: int, g1: int, why: str) -> Segment | None:
+        """Cut the open transmission at the drop: frames before g0 are one key-up (returned), g1 on the next (still
+        open), the hiss between dropped. Neither waits for the hang."""
+        frames, qs, start, up = self._frames, self._qs, self._start, self._up_db
+        piece, cont = self._piece, self.continuing
+        if g1 == 0:                                     # a continuation that is a key-up of its own: nothing to cut
+            self.continuing, self._live, self._chain_start = False, False, self._start
+            last = self._last
+            self._piece = (last[1] if last[1] is not None else last[0], last[0], why) if last else None
+            self._cands = []
+            return None
+        breaks = [b for b in self._breaks if b[1] < g0]
+        head = list(frames[:g0])
+        for b0, b1 in breaks:
+            head[b0:b1] = [np.zeros_like(f) for f in head[b0:b1]]
+        seg = self._segment(head, qs[:g0], start, up, breaks, min_n=RETURN_FRAMES if piece else None)
+        self._begin(frames[g1], qs[g1], start + g1 * FRAME / RATE, up_db=self.close_db)
+        for f, v in zip(frames[g1 + 1:], qs[g1 + 1:]):
+            self._track(f, v)
+        if seg is None:
+            self._piece = (piece[0], piece[1], why) if piece else None
+            return None
+        seg.reason, seg.cont = "key-up", cont
+        self._mark(seg, piece)
+        self._remember(seg, frames[:g0], qs[:g0])
+        self._piece = (seg.first_start, seg.start, why)
+        return seg
+
+    def _mark(self, seg: Segment, piece: tuple | None) -> None:
+        """A piece of a split recording: linked to the piece before it and the recording's first."""
+        if piece is None:
+            seg.first_start = seg.start
+        else:
+            seg.first_start, seg.prev_start, seg.split = piece
+
+    def _remember(self, seg: Segment, frames: list[np.ndarray], qs: list[float]) -> None:
+        """The transmission just closed: its start, its recording's first piece, its quieting and whether it opened with
+        an ID, for a continuation that may be a key-up of its own."""
+        if not self.keyups:
+            return
+        up = [v for v in qs if v >= self.close_db]
+        opened = self._open_id if self._open_id is not None else bool(seg.bursts) or bool(
+            self._id_runs(frames[:EDGE_SEARCH]))
+        self._last = (seg.start, seg.first_start, float(np.median(up)) if up else seg.quieting_db, opened)
+
     def _begin(self, frame: np.ndarray, q: float, start: float, up_db: float | None = None) -> None:
         if not self.open and (self.open_since is None or self._n - self._closed_n > BUSY_GAP_FRAMES):
             self.open_since = start
@@ -449,10 +635,13 @@ class NoiseSquelch:
         self._recent.clear()
         self._last_content = -1
         self._cont_left, self._cont_run = 0, []
+        self._cands, self._piece, self._open_id = [], None, None
 
     def _resume(self) -> None:
         """The transmission just opened came back inside the continuation window: it continues the last."""
         self.continuing, self._live, self._chain_start = True, self._cont_live, self._cont_chain
+        if self.keyups and self._last is not None:      # a new key-up instead? (_keyup_check: level, ID)
+            self._cands.append([0, 0, False, self._last[2]])
 
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped (rtl_fm stalled, died, or was stopped) with the squelch open: what was
@@ -466,18 +655,24 @@ class NoiseSquelch:
         """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
         frames, qs, start = self._frames[:n], self._qs[:n], self._start
         live, cont, breaks = self._live, self.continuing, [b for b in self._breaks if b[1] < n]
+        piece = self._piece
         self._frames, self._qs, self.open, self.continuing = [], [], False, False
         self._closed_n = self._n
         for g0, g1 in breaks:   # carrier gone (hiss) inside the hang: silence, as a radio's squelch would
             frames[g0:g1] = [np.zeros_like(f) for f in frames[g0:g1]]
-        seg = self._segment(frames, qs, start, self._up_db, breaks)
+        seg = self._segment(frames, qs, start, self._up_db, breaks, min_n=RETURN_FRAMES if piece else None)
+        if seg is not None and piece is not None:
+            self._mark(seg, piece)
+        if seg is not None:
+            self._remember(seg, frames, qs)
         if seg is None and reason == "quiet":
             self.shorts.append(self.clock())        # a noise opening (or a blip): nothing kept
         # A window only after a page (or a continuation with tones / speech of its own) went quiet, and
         # only while the page and its continuations span under 2 minutes: they can't chain on noise at
         # the close threshold (#116). After a max-length split the next part has to reach open_db.
+        # A unit's key-up cut from a page (keyups: piece) is no page: nothing of it to wait for.
         window = (live and self._cont_frames > 0 and reason == "quiet" and (not cont or 0 <= self._last_content < n)
-                  and self.clock() - self._chain_start < CHAIN_S)
+                  and self.clock() - self._chain_start < CHAIN_S and piece is None)
         self._cont_left, self._cont_run, self._cont_live = (self._cont_frames if window else 0), [], live
         self._cont_chain = self._chain_start
         if seg is not None:
@@ -561,7 +756,8 @@ class NoiseSquelch:
         return True
 
     def _segment(self, frames: list[np.ndarray], qs: list[float], start: float,
-                 up_db: float | None = None, breaks: list[tuple[int, int]] = ()) -> Segment | None:
+                 up_db: float | None = None, breaks: list[tuple[int, int]] = (),
+                 min_n: int | None = None) -> Segment | None:
         # Keep the carrier-up span: first to last frame fully quieted.
         # Carrier-up span: from the first fully quieted frame to the last frame still above the
         # hold-open level. (Ending at the last *fully* quieted frame cut a 60 s South 2 page at 17 s:
@@ -599,7 +795,7 @@ class NoiseSquelch:
                 b -= 1
             bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
             hi = b - 2
-        if hi - lo + 1 < self.min_frames:
+        if hi - lo + 1 < (self.min_frames if min_n is None else min(min_n, self.min_frames)):
             if not bursts:
                 return None
             # A key-up that is only an ID burst (+ dead carrier): still a transmission (who keyed),
@@ -744,8 +940,10 @@ class NfmReceiver:
                  on_event: Callable[[str], None] = lambda m: None,
                  open_db: float = OPEN_DB, drop_db: float | None = None,
                  hang_s: float | None = None, continue_s: float = 0.0,
-                 close_db: float = CLOSE_DB, min_open_s: float | None = None):
+                 close_db: float = CLOSE_DB, min_open_s: float | None = None, keyups: str = "",
+                 split_s: float = 0.0, jump_db: float | None = None):
         self.rtl_fm, self.device, self.gain_db, self.channel = rtl_fm, device, gain_db, channel
+        self.keyups, self.split_s, self.jump_db = keyups, split_s, jump_db    # key-ups (NoiseSquelch, module doc)
         self.on_segment, self.on_event = on_segment, on_event
         self.open_db, self.drop_db, self.hang_s, self.continue_s = open_db, drop_db, hang_s, continue_s
         self.close_db, self.min_open_s = close_db, min_open_s
@@ -777,7 +975,8 @@ class NfmReceiver:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
         # of the weaker-carrier rules live: 16:32 on 2026-10-08 was held open 51 s by the background.)
         return NoiseSquelch(open_db=self.open_db, close_db=self.close_db, drop_db=self.drop_db, hang_s=self.hang_s,
-                            continue_s=self.continue_s, min_open_s=self.min_open_s, shorts=self.shorts)
+                            continue_s=self.continue_s, min_open_s=self.min_open_s, shorts=self.shorts,
+                            keyups=self.keyups, split_s=self.split_s, jump_db=self.jump_db)
 
     def set_squelch(self, open_db: float, close_db: float, min_open_s: float | None) -> bool:
         """Settings > Radios > Squelch, live: the running squelch and every new one (rtl_fm restarts). True if changed."""
