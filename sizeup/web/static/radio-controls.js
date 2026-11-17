@@ -330,7 +330,8 @@ window.RadioControls = (() => {
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
-        const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
+        // (an antenna group's: the gone dongle whose job a stand-in runs isn't "elsewhere")
+        const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m && o.on !== x.serial && x.on !== o.serial);
         // #275: the job's frequency now on the dongle running it ("NY App 126.4/120.8 · 126.4")
         const now = m === x.mode && sdr.now && sdr.now[m];
         setText(b, now ? `${m} · ${now}` : m);
@@ -344,7 +345,7 @@ window.RadioControls = (() => {
       row.classList.toggle("lent", !!x.lent);
       const ad = row.querySelector(".adsb-use");
       if (ad) {                                       // offered only while no dongle is reserved for ADS-B
-        ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro();
+        ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro() || !!x.group;   // (never a grouped one)
         ad.disabled = st.adsbBusy;
       }
     }
@@ -1025,7 +1026,7 @@ window.RadioControls = (() => {
       up.addEventListener("click", () => mv(-1));
       dn.addEventListener("click", () => mv(1));
       x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); ag.key = ""; renderGroups(); });
-      li.append(el("span", "", j), up, dn, x);
+      li.append(el("span", "", `${k + 1}. ${j}`), up, dn, x);
       jobs.append(li);
     });
     const add = el("select", "sm ag-addjob");
