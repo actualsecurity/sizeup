@@ -231,7 +231,7 @@ def test_the_time_window_and_matching_again_as_adsb_comes_in():
 # Invented callsigns only: XYZ1234 ("Xyzair"), a traffic call on final said twice.
 
 XIX = atc.TelephonyIndex([("XYZ", "Xyzair")])
-XYZ = plane("e17001", "XYZ1234", "N1234X", "E170", "arriving", 4.0)
+XYZ = plane("c0a001", "XYZ1234", "N1234X", "CRJ9", "arriving", 4.0)
 
 
 def heard_as(text, ix=XIX):
@@ -295,7 +295,7 @@ def rec_x(text, planes=(), before=()):
 ])
 def test_the_traffic_call_on_final_names_the_aircraft_on_adsb(text):
     a = rec_x(text, [XYZ, EJA])["aircraft"]
-    assert (a["callsign"], a["status"], a["hex"], a["type"]) == ("XYZ1234", "confirmed", "e17001", "E170")
+    assert (a["callsign"], a["status"], a["hex"], a["type"]) == ("XYZ1234", "confirmed", "c0a001", "CRJ9")
 
 
 def test_the_same_call_74_s_later_with_the_distance_lost_is_the_same_aircraft():
@@ -311,7 +311,7 @@ def test_the_same_call_74_s_later_with_the_distance_lost_is_the_same_aircraft():
     second = tk.heard({"id": "HPNTower-2", "source": CH, "start": T0 + 74, "end": T0 + 78,
                        "text": "Westchester traffic XYZ1234 mile final for runway 34 Westchester."})
     for r in (first, second):
-        assert (r["aircraft"]["callsign"], r["aircraft"]["hex"], r["aircraft"]["type"]) == ("XYZ1234", "e17001", "E170")
+        assert (r["aircraft"]["callsign"], r["aircraft"]["hex"], r["aircraft"]["type"]) == ("XYZ1234", "c0a001", "CRJ9")
         assert r["aircraft"]["status"] in ("confirmed", "probable")
     assert "XYZ1234" in T.describe(second)
 
