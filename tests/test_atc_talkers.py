@@ -261,7 +261,6 @@ def heard_as(text, ix=XIX):
     ("Xyzair 12 25 miles out", "XYZ12"),
     ("Xyzair 12 30 miles out", "XYZ12"),
     ("Xyzair 12 21 miles out", "XYZ12"),
-    ("Xyzair 1 25 miles out", "XYZ1"),
     ("Xyzair 1234 miles out", "XYZ1234"),                       # a 3-4 digit number: no distance out, the callsign's
     # a whole number before the distance or the unit's own number: the flight number's end ("JetBlue 12 34")
     ("Xyzair 12 34 mile final", "XYZ1234"),
@@ -414,6 +413,22 @@ def test_miles_out_is_a_distance_unless_an_aircraft_says_otherwise(text, planes,
         assert (a.callsign, a.confidence) == (callsign, 1.0)
         r = rec_x(text, planes)["aircraft"]
         assert (r["callsign"], r["status"]) == (callsign, "confirmed")
+
+
+X125 = plane("x125", "XYZ125")
+
+
+def test_a_one_digit_flight_before_a_check_in_distance_is_no_callsign_unless_an_aircraft_says_so():
+    text = "Xyzair 1 25 miles out"
+    m, = atc.find_mentions(T.clauses(text), XIX)
+    assert (m.alone, [a[0] for a in m.alts]) == (False, ["125"])
+    assert not atc.reading(m, []).alone and not atc.reading(m, [X1]).alone      # XYZ1 never, as before
+    assert atc.attribute(text, XIX, []) is None and atc.attribute(text, XIX, [X1]) is None
+    assert rec_x(text, [X1]) is None
+    a = atc.attribute(text, XIX, [X125])                                          # ... XYZ125 when it is around
+    assert (a.callsign, a.confidence) == ("XYZ125", 1.0)
+    assert (rec_x(text, [X125])["aircraft"]["callsign"], rec_x(text, [X125])["aircraft"]["status"]) == ("XYZ125", "confirmed")
+    assert atc.reading(m, [], known=["XYZ125"]).text == "XYZ125"                # ... or just talked
 
 
 def test_a_tail_before_a_check_in_distance():

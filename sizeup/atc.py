@@ -318,6 +318,7 @@ class Mention:
     phrase_end: int = -1
     after_number: bool = False   # a tail's end heard right after an ATC number ("runway 347 kilo zulu"): maybe its digits
     alts: tuple[tuple[str, int], ...] = ()   # other readings (suffix, end): its digits or a distance's (reading)
+    alone: bool = True           # False: no callsign unless reading() picks one of the alts ("Xyzair 1 25 miles out")
 
     @property
     def text(self) -> str:
@@ -658,7 +659,10 @@ def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
                 if codes:
                     (suf, j), *alts = _readings(words, i + n, numbers, dist, join, CALLSIGN_MAX["flight"])
                     if suf and suf[0].isdigit():     # an airline flight number starts with a digit
-                        hit = Mention(tuple(codes), suf, i, j, phrase_end=i + n, alts=tuple(alts))
+                        # a one-digit flight before a check-in's distance ("Xyzair 1 25 miles out"): none, as before,
+                        # unless an aircraft around is XYZ125
+                        alone = not (len(suf) == 1 and j in join and not join[j])
+                        hit = Mention(tuple(codes), suf, i, j, phrase_end=i + n, alts=tuple(alts), alone=alone)
                     break
         if hit:
             found.append(hit)
@@ -776,11 +780,12 @@ def reading(m: Mention, aircraft: Sequence[dict], known: Iterable[str] = ()) -> 
     """The mention as one of its readings (find_mentions: "Xyzair 12 4 mile final" is XYZ12 at 4 miles, or XYZ124):
     the one found when an aircraft on ADS-B has it exactly, else the others' shortest an aircraft on ADS-B has ("XYZ12"
     when XYZ12 and XYZ124 are both around), then the same with the callsigns just matched on the channel (known), else
-    the one found."""
+    the one found. A mention found not alone ("Xyzair 1 25 miles out") is a callsign only through one of its alts:
+    callers drop it when it comes back not alone."""
     if not m.alts:
         return m
     known = {k.upper() for k in known}
-    ranked = [(m.suffix, m.end)] + sorted(m.alts, key=lambda r: len(r[0]))
+    ranked = [(m.suffix, m.end)] * m.alone + sorted(m.alts, key=lambda r: len(r[0]))
     planes = [a for a in aircraft if _p(a) >= MIN_P]
 
     def names(suf: str) -> set[str]:
@@ -795,7 +800,7 @@ def reading(m: Mention, aircraft: Sequence[dict], known: Iterable[str] = ()) -> 
     for hit in (on_adsb, lambda suf: bool(names(suf) & known)):
         for suf, end in ranked:
             if hit(suf):
-                return replace(m, suffix=suf, end=end, alts=())
+                return replace(m, suffix=suf, end=end, alts=(), alone=True)
     return m
 
 
@@ -806,6 +811,8 @@ def attribute(text: str, index: TelephonyIndex, aircraft: Sequence[dict]) -> Att
     best: Attribution | None = None
     for m in find_mentions(text, index):
         m = reading(m, aircraft)
+        if not m.alone:
+            continue
         if m.designators:
             cands = [a for a in aircraft if (a.get("flight") or "")[:3].upper() in m.designators]
             scored = []
