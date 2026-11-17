@@ -50,7 +50,7 @@ const cad = {
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
-  closedOpen: false,         // the queue's Closed 12h section unfolded (#89; remembered: closedFold)
+  closedOpen: false,         // the queue's Closed 24h section unfolded (#89; remembered: closedFold)
   timelineOpen: false,       // the incident's Timeline unfolded (#107; remembered: timelineFold)
   commentsAll: false,        // the comments box shows every Timeline entry too (#221; remembered: commentsAll)
   ask: null,                 // {uid, status, where}: asking why (out of service / unmanned)
@@ -645,16 +645,19 @@ function renderQueue() {
   syncList($("#q-active"), all.filter((i) => i.status === "active" && i.emergency), { ...opts, empty: "None" });
   syncList($("#q-nonemerg"), all.filter((i) => (i.status === "pending" || i.status === "active") && !i.emergency).sort(byAge),
     { ...opts, empty: "None" });
-  // Closed 12h: folded to start, the count in its header; a click unfolds it (#89)
+  // Closed 24h: folded to start, the count in its header; a click unfolds it (#89). Its hours from the hub.
   const closed = all.filter((i) => i.status === "closed" || i.status === "dismissed");
   const sec = $("#q-closed-sec"), tog = $("#q-closed-toggle"), box = $("#q-closed");
+  const hrs = (cad.state && cad.state.closed_hours) || 24;
+  setText(tog.querySelector(".h2"), `Closed ${hrs}h`);
+  if (tog.title !== `Closed in the last ${hrs} hours`) tog.title = `Closed in the last ${hrs} hours`;
   sec.classList.toggle("open", cad.closedOpen);
   tog.setAttribute("aria-expanded", String(cad.closedOpen));
   setText($("#q-closed-n"), closed.length ? `· ${closed.length}` : "");
   show(box, cad.closedOpen);
   syncList(box, closed, { ...opts, empty: "None" });
 }
-// The Closed 12h fold, remembered per browser (localStorage, like the operator name): "1" open, else folded.
+// The Closed 24h fold, remembered per browser (localStorage, like the operator name): "1" open, else folded.
 function closedFold(open) {
   if (open === undefined) return store("sizeup.cad.closedOpen") === "1";
   cad.closedOpen = open;
@@ -1930,7 +1933,7 @@ function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;
   return `${fmtTime(e.at, true)} ${EVENT_KINDS[e.kind] || e.kind} · ${(text || "").replace(/\s+/g, " ").trim()}`;
 }
-// The Timeline fold, remembered per browser like Closed 12h (#107): "1" open, else folded.
+// The Timeline fold, remembered per browser like Closed 24h (#107): "1" open, else folded.
 function timelineFold(open) {
   if (open === undefined) return store("sizeup.cad.timelineOpen") === "1";
   cad.timelineOpen = open;
@@ -3537,7 +3540,7 @@ async function renderRecords() {
         const st = el("td");
         const es = eventStatus(i);
         st.append(stBadge(el("span"), es.name, es.bg));
-        const act = el("td", "act");        // a closed one: "⋯" Reopen, from here too (older than the queue's 12 h, #89)
+        const act = el("td", "act");        // a closed one: "⋯" Reopen, from here too (older than the queue's 24 h, #89)
         if (!isOpen(i) && canDo("dispatch")) act.append(UI.menu.button(`Actions: ${i.number}`, () => closedMenuItems(i), { key: `db-closed:${i.id}` }));
         tr.replaceChildren(el("td", "num", i.number), type, el("td", "loc", i.address || "—"), el("td", "t", fmtRecv(i.created_at)),
           el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", i.disposition ? nameOf("dispositions", i.disposition) : ""),

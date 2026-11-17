@@ -31,7 +31,7 @@ def test_the_timeline_starts_folded_with_its_count_and_latest_entry_and_the_note
     assert '$("#d-events-toggle").setAttribute("aria-expanded", String(open))' in js
     assert '$("#d-timeline").classList.toggle("open", open)' in js
     assert "`${fmtTime(e.at, true)} ${EVENT_KINDS[e.kind] || e.kind} · ${" in js
-    # the choice is remembered per browser, through the try/catch store() like Closed 12h
+    # the choice is remembered per browser, through the try/catch store() like Closed 24h
     assert 'store("sizeup.cad.timelineOpen")' in js and 'store("sizeup.cad.timelineOpen", open ? "1" : "0")' in js
     assert '$("#d-events-toggle").addEventListener("click", () => timelineFold(!cad.timelineOpen))' in js
     assert "cad.timelineOpen = timelineFold();" in js

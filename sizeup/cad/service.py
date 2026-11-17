@@ -46,7 +46,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -439,6 +439,7 @@ class Cad:
                 "lists": self.lists.public(),
                 "units": self.store.units(),
                 "incidents": incs,
+                "closed_hours": CLOSED_HOURS,             # the queue's "Closed 24h" header
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,
                 "run_cards_default": any(c["is_default"] for c in cards),
