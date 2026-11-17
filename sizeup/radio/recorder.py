@@ -62,6 +62,11 @@ CC_LOW = 2.0                # messages / s under this: trunk-recorder can't hold
 CC_RUN_GAP_S = 15.0         # it says so every 3 s while it lasts: no such line this long, the run is over
 CC_WARN = trunkrecd.CC_WARN         # a rate logged at or over trunk-recorder's default warn rate: it logs every one
 CC_SILENT_S = trunkrecd.CC_SILENT_S  # ... and none for this long: its decoder has stopped (#547)
+# "TG: 9211 Freq: 773.681250 MHz ... Not Recording: no source covering Freq" (colour codes around each part): a voice
+# grant on a frequency none of its dongles covers. Counted per frequency for the station metrics (sizeup/cloud/metrics.py)
+UNCOVERED_FREQ = re.compile(r"Freq:\s*(?:\x1b\[[0-9;]*m)?\s*(?P<mhz>\d{2,4}\.\d+)\s*MHz.*Not Recording: no source covering",
+                            re.I)
+UNCOVERED_MAX = 20          # distinct frequencies counted a minute (the rest: under "other")
 
 
 class ControlChannel:
@@ -88,8 +93,26 @@ class ControlChannel:
         self.retunes = 0
         self.last_retune: float | None = None
         self.all_logged = False                  # a rate at or over CC_WARN was logged: they all are (#547)
+        # since the last take_minute() (the station metrics, sizeup/cloud/metrics.py): the rate lines' n / sum / min /
+        # max, retunes, uncovered grants by frequency. Fed from the log reader's thread, taken from the metrics thread
+        self._mlock = threading.Lock()
+        self._minute = _new_minute()
+
+    def take_minute(self) -> dict:
+        """What the control channel showed since the last call: {n, sum, lo, hi, retunes, uncovered: {mhz: count}}."""
+        with self._mlock:
+            out, self._minute = self._minute, _new_minute()
+        return out
 
     def feed(self, line: str) -> None:
+        if "Not Recording" in line:
+            m = UNCOVERED_FREQ.search(line)
+            if m:
+                with self._mlock:
+                    u = self._minute["uncovered"]
+                    k = m.group("mhz") if m.group("mhz") in u or len(u) < UNCOVERED_MAX else "other"
+                    u[k] = u.get(k, 0) + 1
+            return
         if "ontrol" not in line:
             return
         now = self.clock()
@@ -99,6 +122,12 @@ class ControlChannel:
                 rate = float(m.group("rate"))
             except ValueError:
                 return
+            with self._mlock:
+                mm = self._minute
+                mm["n"] += 1
+                mm["sum"] += rate
+                mm["lo"] = rate if mm["lo"] is None else min(mm["lo"], rate)
+                mm["hi"] = rate if mm["hi"] is None else max(mm["hi"], rate)
             self.rate, self.at, self.at_mono = rate, now, self.mono()
             if rate >= CC_WARN:
                 self.all_logged = True
@@ -111,6 +140,8 @@ class ControlChannel:
         elif CC_RETUNE.search(line):
             self.retunes += 1
             self.last_retune = now
+            with self._mlock:
+                self._minute["retunes"] += 1
 
     def running(self, start: float | None) -> None:
         """The trunk-recorder that runs now started at `start` (the wall clock; None: none runs). A new one is given
@@ -132,6 +163,10 @@ class ControlChannel:
                 since = self.at if from_mono != self.run_mono else max(self.at, self.run_start)
         return {"rate": self.rate if recent else None, "low_since": self.low_since, "last_low": self.last_low,
                 "retunes": self.retunes, "last_retune": self.last_retune, "silent_since": since}
+
+
+def _new_minute() -> dict:
+    return {"n": 0, "sum": 0.0, "lo": None, "hi": None, "retunes": 0, "uncovered": {}}
 
 
 def make_system(name: str, label: str, command: str, workdir: str,

@@ -116,6 +116,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 - [Radio pre-alerts (intel)](#radio-pre-alerts-intel)
 - [Pre-plan points and site documents (#456, #459)](#pre-plan-points-and-site-documents-456-459)
 - [Station logs (CloudWatch)](#station-logs-cloudwatch)
+- [Station metrics: signal over time](#station-metrics-signal-over-time)
 - [Where the hub's CPU goes (#425)](#where-the-hubs-cpu-goes-425)
 - [The hub's storage](#the-hubs-storage)
   - [How often the replica is written](#how-often-the-replica-is-written)
@@ -3288,6 +3289,26 @@ The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the
 | Reading | Settings > Station > Logs (admins, #493): `GET /api/cad/logs?source=station\|hub\|all&unit=&level=&q=&start=&end=&limit=`, a bounded Logs Insights query, one at a time |
 | Settings | Settings > Station > Logs (section `station_logs`, audited as System): on / off, the least level, units, retention (7 days to a year), and whether the adapter's own lines are shipped (off by default) |
 | Off | `SIZEUP_LOG_SHIP=off` in the station's `station.env`, or the Settings switch |
+
+## Station metrics: signal over time
+
+So the squelch and the gain of each channel can be tuned from weeks of numbers instead of one log line (a rewire that
+raises a channel's noise floor, a splitter that costs a paging channel its quieting, a P25 system decoding fewer
+control messages a second than it should). The station measures; the hub keeps and serves. The station's log lines
+stay exactly as they were (they still go to CloudWatch); this adds numbers beside them.
+
+| | |
+|---|---|
+| Station | `sizeup/cloud/metrics.py`. A thread looks at each running channel's squelch once a second (attributes the receivers keep anyway: never a dongle) and at what changed every 5 s; each transmission's numbers are handed over as its squelch closes it (`App._segment`: a dict queued, no I/O) |
+| Records | `floor` a channel a minute: idle quieting p50 / p90 / max, the FM hiss (relative dB) or the AM floor (dBFS), seconds open, noise opens, and its squelch, dongle, gain (sent when they change and every 15 min). `tx` each transmission: kind (voice, page, burst, noise), length, quieting / carrier, at open and close, the hiss or floor, carrier dBFS and voice SNR (airband), why it ended. `cc` each P25 system a minute: decode rate (avg, low, high), retunes, grants on uncovered frequencies. `ev` what explains a shift: start, sdr, squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped |
+| Path | `POST /api/station/metrics` (gzipped, every minute, at most 2,000 records, at most 4 MB unpacked), on its own thread and connection: never the outbox, so pages and transmissions never queue behind it. Never counted as the station being seen (a second station's, or a wedged primary's, metrics don't keep "connected" up). A malformed batch is a 400, which the station drops; a hub that isn't the leader answers 503 and the batch is sent again. While the hub is away records wait in memory, at most 20,000 (about a day and a half): past that the oldest go, counted, and one `dropped` event says so when the hub is back. Taken from any authenticated station, under its own id |
+| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, max per metric) and events a year. Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
+| Durability | Not in Litestream (nothing added to a drain or a takeover). Copies in the backups bucket (`sizeup/cloud/metricsbackup.py`): `metrics/copy-0..7.sqlite.gz`, round-robin over the oldest, so the last 8 are always there and one bad copy can't take the history with it. A new leader first *settles*: it lists the copies and merges the newest (and the largest) in, or sees, from a listing that succeeded, that there are none; a failed listing or download is retried (30 s doubling to 30 min) and nothing is uploaded until it settles. Then a copy 15 min later and every 3 h (SQLite's backup API: the ingest isn't held up). Once settled its answer to each station carries `resend_from` (when the merged copy was made) and the station sends again what was acked since (kept 6 h; duplicates are ignored). Lost at worst: what the old task took after its last copy, when the station was away for that whole time or settling took longer than 6 h; never what a copy already holds. A copy that can't be read (torn, another release's schema without a key column) is skipped for the next older one; one with a column more or less merges column by column. Settings > Station > Health shows a Metrics warning when it hasn't settled in 6 h or kept no copy in 12 h. Each copy is made in memory (~80 MB at steady state, briefly) |
+| Size | Measured (tests/test_station_metrics.py): a day of 6 channels, 2 P25 systems and 2,000 transmissions is ~13,500 records, ~1.7 MB; ~50 MB at 30 days of raw and ~30 MB for a year of rollups |
+| Reading | `GET /api/cad/metrics?subject=FG1&from=&to=&res=raw\|hour\|auto&station=&kind=&metric=`: raw (a week at most) or hourly, with the events, the station's and the Settings audit's changes to that channel; no subject: the series there are. A signed-in admin only, on the hub only: closed without a verified sign-in |
+
+Why the hub and not CloudWatch metrics: the graphs and the suggested squelch (#606) need fast range queries joined with
+the Settings audit, per-transmission detail, several stations, and nothing to pay.
 
 ## Where the hub's CPU goes (#425)
 

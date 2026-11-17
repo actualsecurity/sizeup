@@ -139,7 +139,9 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                 "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
                                 "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
-                                "/api/cad/stations"}         # stations and their tokens (sizeup/cloud/stations.py)
+                                "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
+                                "/api/cad/metrics"}          # the station's signal metrics (#605; graphs: #606)
+    assert "/api/cad/metrics" not in scripts                                # (no script reads it until #606)
     assert '"/api/cad/stations"' in js("stations.js")
     assert "/api/cad/stations" not in scripts.replace(js("stations.js"), "")       # only its card reads it
     assert '"/api/cad/adapter-password"' in js("adapterpass.js")

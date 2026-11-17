@@ -519,6 +519,7 @@ class StationHealth:
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
         self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
+        self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -733,6 +734,13 @@ class StationHealth:
         if others:
             out["hints"].append({"channel": "Stations", "level": "warn",
                                  "text": f"{', '.join(sorted(others))} refused: multi-station isn't on yet"})
+        try:                                        # the station metrics' copies (#605): a warning, never an alert
+            mb = self.metrics(now) if self.metrics is not None else None
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            mb = None
+        out["metrics_backup"] = mb
+        if mb and mb.get("warn"):
+            out["hints"].append({"channel": "Metrics", "level": "warn", "text": mb["warn"]})
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
