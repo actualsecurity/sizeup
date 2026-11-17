@@ -709,8 +709,31 @@
      list on the right. .nav-on: this viewer turned it on, and the page as before is put away. The rail folds to a
      strip of view marks (.mini); under 640 px it is a sheet over the list (.sheet), behind Sources. ---- */
   .radio-view.nav-on > :is(.rv-filters, .rv-sec) { display: none; }
-  .rn { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: var(--gutter); align-items: start; min-inline-size: 0; }
+  /* the rail's own default (not --rail-w: the queue column dragged narrower must not take the rail under its minimum) */
+  .rn { display: grid; grid-template-columns: minmax(17.5rem, 20%) minmax(0, 1fr); gap: var(--gutter); align-items: start; min-inline-size: 0;
+        --rn-gap: calc(var(--gutter) + var(--s-2)); }
   .rn.mini { grid-template-columns: calc(var(--ctl) + 2 * var(--s-2)) minmax(0, 1fr); }
+  .rn > .rn-rail { grid-area: 1 / 1; }
+  .rn > .rn-main { grid-area: 1 / 2; }
+  /* the rail's width, dragged at its right edge (radio-nav.js): what this viewer chose (--rn-w), at least the layout's
+     own minimum, at most 60% of the window, the list never under 16rem; the handle: the gap itself, widened to 20 px
+     beside a side rail (neither the rail's scrollbar nor the list under it), a line in its middle while hovered,
+     focused or dragged; none while folded or a sheet */
+  .rn-size { display: none; }
+  @media (min-width: 641px) {
+    .rn:not(.mini) { column-gap: var(--rn-gap); }
+    .rn.sized:not(.mini) { grid-template-columns: max(17.5rem, min(var(--rn-w), 60vw, 100% - 16rem - var(--rn-gap))) minmax(0, 1fr); }
+    .rn:not(.mini) > .rn-size {
+      display: block; grid-area: 1 / 1; justify-self: end; align-self: stretch; position: relative; z-index: var(--z-sticky);
+      inline-size: var(--rn-gap); margin-inline-end: calc(-1 * var(--rn-gap)); cursor: col-resize; touch-action: none; pointer-events: auto;
+    }
+  }
+  .rn-size::before {
+    content: ""; position: absolute; inset-block: 0; inset-inline-start: calc(var(--rn-gap) / 2 - var(--bw));
+    inline-size: calc(2 * var(--bw)); background: transparent; transition: background-color 0.12s;
+  }
+  .rn-size:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
+  .rn-size:focus-visible { outline: none; }
   .rn-rail { display: grid; gap: var(--s-1); padding: var(--s-2); background: var(--panel); border: var(--bw) solid var(--line);
              border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: 0;
              max-block-size: calc(100vh - 2 * var(--hdr-h)); overflow-y: auto; }
@@ -786,6 +809,7 @@
   #rn-older { justify-self: center; }
   @media (max-width: 640px) {
     .rn, .rn.mini { grid-template-columns: minmax(0, 1fr); }
+    .rn > .rn-main { grid-area: 1 / 1; }
     .rn-rail { display: none; }
     .rn-rail.sheet { display: grid; position: fixed; inset: var(--hdr-h) 0 0 0; z-index: var(--z-overlay); max-block-size: none;
                      border-radius: 0; align-content: start; }
