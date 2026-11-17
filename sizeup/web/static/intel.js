@@ -276,11 +276,18 @@ window.IntelSettings = (() => {
       kids.push(head, cats, scroll);
     }
     if (!admin) for (const k of kids) for (const x of k.querySelectorAll("input, select, button")) x.disabled = true;
-    card.replaceChildren(sCardHead("Intel", s.push ? (s.enabled ? "on" : "detection off") : "pushes off",
+    // intel pushes go to their own topic only (sizeup/notify.py): none in effect, they are held (counted, not sent)
+    const pt = d.push_topic, held = !!(pt && !pt.set);
+    const pushState = held ? (pt.source === "same" ? "pushes held: intel topic refused" : pt.source === "off" ? "pushes held: intel topic off"
+      : "pushes held: no intel topic") : "on";
+    card.replaceChildren(sCardHead("Intel", s.push ? (s.enabled ? pushState : "detection off") : "pushes off",
       sHelp("Radio pre-alerts: rules over police (and later fire) transcripts. Each event goes off · shadow (counted "
         + "only) · log · map · push, the lowest of its pack, category and rule. Pushes go to the pre-alert (intel) topic "
-        + "in Push notifications, else the alerts topic. Push off: detection and the map go on. Hits and events: 7 days. "
+        + "in Push notifications only, never the alerts or status topic: none set, pushes are held (counted, not sent). "
+        + "Push off: detection and the map go on. Hits and events: 7 days. "
         + `Rule set ${d.ruleset_hash}.`)), ...kids);
+    const info = card.querySelector(".card-head > .dim.small");
+    if (info && held && s.push && s.enabled) { info.className = "warn small"; info.title = "Set one in Push notifications"; }
   }
   return { mount };
 })();
