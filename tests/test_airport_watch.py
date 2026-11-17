@@ -1246,3 +1246,56 @@ def test_a_pronoun_or_a_request_with_another_aircraft_said_is_not_its_own(text):
     w = with_air_c()
     w.atc(0, text)
     assert w.atc(40, text) is None and _abn(w, "N789EF") == set()
+
+
+# -- the aircraft layer's phases end a landing story (#664: no ground flag on a light aircraft) -------------------------
+
+def _story(reports, end="29"):
+    """An abnormal-landing story opened on the tower, then reports flown through a real PhaseMemory into tick() (as
+    the layer draws them). (index of the report that ended it, or None; its go-around flag; the phases)."""
+    from sizeup import aircraft as A
+    w, mem = World(), A.PhaseMemory(A.Procedures())
+    w.tick(0)
+    w.atc(5, "November one two three alpha bravo, we have an unsafe gear indication, request the long runway")
+    a = w.atc(20, "November one two three alpha bravo, we need to run the checklist, may divert, gear still unsafe")
+    ended, ks = None, []
+    for k, r in enumerate(reports):
+        ph = mem.phase(r, 1792003000.0 + k * 5)
+        ks.append(ph.kind)
+        if ph.kind in A.SHOWN:
+            w.plane.update({"phase": ph.kind, "dist": None if ph.dist_nm is None else round(ph.dist_nm, 1),
+                            "alt": r.alt_baro, "gs": r.gs, "vr": r.baro_rate, "lat": r.lat, "lon": r.lon})
+        w.planes = [w.plane] if ph.kind in A.SHOWN else []
+        w.tick(30 + k * 5)
+        if ended is None and w.alerts.get(a["id"])["status"] != "open":
+            ended = k
+    return ended, w.plane["hex"] in w.w._adsb_ga, ks
+
+
+@pytest.mark.parametrize("baro", [0.0, 150.0, -300.0])
+def test_a_no_flag_light_aircraft_s_story_stays_open_on_final_and_ends_on_the_rollout(baro):
+    from tests.test_aircraft_direction import final_29
+    n = len(final_29())                                          # touchdown at report n
+    reports = final_29(baro=baro, legs_after=[(5, {"gs": 45.0}), (15, {"gs": 30.0}), (30, {"gs": 15.0})])
+    ended, _, ks = _story(reports)
+    assert ended is not None and n <= ended <= n + 3 and reports[ended].gs < 50, (ended, ks)
+
+
+@pytest.mark.parametrize("down,hold,gs,baro", [(30, 15, 65.0, 0.0), (0, 20, 70.0, 0.0), (10, 15, 70.0, 0.0),
+                                               (30, 15, 65.0, -300.0), (250, 15, 70.0, -300.0), (30, 15, 65.0, 150.0)])
+def test_a_low_approach_or_a_float_then_a_climb_never_ends_the_story(down, hold, gs, baro):
+    """Level a few feet up (14 ft at 70 kt: a float) or 250 ft up on a high-pressure day (the pressure altitude reads
+    on the field), then climbing away: not landed; near, with the track's go-around."""
+    from tests.test_aircraft_direction import final_29
+    ended, ga, ks = _story(final_29(gs=gs, down_to_ft=down, baro=baro, legs_after=[(hold, {"vr": 0.0}), (120, {"vr": 700.0})]))
+    assert ended is None and ga and "ground" not in ks and ks[-1] == "near", ks
+
+
+@pytest.mark.parametrize("off", [0, 60, 100])
+def test_a_no_flag_helicopter_parked_on_the_ramp_is_hpn_ground_s(off):
+    from sizeup import aircraft as A, atc_scope
+    ac = A.Plane(hex="~h0001", lat=41.0710, lon=-73.7075, track=0.0, gs=0.0, alt_baro=round(A.ELEV_FT + off),
+                 baro_rate=0.0, category="A7")
+    ph = A.PhaseMemory(A.Procedures()).phase(ac, 1792003000.0)
+    view = [{"hex": ac.hex, "flight": "N0TEST", "phase": ph.kind, "dist": round(ph.dist_nm, 1)}]
+    assert [a["flight"] for a in atc_scope.planes_for("HPN Ground", view)] == ["N0TEST"]
