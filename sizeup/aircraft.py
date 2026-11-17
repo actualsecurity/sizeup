@@ -476,6 +476,21 @@ ARRIVING, DEPARTING, GROUND, OTHER_GROUND, LOW, OVERFLIGHT = "arriving", "depart
 NEAR = "near"                  # by HPN, arriving or departing not clear from its track (#279: PhaseMemory)
 SHOWN = (ARRIVING, DEPARTING, NEAR, GROUND, LOW)      # drawn; an emergency is drawn whatever its phase
 GROUND_RADIUS_NM = 2.0
+# On the ground with no ground flag (a light aircraft's transponder often has no squat switch): inferred only within
+# GROUND_RADIUS_NM, and only when level-ish (|rate| under GROUND_LEVEL_FPM, or no rate): a descending or climbing
+# aircraft is never on the ground by inference, however low and slow (a C172 on short final at 58 kt, -576 ft/min).
+# Then: this low (by GNSS height when sent, else the uncorrected pressure altitude) at under ROLLOUT_MAX_KT (the
+# landing roll), or taxi slow within the pressure altitude's error (a few hundred feet on the day: RUNWAY_AGL_FT for a
+# fixed-wing, LOW_SLOW_AGL_FT otherwise).
+GROUND_LEVEL_FPM = 200.0
+GROUND_AGL_FT = 50.0
+ROLLOUT_MAX_KT = 80.0
+TAXI_KT = 35.0
+# A helicopter (or anything ROTOR_LIKE) flies slow and low: on the ground by inference only when all but still, this low
+HOVER_KT = 5.0
+HOVER_AGL_FT = 15.0
+# GNSS height (readsb's alt_geom) is above the WGS84 ellipsoid; the geoid (MSL) is about 32.6 m below it at HPN (EGM96)
+GEOID_FT = -107.0
 
 
 @dataclass(frozen=True)
@@ -518,17 +533,48 @@ def lined_up(ac: Plane, end: str | None) -> bool:
     return any(_on_final(ac, agl, lat, lon, landing) is not None for e, lat, lon, landing in _runway_ends() if e == end)
 
 
+def _level(vr: float | None) -> bool:
+    return vr is None or abs(vr) < GROUND_LEVEL_FPM
+
+
+def ground_agl(ac: Plane) -> float | None:
+    """Its height over HPN's field for the on-the-ground test: by GNSS height when sent (WGS84, less the geoid), else
+    the pressure altitude (not corrected for the day's altimeter setting: off by up to a few hundred feet)."""
+    if ac.alt_geom is not None:
+        return ac.alt_geom - GEOID_FT - ELEV_FT
+    return None if ac.altitude_ft is None else ac.altitude_ft - ELEV_FT
+
+
+def _ground_by_inference(ac: Plane) -> bool:
+    """On HPN's surface with no ground flag (GROUND_LEVEL_FPM's note): level-ish and either this low below rollout
+    speed or taxi slow; a rotorcraft only when all but still and this low."""
+    gs, vr, agl = ac.gs, ac.vertical_rate, ground_agl(ac)
+    if not _level(vr) or agl is None:
+        return False
+    if ac.category in ROTOR_LIKE:
+        return gs is not None and gs < HOVER_KT and agl < HOVER_AGL_FT
+    if gs is not None and gs < TAXI_KT:                 # too slow to fly: within the pressure altitude's error
+        return agl < (RUNWAY_AGL_FT if ac.category in FIXED_WING else LOW_SLOW_AGL_FT)
+    return agl < GROUND_AGL_FT and (gs is None or gs < ROLLOUT_MAX_KT)
+
+
 def classify(ac: Plane, procedures: Procedures | None = None, ceiling_ft: float = CEILING_FT,
              radius_nm: float = RADIUS_NM) -> Phase:
-    """One snapshot's reading, shortfinal's rules unchanged. PhaseMemory.phase() confirms it from the recent reports."""
+    """One snapshot's reading: shortfinal's rules, but on the ground only by the flag or GROUND_LEVEL_FPM's inference.
+    PhaseMemory.phase() confirms it from the recent reports."""
     if not ac.has_position:
         return Phase(OVERFLIGHT)
     d = nm(ARP[0], ARP[1], ac.lat, ac.lon)
     alt = ac.altitude_ft
     agl = None if alt is None else alt - ELEV_FT
     gs, trk, vr = ac.gs, ac.track, ac.vertical_rate
-    if ac.alt_baro == "ground" or (agl is not None and agl < 150 and (gs or 0) < 60):
+    if ac.alt_baro == "ground":                         # the transponder's own air/ground state: authoritative
         return Phase(GROUND if d <= GROUND_RADIUS_NM else OTHER_GROUND, dist_nm=d)
+    if d <= GROUND_RADIUS_NM and _ground_by_inference(ac):
+        return Phase(GROUND, dist_nm=d)
+    if d > GROUND_RADIUS_NM and _level(vr) and gs is not None and gs < TAXI_KT and ac.category not in ROTOR_LIKE \
+            and agl is not None and agl < 150:
+        return Phase(OTHER_GROUND, dist_nm=d)           # taxiing elsewhere (HPN's elevation says little there)
     if procedures is not None and agl is not None and ac.category != "A7":     # A7: rotorcraft
         m = procedures.match(ac.lat, ac.lon, trk, agl, vr)
         if m is not None:
@@ -680,7 +726,8 @@ class PhaseMemory:
          INBOUND_KEEP_S (descended: seen descending while arriving). fixed: a fixed-wing category, or no category
          but flown onto a runway's final at FIXED_WING_ARRIVAL_KT (band: RUNWAY_AGL_FT, else LOW_SLOW_AGL_FT).
       1. p is other_ground, or no position: p.
-      2. p is ground (the ground flag, or under 150 ft and slow): ground; landed (arrival memory cleared).
+      2. p is ground (the ground flag, or level and low or slow on the field: classify()): ground; landed (arrival
+         memory cleared).
       3. Arrived before but never seen descending, now climbing hard (STRONG_CLIMB_FPM) and opening: the arrival
          memory is cleared (a departure misread).
       4. p is arriving, not climbing: arriving, when descending or getting closer (to the field, or along its
