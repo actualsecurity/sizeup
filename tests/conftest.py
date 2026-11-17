@@ -1,19 +1,24 @@
 import json
+import os
 import threading
 from collections import Counter
 
 import pytest
 
-# -- threads that outlive their test (#665): reported at the end, never a failure -----------------------------------
+# -- threads that outlive their test (#665): SIZEUP_TEST_THREAD_REPORT=1 reports them at the end, never a failure ---
 # A thread a test starts and leaves running goes on inside the next tests in that process (pytest-xdist runs many files
 # per worker): an earlier hub answered a station's long poll 25 s late, inside the intel replay's network guard. Each
 # test's new threads still alive when the next test starts are listed under "threads that outlived their test".
+# Opt-in: today about 1,500 (apps tests start and never stop: intel, janitor, stt, broadcast), too many for every run.
 
+_REPORT = os.environ.get("SIZEUP_TEST_THREAD_REPORT", "") not in ("", "0")
 _threads: dict = {"test": None, "before": set()}
 _leaks: dict[str, list[str]] = {}
 
 
 def _note_leaks(now: str | None) -> None:
+    if not _REPORT:
+        return
     if _threads["test"] is not None:
         left = sorted(t.name for t in threading.enumerate() if t not in _threads["before"])
         if left:
