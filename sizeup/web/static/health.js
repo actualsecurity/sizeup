@@ -13,6 +13,33 @@ const StationHealth = (() => {
   }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;
+  // #606: 24 h of each channel's idle quieting and noise opens, each P25 system's decode rate, in half hours
+  // (GET /api/cad/metrics?view=spark, the hub's, admins): a spark on its row, a click to its charts. Every SPARK_MS.
+  const SPARK_MS = 60000;
+  let sparks = null, sparkAt = 0;
+  async function loadSparks() {
+    if (Date.now() - sparkAt < SPARK_MS) return;
+    sparkAt = Date.now();
+    try {
+      const r = await fetch("/api/cad/metrics?view=spark", { headers: { Accept: "application/json" } });
+      sparks = r.ok ? Object.fromEntries(((await r.json()).subjects || []).map((x) => [x.subject, x])) : null;
+    } catch (_) { /* the next turn */ }
+  }
+  const sparkLink = (subject, ...svgs) => {
+    const a = el("a", "hl-spark");
+    a.href = `#settings/radios/signal?s=${encodeURIComponent(subject)}`;
+    a.title = `${subject}: the charts (Settings > Radios > Signal)`;
+    a.append(...svgs);
+    return a;
+  };
+  function chanSpark(label) {
+    const x = sparks && sparks[label];
+    if (!x || !window.SignalChart || !(x.level || x.opens)) return "";
+    const lastOf = (v) => [...(v || [])].reverse().find((y) => y !== null && y !== undefined);
+    const q = SignalChart.spark(x.level, { title: `${x.am ? "Floor" : "Idle q90"} 24 h · now ${lastOf(x.level) ?? "—"} ${x.am ? "dBFS" : "dB"}` });
+    const o = SignalChart.spark(x.opens, { w: 60, lo: 0, cls: "sg-sp-noise", title: `Noise opens/min 24 h · now ${lastOf(x.opens) ?? "—"}` });
+    return sparkLink(label, q, o);
+  }
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const longDur = (s) => {
@@ -125,7 +152,16 @@ const StationHealth = (() => {
     if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
-      for (const x of h.hints) box.append(el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`));
+      for (const x of h.hints) {
+        const p = el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`);
+        if (x.link) {                  // a signal shift (#606): the chart at that time
+          const a = el("a", "nav", "Chart");
+          a.href = x.link;
+          a.title = "Settings > Radios > Signal, the 24 h around it";
+          p.append(" ", a);
+        }
+        box.append(p);
+      }
       kids.push(el("h3", "hl-sub", "Hints"), box);
     }
     const so = d.sources;
@@ -206,6 +242,7 @@ const StationHealth = (() => {
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
+      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")],
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],
@@ -344,13 +381,22 @@ const StationHealth = (() => {
           cc && cc.low_since ? "hl-bad" : cc && cc.rate !== null && cc.rate !== undefined ? "hl-warn" : ""],
         ["Retunes", cc && cc.retunes ? `${cc.retunes} · last ${when(cc.last_retune)}` : ""],
       ]));
+      const ps = Object.values(sparks || {}).filter((x) => x.rate && x.rate.some((v) => v !== null));
+      if (ps.length && window.SignalChart) {
+        const row = el("div", "row hl-sparks");
+        for (const x of ps) {
+          const now = [...x.rate].reverse().find((v) => v !== null);
+          row.append(el("span", "dim small", x.subject), sparkLink(x.subject, SignalChart.spark(x.rate, { lo: 0, title: `${x.subject} decode rate 24 h · now ${now} msg/s` })));
+        }
+        kids.push(row);
+      }
     }
-    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "Restarts", "Hint"],
+    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "24 h", "Restarts", "Hint"],
       (h.channels || []).map((c) => [c.name || c.label, c.mhz || "", [c.word || c.state || "?", stateCls(c.state)],
         c.last_heard ? when(c.last_heard) : "never", c.quiet_s !== null && c.quiet_s !== undefined ? longDur(c.quiet_s) : "",
         c.usual_now_s ? longDur(c.usual_now_s) : c.typical_gap_s ? longDur(c.typical_gap_s) : (c.gaps ? `learning (${c.gaps})` : ""),
         [c.stuck ? `stuck open ${fmtDur(c.open_s)}` : c.open ? `open ${fmtDur(c.open_s)}` : "closed", c.stuck ? "hl-bad" : ""],
-        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "dim" : ""]]),
+        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", chanSpark(c.label), c.restarts || 0, [c.hint || "", c.hint ? "dim" : ""]]),
       "No channels reported"));
     kids.push(el("h3", "hl-sub", "Alert history (24 h)"), table(["Started", "Recovered", "Lasted", "Severity", "Alert", "Where", "Pushed"],
       [...d.alerts.map((a) => [when(a.since), ["not yet", "hl-bad"], longDur(serverNow() - a.since), [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"],
@@ -424,7 +470,7 @@ const StationHealth = (() => {
       const r = await fetch("/api/cad/health", { headers: { Accept: "application/json" } });
       if (r.status === 403) { again = false; say("Admins only"); }
       else if (r.status === 404 || r.status === 409) { again = false; say("On the hub only"); }
-      else if (r.ok) { last = await r.json(); render(last); }
+      else if (r.ok) { last = await r.json(); await loadSparks(); render(last); }
     } catch (_) { /* the next poll tries again */ }
     busy = false;
     if (again && isOpen()) timer = setTimeout(poll, POLL_MS);

@@ -6,17 +6,21 @@
 // With each: the noise floor (idle hiss, relative dB), the quieting now, and the short opens a minute (opens that
 // closed with nothing kept, last 5 min): many means the squelch is chattering on noise, so raise Open.
 // GET /api/cad/squelch (polled while the tab is on screen), POST /api/cad/settings/squelch.
+// Suggested (#606, admins: GET /api/cad/metrics?view=squelch, every SUGG_MS): the Open the station's own 7 days of
+// metrics suggest (sizeup/cloud/metricsinsight.py), its numbers on hover; Apply sets Open and Close (keeping the
+// hysteresis) like an edit here, audited the same. Paging: the numbers only (read-only).
 //   SquelchPanel.mount(box)   when its tab opens (settings.js)
 "use strict";
 
 window.SquelchPanel = (() => {
-  const POLL_MS = 3000;
-  const st = { box: null, timer: null, data: null, error: "", sig: "" };
+  const POLL_MS = 3000, SUGG_MS = 600000;
+  const st = { box: null, timer: null, data: null, error: "", sig: "", sugg: null, suggAt: 0 };
   const FIELDS = [["open_db", "Open", "dB", "Quieting under the idle hiss that opens the squelch (dB). Higher: fewer noise opens, weak carriers missed."],
     ["close_db", "Close", "dB", "Stays open above this quieting (dB), under Open."],
     ["min_open_s", "Min", "s", "Carrier shorter than this: nothing kept, never shown as TX (s)."]];
   const ro = () => typeof canDo === "function" && !canDo("admin");
   const num = (v, d = 1) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
+  const db = (v) => (v === null || v === undefined ? "—" : String(Math.round(Number(v) * 10) / 10));   // 13, 12.5
 
   function mount(box) {
     st.box = box;
@@ -34,9 +38,86 @@ window.SquelchPanel = (() => {
       } catch (e) {
         st.error = `Couldn't load: ${e.message}`;
       }
+      if (!ro() && Date.now() - st.suggAt > SUGG_MS) await suggest();
       render();
     }
     st.timer = setTimeout(poll, POLL_MS);
+  }
+
+  // the suggestions (admins; the hub's): {key: suggestion}; none (not the hub, not an admin): the column stays empty
+  // keyed by subject; a subject two stations report is left out (which one would Apply set?)
+  async function suggest() {
+    st.suggAt = Date.now();
+    try {
+      const r = await fetch("/api/cad/metrics?view=squelch", { headers: { Accept: "application/json" } });
+      if (!r.ok) { st.sugg = null; return; }
+      const by = {};
+      for (const c of (await r.json()).channels || []) by[c.subject] = c.subject in by ? null : c;
+      st.sugg = by;
+    } catch (_) { st.sugg = null; }
+  }
+
+  async function apply(c, s) {
+    const run = c.running || {};
+    // the server refuses it unless this is still what runs (expect): a suggestion is for the squelch it saw
+    const body = { action: "set", key: c.key, open_db: s.open, close_db: s.close,
+      expect: { open_db: run.open_db, close_db: run.close_db }, operator: typeof operator === "function" ? operator() : "" };
+    const ok = !window.UI || !UI.confirm ? true : await UI.confirm(`${c.key}: Open ${db(run.open_db)} → ${db(s.open)} dB, `
+      + `Close ${db(run.close_db)} → ${db(s.close)} dB? ${s.under ?? 0} of ${s.real ?? 0} real transmissions under ${db(s.open)} dB`
+      + (s.cut_tails ? `, ${s.cut_tails} tails cut sooner` : ""), { ok: "Apply" });
+    if (!ok) return;
+    try {
+      await api("POST", "/api/cad/settings/squelch", body);
+      st.error = "";
+    } catch (e) {
+      st.error = `${c.key}: ${e.message}`;
+    }
+    st.sig = "";
+    st.suggAt = 0;
+    poll();
+  }
+
+  // "13 dB" (and Apply for a traffic channel an admin may set), the numbers it used on hover. Never offered when in
+  // doubt: weak traffic in the noise, a raise that would miss transmissions, settling after a change, or a squelch
+  // that runs differently from what the suggestion saw
+  function suggCell(c) {
+    const td = el("td", "sq-sugg");
+    td.dataset.l = "Suggested";
+    const s = st.sugg && st.sugg[c.key];
+    if (!s) { td.textContent = "—"; return td; }
+    if (s.state !== "ok") {
+      td.append(el("span", "dim small", "not enough data"));
+      td.title = s.why || "";
+      return td;
+    }
+    const v = el("span", s.warn || s.capped ? "warn" : "", `${db(s.open)} dB`);
+    v.title = `Suggested Open ${db(s.open)} / Close ${db(s.close)} dB\n${s.why}`;
+    td.append(v);
+    const run = c.running || {};
+    const known = run.open_db !== null && run.open_db !== undefined;
+    const near = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined && Math.abs(a - b) < 0.25;
+    const same = known ? near(run.open_db, s.open) && (run.close_db == null || near(run.close_db, s.close)) : s.same;
+    const stale = known && !(near(run.open_db, s.cur_open) && (run.close_db == null || near(run.close_db, s.cur_close)));
+    if (!c.editable) {
+      td.append(" ", el("span", "dim small", "info"));
+    } else if (s.warn) {                   // (first: "= now" would hide why the running one stays)
+      const w = el("span", "warn small", s.warn.split(":")[0]);
+      w.title = s.warn;
+      td.append(" ", w);
+    } else if (same) {
+      td.append(" ", el("span", "dim small", "= now"));
+    } else if (stale) {
+      const w = el("span", "dim small", "settling");
+      w.title = `Runs Open ${db(run.open_db)} / Close ${db(run.close_db)} now; the suggestion saw ${db(s.cur_open)} / ${db(s.cur_close)}`;
+      td.append(" ", w);
+    } else if (s.apply && !ro()) {
+      const b = el("button", "mini", "Apply");
+      b.type = "button";
+      b.title = `Set ${c.key} Open ${db(s.open)} / Close ${db(s.close)} dB (audited)`;
+      b.addEventListener("click", () => apply(c, s));
+      td.append(" ", b);
+    }
+    return td;
   }
 
   async function save(key, field, raw) {
@@ -87,7 +168,7 @@ window.SquelchPanel = (() => {
     if (!st.box) return;
     const d = st.data || { channels: [], sync: {}, ranges: {} };
     const editing = st.box.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
-    const sig = JSON.stringify([d, st.error, ro()]);
+    const sig = JSON.stringify([d, st.error, ro(), st.sugg]);
     if (sig === st.sig || editing) return;          // never under someone typing
     st.sig = sig;
     const chatter = d.chatter_per_min || 2;
@@ -98,7 +179,9 @@ window.SquelchPanel = (() => {
       ["Short/min", `Opens with nothing kept, per minute (last 5 min). ${chatter}+: chattering on noise, raise Open`],
       ["Key-ups 1 h", "Transmissions kept in the last hour · bare: no speech, no ID"],
       ["PL est.", "Estimated CTCSS tone per key-up (last hour). none: no tone line heard; unsure: too short, speech or hum. "
-        + "FG1 runs PL 100: a key-up without it may be another user or interference"], ["", ""]]) {
+        + "FG1 runs PL 100: a key-up without it may be another user or interference"],
+      ...(st.sugg ? [["Suggested", "Open suggested from 7 days of this channel's idle quieting (p90 + margin), never above "
+        + "its weak real transmissions. Hover a value for the numbers. Settings > Radios > Signal: the charts"]] : []), ["", ""]]) {
       const th = el("th", "", h);
       if (tip) th.title = tip;
       head.append(th);
@@ -137,6 +220,7 @@ window.SquelchPanel = (() => {
       const pl = el("td", k && k.tones.none ? "warn" : "", k ? Object.entries(k.tones).map(([t, n]) => `${t}×${n}`).join(" · ") || "—" : "—");
       pl.dataset.l = "PL est.";
       tr.append(ku, pl);
+      if (st.sugg) tr.append(suggCell(c));
       const act = el("td");
       if (!c.editable) {
         const lk = el("span", "dim small", "Read-only");
