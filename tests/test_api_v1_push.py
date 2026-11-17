@@ -171,6 +171,56 @@ def test_a_client_that_sends_the_headers_and_no_body_cannot_hold_the_slot(rig, m
     assert out.startswith("HTTP/1.1 408") and "request_timeout" in out
 
 
+def test_a_body_that_dribbles_in_is_cut_at_the_total_deadline_not_per_byte(rig, monkeypatch):
+    """One byte every 0.3 s would restart a per-recv socket timeout for ever; the deadline is for the whole body."""
+    import socket
+    import threading
+    import time
+    from sizeup.web import server as web_server
+    monkeypatch.setattr(web_server, "V1_BODY_TIMEOUT_S", 1.0)
+    host, port = rig.url.rsplit("//", 1)[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=10)
+    s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n"
+              f"Content-Length: 60\r\n\r\n".encode())
+    sent, stop = [0], threading.Event()
+
+    def dribble():
+        while sent[0] < 60 and not stop.is_set():
+            try:
+                s.sendall(b" ")
+            except OSError:
+                return
+            sent[0] += 1
+            time.sleep(0.3)
+    t = threading.Thread(target=dribble, daemon=True)
+    t.start()
+    out = b""
+    try:
+        while b"\r\n\r\n" not in out or b"request_timeout" not in out:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            out += chunk
+    finally:
+        stop.set()
+        t.join(5)
+        s.close()
+    assert out.startswith(b"HTTP/1.1 408") and b"request_timeout" in out
+    assert sent[0] < 60                                   # cut while the dribble was still going (it would take 18 s)
+
+
+@pytest.mark.parametrize("length", ["1_0", "+5", "7 7", "\u0663", "1234567", "-1", "0x10", "1.0"])
+def test_a_content_length_that_is_not_plain_digits_is_a_400(rig, length):
+    out = raw_put(rig, f"Content-Length: {length}\r\n")
+    assert out.startswith("HTTP/1.1 400") and "bad_body" in out, length
+    assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_a_duplicate_content_length_is_a_400(rig):
+    out = raw_put(rig, "Content-Length: 5\r\nContent-Length: 5\r\n")
+    assert out.startswith("HTTP/1.1 400") and "bad_body" in out
+
+
 def test_a_put_without_a_length_or_chunked_is_a_411(rig):
     for head in ("", "Transfer-Encoding: chunked\r\n"):
         out = raw_put(rig, head)

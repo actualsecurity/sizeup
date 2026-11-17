@@ -140,7 +140,7 @@ from sizeup.api.v1.handler import BODY_METHODS, V1, BodyRefused
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
-V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not come in this long: 408 (a stalled device holds no slot)
+V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not ALL come in this long: 408 (a dribbling device holds no slot)
 # Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
 COMMON_PLACES_PATH = "/api/cad/settings/common_places"
 MAX_COMMON_PLACES_BODY = 4608 * 1024
@@ -534,8 +534,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def _v1_body(self, limit: int) -> bytes | None:
             """The body hook of /api/v1 (handler.py; every route with a body reuses it): exactly Content-Length bytes,
-            within V1_BODY_TIMEOUT_S. None: over the limit or a bad length (413). BodyRefused: no Content-Length or a
-            chunked body (411: the bytes would be left on a kept-alive connection), a client that stalls (408) or
+            ALL of them within V1_BODY_TIMEOUT_S in total (a monotonic deadline: a socket timeout alone restarts on every
+            byte, so a dribble would hold the slot for hours). None: over the limit (413). BodyRefused: no
+            Content-Length or a chunked body (411: the bytes would be left on a kept-alive connection), a Content-Length
+            that is not plain ASCII digits (at most 6) or is sent twice (400), a client that is too slow (408) or
             stops short (400). Every refusal closes the connection. DELETE may have no body at all."""
             self.close_connection = True              # until the whole body has been read, nothing is kept alive
             if self.headers.get("Transfer-Encoding"):
@@ -546,16 +548,27 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.close_connection = False
                     return b""
                 raise BodyRefused(411, "length_required", "send a Content-Length header")
-            try:
-                n = int(raw_len)
-            except ValueError:
-                return None
-            if not 0 <= n <= limit:
+            if len(self.headers.get_all("Content-Length") or ()) > 1:
+                raise BodyRefused(400, "bad_body", "send Content-Length once")
+            if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):
+                raise BodyRefused(400, "bad_body", "Content-Length must be a whole number of bytes")
+            n = int(raw_len)
+            if n > limit:
                 return None
             before = self.connection.gettimeout()
-            self.connection.settimeout(V1_BODY_TIMEOUT_S)
+            deadline = time.monotonic() + V1_BODY_TIMEOUT_S
+            parts, got = [], 0
             try:
-                data = self.rfile.read(n) if n else b""
+                while got < n:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(max(0.1, left))
+                    chunk = self.rfile.read1(n - got)       # what has come (buffered or one recv), up to what is left
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                    got += len(chunk)
             except (TimeoutError, OSError):
                 raise BodyRefused(408, "request_timeout", "the body did not arrive in time") from None
             finally:
@@ -563,10 +576,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.connection.settimeout(before)
                 except OSError:
                     pass
-            if len(data) != n:
+            if got != n:
                 raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
             self.close_connection = False
-            return data
+            return b"".join(parts)
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
