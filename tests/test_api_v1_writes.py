@@ -879,7 +879,7 @@ def test_no_address_is_in_a_write_answer_even_when_the_console_wrote_one(both):
     assert status == 409 and "@" not in json.dumps(out) and out["current"]["status"] == "closed"
 
 
-# -- review round 2: the body deadline, Content-Length, If-Match *, the note's length -----------------------------------
+# -- review round 2: the body deadline, Content-Length, If-Match *, the note's length -------------------------------
 
 def test_a_body_dribbled_a_byte_at_a_time_hits_one_total_deadline(served, monkeypatch):
     """A per-read timeout restarts on every byte: one byte every 0.5 s kept a 1 s timeout alive for ever."""
