@@ -88,6 +88,11 @@ class _Chan:
     lone: list = field(default_factory=list)    # the emergencies in those closed frames alone
     steps: int = 0                              # decode steps run for this carrier
     looked: list = field(default_factory=list)  # IDs found only with the look-back
+    pending: list = field(default_factory=list)  # a weak radio's emergency in the closed frames: alarmed on its own
+    pkey: str = ""                              # ... its alarm's key
+    ptime: float = 0.0                          # ... about when it was sent
+    heard: list = field(default_factory=list)   # the frames whose decode raised this carrier's alarm
+    prev: tuple | None = None                   # the carrier before's (alarm, its frames' ids, ended at, IDs)
     hold: tuple | None = None                   # the squelch's held key-up cut (drop start, carrier back), its frames
     n: int = 0                                  # frames of this carrier so far
     ids: list = field(default_factory=list)     # [(unit hex, emergency)] decoded live
@@ -240,6 +245,9 @@ class LiveTap:
         audio = np.concatenate(c.buf).astype(np.float32)
         c.steps += 1
         found = self._decode(c, c.buf, audio, back=c.steps <= LOOKBACK_STEPS)
+        if c.pending and not c.pkey and self.on_emergency is not None:
+            # the button, at once: its own alarm (the radio that opened the squelch may be another, with its own ID)
+            c.pkey = self.on_emergency(label, c.ptime, list(c.pending)) or "raised"
         if past:
             c.burst = not found and any(id_burst_frames(audio))     # once per carrier, at the window's end
             c.done = True
@@ -249,6 +257,7 @@ class LiveTap:
                 em = [x for x in found if x[1]]
                 again = all(x in c.looked for x in em) and self._raised(c, em)
                 c.alarm = again or self.on_emergency(label, c.since, list(found)) or "raised"
+                c.heard = (c.back if c.looked else []) + list(c.buf)
             if c.looked and self.log is not None:   # (how often a burst began before the pre-roll: #694)
                 self.log(f"{label}: radio ID decoded from before the squelch opened (look-back)")
             if c.shown:
@@ -259,15 +268,18 @@ class LiveTap:
         frames hold (up to the drop the squelch held the cut at, else up to since), if the decode that set them reached
         past that point (#672: the next radio's pre-ID decoded onto it while the squelch held the cut).
         -> (the IDs and the alarm key that move on with the next carrier)."""
-        until, step = since, FRAME / RATE
+        until, step, tail = since, FRAME / RATE, 0
         if c.hold is not None and abs(c.since + c.hold[1] * step - since) < step / 2:
             until = c.since + c.hold[0] * step          # the cut made is the one held: its drop began at g0
+            tail = 1                # (and g0 still holds the end of a burst sent to the last moment: decoded with it)
         k = round((until - c.t0) / step)
-        if self.mdc is None or k >= len(c.buf):
+        if self.mdc is None or k + tail >= len(c.buf):
             return [], ""                   # every decode was of its own frames (or none ran): as it was
         own = c.buf[:max(0, k)]
         audio = np.concatenate(own).astype(np.float32) if own else np.zeros(0, np.float32)
-        ids = self._decode(c, own, audio, back=bool(c.looked)) if len(own) >= MDC_MIN_FRAMES else []
+        lead = c.buf[:max(0, k + tail)]
+        ids = (self._decode(c, lead, np.concatenate(lead).astype(np.float32), back=bool(c.looked))
+               if len(own) >= MDC_MIN_FRAMES else [])
         moved = [x for x in c.ids if x not in ids]
         c.ids, c.done = ids, True
         c.burst = not ids and len(own) >= MDC_MIN_FRAMES and any(id_burst_frames(audio))
@@ -288,6 +300,7 @@ class LiveTap:
         frames; 0: the rise rule, no drop)."""
         n, h, shut = len(c.buf), list(c.hist), list(c.shut)
         c.back, c.old, c.before, c.weak, c.lone, c.steps, c.looked = [], 0, None, 0, [], 0, []
+        c.pending, c.pkey, c.ptime, c.heard = [], "", since, []
         if len(shut) != len(h) or (n and (len(h) < n or h[-1] is not c.buf[-1])):
             return              # (not the frames the tap saw last: never guess)
         b0 = max(0, len(h) - n - ID_LOOKBACK_FRAMES)
@@ -300,7 +313,8 @@ class LiveTap:
     def _decode(self, c: _Chan, frames: list, audio: np.ndarray, back: bool = True) -> list:
         """The IDs in these frames of the carrier (from buf[0]; audio: them joined), and with back, the IDs of a burst
         that began in its look-back and ran on into its pre-roll (#694). One that ended before that is not this
-        carrier's, unless it is an emergency the carrier before didn't raise."""
+        carrier's; an emergency wholly in frames the squelch was closed for (a weak radio's button) is held apart
+        (pending): alarmed on its own, and this carrier's only if it names no other radio (_mine)."""
         found = list(self.mdc(audio))
         if not (back and c.back):
             return found
@@ -312,17 +326,30 @@ class LiveTap:
                 c.before = list(self.mdc(np.concatenate(old).astype(np.float32))) if old else []
                 lone = old[len(old) - c.weak:] if c.weak else []
                 c.lone = [x for x in self.mdc(np.concatenate(lone).astype(np.float32)) if x[1]] if lone else []
-            more = [x for x in more if x not in c.before or (x in c.lone and not self._raised(c, [x]))]
+            lone = [x for x in more if x in c.before and x in c.lone and x not in c.pending]
+            if lone:
+                c.pending += lone
+                c.ptime = c.t0 - (len(c.back) - (c.old - c.weak)) * FRAME / RATE
+            more = [x for x in more if x not in c.before]
             c.looked += [x for x in more if x not in c.looked]
         return found + more
 
     def _raised(self, c: _Chan, em: list) -> str:
-        """The alarm the carrier just before raised for every one of these emergencies (a burst that ran across both:
-        one press, one alarm) ("" none)."""
-        if not em or not c.last or self.clock() - c.last[-1][2] > MDC_WINDOW_S:
+        """The alarm the carrier just before raised for these emergencies from the same burst: its decode read this
+        carrier's pre-roll too (a burst that ran across both: one press, one alarm). A second press is its own ("")."""
+        p = c.prev
+        if not em or p is None or self.clock() - p[2] > MDC_WINDOW_S or not all(x in p[3] for x in em):
             return ""
-        prev = c.last[-1]
-        return prev[3] if prev[3] and all(x in prev[1] for x in em) else ""
+        return p[0] if any(id(f) in p[1] for f in (c.back + c.buf)[c.old:]) else ""
+
+    def _mine(self, c: _Chan) -> tuple[list, str, bool]:
+        """The carrier's (IDs, alarm, burst flag) for its row: with the weak radio's emergency held apart when it names
+        no other radio (that radio came up strong itself)."""
+        ids, alarm, burst = list(c.ids), c.alarm, c.burst
+        if c.pending and {h for h, _e in ids} <= {h for h, _e in c.pending}:
+            ids += [x for x in c.pending if x not in ids]
+            alarm, burst = alarm or c.pkey, False
+        return ids, alarm, burst
 
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
@@ -331,7 +358,9 @@ class LiveTap:
             # every carrier, with an ID or none: a transmission's own is always the latest that began before it, so it
             # can never take the ID of an older one (a key-up with no ID seconds after one with an ID)
             now = self.clock()
-            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now, c.alarm, c.burst)]
+            ids, alarm, burst = self._mine(c)
+            c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, ids, now, alarm, burst)]
+            c.prev = (c.alarm, {id(f) for f in c.heard}, now, list(c.ids)) if c.alarm and c.heard else None
 
     def ids(self, label: str, start: float, end: float) -> list[tuple[str, bool]]:
         """The IDs decoded live from the carrier that made the transmission start..end (its pre-ID)."""
@@ -353,6 +382,6 @@ class LiveTap:
             c = self._ch.get(label)
             if c is None:
                 return None
-            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm, c.burst)] if c.open else [])
+            cands = list(c.last) + ([(c.since, *self._mine(c)[:1], 0.0, *self._mine(c)[1:])] if c.open else [])
         mine = [x for x in cands if x[0] <= start + 1.0 and x[0] < end and start - x[0] < 150]
         return max(mine, key=lambda x: x[0]) if mine else None      # the latest carrier that began before it

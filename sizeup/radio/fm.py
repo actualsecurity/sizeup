@@ -674,7 +674,7 @@ class NoiseSquelch:
         head = list(frames[:g0])
         for b0, b1 in breaks:
             head[b0:b1] = [np.zeros_like(f) for f in head[b0:b1]]
-        seg = self._segment(head, qs[:g0], start, up, breaks)
+        seg = self._segment(head, qs[:g0], start, up, breaks, after=frames[g0])
         self._begin(frames[g1], qs[g1], start + g1 * FRAME / RATE, up_db=self.close_db)
         for f, v in zip(frames[g1 + 1:], qs[g1 + 1:]):
             self._track(f, v)
@@ -734,6 +734,7 @@ class NoiseSquelch:
     def _close(self, n: int, reason: str = "") -> Segment | None:
         """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
         frames, qs, start = self._frames[:n], self._qs[:n], self._start
+        after = self._frames[n] if n < len(self._frames) else None     # (the end of a burst sent to the last moment)
         live, cont, breaks = self._live, self.continuing, [b for b in self._breaks if b[1] < n]
         piece, self._hold = self._piece, None         # (a key-up still held: never cut, one transmission as before)
         ring = self.keyups == "paging" and self._ringing(n)     # (a continuation after it: not a key-up of its own)
@@ -741,7 +742,7 @@ class NoiseSquelch:
         self._closed_n = self._n
         for g0, g1 in breaks:   # carrier gone (hiss) inside the hang: silence, as a radio's squelch would
             frames[g0:g1] = [np.zeros_like(f) for f in frames[g0:g1]]
-        seg = self._segment(frames, qs, start, self._up_db, breaks)
+        seg = self._segment(frames, qs, start, self._up_db, breaks, after)
         if seg is not None and piece is not None:
             self._mark(seg, piece)
         if seg is not None:
@@ -837,7 +838,8 @@ class NoiseSquelch:
         return True
 
     def _segment(self, frames: list[np.ndarray], qs: list[float], start: float,
-                 up_db: float | None = None, breaks: list[tuple[int, int]] = ()) -> Segment | None:
+                 up_db: float | None = None, breaks: list[tuple[int, int]] = (),
+                 after: np.ndarray | None = None) -> Segment | None:
         # Keep the carrier-up span: first to last frame fully quieted.
         # Carrier-up span: from the first fully quieted frame to the last frame still above the
         # hold-open level. (Ending at the last *fully* quieted frame cut a 60 s South 2 page at 17 s:
@@ -873,7 +875,11 @@ class NoiseSquelch:
             b = k
             while b - 1 >= lo and data[b - 1]:
                 b -= 1
-            bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
+            piece = body[max(lo, b - 1):min(hi, k + 1) + 1]
+            nxt = frames[i0 + len(body)] if i0 + len(body) < len(frames) else after
+            if k == len(body) - 1 and nxt is not None:
+                piece = piece + [nxt]       # a burst to the carrier's last moment: its end is in the frame after it
+            bursts.append(np.concatenate(piece))
             hi = b - 2
         if hi - lo + 1 < self.min_frames:
             if not bursts:

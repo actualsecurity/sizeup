@@ -886,3 +886,60 @@ def test_an_emergency_at_the_end_of_the_radio_befores_transmission_stays_its():
     a_tx = np.concatenate([quiet(0.15), voice_like(2.0) + quiet(2.0), quiet(0.1), mdc(A_ID, EMERGENCY)])
     rows, alarms = a_then(a_tx, 0.15, unit(1.5))
     assert rows[-1] == ([], "") and alarms == []
+
+
+C_ID = 0x3579                                   # invented
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("c_id", [C_ID, None, B_ID])
+def test_a_weak_radios_emergency_is_alarmed_on_its_own_and_never_names_the_radio_that_opens(c_id, kw):
+    # B's emergency while its carrier is too weak to open the squelch (7 dB), then C keys up 0.3 s later. B's button is
+    # alarmed once, at once, as B's. C's row is C's alone when C sends its own ID; with no ID (or B itself coming up
+    # strong) the key-up is B's, and its row carries the emergency and that alarm
+    weak = mdc(B_ID, EMERGENCY) + 0.4 * 10 ** (-7 / 20) * np.random.default_rng(5).standard_normal(len(mdc(B_ID)))
+    rows, alarms = tap_run(np.concatenate([idle(3.0), weak, idle(0.3, 1), unit(1.5, pre=c_id), idle(2.0, 2)]),
+                           mdc=both_ids, **kw)
+    (_s, ids_, _b, key, em), = rows
+    assert [a[1] for a in alarms] == [[(f"{B_ID:04X}", True)]]
+    assert alarms[0][0] < _s.start - 0.2                  # keyed to the burst, not to C's carrier
+    if c_id == C_ID:
+        assert ids_ == [f"{C_ID:04X}"] and key == "" and not em
+    else:
+        assert f"{B_ID:04X}" in ids_ and key == "alarm-1" and em
+
+
+@pytest.mark.parametrize("op", [POST, EMERGENCY], ids=["post-id", "emergency"])
+@pytest.mark.parametrize("gap", [0.12, 0.2, 0.3])
+@pytest.mark.parametrize("talk", [0.8, 3.0])
+def test_a_burst_sent_to_the_last_moment_stays_with_its_radio(talk, gap, op):
+    # A's post-ID / emergency is the very last thing on its carrier (no dead air after it), B keys up after the gap:
+    # the burst's last partial frame is the drop's first. A's row has A (the tap and its segment's cut burst), B's
+    # never has A's ID or A's alarm. (#690: B's row took them while A's key-up window was open; the cut burst lost its
+    # last frame and didn't decode by itself)
+    def seg_ids(seg):           # as App._mdc: each cut burst and the audio decoded on its own
+        return [h for b in [*seg.bursts, seg.audio] for h, _e in both_ids(b)]
+    a = np.concatenate([quiet(0.15), voice_like(talk) + quiet(talk), quiet(0.1), mdc(A_ID, op)])
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a, idle(gap, 1), unit(1.5, pre=B_ID), idle(2.0, 2)]),
+                           mdc=both_ids, **TRAFFIC)
+    (sa, ida, _ba, key_a, _ea), (sb, idb, _bb, key_b, _eb) = rows
+    assert f"{A_ID:04X}" in ida and f"{A_ID:04X}" in seg_ids(sa) if talk < 1.0 else f"{A_ID:04X}" in seg_ids(sa)
+    assert idb == [f"{B_ID:04X}"] and key_b == "" and f"{A_ID:04X}" not in seg_ids(sb)
+    assert key_a == ("alarm-1" if op == EMERGENCY and talk < 1.0 else "")
+    # and without a key-up after it, the segment still holds it (the long transmission's tap window is long past)
+    rows, _ = tap_run(np.concatenate([idle(3.0), a, idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    (s, *_), = rows
+    assert f"{A_ID:04X}" in seg_ids(s)
+
+
+@pytest.mark.parametrize("gap", [0.12, 0.3])
+def test_a_second_press_right_after_is_its_own_alarm(gap):
+    # A presses the button, then again 0.12 / 0.3 s after unkeying, the second burst on a slowly rising carrier (found
+    # only with the look-back): two presses, two alarms; one burst across two carriers stays one alarm
+    a = np.concatenate([quiet(0.15), mdc(A_ID, EMERGENCY), quiet(0.15), voice_like(0.5) + quiet(0.5), quiet(0.1)])
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a, idle(gap, 1), ramped(mdc(A_ID, EMERGENCY), 0.35),
+                                           idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    assert len(alarms) == 2 and rows[0][3] == "alarm-1" and rows[-1][3] == "alarm-2"
+    rows, alarms = tap_run(np.concatenate([idle(3.0), unit(0.6), idle(0.1, 1), ramped(mdc(B_ID, EMERGENCY), 0.35),
+                                           idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    assert len(alarms) == 1 and rows[-1][1] == [f"{B_ID:04X}"] and rows[-1][3] == "alarm-1"
