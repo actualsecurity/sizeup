@@ -151,7 +151,7 @@ def test_a_revoked_device_shows_one_chip_and_no_button(tmp_path):
     out = run(tmp_path, listing([dev("dv0000000000000003", "Old phone", "casey@example.org", active=False, revoked=5)]))
     row = out["rows"][0]
     assert row["buttons"] == [] and row["chips"] == ["revoked just now"] and "retired" in row["cls"]
-    assert "Revoked" not in row["text"]  # the one fact, once
+    assert "Revoked" not in row["text"] and "Seen" not in row["text"]  # the one fact, once
 
 
 def test_text_is_rendered_as_text_never_as_markup(tmp_path):

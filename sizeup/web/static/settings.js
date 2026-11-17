@@ -2042,7 +2042,7 @@ function sDevicesRender() {
       sDevices(true);
     }, "Revoke"), "ro-ok");
     li.append(...[what, el("span", "dim small", `${d.platform} ${d.app_version}`.trim()), all ? el("span", "dim small", d.email) : null,
-      el("span", "dim small", `Seen ${sAgo(d.last_seen)}`), el("span", "spacer"),
+      d.active ? el("span", "dim small", `Seen ${sAgo(d.last_seen)}`) : null, el("span", "spacer"),
       d.active ? revoke : el("span", "chip s-state retired", `revoked ${sAgo(d.revoked_at)}`)].filter(Boolean));
     ol.append(li);
   }

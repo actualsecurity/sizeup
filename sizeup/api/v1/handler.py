@@ -118,7 +118,7 @@ class V1:
                 principal = None
         # a flood of bad tokens is limited per address too
         wait = self.limits.admit(principal.device if principal else None, write=route.method != "GET", peer=peer,
-                                 public=route.need == "public", shared="signin" if route.flag else "meta")
+                                 public=route.need == "public", shared=route.bucket or "meta")
         if wait:
             return error(429, "rate_limited", "too many requests: slow down", wait)
         if route.need == "device" and principal is None:

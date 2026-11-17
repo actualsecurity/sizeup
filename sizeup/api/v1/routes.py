@@ -35,6 +35,7 @@ class Route(NamedTuple):
     need: str          # one of NEEDS (see above)
     flag: str = ""     # one of switches.FEATURES (see above)
     role: str = ""     # one of ROLES, "" for a public route (see above)
+    bucket: str = ""   # a public route's shared rate-limit bucket: "signin" (limits.py), else meta's
 
 
 class Ctx(NamedTuple):

@@ -166,11 +166,11 @@ class AuthService:
     def routes(self) -> list[Route]:
         """The sign-in's routes (their flag is `auth`; the handler's catch-all and limits are v1's)."""
         return [
-            Route("GET", "/auth/v1/authorize", self.authorize, "public", "auth"),
-            Route("POST", "/auth/v1/token", self.token, "public", "auth"),
-            Route("POST", "/auth/v1/revoke", self.revoke, "public", "auth"),
-            Route("GET", "/.well-known/apple-app-site-association", self.apple, "public", "auth"),
-            Route("GET", "/.well-known/assetlinks.json", self.android, "public", "auth"),
+            Route("GET", "/auth/v1/authorize", self.authorize, "public", "auth", "", "signin"),
+            Route("POST", "/auth/v1/token", self.token, "public", "auth", "", "signin"),
+            Route("POST", "/auth/v1/revoke", self.revoke, "public", "auth", "", "signin"),
+            Route("GET", "/.well-known/apple-app-site-association", self.apple, "public", "auth", "", "signin"),
+            Route("GET", "/.well-known/assetlinks.json", self.android, "public", "auth", "", "signin"),
         ]
 
     def _throttled(self, key: str, every: float) -> bool:
@@ -273,8 +273,13 @@ class AuthService:
     # -- for other features (push) --------------------------------------------------------------------------------
 
     def device_active(self, device_id: str) -> bool:
-        """Is this an active device of the app's sign-in?"""
-        return self.db.device_active(device_id)
+        """Is this an active device of an active person (the push sender asks)? The person is read from Settings
+        now, so a deactivation counts even if the revoke hook that follows it failed."""
+        d = self.db.device(device_id)
+        if not (d and d["active"]):
+            return False
+        p = self.people.get(d["email"])
+        return bool(p and p.active)
 
     def add_revoke_hook(self, fn: Callable[[dict], None]) -> None:
         """fn(device) is called whenever a device is revoked (an admin, the person, a logout, theft detected, a

@@ -10,8 +10,8 @@ The key id must be one the hub knows: two are valid during a rotation (the first
 
 The keys: SIZEUP_MOBILE_TOKEN_KEYS, an OPTIONAL environment variable holding `kid:secret` entries separated by commas
 or whitespace (for example `k1:<43+ random characters>`). Unset or malformed: Keys.load() returns None and the app's
-sign-in stays off (every token fails, every auth route answers 404, one log line): the hub fails closed. The variable is set
-from an SSM secret by a person (docs/mobile-api.md "Manual steps"); nothing in the task definition requires it.
+sign-in stays off (every token fails, every auth route answers 404, one log line): the hub fails closed. The variable
+is set from an SSM secret by a person (docs/mobile-api.md "Manual steps"); nothing in the task definition requires it.
 
 Refresh tokens, authorization codes: opaque, 32 random bytes (43 URL-safe characters), stored only as sha256 (a stolen
 hub.sqlite or its replica holds hashes nobody can turn back: the secret is 256 random bits, nothing to guess)."""

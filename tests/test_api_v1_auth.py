@@ -1341,6 +1341,8 @@ def test_the_signin_spec_is_valid_and_is_the_service_routes_both_ways(rig):
 def test_concurrent_enrollments_of_one_person_never_exceed_three_devices(rig, monkeypatch):
     from sizeup.api.v1 import devices as devices_mod
 
+    # (BEGIN IMMEDIATE only matters across processes: inside this one the connection's Python lock serialises the
+    # threads, which is what this test leans on; the database's own guard is the transaction.)
     monkeypatch.setattr(devices_mod, "MAX_OUTSTANDING_CODES", 50)  # 8 codes at once: the cap is tested apart
     n, grants = 8, []
     for i in range(n):
@@ -1453,10 +1455,7 @@ def test_markup_in_the_request_is_never_in_a_page_or_a_redirect(rig):
                 and b"alert(1)" not in raw
                 and "Location" not in out
             )
-    assert (
-        "&lt;" not in ""
-        and b"<script" not in rig.call("GET", "/auth/v1/authorize", "state=" + urllib.parse.quote(payload))[1]
-    )
+    assert b"<script" not in rig.call("GET", "/auth/v1/authorize", "state=" + urllib.parse.quote(payload))[1]
 
 
 def test_the_signing_key_is_in_no_log_activity_or_answer_after_a_full_lifecycle(rig):
@@ -1498,3 +1497,53 @@ def test_the_test_helper_gives_a_principal_with_a_role():
     from tests.mobile_helpers import principal
 
     assert principal("dispatcher").role == "dispatcher" and principal().role == "admin"
+
+
+def test_a_revoke_that_lands_between_a_readers_select_and_its_cache_store_is_not_hidden(rig):
+    """The race: a reader has read the active row, a revoke commits, then the reader stores its row. The generation
+    counter makes it skip the store, so the next read sees the revoke (it would have been served stale for 5 s)."""
+    t = rig.sign_in(CASEY)
+    did = t["device_id"]
+    rig.db._cache.clear()
+    real_q, fired = rig.db._q, []
+
+    def q_then_revoke(sql, params=()):
+        rows = real_q(sql, params)                       # the reader's SELECT is done: the row says active
+        if not fired:
+            fired.append(1)
+            assert rig.db.revoke(did, RIVA, "test")      # a revoke commits (and clears the cache) before the store
+        return rows
+    rig.db._q = q_then_revoke
+    first = rig.db.device(did)
+    rig.db._q = real_q
+    assert first["active"] is True                       # the reader itself saw the old row, as it must
+    assert rig.db.device(did)["active"] is False         # ... but nobody after it does
+    assert not rig.svc.device_active(did) and rig.api(token=t["access_token"])[1]["error"]["code"] == "device_revoked"
+
+
+def test_device_active_is_false_for_a_deactivated_person_even_if_the_revoke_never_ran(rig):
+    t = rig.sign_in(CASEY)
+    assert rig.svc.device_active(t["device_id"])
+    rig.dir.set(CASEY, active=0)                         # Settings deactivated them; the hook did nothing
+    assert rig.db.device(t["device_id"])["active"] is True and not rig.svc.device_active(t["device_id"])
+    del rig.dir.rows[CASEY]
+    rig.dir.rev += 1
+    assert not rig.svc.device_active(t["device_id"])
+
+
+def test_a_public_routes_bucket_is_named_on_the_route():
+    from sizeup.api.v1.routes import ROUTES
+
+    assert all(r.bucket == "" for r in ROUTES)           # meta and /api/v1 routes: the default (meta's)
+    rig = Rig()
+    assert {r.bucket for r in rig.svc.routes()} == {"signin"}
+
+
+def test_a_viewers_revoke_stays_enabled_because_settings_keeps_ro_ok():
+    from pathlib import Path
+
+    static = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
+    keep = [ln for ln in (static / "cad.js").read_text().splitlines() if ln.startswith("const RO_SETTINGS_KEEP")]
+    assert keep and ".ro-ok" in keep[0] and ".ro-ok *" in keep[0]
+    js = (static / "settings.js").read_text()
+    assert 'sBtn("Revoke", "Signs this device out of the app"' in js and '}, "Revoke"), "ro-ok")' in js

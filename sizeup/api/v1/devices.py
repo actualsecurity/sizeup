@@ -80,9 +80,11 @@ class DeviceDb:
         self._touched: dict[str, float] = {}
         self._lock = threading.Lock()
         # The resolver reads a device on EVERY request: a short cache keeps it off mdb._lock (the hub.sqlite
-        # connection's lock, shared with the station's ingest). Every write here clears it (see _tx), so a revoke is
-        # immediate; a write from another process would take up to CACHE_S (there is none: one writer, the leader).
+        # connection's lock, shared with the station's ingest). Every write here bumps a generation and clears it (see
+        # _tx; a read that began before a write never stores its row), so a revoke is immediate in this process;
+        # another task's cache (a standby across a handoff) can be at most CACHE_S stale.
         self._cache: dict[str, tuple[float, dict | None]] = {}
+        self._gen = 0
 
     # -- plumbing -------------------------------------------------------------------------------------------------
 
@@ -107,7 +109,9 @@ class DeviceDb:
             try:
                 out = work(db)
                 db.execute("COMMIT")
-                self._cache.clear()
+                with self._lock:             # after the commit: a reader that started before it never caches its row
+                    self._gen += 1
+                    self._cache.clear()
                 return out
             except BaseException:
                 if db.in_transaction:
@@ -124,18 +128,22 @@ class DeviceDb:
 
     def device(self, did: str) -> dict | None:
         now = self.clock()
-        hit = self._cache.get(did)
-        if hit and now - hit[0] < CACHE_S:
-            return dict(hit[1]) if hit[1] else None
+        with self._lock:
+            hit = self._cache.get(did)
+            if hit and now - hit[0] < CACHE_S:
+                return dict(hit[1]) if hit[1] else None
+            gen = self._gen                  # a write that lands during the read below moves it (see _tx)
         r = self._q(f"SELECT {', '.join(DEVICE_COLUMNS)} FROM mobile_devices WHERE id = ?", (did,))
         row = self._device(r[0]) if r else None
-        if len(self._cache) > 4096:
-            self._cache.clear()
-        self._cache[did] = (now, row)
+        with self._lock:
+            if gen == self._gen:             # no write since the read began: the row is not older than the database
+                if len(self._cache) > 4096:
+                    self._cache.clear()
+                self._cache[did] = (now, row)
         return dict(row) if row else None
 
     def device_active(self, did: str) -> bool:
-        """Is this an active (not revoked) device? For other features (push) that act per device."""
+        """Is this device not revoked? (The person is checked by AuthService.device_active.)"""
         d = self.device(did)
         return bool(d and d["active"])
 
