@@ -161,6 +161,8 @@ dongles plugged in:
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
   select()` (#457).
 - The only custom marker is `replay` (private captures; [below](#replay-tests)). Everything else is plain pytest.
+- `SIZEUP_TEST_THREAD_REPORT=1` lists, at the end, the threads each test left running into the next one (#665: a
+  leftover thread can trip a later test's process-wide fake). A report, never a failure.
 
 **On a Mac, keep it awake and bounded.** A sleeping Mac stalls the run. `caffeinate -i` stops that, and `perl alarm`
 is the timeout (macOS has no `timeout`):
