@@ -11,4 +11,5 @@ import json
 
 def rev_of(obj: dict) -> str:
     """16 hex digits: sha256 of the object (without its own `rev`) as canonical JSON."""
-    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
+    canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(canonical).hexdigest()[:16]

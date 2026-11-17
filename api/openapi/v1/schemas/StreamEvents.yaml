@@ -1,0 +1,33 @@
+description: >
+  The data of each SSE event of /api/v1/stream. The stream opens with `retry: 3000` (the reconnect delay in milliseconds),
+  then these events. Only `change` has an SSE `id` (`<epoch>-<seq>`); the others move no cursor.
+type: object
+properties:
+  hello:
+    type: object
+    required: [epoch, head, server_time]
+    properties:
+      epoch: {type: string}
+      head: {type: integer, minimum: 0}
+      server_time: {type: number}
+  change:
+    type: object
+    required: [seq, epoch, kind, id, rev, at, server_time]
+    allOf:
+      - $ref: ./Change.yaml
+    properties:
+      server_time: {type: number}
+  heartbeat:
+    type: object
+    required: [server_time]
+    properties:
+      server_time: {type: number}
+  close:
+    type: object
+    required: [reason, server_time]
+    properties:
+      reason:
+        type: string
+        enum: [stopping, handover, slow, epoch_changed, revoked]
+        description: Then the connection ends and the app reconnects (an unknown reason is read as stopping).
+      server_time: {type: number}

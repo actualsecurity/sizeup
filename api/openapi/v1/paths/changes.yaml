@@ -51,6 +51,44 @@ get:
         application/json:
           schema:
             $ref: ../schemas/Error.yaml
+    "400":
+      description: "Bad input: error.code is bad_cursor (after is digits only) or bad_limit."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "401":
+      description: "No signed-in device (unauthorized)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "404":
+      description: "Mobile or the stream feature is off (not_found)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "429":
+      description: "Rate limited (rate_limited)."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "503":
+      description: "Not available now: error.code is unavailable (the log is starting, there is none on this host, or no visibility is configured), busy or updating."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
     default:
       description: An error.
       content:

@@ -13,10 +13,12 @@ get:
     - name: after
       in: query
       required: false
+      description: The cursor (a seq) to resume after. Digits only.
       schema: {type: integer, minimum: 0}
     - name: epoch
       in: query
       required: false
+      description: The epoch the cursor came from; another one is a 409.
       schema: {type: string}
     - name: Last-Event-ID
       in: header
@@ -29,6 +31,8 @@ get:
       content:
         text/event-stream:
           schema: {type: string}
+          x-events:
+            $ref: ../schemas/StreamEvents.yaml
           example: "retry: 3000\n\nevent: hello\ndata: {\"epoch\":\"9f3a1c6e2b4d\",\"head\":41,\"server_time\":1767225600.5}\n\nid: 9f3a1c6e2b4d-42\nevent: change\ndata: {\"seq\":42,\"epoch\":\"9f3a1c6e2b4d\",\"kind\":\"unit\",\"id\":\"14\",\"rev\":\"c1d2e3f4a5b60789\",\"at\":1767225601.2,\"server_time\":1767225601.3}\n\n"
     "409":
       description: The epoch changed.
@@ -42,8 +46,40 @@ get:
         application/json:
           schema:
             $ref: ../schemas/Error.yaml
+    "400":
+      description: "Bad input: error.code is bad_cursor (after is digits only) or bad_limit."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "401":
+      description: "No signed-in device (unauthorized)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "404":
+      description: "Mobile or the stream feature is off (not_found)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
     "429":
-      description: Two streams are open for this device already, or the hub's cap is reached (`too_many_streams`).
+      description: "Rate limited (rate_limited), or too_many_streams: two streams are open for this device, or the hub's cap."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "503":
+      description: "Not available now: error.code is unavailable (the log is starting, there is none on this host, or no visibility is configured), busy or updating."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
       content:
         application/json:
           schema:

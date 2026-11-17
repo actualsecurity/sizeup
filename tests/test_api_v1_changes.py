@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from sizeup.api.v1.changelog import MOBILE, Change, ChangeLog, Feed, Scope, Subscription, cad_follow
+from sizeup.api.v1.changelog import Change, ChangeLog, Feed, Subscription, cad_follow
 from sizeup.api.v1.handler import V1
 from sizeup.api.v1.limits import Limits
 from sizeup.api.v1.principal import Principal
@@ -38,6 +38,11 @@ class Box:
         return Switches(lambda: self.enabled, lambda: self.flags, **kw)
 
 
+def everyone(principal, change) -> bool:
+    """A visibility predicate that shows every reference (PR 2 supplies the real one from role and sourcekeys)."""
+    return True
+
+
 class Rig:
     """A CAD, a change log in hub.sqlite beside it, and a V1 on them. The recorder is driven by hand (`settle()`) unless
     a test starts the real thing."""
@@ -50,9 +55,10 @@ class Rig:
         self.box = box or Box()
         self.fence = [True]
         self.log = ChangeLog(tmp_path / "hub.sqlite", lambda: self.fence[0], clock=self.clock)
-        kw = dict(batch_s=0.02, heartbeat_s=0.3, tick_s=0.05, fence_ok=lambda: self.fence[0])
+        kw = dict(batch_s=0.02, heartbeat_s=0.3, tick_s=0.05, fence_ok=lambda: self.fence[0], visible=everyone)
         kw.update(feed_kw)
         self.feed = Feed(self.log, cad_follow(self.store), lambda: self.box.switches().allows("stream"), **kw)
+        self.feed.bind(self.store)
         if live:
             self.feed.attach(self.store)                # (else the recorder runs when a test says: settle())
         self.v1 = V1(switches=self.box.switches(), resolver=lambda h: ME, changes=self.feed, log=lambda m: None)
@@ -91,7 +97,7 @@ def conforms(body, status, path="/api/v1/changes"):
     assert not errs, [e.message for e in errs]
 
 
-# -- rev ------------------------------------------------------------------------------------------------------------
+# -- rev -------------------------------------------------------------------
 
 def test_rev_is_the_designs_content_hash():
     obj = {"b": 2, "a": {"z": "é", "y": [1, 2.5]}}
@@ -100,7 +106,7 @@ def test_rev_is_the_designs_content_hash():
     assert rev_of({"a": 1, "b": 2}) == rev_of({"b": 2, "a": 1}) != rev_of({"a": 1, "b": 3})
 
 
-# -- the log: references, ordering, no payload ------------------------------------------------------------------------
+# -- the log: references, ordering, no payload -----------------------------
 
 def test_a_dispatched_call_is_logged_as_references_in_order(rig):
     inc = rig.incident(("E63", "L31"))
@@ -117,7 +123,8 @@ def test_a_dispatched_call_is_logged_as_references_in_order(rig):
 
 def test_an_entry_is_exactly_a_reference_and_no_payload_leaks(rig):
     rig.incident(address="17 Invented Ct")
-    rig.cad.record_traffic({"id": "FG1-9", "start": rig.clock.t, "end": rig.clock.t + 2, "source": "FG1", "talkgroup": None,
+    rig.cad.record_traffic({"id": "FG1-9", "start": rig.clock.t, "end": rig.clock.t + 2, "source": "FG1", 
+                            "talkgroup": None,
                             "unit": "", "rig": "E63", "radio_id": "6301", "text": "made-up words on the radio",
                             "status": "done"})
     rig.settle()
@@ -133,7 +140,8 @@ def test_an_entry_is_exactly_a_reference_and_no_payload_leaks(rig):
 
 
 def test_radio_traffic_is_not_a_change(rig):
-    rig.cad.record_traffic({"id": "FG1-1", "start": rig.clock.t, "end": rig.clock.t + 2, "source": "FG1", "talkgroup": None,
+    rig.cad.record_traffic({"id": "FG1-1", "start": rig.clock.t, "end": rig.clock.t + 2, "source": "FG1", 
+                            "talkgroup": None,
                             "unit": "", "rig": "", "radio_id": "", "text": "words", "status": "done"})
     assert rig.settle() == []
 
@@ -149,7 +157,8 @@ def test_a_commit_that_changes_nothing_logs_nothing_and_a_real_change_logs_once(
     e63 = uid(rig.cad, "E63")
     rig.store.set_unit_status(e63, "OL", "Lt. Ruiz")
     out = rig.settle()
-    assert {(c.kind, c.id) for c in out} == {("unit", str(e63)), ("incident", "1")}      # (its event is on the call too)
+    # (its event is on the call too)
+    assert {(c.kind, c.id) for c in out} == {("unit", str(e63)), ("incident", "1")}
     assert rig.settle() == []
 
 
@@ -165,6 +174,8 @@ def test_a_closed_call_is_logged_once_more_and_then_left_alone(rig):
 
 def test_a_deleted_object_is_a_row_with_no_rev(rig):
     rig.log.append([("unit", "999", "aaaaaaaaaaaaaaaa", False)])
+    with rig.store.tx():                                                     # (a commit, so the recorder looks)
+        pass
     out = rig.settle()                                                       # the scan does not find unit 999
     assert [(c.kind, c.id, c.rev) for c in out] == [("unit", "999", "")]
 
@@ -179,7 +190,7 @@ def test_the_cad_is_untouched_by_the_log(rig):
         "mobile_changelog", "mobile_changelog_head", "mobile_changelog_meta"}
 
 
-# -- /changes ---------------------------------------------------------------------------------------------------------
+# -- /changes --------------------------------------------------------------
 
 def test_no_cursor_answers_the_head_and_no_changes(rig):
     rig.incident()
@@ -205,7 +216,8 @@ def test_paging_by_limit_and_the_cursor(rig):
     assert seen == sorted(set(seen)) and seen[-1] == head and after == head
 
 
-@pytest.mark.parametrize("query,code", [("after=x", "bad_cursor"), ("after=-1", "bad_cursor"), ("after=1.5", "bad_cursor"),
+@pytest.mark.parametrize("query,code", [("after=x", "bad_cursor"), ("after=-1", "bad_cursor"),
+                                        ("after=1.5", "bad_cursor"),
                                         ("after=0&limit=0", "bad_limit"), ("after=0&limit=501", "bad_limit"),
                                         ("after=0&limit=abc", "bad_limit")])
 def test_bad_input_is_a_400(rig, query, code):
@@ -281,7 +293,8 @@ def test_a_cursor_resumes_across_a_handoff_without_a_resnapshot(tmp_path):
     r.feed.close()
     r.store.set_unit_status(uid(r.cad, "L31"), "RS", "Lt. Ruiz")        # a change nobody logged (the old task is gone)
     r.log = ChangeLog(tmp_path / "hub.sqlite", clock=r.clock)                 # the new task
-    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, fence_ok=None)
+    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone)
+    r.feed.bind(r.store)
     r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
     try:
         assert r.log.epoch == epoch
@@ -293,9 +306,9 @@ def test_a_cursor_resumes_across_a_handoff_without_a_resnapshot(tmp_path):
         r.close()
 
 
-# -- who sees what ------------------------------------------------------------------------------------------------------
+# -- who sees what ---------------------------------------------------------
 
-def test_a_scope_and_a_per_person_predicate_narrow_what_is_returned(tmp_path):
+def test_the_kinds_and_a_per_person_predicate_narrow_what_is_returned(tmp_path):
     r = Rig(tmp_path, visible=lambda p, c: not (p == ME and c.kind == "unit"))
     try:
         r.settle()
@@ -303,16 +316,18 @@ def test_a_scope_and_a_per_person_predicate_narrow_what_is_returned(tmp_path):
         r.settle()
         status, body, _ = r.get("after=0")
         assert body["changes"] and {c["kind"] for c in body["changes"]} == {"incident"}
-        assert body["head"] > body["cursor"] or body["cursor"] == body["head"]     # the cursor still moves past the hidden
+        # the cursor still moves past the hidden
+        assert body["cursor"] == body["head"]
         r.v1.resolver = lambda h: OTHER
         assert {c["kind"] for c in r.get("after=0")[1]["changes"]} == {"incident", "unit"}
-        r.feed.scope = Scope(frozenset({"unit"}))                                  # another consumer's scope (the machine feed)
+        # another consumer's kinds (the machine feed)
+        r.feed.kinds = frozenset({"unit"})
         assert {c["kind"] for c in r.get("after=0")[1]["changes"]} == {"unit"}
     finally:
         r.close()
 
 
-# -- switches, auth, flags --------------------------------------------------------------------------------------------
+# -- switches, auth, flags -------------------------------------------------
 
 def test_switch_off_and_flag_off_are_404_and_no_resolver_or_log_runs(rig):
     for box in (Box(enabled=False), Box(stream=False)):
@@ -354,10 +369,10 @@ def test_a_fenced_task_answers_with_the_handover_signal_and_writes_nothing(rig):
 
 def test_a_log_that_cannot_be_written_is_said_once_and_never_reaches_the_cad(tmp_path):
     said = []
-    r = Rig(tmp_path, say=said.append)
+    r = Rig(tmp_path, report=said.append)
     try:
         r.settle()
-        r.log.append = lambda e: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error"))
+        r.log.append = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error"))
         r.incident()
         assert r.settle() == [] and r.settle() == []
         assert said == ["api v1: the change log could not be written (OperationalError)"]
@@ -366,15 +381,15 @@ def test_a_log_that_cannot_be_written_is_said_once_and_never_reaches_the_cad(tmp
         r.close()
 
 
-# -- nothing at startup, nothing while the flag is off, lazily -------------------------------------------------------
+# -- nothing at startup, nothing while the flag is off, lazily -------------
 
 def test_nothing_is_made_or_written_until_the_flag_is_on(tmp_path):
     r = Rig(tmp_path, Box(stream=False), live=True)
     try:
         r.incident()
         r.store.set_unit_status(uid(r.cad, "E63"), "OL", "Lt. Ruiz")
-        time.sleep(0.2)
-        assert r.feed.recorder._thread is None                                # no thread, either
+        # no thread, either (a poke is synchronous)
+        assert r.feed.recorder._thread is None
         assert not (tmp_path / "hub.sqlite").exists()
         assert r.feed.recorder.flush() == []
         assert not (tmp_path / "hub.sqlite").exists()
@@ -382,18 +397,19 @@ def test_nothing_is_made_or_written_until_the_flag_is_on(tmp_path):
         r.close()
 
 
-def test_the_recorder_thread_writes_a_burst_of_commits_as_one_batch(tmp_path):
-    r = Rig(tmp_path, live=True, batch_s=0.5)
+def test_the_recorder_thread_writes_a_burst_of_commits_as_one_transaction(tmp_path):
+    r = Rig(tmp_path, live=True, batch_s=1.0)
     try:
+        # (the baseline's transaction is counted out)
         r.settle()
-        for _ in range(3):                                                     # a burst of commits
+        before = r.log.commits
+        # a burst of commits, well inside the window
+        for _ in range(3):
             r.store.set_unit_status(uid(r.cad, "E63"), "RS", "Lt. Ruiz")
             r.store.set_unit_status(uid(r.cad, "E63"), "OL", "Lt. Ruiz")
-        deadline = time.time() + 5
-        while time.time() < deadline and not r.log.head():
-            time.sleep(0.02)
-        time.sleep(0.2)
-        assert [(c.kind) for c in r.log.since(0, 50)] == ["unit"]               # the last state, once: not six entries
+        wait_for(lambda: r.log.head())
+        assert [c.kind for c in r.log.since(0, 50)] == ["unit"]                # the last state, once: not six entries
+        assert r.log.commits == before + 1                                     # and one transaction, not one a commit
         assert r.feed.recorder._thread.name == "v1-changelog"
     finally:
         r.close()
@@ -403,7 +419,6 @@ def test_a_cad_commit_never_waits_on_the_log(tmp_path):
     r = Rig(tmp_path, live=True)
     try:
         r.settle()
-        r.feed.recorder.scan_delay = None
         t = time.time()
         for i in range(30):
             r.store.set_unit_status(uid(r.cad, "E63"), "RS" if i % 2 else "OL", "Lt. Ruiz")
@@ -412,7 +427,7 @@ def test_a_cad_commit_never_waits_on_the_log(tmp_path):
         r.close()
 
 
-# -- the stream ---------------------------------------------------------------------------------------------------------
+# -- the stream ------------------------------------------------------------
 
 class Sse:
     """A client of /api/v1/stream over a real socket: events parsed as they come."""
@@ -470,7 +485,8 @@ def hub(tmp_path):
                     if h.get("X-Test-Device") else None)
     v1 = srv.httpd.RequestHandlerClass.v1
     v1.changes.heartbeat_s, v1.changes.tick_s, v1.changes.recorder.batch_s = 0.3, 0.05, 0.02
-    v1.changes.ready()                        # the first reader's baseline (a real app reads before it follows)
+    v1.changes.visible = everyone
+    v1.changes.recorder.prepare()             # the recorder's first run (a reader is told 503 until it has been)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     h = type("Hub", (), {})()
     h.srv, h.box, h.cad, h.v1, h.feed, h.port = srv, box, c, v1, v1.changes, srv.httpd.server_address[1]
@@ -543,7 +559,10 @@ def test_resume_across_a_handoff_the_new_task_serves_the_same_cursor(hub):
     hub.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
     wait_for(lambda: hub.head())
     epoch, head = hub.feed.log.epoch, hub.head()
-    nxt = Feed(ChangeLog(hub.path / "hub.sqlite"), cad_follow(hub.cad.store), lambda: True, tick_s=0.05)
+    nxt = Feed(ChangeLog(hub.path / "hub.sqlite"), cad_follow(hub.cad.store), lambda: True, tick_s=0.05,
+               visible=everyone)
+    nxt.bind(hub.cad.store)
+    nxt.recorder.prepare()
     v1 = V1(switches=hub.box.switches(), resolver=lambda h: ME, changes=nxt)
     status, body, _, _ = v1.respond("GET", "/api/v1/changes", f"after=0&epoch={epoch}", {})
     assert status == 200 and json.loads(body)["head"] == head
@@ -555,7 +574,7 @@ def test_resume_with_the_wrong_epoch_or_too_old_is_refused_before_the_stream_ope
     wait_for(lambda: hub.head())
     s = Sse(hub.port, headers={**dev(), "Last-Event-ID": f"badepoch0000-{hub.head()}"})
     assert s.status == 409 and json.loads(s.resp.read())["error"]["code"] == "epoch_changed"
-    s = Sse(hub.port, headers={**dev(), "Last-Event-ID": "garbage-with-dashes-x"})
+    s = Sse(hub.port, headers={**dev(), "Last-Event-ID": "garbage"})
     assert s.status == 400
     hub.feed.log.max_rows = 1
     hub.cad.create({"type": "STRU", "address": "6 Sample Way", "operator": "Lt. Ruiz"})
@@ -624,37 +643,32 @@ def test_a_stream_holds_no_request_slot_and_the_console_still_answers(hub):
         x.close()
 
 
-def test_a_slow_client_is_dropped_not_buffered(tmp_path):
-    r = Rig(tmp_path, queue=3)
+def test_a_slow_clients_queue_is_bounded_at_256_and_it_is_dropped_not_buffered(tmp_path):
+    r = Rig(tmp_path, queue=256)
     try:
         r.settle()
+        assert Feed(r.log).queue == 256                                                      # the real bound
         sub = r.feed.subscribe()
-        r.feed._notify([Change(i, "unit", "1", "a" * 16, 1.0) for i in range(1, 6)])        # more than it holds
+        r.feed._notify([Change(i, "unit", "1", "a" * 16, 1.0) for i in range(1, 257)])       # exactly the bound: kept
+        assert not sub.dropped and len(sub.get(0.01)) == 256
+        r.feed._notify([Change(i, "unit", "1", "a" * 16, 1.0) for i in range(257, 514)])     # one more than it holds
         assert sub.dropped and sub.get(0.01) == []
-        sub2 = Subscription(3)
-        sub2.put([Change(1, "unit", "1", "a" * 16, 1.0)] * 3)
-        assert not sub2.dropped and len(sub2.get(0.01)) == 3                                 # at the bound: fine
-        with r.feed._mu:
-            assert sub in r.feed._subs
     finally:
         r.close()
 
 
 def test_a_dropped_stream_ends_with_a_reason_and_resumes_from_the_database(hub):
-    hub.feed.queue = 2
     s = Sse(hub.port, headers=dev())
     s.event()
     wait_for(lambda: hub.feed._subs)
-    sub = next(iter(hub.feed._subs))
-    for i in range(1, 5):
-        hub.cad.create({"type": "STRU", "address": f"{i} Sample Way", "operator": "Lt. Ruiz"})
-    sub.put([Change(99, "unit", "1", "a" * 16, 1.0)] * 3)                        # overflows its queue of 2 (made earlier: 256)
-    sub.dropped = True
+    # a burst past 256: no manual flag
+    hub.feed._notify([Change(i, "unit", "1", "a" * 16, 1.0) for i in range(1, 300)])
     e = s.until("close")
     assert e[2]["reason"] == "slow"
     s.close()
     wait_for(lambda: hub.v1.limits.streams() == 0)
-    hub.feed.queue = 256
+    for i in range(1, 5):
+        hub.cad.create({"type": "STRU", "address": f"{i} Sample Way", "operator": "Lt. Ruiz"})
     wait_for(lambda: hub.head() >= 4)
     s2 = Sse(hub.port, headers={**dev(), "Last-Event-ID": f"{hub.feed.log.epoch}-0"})
     assert s2.status == 200
@@ -671,7 +685,7 @@ def test_a_fenced_hub_refuses_a_stream_with_the_503_and_an_open_one_ends_cleanly
     s.event()
     lease[0] = False
     e = s.until("close")
-    assert e[2]["reason"] in ("handover", "stopping")
+    assert e[2]["reason"] == "handover"
     assert s.event() is None
     s.close()
     wait_for(lambda: hub.v1.limits.streams() == 0)
@@ -768,7 +782,7 @@ def test_a_stream_that_raises_is_a_clean_end_and_gives_its_slot_back(tmp_path):
         r.close()
 
 
-# -- cost and startup ------------------------------------------------------------------------------------------------
+# -- cost and startup ------------------------------------------------------
 
 def test_the_log_costs_a_few_wal_frames_per_batch_and_startup_writes_nothing(tmp_path, capsys):
     """Litestream ships each WAL frame (a 4 KB page): the cost of N changes on a seeded hub.sqlite, in one batch and one
@@ -781,11 +795,13 @@ def test_the_log_costs_a_few_wal_frames_per_batch_and_startup_writes_nothing(tmp
     assert hub.name == "hub.sqlite"
     clock = Clock()
     log = ChangeLog(hub, clock=clock)
-    first = wal_frames_written([hub], lambda: log.epoch)["hub"]                      # the three tables, made on first use
+    # the three tables, made on first use
+    first = wal_frames_written([hub], lambda: log.epoch)["hub"]
     assert first <= 12
     log.baseline([("unit", str(i), "0" * 16) for i in range(250)])                  # a board's heads, once
     n = 100
-    batch = wal_frames_written([hub], lambda: log.append([("unit", str(i), f"{i:016x}", False) for i in range(n)]))["hub"]
+    entries = [("unit", str(i), f"{i:016x}", False) for i in range(n)]
+    batch = wal_frames_written([hub], lambda: log.append(entries))["hub"]
     rev = [0]
 
     def one_by_one():
@@ -795,11 +811,14 @@ def test_the_log_costs_a_few_wal_frames_per_batch_and_startup_writes_nothing(tmp
     single = wal_frames_written([hub], one_by_one)["hub"]
     print(f"WAL frames on a seeded hub.sqlite: first use {first}; {n} changes in one batch {batch} "
           f"({batch / n:.2f} per change); {n} changes one transaction each {single} ({single / n:.2f} per change)")
-    assert batch <= n // 4 + 6 and single <= 4 * n                                    # a batch shares pages; alone: a few
+    # a batch shares pages; alone: a few
+    assert batch <= n // 4 + 6 and single <= 4 * n
     log.close()
     assert wal_frames_written(paths, lambda: init_state(cfg))["hub"] <= STEADY_FRAMES      # a start writes nothing
-    MonitorDb(hub).db.close()                                                         # an older release opens it as before
-    assert {r[0] for r in sqlite3.connect(hub).execute("SELECT name FROM sqlite_master")} >= {"traffic", "mobile_changelog"}
+    # an older release opens it as before
+    MonitorDb(hub).db.close()
+    names = {r[0] for r in sqlite3.connect(hub).execute("SELECT name FROM sqlite_master")}
+    assert names >= {"traffic", "mobile_changelog"}
 
 
 def test_a_hub_start_with_mobile_off_makes_no_table_and_writes_nothing(tmp_path):
@@ -820,3 +839,267 @@ def test_the_server_makes_the_feed_only_for_a_file_database_and_never_for_a_stat
         assert (srv.httpd.RequestHandlerClass.v1.changes is not None) is want, (role, cd.store.path)
         srv.httpd.server_close()
     assert not (tmp_path / "hub.sqlite").exists()                  # (and a server that only started made no file)
+
+
+# -- review round 1: locks, restores, fail closed, cursors -----------------
+
+def test_a_commit_while_the_baseline_scans_never_deadlocks_the_cad(tmp_path):
+    """A request-side baseline waits for the CAD's lock inside its scan while a CAD commit (which holds that lock) pokes
+    the recorder: the poke must never wait on anything the baseline holds. Both threads must finish."""
+    r = Rig(tmp_path, live=True)
+    in_scan = threading.Event()
+    r.feed.recorder.follow = [(k, lambda heads, scan=scan: (in_scan.set(), scan(heads))[1])
+                              for k, scan in r.feed.recorder.follow]
+    anchor = r.feed.recorder.anchor                   # (its first call into the CAD is the baseline's first wait)
+    r.feed.recorder.anchor = anchor._replace(get=lambda key: (in_scan.set(), anchor.get(key))[1])
+    prepare = r.feed.recorder.prepare
+
+    def baseline():
+        prepare()
+
+    def commit():
+        with r.store.tx() as db:                      # holds the CAD's lock...
+            db.execute("UPDATE units SET notes = notes")
+            assert in_scan.wait(10)                   # ...until the baseline is about to scan...
+            time.sleep(0.3)                           # ...and is blocked on that lock; the commit's poke follows
+    a = threading.Thread(target=baseline, daemon=True)
+    b = threading.Thread(target=commit, daemon=True)
+    b.start()
+    time.sleep(0.05)
+    a.start()
+    a.join(10)
+    b.join(10)
+    try:
+        assert not a.is_alive() and not b.is_alive(), "the CAD's commit and the baseline wait on each other"
+    finally:
+        r.close()
+
+
+def make_old_copy(hub_path: Path, to: Path) -> None:
+    """A consistent copy of hub.sqlite as it is now (what a Litestream restore of an older point would give back)."""
+    src, dst = sqlite3.connect(hub_path), sqlite3.connect(to)
+    src.backup(dst)
+    src.close()
+    dst.close()
+
+
+def swap_in(new: Path, hub_path: Path) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{hub_path}{suffix}").unlink(missing_ok=True)
+    new.rename(hub_path)
+
+
+def next_task(r: Rig) -> Rig:
+    """The next task on the same CAD and the (possibly restored) hub.sqlite: a new log, feed and V1, prepared."""
+    r.log = ChangeLog(r.path / "hub.sqlite", clock=r.clock)
+    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone)
+    r.feed.bind(r.store)
+    r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
+    r.feed.recorder.prepare()
+    return r
+
+
+def test_a_restored_older_hub_database_after_a_clean_drain_is_a_new_epoch_and_an_old_cursor_is_a_409(tmp_path):
+    r = Rig(tmp_path, live=True)
+    r.feed.recorder.prepare()
+    make_old_copy(tmp_path / "hub.sqlite", tmp_path / "older.sqlite")             # the log as it was at its start
+    r.incident()
+    wait_for(lambda: r.log.head() >= 2)
+    epoch, head = r.log.epoch, r.log.head()
+    # a clean drain: the CAD is told the head
+    r.feed.close()
+    r.log.close()
+    swap_in(tmp_path / "older.sqlite", tmp_path / "hub.sqlite")                   # ...and the older database comes back
+    try:
+        next_task(r)
+        assert r.log.epoch != epoch and r.log.head() == 0
+        status, body, _ = r.get(f"after={head}&epoch={epoch}")
+        assert status == 409 and body["error"]["epoch"] == r.log.epoch
+        assert r.get(f"after=1&epoch={epoch}")[0] == 409                           # below the restored head, too
+    finally:
+        r.close()
+
+
+def test_a_different_or_older_cad_against_the_same_log_is_a_new_epoch(tmp_path):
+    r = Rig(tmp_path / "one")
+    r.settle()
+    r.incident()
+    r.settle()
+    epoch = r.log.epoch
+    r.feed.close()
+    # a CAD restored to before: lower ids, no mark
+    older = Rig(tmp_path / "two")
+    (tmp_path / "one" / "hub.sqlite").replace(tmp_path / "two" / "hub.sqlite")
+    older.log = ChangeLog(tmp_path / "two" / "hub.sqlite", clock=older.clock)
+    older.feed = Feed(older.log, cad_follow(older.store), lambda: True, visible=everyone)
+    older.feed.bind(older.store)
+    older.v1.changes = older.feed
+    older.feed.recorder.prepare()
+    try:
+        assert older.log.epoch != epoch
+        assert older.get(f"after=1&epoch={epoch}")[0] == 409
+        assert older.log.baselined() and older.get("")[1]["epoch"] == older.log.epoch
+    finally:
+        older.close()
+        r.store.shutdown()
+
+
+def test_a_log_lost_with_its_database_is_a_new_epoch_not_the_cads_old_one(tmp_path):
+    r = Rig(tmp_path)
+    r.settle()
+    epoch = r.log.epoch
+    r.feed.close()
+    swap_in_path = tmp_path / "hub.sqlite"
+    for suffix in ("", "-wal", "-shm"):
+        # restored from before the log existed
+        Path(f"{swap_in_path}{suffix}").unlink(missing_ok=True)
+    try:
+        next_task(r)
+        assert r.log.epoch != epoch and r.store.meta_get("mobile_log_epoch") == r.log.epoch
+    finally:
+        r.close()
+
+
+def test_a_clean_handoff_on_the_same_databases_keeps_the_epoch_and_the_cursor(tmp_path):
+    r = Rig(tmp_path, live=True)
+    r.feed.recorder.prepare()
+    r.incident()
+    wait_for(lambda: r.log.head() >= 2)
+    epoch, head = r.log.epoch, r.log.head()
+    r.feed.close()
+    r.log.close()
+    try:
+        next_task(r)
+        assert r.log.epoch == epoch and r.log.head() == head
+        assert r.get(f"after={head}&epoch={epoch}")[0] == 200
+    finally:
+        r.close()
+
+
+def test_the_feed_fails_closed_until_a_visibility_predicate_is_supplied(tmp_path):
+    r = Rig(tmp_path, visible=None)
+    try:
+        r.settle()
+        r.incident()
+        r.settle()
+        assert not r.feed.serving() and not r.feed.allowed(ME, Change(1, "unit", "1", "a" * 16, 1.0))
+        for path in ("/api/v1/changes", "/api/v1/stream"):
+            status, body, h = r.get("after=0", path=path)
+            assert status == 503 and body["error"]["code"] == "unavailable" and h["Retry-After"] == "30"
+        r.feed.visible = everyone
+        assert r.get("after=0")[0] == 200
+    finally:
+        r.close()
+
+
+def test_the_first_reader_is_told_to_retry_while_the_recorder_makes_the_baseline(tmp_path):
+    r = Rig(tmp_path, live=True)
+    try:
+        status, body, h = r.get("after=0")
+        assert status == 503 and body["error"]["code"] == "unavailable" and h["Retry-After"] == "1"
+        assert body["error"]["retry_after_s"] == 1                                  # the header says what the body says
+        wait_for(lambda: r.feed.recorder.ready)
+        assert r.get("")[0] == 200
+    finally:
+        r.close()
+
+
+@pytest.mark.parametrize("after", ["1_0", "+5", "%205", "5%20", "%EF%BC%95", "1e2", "0x10", "9" * 19])
+def test_a_cursor_is_digits_and_nothing_else(rig, after):
+    status, body, _ = rig.get(f"after={after}")
+    assert status == 400 and body["error"]["code"] == "bad_cursor"
+    assert rig.get(f"after=0&limit={after}")[0] == 400
+
+
+def test_limits_the_largest_and_the_default(rig):
+    rig.incident(("E63", "L31", "E60"))
+    rig.settle()
+    assert rig.get("after=0&limit=500")[0] == 200 and rig.get("after=0&limit=501")[0] == 400
+    status, body, _ = rig.get("after=0")
+    assert status == 200 and len(body["changes"]) <= 100 and body["head"] == rig.log.head()
+
+
+def test_an_open_stream_is_cut_off_when_its_device_is_no_longer_valid(hub, monkeypatch):
+    import sizeup.api.v1.stream as stream
+    monkeypatch.setattr(stream, "VALID_EVERY_S", 0.05)
+    s = Sse(hub.port, headers=dev())
+    s.event()
+    hub.feed.valid = lambda p: False                                                # revoked in Settings, mid-stream
+    assert s.until("close")[2]["reason"] == "revoked"
+    s.close()
+
+
+def test_a_long_replay_looks_at_its_stop_conditions_between_pages(rig, monkeypatch):
+    import sizeup.api.v1.stream as stream
+    monkeypatch.setattr(stream, "BACKLOG_ROWS", 1)
+    rig.incident(("E63", "L31", "E60"))
+    rig.settle()
+    assert rig.log.head() >= 4
+    status, body, _, _ = rig.v1.respond("GET", "/api/v1/stream", "after=0", {})
+    written = []
+    why = body.run(lambda raw: written.append(raw), lambda: len([w for w in written if b"event: change" in w]) >= 2)
+    body.close()
+    assert why == "stopping" and len([w for w in written if b"event: change" in w]) == 2     # not the whole log
+
+
+def test_the_recorder_reads_nothing_when_the_cad_has_not_committed(rig):
+    scans = []
+    rig.feed.recorder.follow = [(k, lambda heads, scan=scan: (scans.append(k), scan(heads))[1])
+                                for k, scan in rig.feed.recorder.follow]
+    rig.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})   # (no dispatch: no voice render)
+    rig.settle()
+    n = len(scans)
+    assert n >= 2 and rig.settle() == [] and rig.settle() == [] and len(scans) == n           # no commit: no scan
+    rig.store.set_unit_status(uid(rig.cad, "E63"), "OL", "Lt. Ruiz")
+    rig.settle()
+    assert len(scans) > n
+
+
+def test_a_prune_pass_deletes_at_most_its_batch_and_goes_on_at_the_next(tmp_path, monkeypatch):
+    import sizeup.api.v1.changelog as cl
+    monkeypatch.setattr(cl, "PRUNE_ROWS", 3)
+    log = ChangeLog(tmp_path / "hub.sqlite", max_rows=2)
+    log.append([("unit", str(i), f"{i:016x}", False) for i in range(10)])
+    got = [log.prune(force=True) for _ in range(4)]
+    assert got == [3, 3, 2, 0] and log.floor() == 8 and len(log.since(0, 100)) == 2
+    log.close()
+
+
+def test_a_closed_log_is_not_reopened(tmp_path):
+    from sizeup.api.v1.changelog import ChangeLogClosed
+    log = ChangeLog(tmp_path / "hub.sqlite")
+    assert log.head() == 0
+    log.close()
+    with pytest.raises(ChangeLogClosed):
+        log.head()
+    log.close()                                                                     # (again: nothing)
+
+
+def test_commit_listeners_never_fail_a_commit_and_a_rollback_calls_none(tmp_path):
+    c = cad(tmp_path, Clock())
+    store = c.store
+    calls = []
+
+    def boom():
+        calls.append("boom")
+        raise RuntimeError("a listener's bug")
+    store.commit_listeners.extend([boom, lambda: calls.append("second")])
+    with store.tx() as db:
+        db.execute("UPDATE units SET notes = notes")
+    assert calls == ["boom", "second"]                                              # later listeners still run
+    calls.clear()
+    with pytest.raises(ValueError):
+        with store.tx() as db:
+            db.execute("UPDATE units SET notes = notes")
+            raise ValueError("rolled back")
+    assert calls == []
+    store.commit_listeners.clear()
+    with store.tx() as db:                                                          # no listeners: nothing to call
+        db.execute("UPDATE units SET notes = notes")
+    store.shutdown()
+
+
+def test_an_unavailable_answer_carries_a_retry_after_header_that_matches_its_body(tmp_path):
+    v1 = V1(switches=Box().switches(), resolver=lambda h: ME, changes=None)
+    status, body, _, h = v1.respond("GET", "/api/v1/changes", "", {})
+    assert status == 503 and h["Retry-After"] == str(json.loads(body)["error"]["retry_after_s"]) == "30"

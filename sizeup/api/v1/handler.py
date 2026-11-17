@@ -117,7 +117,11 @@ class V1:
             status, obj = route.handler(ctx)
             if isinstance(obj, StreamPlan):                # SSE (#561): its own slot, and the server runs the body
                 return self._stream(obj, principal)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            headers = {"Cache-Control": "no-store"}
+            wait = obj.get("error", {}).get("retry_after_s") if isinstance(obj, dict) and status >= 400 else None
+            if wait is not None:                       # a handler's error: the header says what the body says
+                headers["Retry-After"] = str(wait)
+            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, headers
         finally:
             self.limits.leave()
 

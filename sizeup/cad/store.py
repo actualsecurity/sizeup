@@ -433,7 +433,9 @@ class Store:
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
         self.after_commit = self.after_rollback = self.touch = None
-        self.commit_listeners: list = []   # fn() after each committed transaction (the mobile change log, #561): never raises here
+        # fn() after each committed transaction (the mobile change log, #561); a list because `after_commit` above
+        # is Comms' single slot. Each is told with the lock held: it must only set an Event (a raising one is ignored).
+        self.commit_listeners: list = []
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here

@@ -1038,24 +1038,40 @@ One append-only log of references `(seq, epoch, kind, id, rev, at)` (no payload,
 `hub.sqlite`, behind the `stream` flag; the app's two views are the cursor read and the SSE stream
 ([mobile-api.md](mobile-api.md#34-live-updates-for-mobile)).
 
-- **Tables** (`mobile_changelog`, `_head`, `_meta`), made on the first use while the flag is on, never in `cad.sqlite`;
-  a start writes nothing and an older release opens the file as before (`tests/test_startup_writes.py`, and a test in
-  `tests/test_api_v1_changes.py`). With mobile or the flag off nothing creates them.
-- **One line into the CAD:** `Store.commit_listeners`, called after each committed transaction, only sets an Event. A
-  thread (`v1-changelog`, started by the first poke with the flag on, no timer) waits one second so a burst of commits
-  is one transaction, compares the open incidents and the board with the last rev it logged for each (`rev_of`, the
-  content hash) and appends what differs. Request threads never write; the first reader makes the baseline once.
+- **Tables** (`mobile_changelog`, `_head`, `_meta`) and the epoch are made on first use while the flag is on (by the
+  recorder's first run, never by a GET), never in `cad.sqlite`; a start writes nothing and an older release opens the file
+  as before (`tests/test_startup_writes.py`, and a test in `tests/test_api_v1_changes.py`). With mobile or the flag off
+  nothing creates them. The one write outside the recorder's batches: the CAD's `meta` gets `mobile_log_epoch` (the epoch
+  the log runs under) once and `mobile_log_clean` (epoch and head) at each clean drain: two small rows, not CAD records.
+- **One line into the CAD:** `Store.commit_listeners`, called after each committed transaction with the CAD's lock held;
+  it only sets an Event. A thread (`v1-changelog`, started by the first poke with the flag on, no timer) waits one second
+  so a burst of commits is one transaction, compares the open incidents and the board with the last rev it logged for each
+  (`rev_of`, the content hash) and appends what differs. It skips a flush when the CAD has not committed since the last.
+  Request threads never write. The first reader is told 503 `unavailable` + `Retry-After: 1` until the recorder has made
+  the baseline (the heads of what is on the board), so the first commit after the flag went on is a change. The lock
+  order (a poke never waits on a lock a request thread holds across a CAD call) is in `changelog.py`'s docstring.
 - **Epoch and cursor are in the database**, so a reconnect after a handoff resumes: the new task reads the same
   epoch and seq, and its first batch finds what changed meanwhile through the heads. A drain writes the last batch.
   A fenced task answers the existing 503 and writes nothing.
-- **Retention:** 7 days and at most 100,000 rows, pruned hourly; an older cursor is a 410 (`oldest`), another
-  epoch (or a cursor ahead of the log) a 409. Reset: `ChangeLog.reset()` (new epoch; every app resnapshots).
+- **After a restore, reset.** The epoch lives in `hub.sqlite`, so restoring an older copy brings the old epoch back. The log
+  checks itself against the CAD at its first run and resets (a new epoch: every app gets a 409 and resnapshots) when the
+  CAD is older than the log has seen, names another epoch, or a clean drain reached a head the log has not. A `hub.sqlite`
+  restored to a point after the last clean drain cannot be told from a crash. **Runbook: after restoring `hub.sqlite` or
+  `cad.sqlite` from Litestream, call `ChangeLog.reset()`** (or delete the `mobile_changelog*` tables with the hub stopped:
+  the next run makes a new epoch).
+- **Retention:** 7 days and at most 100,000 rows, pruned hourly in passes of 5,000 rows; an older cursor is a 410 (`oldest`),
+  another epoch (or a cursor ahead of the log) a 409.
 - **Streams:** 2 per device and `[mobile] max_streams` overall (429 `too_many_streams`), 15 s heartbeats, a bounded queue
-  per stream (a slow client is closed and resumes from the database), a 10 s write timeout, and each ends on a drain, a
-  lost lease, the flag or the switch going off, an epoch change or the client closing.
-- **Cost** (measured on a seeded `hub.sqlite`, `tests/test_api_v1_changes.py`): 100 changes in one batch are 4 WAL
-  frames; one transaction per change about 3 frames each (the log page, the head page, the sequence), and the batch window
-  makes the usual case the first. First use is about 10 frames (three small tables).
+  per stream (256: a slow client is closed and resumes from the database), a 10 s write timeout, and each ends on a drain, a
+  lost lease, the flag or the switch going off, an epoch change, a revoked device or the client closing. A stream is in the
+  server's `gate.inflight` until it ends; the drain closes the feed first, so `wait_idle` does not run to its timeout.
+- **Cost** (`tests/test_api_v1_changes.py`, seeded `hub.sqlite`): WAL frames 100 changes in one batch 4, one transaction per
+  change about 3 each, first use about 10. Read cost: each flush reads the open incidents and the board (two scans, hashed
+  outside the CAD's lock) and is skipped when the CAD has not committed. **Needs a soak and CPU check on the real hub
+  (#446) before the `stream` flag is turned on.**
+- **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view, `meta.epoch` (still null), and
+  per-person filtering: `Feed.visible` fails closed (503 `unavailable`), so PR 2's resolver must supply it (role and
+  sourcekeys) and `valid(principal)` before the `stream` flag is turned on.
 - **Off / undo:** the `stream` flag (off in production: no source wires it yet). The tables may stay.
 
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub

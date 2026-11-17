@@ -123,6 +123,8 @@ import json
 import mimetypes
 import re
 import secrets
+import select
+import socket
 import threading
 import time
 import zlib
@@ -135,7 +137,7 @@ from urllib.parse import parse_qsl, urlsplit
 from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
-from sizeup.api.v1.changelog import ChangeLog, Feed, cad_follow
+from sizeup.api.v1.changelog import STREAM_WRITE_S, ChangeLog, Feed, cad_follow
 from sizeup.api.v1.handler import V1
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -447,7 +449,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         v1.changes = Feed(ChangeLog(Path(cad.cad.store.path).parent / "hub.sqlite",
                                     gate.fence.ok if gate.fence is not None else None),
                           cad_follow(cad.cad.store), lambda: v1.switches.allows("stream"),
-                          fence_ok=gate.fence.ok if gate.fence is not None else None, say=access_log)
+                          fence_ok=gate.fence.ok if gate.fence is not None else None, report=access_log)
         v1.changes.attach(cad.cad.store)
 
     class Handler(BaseHTTPRequestHandler):
@@ -559,9 +561,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 def write(raw: bytes) -> None:
                     self.wfile.write(raw)
                     self.wfile.flush()
-                def gone() -> bool:          # the app closed its end: its slot is free at once, not at the next heartbeat
-                    import select
-                    import socket
+
+                # the app closed its end: its slot is free at once, not at the next heartbeat
+                def gone() -> bool:
                     try:
                         if not select.select([self.connection], [], [], 0)[0]:
                             return False
@@ -570,9 +572,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         return False
                     except (OSError, ValueError):
                         return True
+
+                def stop() -> bool:          # (a lost lease is the body's own check: its close reason is "handover")
+                    return gate.draining.is_set() or gone()
                 try:
-                    body.run(write, lambda: gate.draining.is_set() or (gate.fence is not None and not gate.fence.ok())
-                             or gone())
+                    body.run(write, stop)
                 except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
                     pass
             finally:
@@ -1338,7 +1342,6 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     return Handler
 
 
-STREAM_WRITE_S = 10.0   # /api/v1/stream: a client that takes no bytes for this long is dropped (it resumes by id)
 ADAPTER_PASSWORD = "/api/cad/adapter-password"
 ADAPTER_PASSWORD_BODY = 65536   # two values of at most 4 KB each, JSON-escaped
 PROFILE_WAIT_S = 60.0   # POST /api/cad/perf/profile answers with the profile up to this long; longer: 202, then GET

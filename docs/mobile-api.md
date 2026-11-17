@@ -368,7 +368,7 @@ declared type. So: **foreground stream + background push + cursor resume.**
 
 | State | Mechanism |
 |---|---|
-| App in foreground | `GET /api/v1/stream?after=<cursor>` (SSE). Typed events `{kind: incident\|unit\|alarm\|prealert\|…, id, rev, op: upsert\|delete, data}`, each with `id: <cursor>`; resume with `Last-Event-ID`. A heartbeat comment every 15 s (not 1 s state pushes). Filtered per principal (role, sourcekeys) |
+| App in foreground | `GET /api/v1/stream?after=<seq>&epoch=<e>` (SSE). Events `change` = a reference `{seq, epoch, kind: incident\|unit, id, rev, at, server_time}` (no payload, no `op`: a deletion is an empty `rev`), each with `id: <epoch>-<seq>`; resume with `Last-Event-ID`. An `event: heartbeat` every 15 s (not 1 s state pushes). Filtered per principal (kinds, and a visibility predicate PR 2 supplies: until then the feed is not served) |
 | Backgrounded or killed | APNs/FCM ([§4](#4-pushes-to-the-app)). The push carries a reference (kind, id), not the object |
 | Back to foreground | `GET /api/v1/changes?after=<cursor>&limit=500`, then reopen the stream. `410 {oldest}` means the cursor is too old: resnapshot with `GET /api/v1/snapshot` (active incidents, units, open alarms) |
 | Bad network | The same `changes` endpoint as a long poll (`&wait=25`, under Cloudflare's 100 s) |
@@ -379,8 +379,8 @@ UI blob, the same for every viewer; and it pushes every second even when idle, w
 **Why not WebSockets:** nothing needs client-to-server streaming, SSE already passes the Cloudflare Tunnel in
 production, and native SSE clients are small (URLSession bytes, OkHttp-sse).
 
-**One change log** (`sizeup/changes.py`), built once and shared with the planned `/api/feed/v1`: references
-`(seq, at, kind, id)` hydrated at read time, an epoch, 7-day retention, 410 when a cursor is too old, 409 on an epoch
+**One change log** (`sizeup/api/v1/changelog.py`), built once and shared with the planned `/api/feed/v1`: references
+`(seq, epoch, kind, id, rev, at)` hydrated at read time, an epoch, 7-day retention, 410 when a cursor is too old, 409 on an epoch
 change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/events`, `/api/v1/changes` and
 `/api/v1/stream` are three views of it with different scopes and hydrators.
 
@@ -389,9 +389,15 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
 - **As built (#561):** `sizeup/api/v1/changelog.py` (the log, the recorder, the feed), `changes.py`, `stream.py`, `rev.py`.
   The log lives in `hub.sqlite`; kinds so far are `incident` and `unit` (the radio log, alarms and positions are not
   logged); a deletion is a row with an empty `rev`. `410 cursor_too_old` carries `oldest` (the smallest cursor still
-  served), `409 epoch_changed` the new `epoch`. SSE ids are `<epoch>-<seq>`, so `Last-Event-ID` carries the epoch.
-  Events: `hello`, `change`, `heartbeat`, `close`. Not built: the `wait=` long poll, `/snapshot` and the machine feed's
-  view (a `Scope` per consumer is in place for it). Details: [cloud.md](cloud.md#the-apps-change-log-apiv1changes-and-apiv1stream-561).
+  served), `409 epoch_changed` the new `epoch`. Events: `hello`, `change`, `heartbeat`, `close`.
+  **DEVIATION from the design:** the SSE `id` and `Last-Event-ID` carry `<epoch>-<seq>` (not a bare cursor), so
+  EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works.
+  `rev` is a hash of the whole row: a confirmation oracle only for a row someone could already guess, no practical attack.
+  **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view (the log takes kinds per
+  consumer for it), `meta.epoch` (still null), and per-person filtering: `Feed.visible` fails closed, so `changes` and
+  `stream` answer 503 `unavailable` until PR 2's resolver supplies a predicate from the person's role and sourcekeys (and
+  a `valid(principal)` check that cuts a revoked device off mid-stream). Both must be wired before the `stream` flag is
+  turned on. Details: [cloud.md](cloud.md#the-apps-change-log-apiv1changes-and-apiv1stream-561).
 - **Unverified:** which sources besides `radio_changes.seq` already have a monotonic sequence.
 
 ---
