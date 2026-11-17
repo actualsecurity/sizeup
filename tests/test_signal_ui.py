@@ -308,3 +308,46 @@ const hm = (t) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York
 console.log(JSON.stringify(ticks.map(hm)));
 """, {"now": NOW, "fetch": {}})
     assert len(out) == 7 and set(out) == {"00:00"}                    # the console's midnights, not UTC's
+
+
+# -- the re-review's follow-ups (#686) --------------------------------------------------------------------------------
+
+def test_apply_sends_the_squelch_the_suggestion_was_for_not_what_the_card_shows(tmp_path):
+    data = squelch_data()
+    data["squelch"]["channels"][0]["running"] = {"open_db": 10.1, "close_db": 6.1, "min_open_s": 0.3}   # (near: Apply)
+    out = run(tmp_path, SQUELCH, data)
+    assert out["applies"] == 1
+    # the suggestion's own cur_open / cur_close: the server compares them with what runs and refuses 10.1 / 6.1 itself
+    assert out["posted"][0][1]["expect"] == {"open_db": 10, "close_db": 6}
+
+
+def test_a_subject_two_stations_report_shows_the_one_with_data_in_its_window(tmp_path):
+    data = squelch_data()
+    chans = data["fetch"]["/api/cad/metrics?view=squelch"]["body"]["channels"]
+    old = mi.suggest([], [], mi.DEFAULTS, NOW)                            # an old station id: no floor data in 7 days
+    chans.append({**old, "subject": "FG1", "station": "old-id"})
+    out = run(tmp_path, SQUELCH, data)
+    assert out["cells"][0][0][0] == "13 dB Apply"                       # not blanked by the old id
+    chans.append({**chans[0], "station": "pcfd-annex"})                 # two that both have data: which would Apply set?
+    out = run(tmp_path, SQUELCH, data)
+    assert out["cells"][0][0][0] == "—"
+
+
+TICKS = r"""
+load("signal-chart.js");
+const fmt = (t) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(t * 1000));
+console.log(JSON.stringify(data.spans.map(([a, b, n]) => window.SignalChart.timeTicks(a, b, n).map(fmt))));
+"""
+
+
+def test_ticks_stay_on_local_midnights_and_hours_across_a_dst_change(tmp_path):
+    fall, spring = 1793509200, 1772953200        # 2026-11-01 05:00 UTC (01:00 EST again), 2026-03-08 07:00 UTC (03:00 EDT)
+    spans = [[fall - 4 * DAY, fall + 3 * DAY, 7], [spring - 3 * DAY, spring + 4 * DAY, 7],
+             [fall - 12 * 3600, fall + 12 * 3600, 8], [spring - 12 * 3600, spring + 12 * 3600, 8]]
+    week_f, week_s, day_f, day_s = run(tmp_path, TICKS, {"now": NOW, "fetch": {}, "spans": spans})
+    for week, first in ((week_f, "Oct 29"), (week_s, "Mar 6")):
+        assert len(week) == 7 and {w.split(", ")[1] for w in week} == {"00:00"}      # never 23:00 after the change
+        assert week[0].startswith(first) and len({w.split(", ")[0] for w in week}) == 7   # a date each, none twice
+    for day in (day_f, day_s):
+        assert all(w.split(", ")[1].endswith(":00") and int(w.split(", ")[1][:2]) % 3 == 0 for w in day), day
