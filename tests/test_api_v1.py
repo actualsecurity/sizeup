@@ -21,7 +21,8 @@ from sizeup.cloud.access import Identity
 from sizeup.web.server import WebServer
 from tests import openapi_spec as oas
 
-ON = Switches(lambda: True)           # [mobile] enabled: the master switch on (the safeguards' tests: test_api_v1_safeguards.py)
+# [mobile] enabled: the master switch on (the safeguards' tests are in test_api_v1_safeguards.py)
+ON = Switches(lambda: True)
 DOC = oas.spec()
 PKG = Path(__file__).resolve().parent.parent / "sizeup" / "api"
 

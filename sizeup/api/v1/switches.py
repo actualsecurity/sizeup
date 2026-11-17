@@ -1,9 +1,12 @@
 """The switches of /api/v1 (#619, docs/mobile-api.md "Sharing the production hub"): the master switch ([mobile]
-enabled, off by default) and one flag per feature. Both are read on every request, so a change needs no deploy of
-the app. Nothing here reads a database or a key: the hub's config says whether mobile is on."""
+enabled, off by default) and one flag per feature. Both are checked on every request. Nothing here reads a database
+or a key: the hub's config says whether mobile is on, and it is read at start, so a change needs a restart (no app
+release). The flags are code-driven until a feature's pull request wires a source for them."""
 from __future__ import annotations
 
 from typing import Callable, Mapping
+
+DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS = 8, 16      # v1's share of concurrent requests and open streams
 
 # The app's feature flags, as `meta.features` reports them. Each stays off until its pull request is proven: the
 # route table names the one a route needs (routes.Route.flag).
@@ -16,7 +19,7 @@ class Switches:
 
     def __init__(self, enabled: Callable[[], bool] | None = None,
                  features: Callable[[], Mapping[str, bool]] | None = None,
-                 max_requests: int = 8, max_streams: int = 16):
+                 max_requests: int = DEFAULT_MAX_REQUESTS, max_streams: int = DEFAULT_MAX_STREAMS):
         self._enabled = enabled or (lambda: False)
         self._features = features or (lambda: {})
         self.max_requests, self.max_streams = max_requests, max_streams

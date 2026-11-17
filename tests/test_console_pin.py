@@ -6,7 +6,11 @@ any mobile change. A later mobile change that alters one of them fails here; an 
 
 Routes are the string literals in the three files that serve them (the server's if-chain, the CAD's and the station
 hub's tables), so a route added, removed or renamed shows up too. The responses come from a real hub run in this
-process with an empty database (nothing here is a real incident), the clock-dependent parts normalised."""
+process with an empty database (nothing here is a real incident), the clock-dependent parts normalised.
+
+The one intended console change of the mobile work (#619) is the last sample: an /api/cad request carrying
+`Authorization: Bearer <fake>` is a 401 in the console's JSON shape (a device token is not for the console). It was
+added to the pin alone: the other eight samples and the route tables are byte-identical to what main produced."""
 from __future__ import annotations
 
 import ast
@@ -28,7 +32,8 @@ VOLATILE_HEADERS = {"date", "server-timing", "x-request-id"}
 
 SAMPLE = [("GET", "/healthz"), ("GET", "/api/cad/whoami"), ("GET", "/api/cad/nope"), ("POST", "/api/cad/nope"),
           ("GET", "/api/station/status"), ("GET", "/api/station/nope"),
-          ("POST", "/api/station/events"), ("GET", "/api/cad/search?q=")]
+          ("POST", "/api/station/events"), ("GET", "/api/cad/search?q="),
+          ("GET", "/api/cad/whoami", {"Authorization": "Bearer fake-device-token"})]
 
 
 def route_table() -> list[str]:
@@ -47,9 +52,10 @@ def normal(b: bytes) -> str:
     return re.sub(r'"(?:build|sha|git)":\s*"[^"]*"', '"build":"B"', s)
 
 
-def fetch(url, method, path):
+def fetch(url, method, path, extra=None):
     req = urllib.request.Request(url + path, method=method, data=b"{}" if method == "POST" else None,
-                                 headers={"Content-Type": "application/json"} if method == "POST" else {})
+                                 headers={**({"Content-Type": "application/json"} if method == "POST" else {}),
+                                          **(extra or {})})
     try:
         r = urllib.request.urlopen(req, timeout=10)
     except urllib.error.HTTPError as e:
@@ -68,7 +74,7 @@ def hub(tmp_path_factory):
 
 
 def sample(hub) -> dict:
-    return {f"{m} {p}": fetch(hub.url, m, p) for m, p in SAMPLE}
+    return {f"{m} {p}" + (" +Authorization" if x else ""): fetch(hub.url, m, p, *x) for m, p, *x in SAMPLE}
 
 
 def test_the_consoles_routes_and_responses_are_pinned(hub):
@@ -83,5 +89,5 @@ def test_the_consoles_routes_and_responses_are_pinned(hub):
 
 def test_the_pin_has_teeth():
     pinned = json.loads(PIN.read_text())
-    assert len(pinned["routes"]) > 100 and len(pinned["responses"]) == len(SAMPLE)
+    assert len(pinned["routes"]) > 100 and len(pinned["responses"]) == len(SAMPLE) == 9
     assert any(r.endswith(": /healthz") for r in pinned["routes"])

@@ -394,7 +394,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
                  airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
-                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None):
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
+                 mobile_resolver=None):
     """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
     (sizeup/sourcekeys.py may_see_context), a 404 to anyone else. cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
@@ -434,7 +435,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
-    v1 = V1(switches=mobile, log=access_log)
+    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -493,7 +494,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return True
             if path.startswith("/api/cad/") and (self.headers.get("Authorization") or "")[:7].lower() == "bearer ":
                 self.close_connection = True     # a device's token is not for the console: refused, whoever is signed in
-                return self._send(401, b'{"error":"a device token is not for the console"}', "application/json") or False
+                self._send(401, b'{"error":"a device token is not for the console"}', "application/json")
+                return False
             if access is None or path == "/healthz" or path.startswith("/api/station/"):
                 return True
             who = access.identify(self.headers)
@@ -1277,7 +1279,8 @@ class WebServer:
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
                  airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
-                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None):
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
+                 mobile_resolver=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -1307,7 +1310,8 @@ class WebServer:
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             vessels=vessels,
             airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
-            clip_context=clip_context, adapter_password=adapter_password, mobile=mobile))
+            clip_context=clip_context, adapter_password=adapter_password, mobile=mobile,
+            mobile_resolver=mobile_resolver))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

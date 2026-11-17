@@ -6,8 +6,9 @@ Order, so that a v1 problem never reaches the console (docs/mobile-api.md "Shari
  2. the master switch ([mobile] enabled) or the route's feature flag off: 404, as if the path did not exist. Meta is
     the one path served with mobile off. Nothing below this line runs, so no database or key is touched;
  3. no such route 404, a wrong method 405;
- 4. who: a route that needs a device gets the principal resolver's answer (principal.py), none: 401. A request with
-    no principal is rate limited per address (limits.py), one with a principal per device: 429 + Retry-After;
+ 4. who: a route that needs a device gets the principal resolver's answer (principal.py). A request with no principal
+    is rate limited per address, one with a principal per device (limits.py): 429 + Retry-After. Then no principal
+    on a device route: 401;
  5. v1's share of concurrent requests: 503 + Retry-After when it is used up;
  6. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
 from __future__ import annotations
@@ -16,6 +17,8 @@ import json
 import re
 import sys
 from urllib.parse import parse_qs
+
+from sizeup.fence import FencedWrite
 
 from .errors import JSON, error
 from .limits import Limits
@@ -52,11 +55,11 @@ class V1:
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
         try:
             return self._respond(method, path, query, headers, peer)
+        except FencedWrite:
+            raise                             # the handover signal: the server answers it as a 503
         except Exception as e:                # a v1 failure is v1's: the class only, never a token, header or body
-            if type(e).__name__ == "FencedWrite":
-                raise
             try:
-                self.log(f"api v1: {method} {path[:80]} failed: {type(e).__name__}")
+                self.log(f"api v1: {method} {self._where(path)} failed: {type(e).__name__}")
             except Exception:
                 pass
             return error(500, "internal", "something went wrong: try again")
@@ -82,6 +85,10 @@ class V1:
                          headers={"Allow": ", ".join(sorted(set(allowed)))})
         return self._absent()
 
+    def _where(self, path: str) -> str:
+        """The matched route's template for the log (the path itself could carry a token), else /api/v1/..."""
+        return next((r.path for r, pat in self.routes if pat.match(path)), "/api/v1/...")
+
     @staticmethod
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
@@ -92,7 +99,9 @@ class V1:
             principal = self.resolver(headers)
             if not person(principal):             # fail closed: not a device of a person, whatever the resolver said
                 principal = None
-        wait = self._limit(principal, route, peer)       # (a flood of bad tokens is limited per address too)
+        # (a flood of bad tokens is limited per address too)
+        wait = self.limits.admit(principal.device if principal else None, route.method not in ("GET", "HEAD"), peer,
+                                 route.need == "public")
         if wait:
             return error(429, "rate_limited", "too many requests: slow down", wait)
         if route.need == "device" and principal is None:
@@ -105,6 +114,3 @@ class V1:
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:
             self.limits.leave()
-
-    def _limit(self, principal, route: Route, peer: str) -> int:
-        return self.limits.admit(principal.device if principal else None, route.method not in ("GET", "HEAD"), peer)

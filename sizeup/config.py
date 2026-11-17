@@ -13,6 +13,7 @@ from pathlib import Path
 from sizeup.cloud.access import team_host
 from sizeup.polly import DEFAULT_VOICE as POLLY_DEFAULT
 from sizeup.polly import VOICES as POLLY_VOICES
+from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.radio.tones import ToneCode
 from sizeup.tts import DEFAULT_PYTHON, KOKORO_VOICES
 
@@ -208,8 +209,8 @@ class Config:
     # [mobile] (sizeup/api/v1, docs/mobile-api.md "Sharing the production hub", #619): the hub's own, never a station's.
     # Off unless the section says `enabled = true`: /api/v1 then answers 404 beside its meta.
     mobile_enabled: bool = False
-    mobile_max_requests: int = 8      # v1's share of concurrent requests
-    mobile_max_streams: int = 16      # ... and of open streams (none yet)
+    mobile_max_requests: int = DEFAULT_MAX_REQUESTS      # v1's share of concurrent requests
+    mobile_max_streams: int = DEFAULT_MAX_STREAMS      # ... and of open streams (none yet)
     # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
@@ -560,12 +561,13 @@ def _mobile(data: dict, role: str) -> dict:
     if not isinstance(enabled, bool):
         raise ConfigError("mobile.enabled: true or false")
     nums = {}
-    for k, d, lo, hi in (("max_requests", 8, 1, 64), ("max_streams", 16, 0, 64)):
+    for k, d, lo, hi in (("max_requests", DEFAULT_MAX_REQUESTS, 1, 64), ("max_streams", DEFAULT_MAX_STREAMS, 0, 64)):
         v = mo.get(k, d)
         if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
             raise ConfigError(f"mobile.{k}: a whole number, {lo} to {hi}")
         nums[k] = v
-    return dict(mobile_enabled=enabled, mobile_max_requests=nums["max_requests"], mobile_max_streams=nums["max_streams"])
+    return dict(mobile_enabled=enabled, mobile_max_requests=nums["max_requests"],
+                mobile_max_streams=nums["max_streams"])
 
 
 def _prealert(data: dict) -> dict:
@@ -1390,8 +1392,8 @@ def load(path: str | Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
-                           "cad", "dispatch", "cloud", "mobile", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc", "adapter", "routing", "vessels", "streetview"})
+                           "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
+                           "mobile", "aircraft", "geo", "atc", "adapter", "routing", "vessels", "streetview"})
     adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
@@ -1670,5 +1672,6 @@ def load(path: str | Path) -> Config:
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
         **_atc(data, base),
-        **mobile, **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels, **_streetview(data),
+        **mobile,
+        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels, **_streetview(data),
     )

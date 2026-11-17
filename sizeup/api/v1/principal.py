@@ -1,8 +1,8 @@
 """The principal-resolver seam of /api/v1 (docs/mobile-api.md sections 1.4 and 3.3, #619).
 
 On /api/v1/ the only identity is a device's bearer token, resolved here. It never consults the console's Cloudflare
-Access (a cookie or header there is ignored, so a signed-in browser is not a device), never yields "nobody who is
-allowed anyway" (the trap in CadApi.permit, which checks nothing without a person), and never hands a handler a
+Access (a cookie or header there is ignored, so a signed-in browser is not a device), never yields who=None and
+lets the request through (the trap in CadApi.permit, which checks nothing without a person), and never hands a handler a
 CadApi. A resolver returns a Principal or None; None is a 401. Until the sign-in work (#558) lands there is no
 device token to verify, so the resolver answers None for everything: every route that needs a device is a 401.
 The same rule from the other side: the console refuses a bearer on /api/cad/ (web/server.py)."""

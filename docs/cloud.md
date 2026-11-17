@@ -1021,10 +1021,12 @@ enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelo
 ```
 
 - A hub (or all-in-one) key, never a station's: a station's config refuses the section, and an older release refuses
-  a key it doesn't know. Unknown keys are refused. Read on every request; off again is one line and a restart.
+  a key it doesn't know. Unknown keys are refused. The switch is checked on every request but the config is read at start:
+  a change is one line and a restart.
 - Off: nothing reads a token key, creates a table or sends a push, and `meta.features` reports every flag false.
 - Per-feature flags (auth, reads, stream, writes, push, media, responders) are in `meta.features`, each off until its
-  pull request is proven; a route whose flag is off answers as if it did not exist.
+  pull request is proven (code-driven until a feature wires a source, e.g. `[mobile] features` or a settings
+  policy); a route whose flag is off answers as if it did not exist.
 - Rate limits are in memory per device (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`), and per
   address for requests with no device token.
 - The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.

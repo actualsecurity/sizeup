@@ -16,7 +16,7 @@ from sizeup.api.v1.errors import JSON
 from sizeup.api.v1.handler import V1
 from sizeup.api.v1.limits import Limits
 from sizeup.api.v1.principal import Principal
-from sizeup.api.v1.routes import NEEDS, PUBLIC, ROUTES, Route
+from sizeup.api.v1.routes import NEEDS, PUBLIC, ROLES, ROUTES, Route
 from sizeup.api.v1.switches import FEATURES, Switches
 from sizeup.config import ConfigError, load
 from sizeup.web import server as web_server
@@ -53,7 +53,8 @@ def table(seen: list, boom: Exception | None = None):
     return [Route("GET", "/api/v1/meta", h, "public"),
             Route("GET", "/api/v1/things", h, "device", "reads"),
             Route("POST", "/api/v1/things", h, "device", "writes"),
-            Route("GET", "/api/v1/open", h, "public", "reads")]
+            Route("GET", "/api/v1/open", h, "public", "reads"),
+            Route("GET", "/api/v1/bare", h, "device")]               # no flag: only the master switch gates it
 
 
 def err(r):
@@ -111,6 +112,14 @@ def test_a_flag_off_route_behaves_like_the_switch_off_and_a_flag_on_one_is_serve
     assert list(flags) == list(FEATURES) and flags["reads"] and not flags["writes"]
 
 
+def test_a_route_with_no_flag_is_gated_by_the_master_switch_alone():
+    box = Box(enabled=False)
+    v1 = V1(table([]), switches=box.switches(), resolver=lambda h: DEVICE)
+    assert v1.respond("GET", "/api/v1/bare", "", {})[0] == 404
+    box.enabled = True
+    assert v1.respond("GET", "/api/v1/bare", "", {})[0] == 200
+
+
 def test_a_broken_switch_is_an_off_switch():
     def boom():
         raise RuntimeError("no config")
@@ -119,13 +128,15 @@ def test_a_broken_switch_is_an_off_switch():
     assert V1(table([]), switches=Switches(lambda: True, boom)).respond("GET", "/api/v1/things", "", {})[0] == 404
 
 
-def test_every_route_declares_its_flag_and_who_may_call_it():
+def test_every_route_declares_its_flag_its_role_and_who_may_call_it():
     assert ROUTES and all(r.need in NEEDS for r in ROUTES)
     for r in ROUTES:
         if (r.method, r.path) in PUBLIC:
-            assert r.need == "public" and r.flag == ""             # meta: the one route served with mobile off
+            # meta: the one route served with mobile off; a public route has no person, so no flag and no role
+            assert r.need == "public" and r.flag == "" and r.role == ""
         else:
-            assert r.flag in FEATURES, (r.method, r.path)           # every other route names the flag it needs
+            assert r.need == "device" and r.flag in FEATURES, (r.method, r.path)   # the flag it needs
+            assert r.role in ROLES, (r.method, r.path)                              # and the least role
     assert set(FEATURES) == {"auth", "reads", "stream", "writes", "push", "media", "responders"}
 
 
@@ -139,6 +150,19 @@ def test_a_handler_that_raises_is_a_500_in_the_envelope_and_logs_the_class_only(
     assert (status, code) == (500, "internal")
     assert logs == ["api v1: GET /api/v1/things failed: ValueError"]
     assert "sk-live" not in json.dumps(logs) and "bad token" not in json.dumps(logs)
+
+
+def test_the_log_names_the_route_template_never_the_path_a_token_could_be_in():
+    logs = []
+
+    def boom(ctx):
+        raise KeyError("x")
+    v1 = V1([Route("GET", "/api/v1/things/{id}", boom, "public", "reads")], switches=Box(reads=True).switches(),
+            log=logs.append)
+    assert v1.respond("GET", "/api/v1/things/sk-live-0123456789abcdef", "", {})[0] == 500
+    assert logs == ["api v1: GET /api/v1/things/{id} failed: KeyError"]
+    v1 = V1([], switches=Box().switches(), log=logs.append, resolver=None)
+    assert v1._where("/api/v1/other/sk-live-0123") == "/api/v1/..."
 
 
 def test_a_broken_resolver_or_log_is_a_500_not_a_crash_and_no_handler_runs():
@@ -230,7 +254,7 @@ def test_the_limit_is_a_429_with_retry_after_and_the_envelopes_retry_after_s():
             limits=Limits(clock=clock))
     assert all(v1.respond("POST", "/api/v1/things", "", {})[0] == 200 for _ in range(10))
     status, body, _, headers = v1.respond("POST", "/api/v1/things", "", {})
-    assert status == 429 and headers["Retry-After"] == "1" and "Retry-After" in headers
+    assert status == 429 and headers["Retry-After"] == "1"
     e = json.loads(body)["error"]
     assert e["code"] == "rate_limited" and e["retry_after_s"] == 1
     assert v1.respond("GET", "/api/v1/things", "", {})[0] == 200      # reads are not the writes' bucket
@@ -253,10 +277,36 @@ def test_requests_without_a_principal_are_limited_per_address_and_all_together()
 
 def test_the_buckets_are_bounded_in_memory():
     from sizeup.api.v1 import limits
-    clock, lim = Clock(), Limits(clock=Clock())
+    lim = Limits(clock=Clock())
     for i in range(limits.MAX_KEYS + 500):
         lim.admit(f"dev-{i}", False)
-    assert len(lim._buckets) <= limits.MAX_KEYS
+        lim.admit(None, False, f"192.0.2.{i}")
+    assert len(lim._devices) <= limits.MAX_KEYS and len(lim._ips) <= limits.MAX_KEYS
+
+
+def test_one_flooding_address_does_not_429_another_nor_drain_the_shared_bucket():
+    lim = Limits(clock=Clock())
+    assert [lim.admit(None, False, "203.0.113.5") for _ in range(15)] == [0] * 15
+    assert all(lim.admit(None, False, "203.0.113.5") > 0 for _ in range(500))      # the flood is refused at its address
+    assert lim.admit(None, False, "203.0.113.6") == 0                               # another address: unaffected
+    assert lim._shared["anon"].tokens > 80                                          # ... and the shared bucket is intact
+
+
+def test_device_buckets_survive_a_flood_of_made_up_addresses():
+    from sizeup.api.v1 import limits
+    lim = Limits(clock=Clock())
+    assert [lim.admit("dev-1", False) for _ in range(30)] == [0] * 30              # the device's burst is used up
+    for i in range(limits.MAX_KEYS * 2):
+        lim.admit(None, False, f"10.{i // 65536}.{i // 256 % 256}.{i % 256}")
+    assert lim.admit("dev-1", False) > 0                  # still its own empty bucket, not reset by the eviction
+
+
+def test_a_flood_of_bad_tokens_does_not_starve_meta():
+    v1 = V1(table([]), switches=Box(reads=True).switches(), limits=Limits(clock=Clock()))
+    for i in range(300):
+        v1.respond("GET", "/api/v1/things", "", {}, f"198.51.100.{i % 250}")        # bad tokens: the shared bucket drains
+    assert v1.respond("GET", "/api/v1/things", "", {}, "198.51.100.251")[0] == 429
+    assert v1.respond("GET", "/api/v1/meta", "", {}, "192.0.2.77")[0] == 200       # an app's launch still works
 
 
 def test_v1s_share_of_concurrent_requests_is_capped_and_the_console_is_not_held_up():
@@ -347,6 +397,9 @@ def test_v1_does_not_ask_for_access_and_the_console_still_does():
         srv.shutdown()
 
 
+EXPECTED_WITHOUT_BEARER = {"/api/cad/whoami": 404, "/api/cad/state": 404, "/api/cad/nope": 404}   # (no CAD here)
+
+
 @pytest.mark.parametrize("path", ["/api/cad/whoami", "/api/cad/state", "/api/cad/nope"])
 def test_a_device_bearer_is_refused_on_the_console(path, tmp_path):
     from sizeup.cloud.access import Identity
@@ -361,7 +414,7 @@ def test_a_device_bearer_is_refused_on_the_console(path, tmp_path):
             status, _, body = http(url, path, headers=hdrs)
             assert status == 401 and b"device token" in body
         status, _, _ = http(url, path, headers={"X-Test-User": "m@e.org"})
-        assert status != 401 or path == "/api/cad/nope"                   # the console's own answer without a bearer
+        assert status == EXPECTED_WITHOUT_BEARER[path]                    # the console's own answer without a bearer
         assert http(url, path, "POST", {"Authorization": "Bearer x", "Content-Type": "application/json"}, b"{}")[0] == 401
     finally:
         srv.shutdown()
@@ -429,3 +482,32 @@ def test_the_configs_document_the_switch():
     for f in ("config.example.toml", "deploy/hub/config.hub.toml"):
         text = (ROOT / f).read_text()
         assert "[mobile]" in text and "enabled = false" in text, f
+
+
+def test_a_flood_from_one_address_is_a_429_through_the_servers_address_wiring(hub_with_v1):
+    h = hub_with_v1
+    codes = [http(h.url, "/api/v1/meta", headers={"Cf-Connecting-Ip": "203.0.113.5"})[0] for _ in range(20)]
+    assert codes == [200] * 15 + [429] * 5                       # burst 15 from one address, as Cloudflare names it
+    status, headers, body = http(h.url, "/api/v1/meta", headers={"Cf-Connecting-Ip": "203.0.113.5"})
+    assert status == 429 and headers["Retry-After"] == "1" and json.loads(body)["error"]["code"] == "rate_limited"
+    assert http(h.url, "/api/v1/meta", headers={"Cf-Connecting-Ip": "203.0.113.6"})[0] == 200     # another address
+    assert http(h.url, "/healthz", headers={"Cf-Connecting-Ip": "203.0.113.5"})[0] == 200         # the console: never
+
+
+def test_the_server_hands_its_resolver_to_v1_so_the_sign_in_work_needs_no_server_edit(monkeypatch):
+    from tests.test_api_v1 import serve
+    seen = []
+
+    def resolver(headers):
+        seen.append(headers.get("Authorization"))
+        return DEVICE if headers.get("Authorization") == "Bearer fake-device-token" else None
+    on = Switches(lambda: True, lambda: {"reads": True})
+    from sizeup.api.v1 import handler
+    monkeypatch.setattr(handler, "ROUTES", table([]))
+    srv, url = serve(role="hub", mobile=on, mobile_resolver=resolver)
+    try:
+        assert http(url, "/api/v1/things")[0] == 401
+        assert http(url, "/api/v1/things", headers={"Authorization": "Bearer fake-device-token"})[0] == 200
+        assert seen == [None, "Bearer fake-device-token"]
+    finally:
+        srv.shutdown()

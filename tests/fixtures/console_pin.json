@@ -30,6 +30,16 @@
    },
    "status": 200
   },
+  "GET /api/cad/whoami +Authorization": {
+   "body": "{\"error\":\"a device token is not for the console\"}",
+   "headers": {
+    "cache-control": "no-store",
+    "content-length": "49",
+    "content-type": "application/json",
+    "server": "BaseHTTP/N Python/N"
+   },
+   "status": 401
+  },
   "GET /api/station/nope": {
    "body": "{\"error\":\"no station token (Authorization: Bearer)\",\"reason\":\"no_token\"}",
    "headers": {

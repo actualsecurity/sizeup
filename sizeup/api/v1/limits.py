@@ -2,9 +2,15 @@
 so v1 load cannot starve the console on the hub's one small task (#446).
 
 - a token bucket per principal: reads 10/s burst 30, writes 2/s burst 10 (the design); a request with no principal
-  is limited per client address, and again by one shared bucket, so a spoofed address does not buy more;
+  is limited per client address first, then by one shared bucket (so a spoofed address does not buy more, and one
+  flooder cannot drain the shared bucket: it is only taken once its own address passes). `meta` has a shared bucket
+  of its own, so a flood of bad-token requests cannot starve an app's launch. Address buckets live apart from the
+  device buckets, so a flood of made-up addresses never evicts a device's;
 - a cap on v1's concurrent requests, and on its open streams (none yet), apart from the console's;
-- at most 2 concurrent streams per device."""
+- at most 2 concurrent streams per device.
+
+The address is Cf-Connecting-Ip, which is only trustworthy when the origin is reachable only through Cloudflare (the
+hub's tunnel); anywhere else a client can pick it, and only the shared buckets hold."""
 from __future__ import annotations
 
 import math
@@ -12,12 +18,16 @@ import threading
 import time
 from typing import Callable
 
+from .switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
+
 READ_RATE, READ_BURST = 10.0, 30.0
 WRITE_RATE, WRITE_BURST = 2.0, 10.0
 ANON_RATE, ANON_BURST = 5.0, 15.0            # one client address with no principal
 ALL_ANON_RATE, ALL_ANON_BURST = 50.0, 100.0  # every such client together
 STREAMS_PER_DEVICE = 2
-MAX_KEYS = 4096                               # buckets kept: the memory bound
+META_RATE, META_BURST = 50.0, 100.0           # `meta`, from every address together
+MAX_KEYS = 4096                               # buckets kept (devices, and addresses, each): the memory bound
+IDLE_FULL_S = 60                              # a bucket idle this long is full again: nothing is lost by dropping it
 
 
 class Bucket:
@@ -28,20 +38,23 @@ class Bucket:
 
 
 class Limits:
-    def __init__(self, max_requests: int = 8, max_streams: int = 16, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, max_requests: int = DEFAULT_MAX_REQUESTS, max_streams: int = DEFAULT_MAX_STREAMS,
+                 clock: Callable[[], float] = time.monotonic):
         self.max_requests, self.max_streams, self.clock = max_requests, max_streams, clock
         self._lock = threading.Lock()
-        self._buckets: dict[str, Bucket] = {}
+        self._devices: dict[str, Bucket] = {}
+        self._ips: dict[str, Bucket] = {}
+        self._shared = {"anon": Bucket(ALL_ANON_BURST, clock()), "meta": Bucket(META_BURST, clock())}
         self._busy = 0
         self._streams: dict[str, int] = {}
 
-    def _take(self, key: str, rate: float, burst: float, now: float) -> int:
+    def _take(self, buckets: dict, key: str, rate: float, burst: float, now: float) -> int:
         """0: taken. Else the seconds until a token is back. Caller holds the lock."""
-        b = self._buckets.get(key)
+        b = buckets.get(key)
         if b is None:
-            if len(self._buckets) >= MAX_KEYS:
-                self._evict(now)
-            b = self._buckets[key] = Bucket(burst, now)
+            if len(buckets) >= MAX_KEYS:
+                self._evict(buckets, now)
+            b = buckets[key] = Bucket(burst, now)
         b.tokens = min(burst, b.tokens + (now - b.at) * rate)
         b.at = now
         if b.tokens >= 1.0:
@@ -49,23 +62,28 @@ class Limits:
             return 0
         return max(1, math.ceil((1.0 - b.tokens) / rate))
 
-    def _evict(self, now: float) -> None:
+    @staticmethod
+    def _evict(buckets: dict, now: float) -> None:
         """Full: drop the buckets idle long enough to be full again (they lose nothing); else the oldest quarter."""
-        idle = [k for k, b in self._buckets.items() if now - b.at > 60]
+        idle = [k for k, b in buckets.items() if now - b.at > IDLE_FULL_S]
         if not idle:
-            idle = sorted(self._buckets, key=lambda k: self._buckets[k].at)[:MAX_KEYS // 4]
+            idle = sorted(buckets, key=lambda k: buckets[k].at)[:MAX_KEYS // 4]
         for k in idle:
-            del self._buckets[k]
+            del buckets[k]
 
-    def admit(self, principal: str | None, write: bool, peer: str = "") -> int:
-        """0: go on. Else the Retry-After seconds (a 429). principal: the device's key, None: unauthenticated."""
+    def admit(self, principal: str | None, write: bool, peer: str = "", public: bool = False) -> int:
+        """0: go on. Else the Retry-After seconds (a 429). principal: the device's key, None: unauthenticated.
+        public: the route needs no token (meta), so it has its own shared bucket."""
         now = self.clock()
         with self._lock:
             if principal:
                 rate, burst = (WRITE_RATE, WRITE_BURST) if write else (READ_RATE, READ_BURST)
-                return self._take(f"{'w' if write else 'r'}:{principal}", rate, burst, now)
-            wait = self._take("anon", ALL_ANON_RATE, ALL_ANON_BURST, now)
-            return wait or self._take(f"ip:{peer or '-'}", ANON_RATE, ANON_BURST, now)
+                return self._take(self._devices, f"{'w' if write else 'r'}:{principal}", rate, burst, now)
+            wait = self._take(self._ips, peer or "-", ANON_RATE, ANON_BURST, now)     # its own address first
+            if wait:
+                return wait
+            name, rate, burst = ("meta", META_RATE, META_BURST) if public else ("anon", ALL_ANON_RATE, ALL_ANON_BURST)
+            return self._take(self._shared, name, rate, burst, now)
 
     def enter(self) -> bool:
         """A request starts: False when v1 already has its share of concurrent requests."""
