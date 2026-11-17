@@ -944,6 +944,18 @@ class Cad:
         one a person set (#297)."""
         return self.sources.feed_use(iid, _text(body, "field", 20, required=True), _text(body, "operator", OPERATOR_MAX))
 
+    def merge(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/merge {into, operator} | {undo: true, operator}: a page's own queued card merged
+        into the CAD feed's incident it is (the card's "Merge into #N", sizeup/cad/pagematch.py), or that merge undone
+        (the card back in the queue). Sources.merge_page / unmerge_page."""
+        op = _text(body, "operator", OPERATOR_MAX)
+        if body.get("undo") is True:
+            return self.sources.unmerge_page(iid, op)
+        into = body.get("into")
+        if not isinstance(into, int) or isinstance(into, bool) or into <= 0:
+            raise CadError("into: an event id")
+        return self.sources.merge_page(iid, into, op)
+
     def accept(self, iid: int, body: dict) -> dict:
         """A queued 60 Control page accepted (the type can be picked in the same call)."""
         op = _text(body, "operator", OPERATOR_MAX)
