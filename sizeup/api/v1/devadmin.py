@@ -1,7 +1,8 @@
 """Settings > Users: devices (#558): the console's side of the app's sign-in, served by CadApi at /api/cad/devices
 (a person signed in through Cloudflare Access; the hub only). An admin sees and revokes anyone's; anyone else only
-their own ("My devices"). Revoke deletes the device's refresh tokens (and, through the hooks of AuthService.add_revoke_hook, its
-push endpoint) and writes the activity log; the app's next call is a 401 device_revoked. No token or hash ever leaves here.
+their own ("My devices"). Revoke deletes the device's refresh tokens (and, through the hooks of
+AuthService.add_revoke_hook, its push endpoint) and writes the activity log; the app's next call is a 401
+device_revoked. No token or hash ever leaves here.
 """
 
 from __future__ import annotations
