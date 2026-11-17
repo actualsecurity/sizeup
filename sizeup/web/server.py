@@ -533,28 +533,41 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def _v1_body(self, limit: int) -> bytes | None:
             """The body hook of /api/v1 (handler.py; every route with a body reuses it): exactly Content-Length bytes,
-            within V1_BODY_TIMEOUT_S. None: over the limit or a bad length (413). BodyRefused: no Content-Length or a
-            chunked body (411: the bytes would be left on a kept-alive connection), a client that stalls (408) or
-            stops short (400). Every refusal closes the connection. DELETE may have no body at all."""
+            within V1_BODY_TIMEOUT_S IN TOTAL (a deadline, not a per-read timeout: a client sending a byte at a time
+            holds nothing for long). None: over the limit (413). BodyRefused: no Content-Length or a chunked body
+            (411: the bytes would be left on a kept-alive connection), a bad or repeated Content-Length (400), a
+            client that is too slow (408) or stops short (400). Every refusal closes the connection. DELETE may have
+            no body at all."""
             self.close_connection = True              # until the whole body has been read, nothing is kept alive
             if self.headers.get("Transfer-Encoding"):
                 raise BodyRefused(411, "length_required", "send Content-Length: chunked bodies are not accepted")
+            if len(self.headers.get_all("Content-Length") or []) > 1:
+                raise BodyRefused(400, "bad_body", "Content-Length is given more than once")
             raw_len = self.headers.get("Content-Length")
             if raw_len is None:
                 if self.command == "DELETE":
                     self.close_connection = False
                     return b""
                 raise BodyRefused(411, "length_required", "send a Content-Length header")
-            try:
-                n = int(raw_len)
-            except ValueError:
-                return None
-            if not 0 <= n <= limit:
+            if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):    # not "1_0", "+5", " 7"
+                raise BodyRefused(400, "bad_body", "Content-Length: a number")
+            n = int(raw_len)
+            if n > limit:
                 return None
             before = self.connection.gettimeout()
-            self.connection.settimeout(V1_BODY_TIMEOUT_S)
+            deadline = time.monotonic() + V1_BODY_TIMEOUT_S
+            parts, got = [], 0
             try:
-                data = self.rfile.read(n) if n else b""
+                while got < n:                        # each read is bounded by what is left of the one deadline
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise BodyRefused(408, "request_timeout", "the body did not arrive in time")
+                    self.connection.settimeout(max(0.1, left))
+                    chunk = self.rfile.read1(n - got)
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                    got += len(chunk)
             except (TimeoutError, OSError):
                 raise BodyRefused(408, "request_timeout", "the body did not arrive in time") from None
             finally:
@@ -562,6 +575,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.connection.settimeout(before)
                 except OSError:
                     pass
+            data = b"".join(parts)
             if len(data) != n:
                 raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
             self.close_connection = False

@@ -560,7 +560,8 @@ note. They need the least role the console needs ("dispatch"; a viewer is a 403)
 answers 200.
 
 - **Body.** At most 16 KB (413 `body_too_large`). A POST, PUT, PATCH or DELETE body must come with `Content-Length`: none,
-  or a chunked body, is a 411 `length_required`; a body that does not arrive within 8 s is a 408 `request_timeout`; the
+  or a chunked body, is a 411 `length_required`; a repeated or non-numeric one is a 400 `bad_body`; a body that does not
+  arrive within 8 s in total (one deadline, not per read) is a 408 `request_timeout`; the
   connection is closed on each. The hook (`handler.MAX_BODY`, `respond(..., body=)`, `Ctx.body`) is shared by every v1
   route with a body.
 - **Idempotency-Key** (required): table `v1_idempotency` in hub.sqlite (next to the CAD's state dir; made on the first
@@ -570,15 +571,21 @@ answers 200.
   slow original from overwriting). Only 200, 201, 409 and 412 are kept: a 400, 403 or 404 can be corrected under the
   same key.
 - **If-Match** takes the unit's `rev`: the rev `GET /units` serves (`serialize.with_rev(serialize.unit(...))`, one
-  `rev.py`), and is for unit status only (412 with the current unit). A queued
-  action (`client_at`) must send it (428 `precondition_required`), and a stale one is a 409 `unit_changed`, so an old
-  queued status never overrides a newer one. The check and the write are two steps (the console's methods do the write
-  and take no expected rev): a change between them is not caught.
+  `rev.py`), and is for unit status only (412 with the current unit); an alarm acknowledge and a note ignore the header
+  (an alarm is acknowledged once, and a second try is its own 409). A queued action (`client_at`) must send it (428
+  `precondition_required`; `*` counts as missing there), and a stale one is a 409 `unit_changed`, so an old queued
+  status never overrides a newer one. The check and the write are two steps (the console's methods do the write and
+  take no expected rev): a change between them is not caught.
 - **client_at**: older than 7 days is a 400, more than 5 minutes ahead is clamped (`client_at_clamped`). The audit is the
   activity row of the console's own write, with its "browser" (`ua`) column packed as
   `via=ios app=1.4.2 device=<id> client_at=<unix>` (`clamped` appended when clamped; not separate columns). `via` is ios,
   android or web from `X-Client`, else `api`. A queued action more than a minute late adds a chronology note through the
   console's note path (so it has an activity row of its own).
+- Known gap (fence): if the fence drops after the CAD write but before the key keeps its answer, the key stays
+  "running" with the write applied: a retry is a 409 `in_progress` for 120 s, then the work runs again (a unit status is
+  caught by If-Match, an acknowledge by `already_acknowledged`, a note is added twice).
+- Cost (#446): the key store's lock is held across two sqlite commits per write (the claim and the answer), at most 2
+  writes a second per device; nothing else in v1 takes it.
 - 409 answers carry `error.reason` (`incident_closed`, `unit_changed`, `already_acknowledged`, `in_progress`) and the
   current object. The unit, alarm and incident (summary) in an answer or a `current` are the objects the reads serve,
   built by the same serializers, so the object is what the next GET returns (once reads' cache, up to 1 s, rebuilds);

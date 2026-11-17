@@ -23,6 +23,9 @@ Every one goes through the console's own code, so every rule, validation and aud
   sense is a 409 with a machine-readable
   `reason` and the current object (incident_closed, unit_changed, already_acknowledged): never applied late, never
   merged. A dispatch is not here.
+Known gap (fence): if the hub's fence drops after the CAD write but before the key's answer is kept, the key row stays
+"running" with the write applied. A retry is a 409 `in_progress` for 120 s, then the work runs again: a unit status is
+caught by If-Match and an acknowledge by `already_acknowledged`, but a note would be added twice.
 Every error is the v1 envelope {"error": {"code", "message"}} (+ "reason" and "current" on a 409 / 412)."""
 from __future__ import annotations
 
@@ -39,6 +42,7 @@ from .routes import Ctx, Route
 
 FUTURE_S = 300.0            # a client_at further ahead than this is clamped (docs/mobile-api.md section 8)
 PAST_S = 7 * 86400.0        # ... and one older than this is refused (a 0 would write a 1970 chronology line)
+NOTE_MAX = 2000             # Cad.note's limit
 LATE_S = 60.0               # a queued action this far behind is said so in the chronology
 STORED = (200, 201, 409, 412)    # the answers a key keeps: decisions. A 400 / 403 / 404 is corrected and sent again
 PLATFORMS = ("ios", "android", "web")     # X-Client's platforms, as `via`; anything else (curl, no header) is "api"
@@ -221,6 +225,8 @@ def _if_match_conflict(req: Req, ctx: Ctx, current: dict):
     with none (428), else None."""
     # `If-Match: "abc"` and `W/"abc"` (a proxy's weak ETag) both mean the rev abc: drop the prefix and the quotes
     want = re.sub(r'^(?:W/)?"?|"$', "", (ctx.headers.get("If-Match") or "").strip())
+    if req.client_at is not None and want == "*":
+        want = ""                       # "any rev" would let an old queued status override a newer one: as if missing
     if not want and req.client_at is not None:
         return fail(428, "precondition_required", "a queued action needs If-Match: the unit's rev when it was queued")
     if want and want != "*" and want != current["rev"]:
@@ -330,7 +336,11 @@ def incident_note(ctx: Ctx):
         text = req.body.get("text")
         if not isinstance(text, str):
             return fail(400, "invalid", "text: required")
-        body = {"text": text.strip() + (f" [written {req.act.hms(req.at)}]" if req.late else "")}
+        text = text.strip()
+        if req.late:                    # the suffix counts against the console's 2000 characters: the text is trimmed
+            suffix = f" [written {req.act.hms(req.at)}]"
+            text = text[:NOTE_MAX - len(suffix)].rstrip() + suffix
+        body = {"text": text}
         for k in ("units", "places"):
             if k in req.body:
                 body[k] = req.body[k]

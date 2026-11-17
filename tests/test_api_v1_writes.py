@@ -669,16 +669,15 @@ def test_the_master_switch_off_is_a_404_and_nothing_is_written(rig):
 
 # -- the body hook, over the wire (handler.py, server.py _v1_body) ----------------------------------------------------
 
-def raw_http(url, request: bytes, wait: float = 3.0) -> bytes:
+def raw_http(url, request: bytes, wait: float = 15.0) -> bytes:
+    """The raw answer; the server must have CLOSED the connection (recv returns b""), else the test fails: the wait is
+    only a generous bound, nothing asserts how fast."""
     host, port = url.removeprefix("http://").split(":")
     with socket.create_connection((host, int(port)), timeout=wait) as s:
         s.sendall(request)
         out = b""
-        try:
-            while chunk := s.recv(65536):
-                out += chunk
-        except OSError:
-            pass
+        while chunk := s.recv(65536):
+            out += chunk
         return out
 
 
@@ -692,10 +691,9 @@ def test_a_post_with_no_length_or_a_chunked_body_is_a_411_and_applies_nothing(se
     path = note_path(r.open["id"])
     for extra, body in (("", b""), ("Transfer-Encoding: chunked\r\n", b'5\r\nhello\r\n0\r\n\r\n'),
                         ("Transfer-Encoding: chunked\r\nContent-Length: 20\r\n", b'{"text":"smuggled"}')):
-        t0 = time.monotonic()
+        # no "Connection: close" from the client: it is the server that closes (raw_http reads to the end)
         out = raw_http(url, head(url, extra, body, path).replace(b"Connection: close\r\n", b""))
         assert out.startswith(b"HTTP/1.1 411") and b'"length_required"' in out
-        assert time.monotonic() - t0 < 2.5                          # the server closed the connection itself
     assert r.notes() == [] and keys_stored(r) == 0
 
 
@@ -703,11 +701,10 @@ def test_a_body_that_never_arrives_is_a_408_and_holds_no_slot(served, monkeypatc
     from sizeup.web import server as web_server
     r, url = served
     monkeypatch.setattr(web_server, "V1_BODY_TIMEOUT_S", 0.4)
-    t0 = time.monotonic()
-    out = raw_http(url, head(url, "Content-Length: 50\r\n", b'{"text":', note_path(r.open["id"])), wait=5)
-    assert out.startswith(b"HTTP/1.1 408") and b'"request_timeout"' in out and time.monotonic() - t0 < 4
+    out = raw_http(url, head(url, "Content-Length: 50\r\n", b'{"text":', note_path(r.open["id"])))
+    assert out.startswith(b"HTTP/1.1 408") and b'"request_timeout"' in out
     stall = head(url, "Content-Length: 50\r\n", b"", note_path(r.open["id"])).replace(b"Connection: close", b"X: 1")
-    short = raw_http(url, stall, wait=2)
+    short = raw_http(url, stall)
     assert short.startswith(b"HTTP/1.1 408")
     assert r.notes() == [] and r.v1.limits._busy == 0                      # the concurrency slot is back
 
@@ -767,13 +764,20 @@ def test_put_and_delete_use_the_same_body_hook(hook_server):
     assert out.startswith(b"HTTP/1.1 401")
 
 
-def test_a_fenced_write_answers_the_envelope_and_leaves_no_key(served):
+@pytest.mark.parametrize("which", ["status", "ack", "note"])
+def test_a_fenced_write_answers_the_envelope_leaves_no_key_and_changes_nothing(served, which):
     r, url = served
+    path, body = {"status": (status_path(), {"status": "OL"}),
+                  "ack": (f"/api/v1/alarms/{r.alarm['id']}/ack", {}),
+                  "note": (note_path(r.open["id"]), {"text": "x"})}[which]
+    raw = json.dumps(body).encode()
+    before = (r.unit("E60")["status"], r.cad.alarms.get(r.alarm["id"])["ack_at"], r.notes())
     r.cad.store.may_write = lambda: False
-    out = raw_http(url, head(url, "Content-Length: 13\r\n", b'{"text": "x"}\n'[:13], note_path(r.open["id"])))
+    out = raw_http(url, head(url, f"Content-Length: {len(raw)}\r\n", raw, path))
     r.cad.store.may_write = lambda: True
     assert out.startswith(b"HTTP/1.1 503") and b'"error"' in out and b'"code"' in out
-    assert keys_stored(r) == 0 and r.notes() == []
+    assert keys_stored(r) == 0
+    assert (r.unit("E60")["status"], r.cad.alarms.get(r.alarm["id"])["ack_at"], r.notes()) == before
 
 
 # -- one object, one rev: what a GET serves is what a write answers with and checks (reads: the source of truth) ----
@@ -873,3 +877,86 @@ def test_no_address_is_in_a_write_answer_even_when_the_console_wrote_one(both):
     r.cad.close(r.open["id"], {"disposition": "FALSE", "operator": "pat@example.org"})
     status, out = write(url, note_path(r.open["id"]), {"text": "x"}, key="bare-addr-0004")
     assert status == 409 and "@" not in json.dumps(out) and out["current"]["status"] == "closed"
+
+
+# -- review round 2: the body deadline, Content-Length, If-Match *, the note's length -----------------------------------
+
+def test_a_body_dribbled_a_byte_at_a_time_hits_one_total_deadline(served, monkeypatch):
+    """A per-read timeout restarts on every byte: one byte every 0.5 s kept a 1 s timeout alive for ever."""
+    import threading
+    from sizeup.web import server as web_server
+    r, url = served
+    monkeypatch.setattr(web_server, "V1_BODY_TIMEOUT_S", 1.5)
+    host, port = url.removeprefix("http://").split(":")
+    result = {}
+
+    def dribble():
+        with socket.create_connection((host, int(port)), timeout=10) as s:
+            request = head(url, "Content-Length: 40\r\n", b"", note_path(r.open["id"]))
+            s.sendall(request.replace(b"Connection: close\r\n", b""))
+            out = b""
+            for ch in b'{"text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}':
+                try:
+                    s.sendall(bytes([ch]))
+                except OSError:
+                    break
+                time.sleep(0.4)
+                s.settimeout(0.01)
+                try:
+                    out = s.recv(65536)
+                    if out:
+                        break
+                except OSError:
+                    pass
+            result["out"] = out
+    t = threading.Thread(target=dribble, daemon=True)
+    t.start()
+    t.join(15)
+    assert not t.is_alive() and result["out"].startswith(b"HTTP/1.1 408") and b'"request_timeout"' in result["out"]
+    assert r.notes() == [] and r.v1.limits._busy == 0
+
+
+@pytest.mark.parametrize("length", ["1_0", "+5", "0x10", "-1", "", "1234567", "١٢"])
+def test_a_malformed_content_length_is_a_400_and_a_repeated_one_too(served, length):
+    r, url = served
+    out = raw_http(url, head(url, f"Content-Length: {length}\r\n", b"", note_path(r.open["id"])))
+    assert out.startswith(b"HTTP/1.1 400") and b'"bad_body"' in out, out[:80]
+    twice = raw_http(url, head(url, "Content-Length: 2\r\nContent-Length: 2\r\n", b"{}", note_path(r.open["id"])))
+    assert twice.startswith(b"HTTP/1.1 400") and b'"bad_body"' in twice
+    assert r.notes() == [] and keys_stored(r) == 0
+
+
+def test_a_queued_status_with_if_match_star_is_a_428_not_a_free_pass(rig):
+    status, out, _ = rig.post(status_path(), {"status": "OL", "client_at": rig.clock.t - 30}, headers={"If-Match": "*"})
+    assert status == 428 and rig.unit("E60")["status"] != "OL"
+    # not queued: "*" is any rev
+    assert rig.post(status_path(), {"status": "OL"}, key="star-plain-001", headers={"If-Match": "*"})[0] == 200
+
+
+def test_a_late_note_of_2000_characters_is_trimmed_to_fit_the_suffix(rig):
+    status, out, _ = rig.post(note_path(rig.open["id"]), {"text": "n" * 2000, "client_at": rig.clock.t - 900})
+    assert status == 201
+    line = rig.notes()[-1]
+    assert len(line) <= 2000 and line.endswith("]") and " [written " in line and line.startswith("n" * 100)
+    status, _, _ = rig.post(note_path(rig.open["id"]), {"text": "n" * 2000}, key="exact-2000-001")
+    assert status == 201 and len(rig.notes()[-1]) == 2000                         # not late: untouched
+
+
+# -- review round 2, batch 2 ------------------------------------------------------------------------------------------
+
+def test_the_write_rate_limit_applies_to_the_real_routes(rig, monkeypatch):
+    from sizeup.api.v1 import limits
+    monkeypatch.setattr(limits, "WRITE_BURST", 3.0)
+    monkeypatch.setattr(limits, "WRITE_RATE", 0.001)
+    answers = [rig.post(note_path(rig.open["id"]), {"text": f"n{i}"}, key=f"rate-limit-{i:04d}") for i in range(8)]
+    codes = [a[0] for a in answers]
+    assert codes[:3] == [201] * 3 and set(codes[3:]) == {429}
+    assert answers[3][1]["error"]["code"] == "rate_limited" and int(answers[3][2]["Retry-After"]) >= 1
+    assert rig.notes() == ["n0", "n1", "n2"]                     # no more notes than the budget allowed
+
+
+def test_if_match_is_ignored_on_an_alarm_ack_by_design(rig):
+    """If-Match is for unit status only (the alarm is acknowledged once, and a second ack is its own 409): a stale
+    one on an ack is not a 412."""
+    status, out, _ = rig.post(f"/api/v1/alarms/{rig.alarm['id']}/ack", headers={"If-Match": "stale-rev-0000"})
+    assert status == 200 and out["alarm"]["ack_at"] is not None
