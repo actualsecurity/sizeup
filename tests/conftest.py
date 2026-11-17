@@ -480,3 +480,13 @@ def _dispatch_by_hand_as_pcfd(request, monkeypatch):
     if request.node.get_closest_marker("hand_dispatch_gate") is None:
         from sizeup.cad.automode import AutoDispatch
         monkeypatch.setattr(AutoDispatch, "hand_dispatch", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_service_choices_past_a_test():
+    """The admins' service per source (sourcekeys.set_service_overrides, a process-wide map like the hub's): every test
+    starts with none, and a station test's hub-sent map never reaches the next test."""
+    from sizeup import sourcekeys
+    sourcekeys._service_over, sourcekeys._service_from_hub = {}, False
+    yield
+    sourcekeys._service_over, sourcekeys._service_from_hub = {}, False

@@ -513,7 +513,7 @@ def test_rename_in_place_shows_in_both_places_with_the_original_in_the_hover(pag
 
 def test_the_settings_page_hands_the_names_store_to_the_channels_card():
     js = (STATIC / "settings.js").read_text()
-    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES })" in js
+    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES })" in js
     assert '"/api/cad/settings/radio_folders", { action: "name", key, name' in js and '"/api/cad/comms/sources"' in js
     rc = (STATIC / "radio-controls.js").read_text()
     assert "/api/cad/comms/sources" not in rc and "radio_folders\"" not in rc        # never from the station's page

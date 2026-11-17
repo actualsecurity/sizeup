@@ -44,6 +44,9 @@
 // Each viewer folds folders (remembered here, never on the hub): a folded one shows its name, how many channels, the
 // new calls, an emergency and a live dot; the channel on screen stays under its folded folder. The state push's
 // radio_folders (their rev) asks the tree again when an admin saved.
+// Each channel's service in Edit too (Auto, or Fire / Police / EMS / Transit / Air / Other: the settings section
+// radio_services, sizeup/sourcekeys.py): sent with Save (POST /api/cad/settings/radio_services set_many), before the
+// folders; the hub re-tags that channel's recent rows. The push's radio_services (their rev) asks the tree again.
 // A service is told by a letter in a shape (F P E T A), never by colour alone. The tier is a short code (PA TX REC OFF
 // ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
 //
@@ -58,6 +61,8 @@ window.RadioNav = (() => {
                  ["transit", "Transit", "T", "transit"], ["air", "Air", "A", "air"], ["all", "All", "∗", ""]];
   const MARK = { fire: "F", police: "P", ems: "E", transit: "T", air: "A" };
   const SERVICE = { fire: "Fire", police: "Police", ems: "EMS", transit: "Transit", air: "Air", other: "Other" };
+  const SERVICES = Object.keys(SERVICE);                 // (sizeup/sourcekeys.py SERVICES)
+  const OURS_SYSTEMS = ["westchester", "analog", "airband"];   // (sizeup/sourcekeys.py OURS_SYSTEMS): a fire one of ours is never muted
   const TIER = { alert: ["PA", "Transcribe + pre-alert"], text: ["TX", "Record + transcribe"], record: ["REC", "Record only"],
                  off: ["OFF", "Ignored"], activity: ["ENC", "Encrypted: activity only"] };
   const KEPT = ["event", "unit", "q", "channel", "emergency", "type", "pcfd", "since", "until"];   // in the address
@@ -395,6 +400,8 @@ window.RadioNav = (() => {
         st.src = d.sources || [];
         st.srcRev = d.rev || "";
         st.layout = d.folders || null;                // the admins' folders (#607), null: the automatic grouping
+        st.services = d.services || {};               // the admins' service per channel (none: automatic)
+        st.retagWaiting = new Set(d.retag_waiting || []);   // ... a re-tag waiting for the station's talkgroups
         st.clock = { hub: d.now || Date.now() / 1000, at: Date.now() };
         let changed = false;                          // a source first met: nothing of it is unread
         for (const s of st.src) if (!st.p.seen[s.key]) { st.p.seen[s.key] = now(); changed = true; }
@@ -433,6 +440,12 @@ window.RadioNav = (() => {
       st.layoutAsked = fr;
       sources(true);
     }
+    // ... or a channel's service (here or Settings > Radios > Channels): the tree again, once for that rev
+    const sr = (cad.state && typeof cad.state.radio_services === "string") ? cad.state.radio_services : null;
+    if (sr !== null && st.svcAsked !== undefined && sr !== st.svcAsked && st.src.length) {
+      st.svcAsked = sr;
+      sources(true);
+    } else if (sr !== null && st.svcAsked === undefined) st.svcAsked = sr;
     renderRail();                                     // who is talking now, an emergency window: each push
     renderPaging();
     const rev = pushed();
@@ -628,7 +641,8 @@ window.RadioNav = (() => {
   function editStart() {
     if (!mayEdit() || st.edit) return;
     st.edit = { folders: draftOf(st.src, st.layout), names: { ...((st.layout && st.layout.names) || {}) }, base: st.layout ? st.layout.rev : "", error: "", busy: false, focus: "",
-                start: st.layout };                    // (what the edit began from: a name set meanwhile is merged at Save)
+                start: st.layout,                      // (what the edit began from: a name set meanwhile is merged at Save)
+                services: { ...(st.services || {}) }, svcStart: { ...(st.services || {}) } };   // each channel's service
     st.railSig = "";
     renderRail();
     renderEdit();
@@ -704,6 +718,16 @@ window.RadioNav = (() => {
         nm.dataset.chname = k;
         nm.setAttribute("aria-label", `Name of ${s.name}`);
         nm.title = `${s.name}${idOf(s) ? ` (${idOf(s)})` : ""}: the name on the rail (blank: its own)`;
+        // its service: Auto (its talkgroup file or name) or the admins' choice
+        const auto = s.service_auto || s.service || "";
+        const svc = el("select", "rn-edsvc");
+        svc.dataset.chsvc = k;
+        svc.append(new Option(auto ? `Auto (${SERVICE[auto] || auto})` : "Auto", ""), ...SERVICES.map((v) => new Option(SERVICE[v], v)));
+        svc.value = e.services[k] || "";
+        svc.setAttribute("aria-label", `Service of ${shown}`);
+        svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE[auto] || auto} (its talkgroup file or name)` : ""}`
+          + "\nA change re-tags its last 30 days" + (OURS_SYSTEMS.includes(s.system) ? "\nFire here: never muted" : "")
+          + (st.retagWaiting && st.retagWaiting.has(k) ? "\nRe-tag waits for the station" : "");
         const row = el("div", "rn-edi");
         row.dataset.k = k;
         const g = el("span", "rn-grip", "⠿");
@@ -718,7 +742,7 @@ window.RadioNav = (() => {
         to.value = f.id;
         const first = i === 0 && j === 0, lastOne = i === d.length - 1 && j === f.items.length - 1;
         row.append(g, nm, iconBtn("▲", `Move ${shown} up`, { ed: "iup", id: k }, first),
-                   iconBtn("▼", `Move ${shown} down`, { ed: "idown", id: k }, lastOne), to);
+                   iconBtn("▼", `Move ${shown} down`, { ed: "idown", id: k }, lastOne), to, svc);
         box.append(row);
       });
       out.push(box);
@@ -776,10 +800,20 @@ window.RadioNav = (() => {
     const body = auto ? { action: "reset", base: e.base } : { action: "set", base: e.base, folders: d, names };
     const op = typeof operator === "function" ? operator() : "";
     if (op) body.operator = op;
+    // the channels' services changed in this edit (blank: back to automatic), all in one, before the folders
+    const svc = {};
+    for (const k of new Set([...Object.keys(e.svcStart), ...Object.keys(e.services)])) {
+      if ((e.svcStart[k] || "") !== (e.services[k] || "")) svc[k] = e.services[k] || "automatic";
+    }
     e.busy = true;
     e.error = "";
     renderEdit();
     try {
+      if (Object.keys(svc).length) {
+        const r = await api("POST", "/api/cad/settings/radio_services", { action: "set_many", services: svc, ...(op ? { operator: op } : {}) });
+        st.services = r.radio_services || {};
+        e.svcStart = { ...e.services };              // (saved: a refused folders save doesn't send them again)
+      }
       const r = await api("POST", "/api/cad/settings/radio_folders", body);
       if (st.edit !== e) return;                      // (not this edit any more)
       st.layout = r.radio_folders || null;
@@ -1080,6 +1114,10 @@ window.RadioNav = (() => {
     });
     tree.addEventListener("change", (e) => {
       const t = e.target;
+      if (st.edit && !st.edit.busy && t.dataset.chsvc) {     // a channel's service: kept for Save, no redraw
+        if (t.value) st.edit.services[t.dataset.chsvc] = t.value; else delete st.edit.services[t.dataset.chsvc];
+        return;
+      }
       if (!st.edit || st.edit.busy || !t.dataset.move) return;
       moveItem(st.edit.folders, t.dataset.move, t.value);
       st.edit.reset = false;

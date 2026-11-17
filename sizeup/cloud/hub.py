@@ -14,9 +14,10 @@ runs on a bare Linux box with Python + numpy.
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size, its version -> {ok, build, caps, station}: the
-                                  hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
-                                  and the id it took the post as, which the station adopts (stations.py)
+                                  progress, outbox size, its version -> {ok, build, caps, station, services}:
+                                  the hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
+                                  and the id it took the post as, which the station adopts (stations.py);
+                                  services: the admins' service per source (sourcekeys.set_service_overrides)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
                                   (jobs: tts, call, sources_reset: an incident source's reset(), #301)
@@ -615,6 +616,8 @@ class Hub:
                 # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
                 self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
                                    else r for r in tgs]
+                if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
+                    getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
@@ -627,7 +630,10 @@ class Hub:
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
         # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
         # station: the id the hub took it as (the station adopts it: StationLink.adopt; a rename never locks it out)
+        # services: the admins' service per source (settings radio_services, sizeup/sourcekeys.py): the station tags
+        # its rows (and picks its speech-to-text profile) as the hub does; a station before this ignores it
         return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems", sttinput.CAP],
+                           "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
                            **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:

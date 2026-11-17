@@ -759,6 +759,11 @@
   .rn-edsec { min-inline-size: 0; font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .rn-edi { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; padding-inline-start: var(--s-2); }
   .rn-edch { flex: 1 1 auto; min-inline-size: 0; }
+  /* a channel's service: after Move to, on its own line under the name when the rail is narrow */
+  .rn-edi:has(> .rn-edsvc) { flex-wrap: wrap; }
+  .rn-edi:has(> .rn-edsvc) > .rn-edch { flex: 1 1 5rem; }
+  .rn-edsvc { flex: none; inline-size: auto; max-inline-size: 9rem; min-inline-size: 0; margin-inline-start: var(--s-3);
+              font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .rn-edto { flex: none; inline-size: 4.5rem; min-inline-size: 0; }
   .rn-edsec { color: var(--text-2); }
   .rn-edempty { padding-inline-start: var(--s-4); font-size: var(--fs-xs); line-height: var(--lh-xs); }

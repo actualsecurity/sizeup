@@ -32,7 +32,8 @@ window.RadioControls = (() => {
                adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
-               names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map() };
+               names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
+               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
@@ -55,6 +56,9 @@ window.RadioControls = (() => {
   // An FM / airband channel's source key, as the radio rail names it (sizeup/sourcekeys.py fm())
   const fmKey = (r) => `${r.kind === "airband" ? "air" : "fm"}:${r.chan}`;
   const NAME_MAX = 40;                        // a display name (sizeup/cad/radiofolders.py NAME_MAX)
+  // A source's service (sizeup/sourcekeys.py SERVICES): the admins' choice over its talkgroup file's and its name's
+  const SERVICES = [["fire", "Fire"], ["police", "Police"], ["ems", "EMS"], ["transit", "Transit"], ["air", "Air"], ["other", "Other"]];
+  const SERVICE_NAME = Object.fromEntries(SERVICES);
   const groupName = (g) => g || "Unknown";
   const groupColor = (g) => GROUP_COLORS[g || ""] || GROUP_COLORS[""];
 
@@ -97,6 +101,7 @@ window.RadioControls = (() => {
       n.groups.addEventListener("click", onRename);
       n.groups.addEventListener("change", onEngine);
       n.groups.addEventListener("change", onTier);
+      n.groups.addEventListener("change", onService);
       n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
       n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
@@ -147,6 +152,8 @@ window.RadioControls = (() => {
     loadStt();
     st.namesApi = opts.names || null;              // Settings > Radios on the CAD (settings.js S_RC_NAMES); never the station's page
     if (st.namesApi && st.tab === "channels") loadNames();
+    st.servicesApi = opts.services || null;        // ... and the service per source (settings.js S_RC_SERVICES)
+    if (st.servicesApi && st.tab === "channels") loadServices();
     poll();
   }
 
@@ -165,6 +172,9 @@ window.RadioControls = (() => {
       // an admin named a channel (here or on the radio rail): the names again (the state push carries their rev)
       const fr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_folders === "string" ? cad.state.radio_folders : null;
       if (fr !== null && st.namesApi && st.names !== null && fr !== st.namesRev && !st.namesBusy) loadNames();
+      // ... or a source's service (the rail's Edit too): their rev in the push
+      const sr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : null;
+      if (sr !== null && st.servicesApi && st.services !== null && sr !== st.servicesRev && !st.servicesBusy) loadServices();
       if (st.n.rxCard && st.tab === "receivers" && !ro()) {   // the reception tests (#410): admins', Receivers only
         const x = await fetch("/api/reception", { cache: "no-store" });
         st.rx = x.ok ? (await x.json()).reception : null;
@@ -1515,6 +1525,53 @@ window.RadioControls = (() => {
     return i;
   }
 
+  // ---- a source's service (fire, police, ... : the settings section radio_services) ---------------------------
+  // opts.services {load, save} from settings.js: {source key: service} the admins chose; none: automatic (its
+  // talkgroup file's Service column, else its name's words; an FM channel fire, an airband one air). Admins only, the
+  // CAD's only (the station's own page has none). Its recent rows are re-tagged on the hub.
+
+  async function loadServices() {
+    if (!st.servicesApi) return;
+    st.servicesBusy = true;
+    try {
+      const got = (await st.servicesApi.load()) || {};
+      // {services, waiting}: the choices, and the sources whose re-tag waits for the station (a bare map: choices alone)
+      st.services = got.services && typeof got.services === "object" ? got.services : got;
+      st.svcWaiting = new Set(Array.isArray(got.waiting) ? got.waiting : []);
+      st.servicesRev = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : "";
+    } catch (_) { /* the next push asks again */ }
+    st.servicesBusy = false;
+    renderTalkgroups();
+  }
+  // automatic: what the station worked out (service_auto; a station before that: service), an FM channel's kind
+  const autoService = (r) => (r.fm ? (r.kind === "airband" ? "air" : "fire") : r.service_auto || r.service || "");
+  function chosenService(r) {
+    const k = nameKey(r);
+    return st.svcPending.has(k) ? st.svcPending.get(k) : (st.services || {})[k] || "";
+  }
+  async function onService(e) {
+    const s = e.target.closest("select.tg-svc");
+    if (!s || s.disabled || ro() || !st.servicesApi || st.services === null) return;
+    const li = s.closest(".tg-row"), key = li.dataset.nkey, want = s.value;
+    if (!key || want === ((st.services || {})[key] || "")) return;
+    st.svcPending.set(key, want);
+    st.error = "";
+    renderTalkgroups();
+    try {
+      st.services = (await st.servicesApi.save(key, want || "automatic")) || {};
+    } catch (err) {
+      st.error = `Couldn't set the service of ${li.dataset.label}: ${err.message}`;
+    }
+    st.svcPending.delete(key);
+    renderTalkgroups();
+  }
+  function serviceSelect() {
+    const sel = el("select", "tg-svc sm");
+    sel.append(new Option("Auto", ""), ...SERVICES.map(([v, label]) => new Option(label, v)));
+    sel.setAttribute("aria-label", "Service");
+    return sel;
+  }
+
   // ---- the Channels list, by radio system ------------------------------------------------------------------------
   // Analog FM (FG1, FG2, South 2, ...), Airband, County P25, then each other P25 system by its label; under a P25
   // system its groups (the talkgroups file's Tag). [{id, label, fm, list} | {id, label, groups: [{g, group, list}]}]
@@ -1577,10 +1634,12 @@ window.RadioControls = (() => {
       else items.push(...x.groups);
     }
     const nameable = st.names !== null && !!st.namesApi && !lock;
+    const servable = st.services !== null && !!st.servicesApi && !lock;
     const rowSig = (r) => JSON.stringify([shownName(r), r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
                                          st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
-                                         nameable, st.renaming === nameKey(r)]);
+                                         nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
+                                         st.svcWaiting.has(nameKey(r))]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
@@ -1631,7 +1690,8 @@ window.RadioControls = (() => {
             const pen = el("button", "mini quiet tg-ren", "✎");
             pen.type = "button";
             pen.setAttribute("aria-label", "Rename");
-            id.append(el("span", "tg-mark"), el("b", "tg-name"), renameInput(), pen, el("span", "tg-num"), el("span", "tg-badge", "MAIN"));
+            id.append(el("span", "tg-mark"), el("b", "tg-name"), renameInput(), pen, serviceSelect(), el("span", "tg-num"),
+                      el("span", "tg-badge", "MAIN"));
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
@@ -1641,7 +1701,7 @@ window.RadioControls = (() => {
           },
           fill: (li, r) => {
             const [id, info, sw] = li.children;
-            const [mk, name, input, pen, num, badge] = id.children;
+            const [mk, name, input, pen, svc, num, badge] = id.children;
             const [heard, note] = info.children;
             const confirming = !r.fm && st.confirm === r.src;
             const nk = nameKey(r), shownAs = shownName(r), renaming = nameable && st.renaming === nk;
@@ -1664,6 +1724,17 @@ window.RadioControls = (() => {
             show(input, renaming);
             show(pen, nameable && !renaming);
             pen.title = `Rename (display only; blank: ${r.name})`;
+            // its service: Auto (what its file or name says) or the admins' choice; the hover says what it does
+            const auto = autoService(r), chosen = chosenService(r);
+            show(svc, servable);
+            if (servable) {
+              svc.options[0].textContent = auto ? `Auto (${SERVICE_NAME[auto] || auto})` : "Auto";
+              if (svc.value !== chosen) svc.value = chosen;
+              svc.disabled = st.svcPending.has(nk);
+              svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE_NAME[auto] || auto} (its talkgroup file or name)` : ""}`
+                + "\nA change re-tags its last 30 days" + (r.fm || !r.tier_set ? "\nFire here: never muted" : "")
+                + (st.svcWaiting.has(nk) ? "\nRe-tag waits for the station" : "");
+            }
             show(badge, !!r.main);
             setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));
             heard.className = r.fm || r.count ? "tg-heard" : "tg-heard dim";

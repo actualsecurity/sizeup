@@ -322,7 +322,10 @@ class TalkgroupPrefs:
                              # choices are (sizeup/channels.py); tier None: the county's own switches
                              "system": sysname or self.county, "source": sources.p25(sysname or self.county, tg),
                              "key": sources.channel_key(sysname, tg, self.county), "ours": main,
-                             "service": sources.service(i.get("group") or "", i.get("service") or ""),
+                             # its service: the admins' for this source (sourcekeys.overridden), else automatic
+                             "service": sources.service(i.get("group") or "", i.get("service") or "",
+                                                        key=sources.p25(sysname or self.county, tg)),
+                             "service_auto": sources.service(i.get("group") or "", i.get("service") or ""),
                              "department": i.get("department") or "", "tier": self.tier(tg, sysname)})
         rows.sort(key=lambda r: (not r["main"], -(r["last"] or 0), r["group"], r["tg"]))
         return rows
