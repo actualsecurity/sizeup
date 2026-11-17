@@ -197,6 +197,7 @@ class Dvr:
         self._resumed: set[str] = set()           # cameras resumed from the state (their last key known)
         self._rescan: threading.Thread | None = None
         self._checked_at = -1e18                  # the state last brought up to date (checkpoint)
+        self._state_read = False                  # the state file read (resume, _offsets)
         self._started_at: float | None = None
         self._rescanned_at = 0.0
         # each camera's last key, end, offset ... (#596): the next leader resumes from it
@@ -918,7 +919,9 @@ class Dvr:
         """(#597) The file names give each camera's last key, not the offset its keys carry on from the origin's
         sequence with (it started over): that from the state, even an old one, when it describes the same recording's
         end (its last key the folder's, or up to STATE_LAG_KEYS before it: written after the state). The cameras."""
-        self.state.load()
+        if not self._state_read:                          # (resume() read it already: once is enough)
+            self._state_read = True
+            self.state.load()
         n = 0
         with self._lock:
             for cid in self.state.cameras():
@@ -937,6 +940,7 @@ class Dvr:
         if self._scanned.is_set():
             return False
         t = time.monotonic()
+        self._state_read = True
         if not self.state.load():
             return False
         n = 0
