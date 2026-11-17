@@ -322,8 +322,9 @@ def test_dongles_unplugged_under_a_running_system_stop_it_and_their_return_start
     mrrs.watchdog.restarts.extend([mrrs._m] * trunkrecd.WATCH_PER_HOUR)
     mrrs.watchdog.quiet = 2
     usb[:] = [(0, "v4")]
-    assert mrrs.step(t0 + 106)["state"] == "ok" and first.code is None             # one look: never stopped on it
-    st = mrrs.step(t0 + 107)
+    # none of its dongles listed: three looks a second apart (never stopped on one or two)
+    assert mrrs.step(t0 + 106)["state"] == "ok" and mrrs.step(t0 + 107)["state"] == "ok" and first.code is None
+    st = mrrs.step(t0 + 108)
     assert st["state"] == "absent" and st["detail"] == "SDR 'pd-a', 'pd-b' unplugged: trunk-recorder stopped until it is back"
     assert first.code is not None and not pop.running and "p25 mrrs: absent: SDR 'pd-a', 'pd-b' unplugged" in logs[-1]
     # the station's side (the Receivers row, Health): not running, never green
@@ -333,26 +334,39 @@ def test_dongles_unplugged_under_a_running_system_stop_it_and_their_return_start
     assert seen.status()["state"] == "absent"
     # while they are out: looked for every UNPLUGGED_S, said once, no restart counted, nothing started
     n = len(logs)
-    for t in range(108, 300, 5):
+    for t in range(109, 300, 5):
         st = mrrs.step(t0 + t)
     assert st["state"] == "absent" and "not plugged in" in st["detail"] and st["restarts"] == 0
     assert len(pop.started) == 1 and len(logs) == n
     assert seen.status()["state"] == "absent"
     # one back is not enough: every dongle it was given
     usb[:] = [(0, "v4"), (1, "pd-b")]
-    assert mrrs.step(t0 + 303)["state"] == "absent" and len(pop.started) == 1
+    assert mrrs.step(t0 + 304)["state"] == "absent" and len(pop.started) == 1
     usb[:] = [(0, "v4"), (1, "pd-b"), (2, "pd-a")]                              # back, at other indexes
-    st = mrrs.step(t0 + 308)
+    st = mrrs.step(t0 + 309)
+    assert st["state"] == "absent" and st["detail"].endswith("back: not started yet (USB settling)")
+    assert len(pop.started) == 1                                                # the list the same 5 s first
+    st = mrrs.step(t0 + 314)
     assert st["state"] == "ok" and len(pop.started) == 2 and pop.running == [pop.started[1]]
     assert [s["device"] for s in json.loads((d / "config.runtime.json").read_text())["sources"]] == ["rtl=2", "rtl=1"]
-    assert logs[-3:-1] == ["p25 mrrs: dongles back after 3:21: restarting trunk-recorder",
+    assert logs[-3:-1] == ["p25 mrrs: dongles back after 3:26: restarting trunk-recorder",
                            f"p25 mrrs: trunk-recorder on pd-a (device #2), pd-b (device #1), pid {pop.started[1].pid}"]
     assert seen.status()["state"] == "ok" and st["restarts"] == 0
-    assert not mrrs.watchdog.restarts and mrrs.watchdog.quiet == 0               # a fresh start: never capped
+    assert not mrrs.watchdog.restarts and mrrs.watchdog.quiet == 0               # gone > 60 s: a fresh start
     assert json.loads((claims.DIR / "pd-a.json").read_text())["mode"] == "MRRS 770"   # its claims kept throughout
 
 
-def test_a_dongle_that_stays_or_a_look_that_fails_never_stops_a_running_system(tmp_path):
+def run(sups, usb_at, t_from: float, t_to: float, dt: float = 0.5) -> None:
+    """Step the supervisors every dt s from t_from to t_to, the USB list as usb_at(t) says, in the service's order."""
+    t = t_from
+    while t < t_to:
+        usb_at(t)
+        for s in sups:
+            s.step(t)
+        t = round(t + dt, 3)
+
+
+def test_a_look_that_cant_be_trusted_never_stops_a_running_system(tmp_path):
     usb: list | None = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
     looks = []
 
@@ -370,15 +384,98 @@ def test_a_dongle_that_stays_or_a_look_that_fails_never_stops_a_running_system(t
     assert len(looks) - n == 1                                                  # looked at every UNPLUGGED_S, not every step
     usb = None
     assert mrrs.step(110.0)["state"] == "ok" and mrrs.step(116.0)["state"] == "ok"
-    usb = [(0, "v4"), (1, "pd-b")]                                               # pd-b isn't its: only pd-a counts
-    usb.append((2, "pd-a"))
-    assert mrrs.step(122.0)["state"] == "ok" and len(pop.started) == 1 and pop.running == pop.started
-    # missing at one look, there at the next (a USB hiccup): never stopped
-    usb[:] = [(0, "v4")]
-    assert mrrs.step(128.0)["state"] == "ok"
-    usb[:] = [(0, "v4"), (1, "pd-a")]
-    assert mrrs.step(129.0)["state"] == "ok" and pop.running == pop.started
+    usb = [(0, "v4"), (1, "pd-b"), (2, "pd-a")]                                  # another dongle moving: not its
+    assert mrrs.step(122.0)["state"] == "ok"
+    # libusb failing (an empty list) twice; a dongle whose serial can't be read; missing at one look only
+    for t, listed in ((128, []), (129, []), (130, [(0, "v4"), (1, "")]), (131, [(0, "v4"), (1, "")]),
+                      (132, [(0, "v4"), (1, "")]), (138, [(0, "v4")]), (139, [(0, "v4"), (1, "pd-a")])):
+        usb = listed
+        assert mrrs.step(float(t))["state"] == "ok", t
+    assert len(pop.started) == 1 and pop.running == pop.started
     assert not [m for m in logs if "back after" in m or "absent" in m]
+
+
+def test_a_dongle_missing_at_the_first_start_or_after_another_assignment_is_never_a_return(tmp_path):
+    usb = [(0, "v4"), (1, "pd-a")]
+    _county, mrrs, pop, logs, _d = service(tmp_path, found=lambda: list(usb))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "absent" and not pop.started
+    usb.append((2, "pd-b"))
+    assert mrrs.step(105.0)["state"] == "ok"                                    # no settling: nothing came back
+    assert not [m for m in logs if "back after" in m]
+    # it went, then the assignment changed: the new one starts as new
+    usb[:] = [(0, "v4"), (1, "pd-a")]
+    run([mrrs], lambda t: None, 106.0, 120.0)
+    assert mrrs.status["state"] == "absent" and mrrs.gone_since is not None
+    ask_system(tmp_path, {0: "pd-a"}, seq=2)
+    assert mrrs.step(121.0)["state"] == "ok" and mrrs.gone_since is None and len(pop.started) == 2
+    assert not [m for m in logs if "back after" in m]
+
+
+def test_a_flapping_dongle_is_held_back_longer_each_time_and_counted(tmp_path):
+    # the review's case: a dongle gone 2 s of every 7 s for an hour once meant ~257 starts and ~1,300 journal lines
+    gone = {"on": False}
+    _county, mrrs, pop, logs, _d = service(tmp_path, found=lambda: [(0, "v4"), (2, "pd-b")] + (
+        [] if gone["on"] else [(1, "pd-a")]))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+
+    def flap(t):
+        gone["on"] = (t % 7) < 2
+    run([mrrs], flap, 1000.0, 1000.0 + 3600)
+    assert len(pop.started) <= 12 and len(logs) <= 60, (len(pop.started), len(logs))
+    assert mrrs.status["restarts"] >= 3                                       # counted, as Health shows it
+    # scripted: 20 s in, 10 s out. The holds after each return it didn't keep: 30 s, 2 min, 5 min
+    _county, mrrs, pop, logs, _d = service(tmp_path / "b", found=lambda: [(0, "v4"), (2, "pd-b")] + (
+        [] if gone["on"] else [(1, "pd-a")]))
+    ask_system(tmp_path / "b", {0: "pd-a", 1: "pd-b"})
+    starts: list[float] = []
+
+    def script(t):
+        gone["on"] = (t % 30) >= 20
+        if len(pop.started) > len(starts):
+            starts.append(t)
+    run([mrrs], script, 0.0, 1800.0)
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert len(starts) >= 4 and gaps[0] < 40 and 30 + 20 <= gaps[1] and 120 + 20 <= gaps[2] and 300 + 20 <= gaps[3], gaps
+    assert mrrs.status["restarts"] >= 3
+    assert any("after it came back: started no sooner than 2 min" in m for m in logs)
+
+
+def test_the_county_gets_its_dongle_first_when_a_hub_drops_both_systems(tmp_path):
+    # The review's race: the county's V4 and both MRRS dongles on one hub that drops and comes back with new indexes.
+    # MRRS must never open an index that is about to be the county's: the county starts first, then MRRS on the
+    # indexes of its own serials as listed when it starts.
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    county, mrrs, pop, logs, d = service(tmp_path, found=lambda: list(usb))
+    ask_county(tmp_path)
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    run([county, mrrs], lambda t: None, 100.0, 105.0)
+    fire, pd = pop.started
+    assert county.status["state"] == "ok" and mrrs.status["state"] == "ok"
+    usb[:] = []                                                                 # the hub drops
+    fire.code = 1
+    county.lines.append("(error) usb_open error -4 · No supported devices found")   # the county's exits; MRRS hangs
+    back = [(0, "pd-b"), (1, "pd-a"), (2, "v4")]                                # comes back one by one, new indexes
+
+    def hub(t):
+        if t >= 120:
+            usb[:] = back[:1 + int((t - 120) // 2)]                              # one more every 2 s from 120
+    starts: dict[int, tuple[float, str]] = {}
+
+    def watch(t):
+        hub(t)
+        for p in pop.started[2:]:
+            if p.pid not in starts:
+                starts[p.pid] = (t, "county" if p.kw["cwd"] != str(d) else "mrrs")
+    run([county, mrrs], watch, 106.0, 200.0)
+    assert pd.code is not None and len(pop.started) == 4
+    (tc, who_c), (tm, who_m) = sorted(starts.values())
+    assert (who_c, who_m) == ("county", "mrrs") and tm - tc >= trunkrecd.COUNTY_SETTLE_S
+    work = d.parent.parent
+    assert json.loads((work / "config.runtime.json").read_text())["sources"][0]["device"] == "rtl=2"     # v4's
+    assert [s["device"] for s in json.loads((d / "config.runtime.json").read_text())["sources"]] == ["rtl=1", "rtl=0"]
+    assert county.status["state"] == "ok" and mrrs.status["state"] == "ok"
+    assert any(m.startswith("p25 mrrs: dongles back after") for m in logs)
 
 
 def test_the_service_finds_the_systems_by_their_directories(tmp_path):
