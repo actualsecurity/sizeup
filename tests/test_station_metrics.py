@@ -24,7 +24,9 @@ from sizeup.cloud import hub as hub_mod
 from sizeup.cloud.access import Identity
 from sizeup.cloud.client import HubClient, HubError
 from sizeup.cloud.metrics import BATCH_MAX, PATH, Collector, MetricsLink, Sampler
-from sizeup.cloud.metricstore import (HOURLY_DAYS, RAW_DAYS, SNAPSHOT_NAME, MetricsError, MetricStore)
+from sizeup import fence as fence_mod
+from sizeup.cloud.metricsbackup import SLOTS, S3Copies, next_slot
+from sizeup.cloud.metricstore import (FIRST_UPLOAD_S, HOURLY_DAYS, RAW_DAYS, SNAPSHOT_S, MetricsError, MetricStore)
 from sizeup.radio.fm import FRAME, RATE, Channel, NfmReceiver, NoiseSquelch
 from sizeup.radio.recorder import ControlChannel
 from tests.test_cad import make_cad
@@ -264,7 +266,7 @@ def test_the_sender_keeps_what_the_hub_didnt_take_drops_past_the_bound_and_says_
     cl.fail = None
     clock.t += 400
     link.step(cl)
-    assert cl.posts[0]["station"] == "st-test" and len(cl.posts[0]["records"]) == 10 and cl.posts[0]["dropped"] == 6
+    assert cl.posts[0]["station"] == "st-test" and len(cl.posts[0]["records"]) == 10 and "dropped" not in cl.posts[0]
     [said] = link.c.batch()[1]                                  # once it's back: the gap explained, once
     assert said["ev"] == "dropped" and said["d"].startswith("6 ")
     cl.fail = HubError("hub said 400: bad", 400)
@@ -350,9 +352,10 @@ def test_the_hub_takes_metrics_from_its_station_and_another_never_through_the_ou
 
 
 def test_the_station_link_sends_its_metrics_to_the_hub(tmp_path):
-    from tests.test_cloud import station, station_cfg
+    from sizeup.app import make_app
+    from tests.test_cloud import station_cfg
     hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="t"))
-    st = station(station_cfg(tmp_path, hub.url), {})
+    st = make_app(station_cfg(tmp_path, hub.url))   # the link's threads not started: no long poll outlives the test
     try:
         assert isinstance(st.metrics, Collector) and st.link.metrics_link.c is st.metrics
         queued = st.link.outbox.pending()[0]
@@ -361,8 +364,11 @@ def test_the_station_link_sends_its_metrics_to_the_hub(tmp_path):
         st.metrics.tx("FG1", "voice", seg)
         link = st.link.metrics_link
         link._next = 0.0
-        link.step(HubClient(hub.url, TOKEN))
-        assert link.c.pending() == 0 and link.error == ""
+        client = HubClient(hub.url, TOKEN)
+        link.step(client)
+        assert link.c.pending() == 2 and link.error == ""          # a new store: what it acked, again (resend_from 0)
+        link.step(client, now=time.time() + 1)
+        assert link.c.pending() == 0 and link.error == ""          # ... once: duplicates ignored
         kinds = {x["kind"] for x in hub.app.metric_store.index()["series"]}
         assert "tx" in kinds
         assert st.link.outbox.pending()[0] == queued              # the outbox: untouched by metrics
@@ -372,12 +378,96 @@ def test_the_station_link_sends_its_metrics_to_the_hub(tmp_path):
         hub.close()
 
 
+def post_raw(url, body: bytes, token, gz=True):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url + PATH, data=gzip.compress(body) if gz else body, method="POST",
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                          **({"Content-Encoding": "gzip"} if gz else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_metrics_never_mark_the_station_seen_bad_batches_are_400_and_a_fenced_store_is_503(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="t"))
+    try:
+        h = hub.app.hub
+        other = h.stations.add("st-b")
+        rec = {"k": "floor", "s": "FG1", "at": time.time() - 60, "q90": 2.0}
+        for tok, sid in ((other, "st-b"), (TOKEN, "t")):
+            code, out = post_raw(hub.url, json.dumps({"station": sid, "records": [rec]}).encode(), tok)
+            assert code == 200 and out["accepted"] == 1
+        assert h.last_seen is None and not h.connected()            # neither a second station nor metrics alone
+        for bad in (b"{not json", b"[" * 100_000 + b"]" * 100_000, b'["a list"]',
+                    json.dumps({"records": "x"}).encode()):
+            code, _ = post_raw(hub.url, bad, TOKEN)
+            assert code == 400, bad[:20]                            # the station drops these, never resends them
+        huge = json.dumps({"records": [dict(rec, at=10 ** 400), dict(rec, q90=10 ** 400, at=time.time() - 30)]}).encode()
+        code, out = post_raw(hub.url, huge, TOKEN)
+        assert code == 200 and out["skipped"] == 1 and out["accepted"] == 1
+        code, _ = post_raw(hub.url, b"{" + b" " * (5 * 1024 * 1024) + b"}", TOKEN)
+        assert code == 413                                          # unpacked over 4 MB
+        hub.app.metric_store.may_write = lambda: False              # the lease went between the gate and the write
+        code, _ = post_raw(hub.url, json.dumps({"records": [rec]}).encode(), TOKEN)
+        assert code == 503                                          # the station sends it again, to the leader
+    finally:
+        hub.close()
+
+
+def test_one_bad_channel_costs_only_its_own_minute_and_the_sender_survives(monkeypatch):
+    import threading as th
+    from sizeup.cloud import metrics as metrics_mod
+    clock = Clock()
+    good, bad = receiver("FG1"), receiver("FG2")
+
+    class Broken:
+        open = False
+        quieting_db = hiss_db = 1.0
+
+        @property
+        def params(self):
+            raise RuntimeError("half swapped")
+    bad.squelch = Broken()
+    logs = []
+    app = fake_app([good, bad])
+    c = Collector(clock=clock)
+    s = Sampler(app, c, clock, log=logs.append)
+    s.tick()
+    clock.t = T0 + 60
+    s.tick()
+    clock.t = T0 + 120
+    s.tick()
+    floors_ = [(x["s"], x["at"]) for x in c.batch()[1] if x["k"] == "floor"]
+    assert floors_ == [("FG1", T0), ("FG1", T0 + 60)]               # FG2 skipped, the minutes go on
+    assert len([m for m in logs if "FG2" in m]) == 2                # said once for its floor, once for its events
+    monkeypatch.setattr(metrics_mod, "SEND_S", 0.01)
+    link = MetricsLink(SimpleNamespace(metrics=None), SimpleNamespace(station_id="st-test"), lambda t: None,
+                       log=logs.append, clock=clock)
+    n = {"steps": 0}
+
+    def step(client, now=None):
+        n["steps"] += 1
+        if n["steps"] == 1:
+            raise KeyError("boom")
+        link.stop()
+        return 0.01
+    link.step = step
+    t = th.Thread(target=link._send)
+    t.start()
+    t.join(5)
+    assert not t.is_alive() and n["steps"] == 2 and link.error == "sender: KeyError"
+
+
 # -- the hub: kept ----------------------------------------------------------------------------------------------------
 
 
-def store(tmp_path, clock=None, leader=True, audit=None):
+def store(tmp_path, clock=None, leader=True, audit=None, backup=None):
     clock = clock or Clock(T0 + 3 * 3600)
-    s = MetricStore(tmp_path / "metrics.sqlite", may_write=lambda: leader, log=lambda m: None, clock=clock, audit=audit)
+    s = MetricStore(tmp_path / "metrics.sqlite", may_write=lambda: leader, log=lambda m: None, clock=clock, audit=audit,
+                    backup=backup)
     return s, clock
 
 
@@ -419,46 +509,158 @@ def test_retention_keeps_raw_30_days_and_rollups_and_events_a_year(tmp_path):
     assert q["rows"] == [] and q["events"] == []
 
 
-def test_the_hourly_copy_brings_a_new_task_back_and_a_late_copy_is_merged(tmp_path):
-    a, clock = store(tmp_path / "old")
-    a.ingest("t", floors(T0, [1.0, 2.0, 3.0]))
-    assert a.maintain(force_snapshot=True)["snapshot"] is True
-    snap = tmp_path / "old" / SNAPSHOT_NAME
-    with sqlite3.connect(snap) as db:                           # one consistent file (no -wal beside it)
-        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] == 3
-    # a new task: the copy restored before the store opens (the standby's warm_caches)
-    (tmp_path / "new").mkdir()
-    (tmp_path / "new" / SNAPSHOT_NAME).write_bytes(snap.read_bytes())
-    b, _ = store(tmp_path / "new", clock)
-    assert len(b.query({"subject": "FG1", "from": T0, "to": T0 + 600, "res": "raw"})["rows"]) == 3
-    first = b.ingest("t", floors(T0 + 1200, [4.0]))
-    assert first["resend_from"] == pytest.approx(clock.t)       # when the copy was made: the station sends the rest again
-    assert "resend_from" not in b.ingest("t", floors(T0 + 1260, [4.0]))   # once per station
-    assert b.ingest("st-b", floors(T0, [4.0]))["resend_from"] == pytest.approx(clock.t)
-    a2, _ = store(tmp_path / "old", clock)                      # its own file still there (a restart): nothing to ask
-    assert "resend_from" not in a2.ingest("t", floors(T0 + 1200, [4.0]))
-    # ... or after it opened (the app's own late restore): merged in once, its hours rolled
-    (tmp_path / "late").mkdir()
-    c, _ = store(tmp_path / "late", clock)
-    c.ingest("t", floors(T0 + 300, [9.0]))
-    time.sleep(0.01)
-    (tmp_path / "late" / SNAPSHOT_NAME).write_bytes(snap.read_bytes())
-    assert c.maintain()["merged"] > 3                           # its rows (raw, rollups, the index), none of ours replaced
-    assert len(c.query({"subject": "FG1", "from": T0, "to": T0 + 600, "res": "raw"})["rows"]) == 4
-    assert c.query({"subject": "FG1", "from": T0, "to": T0 + 3600, "res": "hour", "metric": "idle_q90"})["rows"][0]["n"] == 4
+class FakeCopies:
+    """The bucket's copies (sizeup/cloud/metricsbackup.py S3Copies' face), with failures on demand."""
+
+    def __init__(self, clock):
+        self.clock, self.slots, self.puts = clock, {}, []
+        self.fail_list = self.fail_get = None
+
+    def list(self):
+        if self.fail_list:
+            raise self.fail_list
+        return sorted(({"slot": k, "key": f"copy-{k}", "at": at, "size": len(raw)} for k, (at, raw) in self.slots.items()),
+                      key=lambda c: c["at"], reverse=True)
+
+    def get(self, slot):
+        if self.fail_get and slot in self.fail_get:
+            raise OSError("S3 GET 500")
+        return self.slots[slot][1]
+
+    def put(self, slot, raw):
+        self.slots[slot] = (self.clock(), raw)
+        self.puts.append(slot)
+        return len(raw) // 3
 
 
-def test_a_standby_writes_nothing_and_the_copy_is_in_the_cache_mirror(tmp_path):
-    from sizeup.cachesync import gap_for
-    s, _ = store(tmp_path, leader=False)
-    with pytest.raises(MetricsError):
+def raw_count(s):
+    return s._read("SELECT COUNT(*) FROM raw")[0][0]
+
+
+def test_a_new_task_that_cant_list_the_copies_never_overwrites_them(tmp_path):
+    """The review's case: a fresh task whose look at the bucket fails takes posts and runs its janitor, but uploads
+    nothing until it has merged the history in (or seen there is none), and merges it once it can."""
+    clock = Clock(T0 + 3600)
+    bucket = FakeCopies(clock)
+    old, _ = store(tmp_path / "old", clock, backup=bucket)
+    old.ingest("t", floors(T0, [1.0, 2.0, 3.0]))
+    bucket.fail_list = None
+    assert old.backup_turn() == "none" and old.resend_from == 0.0       # a listing that worked, and no copies
+    clock.t += FIRST_UPLOAD_S
+    assert old.backup_turn() == "uploaded" and bucket.puts == [0]
+    good = bucket.slots[0][1]
+    # a new task: the bucket can't be listed (a 500), then posts come in and the janitor runs, for hours
+    new, _ = store(tmp_path / "new", clock, backup=bucket)
+    bucket.fail_list = OSError("S3 GET 500")
+    first = new.ingest("t", floors(T0 + 1800, [9.0]))
+    assert "resend_from" not in first                                     # not settled: nothing to tell yet
+    for _ in range(12):
+        clock.t += 900
+        new.maintain()
+        new.backup_turn()
+    assert bucket.puts == [0] and bucket.slots[0][1] == good and not new.settled   # history untouched
+    assert new.backup_status["error"].startswith("OSError")
+    bucket.fail_list = None
+    clock.t += 3600
+    assert new.backup_turn() == "restored" and raw_count(new) == 4       # its 3 rows and the new one
+    assert new.ingest("t", floors(T0 + 1860, [9.0]))["resend_from"] == pytest.approx(T0 + 3600 + FIRST_UPLOAD_S)
+    clock.t += FIRST_UPLOAD_S
+    assert new.backup_turn() == "uploaded" and bucket.puts == [0, 1]       # a new slot: the old copy stays too
+
+
+def test_copies_go_round_robin_over_the_oldest_and_an_unreadable_newest_falls_back(tmp_path):
+    clock = Clock(T0)
+    bucket = FakeCopies(clock)
+    s, _ = store(tmp_path, clock, backup=bucket)
+    s.ingest("t", floors(T0, [1.0]))
+    s.backup_turn()
+    for k in range(SLOTS + 2):
+        clock.t += SNAPSHOT_S + FIRST_UPLOAD_S
+        assert s.backup_turn() == "uploaded"
+    assert bucket.puts == list(range(SLOTS)) + [0, 1]                    # the last SLOTS copies are always there
+    assert next_slot(bucket.list()) == 2
+    bucket.fail_get = {1}                                               # the newest can't be read: the one before
+    other, _ = store(tmp_path / "x", clock, backup=bucket)
+    assert other.backup_turn() == "restored" and raw_count(other) == 1
+    bucket.fail_get = set(range(SLOTS))                                  # none can: not settled, tried again later
+    third, _ = store(tmp_path / "y", clock, backup=bucket)
+    assert third.backup_turn() == "failed" and not third.settled and third.backup_turn() == ""   # (backing off)
+
+
+def test_a_restart_in_place_is_settled_and_asks_for_nothing(tmp_path):
+    clock = Clock(T0)
+    bucket = FakeCopies(clock)
+    a, _ = store(tmp_path, clock, backup=bucket)
+    a.ingest("t", floors(T0, [1.0]))
+    a.backup_turn()
+    a.close()
+    b, _ = store(tmp_path, clock, backup=bucket)
+    bucket.fail_list = OSError("down")
+    assert "resend_from" not in b.ingest("t", floors(T0 + 60, [1.0])) and b.settled
+
+
+def test_a_merged_copy_keeps_the_widest_series_and_retention_keeps_rollup_coverage(tmp_path):
+    clock = Clock(T0 + 3600)
+    bucket = FakeCopies(clock)
+    a, _ = store(tmp_path / "a", clock, backup=bucket)
+    a.ingest("t", floors(T0 - 20 * 86400, [1.0]) + floors(T0, [1.0]))
+    a.backup_turn()
+    clock.t += FIRST_UPLOAD_S
+    a.backup_turn()
+    b, _ = store(tmp_path / "b", clock, backup=bucket)
+    b.ingest("t", floors(T0 + 1200, [2.0]))
+    b.backup_turn()
+    [sr] = b.index()["series"]
+    assert sr["first"] == T0 - 20 * 86400 and sr["last"] == T0 + 1200       # min / max of both
+    b.maintain()
+    clock.t = T0 + (RAW_DAYS + 1) * 86400
+    b.maintain()
+    [sr] = b.index()["series"]
+    assert sr["first"] == T0 - 20 * 86400 <= sr["last"]                     # its rollups still cover it
+    assert b.query({"subject": "FG1", "from": T0 - 21 * 86400, "to": T0 - 19 * 86400, "res": "hour"})["rows"]
+
+
+def test_a_standby_writes_nothing_and_nothing_is_in_litestream_or_the_handoff(tmp_path):
+    s, _ = store(tmp_path, leader=False, backup=FakeCopies(Clock()))
+    with pytest.raises(fence_mod.FencedWrite):                           # a 503: the station sends it again
         s.ingest("t", floors(T0, [1.0]))
-    assert s.maintain() == {} and not (tmp_path / "metrics.sqlite").exists()
-    assert gap_for(SNAPSHOT_NAME) == 3 * 3600.0 and gap_for("metrics.sqlite") is None    # the copy, never the live file
+    assert s.maintain() == {} and s.backup_turn() == "" and s.query({"subject": "FG1"}) == {
+        "subject": "FG1", "station": None, "from": pytest.approx(s.clock() - 86400), "to": s.clock(), "res": "raw",
+        "rows": [], "events": [], "stations": []}
+    assert s.index() == {"series": []} and not (tmp_path / "metrics.sqlite").exists()    # a read never makes the file
     assert "metrics" not in (Path(hub_mod.__file__).parent.parent.parent / "deploy" / "hub" / "litestream.yml").read_text()
     from sizeup.handoff import DBS
-    assert "metrics" not in DBS                                 # nothing added to a drain or a takeover
+    assert "metrics" not in DBS                                         # nothing added to a drain or a takeover
+
+
+def test_the_s3_copies_list_put_and_get_and_a_failed_listing_raises():
+    calls, objects = [], {}
+
+    def send(method, url, headers, body, timeout):
+        calls.append((method, url))
+        if "fail" in objects:
+            return 500, b"<Error><Code>InternalError</Code></Error>"
+        if method == "PUT":
+            objects[url.rsplit("/", 1)[1]] = bytes(body)
+            return 200, b""
+        if method == "GET" and "list-type=2" in url:
+            items = "".join(f"<Contents><Key>hub/metrics/{k}</Key><LastModified>2026-11-16T0{n}:00:00.000Z</LastModified>"
+                            f"<Size>{len(v)}</Size></Contents>" for n, (k, v) in enumerate(sorted(objects.items())))
+            items += "<Contents><Key>hub/metrics/stray.txt</Key><LastModified>2026-11-16T09:00:00Z</LastModified><Size>1</Size></Contents>"
+            return 200, f'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{items}</ListBucketResult>'.encode()
+        return 200, objects[url.rsplit("/", 1)[1]]
+
+    from sizeup.aws import Credentials
+    c = S3Copies("bucket", "hub", "us-east-1", send=send, creds=lambda: Credentials("AKIDEXAMPLE", "secret"))
+    assert c.list() == []
+    c.put(0, b"SQLite format 3\x00 zero")
+    c.put(3, b"SQLite format 3\x00 three")
+    got = c.list()
+    assert [x["slot"] for x in got] == [3, 0] and c.get(3) == b"SQLite format 3\x00 three"
+    assert all(u.startswith("https://bucket.s3.us-east-1.amazonaws.com/") for _m, u in calls)
+    objects["fail"] = b""
+    with pytest.raises(Exception, match="500"):
+        c.list()
 
 
 def test_queries_check_their_range_and_join_the_settings_audit(tmp_path):
@@ -507,8 +709,7 @@ def test_size_per_day_is_what_the_docs_say(tmp_path):
         s._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     size = (tmp_path / "metrics.sqlite").stat().st_size
     assert len(recs) < 14_000 and size < 2.5e6, (len(recs), size)
-    s.maintain(force_snapshot=True)
-    gz = len(gzip.compress((tmp_path / SNAPSHOT_NAME).read_bytes(), 6))
+    gz = len(gzip.compress(s.snapshot_bytes(), 6))
     assert gz < size / 3, (gz, size)
 
 

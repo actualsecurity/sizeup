@@ -158,8 +158,10 @@ class Sampler:
     """Once a second, each running channel's squelch (idle quieting, open or not, the hiss / floor); each minute, a
     floor record per channel and a cc record per P25 system; every DIFF_S, the events (what changed)."""
 
-    def __init__(self, app, collector: Collector, clock: Callable[[], float] = time.time):
-        self.app, self.c, self.clock = app, collector, clock
+    def __init__(self, app, collector: Collector, clock: Callable[[], float] = time.time,
+                 log: Callable[[str], None] = print):
+        self.app, self.c, self.clock, self.log = app, collector, clock, log
+        self._errors: set[tuple[str, str]] = set()
         self._minute: int | None = None
         self._acc: dict[str, dict] = {}            # label -> this minute's looks
         self._prev: dict[str, dict] = {}           # subject -> what it was at the last diff
@@ -208,7 +210,8 @@ class Sampler:
         now = self.clock() if now is None else now
         minute = int(now // 60)
         if self._minute is not None and minute != self._minute:
-            self.flush(self._minute)
+            done, self._minute = self._minute, minute
+            self.flush(done)                       # (the minute moves on whatever the flush does)
         self._minute = minute
         assigned = self._assigned()
         for label, kind, am, r, sq, ch in self.channels():
@@ -237,58 +240,80 @@ class Sampler:
     # -- each minute ------------------------------------------------------------------------------------------------
 
     def flush(self, minute: int) -> None:
-        t0, t1 = minute * 60.0, minute * 60.0 + 60.0
-        for label, a in self._acc.items():
-            r, sq = a["r"], a["sq"]
-            rec: dict = {"k": "floor", "s": label[:80], "at": t0, "kind": a["kind"], "n": a["n"],
-                         "mhz": round(float(a["mhz"]), 4), "open_s": a["open"]}
-            if a["am"]:
-                rec["am"] = 1
-            hiss = _pct(a["hiss"], 50)
-            if hiss is not None:
-                rec["floor" if a["am"] else "hiss"] = round(hiss, 1)
-            for key, p in (("q50", 50), ("q90", 90), ("qmax", 100)):
-                v = _pct(a["q"], p)
-                if v is not None:
-                    rec[key] = round(v, 1)
-            shorts = getattr(r, "shorts", None)
-            if shorts is not None:
-                rec["noise"] = sum(1 for t in list(shorts) if t0 <= t < t1)
-            params = getattr(sq, "params", None)
-            if params is not None:
-                from sizeup.radio.fm import FRAME, RATE
-                rec.update(open=params[0], close=params[1], min=round(params[2] * FRAME / RATE, 2))
-            else:
-                rec.update(open=getattr(sq, "open_db", None), close=getattr(sq, "close_db", None))
-            rec["sdr"] = _serial(getattr(r, "device", None))
-            if getattr(r, "gain_db", None) is not None:
-                rec["gain"] = r.gain_db
-            rec["state"] = str(getattr(r, "state", ""))
-            settings = tuple(rec.get(k) for k in SETTINGS)
-            if minute % FULL_EVERY and self._sent.get(label) == settings:
-                for k in SETTINGS:
-                    rec.pop(k, None)
-            else:
-                self._sent[label] = settings
-            self.c.add(rec)
-        self._acc = {}
+        """The minute's records: each channel's and each P25 system's on its own, so one that can't be read (a receiver
+        half swapped, a recorder gone) costs only its own record."""
+        acc, self._acc = self._acc, {}
+        for label, a in acc.items():
+            try:
+                self._floor(minute, label, a)
+            except Exception as e:  # noqa: BLE001 - that channel's minute only
+                self._said(f"floor {label}", e)
         for subject, rec_, off in self.recorders():
-            cc = getattr(rec_, "cc", None)
-            if cc is None or not hasattr(cc, "take_minute"):
-                continue
-            m = cc.take_minute()
-            state = off or str(getattr(rec_, "state", "") or "")
-            if state != "ok" and not m["n"] and not m["uncovered"]:
-                continue
-            out: dict = {"k": "cc", "s": subject, "at": t0, "n": m["n"], "state": state,
-                         "sdr": str(rec_.on() or "") if hasattr(rec_, "on") else ""}
-            if m["n"]:
-                out.update(rate=round(m["sum"] / m["n"], 1), lo=m["lo"], hi=m["hi"])
-            if m["retunes"]:
-                out["retunes"] = m["retunes"]
-            if m["uncovered"]:
-                out["unc"] = dict(m["uncovered"])
-            self.c.add(out)
+            try:
+                self._cc(minute, subject, rec_, off)
+            except Exception as e:  # noqa: BLE001 - that system's minute only
+                self._said(f"cc {subject}", e)
+
+    def _said(self, what: str, e: Exception) -> None:
+        """A record that couldn't be made: logged once per (what, error type)."""
+        key = (what, type(e).__name__)
+        if key not in self._errors:
+            self._errors.add(key)
+            self.log(f"station metrics: {what} not recorded: {type(e).__name__}: {e}")
+
+    def _floor(self, minute: int, label: str, a: dict) -> None:
+        t0, t1 = minute * 60.0, minute * 60.0 + 60.0
+        r, sq = a["r"], a["sq"]
+        rec: dict = {"k": "floor", "s": label[:80], "at": t0, "kind": a["kind"], "n": a["n"],
+                     "mhz": round(float(a["mhz"]), 4), "open_s": a["open"]}
+        if a["am"]:
+            rec["am"] = 1
+        hiss = _pct(a["hiss"], 50)
+        if hiss is not None:
+            rec["floor" if a["am"] else "hiss"] = round(hiss, 1)
+        for key, p in (("q50", 50), ("q90", 90), ("qmax", 100)):
+            v = _pct(a["q"], p)
+            if v is not None:
+                rec[key] = round(v, 1)
+        shorts = getattr(r, "shorts", None)
+        if shorts is not None:
+            rec["noise"] = sum(1 for t in list(shorts) if t0 <= t < t1)
+        params = getattr(sq, "params", None)
+        if params is not None:
+            from sizeup.radio.fm import FRAME, RATE
+            rec.update(open=params[0], close=params[1], min=round(params[2] * FRAME / RATE, 2))
+        else:
+            rec.update(open=getattr(sq, "open_db", None), close=getattr(sq, "close_db", None))
+        rec["sdr"] = _serial(getattr(r, "device", None))
+        if getattr(r, "gain_db", None) is not None:
+            rec["gain"] = r.gain_db
+        rec["state"] = str(getattr(r, "state", ""))
+        settings = tuple(rec.get(k) for k in SETTINGS)
+        if minute % FULL_EVERY and self._sent.get(label) == settings:
+            for k in SETTINGS:
+                rec.pop(k, None)
+        else:
+            self._sent[label] = settings
+        self.c.add(rec)
+
+    def _cc(self, minute: int, subject: str, rec_, off) -> None:
+        t0 = minute * 60.0
+        cc = getattr(rec_, "cc", None)
+        if cc is None or not hasattr(cc, "take_minute"):
+            return
+        m = cc.take_minute()
+        state = off or str(getattr(rec_, "state", "") or "")
+        if state != "ok" and not m["n"] and not m["uncovered"]:
+            return
+        out: dict = {"k": "cc", "s": subject, "at": t0, "n": m["n"], "state": state,
+                     "sdr": str(rec_.on() or "") if hasattr(rec_, "on") else ""}
+        if m["n"]:
+            out.update(rate=round(m["sum"] / m["n"], 1), lo=m["lo"], hi=m["hi"])
+        if m["retunes"]:
+            out["retunes"] = m["retunes"]
+        if m["uncovered"]:
+            out["unc"] = dict(m["uncovered"])
+        self.c.add(out)
 
     # -- what changed -----------------------------------------------------------------------------------------------
 
@@ -296,33 +321,38 @@ class Sampler:
         self.c.event(subject, ev, detail, now)
 
     def diff(self, now: float) -> None:
+        """What changed since the last look: each channel and each P25 system on its own (one that can't be read is
+        skipped, said once)."""
         assigned = self._assigned()
         seen: set[str] = set()
         for label, _kind, _am, r, sq, _ch in self.channels():
             if label in seen:
                 continue
             seen.add(label)
-            params = getattr(sq, "params", None)
-            sqv = None
-            if params is not None:
-                from sizeup.radio.fm import FRAME, RATE
-                sqv = (params[0], params[1], round(params[2] * FRAME / RATE, 2))
-            cur = {"state": self._running(r, label, assigned), "detail": str(getattr(r, "detail", "") or ""),
-                   "restarts": int(getattr(r, "restarts", 0) or 0), "sdr": _serial(getattr(r, "device", None)),
-                   "gain": getattr(r, "gain_db", None), "squelch": sqv}
-            self._changed(label, cur, now)
+            try:
+                params = getattr(sq, "params", None)
+                sqv = None
+                if params is not None:
+                    from sizeup.radio.fm import FRAME, RATE
+                    sqv = (params[0], params[1], round(params[2] * FRAME / RATE, 2))
+                cur = {"state": self._running(r, label, assigned), "detail": str(getattr(r, "detail", "") or ""),
+                       "restarts": int(getattr(r, "restarts", 0) or 0), "sdr": _serial(getattr(r, "device", None)),
+                       "gain": getattr(r, "gain_db", None), "squelch": sqv}
+                self._changed(label, cur, now)
+            except Exception as e:  # noqa: BLE001
+                self._said(f"events {label}", e)
         for subject, rec, off in self.recorders():
             try:
                 st = rec.status()
-            except Exception:  # noqa: BLE001 - a report: never in the way
-                continue
-            cc = getattr(rec, "cc", None)
-            ccs = cc.status() if cc is not None else {}
-            lost = bool(ccs.get("low_since") or ccs.get("silent_since"))
-            cur = {"state": off or str(st.get("state") or ""), "detail": str(st.get("detail") or ""),
-                   "restarts": int(st.get("restarts") or 0), "sdr": str(rec.on() or "") if hasattr(rec, "on") else "",
-                   "cc_lost": lost if (off or st.get("state")) == "ok" else None}
-            self._changed(subject, cur, now)
+                cc = getattr(rec, "cc", None)
+                ccs = cc.status() if cc is not None else {}
+                lost = bool(ccs.get("low_since") or ccs.get("silent_since"))
+                cur = {"state": off or str(st.get("state") or ""), "detail": str(st.get("detail") or ""),
+                       "restarts": int(st.get("restarts") or 0), "sdr": str(rec.on() or "") if hasattr(rec, "on") else "",
+                       "cc_lost": lost if (off or st.get("state")) == "ok" else None}
+                self._changed(subject, cur, now)
+            except Exception as e:  # noqa: BLE001
+                self._said(f"events {subject}", e)
 
     def _changed(self, subject: str, cur: dict, now: float) -> None:
         prev = self._prev.get(subject)
@@ -369,7 +399,7 @@ class MetricsLink:
         if getattr(app, "metrics", None) is None:
             app.metrics = Collector(clock=clock)
         self.c: Collector = app.metrics
-        self.sampler = Sampler(app, self.c, clock)
+        self.sampler = Sampler(app, self.c, clock, log)
         self._client = client
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -405,7 +435,13 @@ class MetricsLink:
     def _send(self) -> None:
         client = self._client(20.0)
         while not self._stop.is_set():
-            wait = self.step(client)
+            try:
+                wait = self.step(client)
+            except Exception as e:  # noqa: BLE001 - logged, and the thread goes on (a minute later)
+                wait = SEND_S
+                if self.error != f"sender: {type(e).__name__}":
+                    self.error = f"sender: {type(e).__name__}"
+                    self.log(f"station metrics: sender: {type(e).__name__}: {e}")
             self._stop.wait(wait)
 
     def step(self, client, now: float | None = None) -> float:
@@ -417,7 +453,7 @@ class MetricsLink:
         if not recs:
             self._next = now + SEND_S
             return SEND_S
-        body = {"v": 1, "station": self.cfg.station_id, "dropped": self.c.dropped, "records": recs}
+        body = {"v": 1, "station": self.cfg.station_id, "records": recs}
         try:
             answer = client.request("POST", PATH, body, timeout=20.0, gzip_body=True)
         except HubError as e:

@@ -6,18 +6,21 @@ metrics.sqlite, in the hub's state dir beside the others, but its own file: a bu
 slow cad.sqlite / hub.sqlite, their Litestream replication or the leader's handover. It is NOT in Litestream (neither
 deploy/hub/litestream.yml nor sizeup/handoff.py DBS know it), so it adds nothing to a drain or a takeover. Instead:
 
-    snapshot   every SNAPSHOT_S the leader writes a consistent copy (SQLite's backup API, from a read connection: the
-               ingest isn't held up) to metrics-snapshot.sqlite, and sizeup/cachesync.py keeps a gzip copy of that in
-               the backups bucket like the map caches (at most every 3 hours)
-    restore    a new task (a deploy) gets the copy back with the map caches: the standby fetches it before it is
-               promoted (handoff warm_caches), so nothing waits for it; opened here when metrics.sqlite isn't there yet.
-               A copy that comes back after metrics.sqlite was made (the app's own late restore) is merged in once
-               (INSERT OR IGNORE)
-    resend     a store that started from a copy (or from nothing) answers each station's first post with "resend_from":
-               when the copy was made (meta snapshot_at; 0 from nothing). The station keeps what was acked for 6 h and
-               sends it again (sizeup/cloud/metrics.py resend): duplicates are ignored, so a deploy loses nothing while
-               the station is connected. Without it (a station away for the whole gap, a copy older than 6 h) at most
-               the time since the last copy is lost (agreed: metrics only)
+    settle     before anything is uploaded the store must be SETTLED: the copies in the bucket (sizeup/cloud/
+               metricsbackup.py, SLOTS of them, round-robin) were listed and either the newest (and the largest, if
+               another) merged in (INSERT OR IGNORE: what came in meanwhile stays; series by min / max), or a listing
+               that succeeded showed none. Until then the leader's backup thread tries again (BACKOFF_S, doubling): a
+               listing or a download that fails never lets a near-empty store overwrite the history. A local file
+               that settled before (meta "settled") is settled at once (a restart in place)
+    upload     once settled, FIRST_UPLOAD_S later and then every SNAPSHOT_S: a consistent copy (SQLite's backup API, from
+               the read connection: the ingest isn't held up), gzipped, into an empty slot or over the OLDEST copy, so
+               the last SLOTS copies stay and one bad copy can't take the history with it. The leader only
+    resend     once settled, each station's next post is answered with "resend_from": when the merged copy was made
+               (meta snapshot_at; 0 with none). The station keeps what was acked for 6 h and sends it again
+               (sizeup/cloud/metrics.py resend): duplicates are ignored, so a deploy loses nothing while the station is
+               connected and the restore settles within 6 h. What can be lost: what the old task took after its last
+               copy, if the station was away for that whole time or the restore took longer than its 6 h; never
+               what an earlier copy holds
 
 Tables (made on first use, never at the hub's start):
 
@@ -27,12 +30,13 @@ Tables (made on first use, never at the hub's start):
              channel changes are joined in when read, from cad.sqlite), EVENT_DAYS (365)
     hourly   (station, subject, metric, hour) -> n, lo, p50, p90, hi: the rollups, HOURLY_DAYS (365)
     series   (station, subject, kind) -> first, last: what there is (the API's index, the retention's list)
-    meta     what was rolled up last
+    meta     snapshot_at (when this copy was made), settled
 
 Rollups (METRICS below): an hour is rolled again whenever a record of it comes in (a station back after an outage
 sends late), and at the first maintain() after a start the last two days are rolled again (in case that was lost).
-maintain() runs from the hub's janitor (every 10 min): rollups, then the retention once a day, then the snapshot.
-Only the leader writes (may_write: the hub's fence); a standby's maintain() does nothing.
+maintain() runs from the hub's janitor (every 10 min): rollups, then the retention once a day; backup_turn() from the
+hub's "metrics-backup" thread (every BACKUP_TURN_S): settle, then upload. Only the leader writes (may_write: the hub's
+fence): a standby writes nothing, and a read never makes the file.
 
 Size (docs/cloud.md "Station metrics"; tests/test_station_metrics.py measures it): a day of 6 channels, 2 P25 systems
 and 2,000 transmissions is ~13,500 records, ~1.7 MB (~125 bytes a record with its key); its rollups ~1,100 rows,
@@ -44,19 +48,23 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Callable
 
+from sizeup import fence as fence_mod
+
 RAW_DAYS = 30
 HOURLY_DAYS = 365
 EVENT_DAYS = 365
-SNAPSHOT_S = 3 * 3600.0        # (sizeup/cachesync.py uploads it at most this often too)
+SNAPSHOT_S = 3 * 3600.0         # a copy to the bucket this often, once settled
+FIRST_UPLOAD_S = 900.0          # ... the first this long after settling
+BACKOFF_S = (30.0, 1800.0)      # settling or an upload failed: again in 30 s, doubling to 30 min
+BACKUP_TURN_S = 30.0            # the backup thread's look
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
-SNAPSHOT_NAME = "metrics-snapshot.sqlite"     # (sizeup/cachesync.py FILES)
 KINDS = ("floor", "tx", "cc")
 MAX_RECORDS = 5000              # a post
 MAX_DOC = 2048                  # one record's numbers, as JSON
@@ -110,7 +118,10 @@ class MetricsError(ValueError):
 def _num(v) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    v = float(v)
+    try:
+        v = float(v)
+    except OverflowError:                         # an int too big for a float
+        return None
     return v if math.isfinite(v) else None
 
 
@@ -134,71 +145,62 @@ def _clean_doc(rec: dict) -> dict:
         if isinstance(v, bool):
             out[k] = int(v)
         elif isinstance(v, (int, float)):
-            if math.isfinite(float(v)):
-                out[k] = v
+            f = _num(v)
+            if f is not None:
+                out[k] = v if isinstance(v, float) or abs(v) < 2 ** 53 else f
         elif isinstance(v, str):
             out[k] = _text(v, 40)
         elif k == "unc" and isinstance(v, dict):
             out[k] = {_text(f, 14): int(c) for f, c in list(v.items())[:21]
-                      if isinstance(c, int) and not isinstance(c, bool)}
+                      if isinstance(c, int) and not isinstance(c, bool) and 0 <= c < 2 ** 31}
     return out
 
 
 class MetricStore:
     def __init__(self, path: str | Path, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 audit: Callable[[str, float, float], list[dict]] | None = None):
-        """audit(subject, t0, t1): the Settings audit's changes to that channel (the hub's cad.sqlite), for the events."""
+                 audit: Callable[[str, float, float], list[dict]] | None = None, backup=None):
+        """audit(subject, t0, t1): the Settings audit's changes to that channel (the hub's cad.sqlite), for the events.
+        backup: where the copies are (sizeup/cloud/metricsbackup.py S3Copies, or one like it); None: no copies, the
+        store is settled as it is."""
         self.path = str(path)
-        self.may_write, self.log, self.clock, self.audit = may_write, log, clock, audit
+        self.may_write, self.log, self.clock, self.audit, self.backup = may_write, log, clock, audit, backup
         self._db: sqlite3.Connection | None = None
         self._ro: sqlite3.Connection | None = None
         self._lock = threading.Lock()              # the writer
         self._rlock = threading.Lock()             # the reader
         self._dirty: set[tuple[str, str, int]] = set()
         self._rolled_once = False
-        self._merged = False
-        self._opened_at: float | None = None       # (wall clock) when this process opened the file
-        self.resend_from: float | None = None      # started from a copy (its time) or from nothing (0): stations resend
+        self._reroll_all = False                   # after a merge: every hour raw still has, rolled again once
+        self._fresh = False                        # this process made the file (nothing was here)
+        self.settled = False                       # the copies looked at (merged, or none there): uploads may start
+        self.resend_from: float | None = None      # once settled: what the stations send again (None: nothing lost)
         self._told: set[str] = set()               # ... the stations told so already
-        self._snap_at = 0.0
+        self._next_try = 0.0                       # (clock) settling or uploading: not before this
+        self._fails = 0
+        self._next_upload: float | None = None
+        self.backup_status = {"state": "unsettled", "error": "", "uploaded": None, "restored": None}
         self._retained_day = -1
         self.ingested = 0
 
     # -- the file ---------------------------------------------------------------------------------------------------
 
-    @property
-    def snapshot_path(self) -> Path | None:
-        return None if self.path == ":memory:" else Path(self.path).with_name(SNAPSHOT_NAME)
+    def _exists(self) -> bool:
+        return self.path == ":memory:" or Path(self.path).exists()
 
     def _open(self) -> sqlite3.Connection:
+        """The writer (made with the file when it isn't there: callers check may_write first)."""
         if self._db is not None:
             return self._db
-        snap = self.snapshot_path
-        if snap is not None:
+        if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-            if not Path(self.path).exists():
-                self.resend_from = 0.0              # nothing here: whatever the stations still keep
-            if not Path(self.path).exists() and snap.is_file():
-                # a new task: the last copy (sizeup/cachesync.py brought it back) is where this one starts
-                shutil.copyfile(snap, self.path)
-                self._merged = True
-                self.log(f"metrics: {Path(self.path).name} started from its last copy ({snap.stat().st_size / 1e6:.1f} MB)")
-                try:
-                    with sqlite3.connect(self.path) as c:
-                        v = c.execute("SELECT value FROM meta WHERE key = 'snapshot_at'").fetchone()
-                    self.resend_from = float(v[0]) if v else 0.0
-                except (sqlite3.Error, ValueError):
-                    self.resend_from = 0.0
-        elif self.path == ":memory:":
-            self.resend_from = None
+        self._fresh = not self._exists() or self.path == ":memory:"
         db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         db.execute("PRAGMA journal_mode = WAL")
         db.execute("PRAGMA synchronous = NORMAL")
         db.execute("PRAGMA busy_timeout = 5000")
         db.executescript(SCHEMA)
         self._db = db
-        self._opened_at = time.time()
         if self.path == ":memory:":
             self._ro, self._rlock = db, self._lock
         else:
@@ -206,12 +208,17 @@ class MetricStore:
             ro.execute("PRAGMA busy_timeout = 5000")
             ro.execute("PRAGMA query_only = 1")
             self._ro = ro
+        if not self.settled:
+            was = db.execute("SELECT value FROM meta WHERE key = 'settled'").fetchone()
+            if was is not None:                    # a restart in place: this file has its history already
+                self._settle(None, "local")
+            elif self.backup is None:              # nowhere to look: as it is
+                self._settle(0.0 if self._fresh else None, "no copies")
         return db
 
     def _read(self, sql: str, params=()) -> list:
         if self._db is None:
-            if not (self.path == ":memory:" or Path(self.path).exists()
-                    or (self.snapshot_path is not None and self.snapshot_path.is_file())):
+            if not self._exists():
                 return []                          # nothing kept yet: a read never makes the file
             with self._lock:
                 self._open()
@@ -226,11 +233,28 @@ class MetricStore:
                 self._db.close()
             self._db = self._ro = None
 
+    def _meta(self, key: str, value: str) -> None:
+        self._db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = "
+                         "excluded.value", (key, value))
+
+    def _settle(self, resend_from: float | None, how: str) -> None:
+        """Settled: uploads may start (FIRST_UPLOAD_S from now), and the stations are told what to send again."""
+        self.settled, self.resend_from = True, resend_from
+        self._told = set()
+        self._next_upload = self.clock() + FIRST_UPLOAD_S
+        self.backup_status.update(state="settled", how=how, error="")
+        if self._db is not None and self.path != ":memory:" and self.may_write():
+            try:
+                self._meta("settled", how)
+            except sqlite3.Error:
+                pass
+
     # -- in ---------------------------------------------------------------------------------------------------------
 
-    def ingest(self, station: str, records: list, dropped: int = 0) -> dict:
+    def ingest(self, station: str, records: list) -> dict:
         """POST /api/station/metrics from `station` (the authenticated id). What can't be read is skipped and counted,
-        never refused whole: {ok, accepted, skipped}. MetricsError for a body that isn't one."""
+        never refused whole: {ok, accepted, skipped, resend_from?}. MetricsError for a body that isn't one (the station
+        drops it); fence.FencedWrite when this task isn't the leader (a 503: the station sends it again)."""
         if not isinstance(records, list):
             raise MetricsError("records: a list")
         if len(records) > MAX_RECORDS:
@@ -261,7 +285,7 @@ class MetricStore:
             else:
                 skipped += 1
         if not self.may_write():
-            raise MetricsError("not the hub's leader")
+            fence_mod.refuse("station metrics")
         with self._lock:
             db = self._open()
             db.execute("BEGIN")
@@ -290,12 +314,12 @@ class MetricStore:
                 self._dirty.add((st, s, int(at // 3600)))
         self.ingested += n
         out = {"ok": True, "accepted": n, "skipped": skipped}
-        if self.resend_from is not None and station not in self._told:
+        if self.settled and self.resend_from is not None and station not in self._told:
             self._told.add(station)
-            out["resend_from"] = self.resend_from          # this store started from a copy: what came after, again
+            out["resend_from"] = self.resend_from          # this store lost what came after: again, please
         return out
 
-    # -- the rollups, the retention, the snapshot -------------------------------------------------------------------
+    # -- the rollups, the retention ---------------------------------------------------------------------------------
 
     def roll(self, keys) -> int:
         """Each (station, subject, hour) rolled up again from raw. The rows written."""
@@ -316,6 +340,8 @@ class MetricStore:
                         v = _num(value(d))
                         if v is not None:
                             vals.setdefault(metric, []).append(v)
+            if not vals:
+                continue                           # no raw left for that hour (past RAW_DAYS): its rollups stay
             with self._lock:
                 db = self._open()
                 db.execute("BEGIN")
@@ -333,21 +359,19 @@ class MetricStore:
                     raise
         return out
 
-    def maintain(self, now: float | None = None, force_snapshot: bool = False) -> dict:
-        """The janitor's turn (every 10 min, the leader's): a late copy merged once, the hours that changed rolled up
-        (the last two days too, after a start), the retention once a day, the snapshot once SNAPSHOT_S has passed."""
+    def maintain(self, now: float | None = None) -> dict:
+        """The janitor's turn (every 10 min, the leader's): the hours that changed rolled up (the last two days too,
+        after a start; after a merge every hour raw still has), the retention once a day."""
         now = self.clock() if now is None else now
         did: dict = {}
-        if not self.may_write() or not (self._db is not None or self.path == ":memory:" or Path(self.path).exists()
-                                        or (self.snapshot_path is not None and self.snapshot_path.is_file())):
+        if not self.may_write() or not self._exists():
             return did
-        if not self._merged:
-            did["merged"] = self.merge_snapshot()
         keys = set(self._dirty)
         self._dirty -= keys
         if not self._rolled_once:
             self._rolled_once = True
-            first = int((now - REROLL_S) // 3600)
+            first = int((now - (RAW_DAYS * 86400.0 if self._reroll_all else REROLL_S)) // 3600)
+            self._reroll_all = False
             for st, s, a, b in self._read("SELECT station, subject, MIN(first), MAX(last) FROM series GROUP BY station, subject"):
                 keys |= {(st, s, h) for h in range(max(first, int(a // 3600)), int(b // 3600) + 1)}
         if keys:
@@ -356,13 +380,12 @@ class MetricStore:
         if day != self._retained_day:
             self._retained_day = day
             did["deleted"] = self.retain(now)
-        if force_snapshot or now - self._snap_at >= SNAPSHOT_S:
-            did["snapshot"] = self.snapshot(now)
         return did
 
     def retain(self, now: float | None = None) -> int:
         """raw past RAW_DAYS, hourly past HOURLY_DAYS, events past EVENT_DAYS: deleted, a series at a time (each one
-        range of its primary key)."""
+        range of its primary key). A series' first / last stay what it covers (its rollups go back a year); it leaves
+        the index once even its rollups are gone."""
         now = self.clock() if now is None else now
         n = 0
         series = self._read("SELECT station, subject, kind FROM series")
@@ -371,26 +394,117 @@ class MetricStore:
             for st, s, k in series:
                 n += db.execute("DELETE FROM raw WHERE station = ? AND subject = ? AND kind = ? AND at < ?",
                                 (st, s, k, now - RAW_DAYS * 86400)).rowcount
-                db.execute("UPDATE series SET first = MAX(first, ?) WHERE station = ? AND subject = ? AND kind = ?",
-                           (now - RAW_DAYS * 86400, st, s, k))
             n += db.execute("DELETE FROM hourly WHERE hour < ?", (int((now - HOURLY_DAYS * 86400) // 3600),)).rowcount
             n += db.execute("DELETE FROM events WHERE at < ?", (now - EVENT_DAYS * 86400,)).rowcount
-            # a series with no raw left and no rollup left goes from the index
             db.execute("DELETE FROM series WHERE last < ?", (now - HOURLY_DAYS * 86400,))
+            db.execute("UPDATE series SET first = MAX(first, ?) WHERE first < ?",
+                       (now - HOURLY_DAYS * 86400, now - HOURLY_DAYS * 86400))     # (never past last: last is newer)
         return n
 
-    def snapshot(self, now: float | None = None) -> bool:
-        """A consistent copy beside it (SNAPSHOT_NAME), for sizeup/cachesync.py to keep in S3: written through a temp
-        file and put in place at once (the mirror never reads half of one). From the read connection: no write waits."""
-        snap = self.snapshot_path
-        if snap is None or self._db is None or not self.may_write():
-            return False
-        self._snap_at = self.clock() if now is None else now
-        tmp = snap.with_name(f".{snap.name}.{os.getpid()}.tmp")
+    # -- the copies (sizeup/cloud/metricsbackup.py) -----------------------------------------------------------------
+
+    def backup_turn(self, now: float | None = None) -> str:
+        """The backup thread's turn (the leader's, every BACKUP_TURN_S): settle (merge the newest copy, or see there is
+        none), then a copy every SNAPSHOT_S. What it did, for the log and the tests."""
+        now = self.clock() if now is None else now
+        if self.backup is None or not self.may_write() or now < self._next_try:
+            return ""                              # (no copies: settled as it is when the file opens)
+        with self._lock:
+            self._open()
         try:
-            with self._lock:                       # when it was made: a task starting from it asks for what came after
-                self._db.execute("INSERT INTO meta (key, value) VALUES ('snapshot_at', ?) ON CONFLICT(key) DO UPDATE "
-                                 "SET value = excluded.value", (f"{self._snap_at:.3f}",))
+            if not self.settled:
+                return self.restore(now)
+            if self.backup is not None and self._next_upload is not None and now >= self._next_upload:
+                return self.upload(now)
+        except Exception as e:  # noqa: BLE001 - tried again later; never taken for "nothing there"
+            self._fails += 1
+            wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self._fails - 1, 20))
+            self._next_try = now + wait
+            why = f"{type(e).__name__}: {e}"[:200]
+            if why != self.backup_status.get("error"):
+                self.log(f"metrics: {'restore' if not self.settled else 'copy'} failed ({why}); again in {wait:.0f} s")
+            self.backup_status["error"] = why
+            return "failed"
+        return ""
+
+    def restore(self, now: float) -> str:
+        """Settle: the newest copy (and the largest, if that is another one) merged in, or none there. Raises when the
+        bucket can't be listed or no copy can be read (tried again later; nothing is uploaded meanwhile)."""
+        copies = self.backup.list()
+        if not copies:
+            self._fails = 0
+            with self._lock:
+                self._settle(0.0, "none")
+            self.log("metrics: no copies in the bucket: starting from what comes in")
+            return "none"
+        pick = [copies[0]] + ([c] if (c := max(copies, key=lambda c: c["size"])) is not copies[0] else [])
+        merged, snap_at, last_err = 0, None, None
+        for c in pick + [c for c in copies if c not in pick]:
+            if merged and c not in pick:
+                break                              # the newest (and largest) are in: enough
+            try:
+                n, at = self.merge(self.backup.get(c["slot"]))
+            except (OSError, ValueError, EOFError, sqlite3.Error, RuntimeError) as e:
+                last_err = e
+                self.log(f"metrics: copy {c['slot']} not read ({type(e).__name__}: {e})")
+                continue
+            merged += 1
+            snap_at = at if snap_at is None else max(snap_at, at or 0.0)
+        if not merged:
+            raise RuntimeError(f"no copy could be read ({type(last_err).__name__ if last_err else 'none'})")
+        self._fails = 0
+        self._rolled_once, self._reroll_all = False, True    # its hours (all raw has) rolled at the janitor's next turn
+        with self._lock:
+            self._settle(snap_at or 0.0, "restored")
+        self.backup_status["restored"] = now
+        return "restored"
+
+    def merge(self, data: bytes) -> tuple[int, float | None]:
+        """A copy (an SQLite file's bytes) merged in: INSERT OR IGNORE (what is here stays), the series by min / max.
+        (rows added, its snapshot_at)."""
+        if data[:16] != b"SQLite format 3\x00":
+            raise ValueError("not an SQLite file")
+        fd, tmp = tempfile.mkstemp(prefix=".metrics-copy.", suffix=".sqlite",
+                                   dir=None if self.path == ":memory:" else str(Path(self.path).parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            n = 0
+            with self._lock:
+                db = self._open()
+                db.execute("ATTACH DATABASE ? AS snap", (tmp,))
+                try:
+                    v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()
+                    db.execute("BEGIN")
+                    for t in ("raw", "events", "hourly"):
+                        n += db.execute(f"INSERT OR IGNORE INTO main.{t} SELECT * FROM snap.{t}").rowcount
+                    db.execute("INSERT INTO main.series SELECT * FROM snap.series WHERE true ON CONFLICT(station, subject, "
+                               "kind) DO UPDATE SET first = MIN(first, excluded.first), last = MAX(last, excluded.last)")
+                    db.execute("COMMIT")
+                except Exception:
+                    if db.in_transaction:
+                        db.execute("ROLLBACK")
+                    raise
+                finally:
+                    db.execute("DETACH DATABASE snap")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        self.log(f"metrics: {n} row(s) merged in from a copy")
+        try:
+            return n, float(v[0]) if v else None
+        except ValueError:
+            return n, None
+
+    def snapshot_bytes(self, now: float | None = None) -> bytes:
+        """A consistent copy of the store (SQLite's backup API, from the read connection: no write waits), with when it
+        was made (meta snapshot_at), as one file's bytes."""
+        at = self.clock() if now is None else now
+        with self._lock:
+            self._meta("snapshot_at", f"{at:.3f}")
+        fd, tmp = tempfile.mkstemp(prefix=".metrics-snap.", suffix=".sqlite",
+                                   dir=None if self.path == ":memory:" else str(Path(self.path).parent))
+        os.close(fd)
+        try:
             dst = sqlite3.connect(tmp, isolation_level=None)
             try:
                 with self._rlock:
@@ -398,50 +512,25 @@ class MetricStore:
                 dst.execute("PRAGMA journal_mode = DELETE")     # one file, nothing beside it
             finally:
                 dst.close()
-            os.replace(tmp, snap)
-            self._merged = True                    # ours from now on: never merged back in
-        except (OSError, sqlite3.Error) as e:
-            self.log(f"metrics: snapshot not written ({type(e).__name__}: {e})")
-            return False
+            return Path(tmp).read_bytes()
         finally:
             Path(tmp).unlink(missing_ok=True)
-        return True
 
-    def merge_snapshot(self) -> int:
-        """A copy restored after metrics.sqlite was made here (the app's late cache restore): its rows added once
-        (INSERT OR IGNORE: what is here wins). The rows added."""
-        with self._lock:
-            self._open()
-        self._merged = True
-        snap = self.snapshot_path
-        try:
-            if snap is None or not snap.is_file() or snap.stat().st_mtime < (self._opened_at or 0.0) - 5.0:
-                return 0                           # none, or an older one of ours (a restart): nothing new in it
-        except OSError:
-            return 0
-        n = 0
-        with self._lock:
-            db = self._open()
-            try:
-                db.execute("ATTACH DATABASE ? AS snap", (str(snap),))
-            except sqlite3.Error as e:
-                self.log(f"metrics: last copy not read ({type(e).__name__}: {e})")
-                return 0
-            try:
-                db.execute("BEGIN")
-                for t in ("raw", "events", "hourly", "series", ):
-                    n += db.execute(f"INSERT OR IGNORE INTO main.{t} SELECT * FROM snap.{t}").rowcount
-                db.execute("COMMIT")
-            except sqlite3.Error as e:
-                if db.in_transaction:
-                    db.execute("ROLLBACK")
-                self.log(f"metrics: last copy not merged ({type(e).__name__}: {e})")
-            finally:
-                db.execute("DETACH DATABASE snap")
-        if n:
-            self._rolled_once = False              # its hours rolled again at this turn
-            self.log(f"metrics: {n} row(s) from the last copy merged in")
-        return n
+    def upload(self, now: float) -> str:
+        """A copy into an empty slot or over the oldest (metricsbackup.next_slot): never before settling."""
+        from sizeup.cloud.metricsbackup import next_slot
+        if not self.settled:
+            return ""
+        slot = next_slot(self.backup.list())
+        raw = self.snapshot_bytes(now)
+        if not self.may_write():
+            return ""                              # the lease went meanwhile: the next leader copies
+        size = self.backup.put(slot, raw)
+        self._fails = 0
+        self._next_upload = now + SNAPSHOT_S
+        self.backup_status.update(uploaded=now, error="", slot=slot, bytes=size)
+        self.log(f"metrics: copy {slot} kept ({size / 1e6:.2f} MB gzip)")
+        return "uploaded"
 
     # -- out (GET /api/cad/metrics, admins) -------------------------------------------------------------------------
 
@@ -556,7 +645,7 @@ class MetricStore:
     def stats(self) -> dict:
         """For Health / the PR's size check: rows and the file's size."""
         if self._db is None and not (self.path != ":memory:" and Path(self.path).exists()):
-            return {"rows": 0, "bytes": 0}
+            return {"raw": 0, "hourly": 0, "events": 0, "bytes": 0}
         n = self._read("SELECT (SELECT COUNT(*) FROM raw), (SELECT COUNT(*) FROM hourly), (SELECT COUNT(*) FROM events)")[0]
         size = Path(self.path).stat().st_size if self.path != ":memory:" and Path(self.path).exists() else 0
         return {"raw": n[0], "hourly": n[1], "events": n[2], "bytes": size}

@@ -28,10 +28,11 @@ runs on a bare Linux box with Python + numpy.
                                   lines: [[ms, unit, level, msg]]} -> {ok, accepted, config, retry_s?}: into CloudWatch
                                   Logs /sizeup/station (sizeup/cloud/cwlogs.py), or "not configured" until sizeup-aws
                                   step 25 has run (the station keeps its spool)
-    POST /api/station/metrics     the station's signal metrics (sizeup/cloud/metrics.py), gzipped: {v, station, dropped,
-                                  records: [{k, s, at, ...}]} -> {ok, accepted, skipped}: into metrics.sqlite
-                                  (sizeup/cloud/metricstore.py), keyed by the authenticated station id. Taken from any
-                                  station (like its logs), never through the events' cursor
+    POST /api/station/metrics     the station's signal metrics (sizeup/cloud/metrics.py), gzipped: {v, station,
+                                  records: [{k, s, at, ...}]} -> {ok, accepted, skipped, resend_from?}: into
+                                  metrics.sqlite (sizeup/cloud/metricstore.py), keyed by the authenticated station id.
+                                  Taken from any station (like its logs), never through the events' cursor, never
+                                  "seen" (a second station's metrics don't make the station look connected)
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
@@ -117,6 +118,7 @@ MAX_AIRCRAFT_BODY = 512 * 1024        # 300 aircraft as JSON are ~30 KB; gzipped
 MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; gzipped, far less
 MAX_LOGS_BODY = 4 * 1024 * 1024       # a station log batch, gzipped (sizeup/cloud/logship.py: ~512 KB before gzip)
 MAX_METRICS_BODY = 2 * 1024 * 1024    # a metrics batch, gzipped (sizeup/cloud/metrics.py: 2000 records, ~250 KB before gzip)
+MAX_METRICS_JSON = 4 * 1024 * 1024    # ... and unpacked
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -506,7 +508,10 @@ class Hub:
             # one station until multi-station (per-station state, cursors, jobs: design A2-A4): a second one would
             # reset the outbox cursor, overwrite the status and take the first one's jobs. Not "seen"; on Health
             return self._other_station(p)
-        self._seen()
+        if path not in ("/api/station/logs", "/api/station/metrics"):
+            # (its logs and metrics come from a thread of their own, and from any station: neither says the station's
+            # link works, so a second station or a wedged primary never keeps "connected" up)
+            self._seen()
         self.stations.touch(p)
         try:
             if method == "GET" and path == "/api/station/jobs":
@@ -646,23 +651,30 @@ class Hub:
             import zlib
             z = zlib.decompressobj(wbits=31)
             try:
-                raw = z.decompress(raw, MAX_METRICS_BODY * 8)
+                raw = z.decompress(raw, MAX_METRICS_JSON)
             except zlib.error as e:
                 return _json(400, {"error": f"bad gzip: {e}"})
             if z.unconsumed_tail:
                 return _json(413, {"error": "too large"})
+        if len(raw or b"") > MAX_METRICS_JSON:
+            return _json(413, {"error": "too large"})
         store = getattr(self.app, "metric_store", None)
         if store is None:
             return _json(404, {"error": "no station metrics here"})
-        d = json.loads(raw or b"{}")
+        try:
+            d = json.loads(raw or b"{}")
+        except (ValueError, RecursionError, OverflowError) as e:
+            # a batch that isn't one: 400, which the station drops (never sent again and again)
+            return _json(400, {"error": f"bad JSON: {type(e).__name__}"})
         if not isinstance(d, dict):
-            raise ValueError("a JSON object")
+            return _json(400, {"error": "a JSON object"})
         sid = self._claim(p, d.get("station")) or p.id
         try:
-            return _json(200, store.ingest(sid, d.get("records") if "records" in d else [],
-                                           int(d.get("dropped") or 0) if isinstance(d.get("dropped"), int) else 0))
+            return _json(200, store.ingest(sid, d.get("records") if "records" in d else []))
         except MetricsError as e:
             return _json(400, {"error": str(e)})
+        except fence_mod.FencedWrite:
+            raise                                  # not the leader: 503 + Retry-After, the station sends it again
         except Exception as e:  # noqa: BLE001 - never in the way of the station's link
             self.log(f"station metrics: not kept: {type(e).__name__}: {e}")
             return _json(503, {"error": f"station metrics: {type(e).__name__}"})
@@ -879,11 +891,12 @@ class HubApp(App):
                                         station_status=lambda: self.hub.status, log=log)
         self.cad.station_logs = self.station_logs
         self.cad.stations = self.hub.stations          # Settings > Station > Stations (sizeup/cad/api.py; admins)
-        # the station's signal metrics (sizeup/cloud/metricstore.py): metrics.sqlite, its own file (not in Litestream: an
-        # copy every 3 h kept by the cache mirror), opened at the first post; GET /api/cad/metrics (admins)
+        # the station's signal metrics (sizeup/cloud/metricstore.py): metrics.sqlite, its own file (not in Litestream:
+        # copies in the backups bucket, sizeup/cloud/metricsbackup.py), opened at the first post; GET /api/cad/metrics
+        from sizeup.cloud.metricsbackup import S3Copies
         from sizeup.cloud.metricstore import MetricStore
         self.metric_store = MetricStore(state / "metrics.sqlite" if state else ":memory:", may_write=self._may_write_audio,
-                                        log=log, audit=self._metrics_audit)
+                                        log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         app_mod._mark("hub")
 
@@ -1842,13 +1855,23 @@ class HubApp(App):
                                 "key IN (?, ?) AND at >= ? AND at < ? ORDER BY at LIMIT 500",
                                 (f"squelch/{subject}", f"channel/{subject}", t0, t1))
 
+    def _metrics_backup(self) -> None:
+        """The station metrics' copies (sizeup/cloud/metricstore.py backup_turn): settle from the bucket, then a copy
+        every 3 h. The leader's only (the store checks); never takes anything down."""
+        from sizeup.cloud.metricstore import BACKUP_TURN_S
+        while not self._stopping.wait(BACKUP_TURN_S):
+            try:
+                self.metric_store.backup_turn()
+            except Exception as e:  # noqa: BLE001
+                self.hub.log(f"metrics: backup error: {type(e).__name__}: {e}")
+
     def _hub_janitor(self) -> None:
         while not self._stopping.wait(600):
             try:
                 self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
-            try:                                  # the station metrics: rollups, retention, the copy
+            try:                                  # the station metrics: rollups, retention
                 self.metric_store.maintain()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
@@ -1856,6 +1879,7 @@ class HubApp(App):
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         threading.Thread(target=self._audio_uploader, name="audio-uploader", daemon=True).start()
+        threading.Thread(target=self._metrics_backup, name="metrics-backup", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
