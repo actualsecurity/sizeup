@@ -3092,7 +3092,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 12 categories, 19 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
@@ -3136,7 +3136,7 @@ category's, and the rules' rung. The rung is the highest mode M at which the rul
   carry it.
 
 **Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
-`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+`ems` and `fire`; and a `"place": true` category of any pack (the `police` pack's `fire_call`), which is held while it has no address. The `police` pack's events are never linked. An event already pushed is never held (its mode
 never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
 event gets back the mode its rules give.
 
@@ -3144,6 +3144,7 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). The read-back that places it lets it go (and pushes it). Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area` |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
 [...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that

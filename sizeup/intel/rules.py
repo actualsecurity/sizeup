@@ -35,6 +35,10 @@ the file's). With an area, the address lookup searches those towns (and the town
 them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
 (the police pack, whose sources are local): every place counts, as before.
 
+A category with "place": true (the police pack's fire_call) is held at log until its event has a place a crew can
+drive to (an address, intersection, block or landmark) in the source's towns ("towns"), else the pack's area: a
+burning smell with no address is no pre-alert yet; the read-back that places it lets it go.
+
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
 that must stay quiet writes "mode": "log" on the pack, every category and every rule (the engine takes the lowest).
@@ -384,6 +388,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
+                   "place": bool(cd.get("place")),
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
     rules = []
     seen = set()

@@ -54,6 +54,8 @@ How a row becomes an event, per pack whose scope it is in:
                       (Event.near_incident), never a new lead. A safety category is linked and NOT held: a hazard at
                       our own scene is what a crew most needs to hear.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
+     A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
+     (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere.
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -95,6 +97,7 @@ SAME_PLACE_M = 150.0                   # two places this close are the same inci
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
                           "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
                           "circle", "highway", "hwy", "plaza", "square"})
@@ -767,22 +770,34 @@ class IntelEngine:
 
     def _hold(self, pack, ev: Event, mode: str | None = None) -> None:
         """Out of area, or our own incident's: held at log (the module's doc, step 6). Only a pack with an area (the
-        county-wide packs): the police pack's events are never held or linked. An event already pushed is never held
+        county-wide packs): the police pack's events are never linked, and held only in a "place": true category
+        (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
-        if not pack.area:
+        if not pack.area and not pack.category(ev.category).get("place"):
             return
-        ev.near_incident = self._incident(ev)
-        why = "out_of_area" if self._outside(pack, ev) else ""
+        if pack.area:
+            ev.near_incident = self._incident(ev)
+        why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
         if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
             why = "near_incident"
         if why and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")
             ev.suppressed = why
-        elif ev.suppressed in ("out_of_area", "near_incident"):
+        elif ev.suppressed in ("out_of_area", "near_incident", "unplaced"):
             ev.suppressed = ""
             if mode is not None:
                 ev.mode = max(ev.mode, mode, key=mode_rank)
+
+    def _unplaced(self, pack, ev: Event) -> str:
+        """A "place": true category (rules.py): "unplaced" until the event has a place a crew can drive to (PLACED),
+        "out_of_area" when that place is outside the source's towns (else the pack's area); "" otherwise."""
+        if not pack.category(ev.category).get("place"):
+            return ""
+        if ev.precision not in PLACED:
+            return "unplaced"
+        towns = {t.lower() for t in (pack.towns_for(ev.source_key) or pack.area)}
+        return "out_of_area" if towns and (ev.town or "").lower() not in towns else ""
 
     def _rules_mode(self, pack, ev: Event) -> str | None:
         """The mode the window's rules give the event's category now (pack, category and rung), None: not reached."""
