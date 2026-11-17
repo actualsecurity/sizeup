@@ -137,6 +137,13 @@ def test_am_gets_the_numbers_for_information():
     assert out["am"] and out["info"] == "AM: no squelch setting here" and not out["apply"]
 
 
+def test_close_stays_in_its_range_near_the_top():
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(27.5, 0.2),
+                          settings={"kind": "traffic", "open": 28.0, "close": 27.0})
+    out = mi.suggest(floor, transmissions(NOW - 7 * DAY, 7 * DAY, [35.0] * 40), CFG, NOW)
+    assert out["open"] == 30.0 and out["close"] == 28.0          # the range's top for both (it took Close 29 before)
+
+
 def test_settings_out_of_range_fall_back_to_the_defaults():
     assert mi.settings({"margin_db": 50, "miss_pct": True, "shift_db": 4}) == {**mi.DEFAULTS, "shift_db": 4.0}
 
@@ -226,6 +233,38 @@ def test_the_settings_audits_squelch_change_counts_as_the_event_too(tmp_path):
     assert mi.Insight(s2, clock=lambda: NOW, log=lambda m: None).turn() == []     # record / transcribe: never the cause
 
 
+def test_a_dongle_moved_back_or_a_squelch_raise_after_it_is_never_blamed_on_the_first_move(tmp_path):
+    # moved at T (+4 dB), moved back at T + 4 h: nothing is shifted now, so no warning about the first move
+    t = NOW - 10 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60), q90=lambda k, r: r.gauss(
+        9.0 if t <= t - DAY + 60 * k < t + 4 * 3600 else 5.0, 0.3)))
+    put(s, "FG1", [ev("FG1", t, "sdr", "SDR 00000102 -> 00000105"), ev("FG1", t + 4 * 3600, "sdr", "SDR 00000105 -> 00000102")])
+    assert mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn() == []
+    # an SDR change that changed nothing, then a squelch raise two hours later (the idle reads higher on purpose)
+    s2, _ = store(tmp_path / "sq")
+    t = NOW - 5 * 3600
+    put(s2, "FG1", stepped(t + 2 * 3600, 5.0, 9.3))
+    put(s2, "FG1", [ev("FG1", t, "sdr", "SDR 00000102 -> 00000105"),
+                    ev("FG1", t + 2 * 3600, "squelch", "open 14 close 10 min 0.3 (was open 10 close 6 min 0.3)")])
+    assert mi.Insight(s2, clock=lambda: NOW, log=lambda m: None).turn() == []
+
+
+def test_a_quiet_night_after_a_busy_evening_is_not_a_shift(tmp_path):
+    # traffic 07:00-23:00 every day, none at night; the station restarts at 23:00: the same hours the day before were
+    # quiet too
+    t = NOW - 6 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(t - 2 * DAY, int((NOW - t + 2 * DAY) // 60)))
+    tx = []
+    for d in (2, 1, 0):
+        day0 = t - d * DAY - 16 * 3600                                  # 07:00 that day (t is 23:00)
+        tx += transmissions(day0, 16 * 3600, [20.0] * 160, seed=d)
+    put(s, "FG1", [x for x in tx if x["at"] < NOW])
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    assert mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn() == []
+
+
 def test_noise_opens_up_three_times_after_a_rewire(tmp_path):
     s, _ = store(tmp_path)
     t = NOW - 4 * 3600
@@ -246,7 +285,7 @@ def test_traffic_that_stops_after_an_event_is_warned_and_a_busy_hour_before_is_n
     put(s, "FG1", [ev("FG1", t, "back", "SDR 00000102")])
     found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
     assert [(f["metric"], f["event"]) for f in found] == [("tx_rate", "back")]
-    assert found[0]["before"] == 10.0 and found[0]["after"] <= 2.0
+    assert 9.0 <= found[0]["before"] <= 13.0 and found[0]["after"] <= 2.0       # the same hours the day before
     s2, _ = store(tmp_path / "fire")
     put(s2, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60)))
     put(s2, "FG1", transmissions(t - 3 * 3600, 3600, [20.0] * 300))   # a working fire's hour, the day before: median 0
@@ -260,15 +299,15 @@ def test_a_p25_control_channel_that_decodes_less_after_an_event_is_warned(tmp_pa
     r = random.Random(6)
     cc = [{"k": "cc", "at": a, "n": 20, "state": "ok", "rate": round(r.gauss(40 if a < t else 25, 1.0), 1),
            "lo": 36.0, "hi": 44.0, "sdr": "00000201"} for a in range(int(t - DAY), int(NOW), 60)]
-    put(s, "p25:mrrs", cc)
-    put(s, "p25:mrrs", [ev("p25:mrrs", t, "sdr", "SDR 00000201 -> 00000203")])
+    put(s, "p25:sys2", cc)
+    put(s, "p25:sys2", [ev("p25:sys2", t, "sdr", "SDR 00000201 -> 00000203")])
     found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
-    assert [(f["subject"], f["metric"]) for f in found] == [("p25:mrrs", "cc_rate")]
+    assert [(f["subject"], f["metric"]) for f in found] == [("p25:sys2", "cc_rate")]
     assert found[0]["text"].startswith("decode 25/s (was 40/s) since ") and found[0]["text"].endswith("(SDR change)")
     # a 20% dip is under the default 30%
     s2, _ = store(tmp_path / "dip")
-    put(s2, "p25:mrrs", [dict(d, rate=d["rate"] if d["at"] < t else round(d["rate"] * 0.8 / 0.625, 1)) for d in cc])
-    put(s2, "p25:mrrs", [ev("p25:mrrs", t, "sdr", "SDR 00000201 -> 00000203")])
+    put(s2, "p25:sys2", [dict(d, rate=d["rate"] if d["at"] < t else round(d["rate"] * 0.8 / 0.625, 1)) for d in cc])
+    put(s2, "p25:sys2", [ev("p25:sys2", t, "sdr", "SDR 00000201 -> 00000203")])
     assert mi.Insight(s2, clock=lambda: NOW, log=lambda m: None).turn() == []
 
 

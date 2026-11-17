@@ -2197,6 +2197,9 @@ class Editor:
             before = {**dflt, **(ov.get(key) or {})}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
                                [("radios", f"squelch/{key}", before, eff)])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         elif action == "reset":
             key = _text(key, "key", 40)
             if key not in ov:

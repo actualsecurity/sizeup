@@ -675,18 +675,21 @@ class MetricStore:
         out["events"] = self.events(station, subject, t0, t1)
         return out
 
-    def docs(self, station: str, subject: str, kind: str, t0: float, t1: float, limit: int = MAX_ROWS) -> list[dict]:
-        """One series' raw records in [t0, t1), oldest first, at most `limit` (the oldest kept: one seek of the
-        primary key): {"at", ...its numbers}. A floor record's settings as sent (not carried forward). For
-        sizeup/cloud/metricsinsight.py (the suggestions, the shift checks), never the alert path."""
+    def docs(self, station: str, subject: str, kind: str, t0: float, t1: float, limit: int = MAX_ROWS,
+             newest: bool = False) -> list[dict]:
+        """One series' raw records in [t0, t1), oldest first, at most `limit` (the oldest kept, or the newest with
+        newest=True: one seek of the primary key either way): {"at", ...its numbers}. A floor record's settings as
+        sent (not carried forward). For sizeup/cloud/metricsinsight.py (the suggestions, the shift checks), never
+        the alert path."""
         out = []
         for at, doc in self._read("SELECT at, doc FROM raw WHERE station = ? AND subject = ? AND kind = ? AND at >= ? "
-                                  "AND at < ? ORDER BY at LIMIT ?", (station, subject, kind, t0, t1, max(0, int(limit)))):
+                                  f"AND at < ? ORDER BY at {'DESC' if newest else ''} LIMIT ?",
+                                  (station, subject, kind, t0, t1, max(0, int(limit)))):
             try:
                 out.append({"at": at, **json.loads(doc)})
             except ValueError:
                 continue
-        return out
+        return out[::-1] if newest else out
 
     def hours(self, station: str, subject: str, metric: str, t0: float, t1: float) -> list[dict]:
         """One metric's hourly rollups in [t0, t1): [{at, n, lo, p50, p90, hi}] (the drift check)."""

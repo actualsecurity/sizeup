@@ -308,9 +308,12 @@ window.SignalChart = (() => {
         return r;
       }));
       tip.hidden = false;
-      const right = px > W * 0.55;             // past the middle: the readout on the cursor's left
-      tip.style.left = right ? "auto" : `${px + 12}px`;
-      tip.style.right = right ? `${W - px + 12}px` : "auto";
+      // placed in the figure's own pixels (the svg may be drawn narrower than its viewBox)
+      const fr = fig.getBoundingClientRect ? fig.getBoundingClientRect() : { left: 0, width: W };
+      const cx = ev.clientX - fr.left, fw = fr.width || W;
+      const right = cx > fw * 0.55;            // past the middle: the readout on the cursor's left
+      tip.style.left = right ? "auto" : `${cx + 12}px`;
+      tip.style.right = right ? `${fw - cx + 12}px` : "auto";
     };
     const leave = () => { tip.hidden = true; cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); };
     svg.addEventListener("pointermove", move);

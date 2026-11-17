@@ -84,11 +84,15 @@ window.SquelchPanel = (() => {
     const v = el("span", s.capped ? "warn" : "", `${db(s.open)} dB`);
     v.title = `Suggested Open ${db(s.open)} / Close ${db(s.close)} dB\n${s.why}`;
     td.append(v);
+    // what runs now (the station's own report, seconds after an Apply), not what the 10-min-old suggestion saw
+    const run = c.running || {};
+    const same = run.open_db !== null && run.open_db !== undefined ? Math.abs(run.open_db - s.open) < 0.25
+      && Math.abs((run.close_db ?? s.close) - s.close) < 0.25 : s.same;
     if (!c.editable) {
       td.append(" ", el("span", "dim small", "info"));
-    } else if (s.same) {
+    } else if (same) {
       td.append(" ", el("span", "dim small", "= now"));
-    } else if (s.apply && !ro()) {
+    } else if (!s.info && !ro()) {
       const b = el("button", "mini", "Apply");
       b.type = "button";
       b.title = `Set ${c.key} Open ${db(s.open)} / Close ${db(s.close)} dB (audited)`;

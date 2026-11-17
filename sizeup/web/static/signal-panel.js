@@ -16,7 +16,7 @@ window.SignalPanel = (() => {
   const HOUR_FM = "idle_q50,idle_q90,idle_qmax,noise_opens,sq_open,sq_close,tx_q,tx_q_open,tx_q_close,noise_q,floor,tx_dbfs,tx_snr";
   const HOUR_CC = "cc_rate,cc_lo,cc_uncovered";
   const st = { box: null, range: "24h", res: "", subject: "", at: null, index: null, sugg: {}, data: {}, error: "", gen: 0,
-               loading: false, ro: null };
+               loading: false, ro: null, focused: "", loadedAt: 0 };
 
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
@@ -39,11 +39,13 @@ window.SignalPanel = (() => {
   // the focus a Health hint asked for: ?s=FG1&at=1800000000 (the 24 h around that time)
   function focus() {
     const m = (typeof location !== "undefined" && location.hash || "").match(/\?(.*)$/);
-    if (!m) return;
+    if (!m || m[1] === st.focused) return false;
+    st.focused = m[1];
     const q = new URLSearchParams(m[1]);
     if (q.get("s")) st.subject = q.get("s");
     const at = Number(q.get("at"));
     if (at > 0) { st.at = at; st.range = "24h"; }
+    return true;
   }
 
   function window_() {
@@ -56,13 +58,15 @@ window.SignalPanel = (() => {
     if (!box) return;
     const fresh = st.box !== box;
     st.box = box;
-    if (fresh || !st.index) focus();
+    const moved = focus();                // a Health hint's ?s=&at= (looked at every time: the tab may be open already)
     if (typeof ResizeObserver === "function" && !st.ro) {
       let w = 0;
       st.ro = new ResizeObserver(() => { const nw = Math.round(box.clientWidth / 40); if (nw !== w) { w = nw; render(); } });
       st.ro.observe(box);
     }
-    load();
+    // settings.js mounts it at every render of the tab: the charts load again only when asked for something else, or
+    // once a minute (a range button, the channel, Raw / Hourly load at once)
+    if (fresh || moved || !st.index || st.error || Date.now() - st.loadedAt > 60000) load();
   }
 
   // the subjects: each (station, subject) with its kinds, the station's own row left out
@@ -105,6 +109,7 @@ window.SignalPanel = (() => {
       st.error = e.message;
     }
     st.loading = false;
+    st.loadedAt = Date.now();
     render();
   }
 
@@ -227,10 +232,10 @@ window.SignalPanel = (() => {
         if (paging) L.push({ type: "dots", name: "Pages at close p50", cls: "sg-close-dot", pts: m("tx_q_close").map((r) => [r.at, r.p50]) });
       }
       L2.push({ type: "bars", name: "Noise opens/min p90", cls: "sg-noisebar", pts: m("noise_opens").map((r) => [r.at, r.at + 3600, r.p90]) });
-      const nq = at("noise_q");
+      const nq = at("noise_q"), kq = at("tx_q");
       L3.push({ type: "stack", names: ["Kept", "Noise"], classes: ["sg-voice", "sg-noise"],
-        pts: [...new Set([...m("tx_q").map((r) => r.at), ...nq.keys()])].sort((a, b) => a - b)
-          .map((k) => [k, k + 3600, [(at("tx_q").get(k) || {}).n || 0, (nq.get(k) || {}).n || 0]]) });
+        pts: [...new Set([...kq.keys(), ...nq.keys()])].sort((a, b) => a - b)
+          .map((k) => [k, k + 3600, [(kq.get(k) || {}).n || 0, (nq.get(k) || {}).n || 0]]) });
     }
     if (sug && sug.state === "ok" && !am) L.push({ type: "hline", name: "Suggested Open", cls: "sg-sugg", y: sug.open, label: `Sugg. ${r1(sug.open)}`, ref: true });
     // direct labels on the running Open / Close: their latest values
@@ -285,9 +290,12 @@ window.SignalPanel = (() => {
     // the control channel lost: from each cc_lost to its cc_back (or now)
     const spans = [];
     let lost = null;
+    let first = true;
     for (const e of d.events || []) {
       if (e.ev === "cc_lost" && lost === null) lost = e.at;
       else if (e.ev === "cc_back" && lost !== null) { spans.push([lost, e.at]); lost = null; }
+      else if (e.ev === "cc_back" && first) spans.push([t0, e.at]);     // lost before the range began
+      if (e.ev === "cc_lost" || e.ev === "cc_back") first = false;
     }
     if (lost !== null) spans.push([lost, t1]);
     L.push({ type: "spans", name: "Control channel lost", cls: "sg-lost", spans });
@@ -324,7 +332,7 @@ window.SignalPanel = (() => {
   function suggLine(sug) {
     if (!sug) return null;
     if (sug.state !== "ok") { const s = el("span", "dim small", sug.why || "not enough data"); return s; }
-    const txt = sug.am ? `Floor p90 ${r1(sug.noise_p90)} dB` : `Suggested ${r1(sug.open)} / ${r1(sug.close)} dB`
+    const txt = sug.am ? `Idle q90 p90 ${r1(sug.noise_p90)} dB` : `Suggested ${r1(sug.open)} / ${r1(sug.close)} dB`
       + (num(sug.cur_open) !== null ? ` · now ${r1(sug.cur_open)} / ${r1(sug.cur_close)}` : "") + (sug.info ? ` · ${sug.info}` : "");
     const s = el("span", `small${sug.capped ? " warn" : ""}`, txt);
     s.title = sug.why || "";

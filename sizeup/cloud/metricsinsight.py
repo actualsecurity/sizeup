@@ -25,14 +25,17 @@ Shift warnings (shifts(); the hub's janitor runs it every 10 min, Health shows t
 never a push; mutable like the alerts, Settings > System > Push notifications):
 
     after an event (EVENTS: the station's sdr / gain / squelch / unplug / back / on / start, or the Settings audit's
-    change to the channel) in the last WARN_S, the AFTER_S after it (from its first SETTLE_S, at least MIN_AFTER_S of
-    data) against the BEFORE_S before it (from the event before, if that is nearer):
+    squelch change to the channel) in the last WARN_S, the AFTER_S after it (from its first SETTLE_S, at least
+    MIN_AFTER_S of data, never past the next event) against the BEFORE_S before it (never before the event before);
+    with later events, what it found must still show from the newest one on (a dongle moved back: no warning; a squelch
+    change since: the idle checks can't tell any more):
         FM       the idle minutes' q90 median up more than shift_db; the noise opens a minute up opens_x times and at
                  least OPENS_MIN (neither after a squelch change: the Open itself moves both)
         AM       the floor (dBFS) median up more than shift_db
         traffic  the transmissions an hour (the median of half-hour counts: a fire's hour of traffic moves it
-                 little): rate_x times fewer, from at least RATE_MIN; or the kept noise key-ups rate_x times more, to
-                 at least RATE_MIN (what a gain, a squelch or interference brings)
+                 little) against the same clock hours the day before (a quiet night after a busy evening is no shift):
+                 rate_x times fewer, from at least RATE_MIN; or the kept noise key-ups rate_x times more, to at least
+                 RATE_MIN (what a gain, a squelch or interference brings)
         paging   the pages' quieting at open, median down more than shift_db over at least PAGES_MIN pages after
                  (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few)
         P25      the control channel's decode rate median down more than cc_drop_pct %
@@ -48,6 +51,7 @@ from __future__ import annotations
 
 import math
 import threading
+from urllib.parse import quote
 import time
 from typing import Callable
 
@@ -215,7 +219,7 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
         want = cur_o
     out["under"] = sum(1 for v in rq if v < want)
     hyst = (cur_o - cur_c) if cur_o is not None and cur_c is not None and cur_o > cur_c else 4.0
-    close = max(CLOSE_RANGE[0], _step_down(want - hyst))
+    close = min(CLOSE_RANGE[1], max(CLOSE_RANGE[0], _step_down(want - hyst)))
     if close >= want:
         close = want - STEP
     out.update(state="ok", open=_r(want), close=_r(close), capped=capped,
@@ -279,7 +283,8 @@ def _rates(tx: list[dict], t0: float, t1: float) -> float:
 def check_channel(before: list[dict], after: list[dict], btx: list[dict], atx: list[dict], bw: tuple[float, float],
                   aw: tuple[float, float], meta: dict, cfg: dict, squelch_changed: bool) -> list[dict]:
     """One channel's shift around one event: [{metric, text, before, after}] (empty: none). before / after: its floor
-    records; btx / atx: its transmissions; bw / aw: the windows (t0, t1)."""
+    records; btx / atx: its transmissions (btx None: no rate check); bw / aw: their windows (t0, t1): the same clock
+    hours, the day before and after the event."""
     out = []
     am = bool(meta.get("am"))
     if am:
@@ -296,7 +301,7 @@ def check_channel(before: list[dict], after: list[dict], btx: list[dict], atx: l
                 and ao >= cfg["opens_x"] * bo:
             out.append({"metric": "noise_opens", "before": _r(bo, 2), "after": _r(ao, 2),
                         "text": f"noise opens {ao:.1f}/min (was {bo:.1f})"})
-    if meta.get("kind") != "paging" and bw[1] - bw[0] >= 3600 and len(after) >= MIN_AFTER_S / 60:   # (it ran)
+    if btx is not None and meta.get("kind") != "paging" and len(after) >= MIN_AFTER_S / 60:   # (it ran)
         # medians of half-hour counts, so a fire's hour of traffic before or after never reads as a shift; up: the
         # kept noise key-ups only (what a gain, a squelch or interference brings); down: every kept transmission
         b_all, a_all = _rates(btx, *bw), _rates(atx, *aw)
@@ -370,15 +375,22 @@ class Insight:
         key = (station, subject)
         with self._lock:
             hit = self._sugg.get(key)
-            if hit and now - hit[0] < CACHE_S:
-                return hit[1]
-            t0 = now - SUGGEST_DAYS * 86400.0
-            floor = self.store.docs(station, subject, "floor", t0, now + 60, MAX_DOCS)
-            tx = self.store.docs(station, subject, "tx", t0, now + 60, MAX_DOCS)
-            out = suggest(floor, tx, self.cfg(), now)
-            out.update(subject=subject, station=station, at=now)
+        if hit and now - hit[0] < CACHE_S:
+            return hit[1]
+        t0 = now - SUGGEST_DAYS * 86400.0                 # (read outside the lock: Health's sparks never wait on it)
+        floor = self.store.docs(station, subject, "floor", t0, now + 60, MAX_DOCS, newest=True)
+        tx = self.store.docs(station, subject, "tx", t0, now + 60, MAX_DOCS, newest=True)
+        out = suggest(floor, tx, self.cfg(), now)
+        out.update(subject=subject, station=station, at=now)
+        with self._lock:
             self._sugg[key] = (now, out)
-            return out
+        return out
+
+    def forget(self, subject: str) -> None:
+        """A channel's squelch changed (Settings): its suggestion worked out again at the next look."""
+        with self._lock:
+            for k in [k for k in self._sugg if k[1] == subject]:
+                del self._sugg[k]
 
     def squelch(self, now: float | None = None) -> dict:
         """view=squelch: each FM / AM channel's suggestion (Settings > Radios > Squelch and Signal)."""
@@ -423,27 +435,44 @@ class Insight:
         recent = [c for c in evs if c["at"] >= now - WARN_S][-MAX_EVENTS:]
         out: dict[str, dict] = {}
         meta = self._meta(station, subject, now) if "floor" in kinds else {}
-        for c in reversed(recent):                  # the newest event first: it explains what is now
-            prev = [p["at"] for p in evs if p["at"] < c["at"]]
-            b0 = max(c["at"] - BEFORE_S, prev[-1] + SETTLE_S if prev else 0.0)
-            if c["at"] - b0 < 3600:
-                b0 = c["at"] - BEFORE_S              # the event before was right before: the day before all the same
-            a0, a1 = c["at"] + SETTLE_S, min(now, c["at"] + AFTER_S)
-            if a1 - a0 < MIN_AFTER_S:
-                continue
+        def run(b0: float, b1: float, a0: float, a1: float, p1: float, squelch: bool, prev: list[float]) -> list[dict]:
             hits = []
             if "cc" in kinds:
-                hits += check_cc(self.store.docs(station, subject, "cc", b0, c["at"]),
+                hits += check_cc(self.store.docs(station, subject, "cc", b0, b1),
                                  self.store.docs(station, subject, "cc", a0, a1), cfg)
             if "floor" in kinds:
-                fb = self.store.docs(station, subject, "floor", b0, c["at"])
+                fb = self.store.docs(station, subject, "floor", b0, b1)
                 fa = self.store.docs(station, subject, "floor", a0, a1)
-                tb = self.store.docs(station, subject, "tx", b0, c["at"])
+                # the transmissions: the same clock hours the day before (traffic follows the day: a quiet night after
+                # a busy evening isn't a shift); not when another event falls in those hours
+                y0, y1 = a0 - 86400.0, a1 - 86400.0
+                same = not any(y0 - SETTLE_S <= p <= y1 for p in prev)
+                tb = self.store.docs(station, subject, "tx", y0, y1) if same else None
                 ta = self.store.docs(station, subject, "tx", a0, a1)
-                hits += check_channel(fb, fa, tb, ta, (b0, c["at"]), (a0, a1), meta, cfg, c["squelch"])
+                hits += check_channel(fb, fa, tb, ta, (y0, y1), (a0, a1), meta, cfg, squelch)
                 if meta.get("kind") == "paging":
-                    hits += check_pages(self.store.docs(station, subject, "tx", c["at"] - PAGE_BEFORE_S, c["at"]),
-                                        self.store.docs(station, subject, "tx", a0, min(now, c["at"] + PAGE_AFTER_S)), cfg)
+                    hits += check_pages(self.store.docs(station, subject, "tx", b1 - PAGE_BEFORE_S, b1),
+                                        self.store.docs(station, subject, "tx", a0, p1), cfg)
+            return hits
+
+        for c in reversed(recent):                  # the newest event first: it explains what is now
+            # its windows never cross another event: the before from the one before it, the after to the one after
+            prev = [p["at"] for p in evs if p["at"] < c["at"]]
+            later = [p for p in evs if p["at"] > c["at"]]
+            b0 = max(c["at"] - BEFORE_S, prev[-1] + SETTLE_S if prev else 0.0)
+            a0, a1 = c["at"] + SETTLE_S, min(now, c["at"] + AFTER_S, later[0]["at"] if later else now)
+            if a1 - a0 < MIN_AFTER_S or c["at"] - b0 < 3600:
+                continue
+            p1 = min(now, c["at"] + PAGE_AFTER_S, later[0]["at"] if later else now)      # (pages: a longer after)
+            hits = run(b0, c["at"], a0, a1, p1, c["squelch"], prev)
+            if hits and later:
+                # still so now? from the newest event on (a dongle moved back: no); a squelch change since: the idle
+                # can't tell any more, so only what it still shows stays
+                s0 = later[-1]["at"] + SETTLE_S
+                if now - s0 >= MIN_AFTER_S:
+                    still = {h["metric"] for h in run(b0, c["at"], s0, now, now, c["squelch"] or any(p["squelch"] for p in later),
+                                                      prev + [p["at"] for p in later])}
+                    hits = [h for h in hits if h["metric"] in still]
             for h in hits:
                 if h["metric"] in out:
                     continue                          # a newer event explains it already
@@ -484,7 +513,7 @@ class Insight:
     def hints(self) -> list[dict]:
         """Health's hints (kind "metrics_shift"): one a subject and metric, the newest first."""
         return [{"channel": f["subject"], "level": "warn", "kind": "metrics_shift", "text": f["text"], "at": f["at"],
-                 "link": f"#settings/radios/signal?s={f['subject']}&at={int(f['at'])}"}
+                 "link": f"#settings/radios/signal?s={quote(f['subject'], safe='')}&at={int(f['at'])}"}
                 for f in sorted(self.found, key=lambda f: -f["at"])]
 
     # -- Health's sparks --------------------------------------------------------------------------------------------
@@ -494,8 +523,9 @@ class Insight:
         and the noise opens a minute; P25 the decode rate. Kept 5 min."""
         now = self.clock() if now is None else now
         with self._lock:
-            if self._spark and now - self._spark[0] < 300:
-                return self._spark[1]
+            hit = self._spark
+        if hit and now - hit[0] < 300:
+            return hit[1]
         t0 = now - SPARK_S
         n = int(SPARK_S // SPARK_BIN_S)
         rows = []

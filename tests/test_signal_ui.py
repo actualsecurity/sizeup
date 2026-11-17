@@ -216,20 +216,23 @@ def squelch_data(admin=True, status=200):
                       mi.DEFAULTS, NOW)
     page = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440, kind="paging"),
                       transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page"), mi.DEFAULTS, NOW)
-    row = lambda key, kind: {"key": key, "kind": kind, "editable": kind == "traffic", "set": {}, "state": "ok",
+    row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind == "traffic", "set": {}, "state": "ok",
                              "default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
-                             "running": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3}, "hiss_db": 2.4,
+                             "running": {"open_db": run[0], "close_db": run[1], "min_open_s": 0.3}, "hiss_db": 2.4,
                              "quieting_db": 3.1, "short_per_min": 0.2, "keyups": None}
     return {"now": NOW, "admin": admin,
-            "squelch": {"channels": [row("FG1", "traffic"), row("South 2", "paging")], "ranges": {}, "sync": {}},
+            "squelch": {"channels": [row("FG1", "traffic"), row("South 2", "paging"), row("FG2", "traffic", (13.0, 9.0))],
+                        "ranges": {}, "sync": {}},
             "fetch": {"/api/cad/metrics?view=squelch": {"status": status, "body": {"channels": [
-                {**sugg, "subject": "FG1"}, {**page, "subject": "South 2"}]} if status == 200 else {"error": "Admins only"}}}}
+                {**sugg, "subject": "FG1"}, {**page, "subject": "South 2"}, {**sugg, "subject": "FG2"}]}
+                if status == 200 else {"error": "Admins only"}}}}
 
 
 def test_suggested_with_apply_for_an_admin_on_a_traffic_channel_and_it_posts_the_audited_edit(tmp_path):
     out = run(tmp_path, SQUELCH, squelch_data())
     assert "Suggested" in out["head"]
-    fg1, south = out["cells"]
+    fg1, south, fg2 = out["cells"]
+    assert fg2[0][0] == "13 dB = now"                                   # already running it (an Apply seconds ago)
     assert fg1[0][0] == "13 dB Apply" and fg1[0][1].startswith("Suggested Open 13 / Close 9 dB\nnoise p90 ")
     assert south[0][0] == "10 dB info"                                 # paging: the numbers, never Apply
     assert out["applies"] == 1
