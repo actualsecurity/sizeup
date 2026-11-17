@@ -111,6 +111,7 @@ UNPLUGGED_S = 5.0                 # the dongle isn't on USB: look again this oft
 ABSENT_S = 15.0                   # trunk-recorder said its dongle is gone: start again this much later
 # Another system's dongles unplugged under it and back (#592, SystemSupervisor):
 RETURN_STABLE_S = 5.0             # back: the same (index, serial) list at two looks this far apart before it starts
+RETURN_SETTLE_MAX_S = 60.0        # ... settling at most this long (a flapping dongle elsewhere): then the latest look
 COUNTY_SETTLE_S = 5.0             # ... and the county's trunk-recorder, if it should run, up this long first
 COUNTY_WAIT_S = 60.0              # ... waited for at most this long (the county down for its own reasons)
 FLAP_S = 600.0                    # gone again this soon after a return: a flapping dongle (a restart counted)
@@ -615,23 +616,29 @@ def _load():
 
 
 _USB_LOCK = threading.Lock()
+USB_LOCK_S = 10.0                 # another thread's lookup this long: this one gives up (None: can't look now)
+UNREAD = "?"                      # the serial of a dongle whose strings couldn't be read (never a serial: SERIAL_CHARS)
 
 
 def devices() -> list[tuple[int, str]] | None:
-    """[(index, serial)] plugged in now; None when librtlsdr can't be loaded. A dongle whose strings can't be read is
-    (index, ""): there, serial unknown (never taken for a dongle gone, #592). One lookup at a time in this process
+    """[(index, serial)] plugged in now; None when librtlsdr can't be loaded (or another lookup hangs). A dongle whose
+    strings can't be read is (index, UNREAD): there, serial unknown (#592: a look with one is trusted less); one that
+    has no serial string is (index, ""), like any other dongle that isn't ours. One lookup at a time in this process
     (the county's supervisor and the other systems' thread both look), as sizeup/radio/sdr.py's _lock does in
-    sizeup-station; across processes none is needed: each lookup is its own libusb context and only reads
-    descriptors, and sizeup-station has always looked while trunk-recorder runs."""
+    sizeup-station, with a timeout so a hung one never holds the county's back; across processes none is needed:
+    each lookup is its own libusb context and only reads descriptors, and sizeup-station has always looked while
+    trunk-recorder runs."""
     lib = _load()
-    if lib is None:
+    if lib is None or not _USB_LOCK.acquire(timeout=USB_LOCK_S):
         return None
     out = []
-    with _USB_LOCK:
+    try:
         for i in range(int(lib.rtlsdr_get_device_count())):
             m, p, s = (ctypes.create_string_buffer(256) for _ in range(3))
             ok = lib.rtlsdr_get_device_usb_strings(i, m, p, s) == 0
-            out.append((i, s.value.decode(errors="replace") if ok else ""))
+            out.append((i, s.value.decode(errors="replace") if ok else UNREAD))
+    finally:
+        _USB_LOCK.release()
     return out
 
 
@@ -1184,6 +1191,7 @@ class SystemSupervisor(Supervisor):
         self.missing_n = 0                           # ... at this many looks in a row
         self.back_list: tuple | None = None          # the (index, serial) list since back_since, while it comes back
         self.back_since = 0.0
+        self.back_first: float | None = None         # its first look with every dongle back
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
@@ -1248,8 +1256,8 @@ class SystemSupervisor(Supervisor):
                 "restarts": self.restarts, "workdir": r["workdir"]}
         if self.ran_key is not None and key != self.ran_key and self.proc is None:
             # (#592) another assignment or config: whatever went before is not this one's to come back, nor to wait for
-            self.ran_key, self.gone_since, self.back_list, self.back_at, self.flaps, self.hold_until = (
-                None, None, None, None, 0, 0.0)
+            self.ran_key, self.gone_since, self.back_list, self.back_first, self.back_at, self.flaps, \
+                self.hold_until = None, None, None, None, None, 0, 0.0
             self.backoff, self.next_start = BACKOFF_S[0], 0.0
         if expired:
             self._set(now, "off", f"{label}: its reception test's time is up: stopped, its dongle let go", expired=True,
@@ -1266,6 +1274,11 @@ class SystemSupervisor(Supervisor):
             self._start_system(now, w, r, key, base)
         elif not self._unplugged(now, w, base):
             self._watch(now, base)
+            if self.proc is None and self.status.get("state") == "absent" and self.gone_since is None:
+                # trunk-recorder exited saying its dongle is gone: a return as any other (settled, the county first)
+                self.ran_key = key
+                went = self._went(now)
+                self.status.update(detail=self.status.get("detail", "") + went, restarts=self.restarts)
         self.status["watchdog"] = self.watchdog.report(self._m, self._wcfg)
         self.status["at"] = now
         self._write()
@@ -1276,8 +1289,9 @@ class SystemSupervisor(Supervisor):
         recording nothing (the station, 2026-11-16: both MRRS dongles out, its status "ok" until an assignment changed).
         So while it runs, every UNPLUGGED_S, its dongles are looked for on USB; the same ones missing at two looks a
         second apart stop it ("absent", True), and _start_system starts it again once every one is back. Never on a
-        look that can't be trusted: one that can't be made (librtlsdr in a bad way), or that lists a dongle whose
-        serial it couldn't read; and a list with none of its dongles (an empty one: libusb failing) takes three looks.
+        look that can't be made (librtlsdr in a bad way). One trusted less takes three looks: a list with none of its
+        dongles (an empty one: libusb failing), or one with as many dongles whose strings couldn't be read (UNREAD) as
+        it misses (they may be its own). A dongle with no serial string ("") is another dongle, never a reason.
         Gone again within FLAP_S of a return: a restart counted, and the next start held back (FLAP_HOLD_S)."""
         if now < self.next_look:
             return False
@@ -1287,13 +1301,13 @@ class SystemSupervisor(Supervisor):
             found = None
         mine = [s for _k, s in sorted(w["sources"].items())]
         missing = [s["name"] for s in mine if s["sdr"] not in {x for _i, x in found or []}]
-        unread = sum(1 for _i, x in found or [] if not x)
-        if found is None or not missing or unread >= len(missing):
+        if found is None or not missing:
             self.missing, self.missing_n, self.next_look = [], 0, now + UNPLUGGED_S
             return False
+        unread = sum(1 for _i, x in found if x == UNREAD)
         self.missing_n = self.missing_n + 1 if missing == self.missing else 1
         self.missing = missing
-        if self.missing_n < (3 if len(missing) == len(mine) else 2):
+        if self.missing_n < (3 if len(missing) == len(mine) or unread >= len(missing) else 2):
             self.next_look = now + 1.0                # looked at again in a second: never stopped on one look
             return False
         names = ", ".join(f"'{n}'" for n in missing)
@@ -1310,7 +1324,7 @@ class SystemSupervisor(Supervisor):
         """(#592) A dongle it ran on went (now): when, to say at its return. Gone again within FLAP_S of a return is a
         flapping dongle (a loose plug, a failing hub port): a restart counted, and the next start held back, longer
         each time in a row (FLAP_HOLD_S), never one every few seconds. What to add to the status's detail."""
-        self.gone_since, self.back_list = now, None
+        self.gone_since, self.back_list, self.back_first = now, None, None
         back, self.back_at = self.back_at, None
         if back is None or now - back >= FLAP_S:
             self.flaps, self.hold_until = 0, 0.0
@@ -1399,7 +1413,7 @@ class SystemSupervisor(Supervisor):
             self.log(f"{self.tag}: dongles back after {_mmss(now - self.gone_since)}: restarting trunk-recorder")
             if now - self.gone_since > LONG_ABSENCE_S:
                 self.watchdog.dongles_back()
-            self.gone_since, self.back_list, self.back_at = None, None, now
+            self.gone_since, self.back_list, self.back_first, self.back_at = None, None, None, now
         self.missing, self.missing_n, self.next_look = [], 0, now + UNPLUGGED_S
         self.watchdog.started(now, capture_dir(argv, r["workdir"]), key)
         self.shipper.started()
@@ -1417,20 +1431,28 @@ class SystemSupervisor(Supervisor):
         serial) list at looks RETURN_STABLE_S apart: indexes shift as dongles come back one by one); a flapping dongle
         waits out its hold (_went); and the county's trunk-recorder, when it should run, starts first and has run
         COUNTY_SETTLE_S (up to COUNTY_WAIT_S): a hub that dropped both comes back with new indexes, and the county's
-        dongle is the one to open first. The indexes it starts on are this very look's (_start_system)."""
-        listed = tuple(sorted(found))
+        dongle is the one to open first. The indexes it starts on are this very look's (_start_system).
+        Only the dongles up to the highest index of its own and the county's count for settling (only those can shift
+        their indexes): a spare further up that comes and goes never holds it back; and settling ends after
+        RETURN_SETTLE_MAX_S whatever moves (a power-starved hub), on the latest look."""
+        county = wanted(self.county_state)
+        ours = {s["sdr"] for s in w["sources"].values()} | ({county["sdr"]} if county["on"] and county["sdr"] else set())
+        top = max((i for i, x in found if x in ours), default=-1)
+        listed = tuple(sorted(e for e in found if e[0] <= top))
+        if self.back_first is None:
+            self.back_first = now
         if listed != self.back_list:
             self.back_list, self.back_since = listed, now
         names = ", ".join(f"'{s['name']}'" for _k, s in sorted(w["sources"].items()))
         why = ""
-        if now - self.back_since < RETURN_STABLE_S:
-            why, self.next_start = "USB settling", self.back_since + RETURN_STABLE_S
+        if now - self.back_since < RETURN_STABLE_S and now - self.back_first < RETURN_SETTLE_MAX_S:
+            why = "USB settling"
+            self.next_start = min(self.back_since + RETURN_STABLE_S, self.back_first + RETURN_SETTLE_MAX_S)
         elif now < self.hold_until:
             why = f"held back {_dur(self.hold_until - now)} more: it went soon after it came back"
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
         else:
-            county = wanted(self.county_state)
-            if county["on"] and now - self.back_since < COUNTY_WAIT_S:
+            if county["on"] and now - self.back_first < COUNTY_WAIT_S:
                 st = read_status(self.county_status, now) or {}
                 started = st.get("started")
                 up = st.get("state") == "ok" and isinstance(started, (int, float)) and now - started >= COUNTY_SETTLE_S

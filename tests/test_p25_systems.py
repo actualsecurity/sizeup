@@ -367,7 +367,8 @@ def run(sups, usb_at, t_from: float, t_to: float, dt: float = 0.5) -> None:
 
 
 def test_a_look_that_cant_be_trusted_never_stops_a_running_system(tmp_path):
-    usb: list | None = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    both = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    usb: list | None = list(both)
     looks = []
 
     def found():
@@ -376,7 +377,7 @@ def test_a_look_that_cant_be_trusted_never_stops_a_running_system(tmp_path):
             raise OSError("librtlsdr in a bad way")
         return list(usb)
     _county, mrrs, pop, logs, _d = service(tmp_path, found=found)
-    ask_system(tmp_path, {0: "pd-a"})
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
     assert mrrs.step(100.0)["state"] == "ok"
     n = len(looks)
     for t in range(1, 60):
@@ -384,15 +385,30 @@ def test_a_look_that_cant_be_trusted_never_stops_a_running_system(tmp_path):
     assert len(looks) - n == 1                                                  # looked at every UNPLUGGED_S, not every step
     usb = None
     assert mrrs.step(110.0)["state"] == "ok" and mrrs.step(116.0)["state"] == "ok"
-    usb = [(0, "v4"), (1, "pd-b"), (2, "pd-a")]                                  # another dongle moving: not its
+    usb = [(0, "v4"), (1, "pd-b"), (2, "pd-a"), (3, "spare")]                    # another dongle moving: not its
     assert mrrs.step(122.0)["state"] == "ok"
-    # libusb failing (an empty list) twice; a dongle whose serial can't be read; missing at one look only
-    for t, listed in ((128, []), (129, []), (130, [(0, "v4"), (1, "")]), (131, [(0, "v4"), (1, "")]),
-                      (132, [(0, "v4"), (1, "")]), (138, [(0, "v4")]), (139, [(0, "v4"), (1, "pd-a")])):
+    # libusb failing (an empty list) twice; a dongle whose strings can't be read where pd-a was, twice; pd-a missing
+    # at one look only. Each followed by a look with everything there.
+    for t, listed in ((128, []), (129, []), (130, both), (135, [(0, "v4"), (1, trunkrecd.UNREAD), (2, "pd-b")]),
+                      (136, [(0, "v4"), (1, trunkrecd.UNREAD), (2, "pd-b")]), (137, both), (142, [(0, "v4"), (1, "pd-b")]),
+                      (143, both)):
         usb = listed
         assert mrrs.step(float(t))["state"] == "ok", t
     assert len(pop.started) == 1 and pop.running == pop.started
     assert not [m for m in logs if "back after" in m or "absent" in m]
+
+
+@pytest.mark.parametrize("other, looks", [("", 2), (trunkrecd.UNREAD, 3)])
+def test_a_dongle_with_no_serial_never_hides_one_that_went(tmp_path, other, looks):
+    # review: a dongle with an empty serial made every look untrusted, so pd-a gone was never seen while it stayed.
+    # One with no serial string is just another dongle; one whose strings can't be read costs one more look.
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b"), (3, other)]
+    _county, mrrs, pop, _logs, _d = service(tmp_path, found=lambda: list(usb))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    usb[:] = [(0, "v4"), (1, "pd-b"), (2, other)]
+    states = [mrrs.step(105.0 + k)["state"] for k in range(looks)]
+    assert states == ["ok"] * (looks - 1) + ["absent"] and pop.running == []
 
 
 def test_a_dongle_missing_at_the_first_start_or_after_another_assignment_is_never_a_return(tmp_path):
@@ -421,7 +437,7 @@ def test_a_flapping_dongle_is_held_back_longer_each_time_and_counted(tmp_path):
 
     def flap(t):
         gone["on"] = (t % 7) < 2
-    run([mrrs], flap, 1000.0, 1000.0 + 3600)
+    run([mrrs], flap, 1000.0, 1000.0 + 3600, dt=1.0)
     assert len(pop.started) <= 12 and len(logs) <= 60, (len(pop.started), len(logs))
     assert mrrs.status["restarts"] >= 3                                       # counted, as Health shows it
     # scripted: 20 s in, 10 s out. The holds after each return it didn't keep: 30 s, 2 min, 5 min
@@ -434,17 +450,59 @@ def test_a_flapping_dongle_is_held_back_longer_each_time_and_counted(tmp_path):
         gone["on"] = (t % 30) >= 20
         if len(pop.started) > len(starts):
             starts.append(t)
-    run([mrrs], script, 0.0, 1800.0)
+    run([mrrs], script, 0.0, 1800.0, dt=1.0)
     gaps = [b - a for a, b in zip(starts, starts[1:])]
     assert len(starts) >= 4 and gaps[0] < 40 and 30 + 20 <= gaps[1] and 120 + 20 <= gaps[2] and 300 + 20 <= gaps[3], gaps
     assert mrrs.status["restarts"] >= 3
     assert any("after it came back: started no sooner than 2 min" in m for m in logs)
 
 
-def test_the_county_gets_its_dongle_first_when_a_hub_drops_both_systems(tmp_path):
+def back_starts(tmp_path, usb_at, t_to: float) -> tuple[list[float], list]:
+    """MRRS on pd-a and pd-b, unplugged at 110 and back at 140 (usb_at(t, ours): the list then); its starts."""
+    usb: list = []
+    _county, mrrs, pop, _logs, d = service(tmp_path, found=lambda: list(usb))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    starts: list[float] = []
+    devs: list = []
+
+    def at(t):
+        usb[:] = usb_at(t, t < 110 or t >= 140)
+        if len(pop.started) > len(starts):
+            starts.append(t)
+            devs.append(([s["device"] for s in json.loads((d / "config.runtime.json").read_text())["sources"]],
+                         list(usb)))
+    run([mrrs], at, 100.0, t_to)
+    return starts, devs
+
+
+def test_a_spare_coming_and_going_above_its_dongles_never_holds_a_return_back(tmp_path):
+    # review: a power-starved hub, a spare at index 3 toggling every 5 s kept MRRS "USB settling" for 860 s
+    def usb_at(t, ours):
+        spare = [(3, "spare")] if int(t // 5) % 2 else []
+        return ([(0, "v4"), (1, "pd-a"), (2, "pd-b")] if ours else [(0, "v4")]) + spare
+    starts, _devs = back_starts(tmp_path, usb_at, 200.0)
+    assert len(starts) == 2 and 140 + trunkrecd.RETURN_STABLE_S <= starts[1] <= 140 + 2 * trunkrecd.UNPLUGGED_S
+
+
+def test_settling_ends_after_a_minute_on_the_latest_look_when_its_indexes_keep_moving(tmp_path):
+    # a dongle below its own that comes and goes every 5 s (its looks' pace): the indexes never stay put; it starts
+    # after RETURN_SETTLE_MAX_S on the look it starts on (each serial at its index then)
+    def usb_at(t, ours):
+        low = [(0, "flaky")] if int(t // 5) % 2 else []
+        mine = [(len(low), "pd-a"), (len(low) + 1, "pd-b")] if ours else []
+        return low + mine
+    starts, devs = back_starts(tmp_path, usb_at, 260.0)
+    assert len(starts) == 2 and 140 + trunkrecd.RETURN_SETTLE_MAX_S <= starts[1] <= 140 + trunkrecd.RETURN_SETTLE_MAX_S + 6
+    listed, usb = devs[1]
+    assert listed == [f"rtl={dict((x, i) for i, x in usb)['pd-a']}", f"rtl={dict((x, i) for i, x in usb)['pd-b']}"]
+
+
+@pytest.mark.parametrize("mrrs_exits, back_from", [(False, 120.0), (True, 108.0)])
+def test_the_county_gets_its_dongle_first_when_a_hub_drops_both_systems(tmp_path, mrrs_exits, back_from):
     # The review's race: the county's V4 and both MRRS dongles on one hub that drops and comes back with new indexes.
     # MRRS must never open an index that is about to be the county's: the county starts first, then MRRS on the
-    # indexes of its own serials as listed when it starts.
+    # indexes of its own serials as listed when it starts. Whether MRRS's trunk-recorder hangs (seen, and stopped)
+    # or exits by itself, saying so, before the dongles are back: the same.
     usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
     county, mrrs, pop, logs, d = service(tmp_path, found=lambda: list(usb))
     ask_county(tmp_path)
@@ -454,12 +512,15 @@ def test_the_county_gets_its_dongle_first_when_a_hub_drops_both_systems(tmp_path
     assert county.status["state"] == "ok" and mrrs.status["state"] == "ok"
     usb[:] = []                                                                 # the hub drops
     fire.code = 1
-    county.lines.append("(error) usb_open error -4 · No supported devices found")   # the county's exits; MRRS hangs
+    county.lines.append("(error) usb_open error -4 · No supported devices found")   # the county's exits
+    if mrrs_exits:
+        pd.code = 1
+        mrrs.lines.append("(error) usb_open error -4 · No supported devices found")
     back = [(0, "pd-b"), (1, "pd-a"), (2, "v4")]                                # comes back one by one, new indexes
 
     def hub(t):
-        if t >= 120:
-            usb[:] = back[:1 + int((t - 120) // 2)]                              # one more every 2 s from 120
+        if t >= back_from:
+            usb[:] = back[:1 + int((t - back_from) // 2)]                        # one more every 2 s
     starts: dict[int, tuple[float, str]] = {}
 
     def watch(t):
