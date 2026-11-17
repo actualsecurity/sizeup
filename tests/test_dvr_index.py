@@ -15,6 +15,7 @@ import gzip
 import random
 import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 
@@ -78,6 +79,8 @@ def test_the_eviction_keeps_exactly_what_the_whole_index_eviction_kept(tmp_path,
             key = nxt[cid]
             nxt[cid] += rnd.choice((1, 1, 1, 2, 30))
             t0 = round(now - rnd.choice((0, 0, 0, 0, 0, 3, 200)), 3)
+            if rnd.random() < 0.25:                       # on a shared 8 s grid: the same start on several cameras
+                t0 = float(int(now) // 8 * 8)
             s = (t0, rnd.choice((2.0, 4.0, 6.0)), rnd.randint(60_000, 260_000))
         elif op < 0.7 and ref[cid]:                       # a key written again (a counter that started over)
             key = rnd.choice(list(ref[cid]))
@@ -106,6 +109,22 @@ def test_the_eviction_keeps_exactly_what_the_whole_index_eviction_kept(tmp_path,
             assert d._room(need) is want
             assert _kept(d) == {c: v for c, v in ref.items() if v}
         assert d._cams[cid]["segs"].bytes == sum(x[2] for x in ref[cid].values())
+
+
+def test_a_key_indexed_again_at_a_later_start_is_kept_by_the_window(tmp_path):
+    """A segment's key indexed again with a newer start (shared storage: the scan takes in the other leader's file
+    for a key): its old place in the time order is not it any more, and the window never deletes it through that."""
+    d = Dvr(_Roads(), tmp_path / "dvr", window_s=600, max_bytes=10 ** 12, free_floor=0, log=lambda m: None)
+    t = 1_791_915_000.0
+    segs = d._cam(CAM)["segs"]
+    segs[10] = (t - 700, 4.0, 150_000)                    # past the window: goes
+    segs[11] = (t - 696, 4.0, 150_000)                    # indexed, then again at a start inside the window
+    segs[12] = (t - 692, 4.0, 150_000)                    # past the window: goes
+    segs[11] = (t - 10, 4.0, 160_000)
+    d.clock = lambda: t
+    d.evict()
+    assert dict(segs) == {11: (t - 10, 4.0, 160_000)} and segs.bytes == 160_000 == d.total_bytes()
+    assert segs.head() == (t - 10, 11)
 
 
 class _NoWalk(_Segs):
@@ -211,6 +230,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         srv = self.server
+        if self.path == "/slow.ts":
+            time.sleep(0.2)
         srv.seen.append((self.path, self.headers.get("User-Agent"), id(self.connection)))
         body = srv.bodies.get(self.path, b"\x47" * 188 * 1000)
         hdrs = {"Content-Type": "video/MP2T"}
@@ -275,6 +296,47 @@ def test_a_kept_connection_the_server_dropped_is_asked_again_once_on_a_new_one(s
     srv.server_close()
     with pytest.raises(URLError):
         httpkeep.Pool().get(f"{base}/c.ts", 2.0, 4 << 20)
+
+
+class _Dropper(_Handler):
+    timeout = 0.3                                         # an idle keep-alive closed after 0.3 s (StreamRequestHandler)
+
+
+def test_every_idle_connection_to_a_host_that_dropped_one_goes_and_the_retry_is_a_new_one():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Dropper)
+    srv.seen, srv.bodies, srv.drop_after = [], {}, False
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        pool = httpkeep.Pool(idle_s=30.0)                 # (kept longer than the server keeps them: the case)
+        ths = [threading.Thread(target=pool.get, args=(f"{base}/slow.ts", 10.0, 4 << 20)) for _ in range(4)]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join()
+        assert pool.opened == 4 and len(pool._idle[("http", "127.0.0.1", srv.server_address[1])]) == 4
+        time.sleep(0.6)                                   # every one of them dropped by the server meanwhile
+        assert pool.get(f"{base}/a.ts", 10.0, 4 << 20)[0] == 200
+        assert pool.opened == 5 and len(pool._idle[("http", "127.0.0.1", srv.server_address[1])]) == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_the_open_events_cameras_are_worked_out_again_only_when_the_events_change(tmp_path):
+    r, d, f, clock = setup(tmp_path)
+    cam = r.camera(CAM)
+    calls = []
+    real = r.cameras_for
+    r.cameras_for = lambda *a, **kw: (calls.append(a), real(*a, **kw))[1]
+    ev = {"lat": cam["lat"], "lon": cam["lon"], "address": "", "label": ""}
+    d.incidents = lambda: [ev]
+    for _ in range(3):                                    # idle ticks: the same events, the same cameras
+        step(d, f, clock)
+    assert len(calls) == 1 and "incident" in d.wanted()[CAM]
+    d.incidents = lambda: [ev, dict(ev, lat=cam["lat"] + 0.001)]
+    step(d, f, clock)
+    assert len(calls) == 3                                # another open event: both again
 
 
 def test_the_dvr_records_over_kept_alive_connections_with_the_plain_client(tmp_path, monkeypatch):

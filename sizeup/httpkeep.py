@@ -24,7 +24,7 @@ from urllib.request import getproxies
 from sizeup import USER_AGENT as UA
 
 PER_HOST = 8          # idle connections kept per host (the DVR's workers: 8)
-IDLE_S = 30.0         # an idle connection older than this is closed, not used (servers drop theirs after 60 s or so)
+IDLE_S = 5.0          # an idle connection older than this is closed, not used (a camera's next fetch: within ~4 s)
 ACCEPT = "application/json, image/*;q=0.9, */*;q=0.5"
 STALE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
          http.client.BadStatusLine, ssl.SSLEOFError, ssl.SSLZeroReturnError)
@@ -54,12 +54,16 @@ class Pool:
         self._lock = threading.Lock()
         self.opened = 0                               # connections made (the tests, the benchmark)
 
-    def _take(self, key: tuple[str, str, int], timeout: float) -> tuple[http.client.HTTPConnection, bool]:
-        """(an idle connection to that host, True), else (a new one, False)."""
+    def _take(self, key: tuple[str, str, int], timeout: float, fresh: bool = False) -> tuple[http.client.HTTPConnection, bool]:
+        """(an idle connection to that host, True), else (a new one, False); fresh: a new one, every idle one to that
+        host closed (one was found dropped by the server: the others, kept as long or longer, likely are too)."""
         now, stale = self.clock(), []
         with self._lock:
             idle = self._idle.get(key) or []
             conn = None
+            if fresh:
+                stale += [c for _, c in idle]
+                idle.clear()
             while idle:
                 at, c = idle.pop()
                 if now - at <= self.idle_s:
@@ -110,7 +114,7 @@ class Pool:
         path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         hdrs = {"User-Agent": UA, "Accept": ACCEPT, "Accept-Encoding": "gzip", **(headers or {})}
         for attempt in (1, 2):
-            conn, reused = self._take(key, timeout)
+            conn, reused = self._take(key, timeout, fresh=attempt == 2)
             try:
                 conn.request("GET", path, headers=hdrs)
                 r = conn.getresponse()

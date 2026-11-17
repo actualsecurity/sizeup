@@ -270,6 +270,7 @@ class Dvr:
         self.area, self.shared = area_polygon(area), bool(shared)
         self.area_wall, self.area_extra_m = bool(area_wall) and not self.area, float(area_extra_m)
         self._area_at, self._area_ids = -1e18, []
+        self._inc_cache: tuple = (None, {})       # (open events, cameras with video, near_m) -> _incident_cams
         self.may_write = may_write or (lambda: True)
         self._scanned = threading.Event()
         self._started_at: float | None = None
@@ -624,7 +625,9 @@ class Dvr:
         return self.status(cid)
 
     def _incident_cams(self) -> dict[str, float]:
-        """Camera id -> metres from the nearest open CAD event, for the cameras an event wants."""
+        """Camera id -> metres from the nearest open CAD event, for the cameras an event wants. Worked out again only
+        when the open events or the cameras with video change (#446: every second, each event against every camera and
+        the road picker, as events open through the day)."""
         out: dict[str, float] = {}
         from sizeup.roads import km
         try:
@@ -633,6 +636,11 @@ class Dvr:
             self.log(f"dvr: open events not read ({type(e).__name__})")
             events = []
         cams = [c for c in self.roads.merged("cameras") if c.get("video") and not c.get("off")]
+        key = (tuple((ev.get("lat"), ev.get("lon"), ev.get("label", ""), ev.get("address", "")) for ev in events),
+               tuple((c["id"], c["lat"], c["lon"]) for c in cams), self.near_m)
+        if key == self._inc_cache[0]:
+            return dict(self._inc_cache[1])
+        whole = True
         for ev in events:
             lat, lon = ev.get("lat"), ev.get("lon")
             if lat is None or lon is None:
@@ -644,11 +652,13 @@ class Dvr:
             try:
                 along = self.roads.cameras_for(lat, lon, ev.get("label", ""), ev.get("address", ""))["cameras"]
             except Exception:  # pragma: no cover - the picker's trouble never stops the recording
-                along = []
+                along, whole = [], False
             for c in along:
                 if c.get("rel") in ("at", "before", "after") and c.get("has_video"):
                     d = (c.get("km") or 0) * 1000
                     out[c["id"]] = min(out.get(c["id"], d), d)
+        if whole:
+            self._inc_cache = (key, dict(out))
         return out
 
     def wanted(self) -> dict[str, list[str]]:
