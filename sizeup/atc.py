@@ -295,11 +295,15 @@ _WRITTEN_FLIGHT = re.compile(r"\b([A-Z]{3})(\d{1,4})\b")      # "MXY283", as siz
 ICAO = "icao"                                                   # its word: "icaomxy", then the digits
 
 
+def _said_tails(text: str) -> str:
+    return _WRITTEN_TAIL.sub(lambda m: " ".join((["november"] if m.group(1) else []) + list(m.group(2))
+                                                + [_SPELL[c] for c in m.group(3)]), text or "")
+
+
 def words_of(text: str) -> list[str]:
     """The words, lower case. A tail written the way sizeup/atc_normalize.py writes it ("N123AB", "568LX") is read as
     it was said ("november one two three alfa bravo"), so the matcher sees the same characters either way."""
-    t = _WRITTEN_TAIL.sub(lambda m: " ".join((["november"] if m.group(1) else []) + list(m.group(2))
-                                             + [_SPELL[c] for c in m.group(3)]), text or "")
+    t = _said_tails(text)
     t = _WRITTEN_FLIGHT.sub(lambda m: f"{ICAO}{m.group(1).lower()} {' '.join(m.group(2))}", t)
     return re.findall(r"[a-z]+|\d+", t.lower().replace("x-ray", "xray").replace("x ray", "xray"))
 
@@ -313,7 +317,8 @@ class Mention:
     abbrev: bool = False
     phrase_end: int = -1
     after_number: bool = False   # a tail's end heard right after an ATC number ("runway 347 kilo zulu"): maybe its digits
-    alts: tuple[tuple[str, int], ...] = ()   # shorter readings (suffix, end), longest first: the rest a distance (reading)
+    alts: tuple[tuple[str, int], ...] = ()   # other readings (suffix, end): its digits or a distance's (reading)
+    alone: bool = True           # False: no callsign unless reading() picks one of the alts ("Xyzair 1 25 miles out")
 
     @property
     def text(self) -> str:
@@ -372,12 +377,15 @@ def _char(w: str) -> str:
     return ""
 
 
-def _suffix(words: Sequence[str], i: int, limit: int = 6, stop: Iterable[int] = (), lead: str = "") -> tuple[str, int]:
+def _suffix(words: Sequence[str], i: int, limit: int = 6, stop: Iterable[int] = (), lead: str = "",
+            most: int = 0) -> tuple[str, int]:
     """The callsign characters from words[i] on ("1 2 3 alfa bravo" -> "123AB"), up to the first word that isn't one,
-    or one of an ATC number's (stop). lead: characters already read (the rest of a number run into them)."""
+    or one of an ATC number's (stop). lead: characters already read (the rest of a number run into them). most: at
+    most so many characters; a word that would pass it ends them ("Xyzair 123 25 miles out": 123, then 25)."""
     out, j = lead, i
     while j < len(words) and j - i < limit and j not in stop:
         w = words[j]
+        nj = j + 1
         c = _char(w)
         if not c and w in HOMOPHONES and j > i and j + 1 < len(words) and _char(words[j + 1]):
             c = HOMOPHONES[w]
@@ -386,15 +394,17 @@ def _suffix(words: Sequence[str], i: int, limit: int = 6, stop: Iterable[int] = 
         if not c and w in TENS:
             nxt = words[j + 1] if j + 1 < len(words) else ""
             if nxt in DIGITS and DIGITS[nxt] != "0":
-                c, j = TENS[w] + DIGITS[nxt], j + 1
+                c, nj = TENS[w] + DIGITS[nxt], j + 2
             else:
                 c = TENS[w] + "0"
         if not c:
             break
         if c[0].isdigit() and out and out[-1].isalpha():
             break                                   # a tail's letters come last: "568LX 1 mile" is 568LX, then 1
+        if most and out and len(out) + len(c) > most:
+            break
         out += c
-        j += 1
+        j = nj
     return out, j
 
 
@@ -408,7 +418,7 @@ _FREQ_SKIP = {"departure", "approach", "center", "centre", "tower", "ground", "c
 _POINT = {"point", "decimal"}
 FREQ_MHZ = (118, 137)    # the VHF airband: a number after "contact" outside it is not a frequency
 _DIST_UNITS = {"mile", "miles", "nm"}
-FINAL_MAX_MI = 20        # a distance on final or out is at most this: a bigger number before "mile final" is no distance
+FINAL_MAX_MI = 20        # a distance on final or out is at most this: a bigger number word before "mile final" is none
 CALLSIGN_MAX = {"flight": 4, "tail": 5}   # an airline flight number's characters at most; an N-number's after the N
 
 
@@ -423,20 +433,28 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
     four point six five"), the wind ("wind 340 at 12"), the altimeter, a clock position ("2 o'clock") and a distance or
     speed ("3 miles"). And, for a number speech-to-text ran into the digits after it ("runway 347 kilo zulu"), the
     rest ({index: "7"}): the start of the next words, which may be a tail's ("7KZ")."""
-    covered, rest, _dist = _number_words(words)
+    covered, rest, _dist, _join = _number_words(words)
     return covered, rest
 
 
-def _on_final(words: Sequence[str], i: int) -> bool:
-    """The distance unit at words[i] is a distance on final or out ("4 mile final", "5 miles out", "2 miles on final")."""
-    return words[i + 1:i + 2] in (["final"], ["out"]) or words[i + 1:i + 3] == ["on", "final"]
+def _on_final(words: Sequence[str], i: int) -> str:
+    """The distance unit at words[i] is a distance on final ("4 mile final", "2 miles on final": 'final') or out ("5
+    miles out": 'out'), else ''."""
+    if words[i + 1:i + 2] == ["final"] or words[i + 1:i + 3] == ["on", "final"]:
+        return "final"
+    return "out" if words[i + 1:i + 2] == ["out"] else ""
 
 
-def _number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str], dict[int, int]]:
-    """number_words, and the words read as a distance ("4 mile final"): {index: the unit word's index}."""
+def _number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str], dict[int, int], set[int]]:
+    """number_words; the words read as a distance ("4 mile final"): {index: the unit word's index}; and the number
+    words that may be the end of a callsign before them (_readings), {index: True when that is the reading to use
+    first}: one too big to be a distance on final ("Xyzair 1234 mile final", "JetBlue 12 34 mile final") or out ("Xyzair
+    1234 miles out"), or one before a unit's own number ("JetBlue 12 34 3 thousand"); False: 21 to 99 miles out, a
+    check-in's distance, a callsign's end only when an aircraft around says so ("Xyzair 12 25 miles out": XYZ12)."""
     covered: set[int] = set()
     rest: dict[int, str] = {}
     dist: dict[int, int] = {}
+    join: dict[int, bool] = {}
     n = len(words)
 
     def take(i: int, width: int) -> int:
@@ -548,16 +566,25 @@ def _number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str], dict[
         elif w in _UNITS or w in _ALT_UNITS or (w == "clock" and i > 0 and words[i - 1] == "o"):
             k = i - (2 if w == "clock" else 1)
             got = ""
-            final = w in _DIST_UNITS and _on_final(words, i)
+            final = _on_final(words, i) if w in _DIST_UNITS else ""
             while k >= 0 and _dig(words[k]) and len(got) < 3 and (not got or w in _ALT_UNITS or len(words[k]) == 1):
-                if final and int(_dig(words[k]) + got) > FINAL_MAX_MI:
-                    break          # no one is 34 miles out on final: those digits are a callsign's ("XYZ1234 mile final")
+                q = int(_dig(words[k]))
+                if final and not got and FINAL_MAX_MI < q < 10_000 and (final == "final" or q >= 100):
+                    join[k] = True     # no one is 1234 miles out: a callsign's number ("Xyzair 1234 mile final")
+                    break
+                if final == "out" and not got and FINAL_MAX_MI < q < 100:
+                    join[k] = False    # 25 miles out: a check-in's distance, maybe a callsign's end ("Xyzair 12 25")
+                    covered.add(k)
+                    dist[k] = i
+                    break              # the whole distance: the digits before it are the callsign's ("November 1 2 3 25")
+                if got and len(_dig(words[k])) > 1:
+                    join[k] = True     # a whole number before the unit's own ("34 3 thousand"): maybe a callsign's end
                 got = _dig(words[k]) + got
                 covered.add(k)
                 if w in _DIST_UNITS:
                     dist[k] = i
                 k -= 1
-    return covered, rest, dist
+    return covered, rest, dist, join
 
 
 def after_number(i: int, words: Sequence[str], numbers: set[int], rest: dict[int, str], suffix: str) -> bool:
@@ -578,45 +605,64 @@ AFTER_NUMBER_CONF = 0.35   # a tail's end heard right after an ATC number matche
 _PLAIN_TAIL = re.compile(r"[1-9]\d{0,4}[A-Z]{0,2}")      # an N-number's characters after the N (FAA: 1-5, no leading 0)
 
 
-def _readings(words: Sequence[str], i: int, numbers: set[int], dist: dict[int, int],
-              most: int) -> list[tuple[str, int]]:
-    """The callsign characters from words[i] (_suffix), longest reading first. A callsign that runs into a distance
-    ("XYZ1234 mile final", its "2 mile" lost: the 4 read as the distance) is read whole too, the distance's words
-    given to it one by one while it has at most `most` characters; the shorter readings follow (reading)."""
-    suf, j = _suffix(words, i, stop=numbers)
-    out = [(suf, j)]
+def _readings(words: Sequence[str], i: int, numbers: set[int], dist: dict[int, int], join: dict[int, bool], most: int,
+              written: str = "") -> list[tuple[str, int]]:
+    """The callsign characters from words[i] (_suffix, at most `most`), the reading to use first, then the others
+    (reading). written: the digits of a flight written by its designator ("XYZ1234", one word each): exactly those
+    ("XYZ1234 mile final", its "2" lost, was XYZ1 at 234), never fewer nor more. Else a number word that may be the
+    callsign's end (_number_words: "JetBlue 12 34 mile final", "JetBlue 12 34 3 thousand") is joined to it while it
+    stays within `most` (JBU1234; "Xyzair 123 25 miles out" stays XYZ123), the reading without it the other. Else, when
+    the callsign runs into a distance, each further single-digit word given to it ("Xyzair 12 4 mile final": XYZ124
+    too) is another reading, for an aircraft around to pick, never the first."""
+    stop = numbers | {k for k, first in join.items() if first and k > i}
+    suf, j = _suffix(words, i, stop=stop, most=most)
+    if written:
+        whole, e = _suffix(words, i, limit=len(written), stop=stop - set(range(i, i + len(written))))
+        if whole == written and not (suf.startswith(whole) and suf[len(whole):].isalpha()):
+            return [(whole, e)]
+        return [(suf, j)]
+    joined = suf and j in join and suf[-1].isdigit() and len(suf) + len(_dig(words[j])) <= most
+    if joined and join[j]:
+        return [(suf + _dig(words[j]), j + 1), (suf, j)]
+    out = [(suf, j)] + ([(suf + _dig(words[j]), j + 1)] if joined else [])
     if suf and j in dist:
-        run = list(range(j, dist[j]))
-        for t in range(1, len(run) + 1):
-            s, e = _suffix(words, i, stop=numbers - set(run[:t]))
-            if e == (run[t] if t < len(run) else dist[j]) and len(out[0][0]) < len(s) <= most:
-                out.insert(0, (s, e))
+        k = j
+        while k < dist[j] and len(_dig(words[k])) == 1 and len(suf) < most:
+            suf, k = suf + _dig(words[k]), k + 1
+            out.append((suf, k))
     return out
 
 
 def find_mentions(text: str, index: TelephonyIndex) -> list[Mention]:
     words = words_of(text)
-    numbers, rest, dist = _number_words(words)
+    numbers, rest, dist, join = _number_words(words)
+    at = [k for k, w in enumerate(words) if w.startswith(ICAO) and len(w) == len(ICAO) + 3]
+    flights = [m.group(2) for m in _WRITTEN_FLIGHT.finditer(_said_tails(text))]
+    written = dict(zip(at, flights)) if len(at) == len(flights) else {}
     found: list[Mention] = []
     i = 0
     while i < len(words):
         hit = None
         w = words[i]
         if w.startswith(ICAO) and len(w) == len(ICAO) + 3 and w[len(ICAO):].upper() in index.telephony:
-            (suf, j), *alts = _readings(words, i + 1, numbers, dist, CALLSIGN_MAX["flight"])   # written ("MXY283")
+            (suf, j), *alts = _readings(words, i + 1, numbers, dist, join, CALLSIGN_MAX["flight"],
+                                        written.get(i, ""))   # a flight written by its designator ("MXY283")
             if suf and suf[0].isdigit():
                 hit = Mention((w[len(ICAO):].upper(),), suf, i, j, phrase_end=i + 1, alts=tuple(alts))
         elif words[i] == "november" and not (i > 0 and words[i - 1] in LETTERS):
-            (suf, j), *alts = _readings(words, i + 1, numbers, dist, CALLSIGN_MAX["tail"])
+            (suf, j), *alts = _readings(words, i + 1, numbers, dist, join, CALLSIGN_MAX["tail"])
             if len(suf) >= 2 and any(c.isdigit() for c in suf):
-                hit = Mention((), suf, i, j, alts=tuple(a for a in alts if len(a[0]) >= 2))
+                hit = Mention((), suf, i, j, alts=tuple(alts))
         else:
             for n in range(min(index.max_len, len(words) - i), 0, -1):
                 codes = index.phrases.get(tuple(words[i:i + n]))
                 if codes:
-                    (suf, j), *alts = _readings(words, i + n, numbers, dist, CALLSIGN_MAX["flight"])
+                    (suf, j), *alts = _readings(words, i + n, numbers, dist, join, CALLSIGN_MAX["flight"])
                     if suf and suf[0].isdigit():     # an airline flight number starts with a digit
-                        hit = Mention(tuple(codes), suf, i, j, phrase_end=i + n, alts=tuple(alts))
+                        # a one-digit flight before a check-in's distance ("Xyzair 1 25 miles out"): none, as before,
+                        # unless an aircraft around is XYZ125
+                        alone = not (len(suf) == 1 and j in join and not join[j])
+                        hit = Mention(tuple(codes), suf, i, j, phrase_end=i + n, alts=tuple(alts), alone=alone)
                     break
         if hit:
             found.append(hit)
@@ -731,21 +777,30 @@ def _same_number_other_airline(m: Mention, words: Sequence[str], index: Telephon
 
 
 def reading(m: Mention, aircraft: Sequence[dict], known: Iterable[str] = ()) -> Mention:
-    """The mention as one of its readings (find_mentions: "XYZ1234 mile final" is XYZ1234, or XYZ123 at 4 miles): the
-    longest that is an aircraft around exactly (ADS-B, or known: callsigns just matched on the channel), else the
-    longest."""
+    """The mention as one of its readings (find_mentions: "Xyzair 12 4 mile final" is XYZ12 at 4 miles, or XYZ124):
+    the one found when an aircraft on ADS-B has it exactly, else the others' shortest an aircraft on ADS-B has ("XYZ12"
+    when XYZ12 and XYZ124 are both around), then the same with the callsigns just matched on the channel (known), else
+    the one found. A mention found not alone ("Xyzair 1 25 miles out") is a callsign only through one of its alts:
+    callers drop it when it comes back not alone."""
     if not m.alts:
         return m
     known = {k.upper() for k in known}
-    for suf, end in ((m.suffix, m.end),) + m.alts:
+    ranked = [(m.suffix, m.end)] * m.alone + sorted(m.alts, key=lambda r: len(r[0]))
+    planes = [a for a in aircraft if _p(a) >= MIN_P]
+
+    def names(suf: str) -> set[str]:
+        return {d + suf for d in m.designators} if m.designators else {"N" + suf}
+
+    def on_adsb(suf: str) -> bool:
+        want = names(suf)
         if m.designators:
-            want = {d + suf for d in m.designators}
-            hit = any((a.get("flight") or "").strip().upper() in want for a in aircraft if _p(a) >= MIN_P)
-        else:
-            want = {"N" + suf}
-            hit = any(_tail(a) in want for a in aircraft if _p(a) >= MIN_P)
-        if hit or want & known:
-            return replace(m, suffix=suf, end=end, alts=())
+            return any((a.get("flight") or "").strip().upper() in want for a in planes)
+        return any(_tail(a) in want for a in planes)
+
+    for hit in (on_adsb, lambda suf: bool(names(suf) & known)):
+        for suf, end in ranked:
+            if hit(suf):
+                return replace(m, suffix=suf, end=end, alts=(), alone=True)
     return m
 
 
@@ -756,6 +811,8 @@ def attribute(text: str, index: TelephonyIndex, aircraft: Sequence[dict]) -> Att
     best: Attribution | None = None
     for m in find_mentions(text, index):
         m = reading(m, aircraft)
+        if not m.alone:
+            continue
         if m.designators:
             cands = [a for a in aircraft if (a.get("flight") or "")[:3].upper() in m.designators]
             scored = []
