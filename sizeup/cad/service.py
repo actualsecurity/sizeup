@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, dispatcher, eta, export, mapview, radiofolders, runcards
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
@@ -46,7 +46,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, TZ, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -350,6 +350,7 @@ class Cad:
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
         self._place_ix = None
+        self._places_map = None                # (the names' version, the GeoJSON, its ETag): places_map
         # A new call's location (#204), set by the app over the same gazetteer (sizeup/geo/pagegeo.py):
         # detail_source(suggestion) -> {place, street_address, address_checked, cross, block} (location_detail) and
         # here_source(lat, lon, places) -> what is at a point on the map (what_is_here). None: not here.
@@ -438,6 +439,7 @@ class Cad:
                 "lists": self.lists.public(),
                 "units": self.store.units(),
                 "incidents": incs,
+                "closed_hours": CLOSED_HOURS,             # the queue's "Closed 24h" header
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,
                 "run_cards_default": any(c["is_default"] for c in cards),
@@ -455,6 +457,7 @@ class Cad:
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
+                "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -2228,6 +2231,18 @@ class Cad:
             out["place_address"] = (proper_case(h.get("address") or "") if h.get("source") == "local"
                                     else (h.get("detail") or ""))
         return out
+
+    def places_map(self) -> tuple[bytes, str]:
+        """GET /api/cad/places/map: the department's located place names (the county's common places, hand-made ones) as
+        GeoJSON for the maps' "Common places" layer (commonplaces.map_points) -> (body, ETag). Built again only when the
+        names change (the state's places_rev moves with them); read only, like the place search."""
+        rev = self.settings.places_rev()
+        got = self._places_map
+        if got is None or got[0] != rev:
+            body = json.dumps(commonplaces.map_points(self.local_places()), separators=(",", ":")).encode()
+            got = (rev, body, f'"cp-{hashlib.sha1(body).hexdigest()[:20]}"')
+            self._places_map = got
+        return got[1], got[2]
 
     def search_places(self, query: dict) -> dict:
         """GET /api/cad/places?q=&near=lat,lon&iid=: ranked places of every kind (addresses, intersections,
