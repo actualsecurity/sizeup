@@ -202,7 +202,8 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
   c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: () => null } } });
   await flush();
   out.info = rec.info.map((a) => [a[0], a[1], a[2].map((l) => [l.tagName, l.className, l.textContent]), a[3], a[4]]);
-  // anything drawn over the dot keeps its click: a pre-plan point, a firehouse (topmost first); a base map label never
+  // another layer's mark there keeps its click: a pre-plan point, a firehouse, a camera; a GIS area over it or a base
+  // map label never
   out.over = {};
   const over = { preplan: { source: "pp-points", layer: { id: "pp-icons", type: "symbol" } },
                  firehouse: { source: "firehouses", layer: { id: "firehouse", type: "symbol" } },
@@ -276,7 +277,7 @@ def test_the_layer_in_a_fake_page(tmp_path, cad):
     assert o["info"] == [["2 places", PC, [["B", "cp-name", "Example Burger"], ["DIV", "", "120 Example Avenue"],
                                            ["B", "cp-name", "Sample Fitness"], ["DIV", "", "120 Example Ave"]],
                           "Common places", "cp-info"]]
-    assert o["over"] == {"preplan": 0, "firehouse": 0, "camera": 0, "fill": 0, "base": 1}
+    assert o["over"] == {"preplan": 0, "firehouse": 0, "camera": 0, "fill": 1, "base": 1}   # a GIS area over it: ours
     assert o["placing"] == 0 and o["notPlacing"] == 1
     assert o["markerClick"] == 0 and o["callMapClick"] == 0
     assert o["again"] == 1
