@@ -295,10 +295,14 @@ def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
 class Dvr:
     """Lock order (#644): every path takes them in this order, never the other way round, and lets go of a later one
     before it takes an earlier one again:
-        _scanning (follow() only tries it: never waits for it) -> _disk -> _lock -> the state's own lock
+        _ensuring[cid] (a camera's on-demand read) -> _scanning -> _disk -> _lock -> the state's _lock
         _parked_lock -> _lock
-    So nothing that holds _lock calls what takes _disk (wanted(): follow() moves a folder under _disk; _room, _write,
-    evict): it is called with no lock held and only its answer is kept under _lock (pin, tick)."""
+        the state's _wlock -> the state's _lock
+    _scanning is waited for by _scan (a pool worker's round via record_once -> _ensure, the rescan thread, index_rest,
+    scan_now) and only tried by follow() (it never waits for it: a folder being read, the move comes later). So nothing
+    that holds _lock calls what takes _disk (wanted(): follow() moves a folder under _disk; _room, _write, evict): it
+    runs with no lock held, and its answer is kept under _lock only when no later one was kept already (_set_wanted:
+    pin and tick)."""
 
     def __init__(self, roads, root: str | Path, window_s: float = WINDOW_S, max_bytes: int = MAX_BYTES,
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
@@ -344,6 +348,7 @@ class Dvr:
         self._cams: dict[str, dict] = {}          # cid -> {segs: _Segs {key: (t0, dur, bytes)}, last, end, offset, ...}
         self._opened: dict[str, float] = {}       # cid -> last time someone watched it live
         self._wanted: dict[str, list[str]] = {}
+        self._wanted_gen = self._wanted_kept = 0  # wanted() asked / the newest one kept (_set_wanted, #644)
         self.stopped = ""                         # why recording stopped (the disk), "" when it records
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -744,11 +749,23 @@ class Dvr:
             pins = dict(self.pins)
         self.save_pins(pins)
         self.log(f"dvr: {cid} {'kept' if on else 'no longer kept'}")
-        wanted = self.wanted()                            # (no lock held: follow() takes _disk, then _lock; #644)
-        with self._lock:
-            self._wanted = wanted
+        self._set_wanted()
         self.roads._changed()
         return self.status(cid)
+
+    def _set_wanted(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """wanted() worked out with no lock held (follow() takes _disk, then _lock: #644), kept as _wanted unless a
+        later one (a Keep's, a tick's, begun after this one) was kept meanwhile: then that one stands. (what was
+        wanted before, what is wanted now)."""
+        with self._lock:
+            self._wanted_gen += 1
+            gen = self._wanted_gen
+        wanted = self.wanted()
+        with self._lock:
+            before = self._wanted
+            if gen > self._wanted_kept:
+                self._wanted, self._wanted_kept = wanted, gen
+            return before, self._wanted
 
     def _incident_cams(self) -> dict[str, float]:
         """Camera id -> metres from the nearest open CAD event, for the cameras an event wants. Worked out again only
@@ -1085,10 +1102,7 @@ class Dvr:
                 self._rescan.start()                           # this thread, the rounds go on meanwhile
                 if wait_all:
                     self._rescan.join()
-        wanted = self.wanted()
-        with self._lock:
-            before = self._wanted
-            self._wanted = wanted
+        before, wanted = self._set_wanted()
         self._parked_tick()                                    # (#550) the parked cameras' checks, when due
         if set(wanted) != set(before):
             added, gone = set(wanted) - set(before), set(before) - set(wanted)

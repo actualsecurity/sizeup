@@ -903,3 +903,39 @@ def test_checkpoint_counts_no_bytes_for_a_camera_evicted_from_the_index(tmp_path
     assert d.evict() > 0 and CAM not in d._cams
     d.checkpoint(force=True)
     assert json.loads(path.read_text())["cameras"][CAM]["bytes"] == 0
+
+
+def test_two_keeps_at_once_keep_the_newest_answer(tmp_path, monkeypatch):
+    """#644: wanted() runs with no lock held, so two Keeps (or a Keep and a tick) overlap. The one begun later wins:
+    a Keep that began first and ends last never puts back an answer without the other's camera."""
+    r, d, f, clock = setup(tmp_path)
+    other = next(c["id"] for c in r.merged("cameras") if c.get("video") and c["id"] != CAM and dvr_mod.CAM_RE.fullmatch(c["id"]))
+    first_in, second_done = threading.Event(), threading.Event()
+    real = Dvr.wanted
+
+    def wanted(self):
+        out = real(self)
+        if threading.current_thread().name == "first":
+            first_in.set()                              # its answer (without the other camera) worked out ...
+            assert second_done.wait(5)                  # ... and kept only after the second Keep's
+        return out
+    monkeypatch.setattr(Dvr, "wanted", wanted)
+    a = threading.Thread(target=d.pin, args=(CAM, True), name="first", daemon=True)
+    a.start()
+    assert first_in.wait(5)
+    st = d.pin(other, True)
+    second_done.set()
+    a.join(5)
+    assert not a.is_alive() and st["recording"]
+    assert set(d._wanted) == {CAM, other} and d.status(other)["recording"]
+    # a tick begun before a Keep and ended after it: the Keep's answer stands too
+    d.pin(other, False)
+    first_in.clear()
+    second_done.clear()
+    t = threading.Thread(target=d.tick, name="first", daemon=True)
+    t.start()
+    assert first_in.wait(5)
+    d.pin(other, True)
+    second_done.set()
+    t.join(5)
+    assert not t.is_alive() and set(d._wanted) == {CAM, other}
