@@ -135,10 +135,11 @@ from urllib.parse import parse_qsl, urlsplit
 from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
-from sizeup.api.v1.handler import V1
+from sizeup.api.v1.handler import BODY_METHODS, V1, BodyRefused
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not come in this long: 408 (a stalled device holds no slot)
 # Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
 COMMON_PLACES_PATH = "/api/cad/settings/common_places"
 MAX_COMMON_PLACES_BODY = 4608 * 1024
@@ -525,10 +526,46 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
             out = v1.respond(self.command, path, query, self.headers, self._client()[0] or self.client_address[0],
-                             self._body)
-            if self.command == "POST" and out[0] >= 400:
-                self.close_connection = True     # the body may be unread (refused before it was read)
+                             self._v1_body)
+            if self.command not in ("GET", "HEAD") and (out[0] >= 400 or self.command not in BODY_METHODS):
+                self.close_connection = True     # the body may be unread (refused before it was read, or never read)
             return self._send(*out)
+
+        def _v1_body(self, limit: int) -> bytes | None:
+            """The body hook of /api/v1 (handler.py; every route with a body reuses it): exactly Content-Length bytes,
+            within V1_BODY_TIMEOUT_S. None: over the limit or a bad length (413). BodyRefused: no Content-Length or a
+            chunked body (411: the bytes would be left on a kept-alive connection), a client that stalls (408) or
+            stops short (400). Every refusal closes the connection. DELETE may have no body at all."""
+            self.close_connection = True              # until the whole body has been read, nothing is kept alive
+            if self.headers.get("Transfer-Encoding"):
+                raise BodyRefused(411, "length_required", "send Content-Length: chunked bodies are not accepted")
+            raw_len = self.headers.get("Content-Length")
+            if raw_len is None:
+                if self.command == "DELETE":
+                    self.close_connection = False
+                    return b""
+                raise BodyRefused(411, "length_required", "send a Content-Length header")
+            try:
+                n = int(raw_len)
+            except ValueError:
+                return None
+            if not 0 <= n <= limit:
+                return None
+            before = self.connection.gettimeout()
+            self.connection.settimeout(V1_BODY_TIMEOUT_S)
+            try:
+                data = self.rfile.read(n) if n else b""
+            except (TimeoutError, OSError):
+                raise BodyRefused(408, "request_timeout", "the body did not arrive in time") from None
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+            if len(data) != n:
+                raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
+            self.close_connection = False
+            return data
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -886,9 +923,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             url = urlsplit(self.path)
             if not v1.handles(url.path):
                 return self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
-            self.close_connection = True     # the body is left unread
             if gate.refuse(write=True):
-                return self._updating()
+                return self._updating()          # (closes the connection: the body is left unread)
             if self._admit(url.path):
                 self._v1(url.path, url.query)
 

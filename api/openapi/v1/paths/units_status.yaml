@@ -4,7 +4,9 @@ post:
   description: >
     The console's own unit status (every rule, validation and audit line of it), as the signed-in person: dispatchers and
     admins (a viewer is a 403 `forbidden`). Needs the `writes` feature (else 404). `If-Match` is optional (see the
-    header). The audit has the device, the app version and `via` (ios, android, web, api) from `X-Client`.
+    header; required, as 428, when the body has `client_at`). The audit has the device, the app version and `via` (ios,
+    android, web, or api when `X-Client` names no platform) from `X-Client`. If-Match and 412 are for unit status only.
+    The check and the write are two steps: a change between them is not caught.
   parameters:
     - $ref: ../parameters/IdempotencyKey.yaml
     - $ref: ../parameters/IfMatch.yaml
@@ -18,6 +20,10 @@ post:
   responses:
     "200":
       description: Applied (or the first answer, replayed).
+      headers:
+        Idempotent-Replayed:
+          description: "true when this is the first answer replayed for a retried Idempotency-Key."
+          schema: {type: string, enum: ["true"]}
       content:
         application/json:
           schema:
@@ -33,6 +39,10 @@ post:
             received_at: 1767225600.5
     "409":
       description: Not applied (incident_closed, unit_changed, in_progress). `current` is the unit as it is now.
+      headers:
+        Retry-After:
+          description: Seconds to wait (only for in_progress).
+          schema: {type: integer}
       content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
     "412":
       description: A stale `If-Match`. `current` is the unit as it is now.
@@ -41,5 +51,13 @@ post:
       description: The Idempotency-Key was used for another request.
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
     default:
-      description: An error (400 invalid or idempotency_key_required, 401, 403 forbidden, 404 no_such_unit or no_such_incident, 413, 429, 503).
+      description: >
+        An error: 400 (invalid, bad `client_at` (not a number, negative, older than 7 days), idempotency_key_required,
+        invalid_idempotency_key), 401, 403 forbidden, 404 (no_such_unit, no_such_incident), 408 request_timeout, 411
+        length_required, 413 body_too_large, 428 precondition_required (a queued action, one with `client_at`, needs
+        If-Match), 429, 503.
+      headers:
+        Retry-After:
+          description: Seconds to wait (429, 503).
+          schema: {type: integer}
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}

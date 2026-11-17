@@ -31,7 +31,20 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
+# The request-body hook, shared by every v1 route with a body (writes now, push and the others reuse it verbatim):
+# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit or an unusable length: 413;
+# it raises BodyRefused for a missing length or a body that stalls). The handler sees the bytes as Ctx.body.
 MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
+BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")      # the verbs the hook reads a body for
+
+
+class BodyRefused(Exception):
+    """The server's body reader refusing a request: 411 length_required (no Content-Length, or chunked), 408
+    request_timeout (the client stalled), 400 bad_body (it stopped short). The connection is closed."""
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
 
 
 def _pattern(template: str) -> re.Pattern:
@@ -50,7 +63,7 @@ class V1:
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
-        self.gateway = Gateway(cad) if cad is not None else None    # a write's one way to the CAD, as a person (gateway.py)
+        self.gateway = Gateway(cad) if cad is not None else None    # a write's way to the CAD, as a person
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -119,10 +132,13 @@ class V1:
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
             raw = b""
-            if route.method == "POST" and body is not None:      # a write's body: bounded, read only now (#562)
-                raw = body(MAX_BODY)
+            if route.method in BODY_METHODS and body is not None:   # a body: bounded, read only now (#562)
+                try:
+                    raw = body(MAX_BODY)
+                except BodyRefused as e:
+                    return error(e.status, e.code, e.message)
                 if raw is None:
-                    return error(413, "body_too_large", f"the body is missing a length or over {MAX_BODY // 1024} KB")
+                    return error(413, "body_too_large", f"the body is over {MAX_BODY // 1024} KB")
             ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw, self.gateway, peer)
             status, obj, *extra = route.handler(ctx)             # extra: optional response headers (writes.py)
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, \

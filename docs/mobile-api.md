@@ -552,16 +552,35 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Repos | The hub, the spec and the contract tests stay in this **public** repo. The app goes in a **private** repo (proposed, D10). The app binary holds no secrets: only the hub URL; everything else comes from enrollment |
 
 **Writes (#562, built, behind the `writes` flag).** `POST /api/v1/units/{code}/status`, `/alarms/{id}/ack` and
-`/incidents/{id}/notes` go through the console's own code (`CadApi.post`, so its role check, validation, operator name and
-activity row), as the device's person: the handler gets a `Gateway` (`sizeup/api/v1/gateway.py`), never a `CadApi`, and
-no person is a 503. They need the least role the console needs ("dispatch"; a viewer is a 403). `Idempotency-Key` is
-required (table `v1_idempotency` in hub.sqlite, made on the first write, kept 24 h per device, at most 1000 per device;
-a 400, 403 or 404 is not kept so a corrected request can reuse the key). `If-Match` takes the unit's `rev`
-(`api/v1/rev.py`). `client_at` is recorded in the activity row's browser column with the device id, app version and `via`
-(`via=ios app=1.4.2 device=<id> client_at=<unix>`, `clamped` when more than 5 minutes ahead), and a queued action more than a
-minute late says so in the incident's chronology. 409 answers carry `error.reason` (`incident_closed`, `unit_changed`,
-`already_acknowledged`, `in_progress`) and the current object. A race between the check and the write is narrow but
-not closed (the console's own methods do the write); a dispatch is never offered here.
+`/incidents/{id}/notes` go through the console's own code (`CadApi.post` on the console's path, so its role check,
+validation, operator name and activity row), as the device's person. The handler gets a `Gateway`
+(`sizeup/api/v1/gateway.py`), never a `CadApi`, the Cad service or SQL: `acting(principal)` is None for anything that is
+not a person's device (a 503), and an `Acting` offers only narrow lookups (unit, alarm, incident), `permit`, `post` and a
+note. They need the least role the console needs ("dispatch"; a viewer is a 403). Notes answer 201 where the console
+answers 200.
+
+- **Body.** At most 16 KB (413 `body_too_large`). A POST, PUT, PATCH or DELETE body must come with `Content-Length`: none,
+  or a chunked body, is a 411 `length_required`; a body that does not arrive within 8 s is a 408 `request_timeout`; the
+  connection is closed on each. The hook (`handler.MAX_BODY`, `respond(..., body=)`, `Ctx.body`) is shared by every v1
+  route with a body.
+- **Idempotency-Key** (required): table `v1_idempotency` in hub.sqlite (next to the CAD's state dir; made on the first
+  write), kept 24 h per device, at most 1000 per device, an answer over 16 KB is not kept. A retry gets the first answer
+  back with `Idempotent-Replayed: true`; the same key with another body is a 422; the same key while the first still runs
+  is a 409 `in_progress` with `Retry-After: 1`; a running claim older than 120 s is taken over (its owner token stops the
+  slow original from overwriting). Only 200, 201, 409 and 412 are kept: a 400, 403 or 404 can be corrected under the
+  same key.
+- **If-Match** takes the unit's `rev` (`api/v1/rev.py`) and is for unit status only (412 with the current unit). A queued
+  action (`client_at`) must send it (428 `precondition_required`), and a stale one is a 409 `unit_changed`, so an old
+  queued status never overrides a newer one. The check and the write are two steps (the console's methods do the write
+  and take no expected rev): a change between them is not caught.
+- **client_at**: older than 7 days is a 400, more than 5 minutes ahead is clamped (`client_at_clamped`). The audit is the
+  activity row of the console's own write, with its "browser" (`ua`) column packed as
+  `via=ios app=1.4.2 device=<id> client_at=<unix>` (`clamped` appended when clamped; not separate columns). `via` is ios,
+  android or web from `X-Client`, else `api`. A queued action more than a minute late adds a chronology note through the
+  console's note path (so it has an activity row of its own).
+- 409 answers carry `error.reason` (`incident_closed`, `unit_changed`, `already_acknowledged`, `in_progress`) and the
+  current object. An alarm's `ack_by` is the name only: the console's operator string has the e-mail address, which no
+  v1 answer carries. A dispatch is never offered here.
 
 ---
 

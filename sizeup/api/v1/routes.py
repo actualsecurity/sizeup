@@ -46,7 +46,7 @@ class Ctx(NamedTuple):
     principal: object = None
     features: dict | None = None
     body: bytes = b""          # a POST's body (at most handler.MAX_BODY), read after the token and the limits (#562)
-    gateway: object = None     # gateway.Gateway: how a write reaches the CAD, as a person (None with no CAD). Never a CadApi
+    gateway: object = None     # gateway.Gateway: a write's way to the CAD, as a person (None: no CAD). Never a CadApi
     peer: str = ""             # the client address (Cf-Connecting-Ip), for the audit
 
 

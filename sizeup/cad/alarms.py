@@ -875,8 +875,13 @@ class Alarms:
         return a
 
     @staticmethod
+    def ack_name(a: dict) -> str:
+        """Who acknowledged it, as the chronology says it: the operator string "Name <email>" without the address."""
+        return re.sub(r"\s*<[^>]*>\s*$", "", a["ack_by"] or "") or a["ack_by"]
+
+    @staticmethod
     def _ack_line(a: dict) -> str:
-        name = re.sub(r"\s*<[^>]*>\s*$", "", a["ack_by"] or "") or a["ack_by"]
+        name = Alarms.ack_name(a)
         return f"{line(a)}; acknowledged by {name} at {_hms(a['ack_at'])}"
 
     # -- acknowledge ---------------------------------------------------------------------------------------

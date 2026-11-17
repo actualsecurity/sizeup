@@ -16,6 +16,10 @@ post:
   responses:
     "200":
       description: Acknowledged (or the first answer, replayed).
+      headers:
+        Idempotent-Replayed:
+          description: "true when this is the first answer replayed for a retried Idempotency-Key."
+          schema: {type: string, enum: ["true"]}
       content:
         application/json:
           schema:
@@ -28,10 +32,20 @@ post:
             alarm: {id: 31, level: alarm, created_at: 1767225595.0, incident_id: null, ack_by: Lt. Example, ack_at: 1767225600.5, clear_at: null, rev: 4be7a0c912d83f10}
     "409":
       description: Not applied (already_acknowledged, in_progress). `current` is the alarm as it is now.
+      headers:
+        Retry-After:
+          description: Seconds to wait (only for in_progress).
+          schema: {type: integer}
       content: {application/json: {schema: {$ref: ../schemas/WriteError.yaml}}}
     "422":
       description: The Idempotency-Key was used for another request.
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
     default:
-      description: An error (400, 401, 403 forbidden, 404 no_such_alarm, 413, 429, 503).
+      description: >
+        An error: 400 (invalid, bad `client_at`, idempotency_key_required, invalid_idempotency_key), 401, 403 forbidden,
+        404 no_such_alarm, 408 request_timeout, 411 length_required, 413 body_too_large, 429, 503.
+      headers:
+        Retry-After:
+          description: Seconds to wait (429, 503).
+          schema: {type: integer}
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}

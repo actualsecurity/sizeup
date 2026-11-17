@@ -6,11 +6,22 @@ import json
 JSON = "application/json"
 
 
-def body(code: str, message: str, retry_after_s: int | None = None) -> bytes:
+def envelope(code: str, message: str, retry_after_s: int | None = None, reason: str = "", current=None) -> dict:
+    """The error object. `reason` (machine-readable why, on a 409) is inside `error`; `current` (the object as it is
+    now, on a 409 / 412) is beside it: the WriteError schema."""
     err: dict = {"code": code, "message": message}
+    if reason:
+        err["reason"] = reason
     if retry_after_s is not None:
         err["retry_after_s"] = retry_after_s
-    return json.dumps({"error": err}, separators=(",", ":")).encode()
+    obj: dict = {"error": err}
+    if current is not None:
+        obj["current"] = current
+    return obj
+
+
+def body(code: str, message: str, retry_after_s: int | None = None) -> bytes:
+    return json.dumps(envelope(code, message, retry_after_s), separators=(",", ":")).encode()
 
 
 def error(status: int, code: str, message: str, retry_after_s: int | None = None,
