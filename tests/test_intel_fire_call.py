@@ -37,10 +37,10 @@ def gaz(tmp_path_factory):
     db.executemany("INSERT INTO streets VALUES (?,?,?)", [(1, "example pl", "Example Pl"), (2, "sample st", "Sample St")])
     db.executemany("INSERT INTO addresses VALUES (?,?,?,?,?,?,?)",
                    [(1, n, "", PC, LAT + 0.0001, LON + n * 0.00002, 1) for n in range(2, 80, 2)]
-                   + [(2, n, "", PC, LAT + n * 0.00002, LON, 1) for n in range(1, 60, 2)])
+                   + [(2, n, "", PC, LAT + n * 0.0002, LON, 1) for n in range(1, 60, 2)])     # 21: ~470 m north
     db.executemany("INSERT INTO lines VALUES (?,?,?)",
                    [(1, PC, json.dumps([[LON, LAT], [LON + 0.002, LAT]])),
-                    (2, PC, json.dumps([[LON, LAT - 0.002], [LON, LAT + 0.002]]))])
+                    (2, PC, json.dumps([[LON, LAT - 0.002], [LON, LAT + 0.012]]))])
     db.execute("INSERT INTO intersections VALUES (?,?,?,?,?)", (1, 2, LAT, LON, PC))
     db.commit()
     db.close()
@@ -362,3 +362,78 @@ def test_no_intel_topic_holds_every_fire_call_push(tmp_path, gaz):
         assert by["p25:mrrs:9212"].suppressed == "unplaced"
     finally:
         ntfy.close()
+
+
+# -- re-review of #640: real fire calls the exclusions must not drop; read-backs are the address alone; deferral ----------
+
+@pytest.mark.parametrize("text", [
+    "Respond to 40 Example Place, someone reports an outlet smoking, smell of something burning, notifying the FD.",
+    "Respond to 40 Example Place, they are reporting the wiring is smoking, burning smell, FD notified.",
+    "Respond to 40 Example Place, the donut shop, smell of something burning in the kitchen, notifying the FD.",
+    "Respond to 40 Example Place, a toaster on fire in the kitchen.",
+])
+def test_smoking_wiring_and_a_donut_shop_are_still_fire_calls(gaz, text):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert [(p.category, p.label_full) for p, d in sink.pushes if d.would_push] == [("fire_call", "40 Example Pl, Port Chester")]
+
+
+@pytest.mark.parametrize("text", [
+    "Respond to 40 Example Place, people smoking weed in the stairwell, a smell of smoke.",
+    "Respond to 40 Example Place, someone smoking a cigarette in the hallway, they smell smoke.",
+    "Respond to 40 Example Place, a car doing donuts in the lot, smell of burning.",
+])
+def test_people_smoking_and_donuts_are_not(gaz, text):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert fire_calls(sink) == []
+
+
+@pytest.mark.parametrize("first, then, at", [
+    (UNPLACED, "21 Sample Street, they have a suspicious vehicle in the driveway.", 90),
+    ("Car 44, caller states they smell something burning, I'll be notifying the FD.",
+     "Car 44 also 21 Sample Street when you clear.", 60),
+])
+def test_the_dispatchers_next_job_is_no_read_back(gaz, first, then, at):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", first, clock(), **TALK))
+    clock.t += at
+    e.feed(row("c1-t2", then, clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
+
+
+def test_a_units_address_only_correction_is_a_read_back(gaz):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", "Car 44, caller states they smell something burning, I'll be notifying the FD.", clock(), **TALK))
+    clock.t += 40
+    e.feed(row("c1-t2", "Car 44, correction, that's 40 Example Place.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.suppressed == ""
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
+def test_an_unplaced_fire_report_takes_the_fire_calls_address(gaz):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", "Report of smoke showing from a building, location unknown.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.category == "fire_report" and ev.precision == "none"
+    clock.t += 200                                        # past the window: only the open event is left
+    e.feed(row("c1-t2", "Car 9 respond to 21 Sample Street, caller smells something burning inside, notifying the FD.",
+               clock(), **TALK))
+    [ev] = e.events.open_events()                         # no fire_call beside it
+    assert ev.category == "fire_report" and ev.label_full.startswith("21 Sample St") and ev.precision == "address"
+    pushed = [(p.category, p.precision) for p, d in sink.pushes if d.would_push]
+    assert pushed == [("fire_report", "none"), ("fire_report", "address")]       # the place-found push
+
+
+def test_a_fire_call_elsewhere_is_not_deferred_to_a_placed_fire_report(gaz):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", "Respond to 21 Sample Street, flames showing from the house.", clock(), **TALK))
+    clock.t += 200
+    e.feed(row("c1-t2", CALL, clock(), **TALK))           # another address: another call
+    assert sorted(p.category for p, d in sink.pushes if d.would_push) == ["fire_call", "fire_report"]

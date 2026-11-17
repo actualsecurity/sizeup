@@ -105,6 +105,11 @@ INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
+# a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place")
+READBACK_WORDS = frozenset({"copy", "copied", "that's", "thats", "that", "that'll", "is", "it's", "its", "it", "going",
+                            "gonna", "to", "be", "correction", "correct", "repeat", "again", "the", "address", "at", "uh",
+                            "um", "ok", "okay", "yeah", "yes", "roger", "10", "4", "sorry", "make", "number", "of",
+                            "on", "in", "dispatch", "advised"})
 STOP_JOIN_S = 1.0                      # stop(): how long the thread may take to finish the row in hand
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
                           "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
@@ -561,7 +566,16 @@ class IntelEngine:
                 continue                      # a candidate this row says nothing about: left as it is
             over = True
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
-            if mode == "off" or self._deferred(pack, cat, cats, key, at, win.entries[tid]):
+            if mode == "off":
+                continue
+            dfr = self._deferred(pack, cat, cats, key, at, win.entries[tid])
+            if isinstance(dfr, Event):       # the call it defers to, unplaced: this row's address is its place
+                up = self._set_place(pack, dfr, win.entries[tid].place, key, tid, at)
+                if up is not None:
+                    event_of[up.category] = up
+                    changed.append(up)
+                continue
+            if dfr:
                 continue
             ev = self._raise(pack, row, key, cat, cd, what, contrib, mode, win, at, tid)
             if ev is not None:
@@ -846,9 +860,20 @@ class IntelEngine:
         if entry.at - ev.first_at > RELEASE_S or any(r.category != ev.category for r, _w in entry.hits):
             return False
         talkers, units = self._held_who(pack, ev)
-        if entry.units - units:
+        if entry.units - units or not self._address_only(entry):
             return False
         return bool(entry.talker and entry.talker in talkers) or bool(entry.units & units)
+
+    @staticmethod
+    def _address_only(entry) -> bool:
+        """The row is the address and nothing else: its place's words (number, street, town), street words, the units
+        it names and READBACK_WORDS. Anything more ("they have a suspicious vehicle", "also ... when you clear") is
+        another job's, never the held call's read-back."""
+        if entry.place is None or not entry.place.label:
+            return False
+        ok = set(rules_mod.words(entry.place.label)) | STREET_WORDS | READBACK_WORDS
+        ok |= {w for u in entry.units for w in u.split()}
+        return all(w in ok for w in rules_mod.words(entry.text))
 
     def _held_who(self, pack, ev: Event) -> tuple[set, frozenset]:
         """The talkers and units of an unplaced event's own transmissions (kept past the window, _note_who)."""
@@ -865,19 +890,24 @@ class IntelEngine:
         else:
             self._who_of.pop(ev.id, None)
 
-    def _deferred(self, pack, cat: str, cats: dict, key: str, at: float, entry) -> bool:
+    def _deferred(self, pack, cat: str, cats: dict, key: str, at: float, entry):
         """One pre-alert per call: a category that defers to another ("defer_to": fire_call to fire_report) is not
         raised while that one is over its threshold in this window, or has an open event on this source at this place
-        (or either has none). The other way round, _raise takes the deferring category's open event over."""
+        (or either has none). The other way round, _raise takes the deferring category's open event over.
+        False: not deferred; True: deferred; an Event: deferred to that open event, which has no place while this row
+        has one (the caller gives it the place: "location unknown", then the address).
+        The rows that have a place, and the open event that has one, defer only when the places match."""
         to = pack.category(cat).get("defer_to")
         if not to:
             return False
+        for e in self._open_for(pack, to, key, at, self._merge_span(pack)):
+            if e.precision == "none":
+                return e if entry.place is not None and entry.place.precision in PLACED else True
+            if entry.place is None or same_place(entry.place, e.place()):
+                return True
         tcd = pack.category(to)
         thr = tcd.get("threshold") if tcd.get("threshold") is not None else pack.threshold
-        if to in cats and cats[to][0] >= thr:
-            return True
-        return any(e.precision == "none" or entry.place is None or same_place(entry.place, e.place())
-                   for e in self._open_for(pack, to, key, at, self._merge_span(pack)))
+        return to in cats and cats[to][0] >= thr
 
     def _unplaced(self, pack, ev: Event) -> str:
         """A "place": true category (rules.py): "unplaced" until the event has a place a crew can drive to (PLACED),
