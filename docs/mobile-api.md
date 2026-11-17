@@ -659,6 +659,11 @@ writes. `/me` is PR 2's.
   41228", "ID 41228" ...) applies to the alarm fields, the `alarm`-kind chronology lines and the identity fields (an
   alarm's `who`, a radio row's `unit`, which also lose any standalone number of 4+ digits) ONLY: a "radio 41228" in
   `status`/`tones` events, radio-row transcripts, notes, addresses and remarks is not masked (sent as written, below).
+  `scrub` reads at most 20000 characters of a text (`SCRUB_MAX_CHARS`; the rest is cut and the output ends with an
+  ellipsis), first normalises compatibility forms of "@" and "<" (NFKC; zero-width and direction marks dropped), and is
+  one linear pass per step (no backtracking regex), so a long note cannot stall a cache rebuild. Residual, not
+  addresses a client would link: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org"), and a
+  radio ID written with letters or split into digit groups the mask does not read.
   **Chronology text is an allow-list:** only the kinds in
   `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
   kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,

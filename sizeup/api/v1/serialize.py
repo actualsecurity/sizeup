@@ -23,25 +23,49 @@ deliberately; any other token holding an "@" becomes "an operator"). The radio-I
 `alarm`-kind chronology lines and the identity fields only (an alarm's `who`, a radio row's `unit`, which also lose any
 standalone number of 4+ digits): a "radio 41228" in `status`/`tones` events, radio-row transcripts, notes, addresses and
 remarks is NOT masked (they are sent as written). Not scrubbed at all: unit names, pre-plan `label`, `geo_label`,
-`town`.
+`town`. scrub() reads at most SCRUB_MAX_CHARS characters of a text (the rest is cut and the output ends with an
+ellipsis) and normalises compatibility forms of "@" and "<" (NFKC, zero-width and direction marks dropped)
+first. Residual: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org") and a radio ID written
+with letters or split into groups the pattern does not read.
 Ids are strings (docs/mobile-api.md section 3.2), times unix seconds."""
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from sizeup import sourcekeys
 
 from .rev import rev_of
 
 EVENT_MAX, DISPATCH_MAX, RADIO_MAX = 300, 50, 100        # a detail's lists are bounded (the CAD keeps 300 events)
-_EMAIL = re.compile(r"\s*<[^<>]*>\s*$")                   # "Casey <casey@example.org>" -> "Casey"
-_ANGLE = re.compile(r"\s*<[^>]*>")                        # any <...> part, anywhere
-_ANGLE_OPEN = re.compile(r"\s*<[^>@]*@.*$")               # an unterminated one holding an "@": "Casey <a@x"
+SCRUB_MAX_CHARS = 20000       # the longest text scrub() reads: the rest is cut and the output ends with ELLIPSIS
+ELLIPSIS = "\u2026"
 _TOKEN = re.compile(r"\S+")
-# a talker's ID in an alarm's words: "radio 41228", "rid 41228", "Radio  41228", "radio-41228", "radio #41228"
-_RADIO_ID = re.compile(r"\b(?:radio|rid|id|unit)\W*\d{3,}\b", re.I)
+# A talker's ID in an alarm's words: "radio 41228", "rid-41228", "Radio  41228", "radio #41228", "radio_41228",
+# "ID 41228",
+# "Radio No. 41228", "talker 41228", "tg 41228", digits split by a space or comma ("radio 41 228"): a keyword, a run of
+# non-word characters and an optional "no", then digits. Linear: no nested quantifier, and each run of separators is
+# read once. At least 3 digits in all (see _mask_id).
+_RADIO_ID = re.compile(r"\b(?:radio|rid|id|unit|talker|tg)(?![A-Za-z])[\W_]*(?:no(?![A-Za-z])[\W_]*)?\d(?:[\d ,]*\d)?",
+                       re.I)
 _BARE_ID = re.compile(r"\b\d{4,}\b")
 UNIDENTIFIED = "an unidentified radio"
+
+
+def _drop_angles(s: str) -> str:
+    """Every "<...>" part gone, in one pass: from a "<" to the next ">" (inclusive) or, with no ">", to the end of the
+    text; the white space before the "<" goes with it. No regex, so no backtracking on a text full of "<"."""
+    out, i = [], 0
+    while True:
+        j = s.find("<", i)
+        if j < 0:
+            out.append(s[i:])
+            return "".join(out)
+        out.append(s[i:j].rstrip())
+        k = s.find(">", j + 1)
+        if k < 0:
+            return "".join(out)
+        i = k + 1
 
 
 def _token(m: re.Match) -> str:
@@ -50,24 +74,36 @@ def _token(m: re.Match) -> str:
     return "an operator" if "@" in t and t != "@" else t
 
 
+def _mask_id(m: re.Match) -> str:
+    return UNIDENTIFIED if sum(c.isdigit() for c in m.group(0)) >= 3 else m.group(0)
+
+
 def scrub(text, radio_ids: bool = False, identity: bool = False) -> str:
     """A free text with no operator sign-in email in it (the CAD writes "Name <email>", or the bare email of a person
-    with no name, into event lines and alarm words). Any angle-bracket part goes (a "<5 min>" in a note too: deliberate,
-    fail-safe), then every whitespace-delimited token holding an "@" (any email form, nested or not) becomes ONE
-    "an operator"; a standalone "@" stays. radio_ids (an alarm's own words): "radio 41228", "rid 41228", "ID 41228" and
-    the like become "an unidentified radio". identity (an identity field: an alarm's `who`, a radio row's `unit`): also
-    any standalone number of 4 or more digits. Digits in addresses, remarks and transcripts are never touched."""
-    out = _ANGLE_OPEN.sub("", _ANGLE.sub("", str(text or "")))
-    out = _TOKEN.sub(_token, out)
+    with no name, into event lines and alarm words). The text is read up to SCRUB_MAX_CHARS characters (the rest is cut
+    and the output ends with an ellipsis, so a reader can tell), then: compatibility forms of "@" and "<" are
+    normalised (NFKC: full-width, small) and format characters (zero width, direction marks) dropped; any angle-bracket
+    part goes (a "<5 min>" in a note too: deliberate, fail-safe); every whitespace-delimited token holding an "@", in any
+    email form, becomes ONE "an operator" (a standalone "@" stays). radio_ids (an alarm's own words): "radio 41228",
+    "rid 41228", "ID 41228", "Radio No. 41228", "talker 41228", "tg 41228" and the like become "an unidentified radio".
+    identity (an identity field: an alarm's `who`, a radio row's `unit`): also any standalone number of 4 or more
+    digits. Digits in addresses, remarks and transcripts are never touched. Every step is one linear pass."""
+    s = str(text or "")
+    cut = len(s) > SCRUB_MAX_CHARS
+    s = unicodedata.normalize("NFKC", s[:SCRUB_MAX_CHARS])
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
+    out = _TOKEN.sub(_token, _drop_angles(s))
     if radio_ids or identity:
-        out = _RADIO_ID.sub(UNIDENTIFIED, out)
-    return _BARE_ID.sub(UNIDENTIFIED, out) if identity else out
+        out = _RADIO_ID.sub(_mask_id, out)
+    if identity:
+        out = _BARE_ID.sub(UNIDENTIFIED, out)
+    return out + ELLIPSIS if cut else out
 
 
 def name_of(operator) -> str:
     """An operator as the people see them: the name, never the sign-in email (see scrub: nothing with an "@" is left).
     A bare email is no name: "" ."""
-    s = scrub(_EMAIL.sub("", str(operator or "")).strip())
+    s = scrub(operator).strip()
     return "" if s == "an operator" else s
 
 

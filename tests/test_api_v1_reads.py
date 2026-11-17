@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import math
+import threading
 import time
 
 import pytest
@@ -17,7 +18,7 @@ from sizeup.api.v1.handler import V1
 from sizeup.api.v1.limits import Limits
 from sizeup.api.v1.principal import Principal
 from sizeup.api.v1.rev import rev_of
-from sizeup.api.v1.serialize import name_of, radio_rows, scrub
+from sizeup.api.v1.serialize import SCRUB_MAX_CHARS, name_of, radio_rows, scrub
 from sizeup.api.v1.switches import Switches
 from sizeup.cad.api import CadApi
 from sizeup.cloud.access import Identity
@@ -765,13 +766,60 @@ def test_the_mask_is_for_identity_fields_and_alarm_words_only():
     assert scrub("E64 (77A4)", identity=True) == "E64 (77A4)"
 
 
-@pytest.mark.parametrize("junk", ["a" * 2000, "<" * 2000, "a." * 1000, "-" * 2000, "<a " * 700, "a@" * 1000,
-                                  "<a@" * 700, ("a" * 60 + ".") * 33, " " * 2000, "@" * 2000])
-def test_adversarial_input_is_handled_in_linear_time(junk):
-    """No tight clock: the inputs are 2000 characters of the shapes that make a backtracking pattern cubic, and the
-    patterns here are linear, so these finish at once; the check is on the output (and that they finish at all)."""
-    for out in (scrub(junk), scrub(junk, True, True), name_of(junk)):
-        assert isinstance(out, str) and "@" not in out
+N = 200_000
+ADVERSARIAL = {"<": "<" * N, "a<": "a<" * (N // 2), "<a@": "<a@" * (N // 3), "a@": "a@" * (N // 2), "@": "@" * N,
+               ".": "." * N, " ": " " * N, "-": "-" * N, "<+spaces+@": "<" + " " * N + "@",
+               "radio ": "radio " * (N // 6),
+               "radio 12345 ": "radio 12345 " * (N // 12), "radio+spaces": "radio" + " " * N + "x",
+               "digits": "radio " + "1 " * (N // 2), "<a ": "<a " * (N // 3), "a.": "a." * (N // 2)}
+
+
+def finishes(fn, arg):
+    """fn(arg) on a thread: its result, and that it was done inside a generous 20 s (no tight clock)."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(fn(arg)), daemon=True)
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "still running after 20 s"
+    return box[0]
+
+
+@pytest.mark.parametrize("name", sorted(ADVERSARIAL))
+def test_200_kb_of_adversarial_input_completes_and_is_capped(name):
+    text = ADVERSARIAL[name]
+    for fn in (scrub, lambda t: scrub(t, True, True), name_of):
+        out = finishes(fn, text)
+        assert "@" not in out.replace(" @ ", "") or set(out) <= {"@"}, name        # (a standalone "@" stays)
+        assert len(out) <= 6 * SCRUB_MAX_CHARS + 1                    # the cap bounds the work and the size
+
+
+def test_the_cap_cuts_with_a_marker_and_short_text_has_none():
+    long = "Smoke showing. " * 5000
+    out = scrub(long)
+    assert out.endswith("\u2026") and len(out) == len(long[:SCRUB_MAX_CHARS]) + 1
+    assert scrub("Smoke showing") == "Smoke showing"
+    assert scrub("x" * SCRUB_MAX_CHARS) == "x" * SCRUB_MAX_CHARS                    # exactly the cap: not cut
+    assert scrub("x" * (SCRUB_MAX_CHARS + 1)).endswith("\u2026")
+
+
+@pytest.mark.parametrize("form", ["a\uff20example.org", "a\uff20b", "a\ufe6b x.org", "a\u200b\uff20x", "<a\uff20x",
+                                  "a\u200b@x", "a@\u202ex.org", "a\uff20b\uff20c", "\uff1ca@x\uff1e Casey",
+                                  "Casey \uff1ca\uff20x.org\uff1e note"])
+def test_compatibility_forms_of_the_at_sign_are_normalised_first(form):
+    for out in (scrub(form), name_of(form), scrub(form, identity=True)):
+        assert "@" not in out and "\uff20" not in out and "\ufe6b" not in out and "\u200b" not in out, (form, out)
+
+
+@pytest.mark.parametrize("form", ["Radio No. 41228", "talker 41228", "tg 41228", "radio_41228", "radio no 41228",
+                                  "radio 41 228", "radio 41,228", "RID-41228", "Rid:41228", "unit #41228"])
+def test_more_radio_id_forms_are_masked_in_an_alarms_words(form):
+    out = scrub(f"EMERGENCY: {form} mayday", True)
+    assert not any(c.isdigit() for c in out) and "an unidentified radio mayday" in out, (form, out)
+
+
+def test_the_radio_mask_leaves_small_numbers_and_other_words_alone():
+    for text in ("radio 5 to command", "tg 3", "identity 41228 confirmed", "Radio check 5", "tgs 12345"):
+        assert scrub(text, True) == text, text
 
 
 def test_odd_operator_strings_and_a_bare_numeric_talker_never_reach_the_api(tmp_path):
