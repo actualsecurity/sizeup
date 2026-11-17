@@ -1401,6 +1401,27 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,
   are left alone by automation from then on (`manual_edits`, `unit:<code>` / `close`).
 - **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it.
+- **Out of service is a person's to end (`sizeup/cad/oos.py`).** Every unit status write and every put-on-a-call goes
+  through the store's gate (`set_unit_status`, `set_unit_status_on`, `assign`, `return_to_incident`), which says who
+  is writing: `by=PERSON` for a person's own action through the API, otherwise the automation's name (`radio`,
+  `county`, `page`). Leaving `by` out counts as automation. While a unit is out of service (a status with role `oos`:
+  Out of service, Unmanned), an automated write is refused and nothing about the unit changes. This covers the radio's
+  status hints taken in 60 Control mode, the feed's listed units and unit times, and a page's named units. The refusal
+  is kept as a notice instead: one line in the unit log, one on the call's timeline when it was about a call, and a
+  chip under the unit's board row ("Radio heard “responding” · In service?"). ✓ puts the unit in service (its free status) and
+  ✕ keeps it out (`POST /api/cad/oos-notice/<id>/service | dismiss`, dispatchers and admins, in the person's
+  activity). The chip shows for 5 minutes after its last repeat (`NOTICE_S`), and only while the call it was about is
+  open. Then it lapses, and the unit stays exactly as it was. There is one notice per unit and reason within that
+  window; a repeat is only counted. Only notices from the unit's current out-of-service spell count. ✓ or ✕ ends every
+  open notice of that unit, and after ✕ the unit stays quiet for 5 minutes (while that notice's call is open). Notices
+  are never pushed. The radio's status suggestion for an out-of-service unit is never taken by automation. A person's
+  ✓ on it asks first ("E62 is out of service: put it on the call anyway?", `confirm: true`). Left alone, it expires
+  and the unit stays as it was. A transmission from a radio on an out-of-service rig is still that rig's (radio log,
+  transcript, suggestion). A radio a person moves to another unit (Settings > Radios) works as that unit's from then
+  on. Another agency's unit that a person attached to a call while it was out of service stays on it: the feed's in
+  service can't release it, so the automatic close becomes "close?" for a person (fail-safe). Close, the startup
+  repair and placeholder release already left out-of-service units alone; an undo refuses a unit put out of service
+  since.
 - **Radio log (both modes):** a transmission goes on an open incident when it names one of its board units, its address or
   its place, or is on its fireground channel when the feed names one. Only our dispatch and fire channels count, with the
   guards listed in `radiolog.py`. One click removes it. These links don't extend the audio's retention until a person

@@ -604,6 +604,9 @@
   .hint-chip .hint-ok { color: var(--ok-text); border-color: var(--ok); }
   .hint-chip .hint-no { color: var(--dim); }
   .hint-line { color: var(--info); font-style: italic; margin-block-start: var(--s-1); }
+  /* automation refused on an out-of-service unit (oos-notices.js, sizeup/cad/oos.py): the same chip, in warning */
+  .hint-chip.oos-chip { border-color: var(--warn); color: var(--warn); }
+  .oos-line { display: flex; min-inline-size: 0; margin-block-start: var(--s-1); }
 
   /* a transmission with no radio ID (#163): what was found, dashed, never in the talker's place */
   .chip.noid { color: var(--dim); border-style: dashed; background: transparent; }
