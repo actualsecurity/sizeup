@@ -238,6 +238,39 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**The speech-to-text input** (`sizeup/cloud/sttinput.py`). Each transmission's and page's exact whisper input
+(`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis already applied; a page's voice without
+its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
+
+- `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
+  thread never waits. Its queue is bounded (200 items, 600 s of audio); when it is full the input is dropped and
+  counted.
+- The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
+  before any clip.
+- The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
+  event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
+  `stt_input` in its caps; an older hub never gets them.
+
+```json
+{"v": 1, "station": "st-hq", "items": [{"n": 12, "id": "<clip id>", "kind": "traffic",
+  "source": "FG1", "talkgroup": null, "system": "", "end": 1790000000.5,
+  "stt": {"v": 1, "format": "flac", "input": "stt-src", "kind": "traffic", "rate": 16000, "samples": 48000,
+          "audio": "<base64 FLAC>"}}]}
+-> {"ok": true, "stored": [12], "refused": []}
+```
+
+- A page's item has `label` in place of `source` / `talkgroup` / `system`, and `voice_offset_s` in its `stt`: where the
+  voice starts in its listening clip.
+- The hub checks each one before keeping it. Its FLAC header must match the metadata's rate and sample count. It must
+  be at most 300 s long and carry its MD5.
+- The hub stores it as clip `<id>.src`, whenever it comes, before or after its event. The S3 key is
+  `audio/clip/<yyyy>/<mm>/<dd>/<id>.src.flac`, with the clip's channel and retention. It is never served by
+  `/api/audio`.
+- The hub's engines read it with `HubApp.read_stt_audio(id, wait_s=...)`. `input` is `stt-src`, or `listening-8k` when
+  only the listening clip is there.
+- Drops are counted by reason (`queue`, `too_big`, `failed`, `outbox`, `refused`). Health shows them under Outbox:
+  "STT inputs dropped".
+
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
 built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
@@ -311,7 +344,7 @@ pages of its own ([the station page](#the-station-page)).
 | what fails | what happens |
 |---|---|
 | Internet / hub down | The station runs on as all-in-one. Events wait in `state/outbox.sqlite` (committed as they happen) and go up in order when the hub is back, also after either side restarts. The hub shows "Station offline since ...". |
-| Outbox grows huge | Over `outbox_max_mb` of queued audio, the oldest clips are dropped (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
+| Outbox grows huge | Over `outbox_max_mb` of queued audio, the speech-to-text inputs go first (the hub transcribes the listening clip instead), then the oldest clips (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
 | A batch is delivered twice | Applied once (seq per epoch, ids). |
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
