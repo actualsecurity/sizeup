@@ -201,7 +201,8 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
-                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}]} (Cad.comms_sources)
+                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
+                                          admins' folders (#607) | null} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -286,6 +287,8 @@ POST /api/cad/settings/department_units  {action: set {key: a feed's department 
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
+POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, section, items}], base?} | reset {base?}}: the
+                                          Radio page rail's folders for everyone (#607, sizeup/cad/radiofolders.py); admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins
