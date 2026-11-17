@@ -69,6 +69,23 @@ def test_main_and_record_by_number_alone_never_make_a_county_orphan(two):
         app.cad.settings_post("channels", {"action": "set", "key": f"tg:{PD}", "record": True, "operator": "Lt. Test"})
     app.cad.settings_post("channels", {"action": "set", "key": f"p25:mrrs:{PD}", "record": True, "operator": "Lt. Test"})
     assert app.tg.tier(PD, "mrrs") == "alert"
+    # sent as the county's own source, the number is the county's even though another system lists it
+    assert app.set_talkgroup(PD, False, None, None, sourcekeys.COUNTY) is None
+    assert not app.tg.record(PD) and app.tg.tier(PD, "mrrs") == "alert"
+
+
+def test_a_batch_refused_part_way_says_so_and_audits_what_was_applied(two):
+    app, _said, _logs = two
+    with pytest.raises(CadError, match=f"tg:{PD}: .*mrrs.*1 before it applied"):
+        app.cad.settings_post("channels", {"action": "set_many", "keys": ["tg:301", f"tg:{PD}", "tg:307"], "record": False,
+                                           "operator": "Lt. Test"})
+    assert not app.tg.record(301) and app.tg.record(307)                    # the one before applied, none after
+    a = [(r["key"], r["new"]) for r in app.cad.settings.audit_log("radios") if r["key"].startswith("channel/")]
+    assert [(k, json.loads(v)) for k, v in a] == [("channel/tg:301", {"record": False})]
+    # all applied: all audited (a talkgroup's Record was never on the record before)
+    app.cad.settings_post("channels", {"action": "set_many", "keys": ["tg:301", "tg:307"], "record": True, "operator": "Lt. Test"})
+    assert app.tg.record(301) and app.tg.record(307)
+    assert len([r for r in app.cad.settings.audit_log("radios") if r["key"].startswith("channel/")]) == 3
 
 
 def test_a_county_talkgroup_heard_but_not_listed_is_still_the_countys(tmp_path):
@@ -98,16 +115,34 @@ def test_a_number_on_both_systems_is_two_talkgroups(tmp_path):
 
 
 def test_a_county_choice_saved_under_another_systems_number_is_dropped_on_loading(tmp_path):
-    # what the page wrote before the fix: Main on PD Dispatch, sent as {"tg": 9211}
+    # what the page wrote before the fix: Main on PD Dispatch, sent as {"tg": 9211}; and a county talkgroup the county's
+    # file doesn't list, heard on the county, that has a number MRRS lists too (config.load allows that)
+    other = 9212
     (tmp_path / "talkgroups.json").write_text(json.dumps({"307": {"record": False}, str(PD): {"main": True},
-                                                          "5021": {"main": True}, "4242": {"record": False}}))
+                                                          str(other): {"record": False}, "5021": {"main": True},
+                                                          "4242": {"record": False}}))
     p = prefs(tmp_path)
-    assert p.migrated == [(PD, "mrrs", {"main": True})]
+    assert p.migrated == [] and str(PD) in json.loads((tmp_path / "talkgroups.json").read_text())   # nothing yet
+    p.seed(other, 1000.0)                               # the history: a county call on it
+    p.seed(PD, 1000.0, "mrrs")                          # (the other system's own calls say nothing of the county's)
+    assert p.drop_orphans() == [(PD, "mrrs", {"main": True})] == p.migrated
     assert json.loads((tmp_path / "talkgroups.json").read_text()) == {           # the county's kept, under their numbers
-        "307": {"record": False}, "5021": {"main": True}, "4242": {"record": False}}
+        "307": {"record": False}, str(other): {"record": False}, "5021": {"main": True}, "4242": {"record": False}}
+    kept = json.loads((tmp_path / "talkgroups_migrated.json").read_text())       # what went, kept to put back by hand
+    assert [(k["tg"], k["system"], k["prefs"]) for k in kept] == [(PD, "mrrs", {"main": True})]
     assert [r["source"] for r in p.state() if r["tg"] == PD] == [f"p25:mrrs:{PD}"]
-    assert not p.record(307) and p.main(5021) and not p.record(4242)
-    assert prefs(tmp_path).migrated == []                                         # once
+    assert not p.record(307) and not p.record(other) and p.main(5021) and not p.record(4242)
+    again = prefs(tmp_path)
+    again.seed(other, 1000.0)
+    assert again.drop_orphans() == [] and not again.record(other)                # once; the heard one stays the county's
+    assert len(json.loads((tmp_path / "talkgroups_migrated.json").read_text())) == 1
+
+
+def test_with_no_county_list_nothing_is_dropped(tmp_path):
+    (tmp_path / "talkgroups.json").write_text(json.dumps({str(PD): {"record": False}}))
+    p = TalkgroupPrefs({}, set(), tmp_path / "talkgroups.json", others={"mrrs": MRRS.talkgroups})
+    assert p.drop_orphans() == [] and not p.record(PD)
+    assert not (tmp_path / "talkgroups_migrated.json").exists()
 
 
 def test_the_app_says_what_it_dropped(two, tmp_path):
@@ -117,7 +152,8 @@ def test_the_app_says_what_it_dropped(two, tmp_path):
     import sizeup.app as appmod
     again = appmod.App(app.cfg)
     try:
-        assert any(f"county choice for {PD} dropped (main=True): {PD} is mrrs's" in m for m in logs)
+        assert any(f"county choice for {PD} dropped (main=True; kept in talkgroups_migrated.json): {PD} is mrrs's" in m
+                   for m in logs)
         assert all(r["system"] == "mrrs" for r in again.talkgroups_state() if r["tg"] == PD)
     finally:
         again.stop()
@@ -170,7 +206,23 @@ def test_the_switch_endpoint_sends_the_system_and_the_countys_as_before():
                 assert res.status == 200
     finally:
         srv.shutdown()
-    assert calls == [(PD, None, True, None, "mrrs"), (307, False, None), (PD, None, None, "off", "mrrs"), (307, None, True)]
+    assert calls == [(PD, None, True, None, "mrrs"), (307, False, None, None, "westchester"), (PD, None, None, "off", "mrrs"),
+                     (307, None, True)]
+
+
+def test_the_hub_sends_the_countys_source_bare_to_a_station_from_before_systems(tmp_path):
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    hub = HubApp(hub_cfg(tmp_path))
+    sent = []
+    hub._switch = lambda *a: sent.append(a)
+    hub.hub.status = {"id": "st"}
+    hub.set_talkgroup(307, False, None, None, sourcekeys.COUNTY)
+    hub.hub.status = {"id": "st", "p25_systems": []}
+    hub.set_talkgroup(307, False, None, None, sourcekeys.COUNTY)
+    hub.set_talkgroup(PD, None, True, None, "mrrs")
+    assert sent == [("set_talkgroup", 307, False, None), ("set_talkgroup", 307, False, None, None, "westchester"),
+                    ("set_talkgroup", PD, None, True, None, "mrrs")]
 
 
 # ---- a display name from Settings > Radios > Channels: the radio rail's store --------------------------------------

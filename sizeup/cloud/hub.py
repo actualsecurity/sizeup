@@ -1556,6 +1556,8 @@ class HubApp(App):
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:
+        if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
+            system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
             return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)

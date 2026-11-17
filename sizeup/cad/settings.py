@@ -2099,7 +2099,9 @@ class Editor:
                 vals = {k: channels_mod.clean(k, {f: body.get(f) for f in channels_mod.FIELDS}) for k in keys}
             except ValueError as e:
                 raise CadError(str(e)) from None
-            changes, audit = [], []
+            changes, audit, applied = [], [], []
+            # A talkgroup's Record first, all of them (its own switch, on the station): one refused stops the rest,
+            # and those already applied are on the record (audited) before the refusal is said
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
@@ -2107,7 +2109,11 @@ class Editor:
                     err = "no talkgroups here" if ctx is None else (
                         ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
-                        raise CadError(err)
+                        if applied:
+                            self._commit([], op, applied)
+                        raise CadError(f"{key}: {err}" + (f" ({len(applied)} before it applied)" if applied else ""))
+                    applied.append(("radios", f"channel/{key}", None, {"record": rec}))
+            for key, v in vals.items():
                 if not v:
                     continue
                 cur = ov.get(key) or {}
@@ -2117,9 +2123,9 @@ class Editor:
                 if before != after:
                     changes.append((channels_mod.SECTION, key, new))
                     audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))
-            if not changes:
+            if not changes and not applied:
                 return {"ok": True}
-            out = self._commit(changes, op, audit)
+            out = self._commit(changes, op, applied + audit)
         elif action == "reset":
             key = _text(body.get("key"), "key", 40)
             if key not in ov:

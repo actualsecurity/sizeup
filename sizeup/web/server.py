@@ -936,11 +936,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         if got is None:
                             raise ValueError("source: p25:<system>:<talkgroup>")
                         tier = body.get("tier")
-                        if tier is None and got[0] in ("", _sources.COUNTY):    # the county's: as it always went
-                            err = set_talkgroup(got[1], body.get("record"), body.get("main"))
-                        else:
-                            err = set_talkgroup(got[1], body.get("record"), body.get("main"),
-                                                None if tier is None else str(tier), got[0])
+                        # (the county's too: its system says it is the county's even where the number is also
+                        # another system's; the hub sends it bare to a station from before #409)
+                        err = set_talkgroup(got[1], body.get("record"), body.get("main"),
+                                            None if tier is None else str(tier), got[0])
                     else:
                         err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
                 except (ValueError, KeyError, TypeError) as e:

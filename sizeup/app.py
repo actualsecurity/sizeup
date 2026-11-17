@@ -457,12 +457,13 @@ class App:
                                  set(cfg.p25_incident_talkgroups),
                                  (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None,
                                  others={x.name: x.talkgroups for x in cfg.p25_systems})   # (#409: MTA MRRS)
-        for tg, owner, was in self.tg.migrated:      # Settings > Radios saved these under the county by number alone
-            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}): "
-                f"{tg} is {owner}'s talkgroup, not the county's")
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
+        # (after the seed: a county talkgroup heard in the history is the county's, whatever another system lists)
+        for tg, owner, was in self.tg.drop_orphans():   # the old page saved these under the county by number alone
+            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}; "
+                f"kept in talkgroups_migrated.json): {tg} is {owner}'s talkgroup, never heard on the county")
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -4302,12 +4303,13 @@ class App:
         talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
+        qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
-        if not system and (owners := self.tg.elsewhere(int(tg))):
+        if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
             return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"

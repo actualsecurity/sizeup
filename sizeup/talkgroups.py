@@ -15,12 +15,15 @@ context, never our incident's). The county's choices stay in talkgroups.json und
 before this reads them; the other systems' are in talkgroups_systems.json under "p25:<system>:<tg>". A talkgroup
 granted on another system that isn't in its file is counted as unknown (unknown()).
 
-A bare number is always the county's. A county choice saved under a number the county doesn't list but another system
-does (Settings > Radios sent Main / Record on another system's talkgroup by its number alone, before the page sent the
-source: an "Unknown — TG 9211" card under the county) is dropped on loading (`migrated`): it never reached the other
-system's talkgroup (its tier) and the county has no such talkgroup. Talkgroup numbers are unique across the systems
-here (systems.discover refuses a number twice), so that number was clearly the other system's. elsewhere() is what
-App.set_talkgroup refuses such a bare number by.
+A bare number is always the county's. Settings > Radios once sent Main / Record on another system's talkgroup by its
+number alone (before the page sent the source), which saved a county choice under that number: an "Unknown — TG 9211"
+card under the county, and nothing on the other system's talkgroup (its tier). drop_orphans() (the app, once the
+history has been seeded) drops such a choice: a number the county neither lists nor has heard (no county call in the
+history) that another system lists, and only when the county has a list at all. What it drops is kept in
+talkgroups_migrated.json first (and logged), so a real county choice could be put back by hand. Numbers are not
+guaranteed unique: config.load refuses another system only for a number the county LISTS, so an unlisted county
+talkgroup that is heard can share a number with another system; it stays the county's. elsewhere() is what
+App.set_talkgroup refuses a bare number by (the same test, live).
 """
 
 from __future__ import annotations
@@ -49,6 +52,8 @@ class TalkgroupPrefs:
         self.path = Path(path) if path else None
         self.systems_path = self.path.with_name("talkgroups_systems.json") if self.path else None
         self.unknown_path = self.path.with_name("talkgroups_unknown.json") if self.path else None
+        self.migrated_path = self.path.with_name("talkgroups_migrated.json") if self.path else None
+        self.migrated: list[tuple[int, str, dict]] = []      # drop_orphans(): (number, the system that lists it, what)
         self._lock = threading.Lock()
         self._prefs: dict = {}
         self._seen: dict = {}                 # key -> {"count", "last", "dropped"}
@@ -72,17 +77,38 @@ class TalkgroupPrefs:
             self._unknown = {str(x): {int(k): dict(v) for k, v in d.items()} for x, d in raw.items()}
         except (OSError, ValueError, AttributeError, TypeError):
             self._unknown = {}
-        # county choices under another system's number (see above): dropped, and the file written without them
-        self.migrated: list[tuple[int, str, dict]] = []      # (number, the system that lists it, what was dropped)
-        for k in [k for k in self._prefs if not isinstance(k, tuple) and k not in self.info]:
-            if owners := self._owners(k):
-                self.migrated.append((k, owners[0], self._prefs.pop(k)))
-        if self.migrated:
-            self.save()
 
     def _k(self, tg: int, system: str = ""):
         """The key a talkgroup is held under: its number for the county's, (system, number) for another system's."""
         return int(tg) if not system or system == self.county else (system, int(tg))
+
+    def drop_orphans(self) -> list[tuple[int, str, dict]]:
+        """County choices saved under another system's number by the old page (see above): dropped, kept in
+        talkgroups_migrated.json first, the file written without them. Call once the history is seeded (heard() needs
+        it). -> what was dropped (also `migrated`)."""
+        if not any(not isinstance(k, tuple) for k in self.info):
+            return []                         # no county list: a county talkgroup can't be told from another's
+        with self._lock:
+            gone = []
+            for k in [k for k in self._prefs if not isinstance(k, tuple) and k not in self.info and k not in self._seen]:
+                if owners := self._owners(k):
+                    gone.append((k, owners[0], self._prefs.pop(k)))
+        if not gone:
+            return []
+        if self.migrated_path:
+            try:
+                kept = json.loads(self.migrated_path.read_text()) if self.migrated_path.is_file() else []
+                kept = kept if isinstance(kept, list) else []
+            except (OSError, ValueError):
+                kept = []
+            kept += [{"tg": k, "system": owner, "prefs": was, "at": time.time()} for k, owner, was in gone]
+            try:
+                self.migrated_path.write_text(json.dumps(kept[-200:]))
+            except OSError:
+                pass
+        self.save()
+        self.migrated = gone
+        return gone
 
     def _owners(self, tg: int) -> list[str]:
         """The other systems whose files list this number."""
