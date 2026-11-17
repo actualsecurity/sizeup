@@ -6,7 +6,7 @@
                                                               a local hub: also radio traffic, as the station sends it
 
 Everything is invented: the addresses (Example Ave, Sample St), the remarks and the transcripts. Through the same HTTP
-API the pages use (POST /api/cad/incident, /dispatch, /note, /close) and, with --token, the station's
+API the pages use (POST /api/cad/incident, /dispatch (in PCFD mode, the mode put back after), /note, /close) and, with --token, the station's
 POST /api/station/events (sizeup/cloud/hub.py): FG1 transmissions from the units on a call, so they land on its radio
 log. Run it again for more. Only ever to this machine: any other host (or a user:password@) is refused, the
 environment's proxy is never used and a redirect is never followed, so the token can't leave it.
@@ -117,7 +117,11 @@ def main(argv: list[str] | None = None) -> int:
               "(dev_seed only fills a local instance)", file=sys.stderr)
         return 2
     role = call(base, "/healthz").get("role", "")
-    units = {u["name"]: u["id"] for u in call(base, "/api/cad/state").get("units", [])}
+    state = call(base, "/api/cad/state")
+    units = {u["name"]: u["id"] for u in state.get("units", [])}
+    mode = (state.get("dispatch_mode") or {}).get("mode", "")
+    if mode and mode != "pcfd":                   # 60 Control dispatching refuses a dispatch from here: PCFD meanwhile
+        call(base, "/api/cad/dispatch-mode", {"mode": "pcfd", "operator": OPERATOR})
     radio_ids: dict[str, str] = {}                # unit -> an MDC radio ID of its (confirmed ones first)
     for r in sorted(call(base, "/api/cad/radios").get("radios", []), key=lambda r: r.get("source") != "confirmed"):
         if r.get("system") == "mdc" and r.get("unit"):
@@ -151,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     for iid, disposition in closes:
         call(base, f"/api/cad/incident/{iid}/close", {"disposition": disposition, "operator": OPERATOR})
         print(f"incident {iid}: closed {disposition}")
+    if mode and mode != "pcfd":
+        call(base, "/api/cad/dispatch-mode", {"mode": mode, "operator": OPERATOR})
     print(f"open {base}/cad")
     return 0
 

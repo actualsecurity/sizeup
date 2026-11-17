@@ -28,6 +28,7 @@ def load():
 dev_seed = load()
 
 
+@pytest.mark.hand_dispatch_gate                    # the hub's default, 60 Control, refuses a dispatch: PCFD meanwhile
 def test_a_local_hub_gets_the_calls_their_units_and_their_radio_traffic(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.full(8000, 0.1, np.float32))
     hub = HubRun(hub_cfg(tmp_path))
@@ -36,6 +37,8 @@ def test_a_local_hub_gets_the_calls_their_units_and_their_radio_traffic(tmp_path
         incs = {i["address"]: i for i in hub.app.cad.state()["incidents"]}
         assert {a: i["status"] for a, i in incs.items()} == {
             "100 Example Ave": "active", "25 Sample St": "closed", "Example Ave / Sample St": "pending"}
+        assert hub.app.cad.store.full(incs["100 Example Ave"]["id"])["dispatches"]
+        assert hub.app.cad.auto.mode() == "60control"             # the mode put back
         rows = hub.get("/api/cad/comms?type=radio")["rows"]
         assert len(rows) == sum(len(c["radio"]) for c in dev_seed.CALLS)
         on = {r["text"]: {e["address"] for e in r["events"]} for r in rows}
