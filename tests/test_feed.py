@@ -96,6 +96,27 @@ def test_matcher_phrases_unit_codes_and_spoken_forms(text, why):
     ("All right headquarters, copy", True),                     # "all right" is never Rye
     ("Right, headquarters, copy", True),
     ("60 Control to headquarters, fire alarm in Rye", True),
+    # the addressee decides: a bare base among them is ours, whatever other departments' bases come later
+    ("60 Control to headquarters, can you send an engine to cover Rye headquarters", True),
+    ("60 Control to headquarters relocate an engine to Purchase headquarters", True),
+    ("Rye and headquarters, 60 Control, mutual aid", True),
+    ("Headquarters and Harrison headquarters, 60 Control", True),
+    ("60s to Rye headquarters, have them cover headquarters", False),
+    ("Harrison headquarters and Rye headquarters, 60 Control, mutual aid", False),
+    # "right" is Rye only at the addressee: an acknowledgement whose comma STT dropped stays ours
+    ("That's right headquarters, go ahead", True),
+    ("Copy right headquarters 60 Control", True),
+    ("OK right headquarters", True),
+    ("Yeah right headquarters", True),
+    ("Right face, 60 Control to headquarters", True),
+    ("Right headquarters, 60 Control", False),
+    ("60 to right headquarters", False),
+    # another service's headquarters is never a fire department's
+    ("redirect Village PD headquarters", False),
+    ("Rye PD headquarters", False),
+    ("Port Chester police headquarters", True),           # "Port Chester" is a phrase of its own
+    ("units to the EMS headquarters", False),
+    ("Sample Ambulance headquarters", False),
 ])
 def test_another_departments_headquarters_is_not_ours(text, ours):
     cfg = load_cfg(load())
@@ -110,6 +131,22 @@ def test_rye_heard_as_right_is_read_for_the_decision_only():
     assert read_rye("turn right face the house") == "turn right face the house"     # no base, not the addressee
     assert read_rye("all right headquarters") == "all right headquarters"
     assert read_rye("on your right base of the stairs") == "on your right base of the stairs"
+    assert read_rye("60 Control to right face.") == "60 Control to Rye base."
+    assert read_rye("Right headquarters, 60 Control") == "Rye headquarters, 60 Control"
+    for ack in ("That's right headquarters, go ahead", "Copy right headquarters 60 Control", "OK right headquarters",
+                "Yeah right headquarters", "Right face, 60 Control to headquarters", "60 Control to right side"):
+        assert read_rye(ack) == ack
+
+
+def test_whose_base_looks_only_just_before_each_base():
+    cfg = load_cfg(load())
+    m = Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours)
+    long = "60 Control to headquarters " + "words of a long transmission " * 4000 + "cover Rye headquarters"
+    assert m.match(long) == "headquarters"
+    import time
+    t0 = time.perf_counter()
+    m.match("standing by " + "Rye headquarters and " * 5000)
+    assert time.perf_counter() - t0 < 2.0
 
 
 def test_whose_base_follows_the_lists_towns_and_joint_response(tmp_path):

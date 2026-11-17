@@ -19,9 +19,12 @@ or it is 60 Control's turn right before or after such a unit's turn in the same 
 the key-ups of unknown radios in between). A base phrase ("headquarters", "HQ", "base") counts only when it is ours:
 bare ("60 Control to headquarters") or named ours ("Port Chester headquarters", "Rye Brook headquarters"), never
 another town's or department's ("Rye headquarters", "Harrison base"; the CAD's towns and aliases and the county's
-towns and departments), nor a bare one in a transmission to another department ("Harrison, 60 Control, contact
-headquarters"). Speech-to-text's "right headquarters" / "right face" are read as Rye's for this (read_rye); the
-transcript stays as heard. The CAD feed's "PC" badge and the 60 Control column's "Possible incoming"
+towns and departments; nor another service's: "Rye PD headquarters"). Whom it is to decides: a bare one among the
+addressees is ours whatever other departments' bases follow ("60 Control to headquarters, ... cover Rye
+headquarters", "Rye and headquarters, 60 Control, mutual aid"); with none there, a bare one in a transmission to
+another department isn't ("Harrison, 60 Control, contact headquarters"). Speech-to-text's "right headquarters" /
+"right face" at the addressee ("60s to right headquarters right face.") are read as Rye's for this (read_rye), never
+an acknowledgement ("That's right headquarters"); the transcript stays as heard. The CAD feed's "PC" badge and the 60 Control column's "Possible incoming"
 (sizeup/cad/sources.py consider_radio) both decide by Matcher.match.
 
 A page whose tones aren't ours but whose text names our units (#115, South 2 2026-10-14 07:04: "6462 to rescue
@@ -91,17 +94,25 @@ BASE_PHRASE = re.compile(r"(?:fire\s+)?(?:head\s*quarters?|h\.?\s?q\.?|base|quar
 BASE_WORD = r"(?:fire\s+)?(?:head\s*quarters|h\.?q\.?|base)"
 # between a town and its base: "Rye FD headquarters", "Rye Fire Department base", "Rye's headquarters"
 QUALIFIER_FILLER = {"fire", "fd", "f", "d", "department", "dept", "volunteer", "vol", "s"}
+# ... another service's: "Rye PD headquarters", "Sample EMS base", "police headquarters" are never a fire department's
+AGENCY_FILLER = {"pd", "p", "police", "ems", "vac", "ambulance"}
 QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dots of "F.D.", "H.Q."
-# Speech-to-text hears "Rye" as "right" before a base ("right headquarters", "right HQ", "right base"; "right face" for
-# "Rye base"): read as Rye for this decision only (the stored transcript is never changed). Never "all right" / "the
-# right" / "your right", nor across a comma ("Right, headquarters").
-_NOT_RIGHT = r"(?<!\ball )(?<!\bthe )(?<!\byour )"
-RIGHT_BASE = re.compile(_NOT_RIGHT + r"\bright(?=\s+" + BASE_WORD + r"(?!\w))", re.I)
-RIGHT_FACE = re.compile(_NOT_RIGHT + r"\bright\s+face\b", re.I)
-HAS_BASE = re.compile(r"(?<!\w)" + BASE_WORD + r"(?!\w)", re.I)
+WHOSE_WINDOW = 120                       # how far before a base its qualifier is looked for (characters)
 # who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
 ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
 ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
+# the words an addressee list is made of besides town names: "Rye and headquarters", "16 Rye FD headquarters"
+ADDRESSEE_WORDS = QUALIFIER_FILLER | AGENCY_FILLER | {"and", "head", "headquarters", "quarters", "hq", "h", "q", "base"}
+# Speech-to-text hears "Rye" as "right" before a base ("right headquarters", "right HQ", "right base"; "right face" for
+# "Rye base"): read as Rye for this decision only (the stored transcript is never changed), and only where the
+# addressee is: right after 60 Control's "60s to" / "60 Control to" / "60 to" ("60s to right headquarters right face."),
+# or as the first words before a base ("Right headquarters, 60 Control"). Never an acknowledgement whose comma STT
+# dropped: "That's right headquarters", "Copy right headquarters", "Right face, 60 Control to headquarters".
+CALL_TO = re.compile(r"^\W*(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*to\s+", re.I)
+RIGHT_LEAD = re.compile(r"right(?=\s+" + BASE_WORD + r"(?!\w))", re.I)
+RIGHT_CALLED = re.compile(r"right(?:\s+face)?(?=\s+(?:" + BASE_WORD + r")(?!\w)|\s*[,.;:!?]|\s*$)|right\s+face(?!\w)", re.I)
+RIGHT_MORE = re.compile(r"(\s+)right\s+(?:face|base)(?!\w)", re.I)       # "... headquarters right face": Rye base too
+LEAD_BASE = re.compile(r"\s+" + BASE_WORD + r"(?!\w)", re.I)
 
 
 def _words(s: str) -> tuple[str, ...]:
@@ -109,14 +120,22 @@ def _words(s: str) -> tuple[str, ...]:
 
 
 def read_rye(text: str) -> str:
-    """The words as whose-base reads them: "right" before a base is "Rye" ("right headquarters" -> "Rye
-    headquarters"), and "right face" is "Rye base" in a transmission about a base or as its addressee ("60s to right
-    headquarters right face." -> "60s to Rye headquarters Rye base."). For this decision only: the stored
-    transcript is never changed."""
-    out = RIGHT_BASE.sub("Rye", text or "")
-    if RIGHT_FACE.search(out):
-        lead = ADDRESSEE.match(out).end()
-        out = RIGHT_FACE.sub(lambda m: "Rye base" if HAS_BASE.search(out) or m.start() == lead else m.group(0), out)
+    """The words as whose-base reads them: STT's "right" for Rye at the addressee ("60s to right headquarters right
+    face." -> "60s to Rye headquarters Rye base."; "right headquarters, ..." at the start -> "Rye headquarters, ...").
+    Anywhere else "right" stays ("That's right headquarters"). For this decision only: the stored transcript is never
+    changed."""
+    t = text or ""
+    call = CALL_TO.match(t)
+    at = call.end() if call else len(t) - len(t.lstrip())
+    m = (RIGHT_CALLED if call else RIGHT_LEAD).match(t, at)
+    if not m:
+        return t
+    face = m.group(0).lower().endswith("face")
+    out = t[:at] + ("Rye base" if face else "Rye") + t[m.end():]
+    pos = at + 3                                      # after "Rye": its base, then more of Rye's ("right face")
+    while (b := LEAD_BASE.match(out, pos)) and (more := RIGHT_MORE.match(out, b.end())):
+        out = out[:b.end()] + more.group(1) + "Rye base" + out[more.end():]
+        pos = b.end() + len(more.group(1)) + 3
     return out
 
 
@@ -258,6 +277,7 @@ class Matcher:
             towns, ours = qualifiers(None)
         self.towns, self.ours = towns, ours
         self.longest = max((len(k) for k in towns), default=1)
+        self.town_words = {w for k in towns for w in k}
         self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I),
                          bool(BASE_PHRASE.fullmatch(p.strip()))) for p in phrases]        # (phrase, regex, a base?)
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
@@ -302,16 +322,20 @@ class Matcher:
     def _whose(self, before: str) -> str:
         """The town or department named right before a base ("16 Rye headquarters": Rye; "Rye FD headquarters",
         "Rye's base", "Rye Brook headquarters": Rye Brook, the longest name), '' when none is (across a comma or a
-        sentence's end it never is: "Rye. Headquarters ...")."""
+        sentence's end it never is: "Rye. Headquarters ..."). Another service's ("Rye PD headquarters", "EMS base",
+        "police headquarters") is never ours: "<town> PD" or "PD". before: the text just before the base (a window)."""
         cut = max((m.end() for m in QUALIFIER_BREAK.finditer(before)), default=0)
         w = list(_words(before[cut:]))[-(self.longest + 4):]
-        while w and w[-1] in QUALIFIER_FILLER:
+        agency = ""
+        while w and w[-1] in QUALIFIER_FILLER | AGENCY_FILLER:
+            if w[-1] in AGENCY_FILLER and w[-1] != "p":
+                agency = "PD" if w[-1] in ("pd", "police") else "EMS"
             w.pop()
         for n in range(min(self.longest, len(w)), 0, -1):
             t = self.towns.get(tuple(w[-n:]))
             if t:
-                return t
-        return ""
+                return f"{t} {agency}" if agency else t
+        return agency
 
     def _addressed_elsewhere(self, text: str) -> bool:
         """The transmission is to another department: its first words (past "60 Control to", "60's to") name another
@@ -326,17 +350,37 @@ class Matcher:
                 return t not in self.ours and not (end and ADDRESSEE_STREET.match(rest[end.end():]))
         return False
 
+    def _addressee_end(self, text: str, lead: int) -> int:
+        """Where the addressees end: only towns, departments, numbers, "and" and bases from the addressee's start
+        ("60s to Rye headquarters Rye base", "Rye and headquarters, 60 Control", "16 Rye headquarters"), up to a comma,
+        a sentence's end or any other word ("60 Control to headquarters relocate ...")."""
+        stop = QUALIFIER_BREAK.search(text, lead)
+        end = stop.start() if stop else len(text)
+        for w in re.finditer(r"[a-z0-9]+", text[lead:end], re.I):
+            x = w.group(0).lower()
+            if not (x.isdigit() or x in ADDRESSEE_WORDS or x in self.town_words):
+                return lead + w.start()
+        return end
+
     def _base_ours(self, text: str, rx: re.Pattern) -> bool:
         """A base phrase ("headquarters", "HQ", "base") is ours when one is named ours ("Port Chester headquarters",
-        "PC base", "Rye Brook headquarters"), or every one is bare ("60 Control to headquarters") and the transmission
-        isn't to another department. "Rye headquarters", "Harrison base", STT's "right headquarters" (read_rye) and a bare
-        one in a transmission to another department or naming another's base never are."""
+        "PC base", "Rye Brook headquarters"); else by whom the transmission is to: a bare base among its addressees
+        is ours ("60 Control to headquarters, ... cover Rye headquarters", "Rye and headquarters, 60 Control, mutual
+        aid"), only others' bases there never are ("60s to right headquarters right face.": read_rye, "16 Rye
+        headquarters."). With no base among the addressees: ours when every one is bare and the transmission isn't
+        to another department ("Harrison, 60 Control, contact headquarters" isn't)."""
         text = read_rye(text)
-        whose = [self._whose(text[:m.start()]) for m in rx.finditer(text)]
+        hits = [m.start() for m in rx.finditer(text)]
+        whose = [self._whose(text[max(0, at - WHOSE_WINDOW):at]) for at in hits]
         if not whose:
             return False
         if any(w in self.ours for w in whose):
             return True
+        lead = ADDRESSEE.match(text).end()
+        end = self._addressee_end(text, lead)
+        addressed = [w for at, w in zip(hits, whose) if lead <= at < end]
+        if addressed:
+            return not all(addressed)
         return not any(whose) and not self._addressed_elsewhere(text)
 
     def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
