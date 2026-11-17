@@ -27,8 +27,20 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 # What whisper says for dead air / a mic click (FG1 bench: "Thank you." or "Yes." on 6 of 6
 # dead-air cuts). Rejected only when the audio has no voice energy or is very short.
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
-                  "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
+                  "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end",
+                  # large-v3-turbo on dead air with a term list in its prompt (sizeup/stt_terms.py), 2026-11
+                  "well be right back", "and well see you next time", "well see you next time", "see you next time"}
 SHORT_S = 1.5
+# whisper reads its prompt back on dead air or noise (a list of terms, sizeup/stt_terms.py, makes that likelier): a
+# text that is mostly a run of PROMPT_ECHO_TERMS or more of the prompt's items, in the prompt's order (prompt_echo),
+# is no speech when the clip is short or has no voice energy (as HALLUCINATIONS), or holds more words than anyone
+# says in that time (PROMPT_ECHO_WPS). Real traffic that names a few of the same words keeps its text. On a clip with
+# no voice energy at all, a few of the prompt's words in any order are the prompt too (PROMPT_WORDS_SHARE of the text:
+# large-v3-turbo said three of a police prompt's callsigns and words on a mic click).
+PROMPT_ECHO_TERMS = 3
+PROMPT_ECHO_COVER = 0.7
+PROMPT_ECHO_WPS = 4.5
+PROMPT_WORDS_SHARE = 0.5
 # Queue priority (SttQueue), strict: a class is served only when every class above it is empty (#300). Pages,
 # Fire/EMS 15 and the firegrounds first, the airband pre-alerts next, other live traffic, a person's re-run, then
 # the talkgroups heard only as context (not "main" in Settings > Radios: other towns' fire, county police). #195:
@@ -176,6 +188,51 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: b
 
 
 voice_band = radio_voice  # older name
+
+
+def _said_words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9' ]", " ", str(text or "").lower()).split()
+
+
+def prompt_echo(text: str, prompt: str, min_terms: int = PROMPT_ECHO_TERMS, cover: float = PROMPT_ECHO_COVER) -> bool:
+    """The text is the prompt read back: a run of at least min_terms of the prompt's items (split at , . ; :), one after
+    the other in the prompt's order, makes up at least `cover` of the text's words."""
+    items = [w for w in (_said_words(x) for x in re.split(r"[,.;:]", str(prompt or ""))) if w]
+    out = _said_words(text)
+    if len(items) < min_terms or not out:
+        return False
+    best = 0
+    for i, first in enumerate(items):
+        for p in range(len(out) - len(first) + 1):
+            if out[p:p + len(first)] != first:
+                continue
+            k, q = 1, p + len(first)
+            while i + k < len(items) and out[q:q + len(items[i + k])] == items[i + k]:
+                q += len(items[i + k])
+                k += 1
+            if k >= min_terms:
+                best = max(best, q - p)
+    return best >= cover * len(out)
+
+
+def prompt_noise(raw: str, prompt: str, seconds: float, low_energy: bool = False) -> bool:
+    """whisper read its prompt back (no speech): a run of the prompt (prompt_echo) on a short or quiet clip, or with more
+    words than anyone says in that time; or, on a clip with no voice energy, mostly the prompt's words in any order."""
+    if not raw or not prompt:
+        return False
+    n = len(_said_words(raw))
+    if prompt_echo(raw, prompt) and (seconds < SHORT_S or low_energy or n > PROMPT_ECHO_WPS * max(seconds, 0.5)):
+        return True
+    return low_energy and prompt_share(raw, prompt) >= PROMPT_WORDS_SHARE
+
+
+def prompt_share(text: str, prompt: str) -> float:
+    """The share of the text's words that are words of the prompt."""
+    out = _said_words(text)
+    if not out or not prompt:
+        return 0.0
+    words = set(_said_words(re.sub(r"[,.;:]", " ", prompt)))
+    return sum(1 for w in out if w in words) / len(out)
 
 
 class WhisperClient:
@@ -499,6 +556,10 @@ class Transcriber:
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
             fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
             tries = 3
+            try:
+                prompt = self.prompt(item)
+            except Exception as e:  # noqa: BLE001 - no prompt is better than no transcript
+                self.last_error, prompt = f"prompt: {type(e).__name__}: {e}"[:160], ""
             if prio == CATCHUP:
                 # a shed clip caught up: one greedy pass, one try, a short timeout, no backoff: never minutes of whisper
                 fast, tries = {"fast": True, "timeout_s": CATCHUP_TIMEOUT_S}, 1
@@ -508,7 +569,7 @@ class Transcriber:
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
                     # but changed 1 of 4 real transcripts ("Testing one two" -> "Nothing wanted").
                     raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False),
-                                                      self.prompt(item), **fast)
+                                                      prompt, **fast)
                     self._took.append((time.time(), time.monotonic() - t0))
                     break
                 except Exception as e:
@@ -522,7 +583,8 @@ class Transcriber:
             said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
             if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
                     or (said in HALLUCINATIONS
-                        and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))):
+                        and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))
+                    or prompt_noise(raw, prompt, len(audio) / 16000, getattr(item, "low_energy", False))):
                 raw, status = "", "no_speech"
             else:
                 status = "done"

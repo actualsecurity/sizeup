@@ -124,6 +124,12 @@ class Config:
     stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307", "p25:mrrs:9211")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
     stt_record_only: tuple[str, ...] = ()     # recorded, not transcribed by default ([stt] record_only, #201)
+    # Private term lists per kind of source (sizeup/stt_terms.py, docs/stt-vocabulary.md): read from the hub's backups
+    # bucket (vocab/), else from terms_dir (all-in-one, dev). terms_whisper: the top of a source's list in whisper's
+    # prompt (the hub sends it to the station); terms_aws: one Amazon Transcribe vocabulary per list. Off: as before.
+    stt_terms_dir: str = ""
+    stt_terms_whisper: bool = False
+    stt_terms_aws: bool = False
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
@@ -1329,12 +1335,19 @@ def _stt_aws(stt: dict) -> dict:
     vocab = str(stt.get("aws_vocabulary", "sizeup-pcfd"))
     if not re.fullmatch(r"[0-9a-zA-Z._-]{1,200}", vocab):
         raise ConfigError("stt.aws_vocabulary: letters, digits, . _ -")
+    for k in ("terms_whisper", "terms_aws"):
+        if not isinstance(stt.get(k, False), bool):
+            raise ConfigError(f"stt.{k}: true or false")
+    if not isinstance(stt.get("terms_dir", ""), str):
+        raise ConfigError("stt.terms_dir: a folder (or leave it out)")
     return dict(stt_aws=bool(stt.get("aws", False)), stt_aws_region=str(stt.get("aws_region", "")),
                 stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
                 stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
                 stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
                 stt_aws_context_limit_usd=ctx_limit,
-                stt_aws_vocabulary=vocab, stt_record_only=record_only)
+                stt_aws_vocabulary=vocab, stt_record_only=record_only,
+                stt_terms_dir=str(Path(stt["terms_dir"]).expanduser()) if stt.get("terms_dir") else "",
+                stt_terms_whisper=stt.get("terms_whisper", False), stt_terms_aws=stt.get("terms_aws", False))
 
 
 # [adapter] (#301): the station's incident-source adapter, read only by the station's updater
@@ -1454,7 +1467,8 @@ def load(path: str | Path) -> Config:
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
                                              "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
-                                             "aws_context_budget_usd", "record_only"})
+                                             "aws_context_budget_usd", "record_only", "terms_dir", "terms_whisper",
+                                             "terms_aws"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')

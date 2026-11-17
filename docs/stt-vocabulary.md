@@ -4,7 +4,7 @@ Amazon Transcribe custom vocabularies and whisper prompts, per kind of channel. 
 are in [cloud.md](cloud.md) ("Speech-to-text per channel"). This page covers the words.
 
 Code: `sizeup/transcribe.py` (`build_vocabulary`, `to_aws`, `respell`, `Vocabulary`), `sizeup/stt_vocab.py` (the county
-and police lists, the profiles), `sizeup/channels.py` (`vocabulary_suggestions`), `sizeup/atc.py` and
+and police lists, the profiles), `sizeup/stt_terms.py` (the private term lists), `sizeup/channels.py` (`vocabulary_suggestions`), `sizeup/atc.py` and
 `sizeup/atc_vocab.py` (ATC), `sizeup/app.py` (the wiring).
 
 ## The three vocabularies
@@ -61,6 +61,117 @@ county would be about 1,040 phrases and 19 KB before the home streets; the measu
 
 Nothing in it names a person. Which source uses it is set in `data/stt/profiles.json` (a source key, else a service,
 names a profile; the profile names the vocabulary).
+
+## Private term lists (per kind of source)
+
+The STT plan's step 3a: lists of words to bias speech-to-text toward, one per kind of radio source. They are built
+from data that never goes in this public repo, so the repo holds only the code that reads them (`sizeup/stt_terms.py`)
+and made-up lists in its tests.
+
+| List | Used on |
+|---|---|
+| `county_fire` | the county's Fire/EMS dispatch and paging: South 2, Fire/EMS 15 (`tg:307`), FG1, FG2, our fire talkgroups |
+| `pd_dispatch` | police dispatch: MRRS 9211 and 9212, the county's police talkgroups |
+| `ems` | EMS: MRRS 9570, the county's EMS talkgroups |
+| `airband` | HPN Tower, Approach and Ground |
+| `places` | loaded with every one of them |
+
+Which list a source takes: `stt_terms.own_for()`, by its key first (`BY_KEY`: 9211, 9212, 9570), then airband or
+paging, then its service (fire, police, ems, air). A transit or "other" talkgroup takes none.
+
+### Where they live
+
+The hub reads them from its backups bucket, where only its task role and the admin can read them:
+
+```
+s3://<backups bucket>/sizeup-hub/vocab/county_fire.txt
+s3://<backups bucket>/sizeup-hub/vocab/pd_dispatch.txt
+s3://<backups bucket>/sizeup-hub/vocab/ems.txt
+s3://<backups bucket>/sizeup-hub/vocab/airband.txt
+s3://<backups bucket>/sizeup-hub/vocab/places.txt
+```
+
+The bucket and prefix are the hub's Litestream ones (`LITESTREAM_BUCKET`, `LITESTREAM_PATH`). The task role's
+`backups` policy already lets it read every key there, so nothing in IAM changes. To upload or replace them, from a
+checkout of the private repo's term lists:
+
+```sh
+aws s3 cp <checkout>/vocab/terms/ s3://<backups bucket>/sizeup-hub/vocab/ --recursive \
+    --exclude '*' --include '*.txt'
+```
+
+The hub looks at them at start and every 5 minutes (a conditional GET: an unchanged file costs a 304). A new file is
+in use within 5 minutes. A file deleted takes its list away. A file that can't be read (S3 error, not UTF-8) keeps
+what was read before, and the hub's log says why. No terms are ever logged, only counts and versions.
+
+All-in-one (dev) reads them from a folder instead: `[stt] terms_dir`, holding `<name>.txt` or `terms/<name>.txt`.
+A station never reads them. The hub sends it the top of each list (`set_stt_terms`), kept in memory only.
+
+### Format
+
+UTF-8, one term per line, priority order (a smaller budget takes the top). Lines starting with `#` are comments;
+blank lines are skipped. Terms are compared ignoring case, hyphens and punctuation, and repeats are dropped. Numbers
+are written as said (`transcribe.spoken()`): the engines are only biased, and nothing turns them back into digits.
+
+### Versions
+
+A list's set is its terms with `places` woven in: about a third of every stretch of the top is places, so a small
+budget takes both. Its version is the sha256 of its terms as parsed, 12 hex digits. A comment or blank line changes
+nothing; any term does.
+
+Every transcript records what biased it, in the radio log's `vocab_v` column:
+
+| `vocab_v` | Means |
+|---|---|
+| `county_fire@0123456789ab` | that list at that version (whisper's prompt, or its AWS vocabulary) |
+| `sizeup-pcfd@0123456789ab` | an AWS vocabulary without a term list, at its phrases' signature |
+| empty | no list (switched off, none for the source, no room in the prompt) or not known |
+
+### Switches
+
+`[stt]` in the config. Off unless set; the hub's (`deploy/hub/config.hub.toml`) sets both, and with no lists uploaded
+nothing changes. To turn one off, set it to `false` there (a deploy).
+
+| Key | Does |
+|---|---|
+| `terms_whisper` | whisper's prompt gets the top of the source's list (the hub sends it to the station) |
+| `terms_aws` | one Amazon Transcribe vocabulary per list, used on that list's channels |
+| `terms_dir` | all-in-one: the folder to read them from (the hub uses its bucket) |
+
+### whisper
+
+`App._prompt()` puts the list's top terms in front of the prompt the source already had (its configured text and
+talkers, the police profile, the ATC prompt), within whisper's prompt budget. whisper keeps at most 224 tokens of a
+prompt, its end. `stt_terms.est_tokens()` overcounts: measured against whisper's own tokenizer on prompts filled from
+every list, the real count was at most 0.97 of the estimate. The budget is 210 by that estimate. The terms go most
+important last (nearest the audio), and the source's own prompt after them.
+
+- A police profile with a list leaves out its streets: `places` has them, and the profile alone filled most of the
+  budget.
+- The ATC prompt is unchanged. With aircraft near HPN it fills the budget, so the airband list mostly goes to AWS.
+
+whisper can read a prompt back on dead air. `stt.prompt_echo()` catches it: a text that is mostly a run of three or
+more of the prompt's items, in the prompt's order, is no speech when the clip is short, has no voice energy, or has
+more words than anyone says in that time (4.5 a second). The older rules (`NOISE_LABEL`, `HALLUCINATIONS`, `SHORT_S`)
+still apply.
+
+### Amazon Transcribe
+
+With `terms_aws`, the hub's leader makes one custom vocabulary per list, named by the list and its version:
+`sizeup-terms-county_fire-0123456789ab`. It holds the set's top terms within AWS's limits (1,500 phrases, 50 KB,
+256 characters a phrase, letters only: `build_vocabulary()`; accents dropped). It is made only when the version
+changes (`CreateVocabulary`, then `GetVocabulary` until READY).
+
+- Once READY, new streams on that list's channels use it ahead of the channel's own (`sizeup-pcfd`, `sizeup-pd`,
+  `sizeup-atc`).
+- While the next version is PENDING, the one before stays in use. If none is READY (or AWS refused it), the channel
+  keeps its own vocabulary.
+- The last three per list are kept; older ones are deleted.
+- The respelling is the channel's own, as before. AWS's hyphens are taken off the list's phrases like any other's
+  ([Hyphens](#hyphens)).
+
+The task role's `transcribe` policy (sizeup-aws step 12) covers `vocabulary/sizeup-*`: Create, Update, Get and
+Delete. Settings > Radios > Vocabulary's state (`GET /api/cad/stt`) has each list's under `terms`.
 
 ## How a phrase is built
 

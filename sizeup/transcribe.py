@@ -686,6 +686,7 @@ class Job:
     submitted: float = 0.0
     deadline: float = float("inf")  # past this (the owner's clock) it fails as "AWS timed out"
     state: str = "open"            # open | done | failed | timeout: the first outcome wins
+    vocab: str = ""                # the custom vocabulary of the stream it was fed into ("" for none)
 
     @property
     def seconds(self) -> float:
@@ -714,6 +715,10 @@ class AwsTranscriber:
         # channel -> its own respelling (PD dispatch: sizeup-pd's "two sixty six" -> "266"). A context channel
         # (is_context) never gets ours (sizeup-pcfd's) nor our vocabulary: police words never become fire callsigns
         self.channel_respell: dict[str, Callable[[str], str]] = {}
+        # channel -> a private term list's vocabulary once READY (sizeup/stt_terms.py), ahead of the two above: ""
+        # for none. vocab_version(name): what a transcript records of the vocabulary its stream used (vocab_v)
+        self.term_vocabulary: Callable[[str], str] = lambda channel: ""
+        self.vocab_version: Callable[[str], str] = lambda name: ""
         self.pace = max(0.5, float(s.pace))
         self._workers: dict[str, ChannelWorker] = {}
         self._lock = threading.RLock()
@@ -734,10 +739,19 @@ class AwsTranscriber:
 
     # -- what the callers ask --------------------------------------------------------------------------
 
-    def url(self, channel: str | None = None) -> str:
+    def vocab_for(self, channel: str | None = None) -> str:
+        """The custom vocabulary a new stream of this channel opens with ("" for none)."""
+        try:
+            terms = self.term_vocabulary(channel or "")
+        except Exception as e:  # noqa: BLE001 - the channel's own vocabulary then
+            self.log(f"aws transcribe: term vocabulary: {type(e).__name__}: {e}")
+            terms = ""
+        return terms or self.channel_vocabulary.get(channel or "") or ("" if is_context(channel) else self.vocabulary)
+
+    def url(self, channel: str | None = None, vocab: str | None = None) -> str:
         base = (self.s.endpoint or f"wss://transcribestreaming.{self.region}.amazonaws.com:8443").rstrip("/")
         q = {"language-code": self.s.language, "media-encoding": "pcm", "sample-rate": str(RATE)}
-        vocab = self.channel_vocabulary.get(channel or "") or ("" if is_context(channel) else self.vocabulary)
+        vocab = self.vocab_for(channel) if vocab is None else vocab
         if vocab:
             q["vocabulary-name"] = vocab
         return aws.presign(f"{base}/stream-transcription-websocket?{urllib.parse.urlencode(q)}", self.creds(),
@@ -1034,6 +1048,11 @@ class AwsTranscriber:
             text = self.display(text)
         except Exception as e:
             self.log(f"aws transcribe: vocabulary display: {type(e).__name__}")
+        if hasattr(job.item, "vocab_v"):             # which vocabulary biased it (the transcript's vocab_v)
+            try:
+                job.item.vocab_v = self.vocab_version(job.vocab) if job.vocab else ""
+            except Exception as e:  # noqa: BLE001 - a transcript is never lost to its version
+                self.log(f"aws transcribe: vocabulary version: {type(e).__name__}")
         if self._resolve(job, "done"):
             self.done_n += 1
             self._record_ok()
@@ -1130,6 +1149,7 @@ class ChannelWorker(threading.Thread):
         self.q: deque[Job] = deque()
         self.cv = threading.Condition()
         self.session: Session | None = None
+        self.vocab = ""                   # the custom vocabulary the stream opened with
         self.fed: list[Job] = []          # every job fed into this stream (for mapping words)
         self.pending: list[Job] = []      # fed, not done yet
         self.last_fed = 0.0
@@ -1240,8 +1260,10 @@ class ChannelWorker(threading.Thread):
     # -- the stream ------------------------------------------------------------------------------------
 
     def _open(self) -> None:
-        url = self.o.url(self.channel)
+        vocab = self.o.vocab_for(self.channel)
+        url = self.o.url(self.channel, vocab)
         ws = self.o.connect(url, timeout=10.0)
+        self.vocab = vocab
         self.session = Session(ws, self.o.log)
         self.fed, self.pending = [], []
         self.opened_n += 1
@@ -1266,6 +1288,7 @@ class ChannelWorker(threading.Thread):
             except (OSError, aws.AwsError) as e:
                 return self._retry([job], self._kind(e), self._msg(e))
             s = self.session
+        job.vocab = self.vocab
         step = max(1, int(o.s.chunk_s * RATE))
         pcm = job.pcm.astype("<i2").tobytes()
         job.a, job.flushed = s.sent_s, 0.0

@@ -92,7 +92,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels, sourcekeys
+from sizeup import channels, sourcekeys, stt_terms
 from sizeup import tz
 from sizeup import app as app_mod
 from sizeup import fence as fence_mod
@@ -582,6 +582,7 @@ class Hub:
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
+            self.app.stt_terms_check()         # ... or other term lists for whisper's prompt (sizeup/stt_terms.py)
             try:
                 self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
             except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
@@ -953,12 +954,14 @@ class HubApp(App):
                 page.raw, page.confidence = str(d.get("text") or ""), d.get("confidence")
                 page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
                 page.stt, page.flagged = "", False  # type: ignore[attr-defined]
+                page.vocab_v = str(d.get("vocab_v") or "")[:80]  # type: ignore[attr-defined]
                 self._transcribed(page)
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
-                         quiet=bool(d.get("catchup")))      # (a shed clip caught up: old words, nothing alerts)
+                         quiet=bool(d.get("catchup")),      # (a shed clip caught up: old words, nothing alerts)
+                         vocab_v=str(d.get("vocab_v") or "")[:80])
         elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
@@ -1009,6 +1012,7 @@ class HubApp(App):
         page.flagged = False  # type: ignore[attr-defined]   (flagged by the sweep: its text came after all)
         page.raw, page.confidence = str(d.get("raw") or ""), d.get("confidence")
         page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
+        page.vocab_v = str(d.get("vocab_v") or "")[:80]  # type: ignore[attr-defined]
         self._transcribed(page)
         if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
@@ -1417,6 +1421,16 @@ class HubApp(App):
                 if again:
                     self.channels_check(force=True)
         threading.Thread(target=push, name="hub-channels", daemon=True).start()
+
+    def stt_terms_check(self) -> None:
+        """The station is sent the private term lists' top (whisper's prompt, sizeup/stt_terms.py) when the copy it reports
+        differs: after a change here, or a station that restarted with none. A station from before this refuses the
+        call: tried again a minute later, said once."""
+        push = self.__dict__.get("_terms_push")
+        if push is None:
+            push = self._terms_push = stt_terms.StationPush(
+                self.stt_terms_payload, lambda p: self.hub.remote("set_stt_terms", p), log=self.hub.log)
+        push.check((self.hub.status or {}).get("stt_terms"), self.hub.connected())
 
     def channels_sync(self) -> dict:
         want = self.channel_desired()
@@ -1900,6 +1914,8 @@ class HubApp(App):
         self.prealert_sync()
         self.start_sources()                      # held reports and promotion (#297); the adapters are the station's
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
+        if isinstance(self.stt_terms, stt_terms.TermStore):
+            self.stt_terms.start()                # the private term lists (sizeup/stt_terms.py): now, then every 5 min
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
