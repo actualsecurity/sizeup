@@ -264,6 +264,12 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           a signed-in admin only. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
+GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
+                                          the station's signal metrics (sizeup/cloud/metricstore.py): a channel's ("FG1")
+                                          or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
+                                          most) or hourly (n, lo, p50, p90, hi), with the events that explain a shift (the
+                                          station's and the Settings audit's); no subject: what series there are. The
+                                          hub's only; a signed-in admin only (never without a verified sign-in)
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -381,6 +387,7 @@ ADMIN_READS = {
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/stations": "stations and their tokens are for admins (Settings > Station > Stations)",
+    "/api/cad/metrics": "the station's signal metrics are for admins (Settings > Radios)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
@@ -1050,6 +1057,20 @@ class CadApi:
             return _json(403, {"error": why})
         return _json(200, reg.panel())
 
+    def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/metrics: the station's signal metrics (sizeup/cloud/metricstore.py). The hub's only, and only for
+        an admin with a verified sign-in, like Settings > Station > Stations: closed without one."""
+        store = getattr(self.cad, "station_metrics", None)
+        if store is None:
+            return _json(404, {"error": "station metrics are the hub's"})
+        if (why := self._signed_admin(who)) is not None:
+            return _json(403, {"error": why})
+        from sizeup.cloud.metricstore import MetricsError
+        try:
+            return _json(200, store.query(parse_qs(query)))
+        except MetricsError as e:
+            return _json(400, {"error": str(e)})
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -1062,6 +1083,8 @@ class CadApi:
                 return self._logs(path, query, who)
             if path == "/api/cad/stations":
                 return self._stations(who)
+            if path == "/api/cad/metrics":
+                return self._metrics(query, who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":

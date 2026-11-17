@@ -16,6 +16,8 @@ them for minutes. This keeps a gzip copy of each in the same bucket, under the s
         trains/rail_assets.json   Metro-North's tracks, catenary poles and mileposts (sizeup/railassets.py, #371)
         aircraft/faa_registry.sqlite   the FAA registry as built (sizeup/aircraft.py)
         roadgraph.json            the road graph for the rigs' routes (sizeup/roadgraph.py)
+        metrics-snapshot.sqlite   the station's signal metrics, a copy every 3 h (sizeup/cloud/metricstore.py: metrics.sqlite
+                                  isn't in Litestream; a deploy starts from this copy)
 
     restore()   on start, before the providers read their caches (sizeup/app.py): every copy whose file is missing
                 here (a new task's disk) is fetched and unpacked, a few at once, for at most RESTORE_S in all; what
@@ -68,6 +70,7 @@ FILES: tuple[tuple[re.Pattern, float], ...] = (
     (re.compile(r"trains/rail_assets\.json"), 0.0),    # Metro-North's tracks, poles, mileposts (sizeup/railassets.py, #371)
     (re.compile(r"aircraft/faa_registry\.sqlite"), 0.0),
     (re.compile(r"roadgraph\.json"), 0.0),               # the road graph (sizeup/roadgraph.py, #360): rebuilt monthly
+    (re.compile(r"metrics-snapshot\.sqlite"), 3 * 3600.0),   # the station metrics' copy (sizeup/cloud/metricstore.py)
 )
 DIRS = ("", "gis", "trains", "aircraft")    # the folders of the state dir those are in
 SUB = "cache"                       # <prefix>/cache/...
