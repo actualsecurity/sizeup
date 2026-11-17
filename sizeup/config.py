@@ -250,13 +250,15 @@ class Config:
     # neither: no pushes. And station health's thresholds. Never the topics [prealert] subscribes to: refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
-    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). "" = the alerts' topic.
+    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). Its own channel only: "" = no
+    # intel pushes (never the alerts' or status' topic); one equal to either (case aside) is dropped with alerts_config_note.
     alerts_intel_topic: str = ""
     alerts_intel_topic_source: str = ""
     alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
     alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
     alerts_ntfy_server_source: str = "default"
     alerts_ntfy_server: str = "https://ntfy.sh"
+    alerts_config_note: str = ""          # an [alerts] value not used as given (logged by the app at start)
     alerts_silent_min: float = 3.0       # no state post from the station this long
     alerts_behind_min: float = 15.0      # the station on another build than the hub this long
     alerts_down_min: float = 2.0         # whisper or trunk-recorder down this long
@@ -478,7 +480,8 @@ def hub_url_problem(url: str) -> str:
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
 #                                /sizeup-hub/status-topic)
-#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts; unset: the alerts topic)
+#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts, a topic of their own; unset: no intel
+#                                pushes; the alerts or status topic: refused, logged, intel unset)
 #   SIZEUP_511NY_USER / _PASS         [roads]: 511NY's username and password for the CARS API and CARS-Hub (only
 #                                     ever here; the hub: SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
@@ -614,8 +617,10 @@ def _alerts(data: dict, prealert: dict) -> dict:
     """[alerts] -> Config fields: our ntfy topics for pushes (sizeup/notify.py route(): ntfy_topic for the
     emergency alarms, #128; status_topic for station health, #79, and Amazon Transcribe) and station health's
     thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
-    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name."""
-    from sizeup.notify import server_problem, topic_problem
+    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name. intel_topic: its own
+    channel only (no fallback); one equal to ntfy_topic or status_topic (case aside) is refused without stopping the
+    start: intel unset, alerts_config_note says why (the app logs it)."""
+    from sizeup.notify import INTEL_SAME_WHY, same_topic, server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
                                                   "remind_min", "p25_silent_min", "p25_silent_night_min",
@@ -630,6 +635,10 @@ def _alerts(data: dict, prealert: dict) -> dict:
             raise ConfigError(f"alerts.{key} / {env}: {why}")
         topics[key] = t
         sources[key] = ("env" if os.environ.get(env, "").strip() else "config") if t else ""
+    note = ""
+    if same_topic(topics["intel_topic"], (topics["ntfy_topic"], topics["status_topic"])):
+        note = f"alerts.intel_topic / SIZEUP_INTEL_TOPIC refused: {INTEL_SAME_WHY}; intel pushes off"
+        topics["intel_topic"], sources["intel_topic"] = "", ""
     topic = topics["ntfy_topic"]
     server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).strip().rstrip("/")
     if server_problem(server):
@@ -651,7 +660,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
     return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
                 alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
                 alerts_intel_topic=topics["intel_topic"], alerts_intel_topic_source=sources["intel_topic"],
-                alerts_ntfy_server_source=server_source, **out)
+                alerts_ntfy_server_source=server_source, alerts_config_note=note, **out)
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)

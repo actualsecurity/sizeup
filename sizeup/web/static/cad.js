@@ -46,6 +46,7 @@ const cad = {
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
   search: false,             // the Search view is open (#search, search-view.js, #403)
+  pinfo: false,              // a pre-alert's More info is open (#prealert/<kind>/<id>, prealert-info.js)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
@@ -436,9 +437,17 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || cad.search || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || cad.pinfo || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
+  // #prealert/<kind>/<id>: a pre-alert's More info (prealert-info.js)
+  const pinfo = !BOARD && location.hash.startsWith("#prealert/");
+  if (pinfo !== cad.pinfo || pinfo) {
+    cad.pinfo = pinfo;
+    show($("#prealert-view"), pinfo);
+    if (window.PrealertInfo) { if (pinfo) PrealertInfo.open(location.hash.slice("#prealert/".length)); else PrealertInfo.close(); }
+    if (cad.state) render();
+  }
   const search = !BOARD && location.hash.startsWith("#search");
   if (search !== cad.search || search) {
     cad.search = search;
@@ -458,7 +467,7 @@ function route() {                    // #radio?filters: the Radio view; #search
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.pinfo ? "prealert" : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
@@ -621,12 +630,12 @@ function renderPrealert() {
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
-    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), select: selectIncident, alarms: cad.state && cad.state.alarms });
+    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), more: !BOARD, select: selectIncident, alarms: cad.state && cad.state.alarms });
     AirportAlerts.notify(aa);
   }
   show($("#csv-airport-alerts"), !!aa);
   // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
-  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false });
+  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false, more: true });
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -705,7 +714,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio || cad.search) {      // the Radio view (radio-view.js) or Search (search-view.js) has the middle column
+  if (cad.radio || cad.search || cad.pinfo) {      // Radio (radio-view.js), Search, a pre-alert's More info: the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }
@@ -3983,6 +3992,7 @@ $("#note-text").addEventListener("click", suggestNote);
 $("#runcards-open").addEventListener("click", openRunCards);
 $("#dispatch-open").addEventListener("click", openDispatch);
 window.addEventListener("hashchange", route);
+$("#pi-reload").addEventListener("click", () => { if (window.PrealertInfo) PrealertInfo.reload(); });   // a pre-alert's More info
 if (BOARD) setText($("#page-title"), "Monitor");
 Radio.mountAlerts($("#alerts"));
 CadFeed.mount($("#feed"), { state: () => cad.state, radioRow, time: (u) => fmtTime(u, true), rev: () => cad.txRev,

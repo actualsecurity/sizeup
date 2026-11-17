@@ -464,6 +464,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
 | Feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime) and the phone pre-alert (Tapout; "not configured" until its topic is set): ok / fallback and why, last read | the trains look coarse |
+| Intel | each rule pack's in scope / considered (24 h), and a warning row "Intel pushes: no intel topic set" (or "refused: same as the alerts or status topic") while pre-alerts have no topic of their own: never pushed | pre-alerts reach nobody's phone |
 | Station | connected or offline, last state post, clock skew, sizeup and machine up since, host | "Station offline" |
 | Version | station and hub builds, the update state, the last update with its timings and log line, failed builds, the adapter (with Reset when a source is failing) | after a deploy; "Station behind" |
 | Outbox and system | events waiting and the oldest, clips dropped, CPU, load, memory, disk, temperature | "events backing up", "disk full" |
@@ -510,10 +511,16 @@ Three kinds (`sizeup/notify.py` `route()`):
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices; the airport pre-alerts (HPN ATC, #233), once each |
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), the replica and task-failure pushes ([Replica checks](#replica-checks)), and every recovery notice |
-| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. A channel of its own only (admin, 2026-11-17): no intel topic, no intel pushes |
 
-Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
-("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
+Only one of alerts / status set: both kinds go to it. Intel never falls back: with no topic of its own its pushes are
+not sent (each event counted "held", unsent), the startup line says "intel → off (no intel topic set)", and
+Settings > Station > Health shows a warning row "Intel pushes: no intel topic set" (never a push about it). An intel
+topic equal to the alerts or status topic (trimmed, case aside) is refused: Settings won't save it ("the intel topic
+must differ from the alerts and status topics"), nor an alerts / status topic equal to the intel one; one from SSM /
+env / the config file is dropped at startup with a log line ("notify: config: ... refused"), and the sender refuses
+the pair again at every push. The app logs at startup where each kind goes
+("notify: alerts → topic set (SSM), status → topic set (SSM), intel → off (no intel topic set)"), never the names.
 
 **Settings > System > Push notifications** (admins only) changes each topic, and the ntfy server, without a
 restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
@@ -1394,6 +1401,27 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,
   are left alone by automation from then on (`manual_edits`, `unit:<code>` / `close`).
 - **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it.
+- **Out of service is a person's to end (`sizeup/cad/oos.py`).** Every unit status write and every put-on-a-call goes
+  through the store's gate (`set_unit_status`, `set_unit_status_on`, `assign`, `return_to_incident`), which says who
+  is writing: `by=PERSON` for a person's own action through the API, otherwise the automation's name (`radio`,
+  `county`, `page`). Leaving `by` out counts as automation. While a unit is out of service (a status with role `oos`:
+  Out of service, Unmanned), an automated write is refused and nothing about the unit changes. This covers the radio's
+  status hints taken in 60 Control mode, the feed's listed units and unit times, and a page's named units. The refusal
+  is kept as a notice instead: one line in the unit log, one on the call's timeline when it was about a call, and a
+  chip under the unit's board row ("Radio heard “responding” · In service?"). ✓ puts the unit in service (its free status) and
+  ✕ keeps it out (`POST /api/cad/oos-notice/<id>/service | dismiss`, dispatchers and admins, in the person's
+  activity). The chip shows for 5 minutes after its last repeat (`NOTICE_S`), and only while the call it was about is
+  open. Then it lapses, and the unit stays exactly as it was. There is one notice per unit and reason within that
+  window; a repeat is only counted. Only notices from the unit's current out-of-service spell count. ✓ or ✕ ends every
+  open notice of that unit, and after ✕ the unit stays quiet for 5 minutes (while that notice's call is open). Notices
+  are never pushed. The radio's status suggestion for an out-of-service unit is never taken by automation. A person's
+  ✓ on it asks first ("E62 is out of service: put it on the call anyway?", `confirm: true`). Left alone, it expires
+  and the unit stays as it was. A transmission from a radio on an out-of-service rig is still that rig's (radio log,
+  transcript, suggestion). A radio a person moves to another unit (Settings > Radios) works as that unit's from then
+  on. Another agency's unit that a person attached to a call while it was out of service stays on it: the feed's in
+  service can't release it, so the automatic close becomes "close?" for a person (fail-safe). Close, the startup
+  repair and placeholder release already left out-of-service units alone; an undo refuses a unit put out of service
+  since.
 - **Radio log (both modes):** a transmission goes on an open incident when it names one of its board units, its address or
   its place, or is on its fireground channel when the feed names one. Only our dispatch and fire channels count, with the
   guards listed in `radiolog.py`. One click removes it. These links don't extend the audio's retention until a person
@@ -1648,7 +1676,8 @@ whole (temp file, rename); the index is the file names (an app restart finds the
 The viewer: ● Rec (why, in the tooltip), the timeline, the time showing, **Live**, **Keep**.
 
 A segment's time is when it first appears in the chunklist, less the durations listed after it; after the first,
-each begins where the one before ended. It can be off by up to a segment (4-8 s) from the camera's own clock.
+each begins where the one before ended, as long as that lies between the earliest and the latest it can have begun
+(#597). It can be off by up to a round (4-8 s) from the camera's own clock, never more.
 
 **Network**: the service runs in the default VPC's subnets with a public IP (sizeup-aws `9-service.sh`:
 `assignPublicIp=ENABLED`), so the recording's ~1.6 GB a day per camera comes in through the internet gateway, not a
@@ -1684,11 +1713,18 @@ With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto
   for the area;
 - only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`), and a camera merge's folder rename
   (`follow()`, #324) only on it and never while a clip of either camera is being saved (`may_move`); the standby's
-  warm app never makes a DVR. A new leader reads the index in the background (the file names carry the size,
-  `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read; recording waits for it),
-  then appends after each camera's last segment. For 5 min after the start it lists the folders again every 30 s,
-  taking in what the draining leader wrote after the first look and dropping what it evicted; another writer's temp
-  file is left alone unless it is 10 min old;
+  warm app never makes a DVR. The leader keeps each camera's last key, end and sequence offset in a small state
+  file beside the recordings (`.dvr-state.json`, `sizeup/dvrstate.py`, #596: written whole every 5 s and on a clean
+  stop). The offset outlives the task (#597): with it a restart or a short handover neither says "started over" again
+  nor records the chunklist's segments a second time; with no state at all, only the entries that begin after the
+  recording's end are taken as new. A new leader resumes from it and records at once; it reads the index in the background (the file names
+  carry the size, `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read). Until that
+  is done a camera's own folder is read when its recording is asked for (playback, a clip, Keep), nothing is evicted
+  and the cap is weighed against the bytes the state counted (2 % over at most). No state, or one over 10 min old:
+  the index is read first, as before (measured on EFS: ~11-20 s for ~128,000 files). For 5 min after the start it
+  lists the folders again every 30 s, off the recording's thread, taking in what the draining leader wrote after
+  the first look and dropping what it evicted; another writer's temp file (temp names carry the writer's token) is
+  left alone until it is 60 s old;
 - without shared storage nothing changes: local disk, 2 h, the on-demand cameras only.
 
 The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, **Bursting** throughput, no lifecycle,
@@ -2376,7 +2412,26 @@ Merged into the GTFS-realtime trains by **train number and run date**: the posit
 gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
-is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+is good: Amtrak's trains on the New Haven Line (TrainTime's branch `AM`; never in Metro-North's GTFS-realtime), whose
+box says *Amtrak*, not *Metro-North*, and whose next stop and its limit are TrainTime's own.
+
+**SIGNAL locations.** TrainTime's `SIGNAL` location (Amtrak's trains, or a Metro-North train whose GPS is out) is
+where Metro-North's signal system has the train: the block it entered, timed when it entered it, unchanged until it
+enters the next one 1 to 3 km on (a minute or more; minutes at a red signal). It is taken as it is, not filtered (the
+GPS filter drew it halfway between two signals); the same signal again is the train still in that block (its time
+stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
+allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
+just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on at that speed with no "no news" ease, to the end
+of its block (as long as the block it just ran, plus 10 s of its travel for the next fix's lateness; 1.5 km before a
+block is known), never past its next stop, and not braked for the block's end: the next signal's fix normally comes as
+it gets there, and is closed smoothly, never snapped back. Held at a red signal, it is drawn on through the block's end
+by about that slack and a hard stop, then glided back. After 3 min with no new signal it is drawn dimmed, *At signal ·
+4 min ago* (not the feed's *Stale*). A train TrainTime alone has keeps its signal location 10 min from when it first
+had that signal (however often TrainTime re-stamps it; a GPS location: 40 s, as before), so it no longer drops off the
+map 40 s after each signal. A Metro-North train reporting SIGNAL takes the same path while its TrainTime position is
+used (under 40 s old and as new as GTFS-realtime's), which is rare. #589's GPS rules are unchanged; signal fixes add
+nothing to the prediction residuals. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
@@ -3097,7 +3152,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
-| Push | `push.py` | composed from an allow-list of fields, then scrubbed, failing closed |
+| Push | `push.py` | composed from an allow-list of fields; with `push_pii` off, then scrubbed, failing closed |
 | Listen | `listen.py` | a link in the push to the audio around it ([below](#listen-links-and-inference-intel)) |
 | Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
@@ -3175,6 +3230,7 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 |---|---|---|
 | `enabled` | on | the whole pipeline |
 | `push` | on | the kill switch: off, detection goes on, nothing is pushed |
+| `push_pii` | on | "PII": intel pushes skip the PII scrub (admin decision, 2026-11-17: access to the output is limited instead). Off: the scrub withholds a push as before. The INTEL kind only; ntfy topics are readable by anyone who knows the name |
 | `per_hour` / `per_day` / `per_category_hour` | 30 / 200 / 10 | push caps. Over one: the event is kept with suppressed "rate"; a digest (counts only, priority 2) goes every `digest_min` (15) |
 | `repush_min`, `max_repush` | 10, 2 | an escalation (a higher level, a place found or confirmed) pushes again at most this often, this many times |
 | `place_repush_min` | 5 | the place first heard this soon after the first push pushes once more |
@@ -3183,11 +3239,14 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 | `move_min` | 5 | a moving incident pushes its new place at most this often |
 | `quiet_from`, `quiet_to` | none | local "HH:MM": no pushes in between |
 
-**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic, else the
-alerts'): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
+**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
+no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
-high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
-fails the scrub is not sent (suppressed "scrub", logged without the text). It opens
+high). Not among its fields: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With
+`push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
+fails the scrub is not sent (suppressed "scrub", logged without the text). Nothing scrubs what is stored or shown:
+transcripts are kept and shown as heard; only the model's input (`infer.py` `clean_text`) has plates and IDs taken out.
+It opens
 `<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
 `Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
 
