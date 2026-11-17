@@ -8,7 +8,8 @@ Routes are the string literals in the three files that serve them (the server's 
 hub's tables). The route half is a SUBSET check: every pinned route must still be there, so a route removed or renamed
 fails, but a route ADDED passes. Many branches add console routes in parallel; an equality check would fail every
 unrelated pull request and conflict on the fixture. The sample responses are exact (status, headers, body).
-The responses come from a real hub run in this process with an empty database (nothing here is a real incident), the clock-dependent parts normalised.
+The responses come from a real hub run in this process with an empty database (nothing here is a real
+incident), the clock-dependent parts normalised.
 
 The one intended console change of the mobile work (#619) is the last sample: an /api/cad request carrying
 `Authorization: Bearer <fake>` is a 401 in the console's JSON shape (a device token is not for the console). It was
