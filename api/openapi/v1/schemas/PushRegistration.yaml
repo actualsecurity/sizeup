@@ -1,0 +1,28 @@
+type: object
+required: [platform, token]
+additionalProperties: false
+properties:
+  platform: {type: string, enum: [ios, android]}
+  token: {type: string, minLength: 16, maxLength: 1024, description: The APNs device token or the FCM registration token.}
+  environment:
+    type: string
+    enum: [sandbox, production]
+    description: Required for ios (the build's Apple environment); not allowed for android.
+  prefs:
+    type: object
+    additionalProperties: false
+    description: Which kinds this device gets. Missing keys are the defaults (alerts, intel and status on, dispatch off).
+    properties:
+      alerts: {type: boolean}
+      intel: {type: boolean}
+      status: {type: boolean, description: Only admins' devices ever get status.}
+      dispatch: {type: boolean}
+  quiet:
+    type: [object, "null"]
+    additionalProperties: false
+    required: [from, to, tz]
+    description: Quiet hours holding intel and status (never alerts or dispatch), in the device's own zone.
+    properties:
+      from: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}
+      to: {type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"}
+      tz: {type: string, description: An IANA zone name.}

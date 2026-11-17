@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Callable, NamedTuple
 
-from . import API_VERSION
+from . import API_VERSION, push
 
 # The oldest app each platform may run (forced upgrades, #566 enforces it). 0.0.0: nothing is refused yet.
 MIN_APP = {"ios": "0.0.0", "android": "0.0.0"}
@@ -45,6 +45,7 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
+    body: bytes = b""           # a PUT's request body, already read and capped by the server (server.py _other_method)
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -56,4 +57,6 @@ def meta(ctx: Ctx) -> tuple[int, dict]:
 
 ROUTES: list[Route] = [
     Route("GET", "/api/v1/meta", meta, "public"),
+    Route("PUT", "/api/v1/devices/{id}/push", push.put_push, "device", "push", "read"),      # #563
+    Route("DELETE", "/api/v1/devices/{id}/push", push.delete_push, "device", "push", "read"),
 ]

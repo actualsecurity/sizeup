@@ -437,6 +437,49 @@ devices, about 40 calls) on the Notifier thread.
   ([§5](#5-audio-video-and-maps)). The presigned 20-min Listen link stays for ntfy.
 - Device pushes never touch ntfy topics, so the protected-topic machinery is unaffected.
 
+### 4.1 Built in PR 7 (#563)
+
+Off until switched on: the route flag `push` (code-driven, like the others), the master switch, and a per-kind kill switch.
+
+| Piece | Where |
+|---|---|
+| `PUT` / `DELETE /api/v1/devices/{id}/push` | `sizeup/api/v1/push.py`. Needs a signed-in device, flag `push`, role `read`; a device registers only itself (another id: 403). Body `{platform: ios\|android, token, environment: sandbox\|production (ios: required), prefs?, quiet?}`; the token and the SNS endpoint are never answered back |
+| Storage | `push_devices` in `hub.sqlite`, created on the first registration, keyed by device id, no link to the `devices` table. `sizeup.push.service.drop_device(device_id)` is what Revoke calls (removes the SNS endpoint and the row) |
+| SNS client | `sizeup/push/sns.py`: CreatePlatformEndpoint, SetEndpointAttributes, DeleteEndpoint, Publish over `aws.sign` (outbound guard) |
+| Fan-out | `notify.Pushes.fan_out`, called by `KindNotifier.send` beside the unchanged ntfy path; one worker thread, one Publish per endpoint, at most 40 devices |
+| Content | `sizeup/push/content.py`: `notify.compose` plus the intel `scrub()`; talker, dongle, links and the Listen line removed; a message that still fails is replaced by a generic one. Payload `{kind, id, title, body}` only |
+
+Who gets what: alerts, intel, dispatch: every active signed-in person's subscribed device; status: admins. A device's
+`prefs` (alerts, intel, status on by default, **dispatch off**) and `quiet` hours (`{from, to, tz}`) are stored
+server-side; quiet hours hold intel and status, never alerts or dispatch. A person who is deactivated or not an operator
+gets nothing.
+
+Interruption level: `time-sensitive` by default; `critical` plus the `sound` dictionary only for dispatch and an
+emergency alert (priority 5) **and** when `SIZEUP_PUSH_CRITICAL=1` (Apple granted the entitlement). Message attributes
+`AWS.SNS.MOBILE.APNS.PUSH_TYPE=alert`, `...PRIORITY` (10, or 5 for a passive status) and `...TTL=900`. Android: a
+high-priority FCM v1 data message through the SNS `GCM` key. Still **unverified**: that SNS passes these through
+unchanged. Prove it with a real sandbox build before relying on it (see "Could not verify").
+
+Caps and kill switches (the intel `policy` pattern): the settings section `notify`, key `devices`:
+`{"off": true, "<kind>": {"on": false, "per_minute": 10, "per_hour": 60, "per_day": 300}}`. Defaults: alerts 10 / 60 / 300,
+intel 6 / 30 / 200, status 4 / 20 / 100, dispatch 10 / 120 / 600 and **`on: false`** (the department's sign-off and the
+entitlement come first, D3). Over a cap the devices are skipped (ntfy is unaffected) and it is logged once a minute. A
+Settings screen for these is a follow-up: until then the flag, the master switch or unsetting the SNS variables stops them.
+Nothing produces a `dispatch` push yet: the kind, its policy and its payload exist so a later change only has to call
+`Pushes.fan_out("dispatch", ...)`.
+
+**Manual steps (a person, once; nothing in the task definition or SSM changes):**
+
+1. Apple: an APNs key (token-based) for the app's bundle id; Google: a Firebase project with FCM v1 and a service-account key.
+2. In SNS (the hub's region) create three platform applications: APNs sandbox, APNs production, FCM (v1).
+3. In the separate `sizeup-aws` repo, grant the hub's task role `sns:CreatePlatformEndpoint`, `sns:SetEndpointAttributes`,
+   `sns:DeleteEndpoint`, `sns:Publish` on those applications and their endpoints, and `sns:GetEndpointAttributes` if wanted.
+4. Give the task the optional variables (not secrets, not in the repo; unset = that platform refuses with 503):
+   `SIZEUP_SNS_APNS_SANDBOX_ARN`, `SIZEUP_SNS_APNS_ARN`, `SIZEUP_SNS_FCM_ARN`, and `SIZEUP_PUSH_CRITICAL=1` only once Apple
+   grants Critical Alerts. A variable whose ARN is for another platform is ignored (a sandbox ARN can't sit in the production slot).
+5. Not built here: the `GET /api/v1/listen/{event}` deep link. The Listen links are random S3 keys made per event on the
+   `listen` thread and forgotten once past; a fresh URL for an old event needs a lookup there. PR 8 (media) owns it.
+
 ---
 
 ## 5. Audio, video and maps

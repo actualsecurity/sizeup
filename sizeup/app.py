@@ -4832,6 +4832,11 @@ def adapter_password(cfg: Config):
 
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
+    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests, max_streams=cfg.mobile_max_streams)
+    if cfg.cloud_role != "station" and cfg.cad_db:       # device push (#563): nothing sent or written until it is on
+        from sizeup.push.wire import wire as wire_push
+        wire_push(app.pushes, Path(cfg.cad_db).parent, mobile, app.cad.store,
+                  may_write=app.fence.ok if app.fence is not None else None, log=log)
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
@@ -4846,8 +4851,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
                        adapter_password=adapter_password(cfg),
-                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
-                                       max_streams=cfg.mobile_max_streams))
+                       mobile=mobile)
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 

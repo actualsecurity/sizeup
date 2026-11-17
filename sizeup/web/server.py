@@ -136,6 +136,7 @@ from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
 from sizeup.api.v1.handler import V1
+from sizeup.api.v1.push import MAX_BODY as V1_BODY_MAX
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
@@ -519,13 +520,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
-        def _v1(self, path: str, query: str) -> None:
+        def _v1(self, path: str, query: str, body=b"") -> None:
             """/api/v1 (sizeup/api/v1): the hub's. A station has no CAD, so no API for the app: 409 in v1's envelope."""
             if station_ui:
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
             return self._send(*v1.respond(self.command, path, query, self.headers,
-                                          self._client()[0] or self.client_address[0]))
+                                          self._client()[0] or self.client_address[0], body))
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -887,7 +888,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if gate.refuse(write=True):
                 return self._updating()
             if self._admit(url.path):
-                self._v1(url.path, url.query)
+                # a PUT's small body (#563: the push registration): read lazily, after the token is checked, and only when
+                # its length is sane
+                self._v1(url.path, url.query, (lambda: self._body(V1_BODY_MAX) or b"") if self.command == "PUT" else b"")
 
         do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _other_method
 

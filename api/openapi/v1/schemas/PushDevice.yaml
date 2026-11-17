@@ -1,0 +1,21 @@
+type: object
+required: [device, platform, environment, prefs, quiet, updated]
+properties:
+  device: {type: string}
+  platform: {type: string, enum: [ios, android]}
+  environment: {type: [string, "null"], enum: [sandbox, production, null]}
+  prefs:
+    type: object
+    required: [alerts, intel, status, dispatch]
+    properties:
+      alerts: {type: boolean}
+      intel: {type: boolean}
+      status: {type: boolean}
+      dispatch: {type: boolean}
+  quiet:
+    type: [object, "null"]
+    properties:
+      from: {type: string}
+      to: {type: string}
+      tz: {type: string}
+  updated: {type: number, description: Unix seconds.}

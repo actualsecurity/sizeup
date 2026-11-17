@@ -14,6 +14,8 @@ security:
 paths:
   /api/v1/meta:
     $ref: ./paths/meta.yaml
+  /api/v1/devices/{id}/push:
+    $ref: ./paths/devices_push.yaml
 components:
   securitySchemes:
     deviceToken:

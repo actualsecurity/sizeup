@@ -52,11 +52,12 @@ class V1:
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
 
-    def respond(self, method: str, path: str, query: str, headers, peer: str = "") -> tuple[int, bytes, str, dict]:
+    def respond(self, method: str, path: str, query: str, headers, peer: str = "",
+                body=b"") -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
         try:
-            return self._respond(method, path, query, headers, peer)
+            return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
             raise                             # the handover signal: the server answers it as a 503
         except Exception as e:                # a v1 failure is v1's: the class only, never a token, header or body
@@ -66,7 +67,7 @@ class V1:
                 pass
             return error(500, "internal", "something went wrong: try again")
 
-    def _respond(self, method, path, query, headers, peer) -> tuple[int, bytes, str, dict]:
+    def _respond(self, method, path, query, headers, peer, body=b"") -> tuple[int, bytes, str, dict]:
         if len(path) > MAX_PATH:
             return error(414, "uri_too_long", "path too long")
         if not self.switches.enabled() and not (method in ("GET", "HEAD") and path == "/api/v1/meta"):
@@ -81,7 +82,7 @@ class V1:
                 continue
             if not self.switches.allows(route.flag):
                 return self._absent()
-            return self._serve(route, m.groupdict(), query, headers, peer)
+            return self._serve(route, m.groupdict(), query, headers, peer, body)
         if allowed:
             return error(405, "method_not_allowed", f"{method} is not allowed here",
                          headers={"Allow": ", ".join(sorted(set(allowed)))})
@@ -95,7 +96,7 @@ class V1:
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
 
-    def _serve(self, route: Route, params: dict, query: str, headers, peer: str) -> tuple[int, bytes, str, dict]:
+    def _serve(self, route: Route, params: dict, query: str, headers, peer: str, body=b"") -> tuple[int, bytes, str, dict]:
         principal = None
         if route.need == "device":
             principal = self.resolver(headers)
@@ -111,7 +112,9 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
+            if callable(body):                  # the body is read only now: past the token, the limits and the cap
+                body = body()
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), body)
             status, obj = route.handler(ctx)
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:
