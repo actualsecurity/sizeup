@@ -473,6 +473,8 @@ class Cad:
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
+                # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
+                "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
