@@ -62,7 +62,7 @@ class _Cached:
         with self._lock:
             now = self.clock()
             if self._failed is not None and now - self._failed[0] < REBUILD_FLOOR_S:
-                raise self._failed[1]
+                raise type(self._failed[1])(*self._failed[1].args) from None   # a fresh one: no growing traceback
             if self._value is not None and now - self._at < REBUILD_FLOOR_S:
                 return self._value
             if self._value is None or rev != self._rev or now - self._at >= self.max_age:

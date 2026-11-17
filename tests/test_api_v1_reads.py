@@ -73,7 +73,8 @@ def seed(tmp_path, calls=3, clock=None):
         c.clock.t += 5 if hasattr(c.clock, "t") else 0
     # a dispatch starts two workers that commit later (the voice's audio, service._send; the radio log's units
     # backfill, radiolog.units_soon), which moves the CAD's change counter at a time of its own. Here the voice job is
-    # taken and never run and the backfill runs inline, so a test's counts are its own (B3: that was the flake)
+    # taken and never run and the backfill runs inline, so a test's counts are its own. (Those late commits moved the
+    # test's `(rev, total_changes)` check; a second rebuild could only happen before the 1 s rebuild floor.)
     c.voice.put = lambda job: True
     c.radiolog.inline = True
     c.dispatch(ids[0], {"unit_ids": [uid(c, "E60"), uid(c, "L31")], "operator": "Casey <casey@example.org>"})
@@ -424,14 +425,54 @@ def test_the_chronology_sends_text_only_for_kinds_it_knows_and_is_the_callers_ne
     assert event_text("system", "Dispatch #4 transmitted") == ""                       # a kind not listed: no text
     for kind in ("feed", "radio", "prealert", "a-kind-added-later"):
         assert event_text(kind, "anything at all") == ""
-    for kind in ("note", "status", "created", "dispatch", "alarm"):
-        assert kind in EVENT_TEXT_KINDS and event_text(kind, "Engine 60 on scene") == "Engine 60 on scene"
+    for kind in sorted(EVENT_TEXT_KINDS):                                              # every allow-listed kind
+        assert event_text(kind, "Engine 60 on scene") == "Engine 60 on scene", kind
+        for who in ("Casey <casey@example.org>", "casey@example.org"):                  # an operator string in the text
+            said = event_text(kind, f"Engine 60 by {who} at 14:32; all clear from {who} at 14:40")
+            assert "@" not in said and "example.org" not in said, (kind, said)
+            assert said.startswith("Engine 60 by ") and "14:32" in said and "14:40" in said, kind
     assert event_text("note", "Caller info: leaked by hand") == ""
     for line in ("Edited caller: Zed Quill; Ray", "Edited remarks updated; phone: 555-0147",
                  "Edited location: 9 Sample St; caller address: 9 Quillmere Ct; Apt 4"):
         assert event_text("edit", line) == "Edited caller details"
     fine = "Edited type: Structure fire; remarks updated"
     assert event_text("edit", fine) == fine
+
+
+def test_an_operators_email_is_in_no_line_whatever_the_operator_string_was(tmp_path):
+    """alarms.all_clear writes the raw operator into the chronology line, reopened and the ack line strip only a
+    trailing "<...>": a bare email (a person with no name yet) passes through the CAD intact, and never the API."""
+    c, ids = seed(tmp_path, calls=3)
+    c.ids = ids
+    v1 = v1_for(c)
+    for n, op in enumerate(("Casey <casey@example.org>", "casey@example.org")):
+        t = tx(f"FG1-{n}", "Engine 60 mayday", rig="E60", unit="E60 P1", radio_id="6401", at=c.clock() - 1)
+        c.record_traffic(t)
+        a = c.alarms.on_traffic(t)
+        c.alarm_ack(a["id"], {"operator": op})
+        c.alarm_clear(a["id"], {"operator": op})
+        c.close(ids[1 + n], {"operator": op, "disposition": "NO ACTION"})
+        c.reopen(ids[1 + n], {"operator": op})
+        c.clock.t += 2
+    raw = " ".join(e["text"] for i in ids for e in c.store.full(i)["events"])
+    assert "casey@example.org" in raw                                                  # (the CAD does write it)
+    for who in ("val", "jordan", "casey"):
+        text = whole_api(v1, c, who)
+        assert "casey@example.org" not in text and "example.org" not in text, who
+        assert "@" not in text, who          # nothing on the seeded surface can hold one (a named place's " @ " is
+        assert "all clear from" in text and "acknowledged by" in text and "Reopened by" in text    # not seeded here)
+
+
+def test_an_unidentified_talkers_radio_id_is_masked_in_alarms(cad):
+    t = tx("FG1-5", "mayday mayday", rig="", unit="", radio_id="41228", at=cad.clock() - 1)
+    cad.record_traffic(t)
+    a = cad.alarms.on_traffic(t)
+    assert cad.alarms.get(a["id"])["who"] == "radio 41228"                              # (the CAD says it)
+    cad.clock.t += 2
+    v1 = v1_for(cad)
+    row = get(v1, "/api/v1/alarms")[1]["items"][0]
+    assert row["who"] == "an unidentified radio"
+    assert "41228" not in whole_api(v1, cad, "val")
 
 
 def test_a_cache_warmed_by_one_role_never_serves_another_what_it_may_not_see(cad):

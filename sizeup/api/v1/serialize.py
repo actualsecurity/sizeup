@@ -10,9 +10,14 @@ What is NOT sent, however the console shows it:
     that names one;
   - the operators' sign-in emails (a name only), every radio ID, rig and talker beyond a row's own alias, and the
     console's draw hints.
-What IS sent as written, because the people on the call read it: an incident's `remarks`, `type_note`, `place` and
-address, the dispatches' text and the operators' notes and dispatch remarks in the chronology. These are what the
-dispatcher typed or the page said about the call; the CAD does not put the caller's details in them.
+What IS sent as written, because the people on the call read it (every one of these can contain a name, address or phone
+number that a human or a transcript put there; the server does NOT filter them): an incident's `remarks`, `type_note`,
+`place` and address; the dispatches' text; the operators' notes and the dispatch remarks in the chronology; `status`
+events (a unit's radio transcript, "E60 on scene: <said>"); `tones` events (paging-feed lines of up to 2000 characters
+from outside the CAD); an alarm's `text`, `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts);
+a premise note's `text`. The CAD does not write the caller's details into these fields itself, but a human or a
+transcript can. Every free text goes through scrub(): an operator's sign-in email never leaves (a "<email>" is dropped,
+a bare email becomes "an operator") and a bare radio ID in an alarm's words is masked ("an unidentified radio").
 Ids are strings (docs/mobile-api.md section 3.2), times unix seconds."""
 from __future__ import annotations
 
@@ -24,6 +29,17 @@ from .rev import rev_of
 
 EVENT_MAX, DISPATCH_MAX, RADIO_MAX = 300, 50, 100        # a detail's lists are bounded (the CAD keeps 300 events)
 _EMAIL = re.compile(r"\s*<[^<>]*>\s*$")                   # "Casey <casey@example.org>" -> "Casey"
+_ANGLE = re.compile(r"\s*<[^>]*>")
+_BARE_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
+_RADIO_ID = re.compile(r"\bradio \d{3,}\b", re.I)          # alarms.who(): "radio 41228" for a talker with no alias
+
+
+def scrub(text, radio_ids: bool = False) -> str:
+    """A free text with no operator sign-in email in it (the CAD writes "Name <email>", or the bare email of a person
+    with no name, into event lines and alarm words): an angle-bracket part goes, a bare email becomes "an operator".
+    radio_ids: also a bare "radio 41228" (an unidentified talker's ID) becomes "an unidentified radio"."""
+    out = _BARE_EMAIL.sub("an operator", _ANGLE.sub("", str(text or "")))
+    return _RADIO_ID.sub("an unidentified radio", out) if radio_ids else out
 
 
 def name_of(operator) -> str:
@@ -52,9 +68,9 @@ def incident_summary(i: dict) -> dict:
     return {"id": sid(i["id"]), "number": i.get("number"), "status": i.get("status") or "", "type": i.get("type") or "",
             "subtype": i.get("subtype") or "", "emergency": bool(i.get("emergency")),
             "received_via": i.get("received_via") or "", "priority": i.get("priority"),
-            "address": i.get("address") or "", "cross_street": i.get("cross_street") or "",
-            "place": i.get("place") or "", "lat": i.get("lat"), "lon": i.get("lon"),
-            "remarks": i.get("remarks") or "", "disposition": i.get("disposition") or "",
+            "address": scrub(i.get("address")), "cross_street": scrub(i.get("cross_street")),
+            "place": scrub(i.get("place")), "lat": i.get("lat"), "lon": i.get("lon"),
+            "remarks": scrub(i.get("remarks")), "disposition": scrub(i.get("disposition")),
             "source": i.get("source") or "", "created_at": i.get("created_at"), "accepted_at": i.get("accepted_at"),
             "closed_at": i.get("closed_at"), "until_at": i.get("until_at"),
             "units": [_assignment(a) for a in i.get("assignments") or []]}
@@ -70,6 +86,10 @@ _CALLER = re.compile(r"caller|phone", re.I)       # "caller: ", "caller address:
 
 def event_text(kind: str, text: str) -> str:
     """The chronology line as the app may read it (see the module docstring)."""
+    return scrub(_event_text(kind, text), kind == "alarm")
+
+
+def _event_text(kind: str, text: str) -> str:
     if kind == "edit":
         # store.update joins "label: value" with "; ", and a value may hold "; " itself: so a line that touches a caller
         # field is dropped whole, never split
@@ -84,26 +104,26 @@ def _event(e: dict) -> dict:
 
 
 def _dispatch(d: dict) -> dict:
-    return {"id": sid(d.get("id")), "at": d.get("at"), "kind": d.get("kind") or "", "text": d.get("text") or "",
+    return {"id": sid(d.get("id")), "at": d.get("at"), "kind": d.get("kind") or "", "text": scrub(d.get("text")),
             "operator": name_of(d.get("operator")), "unit_ids": [sid(u) for u in d.get("unit_ids") or []]}
 
 
 def _premise(n: dict) -> dict:
     return {"id": sid(n.get("id")), "category": n.get("category") or "", "priority": n.get("priority"),
-            "text": n.get("text") or "", "label": n.get("label") or "", "review_due": bool(n.get("review_due")),
+            "text": scrub(n.get("text")), "label": scrub(n.get("label")), "review_due": bool(n.get("review_due")),
             "expires_at": n.get("expires_at"), "updated_at": n.get("updated_at"), "nearby": bool(n.get("nearby"))}
 
 
 def _preplan(p: dict) -> dict:
     return {"id": sid(p.get("id")), "kind": p.get("kind") or "", "label": p.get("label") or "",
-            "note": p.get("note") or "", "lat": p.get("lat"), "lon": p.get("lon"), "level": p.get("level"),
+            "note": scrub(p.get("note")), "lat": p.get("lat"), "lon": p.get("lon"), "level": p.get("level"),
             "priority": p.get("priority"), "review_due": bool(p.get("review_due")), "nearby": bool(p.get("nearby"))}
 
 
 def radio_row(r: dict) -> dict:
     """A radio-log row on a call: its words and channel, the talker only as its alias says (never the radio ID)."""
     return {"id": str(r.get("id")), "at": r.get("start"), "channel": r.get("channel") or "",
-            "text": r.get("text") or "", "unit": r.get("unit") or "", "emergency": bool(r.get("emergency")),
+            "text": scrub(r.get("text")), "unit": scrub(r.get("unit")), "emergency": bool(r.get("emergency")),
             "has_audio": bool(r.get("has_audio"))}
 
 
@@ -118,7 +138,7 @@ def incident_detail(full: dict, premise: list, preplan: list, radio: list) -> di
     """One incident with its chronology, dispatches and what the person's role may see on its building (no rev yet)."""
     out = incident_summary(full)
     out.update({
-        "type_note": full.get("type_note") or "", "place_address": full.get("place_address") or "",
+        "type_note": scrub(full.get("type_note")), "place_address": scrub(full.get("place_address")),
         "geo_label": full.get("geo_label") or "", "town": full.get("town") or "",
         "aircraft": ({"type": full.get("acft_type") or "", "nature": full.get("acft_nature") or "",
                       "eta_min": full.get("acft_eta"), "runway": full.get("acft_runway") or "",
@@ -146,9 +166,10 @@ def alarm(a: dict, state: str) -> dict:
     """An emergency alarm or notice (no rev yet). `who` is the label the console shows (never a separate radio ID).
     state: open | notice | recent."""
     return {"id": sid(a["id"]), "state": state, "level": a.get("level") or "", "at": a.get("at"),
-            "created_at": a.get("created_at"), "what": a.get("what") or "", "who": a.get("who") or "",
-            "channel": a.get("channel") or "", "text": a.get("text") or "", "emergency": bool(a.get("emergency")),
-            "drill": bool(a.get("drill")), "source": a.get("source") or "", "subject": a.get("subject") or "",
+            "created_at": a.get("created_at"), "what": scrub(a.get("what"), True), "who": scrub(a.get("who"), True),
+            "channel": a.get("channel") or "", "text": scrub(a.get("text"), True),
+            "emergency": bool(a.get("emergency")),
+            "drill": bool(a.get("drill")), "source": a.get("source") or "", "subject": scrub(a.get("subject"), True),
             "incident_id": sid(a.get("incident_id")), "incident_number": a.get("incident_number"),
             "has_clip": bool(a.get("has_clip")), "quiet": bool(a.get("quiet")),
             "ack_by": name_of(a.get("ack_by")), "ack_at": a.get("ack_at"),

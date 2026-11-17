@@ -178,7 +178,9 @@ def test_the_package_never_touches_a_database():
     """No startup database writes: nothing in sizeup/api reads or writes a store."""
     for f in PKG.rglob("*.py"):
         # (the one import of the CAD's own exception class, CadError, is allowed: reads.py answers a missing row)
-        src = f.read_text().replace("from sizeup.cad.store import CadError", "")
+        src = f.read_text()
+        if f.name == "reads.py":      # only reads.py, and only that whole line
+            src = re.sub(r"^from sizeup\.cad\.store import CadError\s*(#.*)?$", "", src, flags=re.M)
         assert not re.search(r"^\s*(import|from)\s+\S*(sqlite3|store|sizeup\.cad)", src, re.M), f
 
 

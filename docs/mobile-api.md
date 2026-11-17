@@ -650,14 +650,27 @@ writes. `/me` is PR 2's.
   and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
 - **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
   category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
-  (a device is a signed-in person). **Never sent:** the caller's name, address and phone (not as fields, and not in the
-  chronology: the "Caller info: ..." line and any "Edited ..." line that names a caller field are dropped whole),
-  operators' sign-in emails (a name only), every radio ID, rig and talker beyond a row's alias. **Chronology text is an
-  allow-list:** only the kinds the CAD words itself or an operator wrote (`serialize.EVENT_TEXT_KINDS`) carry text; every
-  other kind (system, feed, radio, prealert, any kind added later) is sent as kind, time and operator with an empty
-  text. **Sent as written:** an incident's `remarks`, `type_note`, `place`, address, the dispatches' text and the
-  operators' notes. Site documents and the radio log are not served by these routes. The snapshot and the lists are the
-  same for every role; premise, pre-plan and radio are only in an incident's detail.
+  (a device is a signed-in person). **Never sent:** the caller's name, address and phone as fields, nor in the
+  chronology (the "Caller info: ..." line is dropped; an "Edited ..." line that names a caller field is dropped whole,
+  and the match is deliberately broad: any edit line containing "caller" or "phone" becomes "Edited caller details",
+  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (an "<email>" is dropped, a bare
+  email becomes "an operator", in every free text); every radio ID, rig and talker beyond a row's alias (a bare
+  "radio 41228" in an alarm becomes "an unidentified radio"). **Chronology text is an allow-list:** only the kinds in
+  `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
+  kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,
+  `place` and address; the dispatches' text; operators' notes; `status` events (a unit's radio transcript, "E60 on
+  scene: <said>"); `tones` events (paging-feed lines up to 2000 characters from outside the CAD); an alarm's `text`,
+  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`. ANY of these
+  can contain a name, address or phone number that a human or a transcript put there, and the server does not filter
+  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Site
+  documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
+  premise, pre-plan and radio are only in an incident's detail.
+- **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
+  the `rev` key itself excluded; `with_rev` adds it). The stream's `(kind, id, rev)` (PR 5) and the write answers and
+  `If-Match` (PR 6) must reuse `rev_of` and `with_rev` on these same shapes. `epoch` stays null until PR 5.
+- **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
+  read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
+  incident read is uncached.
 - **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
   by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
   remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
