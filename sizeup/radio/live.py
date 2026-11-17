@@ -5,6 +5,8 @@ P25 (county system): trunk-recorder's own log, read line by line as sizeup drain
 
     Starting P25 Recorder ...                       the talkgroup is up (talker not known yet)
     Unit ID set via Control Channel, ext: 41228     a new transmission on the call: radio 41228 keyed
+    Unit ID changed on Voice Channel, ext: 41228    the next radio keyed with no terminator between (the
+                                                    station's patched build, #397): radio 41228 talks now
     New MotoP25_TDMA alias: 41228 (77A4)            radio 41228's alias (first time this run): also the
                                                     talker when the call has none yet
     Concluding Recorded Call / Stopping P25 ...     the call is over
@@ -52,6 +54,9 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\[(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)\]")   # trunk-recorder's (local) time
 LINE = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+(?P<call>\w+)\s+TG:\s*(?P<tg>\d+)\s+Freq:\s*[\d.]+\s*MHz\s+(?P<msg>.*)$")
 UNIT_SET = re.compile(r"Unit ID set via Control Channel, ext: (?P<src>\d+)")
+# The station's trunk-recorder (#397, deploy/station/install-linux.sh tr_patch): the voice channel named a new radio
+# with no terminator between, so it ended the transmission there. A key-up nothing on the control channel named.
+VOICE_SET = re.compile(r"Unit ID changed on Voice Channel, ext: (?P<src>\d+)")
 # 5.2.0 (error level) / later (debug): a grant to another radio while the recorder holds this call's
 # transmission; trunk-recorder caches it for the next transmission. Kept as a grant (call turns only).
 GRANT_SET = re.compile(r"Unit ID externally set from GRANT: (?P<src>\d+)")
@@ -243,6 +248,9 @@ class LiveTalk:
                 if m["src"] not in ("-1", "0"):
                     self._log_grant(system, tg, m["src"], now)
                 return self._talker(call, m["src"], now, "log")
+            if m := VOICE_SET.search(msg):
+                # not a grant: the call JSON already has this key-up as its own srcList entry
+                return self._talker(call, m["src"], now, "voice") if m["src"] not in ("-1", "0") else False
             if m := ALIAS.search(msg):
                 src, alias = m["src"], m["alias"].strip()
                 self.aliases[src] = alias

@@ -23,6 +23,19 @@ are concatenated, gaps left out):
     "freqList": [{"freq": 478187500, "time": 1790000000, "pos": 0.0, "len": 5.84,
                   "error_count": 3, "spike_count": 0}, ...]
 
+Checked against 5.2.0's source (call_concluder.cc create_call_data / create_call_json, gr_blocks/transmission_sink.cc):
+"pos" is the sum of the earlier transmissions' lengths, each from its own sample count, so it is where that transmission
+starts in the call WAV (ffmpeg concatenates the transmissions' WAVs; the loudnorm 5.2.0 applies by default changes the
+level, never the length, though a short call comes out at 192 kHz: read_wav_16k resamples). sizeup cuts the WAV at
+"pos" as it is: nothing is trimmed or re-encoded first.
+
+A transmission ends on a terminator only: Phase 1's TDU, or on Phase 2 (TDMA) MAC_HANGTIME (5.2.0 leaves MAC_END_PTT
+alone). When the terminator isn't decoded and the next radio keys up on the same voice channel, stock 5.2.0 keeps
+writing the same transmission and the new radio ID only replaces the old one: one srcList entry, credited to the later
+radio. The station's build is patched (#397, deploy/station/install-linux.sh tr_patch) to end the transmission where
+the new ID came in, so each talker is its own srcList entry at its own "pos". Without the patch (a bench's own
+trunk-recorder), apply_grants() below still cuts such a transmission where a live grant names the next radio.
+
 "src" is -1 when no radio ID was decoded for that transmission ("time" is whole seconds). Each
 entry is its own Turn: the same radio keying twice is two turns, and an entry with no ID is a turn
 of an unknown talker, never folded into the previous one. Where the live grants (radio/live.py,

@@ -40,6 +40,81 @@ RTLSDR_COMMIT="240bd0e1e6d9f64361b6949047468958cd08aa31"
 TR_REPO="https://github.com/TrunkRecorder/trunk-recorder.git"
 TR_TAG="v5.2.0"
 TR_COMMIT="7f9e21ecfa445e568371cef3153a07887c36b380"
+# ... with one change of ours (#397), applied to the pinned source before the build. 5.2.0 ends a transmission only on a
+# terminator: P25 Phase 1's TDU, or on Phase 2 MAC_HANGTIME (MAC_END_PTT doesn't end one). When that isn't decoded and
+# the next radio keys up on the same voice channel, the new radio's ID only replaces the transmission's (all of it is
+# then the later radio's, one srcList entry). Patched, the transmission ends where the new ID came in, so the call
+# JSON lists each talker at its own pos and logs "Unit ID changed on Voice Channel, ext: <id>" (sizeup/radio/live.py).
+# The build's name and its .sizeup-build carry the patch's hash: a change to it is a new build (an older release keeps
+# the one it ran with), made from the same source tree (only the patched file is compiled again).
+tr_patch() {
+  cat <<'PATCH'
+diff --git a/trunk-recorder/gr_blocks/transmission_sink.cc b/trunk-recorder/gr_blocks/transmission_sink.cc
+index 4e8c2ba..a677b79 100644
+--- a/trunk-recorder/gr_blocks/transmission_sink.cc
++++ b/trunk-recorder/gr_blocks/transmission_sink.cc
+@@ -401,6 +401,11 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+   // get_tags_in_range(tags, 0, nitems_read(0), nitems_read(0) + noutput_items);
+   get_tags_in_window(tags, 0, 0, noutput_items);
+   unsigned pos = 0;
++  // sizeup: a new talker on a trunked call's voice channel with no terminator between (a lost Phase 1 TDU; on
++  // Phase 2 only MAC_HANGTIME ends a transmission) ends the transmission where the new radio's ID came in, so
++  // the call JSON lists that radio in srcList at its own pos instead of crediting all of it to the last radio.
++  int split_at = -1;
++  long split_src = -1;
+   // long curr_src_id = 0;
+ 
+   for (unsigned int i = 0; i < tags.size(); i++) {
+@@ -456,7 +461,13 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+ 
+         curr_src_id = src_id;
+       } else if (src_id != curr_src_id) {
+-        if (state == RECORDING) {
++        if ((state == RECORDING) && !d_conventional && (d_sample_count > 0) && !d_termination_flag) {
++          if (split_at < 0) {
++            split_at = (int)(tags[i].offset - nitems_read(0));
++            BOOST_LOG_TRIVIAL(info) << loghdr << "Unit ID changed on Voice Channel, ext: " << src_id << "\tprevious: " << curr_src_id << "\t samples: " << d_sample_count;
++          }
++          split_src = src_id;
++        } else if (state == RECORDING) {
+ 
+           // BOOST_LOG_TRIVIAL(info) << "ENDING TRANSMISSION from TAGS Voice Channel mismatch source id - current: "<< curr_src_id << " new: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
+           /*
+@@ -502,6 +513,31 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+   }
+   tags.clear();
+ 
++  // sizeup: the samples before the new talker's ID are the earlier talker's; the rest start a new transmission.
++  if (split_at >= 0) {
++    int before = (split_at < noutput_items) ? split_at : noutput_items;
++    int n_in_chans = input_items.size();
++    if (d_fp) {
++      for (int k = 0; k < before; k++) {
++        for (int chan = 0; chan < d_nchans; chan++) {
++          short int sample = (chan < n_in_chans) ? ((const int16_t *)input_items[chan])[k] : 0;
++          wav_write_sample(d_fp, sample, d_bytes_per_sample);
++          d_sample_count++;
++        }
++      }
++    }
++    end_transmission();
++    curr_src_id = split_src;
++    if (before > 0) {
++      gr_vector_const_void_star rest(input_items.size());
++      for (unsigned int chan = 0; chan < input_items.size(); chan++) {
++        rest[chan] = (const void *)(((const int16_t *)input_items[chan]) + before);
++      }
++      dowork(noutput_items - before, rest, output_items);
++      return noutput_items;
++    }
++  }
++
+   // if the System for this call is in Transmission Mode, and we have a recording and we got a flag that a Transmission ended...
+   int nwritten = dowork(noutput_items, input_items, output_items);
+ 
+PATCH
+}
+TR_PATCH_ID=$(tr_patch | sha256sum | cut -c1-8)
 # whisper.cpp: whisper-server, the same release the Mac station runs
 WHISPER_REPO="https://github.com/ggml-org/whisper.cpp.git"
 WHISPER_TAG="v1.9.4"
@@ -75,7 +150,8 @@ MODELS=$OPT/models
 LEGACY_APP=$OPT/app                # before #58: a git checkout run in place (and its venv)
 LEGACY_VENV=$OPT/venv
 RTLSDR_B="$BUILDS/rtl-sdr-blog-$RTLSDR_TAG-${RTLSDR_COMMIT:0:12}"
-TR_B="$BUILDS/trunk-recorder-$TR_TAG-${TR_COMMIT:0:12}"
+TR_PLAIN_B="$BUILDS/trunk-recorder-$TR_TAG-${TR_COMMIT:0:12}"   # (before #397: unpatched)
+TR_B="$TR_PLAIN_B-p$TR_PATCH_ID"
 WHISPER_B="$BUILDS/whisper.cpp-$WHISPER_TAG-${WHISPER_COMMIT:0:12}-native"
 READSB_B="$BUILDS/readsb-$READSB_TAG-${READSB_COMMIT:0:12}"
 STATE=/var/lib/sizeup
@@ -542,7 +618,7 @@ adopt_legacy() {
 builds() {
   local want src lib pair
   adopt_legacy "$OPT/rtl-sdr" "rtl-sdr-blog $RTLSDR_TAG $RTLSDR_COMMIT" "$RTLSDR_B"
-  adopt_legacy "$OPT/trunk-recorder" "trunk-recorder $TR_TAG $TR_COMMIT" "$TR_B"
+  adopt_legacy "$OPT/trunk-recorder" "trunk-recorder $TR_TAG $TR_COMMIT" "$TR_PLAIN_B"
   adopt_legacy "$OPT/whisper" "whisper.cpp $WHISPER_TAG $WHISPER_COMMIT native" "$WHISPER_B"
 
   step "rtl-sdr-blog $RTLSDR_TAG"
@@ -567,11 +643,13 @@ builds() {
   fi
 
   step "trunk-recorder $TR_TAG"
-  want="trunk-recorder $TR_TAG $TR_COMMIT"
+  want="trunk-recorder $TR_TAG $TR_COMMIT patch $TR_PATCH_ID"
   if up_to_date "$TR_B/bin/trunk-recorder" "$TR_B/.sizeup-build" "$want"; then
     say "trunk-recorder: up to date"
   else
     src=$(fetch_source trunk-recorder "$TR_REPO" "$TR_TAG" "$TR_COMMIT")
+    tr_patch | git -C "$src" apply - || die "trunk-recorder: our patch (#397) doesn't apply to $TR_TAG"
+    say "trunk-recorder: patched (#397: a new talker on the voice channel ends the transmission)"
     cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$TR_B"
     cmake --build "$src/build" -j "$JOBS"
     rm -rf "$TR_B"
