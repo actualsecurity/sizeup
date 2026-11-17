@@ -1,0 +1,384 @@
+{
+ "why": "Expiry is lazy: an open pre-alert unanswered for MORE than expire_s (1800 s from its last addition) stays open in the table until something runs tick(): the console's read, or the next raise. A read exactly at 1800 s keeps it.",
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 0,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "we just got lasered on a two mile final, green laser from the ground"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 0.0,
+     "updated_at": 0.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 0.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered on a two mile final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 0.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: laser strike (laser strike) (alert low 55%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: laser strike (laser strike)",
+     "message": "“We just got lasered on a two mile final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 1800
+   },
+   "console": {
+    "read": "open",
+    "open": [
+     "A1"
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "wait",
+    "t": 1801
+   }
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 1801
+   },
+   "console": {
+    "read": "open",
+    "open": []
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 0.0,
+     "updated_at": 0.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "expired",
+     "outcome_at": 1801.0,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 0.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered on a two mile final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 1801.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:00 expired (unanswered 30 min): HPN ATC: laser strike (laser strike)",
+     "operator": ""
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1900,
+    "id": "twr-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "we just got lasered again on short final, green laser from the ground"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 1900.0,
+     "updated_at": 1900.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-2",
+        "at": 1900.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered again on short final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 1900.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: laser strike (laser strike) (alert low 55%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: laser strike (laser strike)",
+     "message": "“We just got lasered again on short final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "wait",
+    "t": 3701
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 3702,
+    "id": "twr-3",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "tower, we went off the runway, we are in the grass at taxiway alfa"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 1900.0,
+     "updated_at": 1900.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "expired",
+     "outcome_at": 3702.0,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-2",
+        "at": 1900.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered again on short final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    },
+    {
+     "id": "A3",
+     "source": "atc",
+     "kind": "runway",
+     "subject": "runway",
+     "group": "HPN Tower",
+     "at": 3702.0,
+     "updated_at": 3702.0,
+     "title": "HPN ATC: disabled aircraft / runway (aircraft off the runway)",
+     "detail": "disabled aircraft / runway · heard: went off the runway · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-3",
+        "at": 3702.0,
+        "channel": "HPN Tower",
+        "text": "Tower, we went off the runway, we are in the grass at taxiway alfa",
+        "hits": [
+         "went off the runway"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "runway"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "DISABLED"
+      },
+      "rank": 1,
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 3702.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:31:40 expired (unanswered 30 min): HPN ATC: laser strike (laser strike)",
+     "operator": ""
+    },
+    {
+     "incident": null,
+     "at": 3702.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: disabled aircraft / runway (aircraft off the runway) (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: disabled aircraft / runway (aircraft off the runway)",
+     "message": "“Tower, we went off the runway, we are in the grass at taxiway alfa” · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  }
+ ]
+}

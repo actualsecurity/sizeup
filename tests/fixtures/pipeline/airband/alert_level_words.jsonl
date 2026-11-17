@@ -1,0 +1,5 @@
+{"do": "scenario", "t0": "day", "why": "Alert levels said in words (as speech-to-text may write them): 'alert level two' with the airport in it raises the alert and its incident, 'alert level three' upgrades, 'alert level one' downgrades (the incident stays). The same words on a talkgroup that isn't a fire one are never heard by the watch."}
+{"do": "radio", "t": 0, "id": "ops-1", "tg": 999, "ch": "County Ops 9", "text": "60 Control, car 9901, declaring an alert level 2 for a Citation at the airport, runway 34"}
+{"do": "radio", "t": 30, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, declaring an alert level two at the airport for a King Air, runway one six"}
+{"do": "radio", "t": 150, "id": "fire-2", "tg": 307, "text": "60 Control, car 9901, upgrade to an alert level three, the King Air is reporting smoke"}
+{"do": "radio", "t": 400, "id": "fire-3", "tg": 307, "text": "60 Control, car 9901, downgrade to an alert level one, smoke is cleared"}

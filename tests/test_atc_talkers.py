@@ -227,6 +227,95 @@ def test_the_time_window_and_matching_again_as_adsb_comes_in():
     assert json.loads(cad.store.one("SELECT data FROM atc_talkers WHERE traffic_id = 'HPNTower-2'")["data"])["addressed"]["status"] == "heard"
 
 
+# -- a callsign run into "N mile final": speech-to-text lost the distance --------------------------------------------------
+# Invented callsigns only: XYZ1234 ("Xyzair"), a traffic call on final said twice.
+
+XIX = atc.TelephonyIndex([("XYZ", "Xyzair")])
+XYZ = plane("c0a001", "XYZ1234", "N1234X", "CRJ9", "arriving", 4.0)
+
+
+def heard_as(text, ix=XIX):
+    return [(m.text, m.end) for m in atc.find_mentions(T.clauses(text), ix)]
+
+
+@pytest.mark.parametrize("text, callsign", [
+    ("Westchester traffic XYZ1234 is 4 mile final. Runway 34 Westchester.", "XYZ1234"),
+    ("Westchester traffic XYZ1234 mile final for runway 34 Westchester.", "XYZ1234"),   # "2" lost: not XYZ1 at 234
+    ("Westchester traffic XYZ1234 miles out for runway 34.", "XYZ1234"),
+    ("Xyzair 1234 mile final", "XYZ1234"),                     # the spoken digits written (atc_normalize): not 1234 miles
+    ("Xyzair one two three four mile final", "XYZ1234"),
+    # a distance said: the callsign stops before it
+    ("XYZ1234 3 mile final", "XYZ1234"),
+    ("XYZ1234 two mile final", "XYZ1234"),
+    ("XYZ1234, 5 miles out", "XYZ1234"),
+    ("Xyzair one two three four, two mile final", "XYZ1234"),
+    ("XYZ1234 5 miles south", "XYZ1234"),
+])
+def test_a_callsign_before_mile_final_keeps_its_digits(text, callsign):
+    assert [m[0] for m in heard_as(text)] == [callsign]
+
+
+def test_a_distance_said_after_the_callsign_is_still_a_distance():
+    for text, said, dist in (("XYZ1234 3 mile final", "3", 3), ("XYZ1234 two mile final", "two", 2),
+                             ("XYZ1234, 5 miles out", "5", 5)):
+        words = atc.words_of(T.clauses(text))
+        assert [words[k] for k in sorted(atc.number_words(words)[0])] == [said]   # the distance, none of the callsign
+        assert atc.where(atc.normalize(text)).dist_nm == dist          # the pre-alert's location words: unchanged
+
+
+def test_no_distance_on_final_is_over_twenty_miles():
+    def dist(text):
+        words = atc.words_of(text)
+        return [words[k] for k in sorted(atc.number_words(words)[0])]
+    assert dist("1234 mile final") == [] and dist("34 miles out") == [] and dist("2 1 miles on final") == ["1"]
+    assert dist("20 miles out") == ["20"] and dist("1 8 mile final") == ["1", "8"] and dist("twelve mile final") == ["twelve"]
+    assert dist("traffic 1 2 3 miles south") == ["1", "2", "3"]       # not on final: as before
+
+
+def test_the_reading_an_aircraft_has_wins_else_the_whole_callsign():
+    m, = atc.find_mentions("XYZ123 4 mile final", XIX)              # XYZ1234 heard whole, or XYZ123 at 4 miles
+    assert (m.text, [a[0] for a in m.alts]) == ("XYZ1234", ["123"])
+    assert atc.reading(m, []).text == "XYZ1234"                       # nothing around: the longest
+    other = plane("e12301", "XYZ123", phase="arriving")
+    assert atc.reading(m, [other]).text == "XYZ123"                    # the one on ADS-B
+    assert atc.reading(m, [other, XYZ]).text == "XYZ1234"             # both: the longest
+    assert atc.reading(m, [], known=["XYZ123"]).text == "XYZ123"     # just matched on the channel
+    assert atc.attribute("XYZ123 4 mile final", XIX, [other]).callsign == "XYZ123"
+    r = rec_x("Westchester traffic XYZ123 4 mile final", [other])
+    assert (r["aircraft"]["callsign"], r["aircraft"]["status"]) == ("XYZ123", "confirmed")
+
+
+def rec_x(text, planes=(), before=()):
+    return T.analyze(T.Tx("t1", CH, T0, T0 + 3, text), XIX, list(planes), list(before))
+
+
+@pytest.mark.parametrize("text", [
+    "Westchester traffic XYZ1234 is 4 mile final. Runway 34 Westchester.",
+    "Westchester traffic XYZ1234 mile final for runway 34 Westchester.",
+])
+def test_the_traffic_call_on_final_names_the_aircraft_on_adsb(text):
+    a = rec_x(text, [XYZ, EJA])["aircraft"]
+    assert (a["callsign"], a["status"], a["hex"], a["type"]) == ("XYZ1234", "confirmed", "c0a001", "CRJ9")
+
+
+def test_the_same_call_74_s_later_with_the_distance_lost_is_the_same_aircraft():
+    """As live: "... is 4 mile final" matched; 74 s later "... mile final" (its "2" lost) was heard as XYZ1."""
+    clock = [T0]
+    cad = Cad(Settings(airband=(CH,)), log=lambda m: None, clock=lambda: clock[0])
+    tk = cad.atc_talkers
+    tk.observe([XYZ, EJA], T0)
+    first = tk.heard({"id": "HPNTower-1", "source": CH, "start": T0, "end": T0 + 4,
+                      "text": "Westchester traffic XYZ1234 is 4 mile final. Runway 34 Westchester."})
+    clock[0] = T0 + 74
+    tk.observe([dict(XYZ, dist=2.0), EJA], clock[0])
+    second = tk.heard({"id": "HPNTower-2", "source": CH, "start": T0 + 74, "end": T0 + 78,
+                       "text": "Westchester traffic XYZ1234 mile final for runway 34 Westchester."})
+    for r in (first, second):
+        assert (r["aircraft"]["callsign"], r["aircraft"]["hex"], r["aircraft"]["type"]) == ("XYZ1234", "c0a001", "CRJ9")
+        assert r["aircraft"]["status"] in ("confirmed", "probable")
+    assert "XYZ1234" in T.describe(second)
+
+
 # -- exchanges -------------------------------------------------------------------------------------------------------------
 
 

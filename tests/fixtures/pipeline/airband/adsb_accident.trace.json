@@ -1,0 +1,364 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 5,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N123AB, we lost contact with the aircraft that was ahead of us",
+     "hits": [
+      [
+       "lost-contact",
+       "lost contact with"
+      ]
+     ],
+     "score": 0.45,
+     "adsb": null,
+     "context": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 20
+   }
+  },
+  {
+   "step": {
+    "do": "retext",
+    "t": 21,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N123AB, we lost contact with the aircraft that was ahead of us",
+     "hits": [
+      [
+       "lost-contact",
+       "lost contact with"
+      ]
+     ],
+     "score": 0.135,
+     "adsb": [
+      "normal",
+      "ADS-B: flying normally after (2,500 ft, 120 kt)"
+     ],
+     "context": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": null
+    }
+   ],
+   "log": [
+    "atc: atc: twr-1: held back (ADS-B: flying normally after (2,500 ft, 120 kt)): lost contact with"
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 300
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 305,
+    "id": "twr-2"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-2",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N123AB, aircraft down off the end of runway 34",
+     "hits": [
+      [
+       "crash",
+       "aircraft down"
+      ]
+     ],
+     "score": 0.5,
+     "adsb": [
+      "normal",
+      "ADS-B: flying normally after (2,500 ft, 120 kt)"
+     ],
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "accident",
+      "subject": "acft:N123AB",
+      "group": "HPN Tower",
+      "title": "HPN ATC: possible aircraft accident (possible crash): N123AB, runway 34",
+      "confidence": 0.5,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N123AB",
+        "a0b1c2",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-2",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-2",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: possible aircraft accident (possible crash): N123AB, runway 34 (0.50)"
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 600
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 605,
+    "id": "twr-3"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-3",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N456CD, we lost contact with our number two engine and descending",
+     "hits": [
+      [
+       "lost-contact",
+       "lost contact with"
+      ]
+     ],
+     "score": 0.67,
+     "adsb": [
+      "worse",
+      "ADS-B: squawk 7700"
+     ],
+     "context": [],
+     "row": "A2"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "accident",
+      "subject": "acft:N456CD",
+      "group": "HPN Tower",
+      "title": "HPN ATC: possible aircraft accident (contact lost): N456CD",
+      "confidence": 0.67,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N456CD",
+        "b0b0b0",
+        1.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-3",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "hex": "b0b0b0",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "hex": "b0b0b0",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": "b0b0b0"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-3",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: possible aircraft accident (contact lost): N456CD (0.67)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 900,
+    "id": "twr-4"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-4",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N456CD, we lost contact with the aircraft behind us",
+     "hits": [
+      [
+       "lost-contact",
+       "lost contact with"
+      ]
+     ],
+     "score": 0.45,
+     "adsb": null,
+     "context": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-4",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-4",
+     "row": null
+    }
+   ]
+  }
+ ]
+}

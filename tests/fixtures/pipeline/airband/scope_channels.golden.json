@@ -1,0 +1,669 @@
+{
+ "why": "Who can be on a frequency (atc_scope): the approach channel matches the wider set out to 40 NM (and widens the picture), Ground only aircraft on the surface, the tower its area; an aircraft out of a channel's scope is heard, not matched.",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "a1b2c3",
+      "flight": "JBU1234",
+      "reg": "N123JB",
+      "type": "A320",
+      "lat": 41.05,
+      "lon": -73.69,
+      "alt": 1800,
+      "gs": 160,
+      "trk": 150,
+      "vr": 1500,
+      "phase": "departing",
+      "rwy": "16",
+      "dist": 1.2,
+      "age": 1.0
+     },
+     {
+      "hex": "0dd0dd",
+      "flight": "EJA521",
+      "reg": "N521QS",
+      "type": "C68A",
+      "lat": 41.068,
+      "lon": -73.709,
+      "alt": "ground",
+      "gs": 0,
+      "trk": 0,
+      "phase": "ground",
+      "dist": 0.4,
+      "age": 1.0
+     }
+    ],
+    "wide": [
+     {
+      "hex": "dd0045",
+      "flight": "DAL45",
+      "type": "B712",
+      "lat": 41.45,
+      "lon": -73.55,
+      "alt": 9000,
+      "gs": 280,
+      "trk": 200,
+      "vr": -1200,
+      "phase": "inbound",
+      "dist": 30.0,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 5,
+    "id": "app-1",
+    "ch": "NY App 126.4/120.8",
+    "dur": 4,
+    "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:DAL45",
+     "group": "NY App 126.4/120.8",
+     "at": 5.0,
+     "updated_at": 5.0,
+     "title": "HPN ATC: emergency declared: DAL45",
+     "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
+     "confidence": 0.99,
+     "channel": "NY App 126.4/120.8",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-1",
+        "at": 5.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin",
+        "hits": [
+         "smoke in the cabin",
+         "declaring an emergency"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "DAL45",
+        "hex": "dd0045",
+        "spoken": "DAL45",
+        "match": 1.0,
+        "type": "B712",
+        "lat": 41.45,
+        "lon": -73.55,
+        "alt": 9000,
+        "gs": 280,
+        "trk": 200,
+        "phase": "inbound",
+        "dist": 30.0,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "DAL45 · B712"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "smoke · emergency"
+       ],
+       [
+        "Track",
+        "9,000 ft · 30.0 NM · inbound"
+       ]
+      ]
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 5.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: emergency declared: DAL45 (alert high 99%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: emergency declared: DAL45",
+     "message": "“New York approach, Delta forty five, declaring an emergency, smoke in the cabin” · DAL45 (B712) · 30.0 NM from HPN · 9,000 ft · inbound · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "aircraft_widened_nm": [
+    40.0
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 200,
+    "planes": [
+     {
+      "hex": "a1b2c3",
+      "flight": "JBU1234",
+      "reg": "N123JB",
+      "type": "A320",
+      "lat": 41.05,
+      "lon": -73.69,
+      "alt": 1800,
+      "gs": 160,
+      "trk": 150,
+      "vr": 1500,
+      "phase": "departing",
+      "rwy": "16",
+      "dist": 1.2,
+      "age": 1.0
+     },
+     {
+      "hex": "0dd0dd",
+      "flight": "EJA521",
+      "reg": "N521QS",
+      "type": "C68A",
+      "lat": 41.068,
+      "lon": -73.709,
+      "alt": "ground",
+      "gs": 0,
+      "trk": 0,
+      "phase": "ground",
+      "dist": 0.4,
+      "age": 1.0
+     }
+    ],
+    "wide": [
+     {
+      "hex": "dd0045",
+      "flight": "DAL45",
+      "type": "B712",
+      "lat": 41.45,
+      "lon": -73.55,
+      "alt": 9000,
+      "gs": 280,
+      "trk": 200,
+      "vr": -1200,
+      "phase": "inbound",
+      "dist": 30.0,
+      "age": 1.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:DAL45",
+     "group": "NY App 126.4/120.8",
+     "at": 5.0,
+     "updated_at": 200.0,
+     "title": "HPN ATC: emergency declared: DAL45",
+     "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
+     "confidence": 0.99,
+     "channel": "NY App 126.4/120.8",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-1",
+        "at": 5.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin",
+        "hits": [
+         "smoke in the cabin",
+         "declaring an emergency"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "DAL45",
+        "hex": "dd0045",
+        "spoken": "DAL45",
+        "match": 1.0,
+        "type": "B712",
+        "lat": 41.45,
+        "lon": -73.55,
+        "alt": 9000,
+        "gs": 280,
+        "trk": 200,
+        "phase": "inbound",
+        "dist": 30.0,
+        "pos_at": 199.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "DAL45 · B712"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "smoke · emergency"
+       ],
+       [
+        "Track",
+        "9,000 ft · 30.0 NM · inbound"
+       ],
+       [
+        "Where",
+        "NY App 126.4/120.8"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 205,
+    "id": "gnd-1",
+    "ch": "HPN Ground",
+    "dur": 4,
+    "text": "Westchester ground, Execjet five twenty one, we have smoke in the cabin, request the equipment"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "fire_acft",
+     "subject": "fire",
+     "group": "HPN Ground",
+     "at": 205.0,
+     "updated_at": 205.0,
+     "title": "HPN ATC: smoke on board reported by EJA521",
+     "detail": "fire or smoke on an aircraft · heard: smoke in the cabin · HPN Ground",
+     "confidence": 0.85,
+     "channel": "HPN Ground",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "gnd-1",
+        "at": 205.0,
+        "channel": "HPN Ground",
+        "text": "Westchester Ground, Execjet five twenty one, we have smoke in the cabin, request the equipment",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "EJA521",
+        "hex": "0dd0dd",
+        "spoken": "EJA521",
+        "match": 1.0,
+        "type": "C68A",
+        "reg": "N521QS",
+        "lat": 41.068,
+        "lon": -73.709,
+        "alt": "ground",
+        "gs": 0,
+        "trk": 0,
+        "phase": "ground",
+        "dist": 0.4,
+        "pos_at": 199.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ACFT-FIRE"
+      },
+      "rank": 2,
+      "pushed": 0.85
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 205.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: smoke on board reported by EJA521 (alert high 85%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: smoke on board reported by EJA521",
+     "message": "“Westchester Ground, Execjet five twenty one, we have smoke in the cabin, request the equipment” · EJA521 (C68A) · 0.4 NM from HPN · GND · ground · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 400,
+    "planes": [
+     {
+      "hex": "a1b2c3",
+      "flight": "JBU1234",
+      "reg": "N123JB",
+      "type": "A320",
+      "lat": 41.05,
+      "lon": -73.69,
+      "alt": 1800,
+      "gs": 160,
+      "trk": 150,
+      "vr": 1500,
+      "phase": "departing",
+      "rwy": "16",
+      "dist": 1.2,
+      "age": 1.0
+     },
+     {
+      "hex": "0dd0dd",
+      "flight": "EJA521",
+      "reg": "N521QS",
+      "type": "C68A",
+      "lat": 41.068,
+      "lon": -73.709,
+      "alt": "ground",
+      "gs": 0,
+      "trk": 0,
+      "phase": "ground",
+      "dist": 0.4,
+      "age": 1.0
+     }
+    ],
+    "wide": [
+     {
+      "hex": "dd0045",
+      "flight": "DAL45",
+      "type": "B712",
+      "lat": 41.45,
+      "lon": -73.55,
+      "alt": 9000,
+      "gs": 280,
+      "trk": 200,
+      "vr": -1200,
+      "phase": "inbound",
+      "dist": 30.0,
+      "age": 1.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:DAL45",
+     "group": "NY App 126.4/120.8",
+     "at": 5.0,
+     "updated_at": 400.0,
+     "title": "HPN ATC: emergency declared: DAL45",
+     "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
+     "confidence": 0.99,
+     "channel": "NY App 126.4/120.8",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-1",
+        "at": 5.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin",
+        "hits": [
+         "smoke in the cabin",
+         "declaring an emergency"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "DAL45",
+        "hex": "dd0045",
+        "spoken": "DAL45",
+        "match": 1.0,
+        "type": "B712",
+        "lat": 41.45,
+        "lon": -73.55,
+        "alt": 9000,
+        "gs": 280,
+        "trk": 200,
+        "phase": "inbound",
+        "dist": 30.0,
+        "pos_at": 399.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "DAL45 · B712"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "smoke · emergency"
+       ],
+       [
+        "Track",
+        "9,000 ft · 30.0 NM · inbound"
+       ],
+       [
+        "Where",
+        "NY App 126.4/120.8"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 405,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, Delta forty five, declaring an emergency, smoke in the cabin"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:DAL45",
+     "group": "NY App 126.4/120.8",
+     "at": 5.0,
+     "updated_at": 405.0,
+     "title": "HPN ATC: emergency declared: DAL45",
+     "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
+     "confidence": 0.99,
+     "channel": "NY App 126.4/120.8",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-1",
+        "at": 5.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin",
+        "hits": [
+         "smoke in the cabin",
+         "declaring an emergency"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-1",
+        "at": 405.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, Delta forty five, declaring an emergency, smoke in the cabin",
+        "hits": [
+         "smoke in the cabin",
+         "declaring an emergency"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "DAL45",
+        "hex": null,
+        "spoken": "DAL45",
+        "match": 0.0
+       },
+       {
+        "callsign": "DAL45",
+        "hex": "dd0045",
+        "spoken": "DAL45",
+        "match": 1.0,
+        "type": "B712",
+        "lat": 41.45,
+        "lon": -73.55,
+        "alt": 9000,
+        "gs": 280,
+        "trk": 200,
+        "phase": "inbound",
+        "dist": 30.0,
+        "pos_at": 399.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "DAL45 · B712"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "smoke · emergency"
+       ],
+       [
+        "Track",
+        "9,000 ft · 30.0 NM · inbound"
+       ],
+       [
+        "Where",
+        "back on HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}
