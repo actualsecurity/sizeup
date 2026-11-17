@@ -105,6 +105,7 @@ from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
 from sizeup.cloud import cwlogs
 from sizeup.cloud import health as health_mod
+from sizeup.fence import FencedWrite
 from sizeup.geo.localaddr import parse_number, split_address
 from sizeup.geo.places import norm_tokens
 from sizeup.radio.tones import pair_key
@@ -2901,7 +2902,8 @@ class Editor:
     # last_seen / last_ip / last_ua (sizeup/cad/activity.py) are left out: where someone was is their
     # activity, an admin's to see (GET /api/cad/activity), not every reader of the Settings page's.
     OPERATOR_COLUMNS = "id, name, role, active, created_at, updated_at, email, callsign"
-    on_deactivate = staticmethod(lambda email: None)    # fn(email): the app's device sign-in revokes their devices (#558)
+    # fn(email): the app's device sign-in revokes the devices of an email that stopped being an active sign-in (#558)
+    on_deactivate = staticmethod(lambda email: None)
 
     def operators(self) -> list[dict]:
         rows = self.store.q(f"SELECT {self.OPERATOR_COLUMNS} FROM operators ORDER BY active DESC, name COLLATE NOCASE")
@@ -3059,7 +3061,12 @@ class Editor:
                        (new["name"], new["role"], int(new["active"]), new["email"], new["callsign"], now, oid))
             self._audit(db, now, op, "users", cur["name"], {k: a for k, (a, _) in diff.items()}, {k: b for k, (_, b) in diff.items()})
         if cur["email"] and ("active" in diff and not new["active"] or "email" in diff):
-            self.on_deactivate(cur["email"])         # deactivated, or the sign-in email changed: devices of the old one go
+            try:                    # deactivated, or the sign-in email changed: the old one's devices go
+                self.on_deactivate(cur["email"])
+            except FencedWrite:
+                raise
+            except Exception as e:  # noqa: BLE001 - the edit is saved; the resolver revokes them on their next call
+                self.cad.log(f"CAD: users: the app's devices of {cur['email']} not revoked now ({type(e).__name__})")
         return self._operator(oid)
 
     def _operator(self, oid: int) -> dict:

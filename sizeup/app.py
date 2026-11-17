@@ -4833,7 +4833,8 @@ def adapter_password(cfg: Config):
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
     access = access_verifier(cfg)
-    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests, max_streams=cfg.mobile_max_streams)
+    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                      max_streams=cfg.mobile_max_streams)
     from sizeup.api.v1.wire import make_auth     # the app's sign-in (#558): built only when [mobile] is on with a key
     mobile_auth = make_auth(cfg, app, access, mobile, log)
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,

@@ -10,6 +10,7 @@ is the role its person has, a viewer when they are deactivated.
 
 lookup(email) -> {name, role, active} | None reads the operators; rev() is the settings rev. Both are the app's
 (sizeup/api/v1/wire.py): this package never imports the CAD."""
+
 from __future__ import annotations
 
 import threading
@@ -22,7 +23,7 @@ MAX_CACHED = 2048
 class Person(NamedTuple):
     email: str
     name: str
-    role: str            # admin | dispatcher | viewer (a deactivated person: viewer)
+    role: str  # admin | dispatcher | viewer (a deactivated person: viewer)
     active: bool
 
 

@@ -1031,6 +1031,7 @@ enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelo
 - Rate limits are in memory per device (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`), and per
   address for requests with no device token.
 - The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.
+- The app's device sign-in (`/auth/v1/*`, the token key `SIZEUP_MOBILE_TOKEN_KEYS`, Settings > Users devices, the manual steps): [mobile-api.md](mobile-api.md#device-sign-in-558-what-shipped).
 
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
 

@@ -584,9 +584,11 @@ def _mobile(data: dict, role: str) -> dict:
 
 
 MOBILE_CLIENT_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
-MOBILE_SCHEME_URI = re.compile(r"[a-z][a-z0-9+.-]*\.[a-z0-9+.-]*:/[^\s#*]*")       # a reverse-domain scheme (RFC 8252 7.1)
+# a reverse-domain scheme (RFC 8252 7.1)
+MOBILE_SCHEME_URI = re.compile(r"[a-z][a-z0-9+.-]*\.[a-z0-9+.-]*:/[^\s#*]*")
 MOBILE_HTTPS_URI = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[^\s#*?]*")    # an app link: no wildcard, no query
-MOBILE_STRINGS = {"apple_team_id": re.compile(r"[A-Z0-9]{10}"), "android_package": re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,150}")}
+MOBILE_STRINGS = {"apple_team_id": re.compile(r"[A-Z0-9]{10}"),
+                  "android_package": re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,150}")}
 MOBILE_LISTS = {"apple_bundle_ids": re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,150}"),
                 "android_sha256": re.compile(r"([0-9A-F]{2}:){31}[0-9A-F]{2}")}
 
@@ -608,8 +610,9 @@ def _mobile_signin(mo: dict) -> dict:
             raise ConfigError("mobile.clients.id: a short unique name, like sizeup-ios")
         if platform not in ("ios", "android"):
             raise ConfigError("mobile.clients.platform: ios or android")
-        if (not isinstance(uris, list) or not 1 <= len(uris) <= 8 or not all(
-                isinstance(u, str) and (MOBILE_HTTPS_URI.fullmatch(u) or MOBILE_SCHEME_URI.fullmatch(u)) for u in uris)):
+        def exact(u) -> bool:
+            return isinstance(u, str) and bool(MOBILE_HTTPS_URI.fullmatch(u) or MOBILE_SCHEME_URI.fullmatch(u))
+        if not isinstance(uris, list) or not 1 <= len(uris) <= 8 or not all(exact(u) for u in uris):
             raise ConfigError("mobile.clients.redirect_uris: 1 to 8 exact addresses: https://host/path or a "
                               "reverse-domain scheme (org.example.app:/callback)")
         seen.add(cid)

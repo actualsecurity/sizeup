@@ -22,7 +22,8 @@ paths:
         hub verifies Access's own token (never given to the app). client_id and redirect_uri must match the hub's
         configuration exactly. An unknown or deactivated person, a fourth device or a bad request is an HTML page, never
         a redirect. Success is a 302 to redirect_uri with `code` (60 s, single use, bound to the PKCE challenge) and the
-        app's `state`.
+        app's `state`. `device_name` over 60 characters is cut to 60, not rejected. At most 5 codes per person are
+        outstanding (older ones stop working).
       security: []
       parameters:
         - {name: response_type, in: query, required: true, schema: {const: code}}
@@ -39,6 +40,7 @@ paths:
           headers:
             Location: {schema: {type: string}, description: "redirect_uri?code=...&state=..."}
         "400": {description: "An HTML page. The app or its return address is not known, or the request is not valid."}
+        "405": {description: "An HTML page. Only GET is allowed."}
         "401": {description: "An HTML page. No verified Cloudflare Access sign-in."}
         "403": {description: "An HTML page. The person is unknown or deactivated, or already has 3 devices."}
         "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
@@ -50,7 +52,8 @@ paths:
         `authorization_code`: the code, its PKCE verifier, the client and redirect_uri trade for a device (at most 3
         active per person) and its tokens. `refresh_token`: silent, no browser; the refresh token is ROTATED on every use
         (store the new one), and one already exchanged revokes the device. Access token: 15 minutes. Refresh token: 30
-        days idle, 180 days absolute. 10 requests a minute per address.
+        days idle, 180 days absolute. 10 requests a minute per address. `/api/v1` accepts an access token up to 30 seconds
+        past its `exp`; then it is 401 `token_expired`.
       security: []
       requestBody:
         required: true
@@ -61,7 +64,7 @@ paths:
             schema: {$ref: "#/components/schemas/TokenRequest"}
       responses:
         "200":
-          description: The tokens.
+          description: "The tokens. Sent with Cache-Control no-store and Pragma no-cache."
           content:
             application/json:
               schema: {$ref: "#/components/schemas/TokenResponse"}
@@ -75,7 +78,7 @@ paths:
         "401": {description: "invalid_client, device_revoked or user_inactive: wipe local data and sign in again.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
         "403": {description: "device_limit: 3 devices are signed in; sign one out first.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
         "426": {description: "upgrade_required: the app is older than the hub accepts.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
-        "429": {description: "rate_limited, with Retry-After.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "429": {description: "rate_limited, with Retry-After.", headers: {Retry-After: {schema: {type: integer}}}, content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
         "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
   /auth/v1/revoke:
     post:
@@ -93,9 +96,9 @@ paths:
           application/json:
             schema: {$ref: "#/components/schemas/RevokeRequest"}
       responses:
-        "200": {description: "Done", content: {application/json: {schema: {type: object}}}}
+        "200": {description: "Done. Sent with Cache-Control no-store and Pragma no-cache.", content: {application/json: {schema: {type: object}}}}
         "400": {description: "invalid_request", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
-        "429": {description: "rate_limited, with Retry-After", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "429": {description: "rate_limited, with Retry-After", headers: {Retry-After: {schema: {type: integer}}}, content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
         "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
   /.well-known/apple-app-site-association:
     get:

@@ -84,7 +84,7 @@ def test_the_permission_map():
     # ... and a panorama opened (street view's monthly limit counts it: anyone who may look at the map)
     assert [p.pattern for p, need in WRITES if need == "read"] == [r"/api/cad/intel/\d{1,9}/feedback",
                                                                   r"/api/cad/streetview/open",
-                                                                  r"/api/cad/devices"]     # the app's devices (#558): its own check
+                                                                  r"/api/cad/devices"]     # the app's devices (#558)
 
 
 def test_whoami_says_the_role_and_that_it_is_enforced(api):

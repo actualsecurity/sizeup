@@ -610,6 +610,18 @@ caps and rate limits as `/api/v1`, and never reaches `CadApi`. The token and rev
 - **No per-request database work beyond one indexed read** of the device (and the person from a cache keyed by the
   settings rev). `last_seen` is written at most every 5 minutes; a deactivation or email change in Settings revokes the
   person's devices at once (`Editor.on_deactivate`), and the resolver revokes any it finds belonging to an inactive person.
+- **The real code binding is PKCE.** The code row also carries the Access session id, but only for the activity log (the
+  design text above says "bound to the Access session": it is not checked, a verifier proves the app). `device_name` is
+  cut to 60 characters, not rejected.
+- **The person must be on the list first.** An unseen email is refused with a page ("open the console once ... or ask an
+  admin"). The console's `Settings.person()` auto-adds an unseen Access email as a DISPATCHER on its first request, so
+  a person who opens the console becomes a dispatcher and can then sign in to the app; the app's sign-in itself never
+  adds anyone. On the console's bootstrap rule (no active admin yet: everyone signed in counts as admin) every person is
+  "admin" on `/api/cad/devices`; mobile itself never bootstraps.
+- **Limits:** at most 5 outstanding unexpired codes per person (older ones are dropped); the sign-in's public routes
+  share a rate-limit bucket of their own (`signin`), apart from `meta`; the device row is cached 5 seconds and every
+  write clears it (so a revoke is immediate and a request does not take the hub.sqlite lock). `/api/v1` accepts an access
+  token up to 30 seconds past its `exp`.
 - `/api/cad/devices` (GET, POST `{action: revoke, id}`) is the console's side (Settings > Users: devices, and "My devices"
   for anyone). `AuthService.on_revoke` is a list of hooks called with the device when it is revoked: the push pull request
   adds the removal of the device's SNS endpoint there.
@@ -621,15 +633,19 @@ code and the config together): `clients = [{ id, platform = "ios"|"android", red
 `https://host/path` or a reverse-domain scheme, never a wildcard or http), `apple_team_id`, `apple_bundle_ids`,
 `android_package`, `android_sha256`. The apple and android values are public, not secrets.
 
-**Manual steps (a person; nothing here blocks a deploy):**
+**Manual steps (a person). Step 1 can break every deploy if done out of order:**
 
-1. **The signing key.** Create an SSM SecureString parameter (for example `/sizeup-hub/mobile-token-keys`) holding
+1. **The signing key: SSM parameter first, then the taskdef line.** Create an SSM SecureString parameter (for example `/sizeup-hub/mobile-token-keys`) holding
    `k1:<43 random characters>` (`python3 -c "import secrets;print('k1:' + secrets.token_urlsafe(32))"`), then add one line
    to the container's `secrets` in `deploy/aws/taskdef.json`: `{"name": "SIZEUP_MOBILE_TOKEN_KEYS", "valueFrom": "<that
-   parameter's ARN>"}`. Create the parameter FIRST: a secret naming a parameter that does not exist blocks every deploy
-   (this pull request deliberately does not touch the task definition). Rotation: put `k2:<new>,k1:<old>` (the first signs,
+   parameter's ARN>"}`, in a separate pull request. Create the parameter FIRST: a secret naming a parameter that does not
+   exist blocks every deploy (this pull request deliberately does not touch the task definition). Key format: a kid of
+   1 to 16 characters `A-Za-z0-9_-`, a secret of at least 32 characters from `A-Za-z0-9_+/=.-` with at least 10
+   different characters (a repeated character is refused); a malformed variable is the same as an unset one. Rotation: put `k2:<new>,k1:<old>` (the first signs,
    both verify), deploy, wait 15 minutes (the longest access token), then drop `k1`.
-2. **Turn it on:** `[mobile] enabled = true` plus `clients` in the hub's config, a restart, and the `auth` feature. Features
+2. **Turn it on:** `[mobile] enabled = true` plus `clients` in the hub's config, a restart, and the `auth` feature. The
+   sign-in is only built on the hub role with a hub database, with Cloudflare Access configured (`[cloud] access_team`
+   and `access_aud`: authorize needs a verified person) and a usable key; otherwise it logs one line and stays off. Features
    have no production source yet (`meta.features` reads all false): a later pull request wires one. Until then nothing in
    production changes.
 3. **Cloudflare Bypass (only after the tests here are merged and proven; a person makes it in the dashboard):** one more
@@ -644,8 +660,22 @@ code and the config together): `clients = [{ id, platform = "ios"|"android", red
    the app can (iOS 17.4+ with `ASWebAuthenticationSession`'s https callback), else the reverse-domain scheme.
 
 **Off and undo.** Turn off: `[mobile] enabled = false` and a restart (every route above is a 404; no key is read); or remove
-the key (the sign-in refuses to start, no token verifies). Undo: revert the pull request; the three `mobile_*` tables in
+the key (the sign-in stays off: every auth path is a 404, logged once at start, and no token is issued or accepted). Undo: revert the pull request; the three `mobile_*` tables in
 `hub.sqlite` may stay (nothing reads them). A person's or a device's access is revoked in Settings > Users.
+
+**Notes for the app team:**
+
+1. Refresh single-flight, and store the NEW refresh token before using the new access token (a token already
+   exchanged revokes the device: a refresh whose answer was lost looks like theft). Refresh at 80% of `expires_in` or on
+   a 401 `token_expired`.
+2. Use an ephemeral browser session (no Access cookie stays); the sign-in sheet shows an HTML page for every refusal.
+3. Wipe local data and go back to sign-in on `invalid_grant`, `device_revoked`, `user_inactive` (from `/auth/v1/token`) or
+   a 401 `device_revoked` or `user_inactive` from `/api/v1`. After an admin or self revoke the device's refresh tokens
+   are deleted, so a refresh answers `invalid_grant` (400), not `device_revoked`; the access token answers `device_revoked`
+   until it expires.
+4. To sign in again at the 180-day limit without using a fourth slot, send the old `device_id` to both `/auth/v1/authorize`
+   (query) and `/auth/v1/token` (form).
+5. `device_limit` (403 at token, or a page at authorize): three devices are signed in; sign one out first.
 
 For the next pull requests: a route that needs a device sets its `role`; the route-table test
 (`tests/test_api_v1_safeguards.py`) and `tests/test_api_v1_auth.py` check flag, role and need over every route.

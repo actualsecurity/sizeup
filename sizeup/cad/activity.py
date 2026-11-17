@@ -26,8 +26,9 @@ from typing import Callable
 from sizeup.cad.export import _csv, ts
 from sizeup.fence import bookkeeping
 
-# search: a Search page query or its CSV (#403). The app's device sign-in (#558, sizeup/api/v1/auth.py): device_enrolled,
-# refresh (once a day per device), revoked; its refusals are "refused" (with the device id, app version, address, browser).
+# search: a Search page query or its CSV (#403). The app's device sign-in (#558, sizeup/api/v1/auth.py):
+# device_enrolled, refresh (once a day per device), revoked; its refusals are "refused" (with the device id, address
+# and browser).
 KINDS = ("signin", "action", "refused", "search", "device_enrolled", "refresh", "revoked")
 KEEP_S = 90 * 86400            # rows older than this are dropped
 PRUNE_EVERY_S = 86400

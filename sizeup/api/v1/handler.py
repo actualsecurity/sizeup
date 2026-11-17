@@ -118,7 +118,7 @@ class V1:
                 principal = None
         # a flood of bad tokens is limited per address too
         wait = self.limits.admit(principal.device if principal else None, write=route.method != "GET", peer=peer,
-                                 public=route.need == "public")
+                                 public=route.need == "public", shared="signin" if route.flag else "meta")
         if wait:
             return error(429, "rate_limited", "too many requests: slow down", wait)
         if route.need == "device" and principal is None:
@@ -131,7 +131,7 @@ class V1:
             ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), method, peer, read)
             status, obj = route.handler(ctx)
             if isinstance(obj, Raw):
-                return status, obj.body, obj.ctype, {"Cache-Control": "no-store", **obj.headers}
+                return status, obj.body, obj.ctype, {"Cache-Control": "no-store", **(obj.headers or {})}
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:
             self.limits.leave()

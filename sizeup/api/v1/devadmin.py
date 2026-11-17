@@ -1,12 +1,25 @@
 """Settings > Users: devices (#558): the console's side of the app's sign-in, served by CadApi at /api/cad/devices
 (a person signed in through Cloudflare Access; the hub only). An admin sees and revokes anyone's; anyone else only
 their own ("My devices"). Revoke deletes the device's refresh tokens (and, through AuthService.on_revoke, its push
-endpoint) and writes the activity log; the app's next call is a 401 device_revoked. No token or hash ever leaves here."""
+endpoint) and writes the activity log; the app's next call is a 401 device_revoked. No token or hash ever leaves here.
+"""
+
 from __future__ import annotations
 
 from .devices import MAX_DEVICES
 
-PUBLIC = ("id", "email", "name", "platform", "app_version", "created", "last_seen", "revoked_at", "revoked_why", "active")
+PUBLIC = (
+    "id",
+    "email",
+    "name",
+    "platform",
+    "app_version",
+    "created",
+    "last_seen",
+    "revoked_at",
+    "revoked_why",
+    "active",
+)
 
 
 def listing(svc, email: str, admin: bool) -> dict:
@@ -16,7 +29,8 @@ def listing(svc, email: str, admin: bool) -> dict:
 
 
 def act(svc, body: dict, email: str, admin: bool) -> dict:
-    """POST /api/cad/devices {action: "revoke", id}: ValueError (a 400 or 403 with its text) when not allowed."""
+    """POST /api/cad/devices {action: "revoke", id}: ValueError (a 400) for a bad request or no such device,
+    PermissionError (a 403) for a non-admin asking about someone else's device."""
     if body.get("action") != "revoke":
         raise ValueError("action: revoke")
     did = body.get("id")

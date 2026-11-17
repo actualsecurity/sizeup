@@ -2018,9 +2018,10 @@ function sUsers(panel) {
 // The app's devices (#558, sizeup/api/v1/devadmin.py): one line a device, Revoke signs it out (its next call is a 401).
 // An admin sees everyone's; anyone else their own ("My devices"). GET /api/cad/devices is a 404 where the app's sign-in
 // is off or this is not the hub: the card stays hidden.
+const S_DEV_TTL_MS = 15000;         // GET /api/cad/devices again no sooner than this
 async function sDevices(force) {
   if (!cad.who || S.section !== "users") return;
-  if (!force && Date.now() - (S.devAt || 0) < 15000) return;
+  if (!force && Date.now() - (S.devAt || 0) < S_DEV_TTL_MS) return;
   S.devAt = Date.now();
   try { S.dev = await api("GET", "/api/cad/devices"); } catch (e) { S.dev = null; }
   sDevicesRender();
@@ -2035,13 +2036,14 @@ function sDevicesRender() {
   for (const d of rows) {
     const li = el("li", "s-row" + (d.active ? "" : " retired"));
     const what = Object.assign(el("strong", "", d.name || d.id), { title: d.id });
-    li.append(what, el("span", "dim small", `${d.platform} ${d.app_version}`.trim()), all ? el("span", "dim small", d.email) : null,
-      el("span", "dim small", d.active ? `Seen ${sAgo(d.last_seen)}` : `Revoked ${sAgo(d.revoked_at)}`), el("span", "spacer"),
-      d.active ? sBtn("Revoke", "Signs this device out of the app", () => sAsk(`Revoke ${d.name || d.id}${all ? ` (${d.email})` : ""}?`, async () => {
-        try { await api("POST", "/api/cad/devices", { action: "revoke", id: d.id }); sMsg(`${d.name || d.id} revoked`, true); } catch (e) { sMsg(e.message); }
-        sDevices(true);
-      }, "Revoke")) : el("span", "chip s-state retired", "revoked"));
-    [...li.childNodes].forEach((n) => { if (n.nodeType === 3) n.remove(); });   // the nulls above
+    // Revoke keeps working for a viewer or dispatcher (ro-ok): the hub lets anyone revoke their own
+    const revoke = sBtn("Revoke", "Signs this device out of the app", () => sAsk(`Revoke ${d.name || d.id}${all ? ` (${d.email})` : ""}?`, async () => {
+      try { await api("POST", "/api/cad/devices", { action: "revoke", id: d.id }); sMsg(`${d.name || d.id} revoked`, true); } catch (e) { sMsg(e.message); }
+      sDevices(true);
+    }, "Revoke"), "ro-ok");
+    li.append(...[what, el("span", "dim small", `${d.platform} ${d.app_version}`.trim()), all ? el("span", "dim small", d.email) : null,
+      el("span", "dim small", `Seen ${sAgo(d.last_seen)}`), el("span", "spacer"),
+      d.active ? revoke : el("span", "chip s-state retired", `revoked ${sAgo(d.revoked_at)}`)].filter(Boolean));
     ol.append(li);
   }
   if (!rows.length) ol.append(el("li", "empty", "None"));

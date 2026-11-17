@@ -3,9 +3,9 @@
 On /api/v1/ the only identity is a device's bearer token, resolved here. It never consults the console's Cloudflare
 Access (a cookie or header there is ignored, so a signed-in browser is not a device), never yields who=None and
 lets the request through (the trap in CadApi.permit, which checks nothing without a person), and never hands a handler a
-CadApi. A resolver returns a Principal or None; None is a 401. Until the sign-in work (#558) lands there is no
-device token to verify, so the resolver answers None for everything: every route that needs a device is a 401.
-The sign-in (#558, sizeup/api/v1/auth.py) is the real resolver, wired by sizeup/app.py when the `auth` feature is on.
+CadApi. A resolver returns a Principal, a Refusal (a reasoned 401) or None (a plain 401). none_yet, which answers
+None for everything, is the fallback when no sign-in is built (mobile off, no token key): every route that needs a
+device is then a 401. The real resolver is the sign-in's (#558, sizeup/api/v1/auth.py AuthService.resolve).
 The same rule from the other side: the console refuses a bearer on /api/cad/ (web/server.py)."""
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def may(p: "Principal", level: str) -> bool:
 
 
 def none_yet(headers) -> Principal | None:
-    """No device tokens exist yet (#558): nobody resolves."""
+    """The fallback when no sign-in is built (mobile off, no token key): nobody resolves."""
     return None
 
 

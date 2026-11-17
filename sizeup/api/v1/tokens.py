@@ -10,11 +10,12 @@ The key id must be one the hub knows: two are valid during a rotation (the first
 
 The keys: SIZEUP_MOBILE_TOKEN_KEYS, an OPTIONAL environment variable holding `kid:secret` entries separated by commas
 or whitespace (for example `k1:<43+ random characters>`). Unset or malformed: Keys.load() returns None and the app's
-sign-in refuses to start (every token fails, every auth route answers 404): the hub fails closed. The variable is set
+sign-in stays off (every token fails, every auth route answers 404, one log line): the hub fails closed. The variable is set
 from an SSM secret by a person (docs/mobile-api.md "Manual steps"); nothing in the task definition requires it.
 
 Refresh tokens, authorization codes: opaque, 32 random bytes (43 URL-safe characters), stored only as sha256 (a stolen
 hub.sqlite or its replica holds hashes nobody can turn back: the secret is 256 random bits, nothing to guess)."""
+
 from __future__ import annotations
 
 import base64
@@ -26,11 +27,12 @@ import secrets
 from typing import Mapping
 
 ENV = "SIZEUP_MOBILE_TOKEN_KEYS"
-ACCESS_TTL_S = 900               # 15 minutes
-LEEWAY_S = 30                    # exp is honoured this long past (the design: at most 60 s)
-FUTURE_S = 60                    # an iat further in the future than this is refused
+ACCESS_TTL_S = 900  # 15 minutes
+LEEWAY_S = 30  # exp is honoured this long past (the design: at most 60 s)
+FUTURE_S = 60  # an iat further in the future than this is refused
 MAX_TOKEN = 1024
-MIN_SECRET = 32                  # characters
+MIN_SECRET = 32  # characters
+MIN_DISTINCT = 10  # different characters in a secret: 32 x "a" is refused (43 random ones have ~40)
 KID = re.compile(r"[A-Za-z0-9_-]{1,16}")
 SECRET = re.compile(r"[A-Za-z0-9_+/=.-]{%d,128}" % MIN_SECRET)
 B64URL = re.compile(r"[A-Za-z0-9_-]+")
@@ -80,6 +82,8 @@ class Keys:
         for kid, secret in keys.items():
             if not KID.fullmatch(kid) or not SECRET.fullmatch(secret):
                 raise ValueError("a key id (1-16 of A-Z a-z 0-9 _ -) and a secret of at least 32 characters")
+            if len(set(secret)) < MIN_DISTINCT:
+                raise ValueError("a secret of repeated characters is not random")
         self._keys = {k: v.encode() for k, v in keys.items()}
         self.current = current or next(iter(keys))
         if self.current not in self._keys:
@@ -126,7 +130,7 @@ class Keys:
             return self._verify(token, now, allow_expired)
         except TokenError:
             raise
-        except (ValueError, TypeError):          # bad JSON, bad base64, bad UTF-8: not ours
+        except (ValueError, TypeError):  # bad JSON, bad base64, bad UTF-8: not ours
             raise TokenError("malformed") from None
 
     def _verify(self, token: str, now: float, allow_expired: bool) -> dict:
@@ -137,17 +141,18 @@ class Keys:
         if not isinstance(header, dict) or not isinstance(header.get("kid"), str):
             raise TokenError("malformed header")
         if {k: v for k, v in header.items() if k != "kid"} != HEADER_FIXED:
-            raise TokenError("not our algorithm")                   # none, HS512, RS256 ...: the alg is fixed
+            raise TokenError("not our algorithm")  # none, HS512, RS256 ...: the alg is fixed
         kid = header["kid"]
         if kid not in self._keys:
             raise TokenError("unknown key id")
         if not hmac.compare_digest(self._mac(kid, f"{h64}.{p64}".encode()), _b64d(s64)):
             raise TokenError("bad signature")
         claims = json.loads(_b64d(p64))
-        sub, did, iat, exp = (claims.get(k) for k in ("sub", "did", "iat", "exp")) if isinstance(claims, dict) \
-            else (None,) * 4
-        if not (isinstance(sub, str) and "@" in sub and isinstance(did, str) and did
-                and all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in (iat, exp))):
+        if not isinstance(claims, dict):
+            raise TokenError("malformed claims")
+        sub, did, iat, exp = (claims.get(k) for k in ("sub", "did", "iat", "exp"))
+        numbers = all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in (iat, exp))
+        if not (isinstance(sub, str) and "@" in sub and isinstance(did, str) and did and numbers):
             raise TokenError("malformed claims")
         if iat > now + FUTURE_S:
             raise TokenError("issued in the future")

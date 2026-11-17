@@ -31,7 +31,8 @@ Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
 (tools/airband_ab.py, curl), are unaffected.
-GET|POST /auth/v1/..., GET /.well-known/{apple-app-site-association,assetlinks.json}   the app's sign-in (sizeup/api/v1/auth.py, #558)
+GET|POST /auth/v1/..., GET /.well-known/{apple-app-site-association,assetlinks.json}   the app's sign-in
+                                (sizeup/api/v1/auth.py, #558)
 GET  /api/v1/...                the mobile app's versioned API (sizeup/api/v1, spec in api/openapi/v1/, #557): the hub only
                                (409 on the station), errors always {"error": {"code", "message", "retry_after_s"?}}
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
@@ -906,7 +907,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.close_connection = True
                 return self._send(code, body, ctype)
             if v1.handles(path):
-                self.close_connection = True     # a refused POST's body is left unread (the sign-in reads its own, #558)
+                self.close_connection = True     # a refused POST's body is left unread (the sign-in reads its own)
                 return self._v1(path, urlsplit(self.path).query, self._body)
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread

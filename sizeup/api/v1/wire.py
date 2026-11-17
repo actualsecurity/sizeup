@@ -5,6 +5,7 @@ Off (None, and every /auth/v1 and /.well-known path a 404) unless ALL of: this i
 database, Cloudflare Access configured (authorize needs a verified person) and a usable token key in
 SIZEUP_MOBILE_TOKEN_KEYS (tokens.py). A missing key is said once in the log and nothing is signed or verified: the
 hub fails closed. Building reads nothing from a database and writes nothing."""
+
 from __future__ import annotations
 
 import os
@@ -30,15 +31,23 @@ def make_auth(cfg, app, access, switches, log=print, env: Mapping[str, str] | No
     if keys is None:
         log(f"mobile sign-in: off: {ENV} is not set (kid:secret): no token is issued or accepted")
         return None
-    config = AuthConfig(tuple(Client(i, p, tuple(u)) for i, p, u in cfg.mobile_clients), cfg.mobile_apple_team_id,
-                        tuple(cfg.mobile_apple_bundle_ids), cfg.mobile_android_package, tuple(cfg.mobile_android_sha256))
-    people = People(lambda email: cad.store.one("SELECT name, role, active FROM operators WHERE email = ?", (email,)),
-                    lambda: cad.store.rev)
+    config = AuthConfig(
+        tuple(Client(i, p, tuple(u)) for i, p, u in cfg.mobile_clients),
+        cfg.mobile_apple_team_id,
+        tuple(cfg.mobile_apple_bundle_ids),
+        cfg.mobile_android_package,
+        tuple(cfg.mobile_android_sha256),
+    )
+    people = People(
+        lambda email: cad.store.one("SELECT name, role, active FROM operators WHERE email = ?", (email,)),
+        lambda: cad.store.rev,
+    )
 
     def activity(email, kind, summary, ip, ua, ok, route, session):
         cad.activity.record(email, kind, route, summary, None, ok, ip, ua, session)
+
     svc = AuthService(DeviceDb(mdb, time.time), keys, people, access, config, switches, activity, log)
-    cad.devices = svc                                   # Settings > Users: devices (CadApi /api/cad/devices)
-    cad.settings.on_deactivate = svc.user_deactivated   # a deactivated person's devices are revoked at once
+    cad.devices = svc  # Settings > Users: devices (CadApi /api/cad/devices)
+    cad.settings.on_deactivate = svc.user_deactivated  # a deactivated person's devices are revoked at once
     log(f"mobile sign-in: on (key ids {', '.join(keys.kids())}, {len(config.clients)} app(s))")
     return svc

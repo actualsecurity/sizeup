@@ -140,15 +140,19 @@ channels = ["FG1", "PC repeater"]
 enabled = false
 # max_requests = 8
 # max_streams = 16
-# The app's sign-in (#558, docs/mobile-api.md section 3.3): needs the `auth` feature and a token key, which is NOT in
-# this file: SIZEUP_MOBILE_TOKEN_KEYS (`kid:secret`, a second entry during a rotation) from an SSM secret, set by a person.
-# Unset, the sign-in stays off. clients: the apps and their EXACT return addresses (an https app link, or a
-# reverse-domain scheme); apple_* and android_* fill the /.well-known/ association files (public values).
+# The app's sign-in (#558, docs/mobile-api.md section 3.3): needs `enabled = true`, the `auth` feature and a token key,
+# which is NOT in this file: SIZEUP_MOBILE_TOKEN_KEYS (`kid:secret`, a second entry during a rotation) from an SSM secret,
+# set by a person. Unset, the sign-in stays off. Needs Cloudflare Access ([cloud] access_team, access_aud). Bounds
+# (a bad value stops startup with a ConfigError): at most 8 clients, each id lower-case a-z 0-9 . _ - up to 40 characters,
+# platform ios or android, 1 to 8 redirect_uris matched EXACTLY (an https app link with a path and no query, fragment or
+# wildcard, or a reverse-domain scheme like org.example.app:/callback); apple_team_id 10 characters A-Z 0-9; at most 8
+# apple_bundle_ids; android_sha256 at most 8 certificates, UPPERCASE hex pairs joined by colons (32 pairs).
+# apple_* and android_* fill the /.well-known/ association files (public values).
 # clients = [{ id = "sizeup-ios", platform = "ios", redirect_uris = ["https://hub.example.org/app/callback"] }]
 # apple_team_id = "ABCDE12345"
 # apple_bundle_ids = ["org.example.sizeup"]
 # android_package = "org.example.sizeup"
-# android_sha256 = ["AA:BB:...:FF"]   # the signing certificate's SHA-256, 32 colon-separated hex pairs
+# android_sha256 = ["AA:BB:...:FF"]   # the signing certificate's SHA-256: 32 uppercase hex pairs, colon-separated
 
 [prealert]
 # The phone pre-alert from Tapout (docs/cloud.md, config.example.toml): the hub is the CAD of record,

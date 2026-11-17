@@ -56,7 +56,7 @@ class Raw(NamedTuple):
     (/auth/v1/*, /.well-known/): (status, Raw(body, content type, headers)). Never cached unless it says so."""
     body: bytes
     ctype: str = "application/json"
-    headers: dict = {}
+    headers: dict | None = None
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:

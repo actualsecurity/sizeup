@@ -270,7 +270,7 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           a signed-in admin only. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
-GET  /api/cad/devices                     Settings > Users: devices (the app's sign-in, sizeup/api/v1/devadmin.py, #558): name,
+GET  /api/cad/devices                     Settings > Users: devices (the app's sign-in, #558): name,
                                           platform, app version, last seen; an admin sees everyone's, anyone their own.
                                           The hub's only (404 elsewhere); never a token
 POST /api/cad/devices                     {action: revoke, id}: an admin any device, anyone their own; in the person's
@@ -436,7 +436,7 @@ WRITES = (
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (re.compile(r"/api/cad/stations"), "admin"),                            # stations' tokens (sizeup/cloud/stations.py)
-    (re.compile(r"/api/cad/devices"), "read"),                              # revoke a device: anyone's own, an admin's anyone's (#558)
+    (re.compile(r"/api/cad/devices"), "read"),                              # revoke a device: own, or an admin's (#558)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
