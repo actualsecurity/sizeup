@@ -361,7 +361,7 @@ def restart_echoes(evs: list[dict], before: Callable[[float], dict]) -> list[dic
         return evs
     out = []
     for e in evs:
-        if e.get("ev") == "squelch" and e.get("source", "station") == "station" and isinstance(e.get("at"), (int, float)):
+        if e.get("ev") == "squelch" and e.get("source", "station") == "station" and isinstance(e.get("at"), float | int):
             st = max((t for t in starts if 0 <= e["at"] - t <= SETTLE_S), default=None)
             m = _SQ.match(str(e.get("detail") or ""))
             if st is not None and m:
@@ -575,24 +575,27 @@ class Insight:
         """(station, subject) of each series with floor records in the suggestion's window (SUGGEST_DAYS): an old or
         renamed station id still in the 30 days kept never stands beside the one that reports the channel now (#686)."""
         t0 = now - SUGGEST_DAYS * 86400.0
-        return sorted({(s["station"], s["subject"]) for s in self.store.index()["series"]
-                       if s["kind"] == "floor" and s["subject"] != "station" and (s.get("last") is None or s["last"] >= t0)})
+        return sorted({(s["station"], s["subject"]) for s in self.store.index()["series"] if s["kind"] == "floor"
+                       and s["subject"] != "station" and (s.get("last") is None or s["last"] >= t0)})
 
     def applicable(self, subject: str, expect: dict, now: float | None = None) -> str:
         """An Apply from the Squelch card, checked again here (#686): "" when the channel's suggestion still offers
         Apply and was worked out for the Open / Close in `expect` (the suggestion's own cur_open / cur_close), else
         why not."""
         now = self.clock() if now is None else now
-        rows = [r for r in (self.suggestion(st, s, now) for st, s in self._live(now) if s == subject) if r.get("minutes")]
+        rows = [self.suggestion(st, s, now) for st, s in self._live(now) if s == subject]
+        rows = [r for r in rows if r.get("minutes")]
         if len(rows) != 1:
             return f"{subject}: {'no suggestion' if not rows else 'two stations report it'} now, look again"
         s = rows[0]
         if not s.get("apply"):
-            return f"{subject}: the suggestion isn't offered now ({s.get('warn') or s.get('info') or s.get('why') or 'no change'})"
+            why = s.get("warn") or s.get("info") or s.get("why") or "no change"
+            return f"{subject}: the suggestion isn't offered now ({why})"
         for f, k in (("open_db", "cur_open"), ("close_db", "cur_close")):
             e, c = _num((expect or {}).get(f)), _num(s.get(k))
             if e is None or c is None or abs(e - c) > 0.01:
-                return f"{subject}: the suggestion was worked out for Open {s.get('cur_open')} / Close {s.get('cur_close')}, look again"
+                return (f"{subject}: the suggestion was worked out for Open {s.get('cur_open')} / Close "
+                        f"{s.get('cur_close')}, look again")
         return ""
 
     def forget(self, subject: str) -> None:
