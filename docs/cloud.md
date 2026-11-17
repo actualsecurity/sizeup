@@ -1177,12 +1177,25 @@ clip waits for one only as long as its class allows. After that the clip goes th
 - **Which clips:**
   - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
   - Shed clips go to a ready worker first, before the station's whisper idles. Fire work doesn't pause them; they stay quiet (old words alert nothing). A clip the pool hands back is routed again next tick, with no try burnt.
-- **When the pool is off:** with no worker added, or the pool switched off, nothing changes. The pool is also skipped when its estimated wait (work ahead × the median service time) is over the class's budget.
+- **When the pool is off:** with no worker added, or the pool switched off, nothing changes. A clip also skips the pool when its estimated wait (work ahead × the median service time) is over the class's budget.
+- **Pre-alert clips** (pages, Fire/EMS 15, firegrounds, airband, police alert talkgroups) go to the pool only when all of these hold:
+  - a worker is idle now: in a claim, with no job;
+  - no other pre-alert clip waits;
+  - the workers' recent time from claim to text on these classes is under 3 s.
+
+  Otherwise they go to AWS, as before.
+- **Catch-up:** fire work pauses it, on the pool too, so a worker busy on old clips never stands between a pre-alert and the pool.
 - **Budgets per class:** `sttpool.BUDGETS` sets three limits for each class: how long a clip waits for a claim, the first lease, and the lease cap.
-  - The pages, Fire/EMS 15, the firegrounds, the airband and the police alert talkgroups wait 2.5 s, with a 6 s lease and a 10 s cap.
+  - The pre-alert classes wait 2.5 s and get a 4 s first lease, renewable to an absolute 8 s from the claim. The deadline doesn't grow with the clip's length, and the job is decoded in one greedy pass (`fast`).
   - The pre-alert target is p50 ≤ 5 s and p95 ≤ 15 s, from the end of the transmission to its text.
 - **Leases:**
-  - A lease that runs out, a job handed back (`release`), or a revoked worker sends the job to the next engine at once.
+  - Any of these sends the job to the next engine at once:
+    - a lease that runs out;
+    - a worker unheard for 12 s;
+    - a job handed back (`release`);
+    - a worker that starts gaming or pauses (its pre-alert jobs);
+    - a revoked worker.
+  - A worker holds at most 2 jobs at once.
   - A late `complete` gets 409 and is counted. It is never applied.
   - The queue lives in memory on the leader. After a restart, an AWS-channel clip is still `pending` on its row, and `_aws_recover` routes it.
 - **States:**
@@ -1191,14 +1204,20 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - `offline`: no word for 30 s.
   - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
 - **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
-- **Cloudflare:** each worker also needs a Cloudflare Access service token on the policy that lets `/api/station/*` through. This is an operator step, as for a station.
-- **Every transcript is kept:** the hub appends each one to cad.sqlite `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper). The table is made on the first write and kept 90 days. Each row holds:
+- **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
+- **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
+  - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
+  - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme: one every 3 h and one when the hub stops. A new task merges them in.
+  - A run goes with its radio log row (that channel's transcript retention), and is kept 90 days at most.
+
+  Each row holds:
   - the engine, model, worker and prompt hash;
   - the role (`text`, `alt`, `late`, `rerun` or `catchup`);
   - the raw text, the confidence and the words;
   - the class;
   - the clip's end, when it was queued, when the engine started and when it finished;
-  - the wait and the run time.
+  - the wait and the run time;
+  - the P25 `call_id` and `turn`, and the radio's `keyup` split.
 
   The station's whisper measures its own wait and run (`Transcriber._timing`) and sends them with the transmission. `radio_traffic.text_at` is when a row's first text landed (`updated_at` moves with every edit).
 - **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.

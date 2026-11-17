@@ -36,11 +36,16 @@ from sizeup.stt import CATCHUP, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LI
 # class -> (wait for a claim, first lease, lease cap from the claim), seconds (#639; the pre-alert channels' target:
 # transmission end -> text p50 <= 5 s, p95 <= 15 s, so their wait and cap are short)
 BUDGETS: dict[float, tuple[float, float, float]] = {
-    URGENT: (2.5, 6.0, 10.0), HIGH: (2.5, 6.0, 10.0), CONTEXT_FALLBACK: (2.5, 6.0, 10.0), CONTEXT: (2.5, 6.0, 10.0),
+    URGENT: (2.5, 4.0, 8.0), HIGH: (2.5, 4.0, 8.0), CONTEXT_FALLBACK: (2.5, 4.0, 8.0), CONTEXT: (2.5, 4.0, 8.0),
     LIVE: (5.0, 10.0, 20.0), RERUN: (10.0, 15.0, 45.0), LOW: (30.0, 20.0, 60.0), CATCHUP: (120.0, 30.0, 120.0)}
-PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio
+PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
+                          # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
 OFFLINE_S = 30.0          # ... and one not seen this long is offline
+LOST_S = 12.0             # a worker holding a lease unheard this long (two heartbeats): its leases fall back at once
+MAX_LEASES = 2            # jobs one worker holds at once at most
+PREALERT_MAX_SERVICE_S = 3.0   # a pre-alert clip goes to the pool only to an idle worker (in a claim now) whose recent
+                               # claim -> text on these classes is this quick (AWS answers them in seconds)
 FAIL_N = 3                # leases lost or handed back in a row: the worker cools down ...
 COOLDOWN_S = 60.0         # ... this long (no new jobs)
 SERVICE_DEFAULT_S = 2.0   # a job's claim -> done before any was measured (the estimate of the wait)
@@ -50,9 +55,14 @@ WINDOW_S = 7200.0         # done jobs kept for the numbers (Health), seconds
 STATES = ("online", "gaming", "paused")
 REASONS = ("unclaimed", "lease", "released", "no_worker", "error")   # why a job fell back
 CLASSES = tuple(BUDGETS)
-# the short-lease classes: one greedy pass (whisper-server's temperature_inc 0, as the station's WhisperClient fast=True),
-# so a hard clip is never decoded five more times past its lease
-FAST_CLASSES = tuple(c for c, (_w, _l, cap) in BUDGETS.items() if cap <= 10.0)
+# the pre-alert classes: an absolute deadline (no per-audio extension), only an idle quick worker, one greedy pass
+# (whisper-server's temperature_inc 0, as the station's WhisperClient fast=True), so a hard clip is never decoded five
+# more times past its lease, and back at once when their worker starts gaming or pauses
+FAST_CLASSES = (URGENT, HIGH, CONTEXT_FALLBACK, CONTEXT)
+
+
+def _extra(job) -> float:
+    return 0.0 if job.cls in FAST_CLASSES else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
 
@@ -128,8 +138,9 @@ class Pool:
     worker registered at all). Thread-safe; fallbacks and results run outside the lock."""
 
     def __init__(self, enabled: Callable[[float], bool] = lambda cls: False, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print):
-        self.enabled, self.clock, self.log = enabled, clock, log
+                 log: Callable[[str], None] = print, allowed: Callable[[str], bool] = lambda wid: True):
+        """allowed(worker id): its token still stands (a revoke racing a request never brings a worker back)."""
+        self.enabled, self.clock, self.log, self.allowed = enabled, clock, log, allowed
         self._cv = threading.Condition()
         self._queue: list[Job] = []
         self._leases: dict[str, Job] = {}
@@ -195,8 +206,10 @@ class Pool:
             self.log(f"stt pool: {job.id}: fallback failed: {type(e).__name__}: {e}")
 
     def _fall(self, job: Job, reason: str, why: str) -> None:
-        """Called with the lock held: out of the pool, its fallback queued (run on the fallback thread)."""
+        """Called with the lock held: out of the pool, its fallback queued (run on the fallback thread). The reason is
+        on the job (extra["fell"]): a catch-up clip's lost lease is a failed try, nobody taking it is none."""
         self._open.discard(job.id)
+        job.extra["fell"] = reason
         self.fallbacks[reason] = self.fallbacks.get(reason, 0) + 1
         with self._fb_cv:
             self._fb_q.append((job, why))
@@ -218,13 +231,22 @@ class Pool:
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
-        online hands nothing back by itself: what it holds runs to its lease (it may finish it)."""
+        online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
+        whose token no longer stands (revoked meanwhile)."""
+        if wid not in self.workers and not self.allowed(wid):
+            return None
         with self._cv:
             w = self.workers.get(wid)
             if w is None:
                 w = self.workers[wid] = Worker(wid)
             w.seen = self.clock()
             if state in STATES:
+                if state != "online" and w.state == "online":
+                    for lease in list(w.leases):
+                        job = self._leases.get(lease)
+                        if job is not None and job.cls in FAST_CLASSES:
+                            self._end_lease(job)
+                            self._fall(job, "released", f"GPU worker {wid} went {state}")
                 w.state = state
             if model is not None:
                 w.model = str(model)[:80]
@@ -262,8 +284,9 @@ class Pool:
             return "cooling"
         return w.state
 
-    def _service_s(self) -> float:
-        took = [x[4] for x in self._done if x[4] is not None][-50:]
+    def _service_s(self, fast: bool | None = None) -> float:
+        """The median claim -> text of the last 50 jobs (fast: of the pre-alert classes only)."""
+        took = [x[4] for x in self._done if x[4] is not None and (fast is None or (x[1] in FAST_CLASSES) == fast)][-50:]
         return pct(took, 50) or SERVICE_DEFAULT_S
 
     def ready(self, cls: float, now: float | None = None) -> tuple[bool, str]:
@@ -276,10 +299,23 @@ class Pool:
                 return False, "off"
         except Exception:  # noqa: BLE001 - a setting that can't be read: off
             return False, "off"
+        if self._stop.is_set():
+            return False, "stopped"
         with self._cv:
             ready = [w for w in self.workers.values() if self._ready(w, now)]
             if not ready:
                 return False, "no worker ready"
+            if cls in FAST_CLASSES:
+                # a pre-alert clip: only to a worker idle now (in a claim: never one busy on a catch-up clip), and only
+                # while the workers are quick on these (else AWS, which answers them in seconds)
+                if not any(w.polling > 0 and not w.leases for w in ready):
+                    return False, "no worker idle now"
+                if any(j.cls in FAST_CLASSES for j in self._queue):
+                    return False, "a pre-alert clip waits already"
+                svc = self._service_s(fast=True)
+                if svc > PREALERT_MAX_SERVICE_S:
+                    return False, f"slow on pre-alert clips lately ({svc:.1f} s)"
+                return True, ""
             ahead = sum(1 for j in self._queue if j.cls <= cls) + len(self._leases)
             est = ahead * self._service_s() / len(ready)
         if est > BUDGETS[cls][0]:
@@ -296,7 +332,7 @@ class Pool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
         ok, _why = self.ready(job.cls)
-        if not ok:
+        if not ok or self._stop.is_set():
             return False
         with self._cv:
             if job.id in self._open:
@@ -316,6 +352,8 @@ class Pool:
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
         w = self.seen(wid, state, model)
+        if w is None:
+            return None
         with self._cv:
             w.polling += 1
             try:
@@ -324,7 +362,7 @@ class Pool:
                     w.seen = now
                     if wid not in self.workers:          # revoked meanwhile
                         return None
-                    if self._ready(w, now):
+                    if self._ready(w, now) and len(w.leases) < MAX_LEASES:
                         job = self._best()
                         if job is not None:
                             self._queue.remove(job)
@@ -339,7 +377,7 @@ class Pool:
 
     def _lease(self, job: Job, w: Worker, now: float) -> Job:
         _wait, lease_s, cap_s = BUDGETS[job.cls]
-        extra = PER_AUDIO_S * max(0.0, job.seconds)
+        extra = _extra(job)
         job.lease, job.worker, job.claimed_at = secrets.token_hex(8), w.id, now
         job.expires, job.cap_at = now + lease_s + extra, now + cap_s + extra
         self._leases[job.lease] = job
@@ -367,7 +405,7 @@ class Pool:
                 return None
             now = self.clock()
             _wait, lease_s, _cap = BUDGETS[job.cls]
-            job.expires = min(job.cap_at, now + lease_s + PER_AUDIO_S * max(0.0, job.seconds))
+            job.expires = min(job.cap_at, now + lease_s + _extra(job))
             return job
 
     def _end_lease(self, job: Job) -> None:
@@ -410,6 +448,7 @@ class Pool:
             self.log(f"stt pool: {job.id}: the result couldn't be applied ({type(e).__name__}: {e}): falling back")
             with self._cv:
                 self.fallbacks["error"] += 1
+            job.extra["fell"] = "error"
             self._call_fallback(job, f"the GPU worker's text couldn't be applied: {type(e).__name__}")
         return True
 
@@ -444,7 +483,13 @@ class Pool:
         n = 0
         with self._cv:
             for lease, job in list(self._leases.items()):
-                if now >= job.expires:
+                w = self.workers.get(job.worker)
+                if now < job.expires and w is not None and now - w.seen >= LOST_S:
+                    self._end_lease(job)               # its worker unheard: gone (a crash, the network), not slow
+                    self._failed(job.worker, now)
+                    self._fall(job, "lease", f"GPU worker {job.worker}: no word for {now - w.seen:.0f} s")
+                    n += 1
+                elif now >= job.expires:
                     self._end_lease(job)
                     self._failed(job.worker, now)
                     past_cap = now >= job.cap_at

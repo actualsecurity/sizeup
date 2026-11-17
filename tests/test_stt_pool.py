@@ -17,7 +17,7 @@ import pytest
 
 from sizeup import sttpool, sttruns
 from sizeup.cloud.sttworkers import WorkerRegistry, clean_result
-from sizeup.stt import CATCHUP, CONTEXT, HIGH, LIVE, LOW, URGENT
+from sizeup.stt import CATCHUP, CONTEXT, HIGH, LIVE, LOW, RERUN, URGENT
 from sizeup.sttpool import BUDGETS, Job, Pool
 from tests.fake_transcribe import FakeTranscribe
 from tests.test_app import voice, wait
@@ -58,6 +58,13 @@ def pool(clock=None, on=True):
     return Pool(enabled=lambda cls: on, clock=clock or Clock(), log=lambda s: None)
 
 
+def online(p, wid="gpu-1"):
+    """A worker online and in a claim's long poll now (idle: what a pre-alert clip needs)."""
+    w = p.seen(wid, "online")
+    w.polling = 1
+    return w
+
+
 # -- the pool on its own ---------------------------------------------------------------------------------------------
 
 
@@ -65,7 +72,7 @@ def test_with_no_worker_or_the_pool_off_nothing_is_taken():
     j = Jobs()
     p = pool()
     assert p.ready(URGENT) == (False, "no worker ready") and not p.submit(j.job("a"))
-    p.seen("gpu-1", "online")
+    online(p)
     off = pool(on=False)
     off.seen("gpu-1", "online")
     assert off.ready(URGENT) == (False, "off") and not off.submit(j.job("a"))
@@ -77,23 +84,24 @@ def test_the_classes_keep_their_strict_order_oldest_first_in_a_class(monkeypatch
     monkeypatch.setattr(sttpool, "SERVICE_DEFAULT_S", 0.1)    # (a fast worker: the queue never looks too long)
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
-    for cid, cls in (("catchup", CATCHUP), ("low", LOW), ("live-1", LIVE), ("police", CONTEXT), ("page", URGENT),
-                     ("air", HIGH), ("live-2", LIVE)):
+    online(p)
+    for cid, cls in (("catchup", CATCHUP), ("low", LOW), ("live-1", LIVE), ("rerun", RERUN), ("live-2", LIVE),
+                     ("page", URGENT)):                   # (one pre-alert clip at a time: a second goes to AWS)
         clock.t += 0.01
         assert p.submit(j.job(cid, cls, seconds=0.0)), cid
+    assert not p.submit(j.job("air", HIGH)) and p.ready(HIGH) == (False, "a pre-alert clip waits already")
     got = []
     while (job := p.claim("gpu-1", 0)) is not None:
         got.append(job.id)
         assert p.complete("gpu-1", job.lease, {"text": "x"})
-    assert got == ["page", "air", "live-1", "live-2", "police", "low", "catchup"]
+    assert got == ["page", "live-1", "live-2", "rerun", "low", "catchup"]
     assert set(j.done) == set(got) and j.fell == {}
 
 
 def test_a_job_nobody_claims_in_its_wait_falls_back_and_the_classes_wait_differently():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("page", URGENT, seconds=0.0))
     p.submit(j.job("shed", CATCHUP, seconds=0.0))
     clock.t += BUDGETS[URGENT][0] - 0.1
@@ -112,10 +120,10 @@ def test_a_job_nobody_claims_in_its_wait_falls_back_and_the_classes_wait_differe
 def test_a_lease_that_runs_out_falls_back_and_the_late_answer_is_refused():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("a", URGENT, seconds=4.0))
     job = p.claim("gpu-1", 0)
-    lease_s = BUDGETS[URGENT][1] + sttpool.PER_AUDIO_S * 4.0
+    lease_s = BUDGETS[URGENT][1]                              # (a pre-alert clip's: never longer for a longer clip)
     assert job.public()["lease_s"] == lease_s and job.public()["audio"].endswith(f"/{job.lease}/audio")
     assert job.public()["fast"] is True                       # a short lease: one greedy pass, no temperature fallback
     p.submit(j.job("b", LOW))
@@ -130,7 +138,7 @@ def test_a_lease_that_runs_out_falls_back_and_the_late_answer_is_refused():
 def test_extend_renews_the_lease_up_to_its_cap_never_past_it():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("a", URGENT, seconds=0.0))
     job = p.claim("gpu-1", 0)
     wait_s, lease_s, cap_s = BUDGETS[URGENT]
@@ -148,7 +156,7 @@ def test_extend_renews_the_lease_up_to_its_cap_never_past_it():
 def test_a_worker_going_gaming_or_paused_takes_nothing_new_and_what_waits_falls_back_at_once():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("a", LIVE))
     p.seen("gpu-1", "gaming")
     assert p.ready(LIVE) == (False, "no worker ready")
@@ -157,20 +165,21 @@ def test_a_worker_going_gaming_or_paused_takes_nothing_new_and_what_waits_falls_
     assert p.stats()["workers"][0]["state"] == "gaming"
     p.seen("gpu-1", "paused")
     assert not p.submit(j.job("b")) and p.stats()["workers"][0]["state"] == "paused"
-    p.seen("gpu-1", "online")
+    online(p)
     assert p.submit(j.job("b"))
 
 
 def test_a_worker_that_disappears_mid_job_loses_it_and_goes_offline():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("a", LIVE, seconds=0.0))
     job = p.claim("gpu-1", 0)
     clock.t += BUDGETS[LIVE][1]
     p.tick()
     p.drain()
     assert "a" in j.fell
+    p.workers["gpu-1"].polling = 0                            # (its long poll gone with it)
     clock.t += sttpool.OFFLINE_S
     assert p.stats()["workers"][0]["state"] == "offline" and not p.ready(LIVE)[0]
     assert job.lease not in p._leases and not p.has("a")
@@ -179,7 +188,7 @@ def test_a_worker_that_disappears_mid_job_loses_it_and_goes_offline():
 def test_handing_back_falls_back_now_and_repeated_failures_cool_the_worker_down():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     for i in range(sttpool.FAIL_N):
         p.submit(j.job(f"c{i}", LIVE, seconds=0.0))
         job = p.claim("gpu-1", 0)
@@ -199,7 +208,7 @@ def test_a_result_that_cannot_be_applied_falls_back_never_dropped():
     def boom(job, res):
         raise RuntimeError("the CAD said no")
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(Job("a", LIVE, "FG1", "traffic", 1.0, audio=lambda: b"", on_done=boom,
                  on_fallback=lambda job, why: fell.append(why)))
     job = p.claim("gpu-1", 0)
@@ -209,22 +218,81 @@ def test_a_result_that_cannot_be_applied_falls_back_never_dropped():
 def test_a_busy_pool_turns_a_clip_away_rather_than_make_it_wait_past_its_budget():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     for i in range(3):                                        # a backlog of context clips
         assert p.submit(j.job(f"low{i}", LOW, seconds=0.0))
     ok, why = p.ready(LOW)
     assert ok                                                 # (LOW waits 30 s: 3 x 2 s is fine)
-    assert p.ready(URGENT)[0]                                 # a page doesn't queue behind them (strict order)
-    for i in range(3):
-        p.claim("gpu-1", 0)                                   # three leased now: work ahead of anything
-    ok, why = p.ready(URGENT)
+    assert p.ready(URGENT)[0]                                 # idle now: a page may go to it (ahead of them all)
+    assert p.claim("gpu-1", 0) is not None                    # busy on a context clip now ...
+    assert p.ready(URGENT) == (False, "no worker idle now")     # ... so a page goes to AWS, never behind it
+    p.claim("gpu-1", 0)
+    assert p.claim("gpu-1", 0) is None                        # two jobs at once at most
+    for i in range(6):
+        p.submit(j.job(f"more{i}", LIVE, seconds=0.0))      # (the first two fit; then the work ahead is too long)
+    ok, why = p.ready(LIVE)
     assert not ok and why.startswith("busy")
+
+
+def test_a_pre_alert_clip_has_an_absolute_deadline_and_a_lost_or_gaming_worker_gives_it_back_at_once():
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    online(p)
+    assert p.submit(j.job("page", URGENT, seconds=40.0))     # a long page: its deadline is the same
+    job = p.claim("gpu-1", 0)
+    wait_s, lease_s, cap_s = BUDGETS[URGENT]
+    assert job.expires - job.claimed_at == lease_s and job.cap_at - job.claimed_at == cap_s
+    clock.t += lease_s                                        # a dead worker holds it 4 s, not 16 s
+    assert p.tick() == 1 and p.drain() == 1 and "page" in j.fell
+    online(p)
+    assert p.submit(j.job("long", LOW, seconds=0.0))
+    long = p.claim("gpu-1", 0)
+    clock.t += sttpool.LOST_S                                 # its worker unheard (no extend, no heartbeat) ...
+    assert long.expires > clock.t and p.tick() == 1 and p.drain() == 1 and "no word" in j.fell["long"]   # ... back now
+    online(p)
+    assert p.submit(j.job("air", HIGH, seconds=0.0))
+    air = p.claim("gpu-1", 0)
+    assert p.submit(j.job("low", LOW, seconds=0.0))
+    low = p.claim("gpu-1", 0)
+    p.seen("gpu-1", "gaming")                                 # gaming: its pre-alert job back now, the rest runs on
+    p.drain()
+    assert "went gaming" in j.fell["air"] and "low" not in j.fell and low.lease in p._leases
+    assert p.complete("gpu-1", air.lease, {"text": "late"}) is False
+
+
+def test_pre_alerts_go_only_to_a_quick_idle_worker(monkeypatch):
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    w = online(p)
+    assert p.submit(j.job("p0", URGENT, seconds=0.0))
+    job = p.claim("gpu-1", 0)
+    clock.t += 3.5                                            # slow on pre-alert clips lately (AWS would be as quick)
+    assert p.complete("gpu-1", job.lease, {"text": "x"})
+    ok, why = p.ready(URGENT)
+    assert not ok and why.startswith("slow on pre-alert clips")
+    assert p.ready(LIVE)[0]                                   # (other classes go on as before)
+    w.polling = 0                                              # not in a claim now: not idle
+    assert p.ready(LIVE)[0] and p.ready(URGENT)[0] is False
+
+
+def test_a_stopped_pool_takes_nothing_and_a_revoked_worker_never_comes_back():
+    j = Jobs()
+    allowed = {"gpu-1": True}
+    p = Pool(enabled=lambda cls: True, clock=Clock(), log=lambda s: None, allowed=lambda wid: allowed.get(wid, False))
+    online(p)
+    p.forget("gpu-1")
+    allowed["gpu-1"] = False
+    assert p.seen("gpu-1", "online") is None and p.claim("gpu-1", 0) is None and "gpu-1" not in p.workers
+    allowed["gpu-1"] = True                                   # a new token (Rotate): back
+    online(p)
+    p.stop()
+    assert not p.submit(j.job("a")) and p.ready(LIVE) == (False, "stopped")
 
 
 def test_a_revoked_worker_hands_back_what_it_holds():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     p.submit(j.job("a"))
     job = p.claim("gpu-1", 0)
     assert p.forget("gpu-1") == 1 and p.drain() == 1 and "revoked" in j.fell["a"]
@@ -277,7 +345,7 @@ def test_nothing_is_dropped_whatever_the_workers_do():
 def test_the_numbers_queued_to_text_p50_p90_and_jobs_an_hour():
     clock, j = Clock(), Jobs()
     p = pool(clock)
-    p.seen("gpu-1", "online")
+    online(p)
     for i, took in enumerate([0.4, 0.5, 0.6, 0.7, 2.0]):
         p.submit(j.job(f"c{i}", LIVE, seconds=0.0))
         job = p.claim("gpu-1", 0)
@@ -396,6 +464,7 @@ def test_with_no_worker_added_an_aws_clip_goes_to_aws_as_before_and_the_pool_is_
         assert hub.app.sttpool.submitted == 0 and asked and hub.app.hub.workers.any() is False
         db = sqlite3.connect(Path(hub.app.cfg.cad_db).parent / "hub.sqlite")
         assert "stt_workers" not in {r[0] for r in db.execute("SELECT name FROM sqlite_master")}   # nothing made
+        assert wait(lambda: hub.app.stt_runs.of("FG1-1"), 5)   # (written just after the text)
         runs = hub.app.stt_runs.of("FG1-1")                   # the transcript is versioned all the same
         assert [(r["engine"], r["model"], r["role"], r["text"]) for r in runs] == [
             ("aws", "aws-transcribe", "text", AWS_TEXT + ".")]
@@ -424,6 +493,7 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
             assert f.getframerate() == 16000 and abs(f.getnframes() / 16000 - 4.0) < 0.05
         assert w.answers[0][0] == 200
         assert hub.app.aws.health()["done"] == 0             # AWS never asked
+        assert wait(lambda: hub.app.stt_runs.of("FG1-2"), 5)
         (run,) = hub.app.stt_runs.of("FG1-2")
         assert run["engine"] == "gpu-worker" and run["worker"] == "gpu-1" and run["model"] == "ggml-large-v3-turbo-q5_0.bin"
         assert run["text"] == GPU_TEXT and run["confidence"] == 0.8 and run["class"] == "urgent"
@@ -623,7 +693,7 @@ def test_the_table_is_made_on_first_use_never_at_the_start(tmp_path):
 # -- the catch-up: shed clips to the pool first -------------------------------------------------------------------------
 
 
-def test_a_shed_clip_is_caught_up_on_a_worker_quietly_even_while_fire_work_pauses_whisper(tmp_path):
+def test_a_shed_clip_is_caught_up_on_a_worker_quietly_once_fire_work_is_over(tmp_path):
     from tests.test_stt_catchup import PD, pd_alert, pd_event
     hub = HubRun(hub_cfg(tmp_path))
     token = hub.app.hub.workers.add("gpu-1")
@@ -635,7 +705,10 @@ def test_a_shed_clip_is_caught_up_on_a_worker_quietly_even_while_fire_work_pause
         assert wait(lambda: [r["id"] for r in app.cad.comms.shed_clips(now - 3600)[0]] == [tid], 10)
         assert wait(lambda: app.sttpool.ready(CATCHUP)[0], 5)
         assert app._catchup_route(PD) == "pool"
-        app.catchup.pause = lambda: "an event is open"          # fire work: the station's whisper waits, the pool doesn't
+        app.catchup.pause = lambda: "an event is open"          # fire work: nothing goes, to the pool either
+        assert app.catchup.tick() == 0 and app.sttpool.submitted == 0
+        assert "paused: an event is open" in app.catchup.stats()["why"]
+        app.catchup.pause = lambda: ""
         heard = []
         app.cad.comms.on_text = heard.append
         app.cad.comms.on_context_text = heard.append
@@ -646,16 +719,16 @@ def test_a_shed_clip_is_caught_up_on_a_worker_quietly_even_while_fire_work_pause
         assert res() == {"status": "done", "text": GPU_TEXT, "model": "large-v3-turbo-q5_0 (GPU gpu-1)",
                          "rerun_result": "changed; catch-up"}
         assert heard == []                                       # old words alert nothing
+        assert wait(lambda: app.stt_runs.of(tid), 5)
         (run,) = app.stt_runs.of(tid)
         assert run["role"] == "catchup" and run["class"] == "catchup" and run["engine"] == "gpu-worker"
         assert app.stt_latency.table() == []                    # a catch-up isn't live latency
-        assert "paused: an event is open" in app.catchup.stats()["why"]
     finally:
         w.close()
         hub.close()
 
 
-def test_a_shed_clip_the_pool_hands_back_burns_no_try_and_goes_the_old_way_next(tmp_path, quick):
+def test_a_shed_clip_a_worker_loses_is_a_failed_try_and_one_nobody_takes_burns_none(tmp_path, quick):
     from tests.test_stt_catchup import PD, pd_alert, pd_event
     hub = HubRun(hub_cfg(tmp_path))
     token = hub.app.hub.workers.add("gpu-1")
@@ -668,9 +741,20 @@ def test_a_shed_clip_the_pool_hands_back_burns_no_try_and_goes_the_old_way_next(
         assert wait(lambda: app.sttpool.ready(CATCHUP)[0], 5)
         app.catchup.pause = lambda: ""
         assert app.catchup.tick() == 1 and tid in app.catchup._sent
-        assert wait(lambda: tid not in app.catchup._sent, 10)    # handed back: forgotten, no try burnt
-        assert app.cad.comms.catchup_tries(tid) == 0 and tid not in app._rerun_note
+        assert wait(lambda: app.cad.comms.catchup_tries(tid) == 1, 10)    # its lease lost: a failed try (a poison clip ends)
         w.close()
+        # one nobody takes (no worker ready by then): back to the catch-up, no try burnt
+        tid2 = "9211-1794-call_11"
+        send(hub, pd_event(tid2, now, seq=2))
+        assert wait(lambda: tid2 in [r["id"] for r in app.cad.comms.shed_clips(now - 3600)[0]], 10)
+        app.sttpool.seen("gpu-1", "online")
+        app.sttpool.workers["gpu-1"].polling = 1
+        assert app._catchup_pool({"id": tid2, "key": PD, "source": "MRRS PD", "start": now - 3, "seconds": 3.0})[0]
+        app.catchup._sent[tid2] = (1, time.time())
+        app.sttpool.seen("gpu-1", "gaming")
+        app.sttpool.workers["gpu-1"].polling = 0
+        assert wait(lambda: tid2 not in app.catchup._sent, 10)  # nobody could take it: forgotten, routed again
+        assert app.cad.comms.catchup_tries(tid2) == 0 and tid2 not in app._rerun_note
         app.sttpool.forget("gpu-1")
         assert app._catchup_route(PD) == "whisper"               # no worker now: the station's whisper, as before
     finally:
@@ -708,21 +792,26 @@ def test_the_stations_whisper_text_is_kept_as_a_run_with_its_latency(tmp_path):
         hub.close()
 
 
-def test_runs_are_pruned_after_their_keep_and_a_failure_to_write_never_stops_a_transcript(tmp_path):
-    from tests.test_station_identity import make_cad
-    cad = make_cad(tmp_path)
+def test_runs_are_pruned_after_their_keep_and_with_their_transcript_and_a_failure_never_stops_one(tmp_path):
     clock = Clock(2_000_000_000.0)
     logs = []
-    runs = sttruns.Runs(cad.store, clock=clock, log=logs.append)
-    assert runs.prune() == 0                                     # no table yet: nothing, no error
-    for i, days in enumerate((150, 100, 1)):
+    logged = {"c2", "c3"}                                        # the radio log's rows still there
+    runs = sttruns.Runs(tmp_path / "stt.sqlite", clock=clock, log=logs.append, exists=lambda ids: set(ids) & logged)
+    assert runs.prune() == 0 and not (tmp_path / "stt.sqlite").exists()   # no file yet: nothing made, no error
+    for i, days in enumerate((150, 100, 1, 1)):
         assert runs.add(f"c{i}", "aws", text="x", done_at=clock.t - days * 86400)
-    assert runs.prune() == 2 and [r["clip_id"] for r in runs.of("c2")] == ["c2"] and runs.of("c0") == []
+    assert runs.prune() == 2 and runs.of("c0") == [] and [r["clip_id"] for r in runs.of("c2")] == ["c2"]
+    logged.discard("c3")                                         # its transcript's retention pruned the row
+    assert runs.prune() == 1 and runs.of("c3") == [] and runs.of("c2")
+    for i in range(1200):                                        # more than a batch: pruned in one pass all the same
+        runs.add(f"old{i}", "aws", done_at=clock.t - 100 * 86400)
+    assert runs.prune() == 1200
+    assert runs.add("c5", "aws", confidence=float("nan"), clip_end=float("inf"))
+    assert runs.of("c5")[0]["confidence"] is None and runs.of("c5")[0]["clip_end"] is None
 
-    class Broken:
-        def tx(self):
-            raise sqlite3.OperationalError("disk I/O error")
-    bad = sttruns.Runs(Broken(), clock=clock, log=logs.append)
+    standby = sttruns.Runs(tmp_path / "standby.sqlite", may_write=lambda: False, clock=clock)
+    assert standby.add("c9", "aws") is False and not (tmp_path / "standby.sqlite").exists()
+    bad = sttruns.Runs(tmp_path / "no-dir" / "x" / "\0bad", clock=clock, log=logs.append)
     assert bad.add("c9", "aws") is False and bad.add("c9", "aws") is False and len(logs) == 1   # said once a while
     assert sttruns.prompt_version("") == "" and len(sttruns.prompt_version("Engine 99")) == 10
     # a cut transmission's piece (the radio's key-up split): kept with its run, for grouping later
@@ -773,5 +862,123 @@ def test_the_hub_logs_when_a_channel_is_denied_aws_and_when_it_may_again(tmp_pat
                         "reserve kept: tg:307",
                         "aws transcribe: our channels may use AWS again",
                         "aws transcribe: denied AWS on its own budget: p25:mrrs:9211 (its own budget is used up)"]
+    finally:
+        hub.close()
+
+
+# -- the #651 review: a page end to end, a restart with a job out, numbers that aren't, the copies --------------------
+
+
+def test_a_page_goes_through_a_worker_end_to_end_and_its_dispatch_is_read(tmp_path):
+    from tests.test_transcribe_watchdog import _page_event
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    token = hub.app.hub.workers.add("gpu-1")
+    w = FakeWorker(hub.url, token, text="Port Chester engine 99 respond to a structure fire").start()
+    try:
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        send(hub, _page_event("South_2-900"))
+        page = lambda: next((p for p in hub.app.pages if p.id == "South_2-900"), None)   # noqa: E731
+        assert wait(lambda: page() is not None and page().status == "done", 20)
+        p = page()
+        assert p.raw == "Port Chester engine 99 respond to a structure fire" and p.model.endswith("(GPU gpu-1)")
+        assert w.jobs[0]["class"] == "urgent" and w.jobs[0]["fast"] is True and w.jobs[0]["kind"] == "page"
+        assert hub.app.aws.health()["done"] == 0
+        assert wait(lambda: hub.app.stt_runs.of("South_2-900"), 5)
+        assert hub.app.stt_runs.of("South_2-900")[0]["engine"] == "gpu-worker"
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_a_hub_restart_with_a_job_out_sends_it_the_aws_way(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    token = hub.app.hub.workers.add("gpu-1")
+    w = FakeWorker(hub.url, token, mode="vanish").start()
+    try:
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        send(hub, pending_event("FG1-77"))
+        assert wait(lambda: w.jobs, 10)                        # a worker has it ... and the hub goes down
+        w.close()
+        hub.close()
+        assert row(hub, "FG1-77")["status"] == "pending"
+        hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))     # back: _aws_recover
+        assert wait(lambda: row(hub, "FG1-77").get("text") == AWS_TEXT + ".", 20)
+        late = call(hub.url + f"/api/station/stt/jobs/{w.jobs[0]['lease']}/complete", "POST", {"text": "x"}, token=token)
+        assert late[0] == 409                                   # the old lease means nothing to the new hub
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_numbers_that_arent_never_get_in_and_a_body_nested_too_deep_is_refused(tmp_path):
+    res = clean_result({"text": "x", "segments": [{"start": float("nan"), "end": float("inf"), "text": "x",
+                                                   "words": [{"word": "x", "probability": float("nan")},
+                                                             {"word": "y", "probability": 1.7},
+                                                             {"word": "z", "probability": -0.1},
+                                                             {"word": "ok", "probability": 0.5}]}],
+                        "timing": {"infer_ms": float("inf")}})
+    assert [w[1] for w in res["words"]] == [None, None, None, 0.5] and res["segments"][0]["start"] is None
+    assert res["timing"] == {}
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        token = hub.app.hub.workers.add("gpu-1")
+        import urllib.request
+        body = b'{"text": ' + b"[" * 50000 + b"]" * 50000 + b"}"
+        req = urllib.request.Request(hub.url + "/api/station/stt/jobs/0123456789abcdef/complete", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            code = 200
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 400
+    finally:
+        hub.close()
+
+
+class FakeCopies:
+    """The bucket's copies (sizeup/cloud/metricsbackup.py S3Copies' shape), in memory."""
+
+    def __init__(self):
+        self.slots, self.puts = {}, 0
+
+    def list(self):
+        return [{"slot": k, "at": at, "size": len(raw)} for k, (at, raw) in
+                sorted(self.slots.items(), key=lambda kv: -kv[1][0])]
+
+    def get(self, slot):
+        return self.slots[slot][1]
+
+    def put(self, slot, raw):
+        self.puts += 1
+        self.slots[slot] = (time.time() + self.puts, raw)
+        return len(raw)
+
+
+def test_runs_live_in_their_own_file_with_copies_a_new_task_merges(tmp_path):
+    copies = FakeCopies()
+    clock = Clock(2_000_000_000.0)
+    old = sttruns.Runs(tmp_path / "old" / "stt.sqlite", backup=copies, clock=clock, log=lambda m: None)
+    assert old.backup_turn() == "settled"                      # nothing there yet
+    old.add("FG1-1", "aws", text="before the deploy", done_at=clock.t - 60)
+    assert old.backup_turn(force=True) == "uploaded" and copies.puts == 1     # (the hub stopping: a last copy)
+    new = sttruns.Runs(tmp_path / "new" / "stt.sqlite", backup=copies, clock=clock, log=lambda m: None)
+    new.add("FG1-2", "gpu-worker", text="after the deploy", done_at=clock.t)   # written before it settled
+    assert new.backup_turn() == "settled"
+    assert [r["text"] for r in new.of("FG1-1")] == ["before the deploy"] and new.of("FG1-2")
+    assert new.backup_turn() == ""                              # a copy every few hours, not every turn
+    clock.t += sttruns.SNAPSHOT_S
+    assert new.backup_turn() == "uploaded" and copies.puts == 2
+    standby = sttruns.Runs(tmp_path / "standby" / "stt.sqlite", backup=copies, may_write=lambda: False, clock=clock)
+    assert standby.backup_turn() == "" and not (tmp_path / "standby").exists()
+    # the hub's own: its file next to hub.sqlite, never in cad.sqlite
+    hub = HubRun(hub_cfg(tmp_path / "hub"))
+    try:
+        assert Path(hub.app.stt_runs.path).name == "stt.sqlite"
+        assert Path(hub.app.stt_runs.path).parent == Path(hub.app.cfg.cad_db).parent
     finally:
         hub.close()

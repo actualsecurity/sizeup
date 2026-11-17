@@ -38,20 +38,21 @@ NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 class S3Copies:
     def __init__(self, bucket: str, prefix: str = "sizeup-hub", region: str = "",
                  send: Callable[[str, str, dict, object, float], tuple[int, bytes]] | None = None,
-                 creds: Callable[[], aws.Credentials] = aws.credentials, endpoint: str = ""):
+                 creds: Callable[[], aws.Credentials] = aws.credentials, endpoint: str = "", sub: str = SUB):
         self.bucket, self.region = bucket, aws.region(region)
-        self.prefix = "/".join(p for p in (prefix.strip("/"), SUB) if p)
+        self.prefix = "/".join(p for p in (prefix.strip("/"), sub) if p)
         self.endpoint = (endpoint or f"https://{bucket}.s3.{self.region}.amazonaws.com").rstrip("/")
         self.send, self.creds = send or _send, creds
         self.name = f"s3://{bucket}/{self.prefix}/"
 
     @classmethod
-    def from_env(cls) -> S3Copies | None:
+    def from_env(cls, sub: str = SUB) -> S3Copies | None:
+        """sub: the folder ("metrics"; "stt": the transcripts as written, sizeup/sttruns.py, #639)."""
         bucket = os.environ.get("LITESTREAM_BUCKET", "").strip()
         if not bucket or os.environ.get("SIZEUP_METRICS_S3", "").strip().lower() in ("0", "off", "no", "false"):
             return None
         return cls(bucket, os.environ.get("LITESTREAM_PATH", "").strip() or "sizeup-hub",
-                   os.environ.get("LITESTREAM_REGION", "").strip())
+                   os.environ.get("LITESTREAM_REGION", "").strip(), sub=sub)
 
     def key(self, slot: int) -> str:
         return f"{self.prefix}/copy-{int(slot)}.sqlite.gz"

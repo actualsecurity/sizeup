@@ -14,8 +14,8 @@ Tokens
 The pool's switches (hub.sqlite meta "stt_pool", JSON): on (default on) and, per class, whether its clips go to the
 pool first (default all). With no active worker the pool is off whatever they say: nothing changes without one.
 
-The worker API (every request: Authorization: Bearer sw1...; at the edge, the Cloudflare Access service token that lets
-/api/station/* through). JSON in and out; 401 {error, reason} for a token refused (no_token, token_unknown,
+The worker API (every request: Authorization: Bearer sw1...; at the edge, a Cloudflare Access service token: best its
+own Access application scoped to /api/station/stt/*, so a worker's service token reaches nothing of the station's). JSON in and out; 401 {error, reason} for a token refused (no_token, token_unknown,
 token_revoked); 409 {error} for a lease that is gone.
 
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -127,6 +128,11 @@ class WorkerRegistry:
 
     def rows(self) -> list[dict]:
         return [dict(zip(COLUMNS, r)) for r in self._q(f"SELECT {', '.join(COLUMNS)} FROM stt_workers ORDER BY created, id")]
+
+    def active(self, wid: str) -> bool:
+        """This worker exists and isn't revoked."""
+        r = self.row(wid)
+        return r is not None and r["revoked"] is None
 
     def any(self) -> bool:
         """An active (not revoked) worker exists: the pool can be on at all. Cached for a second (asked per clip)."""
@@ -336,7 +342,14 @@ def _json(code: int, obj) -> tuple[int, bytes, str]:
 
 
 def _num(v) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    """A finite number, else None (NaN and infinities never get in)."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def _prob(v) -> float | None:
+    """A probability: 0 to 1, else None."""
+    f = _num(v)
+    return f if f is not None and 0.0 <= f <= 1.0 else None
 
 
 def clean_result(raw: dict) -> dict:
@@ -354,7 +367,7 @@ def clean_result(raw: dict) -> dict:
                            "text": str(s.get("text") or "")[:2000]})
         for w in (s.get("words") if isinstance(s.get("words"), list) else [])[:WORDS_MAX]:
             if isinstance(w, dict) and len(words) < WORDS_MAX:
-                words.append([str(w.get("word") or "")[:60], _num(w.get("probability")), _num(w.get("start")),
+                words.append([str(w.get("word") or "")[:60], _prob(w.get("probability")), _num(w.get("start")),
                               _num(w.get("end"))])
     timing = raw.get("timing") if isinstance(raw.get("timing"), dict) else {}
     return {"text": " ".join(text.split())[:TEXT_MAX], "segments": clean_segs, "words": words,
@@ -438,8 +451,8 @@ class WorkerApi:
             if what == "release":
                 why = str(d.get("why") or "")[:160]
                 return _json(200, {"ok": True}) if self.pool.release(wid, lease, why) else _json(409, {"error": "lease lost"})
-        except ValueError as e:
-            return _json(400, {"error": f"bad request: {e}"})
+        except (ValueError, RecursionError) as e:          # (a body nested too deep is no result either)
+            return _json(400, {"error": f"bad request: {type(e).__name__}"})
         return _json(404, {"error": "not found"})
 
     def _audio(self, wid: str, lease: str) -> tuple[int, bytes, str]:

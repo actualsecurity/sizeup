@@ -18,10 +18,11 @@ all-in-one), on its own thread, a few at a time:
                 reserve; otherwise the local model (the station's whisper: its catch_up call), in the CATCHUP class:
                 under every other clip, started only after a quiet spell with nothing of ours heard, one greedy pass,
                 one try, a short timeout, at most MAX_CLIP_S of audio (sizeup/stt.py)
-    the pool    a GPU worker ready (sizeup/sttpool.py, #639): route "pool" first, whatever the channel's engine. Neither
-                whisper's idleness nor fire work holds it (the pool serves every live clip first, strictly), the clip is
-                quiet all the same, POOL_BATCH a tick, up to POOL_MAX_CLIP_S long. A clip the pool hands back (no worker
-                took it, its lease ran out) is forgotten here, no try burnt: the next tick routes it again
+    the pool    a GPU worker ready (sizeup/sttpool.py, #639): route "pool" first, whatever the channel's engine. It doesn't
+                wait for whisper to be idle; fire work pauses it like the rest (a worker busy on old clips is one the
+                pre-alerts can't have). Quiet all the same, POOL_BATCH a tick, up to POOL_MAX_CLIP_S long. A clip the
+                pool hands back untried (no worker took it) is forgotten here, no try burnt: the next tick routes it
+                again; a lease lost on it is a failed try on its row
     bounds      WHISPER_BATCH clips to whisper a tick and none more until the station says they are done,
                 AWS_BATCH per channel; a try that failed is on the row (rerun_result "failed: why; catch-up try N":
                 it outlives a restart and a handover) and is tried again after RETRY_S, at most MAX_TRIES times; a
@@ -52,7 +53,7 @@ MAX_TRIES = 2              # ... at most this many times in all
 FETCH = 60                 # eligible rows taken a tick
 MAX_CLIP_S = CATCHUP_MAX_CLIP_S   # a longer clip never goes to whisper (AWS takes it, on a channel that may)
 POOL_BATCH = 20            # clips handed to the GPU pool a tick (#639)
-POOL_MAX_CLIP_S = 120.0    # ... each at most this long
+POOL_MAX_CLIP_S = 60.0     # ... each at most this long
 CAUGHT_CACHE_S = 60.0      # the 24 h count is read from the radio log this often
 DEFAULT_MAX_AGE_H = 6.0
 MAX_AGE_RANGE_H = (0.5, 48.0)
@@ -201,12 +202,11 @@ class CatchUp:
         if not rows:
             self.state["why"] = "nothing to catch up"
             return 0
-        sent, why = self._pool(rows, now)                # the GPU pool (#639): never held by fire work
         paused = self.pause()
-        if paused:                                       # fire work first: nothing goes, to whisper or to AWS
-            self.state["why"] = "; ".join([f"paused: {paused}", *why])
-            self.state["sent"] = self.state.get("sent", 0) + sent
-            return sent
+        if paused:                                       # fire work first: nothing goes, to the pool, whisper or AWS
+            self.state["why"] = f"paused: {paused}"
+            return 0
+        sent, why = self._pool(rows, now)                # the GPU pool (#639) first
         whisper = [r for r in rows if r.get("route") == "whisper"]      # (in order: the alert tier, then the newest)
         aws: dict[str, list[dict]] = {}
         for r in rows:
