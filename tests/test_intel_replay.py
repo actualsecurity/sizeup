@@ -437,6 +437,7 @@ def test_tool_json_never_inside_the_repo(restored):
     assert not (intel_replay.ROOT / "x.intel-replay.json").exists()
 
 
+@pytest.mark.flaky(issue=665)
 def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
     """The real engine and the gazetteer over a read-only copy: no socket call is ever made (recorded, not raised: the
     engine's own `except Exception` would swallow a raise), the engine has no notifier, no listen links and no model

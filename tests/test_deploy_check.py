@@ -150,3 +150,149 @@ def test_the_workflow_runs_it_after_the_deploy_and_skips_without_the_secret():
 @pytest.mark.parametrize("a,b,same", [(NEW, NEW[:7], True), (NEW, OLD, False), ("", NEW, False), ("abc", "abc", False)])
 def test_same_build(a, b, same):
     assert dc.same_build(a, b) is same
+
+
+# -- pick: the newest tested commit on main (back-to-back merges) -------------------------------------------------------
+
+REPO = "o/r"
+
+
+class FakeGitHub:
+    """The GitHub API as pick reads it: main's first-parent chain (oldest first), the commits whose `test` push run
+    passed, and the deploy runs, newest first: (run id, conclusion, the sha its "deploy <sha>" job named, rolled)."""
+
+    def __init__(self, chain, passed=(), deploys=()):
+        self.chain, self.passed, self.deploys, self.paths = list(chain), set(passed), list(deploys), []
+
+    def __call__(self, path):
+        from urllib.parse import parse_qs, urlsplit
+        self.paths.append(path)
+        u = urlsplit(path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        parts = u.path.split("/")
+        if parts[3] == "branches":
+            return {"commit": {"sha": self.chain[-1]}}
+        if parts[3] == "compare":
+            a, b = parts[4].split("...")
+            if a not in self.chain or b not in self.chain:
+                return {}                                                  # 404: an unknown commit
+            ia, ib = self.chain.index(a), self.chain.index(b)
+            status = "identical" if ia == ib else "ahead" if ib > ia else "behind"
+            between = self.chain[ia + 1:ib + 1] if ib > ia else []
+            per, page = int(q.get("per_page", 250)), int(q.get("page", 1))
+            return {"status": status, "total_commits": len(between),
+                    "commits": [{"sha": s} for s in between[(page - 1) * per:page * per]]}
+        if parts[4:6] == ["workflows", "test.yml"]:
+            assert q == {"branch": "main", "event": "push", "status": "success", "per_page": "100"}
+            return {"workflow_runs": [{"head_sha": s} for s in sorted(self.passed)]}
+        if parts[4:6] == ["workflows", "deploy.yml"]:
+            return {"workflow_runs": [{"id": i, "conclusion": c} for i, c, *_ in self.deploys]}
+        if parts[4] == "runs" and parts[6] == "jobs":
+            for i, c, sha, rolled in self.deploys:
+                if str(i) == parts[5]:
+                    steps = [{"name": "Nothing newer is deployed", "conclusion": "success"},
+                             {"name": dc.ROLL_STEP, "conclusion": "success" if rolled else "failure"}]
+                    return {"jobs": [{"name": "pick", "conclusion": "success"},
+                                     {"name": f"deploy {sha}" if sha else "deploy", "steps": steps}]}
+            return {"jobs": []}
+        raise AssertionError(path)
+
+
+C = [f"{i:x}" * 40 for i in range(1, 8)]            # main: C[0] (oldest) .. C[6] (the tip)
+
+
+def test_pick_deploys_the_newest_tested_commit_on_main_not_the_one_that_started_the_run():
+    gh = FakeGitHub(C, passed={C[1], C[3], C[4]})                      # C[5], C[6]: still testing (or failed)
+    sha, why = dc.pick(gh, REPO, C[1])
+    assert sha == C[4] and "3 commit(s) after" in why
+    assert dc.pick(gh, REPO, C[4])[0] == C[4]                          # the newest one itself
+    gh.passed = {C[3]}
+    assert dc.pick(gh, REPO, C[4])[0] == C[4]   # the run's own commit passed even if the listing hasn't caught up
+    assert dc.pick(gh, REPO, C[6])[0] == C[6]
+
+
+def test_pick_never_deploys_a_commit_older_than_or_the_same_as_the_last_deploy():
+    gh = FakeGitHub(C, passed={C[1], C[2]}, deploys=[(9, "success", C[4], True)])
+    sha, why = dc.pick(gh, REPO, C[1])           # a late test run for an older commit
+    assert sha == "" and "is already deployed" in why and C[4][:7] in why
+    gh.deploys = [(9, "success", C[2], True)]
+    sha, why = dc.pick(gh, REPO, C[1])
+    assert sha == "" and why.startswith(f"{C[2][:7]} is already deployed (deploy run 9)")
+    gh.passed.add(C[5])
+    assert dc.pick(gh, REPO, C[1])[0] == C[5]                          # something newer passed: that one
+    assert dc.pick(gh, REPO, C[5], run_id="9")[0] == C[5]              # (this run itself never counts)
+
+
+def test_the_last_deploy_is_what_ecs_runs_whatever_the_checks_after_said():
+    gh = FakeGitHub(C, passed={C[3]}, deploys=[
+        (12, "skipped", None, False),                                  # a failed test run's deploy: no job ran
+        (11, "success", C[6], False),                                  # (impossible, but: never rolled, never counts)
+        (10, "failure", C[3], True),                                   # rolled, then the station check failed
+        (9, "success", C[2], True)])
+    assert dc.last_deployed(gh, REPO) == (C[3], "10")
+    assert not any("/runs/12/jobs" in p for p in gh.paths)
+    assert dc.pick(gh, REPO, C[3])[0] == ""                            # not again
+    gh.deploys = [(8, "success", None, True)]                         # before pick existed: "deploy", no sha
+    assert dc.last_deployed(gh, REPO) == ("", "") and dc.pick(gh, REPO, C[3])[0] == C[3]
+
+
+def test_pick_deploys_nothing_that_is_not_on_main():
+    gh = FakeGitHub(C, passed=set(C))
+    sha, why = dc.pick(gh, REPO, "e" * 40)                             # a fork's "main", a force-pushed-away commit
+    assert sha == "" and "is not on main" in why
+
+
+def test_pick_reads_every_page_of_a_long_compare():
+    chain = [f"{i:040x}" for i in range(1, 260)]
+    gh = FakeGitHub(chain, passed={chain[0], chain[230]})
+    assert dc.pick(gh, REPO, chain[0])[0] == chain[230]
+    assert sum("page=" in p and "/compare/" in p for p in gh.paths) == 3
+
+
+def test_the_guard_refuses_a_rerun_that_would_roll_back():
+    gh = FakeGitHub(C, deploys=[(9, "success", C[4], True)])
+    ok, why = dc.guard(gh, REPO, C[2], run_id="7")
+    assert not ok and "newer than" in why and "won't roll back" in why
+    assert dc.guard(gh, REPO, C[4], run_id="7")[0]                     # the same commit again: fine
+    assert dc.guard(gh, REPO, C[5], run_id="7")[0]
+    assert dc.guard(gh, REPO, C[2], run_id="9")[0]                     # its own earlier attempt doesn't count
+
+
+def test_pick_main_writes_the_output_and_says_why(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    gh = FakeGitHub(C, passed={C[1], C[3]})
+    monkeypatch.setattr(dc, "github_get", lambda token: gh)
+    assert dc.main(["pick", "--repo", REPO, "--sha", C[1], "--run-id", "5"]) == 0
+    assert out.read_text() == f"sha={C[3]}\n" and "::notice title=Deploying::" in capsys.readouterr().out
+    gh.deploys = [(4, "success", C[3], True)]
+    assert dc.main(["pick", "--repo", REPO, "--sha", C[1], "--run-id", "5"]) == 0
+    assert out.read_text().endswith("sha=\n") and "::notice title=Not deploying::" in capsys.readouterr().out
+    assert dc.main(["pick", "--guard", "--repo", REPO, "--sha", C[1], "--run-id", "5"]) == 1
+    assert "::error title=A newer commit is deployed::" in capsys.readouterr().out
+
+    def down(path):
+        raise dc.GitHubError(f"HTTP 502 for {path}")
+    monkeypatch.setattr(dc, "github_get", lambda token: down)
+    out.write_text("")
+    assert dc.main(["pick", "--repo", REPO, "--sha", C[1]]) == 1
+    assert out.read_text() == "" and "nothing was deployed" in capsys.readouterr().out   # no output: deploy skipped
+    assert dc.main(["pick", "--repo", REPO, "--sha", "abc1234"]) == 2
+
+
+def test_the_deploy_workflow_picks_first_and_names_the_job_after_the_commit():
+    wf = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+    assert 'python3 tools/deploy_check.py pick --repo "$GITHUB_REPOSITORY" --sha "$TESTED"' in wf
+    assert "name: deploy ${{ needs.pick.outputs.sha }}" in wf and "if: needs.pick.outputs.sha != ''" in wf
+    assert f"name: {dc.ROLL_STEP}" in wf
+    guard = wf.index("deploy_check.py pick --guard")
+    assert wf.index("needs: pick") < guard < wf.index("aws-actions/configure-aws-credentials")
+    assert "github.event.workflow_run.event == 'push'" in wf and "cancel-in-progress: false" in wf
+    assert "&& 'deploy' || format('deploy-skipped-{0}', github.run_id)" in wf   # skipped runs: their own group
+
+
+def test_main_test_runs_are_never_cancelled_only_a_prs():
+    ci = (ROOT / ".github" / "workflows" / "test.yml").read_text()
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in ci
+    assert "format('test-{0}-{1}', github.ref, github.run_id)" in ci                # main: a group per run

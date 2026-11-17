@@ -60,6 +60,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [What each Health row means](#what-each-health-row-means)
   - [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy)
   - [A deploy that checks itself](#a-deploy-that-checks-itself)
+  - [Back-to-back merges](#back-to-back-merges)
 - [Auth and security](#auth-and-security)
 - [How station authentication works](#how-station-authentication-works)
   - [The tokens and where each lives](#the-tokens-and-where-each-lives)
@@ -142,7 +143,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 
 | When | Go to |
 |---|---|
-| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
+| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Back-to-back merges](#back-to-back-merges) (which commit a deploy picks), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
 | A deploy with a migration | [Writing a migration](#writing-a-migration), [After a takeover: let the first snapshot finish](#after-a-takeover-let-the-first-snapshot-finish) |
 | The deploy's SSM step is red | [A deploy that checks itself](#a-deploy-that-checks-itself): create the parameter (sizeup-aws), then deploy again |
 | The deploy's replica step is red | [Replica checks](#replica-checks): "corrupt" or "not verifiable" is real; "not verified within 10 min" may be a slow first restore |
@@ -569,16 +570,52 @@ uses it too.
 
 ### A deploy that checks itself
 
-`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time:
+`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time.
+First it picks the commit: the newest one on main that passed `test` ([Back-to-back merges](#back-to-back-merges)).
 
 | Step | What | Fails when |
 |---|---|---|
+| 0. Pick | `tools/deploy_check.py pick`: the newest commit on main that passed `test`, or nothing if it (or a newer one) is already on ECS; the deploy job is named `deploy <sha>`. Then `pick --guard`: nothing newer is on ECS (a re-run of an old run) | GitHub can't be asked: nothing is deployed, the next deploy catches up. The guard: a newer commit is already deployed |
 | 1. SSM guard (#469) | `tools/taskdef_params.py` lists every SSM parameter `deploy/aws/taskdef.json` names (each a full ARN in the deploy's region and account); `aws ssm describe-parameters` must find them all. Names only, never a value (`ssm:DescribeParameters`: sizeup-aws `23-deploy-ssm-describe.sh`) | one is missing ("Missing SSM parameter"), or AWS couldn't be asked ("Could not check SSM"): nothing is built or deployed. A task whose secret is missing never starts |
 | 2. Build and roll | the arm64 image to ECR with `SIZEUP_BUILD` = the full sha, both containers rendered, the service updated, waiting for stability | ECS's circuit breaker rolls back |
 | 3. Replicas | `tools/deploy_check.py replicas --build <sha> --timeout 600` ([Replica checks](#replica-checks)) | a replica is corrupt or not verifiable, or nothing was verified in 10 min |
 | 4. Station | `tools/deploy_check.py --url <hub> --build <sha> --timeout 900` (below) | the station's update failed, was rolled back or is paused; the token is refused; 15 min pass |
 
 Tests: `tests/test_deploy_ssm_guard.py`, `tests/test_deploy_check.py`.
+
+### Back-to-back merges
+
+PRs can be merged one after another without waiting for each deploy (about 9 min, plus up to 15 for the station):
+
+* **Every merge is tested to the end.** `test` runs on main are never cancelled or queued behind each other
+  (`.github/workflows/test.yml`: each has its own concurrency group). A PR's own runs still cancel each other.
+* **Deploys queue, one at a time.** Each `test` run that passes on main starts a `deploy` run. They share the `deploy`
+  concurrency group, and GitHub keeps only the newest waiting run: an older waiting one shows as cancelled. That loses
+  nothing, because of the next point. A run for a failed or cancelled `test` run is skipped in a group of its own, so
+  it never pushes a waiting deploy out.
+* **A deploy deploys the newest tested commit, when it starts.** Its first job, `pick`, takes main from the commit
+  that started it up to the tip and chooses the newest commit whose `test` push run passed (`tools/deploy_check.py
+  pick`, GitHub API reads only). Nothing, when that commit or a newer one is already on ECS: the last deploy run whose
+  `deploy <sha>` job got past "Roll the ECS service" (even if its replica or station check failed after). So an older
+  commit is never deployed after a newer one, and no commit twice in a row.
+* **Re-running an old deploy** ("Re-run failed jobs") keeps that run's pick: its first step, `pick --guard`, stops
+  it if something newer is on ECS. Re-run all jobs to pick again.
+* **By hand** (Actions → deploy → Run workflow): deploys exactly that ref, no pick and no guard. This is how to roll
+  back; the next merge that passes deploys main again.
+
+Three merges a minute apart: the first deploys; the second's run waits; the third's run replaces it in the queue and,
+when the first is done, deploys the third. If the third's tests are still running then, the second's run deploys the
+second and the third's deploys it after. A merge whose test failed (a flake, then re-run): when the re-run passes, its
+deploy picks the newest tested commit; if something newer is already on ECS it does nothing.
+
+**Flaky tests.** Known flakes are marked `@pytest.mark.flaky(issue=NNN)` and retried once when they fail
+(`tests/conftest.py`; docs/development.md "Known failures and flakes"), so one doesn't hold back a deploy. Any other
+failure is final.
+
+**The merge queue (not enabled).** `test.yml` already has the `merge_group` trigger (inert without a ruleset). To
+turn it on: Settings → Rules → Rulesets (or Branches → the rule for `main`): "Require merge queue" (merge method,
+build concurrency, "Only merge non-failing pull requests"), with `pytest` and `image` as required status checks. The
+queue then tests each PR on top of the ones ahead of it before merging; the deploy still starts from the push to main.
 
 **The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's

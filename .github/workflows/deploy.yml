@@ -9,6 +9,16 @@ name: deploy
 # without SIZEUP_STATUS_TOKEN the check is skipped with a warning. vars.SIZEUP_HUB_URL overrides the URL.
 # Before that, the replicas: the new leader's own check of each must pass (tools/deploy_check.py replicas reads its
 # record, replica-watch.json, and nothing else: sizeup-aws/28-replica-watch.sh).
+#
+# Back-to-back merges (docs/cloud.md "Back-to-back merges"): main's test runs are never cancelled (test.yml), so each
+# merge that passes starts a run here, in any order. Runs wait in one queue (the "deploy" group: one at a time; GitHub
+# keeps only the newest waiting run and cancels an older waiting one, which is fine because of what comes next). The
+# first job, pick, chooses what to deploy when the run actually starts: the NEWEST commit on main (from the one that
+# started this run up to main's tip) whose test push run passed, or nothing when that commit or a newer one is already
+# on ECS (tools/deploy_check.py pick). So three quick merges deploy the first and then the third, never an older commit
+# after a newer one, and a merge whose run was cancelled from the queue still reaches ECS with a later run. The deploy
+# job is named "deploy <sha>": that is how the next pick knows what is deployed. By hand (workflow_dispatch): deploys
+# exactly the chosen ref (a rollback too), no pick.
 on:
   workflow_run:
     workflows: [test]
@@ -20,21 +30,61 @@ permissions:
   id-token: write
   contents: read
 
+# Only runs that may deploy share the queue: a run for a failed or cancelled test run (skipped below) gets a group of
+# its own, so it never pushes a waiting deploy out of the queue.
 concurrency:
-  group: deploy
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy' || format('deploy-skipped-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
+  pick:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read     # the test and deploy runs (GitHub API, read only)
+      contents: read
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools
+      - id: pick
+        name: The newest tested commit on main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "::notice title=Deploying::$GITHUB_SHA ($GITHUB_REF_NAME, by hand)"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 tools/deploy_check.py pick --repo "$GITHUB_REPOSITORY" --sha "$TESTED" --run-id "$GITHUB_RUN_ID"
+
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    needs: pick
+    if: needs.pick.outputs.sha != ''
+    name: deploy ${{ needs.pick.outputs.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    permissions:
+      actions: read     # the re-run guard below
+      id-token: write
+      contents: read
     env:
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SHA: ${{ needs.pick.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SHA }}
+      # A re-run of an old run's failed deploy job keeps that run's pick: it must not put an older commit back on ECS.
+      - name: Nothing newer is deployed
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/deploy_check.py pick --guard --repo "$GITHUB_REPOSITORY" --sha "$SHA" --run-id "$GITHUB_RUN_ID"
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
@@ -97,6 +147,7 @@ jobs:
       - id: svc
         run: echo "exists=$(aws ecs describe-services --cluster sizeup-hub --services sizeup-hub --query 'length(services[?status==`ACTIVE`])' --output text)" >> "$GITHUB_OUTPUT"
       - id: deploy
+        name: Roll the ECS service   # this name: the next pick reads "deployed" from it (tools/deploy_check.py ROLL_STEP)
         if: steps.svc.outputs.exists == '1'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
