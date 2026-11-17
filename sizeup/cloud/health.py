@@ -102,6 +102,8 @@ episode's push says so. Each alert's own grace (held()) is as before.
 Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
 unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Station > Health as before,
 marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
+"metrics_shift" (#606, sizeup/cloud/metricsinsight.py: a channel's signal shifted after an event) is a hint, never pushed:
+muted, it isn't shown.
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
@@ -188,7 +190,8 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
-              "replication_checks": "Takeover checks skipped"}
+              "replication_checks": "Takeover checks skipped",
+              "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
 MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
@@ -533,6 +536,7 @@ class StationHealth:
         self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
+        self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -639,6 +643,11 @@ class StationHealth:
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,
                          "age_s": round(snow - oldest, 1) if oldest and ob.get("pending") else None,
                          "dropped_audio": int(ob.get("dropped_audio") or 0)}
+        si = st.get("stt_input") if isinstance(st.get("stt_input"), dict) else {}
+        why = si.get("dropped") if isinstance(si.get("dropped"), dict) else {}
+        why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+        out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
+        out["outbox"]["dropped_stt_why"] = why
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -768,6 +777,11 @@ class StationHealth:
         out["metrics_backup"] = mb
         if mb and mb.get("warn"):
             out["hints"].append({"channel": "Metrics", "level": "warn", "text": mb["warn"]})
+        try:                                        # #606: a channel's signal shifted after an event (a warning, no push)
+            shifts = self.shifts() if self.shifts is not None and "metrics_shift" not in self._mutes(now) else []
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            shifts = []
+        out["hints"] += shifts
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

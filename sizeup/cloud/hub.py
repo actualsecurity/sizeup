@@ -7,12 +7,17 @@ runs on a bare Linux box with Python + numpy.
                                   (_page_heard, _transcribed, _retext, the radio registry); each
                                   event once: the hub remembers the last seq per outbox epoch
                                   (hub.sqlite), and pages / transmissions are keyed by their ids
+    POST /api/station/stt         each clip's speech-to-text input, gzipped (sizeup/cloud/sttinput.py): {v, station,
+                                  items: [{n, id, kind, ..., stt}]} -> {ok, stored: [n], refused: [n]}: kept as clip
+                                  "<id>.src" beside the clip (before or after its event); read_stt_audio reads it.
+                                  Its own lane: never through the events' cursor
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size, its version -> {ok, build, caps, station}: the
-                                  hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
-                                  and the id it took the post as, which the station adopts (stations.py)
+                                  progress, outbox size, its version -> {ok, build, caps, station, services}:
+                                  the hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
+                                  and the id it took the post as, which the station adopts (stations.py);
+                                  services: the admins' service per source (sourcekeys.set_service_overrides)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
                                   (jobs: tts, call, sources_reset: an incident source's reset(), #301)
@@ -101,6 +106,8 @@ from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALL
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
+from sizeup.audiostore import STT_SRC
+from sizeup.cloud import sttinput
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -120,6 +127,9 @@ MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; 
 MAX_LOGS_BODY = 4 * 1024 * 1024       # a station log batch, gzipped (sizeup/cloud/logship.py: ~512 KB before gzip)
 MAX_METRICS_BODY = 2 * 1024 * 1024    # a metrics batch, gzipped (sizeup/cloud/metrics.py: 2000 records, ~250 KB before gzip)
 MAX_METRICS_JSON = 4 * 1024 * 1024    # ... and unpacked
+MAX_STT_BODY = 12 * 1024 * 1024       # STT inputs, gzipped (the station sends ~256 KB of FLAC a post; one may be 8 MB)
+MAX_STT_JSON = 16 * 1024 * 1024       # ... and unpacked (base64)
+STT_WAIT_MAX_S = 30.0                 # read_stt_audio's wait_s at most this
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -138,6 +148,7 @@ JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 STATION_ROUTES = (("GET", "/api/station/status"), ("GET", "/api/station/hello"), ("GET", "/api/station/jobs"),
                   ("POST", "/api/station/events"), ("POST", "/api/station/state"), ("POST", "/api/station/aircraft"),
                   ("POST", "/api/station/vessels"), ("POST", "/api/station/logs"), ("POST", "/api/station/metrics"),
+                  ("POST", "/api/station/stt"),
                   ("POST", "/api/station/jobs/0123456789abcdef"))
 REFUSAL_LOG_S = 3600.0   # a refused station request: logged once per (reason, station) this often
 MISMATCH_LOG_S = 60.0    # ... an id_mismatch this often (a live station locked out: its log says who it says it is)
@@ -548,6 +559,8 @@ class Hub:
                 return self._logs(body(MAX_LOGS_BODY), headers, p)
             if method == "POST" and path == "/api/station/metrics":
                 return self._metrics(body(MAX_METRICS_BODY), headers, p)
+            if method == "POST" and path == "/api/station/stt":           # (sttinput.PATH)
+                return self._stt_inputs(body(MAX_STT_BODY), headers, p)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -603,6 +616,8 @@ class Hub:
                 # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
                 self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
                                    else r for r in tgs]
+                if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
+                    getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
@@ -613,8 +628,12 @@ class Hub:
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
+        # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
         # station: the id the hub took it as (the station adopts it: StationLink.adopt; a rename never locks it out)
-        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"],      # (#409: what this hub knows)
+        # services: the admins' service per source (settings radio_services, sizeup/sourcekeys.py): the station tags
+        # its rows (and picks its speech-to-text profile) as the hub does; a station before this ignores it
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems", sttinput.CAP],
+                           "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
                            **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
@@ -668,6 +687,48 @@ class Hub:
             self.log(f"station logs: {type(e).__name__}")
             return _json(503, {"error": f"station logs: {type(e).__name__}"})
         return _json(code, out)
+
+    def _stt_inputs(self, raw: bytes | None, headers, p: Principal | None = None) -> tuple[int, bytes, str]:
+        """The station's STT inputs (sizeup/cloud/sttinput.py): each kept beside its clip. stored / refused (a bad one,
+        never sent again: whatever went wrong with one item, the rest still go); a write the fence refused fails the
+        whole post (503: the station sends it to the leader)."""
+        if raw is None:
+            return _json(413, {"error": "too large"})
+        if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+            import zlib
+            z = zlib.decompressobj(wbits=31)
+            try:
+                raw = z.decompress(raw, MAX_STT_JSON)
+            except zlib.error as e:
+                return _json(400, {"error": f"bad gzip: {e}"})
+            if z.unconsumed_tail:
+                return _json(413, {"error": "too large"})
+        if len(raw or b"") > MAX_STT_JSON:
+            return _json(413, {"error": "too large"})
+        d = json.loads(raw or b"{}")
+        if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+            raise ValueError("{items: [...]}")
+        if p is not None:
+            self._claim(p, d.get("station"))         # (the station a payload names must be the one its token proves)
+        stored, refused = [], []
+        try:
+            for it in d["items"][:200]:
+                n = it.get("n") if isinstance(it, dict) else None
+                if not isinstance(n, int) or isinstance(n, bool):
+                    continue
+                fenced = fence_mod.refused()
+                try:
+                    ok = self.app.put_stt_input(it)
+                except Exception as e:  # noqa: BLE001 - one malformed item never fails the post (nor stalls the lane)
+                    if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != fenced:
+                        raise
+                    self.app._stt_say(f"hub: speech-to-text input refused: {type(e).__name__}")
+                    ok = False
+                (stored if ok else refused).append(n)
+        finally:
+            if stored:
+                self.app.stt_stored()               # the waiters (read_stt_audio's wait_s): once per post
+        return _json(200, {"ok": True, "stored": stored, "refused": refused})
 
     def _metrics(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
         """The station's signal metrics (sizeup/cloud/metrics.py): into metrics.sqlite under the authenticated id."""
@@ -816,6 +877,7 @@ class HubApp(App):
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
+        self._stt_cond = threading.Condition()          # an STT input stored (read_stt_audio's wait_s)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
         # audio.sqlite: under the hub's supervisor (sizeup/handoff.py) the standby follows it with cad and hub, so
@@ -929,6 +991,11 @@ class HubApp(App):
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
+        # #606: the suggested squelch, Health's sparks (GET /api/cad/metrics?view=) and the shift warnings (Health hints)
+        from sizeup.cloud.metricsinsight import SECTION as SIGNAL_SECTION, Insight
+        self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
+        self.cad.station_metrics_insight = self.metric_insight
+        self.health.shifts = self.metric_insight.hints
         self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
@@ -1472,12 +1539,74 @@ class HubApp(App):
     # -- what App does with local radios -----------------------------------------------------------------
 
     def clip(self, cid: str) -> bytes | None:
-        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+        if not CLIP_ID.fullmatch(cid) or ".." in cid or cid.endswith(STT_SRC):   # (an STT input is no clip to play)
             return None
         return self.audio.get(cid)
 
     def has_clip(self, cid: str) -> bool:
-        return self.audio.has(cid)
+        return not cid.endswith(STT_SRC) and self.audio.has(cid)
+
+    # -- the speech-to-text input (sizeup/cloud/sttinput.py) -------------------------------------------------------
+
+    def put_stt_input(self, it: dict) -> bool:
+        """One clip's STT input from POST /api/station/stt, beside its clip (the same channel, talkgroup and time: the
+        same retention), whether its event came already or not. False: not one to keep (refused for good, logged; its
+        STT consumers get the listening clip). A write the fence refused is raised (nothing acked)."""
+        try:
+            cid = self._id(it)
+            kind = it.get("kind")
+            if kind not in ("traffic", "page"):
+                raise ValueError(f"kind {str(kind)[:20]!r}")
+            data, meta = sttinput.from_wire(it.get("stt"))
+        except ValueError as e:
+            self._stt_say(f"hub: speech-to-text input refused: {str(e)[:120]}")
+            return False
+        d = dict(it)
+        if kind == "traffic" and d.get("source") in RENAMED and d["source"] not in self._kind \
+                and RENAMED[d["source"]] in self._kind:
+            d["source"] = RENAMED[d["source"]]                  # (#275, as apply() does for its event)
+        end = d.get("end")
+        at = float(end) if isinstance(end, (int, float)) and not isinstance(end, bool) else time.time()
+        where = _where(d) if kind == "traffic" else {"channel": str(d.get("label") or "")}
+        refused = fence_mod.refused()
+        try:
+            sttinput.store(self.audio, cid, data, meta, at, **where)
+        except Exception as e:  # noqa: BLE001 - a store that fails never costs anything else (its clip is read)
+            if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
+                raise
+            self._stt_say(f"hub: speech-to-text input for {cid} not stored: {type(e).__name__}: {str(e)[:120]}")
+            return False
+        return True
+
+    def stt_stored(self) -> None:
+        """STT inputs were stored: wake read_stt_audio's waiters (once per post)."""
+        with self._stt_cond:
+            self._stt_cond.notify_all()
+
+    def _stt_say(self, msg: str) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "_stt_said", -1e9) >= 60.0:
+            self._stt_said = now
+            self.hub.log(msg)
+
+    def read_stt_audio(self, cid: str, voice_offset_s: float | None = None,
+                       wait_s: float = 0.0) -> sttinput.SttAudio | None:
+        """The audio a speech-to-text engine on the hub should take for this transmission or page (Amazon Transcribe,
+        a GPU worker): the station's own whisper input ("stt-src") when it came, else the listening clip ("listening-8k",
+        a page's from its voice on), else None. voice_offset_s: a page's (None: looked up among the pages here).
+        wait_s: the STT input comes on its own lane, usually a moment after its event: wait up to this long for it
+        before taking the listening clip (0: never wait)."""
+        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+            return None
+        if voice_offset_s is None:
+            with self._lock:
+                page = next((p for p in self.pages if p.id == cid), None)
+            voice_offset_s = float(page.voice_offset_s) if page is not None else 0.0
+        wait_s = min(max(0.0, float(wait_s or 0.0)), STT_WAIT_MAX_S)
+        if wait_s > 0:
+            with self._stt_cond:
+                self._stt_cond.wait_for(lambda: self.audio.has(sttinput.src_id(cid)), timeout=wait_s)
+        return sttinput.read(self.audio, cid, voice_offset_s, log=self.hub.log)
 
     def radio_status(self) -> list[dict]:
         return self.hub.radio_rows()
@@ -1913,6 +2042,9 @@ class HubApp(App):
                 m = store.rename_station(old, new, before=at)     # (only its rows from before the rename)
                 if m:
                     self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
+                    ins = getattr(self, "metric_insight", None)     # #606: its suggestions / sparks / shifts follow
+                    if ins is not None:
+                        ins.renamed(old, new)
                 n += m
             if n:
                 store.copy_soon()
@@ -1943,6 +2075,10 @@ class HubApp(App):
                 self.metrics_turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
+            try:                                  # ... then the shift checks (#606): Health's warnings, never a push
+                self.metric_insight.turn()
+            except Exception as e:  # noqa: BLE001 - never takes anything down
+                self.hub.log(f"metrics: shift check error: {type(e).__name__}: {e}")
 
     def metrics_turn(self) -> dict | None:
         """The janitor's station-metrics turn: the renames, then the rollups and retention (maintain), which wait for

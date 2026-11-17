@@ -5,6 +5,7 @@
 // how often it is refreshed (an admin picks it for the slow ones; the rest keep the provider's own) and Refresh now
 // (admins; rate-limited by the hub). GET /api/cad/datasources is polled only while this section is on screen (every POLL_MS, every RUN_MS
 // while a refresh runs): nothing goes in the state push. Self-contained: settings.js mounts it (sRender).
+"use strict";
 const DataSourcesPanel = (() => {
   const POLL_MS = 15000, RUN_MS = 2000;
   const EVERY = [["off", "Off"], ["hourly", "Hourly"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]];

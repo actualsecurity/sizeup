@@ -47,6 +47,10 @@
   .lg-table tr.lg-error td:nth-child(4) { color: var(--err); font-weight: 600; }
   .lg-table tr.lg-warning td:nth-child(4) { color: var(--warn); }
 
+  /* #606: 24 h sparks on a channel's row and the P25 trunk's, a link to its charts (Settings > Radios > Signal) */
+  .hl-spark { display: inline-flex; align-items: center; gap: var(--s-1); }
+  .hl-sparks { flex-wrap: wrap; gap: var(--s-1) var(--s-3); margin-block-start: var(--s-1); }
+
   /* the hub's Station row (Settings > Radios > Receivers): opens Settings > Station > Health, for an admin */
   .pill.radio.link { cursor: pointer; }
 }

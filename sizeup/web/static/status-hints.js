@@ -6,6 +6,7 @@
    A unit out of service (h.oos, sizeup/cad/oos.py): ✓ asks first ("E62 is out of service: put it on the call
    anyway?"); left alone, the suggestion expires and the unit stays as it was.
    Drawn after every render (cad.hooks) over what cad.js drew: cad.js only marks each transmission row (data-tx). */
+"use strict";
 (function () {
   "use strict";
   const busy = new Set();                  // suggestions being accepted / dismissed: not offered twice

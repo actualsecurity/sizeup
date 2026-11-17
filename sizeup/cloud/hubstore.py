@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from sizeup.audiostore import PREFIX, StoreError, object_key
+from sizeup.audiostore import PREFIX, STT_SRC, StoreError, key_id, object_key
 from sizeup.fence import GuardedConnection
 from sizeup.incidents import Incident, IncidentStore, Traffic
 
@@ -500,8 +500,8 @@ class AudioDb:
             cur_at, cur_rowid = last
             if due:
                 ids = [a for a, _ in due]
-                keep = kept(ids) if kept is not None else set()
-                ext = context(ids) if context is not None else {}
+                keep = _paired(kept, ids) if kept is not None else set()
+                ext = _paired(context, ids) if context is not None else {}
                 gone = [aid for aid, at in due
                         if (aid not in keep and not ext.get(aid, (0, False))[1])
                         or (aid in keep and kept_older_than is not None and at < kept_older_than)]
@@ -519,7 +519,7 @@ class AudioDb:
             # every clip with its bytes wherever kept (audio.sqlite or the store), oldest first
             sizes = self._scan("SELECT id, CASE WHEN LENGTH(wav) > 0 THEN LENGTH(wav) ELSE bytes END, stored, "
                                "LENGTH(wav) FROM audio WHERE kind = 'clip' ORDER BY at")
-            ctx = context([r[0] for r in sizes]) if sizes else {}
+            ctx = _paired(context, [r[0] for r in sizes]) if sizes else {}
             if ctx:
                 # context clips: the lowest tier first, then the oldest (sizes is oldest first: a stable sort keeps that)
                 mine = sorted((r for r in sizes if r[0] in ctx), key=lambda r: ctx[r[0]][0])
@@ -539,7 +539,7 @@ class AudioDb:
         if total > self.max_bytes:
             sizes = self._scan("SELECT id, LENGTH(wav) FROM audio WHERE stored = 'db' AND kind = 'clip' "
                                "AND LENGTH(wav) > 0 ORDER BY at")
-            keep = kept([r[0] for r in sizes]) if kept is not None and sizes else set()
+            keep = _paired(kept, [r[0] for r in sizes]) if kept is not None and sizes else set()
             for aid, size in sizes:
                 if total <= self.max_bytes:
                     break
@@ -639,8 +639,8 @@ class AudioDb:
             looked += len(old)
             marks = ",".join("?" * len(old))
             named = {r[0] for r in self._scan(f"SELECT key FROM audio WHERE key IN ({marks})", old)}
-            unnamed = {k: k.rsplit("/", 1)[-1].removesuffix(".wav") for k in old if k not in named}
-            still = known(list(unnamed.values())) if unnamed else {}
+            unnamed = {k: key_id(k) for k in old if k not in named}
+            still = _paired(known, list(unnamed.values())) if unnamed else {}     # (an STT input: as its clip)
             for k, aid in unnamed.items():
                 if aid in still:
                     self._restore_row(aid, k, *still[aid])
@@ -754,8 +754,10 @@ class AudioDb:
         if time.monotonic() - at < max_age_s:
             return got
         rows = self._scan(
-            "SELECT channel, talkgroup, COUNT(*), COALESCE(SUM(CASE WHEN bytes > 0 THEN bytes ELSE LENGTH(wav) END), 0), "
-            "MIN(at) FROM audio WHERE kind = 'clip' GROUP BY channel, talkgroup ORDER BY channel, talkgroup")
+            "SELECT channel, talkgroup, SUM(id NOT LIKE ?), "        # (a clip's STT input: its bytes count, not a clip)
+            "COALESCE(SUM(CASE WHEN bytes > 0 THEN bytes ELSE LENGTH(wav) END), 0), "
+            "MIN(at) FROM audio WHERE kind = 'clip' GROUP BY channel, talkgroup ORDER BY channel, talkgroup",
+            (f"%{STT_SRC}",))
         got = [{"channel": ch, "talkgroup": tg, "clips": int(n), "bytes": int(b), "oldest": oldest}
                for ch, tg, n, b, oldest in rows]
         self._channels = (time.monotonic(), got)
@@ -766,6 +768,16 @@ class AudioDb:
             self.ro.close()
             self.scan.close()
         self.db.close()
+
+
+def _paired(fn: Callable, ids: list[str]):
+    """A retention callback over clip ids (kept: a set, context: a dict), answering for a clip's STT input
+    ("<id>.src", sizeup/cloud/sttinput.py) as for the clip itself: the two go together."""
+    base = {a: a.removesuffix(STT_SRC) for a in ids}
+    got = fn(list(dict.fromkeys(base.values())))
+    if isinstance(got, dict):
+        return {a: got[b] for a, b in base.items() if b in got}
+    return {a for a, b in base.items() if b in got}
 
 
 def wav_seconds(wav: bytes) -> float:

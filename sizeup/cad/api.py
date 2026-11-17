@@ -133,6 +133,8 @@ GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels
                                           quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
 POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
                                           an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
+POST /api/cad/settings/signal_metrics    {action: set {key, value} | reset {key}}: the suggested squelch's margin and the
+                                          shift warnings' thresholds (sizeup/cloud/metricsinsight.py, #606): admins, audited
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -285,7 +287,10 @@ GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric
                                           or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
                                           most) or hourly (n, lo, p50, p90, hi), with the events that explain a shift (the
                                           station's and the Settings audit's); no subject: what series there are. The
-                                          hub's only; a signed-in admin only (never without a verified sign-in)
+                                          hub's only; a signed-in admin only (never without a verified sign-in).
+                                          metric= one or several, comma-separated. ?view=squelch: each channel's
+                                          suggested squelch and the numbers behind it; view=spark: 24 h in half hours
+                                          (Health); view=shifts: the shift warnings (sizeup/cloud/metricsinsight.py)
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -312,6 +317,11 @@ POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, sec
                                           base?} | reset {base?}}: the Radio page rail's folders for everyone (#607,
                                           sizeup/cad/radiofolders.py; name: one channel's display name, blank its own,
                                           also from Settings > Radios > Channels); admins
+POST /api/cad/settings/radio_services     {action: set {key, service} | set_many {services: {key: service}}}: a source's
+                                          service (fire | police | ems | transit | air | other; automatic: none chosen)
+                                          over its talkgroups file's and its words (sizeup/sourcekeys.py); its rows of
+                                          the last 30 days re-tagged, off the request; from Settings > Radios > Channels
+                                          and the rail's Edit; admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins
@@ -1125,8 +1135,17 @@ class CadApi:
         if (why := self._signed_admin(who)) is not None:
             return _json(403, {"error": why})
         from sizeup.cloud.metricstore import MetricsError
+        q = parse_qs(query)
+        if "view" in q:                         # #606: suggestions, Health's sparks, the shifts (metricsinsight.py)
+            ins = getattr(self.cad, "station_metrics_insight", None)
+            if ins is None:
+                return _json(404, {"error": "station metrics are the hub's"})
+            try:
+                return _json(200, ins.view(q["view"][0]))
+            except ValueError as e:
+                return _json(400, {"error": str(e)})
         try:
-            return _json(200, store.query(parse_qs(query)))
+            return _json(200, store.query(q))
         except MetricsError as e:
             return _json(400, {"error": str(e)})
 

@@ -724,10 +724,11 @@ class App:
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
         # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
         # is the leader's app: the standby's warm app (prewarm) never gets here.
-        if cfg.roads_dvr and cfg.roads_enabled:
+        # Only with a folder for it (#661): the state folder's dvr/ (cad_db) or dvr_dir; an in-memory app (cad_db "",
+        # the tests) has none, and never records into the working directory.
+        if cfg.roads_dvr and cfg.roads_enabled and (cfg.roads_dvr_dir or cfg.cad_db):
             from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
-            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else Path(cfg.cad_db).parent / "dvr"
             fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
             shared = cfg.roads_dvr_shared == "on" or bool(fs)
             if shared:
@@ -1647,7 +1648,12 @@ class App:
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
-                t.group, t.service = info.get("group") or "", info.get("service") or "other"  # type: ignore[attr-defined]
+                # its service: the admins' for this source (Settings > Radios > Channels; its speech-to-text profile
+                # and this station's page), else its file's (#409); service_auto, the file's, goes to the hub with it
+                # (the hub applies the choice it has then: one put back to automatic meanwhile is not the row's)
+                t.group = info.get("group") or ""  # type: ignore[attr-defined]
+                t.service_auto = info.get("service") or "other"  # type: ignore[attr-defined]
+                t.service = sources.overridden(t.source_key, t.service_auto)  # type: ignore[attr-defined]
                 t.dept = info.get("department") or ""  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -2100,18 +2106,26 @@ class App:
         service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
         talkgroups and the analog channels are worked out here."""
         if getattr(t, "system", ""):
+            # its service with no choice (service_auto; a station before that: its service, which never had one) and
+            # the admins' choice of now over it (Comms.record applies it)
+            auto = getattr(t, "service_auto", "") or getattr(t, "service", "")
             return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
-                    "service": getattr(t, "service", ""), "ours": False, "dept": getattr(t, "dept", ""),
+                    "service": sources.overridden(getattr(t, "source_key", ""), auto), "service_auto": auto,
+                    "ours": False, "dept": getattr(t, "dept", ""),
                     "tier": getattr(t, "tier", "")}
         if t.talkgroup is None:
             kind = next((c.kind for c in self.cfg.channels if c.label == t.source), "")
             air = kind == "airband"
             return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
-                    "group": "Airband" if air else "Analog", "service": sources.service(kind=kind or "traffic"),
+                    "group": "Airband" if air else "Analog",
+                    "service": sources.service(kind=kind or "traffic", key=sources.fm(t.source, kind)),
+                    "service_auto": sources.service(kind=kind or "traffic"),
                     "ours": not air, "dept": "", "tier": ""}
         info = self.tg.info.get(t.talkgroup, {})
         return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
-                "group": info.get("group") or "", "service": sources.service(info.get("group") or ""),
+                "group": info.get("group") or "",
+                "service": sources.service(info.get("group") or "", key=sources.p25(self.tg.county, t.talkgroup)),
+                "service_auto": sources.service(info.get("group") or ""),
                 "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
 
     def _backfill(self) -> None:
@@ -2682,6 +2696,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
+        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2696,6 +2711,18 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
+
+    def _stt_input(self, item, audio: np.ndarray | None) -> None:
+        """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
+        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
+        link = self.link
+        if link is None or audio is None or not hasattr(link, "stt_input"):
+            return
+        try:
+            link.stt_input(item, audio)
+        except Exception as e:  # never in the radio path's way (the hub falls back to the clip)
+            log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_priority(self, item, key: str) -> int:
         """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first
@@ -4906,6 +4933,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     app.cad.on_dispatch = server.poke                    # and a dispatch, then its voice once rendered (#426)
     app.cad.resume_voice()                               # ... and the voices a restart cut short, now that all is wired
+    app.cad.retag_resume()                               # ... and a source's rows a restart left to re-tag (its service)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server

@@ -106,6 +106,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
   - [The rail's folders (#607)](#the-rails-folders-607)
+  - [A source's service, chosen by the admins](#a-sources-service-chosen-by-the-admins)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -238,6 +239,39 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**The speech-to-text input** (`sizeup/cloud/sttinput.py`). Each transmission's and page's exact whisper input
+(`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis already applied; a page's voice without
+its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
+
+- `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
+  thread never waits. Its queue is bounded (200 items, 600 s of audio); when it is full the input is dropped and
+  counted.
+- The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
+  before any clip.
+- The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
+  event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
+  `stt_input` in its caps; an older hub never gets them.
+
+```json
+{"v": 1, "station": "st-hq", "items": [{"n": 12, "id": "<clip id>", "kind": "traffic",
+  "source": "FG1", "talkgroup": null, "system": "", "end": 1790000000.5,
+  "stt": {"v": 1, "format": "flac", "input": "stt-src", "kind": "traffic", "rate": 16000, "samples": 48000,
+          "audio": "<base64 FLAC>"}}]}
+-> {"ok": true, "stored": [12], "refused": []}
+```
+
+- A page's item has `label` in place of `source` / `talkgroup` / `system`, and `voice_offset_s` in its `stt`: where the
+  voice starts in its listening clip.
+- The hub checks each one before keeping it. Its FLAC header must match the metadata's rate and sample count. It must
+  be at most 300 s long and carry its MD5.
+- The hub stores it as clip `<id>.src`, whenever it comes, before or after its event. The S3 key is
+  `audio/clip/<yyyy>/<mm>/<dd>/<id>.src.flac`, with the clip's channel and retention. It is never served by
+  `/api/audio`.
+- The hub's engines read it with `HubApp.read_stt_audio(id, wait_s=...)`. `input` is `stt-src`, or `listening-8k` when
+  only the listening clip is there.
+- Drops are counted by reason (`queue`, `too_big`, `failed`, `outbox`, `refused`). Health shows them under Outbox:
+  "STT inputs dropped".
+
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
 built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
@@ -311,7 +345,7 @@ pages of its own ([the station page](#the-station-page)).
 | what fails | what happens |
 |---|---|
 | Internet / hub down | The station runs on as all-in-one. Events wait in `state/outbox.sqlite` (committed as they happen) and go up in order when the hub is back, also after either side restarts. The hub shows "Station offline since ...". |
-| Outbox grows huge | Over `outbox_max_mb` of queued audio, the oldest clips are dropped (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
+| Outbox grows huge | Over `outbox_max_mb` of queued audio, the speech-to-text inputs go first (the hub transcribes the listening clip instead), then the oldest clips (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
 | A batch is delivered twice | Applied once (seq per epoch, ids). |
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
@@ -2824,6 +2858,30 @@ order (ours first, then by name). A heading with one folder of its own name (Ana
 Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
 folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
 
+### A source's service, chosen by the admins
+
+`sizeup/sourcekeys.py` (`set_service_overrides`, `overridden`), settings section `radio_services`
+(`sizeup/cad/settings.py`), `Cad.retag_services` / `Comms.retag`, `static/radio-controls.js`, `static/radio-nav.js`.
+
+A source's service (fire, police, EMS, transit, air, other) puts it in a view (Police, EMS, Transit, Air), the filters,
+the emergency prominence and intel's scopes. Automatic: the talkgroups file's `Service` column, else the group's words
+(`SERVICE_WORDS`); an FM channel is fire, an airband one air. An admin can choose it per source instead.
+
+| | |
+|---|---|
+| Where | a small select beside the rename pencil in Settings > Radios > Channels (one at a time), and on each channel's row in the rail's Edit (sent with Save, before the folders). **Auto (Transit)** names what automatic gives. Admins only; never on the station's own page |
+| Stored | settings section `radio_services`: `{qualified source key: service}` (`p25:<system>:<tg>`, `fm:<label>`, `air:<label>`; `tg:307` is kept as `p25:westchester:307`). The same number on two systems is two keys. `POST /api/cad/settings/radio_services {action: set, key, service} \| {action: set_many, services}`; `automatic` removes the choice. Audited as Radios (`radio_services/<key>`, old → new), exported and imported with the rest |
+| Wins over | the file's column and the words, wherever a service is worked out: `Comms.record` (every row written), `App._row_source`, `App._call_system` (another system's rows, and so its speech-to-text profile), `TalkgroupPrefs.state()` (`service`, with `service_auto` beside it), `Cad.comms_sources` (`service`, `service_auto`; `services`: the choices this reader may know of) |
+| The station | the hub's answer to `POST /api/station/state` carries `services`. The station tags its rows and picks its speech-to-text profile by them, keeps them in `hub_services.json` beside the outbox (a start while the hub is away tags as before), and from then on never takes its own CAD's. A hub before this sends none (kept as they were); a station before this ignores them, and the hub applies them to its rows anyway |
+| Re-tag | a change (or an import) marks that source in `radio_retag_pending`, in the setting's own transaction. Off the request's thread, one source at a time, only on the CAD of record, its rows of the last 30 days (`RETAG_DAYS`) are re-tagged, 500 a transaction along `(start, rowid)`; then the mark is taken off and the count audited (`radio_services/<key>/retag`: `{service, rows, days}`). A start of the CAD of record (a restart, a task that took over) runs what is still marked; a fenced task leaves the marks. Back to automatic recomputes them (the station's row: the file's column, else the words). A talkgroup whose automatic service isn't known yet (no station has said what it lists: a hub just started) waits, marked and logged, until the station's talkgroups arrive. The Radio page's readers are told to ask afresh once (another system's: only those who may see it). Older rows keep their tag |
+| On the wire | the station sends each row's `service_auto` (the file's) beside its `service` (with its choice, for its speech-to-text profile and its own page). The hub records the choice it has then over `service_auto`, so a row queued under a choice since put back to automatic is recorded automatic |
+| Import | an export always has `radio_services` (`{}` with no choices): its choices replace these and re-tag what moved. Only a file from before them (no section) keeps the ones here |
+| Waiting | a re-tag waiting for the station's talkgroups is listed in the tree's `retag_waiting`; the select's hover says "Re-tag waits for the station", and its Auto has no label until the service is known |
+| Mute | a source of ours (county, analog, airband) set to Fire can't be muted on the rail (the existing rule for fire channels of ours); the hover says so |
+| Who sees it | the choices come with the tree; another system's only for a reader who may see it. The state push carries their rev (`radio_services`): the rail and the Channels tab ask again when it moves |
+
+Tests: `tests/test_service_override.py`.
+
 ## Aircraft near HPN (shortfinal's picture)
 
 > "can we pull in the shortfinal components into this as additional layers? the way we implemented the data
@@ -3489,6 +3547,20 @@ stay exactly as they were (they still go to CloudWatch); this adds numbers besid
 
 Why the hub and not CloudWatch metrics: the graphs and the suggested squelch (#606) need fast range queries joined with
 the Settings audit, per-transmission detail, several stations, and nothing to pay.
+
+### Graphs, suggested squelch, shift warnings (#606)
+
+`sizeup/cloud/metricsinsight.py` reads the store back; the hub's, admins only, nothing on the alert path.
+
+| | |
+|---|---|
+| Graphs | Settings > Radios > **Signal** (`signal-panel.js`, `signal-chart.js`: small SVG charts, no library). One row above them: 6 h / 24 h / 7 d / 30 d, Raw (up to 7 d) or Hourly, a channel. FM: idle quieting p50–p90 band and max, Open / Close as running, the suggested Open, each transmission (paging: at open, and at close on the hourly view); noise opens a minute; transmissions by kind (voice, page, ID burst, noise); the 7-day distribution the suggestion comes from. AM: floor and each carrier (SNR on hover). P25: decode rate with its low–high band, control channel lost shaded, grants on uncovered frequencies. Each event (sdr, gain, squelch, unplug, back, stall, start, a Settings squelch change) a tick on top; ticks closer than 8 px are one, with the count; hover gives the detail. One y axis a chart (two measures: two charts over the same time axis) |
+| Health | Settings > Station > Health: a 24 h spark (idle q90 and noise opens; AM: floor) on each channel's row and the decode rate under P25 trunk (`?view=spark`, half hours, kept 5 min); each links to its charts |
+| Suggested squelch | `?view=squelch` (kept 10 min; again at once after a newer event), on the Squelch card beside Open / Close. **It never makes a channel worse: when in doubt the running Open stays and Apply isn't offered.** Window: the last 7 days, or from the channel's last SDR / gain / unplug / back event (under 24 h since: "not enough data since <event>"). noise = p90 of the idle minutes' q90; Open = ceil(noise + margin), margin 3 dB. No real transmission (voice, ID burst, page; at its quieting at open) may be under it by default: when the weakest are under noise + margin, "weak traffic overlaps the noise" and the running Open stays. A raise needs 20 real transmissions and leaves none under it; a raised Close stays under the real tails' quieting at close. A lower one stays over the idle max and moves at most 2 dB a step. Chattering (noise opens' median since the last squelch change ≥ 2/min): never lower, +1 dB. 6 h after a squelch change: settling, no Apply. Close keeps the running hysteresis. Apply (admins, traffic channels) sends the Open / Close it was worked out for, and the hub refuses it if another runs now; audited like an edit on the card. Paging (read-only) and AM: the numbers only; paging never above its running Open |
+| Shift warnings | Every 10 min (the hub janitor), for each event of the last 48 h (sdr, gain, squelch, unplug, back, on, start, a Settings squelch change; within 10 min: one): the 6 h after it (from 5 min after, at least 30 min of data) against the 24 h before it; neither window crosses another event, and a shift must still show from the newest event on (a dongle moved back: no warning). An SDR change with a squelch edit minutes later is still checked. FM idle q90 median up > 3 dB, noise opens a minute ×3 and ≥ 0.5 (the median of half-hour means; neither after a squelch change alone), kept voice quieting down > 3 dB (a cable or splitter's loss), transmissions an hour ÷3 from ≥ 4/h or noise key-ups ×3 to ≥ 4/h (medians of half-hour counts, against the same clock hours the day before), AM floor up > 3 dB, pages at open down > 3 dB (≥ 3 pages; windows 7 d / 72 h), P25 decode rate down > 30%. Without an event, once a day: the last 7 days' hourly medians against the 21 before. A Health hint ("FG1: idle quieting +4.2 dB since 14:05 (SDR change)", with a Chart link), never a push; "Signal shift warnings" can be muted like an alert (muted: not shown) |
+| Limit | The quieting is measured against the receiver's own hiss reference, which follows the floor (`radio/fm.py`): a uniform rise of the noise moves both, so the idle quieting can read a shift as smaller than it is. The AM floor (dBFS) and the transmissions' own level (the kept voice quieting check) don't have that limit |
+| Thresholds | Settings > Radios > Signal > Thresholds (`signal_metrics`, audited as Radios): margin, % real allowed under (default 0), shift dB, noise opens ×, transmissions ×, decode drop % |
+| Reading | `GET /api/cad/metrics?view=squelch\|spark\|shifts` (the same admin check as the rest); `metric=` takes several, comma-separated. The rollups gained `sq_open` / `sq_close` (the squelch as running, for the hourly view's steps) |
 
 ## Where the hub's CPU goes (#425)
 

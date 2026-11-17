@@ -202,6 +202,14 @@ these tests look for `node` on `PATH`, then in `/opt/homebrew/bin` and `/usr/loc
 skip without it. One focus-order test in `tests/test_new_call.py` also wants `jsdom` where node can `require` it, and
 `tests/test_tts.py` wants the Kokoro voice set up (`tools/setup_tts.sh`, ~1.3 GB); both skip otherwise.
 
+### The /cad bundles
+
+The hub image joins `/cad`'s scripts into one file and its stylesheets into another (`sizeup/web/bundle.py`, run by the
+Dockerfile; written to `sizeup/web/static/bundle/`, which git ignores). A checkout serves the separate files, as do
+`/cad?bundle=0` and any bundle older than a file it holds. `python -m sizeup.web.bundle` builds them locally;
+delete `sizeup/web/static/bundle/` to go back. A script between the page's `<!-- bundle js cad -->` markers must
+start with `"use strict";` (the build refuses it otherwise) and be a plain `<script src>`.
+
 ### Replay tests
 
 `@pytest.mark.replay(...)` tests replay private captures from a cache outside the repo (`~/.cache/sizeup-replay` or
