@@ -18,6 +18,7 @@ created_at: 1767225600.5
 accepted_at: 1767225610.0
 closed_at: null
 until_at: null
+last_event_id: 9001
 units:
   - {unit_id: "7", name: E60, status: OS, dispatched_at: 1767225620.0, enroute_at: 1767225640.0, onscene_at: null, cleared_at: null}
 type_note: ""

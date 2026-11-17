@@ -674,6 +674,9 @@ writes. `/me` is PR 2's.
   them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Unit names, the pre-plan `label`, `geo_label` and `town` are not scrubbed. Site
   documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
   premise, pre-plan and radio are only in an incident's detail.
+- **Chronology moves the rev.** The incident summary carries `last_event_id` (the largest chronology event id, an
+  integer, null only for an incident with no events), so a note or any other event changes the incident's `rev` in
+  lists, the snapshot and the detail, though the summary shows no event text.
 - **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
   the `rev` key itself excluded; `with_rev` adds it). The stream's `(kind, id, rev)` (PR 5) and the write answers and
   `If-Match` (PR 6) must reuse `rev_of` and `with_rev` on these same shapes. `epoch` stays null until PR 5.
