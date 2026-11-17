@@ -852,3 +852,37 @@ def test_a_slow_emergency_is_its_rows_with_the_live_alarm(tmp_path):
     assert t.radio_id == f"{B_ID:04X}" and t.emergency and t.alarm_key == live.id
     assert getattr(t, "id_note", "") == ""
     assert [a.id for a in alarms] == [live.id, t.id]   # the row's own alarm carries the live one's key
+
+
+def a_then(a_tx, gap, b_tx):
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a_tx, idle(gap, 1), b_tx, idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    return [(i, k) for _s, i, _b, k, _e in rows], alarms
+
+
+@pytest.mark.parametrize("gap", [0.1, 0.12])
+@pytest.mark.parametrize("b_id", [B_ID, None])
+def test_the_look_back_never_hands_the_radio_befores_post_id_to_the_next(b_id, gap):
+    # A's post-ID right before a short drop, B keying up at once: the drop alone is B's pre-roll, never A's tail
+    a_tx = np.concatenate([quiet(0.15), voice_like(0.8) + quiet(0.8), quiet(0.1), mdc(A_ID, POST), quiet(0.05)])
+    rows, alarms = a_then(a_tx, gap, unit(1.5, pre=b_id))
+    assert rows[0] == ([f"{A_ID:04X}"], "") and rows[-1][0] == ([f"{B_ID:04X}"] if b_id else []) and alarms == []
+
+
+def test_the_radio_befores_emergency_is_not_the_next_ones_and_the_next_ones_own_is_raised():
+    # A's emergency-only key-up, then B 0.1 s later: with no ID B's row is clean; with its own emergency it is raised
+    # (a second alarm, B's, never under A's key)
+    a_tx = np.concatenate([quiet(0.15), mdc(A_ID, EMERGENCY), quiet(0.15)])
+    rows, alarms = a_then(a_tx, 0.1, unit(1.5))
+    assert len(alarms) == 1 and rows[0] == ([f"{A_ID:04X}"], "alarm-1") and rows[-1] == ([], "")
+    b_tx = np.concatenate([quiet(0.15), mdc(B_ID, EMERGENCY), quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
+    rows, alarms = a_then(a_tx, 0.1, b_tx)
+    assert [a[1] for a in alarms] == [[(f"{A_ID:04X}", True)], [(f"{B_ID:04X}", True)]]
+    assert rows[0] == ([f"{A_ID:04X}"], "alarm-1") and rows[-1] == ([f"{B_ID:04X}"], "alarm-2")
+
+
+def test_an_emergency_at_the_end_of_the_radio_befores_transmission_stays_its():
+    # A long transmission ending in an emergency packet (past the tap's window: its row alarms from the segment), B
+    # 0.15 s later: the packet is in B's look-back, in A's carrier, never B's
+    a_tx = np.concatenate([quiet(0.15), voice_like(2.0) + quiet(2.0), quiet(0.1), mdc(A_ID, EMERGENCY)])
+    rows, alarms = a_then(a_tx, 0.15, unit(1.5))
+    assert rows[-1] == ([], "") and alarms == []

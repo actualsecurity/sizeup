@@ -21,10 +21,12 @@ The ID look-back (#694): a carrier that rises slowly opens the squelch only once
 sent at key-up can begin more than the pre-roll before that (a 0.4 s ramp: ~0.3 s), so its sync was lost, and an
 emergency press raised no alarm. So the first two decode steps also read ID_LOOKBACK_FRAMES (0.4 s) of the channel
 before the carrier's buffer, whatever the squelch made of them (hiss, the drop before a key-up cut, the weak tail of the
-carrier before). An ID found only that way is taken when its burst ran on into the pre-roll (the last 0.2 s before the
-carrier): one that ended before that is the carrier before's, or a weak radio's that never opened the squelch, and
-is left, unless it is an emergency no carrier just before raised (that alarms, on this key-up's row). The clip, the
-pre-roll and the "ID not decoded" check (#163) are as they were: only the decode looks further back.
+carrier before). An ID found only that way is taken when its burst ran on into the pre-roll (the last 0.2 s before an
+open; on a key-up cut only the drop, never the carrier before's tail): one that ended before that is the carrier
+before's, or a weak radio's that never opened the squelch, and is left, unless it is an emergency wholly in frames the
+squelch was closed for (the weak radio's button: it alarms, on this key-up's row). An emergency the carrier just before
+already raised for the same burst keeps that alarm (one press, one alarm). The clip, the pre-roll and the "ID not
+decoded" check (#163) are as they were: only the decode looks further back.
 
 Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 1.7 s of audio and
 runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found; tones
@@ -78,9 +80,12 @@ class _Chan:
     buf: list = field(default_factory=list)     # pre-roll + the first MDC_WINDOW_S of this carrier (kept to its end)
     t0: float = 0.0                             # when buf[0] began (on the squelch's clock: since + frames)
     hist: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))
+    shut: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))   # per hist frame: the squelch was closed
     back: list = field(default_factory=list)    # the ID look-back: the channel's frames just before buf (#694)
     old: int = 0                                # ... how many of back + buf began before the pre-roll
     before: list | None = None                  # the IDs in those alone (looked at once, when needed)
+    weak: int = 0                               # ... the last of those the squelch was closed for (no carrier's own)
+    lone: list = field(default_factory=list)    # the emergencies in those closed frames alone
     steps: int = 0                              # decode steps run for this carrier
     looked: list = field(default_factory=list)  # IDs found only with the look-back
     hold: tuple | None = None                   # the squelch's held key-up cut (drop start, carrier back), its frames
@@ -159,6 +164,7 @@ class LiveTap:
                     c.pre.clear()
                 if c is not None:
                     c.hist.clear()      # (what comes next doesn't follow on from it)
+                    c.shut.clear()
             if was and self.kind(channel.label) == "paging" and self.paging is not None:
                 self.paging.close(channel.label)
         except Exception as e:  # the tap must never stop the receiver
@@ -177,6 +183,7 @@ class LiveTap:
                 # the pre-roll of the carrier before it.
                 cut = c.open and bool(frames)
                 moved, alarm = self._own(c, since) if cut and kind == "traffic" else ([], "")
+                drop = (c.hold[1] - c.hold[0] if self._held(c, since) else 0) if cut else None
                 rise = cut and kind == "traffic" and not made and not self._held(c, since)
                 if rise and since - c.since <= MDC_WINDOW_S:
                     # The stronger carrier over the one before (fm.py's rise rule), and the squelch made no row of that:
@@ -191,7 +198,7 @@ class LiveTap:
                 # buf[len(buf)] is this frame, the squelch's frames[-1] (a reopen hands it several at once)
                 c.t0 = since + ((len(frames) if frames else 1) - 1 - len(c.buf)) * FRAME / RATE
                 c.pre.clear()
-                self._look_back(c, since)
+                self._look_back(c, since, drop)
             c.hold = tuple(hold[:2]) if is_open and hold else None
             if not is_open:
                 was = c.open
@@ -203,6 +210,7 @@ class LiveTap:
                 c.n += 1
             if kind == "traffic":
                 c.hist.append(frame)
+                c.shut.append(not is_open)
         if not is_open:
             if was and kind == "paging" and self.paging is not None:
                 self.paging.close(label)
@@ -238,7 +246,9 @@ class LiveTap:
         if found:
             c.ids, c.done = list(found), True
             if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
-                c.alarm = self._raised(c) or self.on_emergency(label, c.since, list(found)) or "raised"
+                em = [x for x in found if x[1]]
+                again = all(x in c.looked for x in em) and self._raised(c, em)
+                c.alarm = again or self.on_emergency(label, c.since, list(found)) or "raised"
             if c.looked and self.log is not None:   # (how often a burst began before the pre-roll: #694)
                 self.log(f"{label}: radio ID decoded from before the squelch opened (look-back)")
             if c.shown:
@@ -271,15 +281,21 @@ class LiveTap:
         step = FRAME / RATE
         return c.hold is not None and abs(c.since + c.hold[1] * step - since) < step / 2
 
-    def _look_back(self, c: _Chan, since: float) -> None:
-        """The carrier just begun at since (its buf, t0 set): its ID look-back, the channel's frames just before buf."""
-        n, h = len(c.buf), list(c.hist)
-        c.back, c.old, c.before, c.steps, c.looked = [], 0, None, 0, []
-        if n and (len(h) < n or h[-1] is not c.buf[-1]):
+    def _look_back(self, c: _Chan, since: float, drop: int | None) -> None:
+        """The carrier just begun at since (its buf, t0 set): its ID look-back, the channel's frames just before buf.
+        Its pre-roll: the PREROLL_FRAMES just before since when it opened (the carrier before ended at least the hang
+        earlier), on a cut only the drop it was cut at, less its first frame (still partly the carrier before: drop
+        frames; 0: the rise rule, no drop)."""
+        n, h, shut = len(c.buf), list(c.hist), list(c.shut)
+        c.back, c.old, c.before, c.weak, c.lone, c.steps, c.looked = [], 0, None, 0, [], 0, []
+        if len(shut) != len(h) or (n and (len(h) < n or h[-1] is not c.buf[-1])):
             return              # (not the frames the tap saw last: never guess)
-        c.back = h[:len(h) - n][-ID_LOOKBACK_FRAMES:]
-        ahead = max(0, round((since - c.t0) * RATE / FRAME))      # buf's frames before since (its pre-roll)
-        c.old = max(0, len(c.back) + ahead - PREROLL_FRAMES)
+        b0 = max(0, len(h) - n - ID_LOOKBACK_FRAMES)
+        c.back, shut = h[b0:len(h) - n], shut[b0:]
+        at = len(c.back) + round((since - c.t0) * RATE / FRAME)  # since's place in back + buf
+        c.old = max(0, at - min(PREROLL_FRAMES, PREROLL_FRAMES if drop is None else drop - 1))
+        while c.weak < c.old and shut[c.old - 1 - c.weak]:
+            c.weak += 1
 
     def _decode(self, c: _Chan, frames: list, audio: np.ndarray, back: bool = True) -> list:
         """The IDs in these frames of the carrier (from buf[0]; audio: them joined), and with back, the IDs of a burst
@@ -294,18 +310,19 @@ class LiveTap:
             if c.before is None:
                 old = (c.back + c.buf)[:c.old]
                 c.before = list(self.mdc(np.concatenate(old).astype(np.float32))) if old else []
-            more = [x for x in more if x not in c.before or (x[1] and not self._raised(c, [x]))]
+                lone = old[len(old) - c.weak:] if c.weak else []
+                c.lone = [x for x in self.mdc(np.concatenate(lone).astype(np.float32)) if x[1]] if lone else []
+            more = [x for x in more if x not in c.before or (x in c.lone and not self._raised(c, [x]))]
             c.looked += [x for x in more if x not in c.looked]
         return found + more
 
-    def _raised(self, c: _Chan, found: list | None = None) -> str:
-        """The alarm the carrier just before raised for an emergency found here only with the look-back (that burst ran
-        across both: one press, one alarm) ("" none)."""
-        em = [x for x in (c.looked if found is None else found) if x[1]]
+    def _raised(self, c: _Chan, em: list) -> str:
+        """The alarm the carrier just before raised for every one of these emergencies (a burst that ran across both:
+        one press, one alarm) ("" none)."""
         if not em or not c.last or self.clock() - c.last[-1][2] > MDC_WINDOW_S:
             return ""
         prev = c.last[-1]
-        return prev[3] if prev[3] and any(x in prev[1] for x in em) else ""
+        return prev[3] if prev[3] and all(x in prev[1] for x in em) else ""
 
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
