@@ -23,6 +23,10 @@
     logs thread        POST /api/station/logs: this station's journal (sizeup-logread hands it over: logread.py),
                        scrubbed and gzipped, every ~45 s, spooled on disk while the hub is away (logship.py); the hub
                        writes it to CloudWatch (cwlogs.py)
+    metrics threads    POST /api/station/metrics: the signal metrics (sizeup/cloud/metrics.py): each channel's noise floor
+                       and squelch a minute, each transmission's levels, each P25 control channel's decode rate, what
+                       changed; batched every minute, in memory while the hub is away (bounded: the oldest dropped,
+                       counted), never through the outbox
     vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
                        [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
@@ -60,6 +64,7 @@ from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.logship import LogShipper
+from sizeup.cloud.metrics import MetricsLink
 from sizeup.cloud.outbox import Outbox
 from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
@@ -154,6 +159,8 @@ class StationLink:
         # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
         # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
         self.logs = LogShipper(cfg, self._client, log, app=app)
+        # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
+        self.metrics_link = MetricsLink(app, cfg, self._client, log)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -197,6 +204,7 @@ class StationLink:
         self.aircraft.start()
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         self.logs.start()
+        self.metrics_link.start()
         return self
 
     @property
@@ -215,6 +223,7 @@ class StationLink:
         self.aircraft.stop()
         self.vessels.stop()
         self.logs.stop()
+        self.metrics_link.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -348,6 +357,7 @@ class StationLink:
             out["logship"] = self.logs.stats()
         except Exception as e:  # noqa: BLE001 - a report
             out["logship"] = {"state": "error", "reason": type(e).__name__}
+        out["metrics"] = self.metrics_link.stats()
         try:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself

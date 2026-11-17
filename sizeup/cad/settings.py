@@ -62,6 +62,9 @@ Reset to default = drop the override (one item, or a whole section).
     alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
                                    silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
                                    Health, not pushed (#340; Settings > System > Push notifications, admins)
+    radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}]}: the Radio page
+                                   rail's folders, set for the department (#607, sizeup/cad/radiofolders.py; admins, from
+                                   the rail's Edit); not set: the automatic grouping
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -95,7 +98,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import commonplaces, dispatcher, eta, mapview, runcards, tonelist
+from sizeup.cad import commonplaces, dispatcher, eta, mapview, radiofolders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -168,6 +171,10 @@ PAGE_SECTION[PREMISE_SECTION] = "system"
 # key "prominent" -> [services] (sourcekeys.SERVICES).
 EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems", "other")
 PAGE_SECTION[EM_SECTION] = "radios"
+# The Radio page's folders (#607, sizeup/cad/radiofolders.py): how the rail's channel tree is grouped, admins, audited
+# as Radios. key "layout" -> {folders: [{id, name, section, items}]}; not set: the automatic grouping.
+FOLDERS_SECTION = radiofolders.SECTION
+PAGE_SECTION[FOLDERS_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
 LOGS_SECTION = cwlogs.SECTION
@@ -487,6 +494,7 @@ class Editor:
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
+        self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -949,6 +957,32 @@ class Editor:
                            [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
         return {**out, "radio_emergencies": self.em_page()}
 
+    def _folders_op(self, action: str, body: dict, op: str) -> dict:
+        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | reset {base?}: the Radio page's
+        folders and channel names (#607), admins,
+        audited as Radios. base: the rev the edit started from (radiofolders.rev; "" the default): someone else saved
+        meanwhile -> refused, nothing written."""
+        cur = radiofolders.stored(self.overrides())
+        base = body.get("base")
+        if base is not None and base != radiofolders.rev(cur):
+            raise CadError("the folders were changed meanwhile: reload them and edit again")
+        if action == "reset":
+            v = None
+        elif action == "set":
+            v = radiofolders.clean({"folders": body.get("folders"), "names": body.get("names")})
+            if not self.cad.comms._sees_context():
+                v = radiofolders.merge_hidden(v, cur)
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_folders": radiofolders.for_viewer(cur, sees_context=self.cad.comms._sees_context(),
+                                                       hidden_labels=self.cad.context_labels())}
+        out = self._commit([(FOLDERS_SECTION, radiofolders.KEY, REMOVE if v is None else v)], op,
+                           [("radios", f"{FOLDERS_SECTION}/{radiofolders.KEY}", radiofolders.summary(cur),
+                             radiofolders.summary(v))])
+        return {**out, "radio_folders": radiofolders.for_viewer(v, sees_context=self.cad.comms._sees_context(),
+                                                       hidden_labels=self.cad.context_labels())}
+
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
         key = body.get("key")
@@ -1122,7 +1156,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FOLDERS_SECTION: self._folders_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -3105,6 +3139,14 @@ class Editor:
                 e["prominent"] = em_value(e["prominent"])
             except CadError as x:
                 raise CadError(f"overrides.{EM_SECTION}.{x}") from None
+        f = ov.get(FOLDERS_SECTION) or {}                     # the Radio page's folders (#607)
+        if set(f) - {radiofolders.KEY}:
+            raise CadError(f"overrides.{FOLDERS_SECTION}: {radiofolders.KEY} only")
+        if radiofolders.KEY in f:
+            try:
+                f[radiofolders.KEY] = radiofolders.clean(f[radiofolders.KEY])
+            except CadError as x:
+                raise CadError(f"overrides.{FOLDERS_SECTION}.{x}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
