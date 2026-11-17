@@ -255,3 +255,6 @@ stt-corrections*.jsonl
 
 # the camera DVR's state file a test run can leave in the working directory (#661)
 /dvr/.dvr-state.json
+
+# /cad's bundles, built with the hub image (sizeup/web/bundle.py)
+sizeup/web/static/bundle/

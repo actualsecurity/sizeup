@@ -56,6 +56,9 @@ RUN groupadd --system --gid 10001 sizeup \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY sizeup ./sizeup
+# /cad's scripts and stylesheets as one file each (sizeup/web/bundle.py; static/bundle/, never committed): a first
+# load asks for a handful of files instead of ~60
+RUN python -B -m sizeup.web.bundle
 # [docs]: pypdf, PDFium (pypdfium2) and Pillow for site documents (#459, sizeup/docfiles.py)
 # [intel-llm]: the Anthropic SDK (Bedrock Mantle client + boto3) for radio pre-alert inference (sizeup/intel/infer.py; off
 # until Settings turn it on), at the exact versions of deploy/hub/constraints-intel-llm.txt (reproducible images)

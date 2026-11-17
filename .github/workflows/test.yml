@@ -51,6 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t sizeup-hub:ci .
+      - run: docker run --rm --entrypoint python sizeup-hub:ci -B -m sizeup.web.bundle --check   # /cad's bundles built
       - run: |
           docker run -d --name hub -e SIZEUP_HOST=0.0.0.0 -e SIZEUP_STATION_TOKEN="$(openssl rand -hex 32)" -p 8090:8090 sizeup-hub:ci
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8090/healthz && break; sleep 2; done
