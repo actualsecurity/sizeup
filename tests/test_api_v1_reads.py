@@ -17,7 +17,7 @@ from sizeup.api.v1.handler import V1
 from sizeup.api.v1.limits import Limits
 from sizeup.api.v1.principal import Principal
 from sizeup.api.v1.rev import rev_of
-from sizeup.api.v1.serialize import name_of, radio_rows
+from sizeup.api.v1.serialize import name_of, radio_rows, scrub
 from sizeup.api.v1.switches import Switches
 from sizeup.cad.api import CadApi
 from sizeup.cloud.access import Identity
@@ -723,3 +723,90 @@ def test_the_404_and_503_bodies_are_the_specs_error(cad):
         assert s == 503 and h["Retry-After"] == "5"
         conforms(body, "GET", spec, 503)
         assert "503" in DOC["paths"][spec]["get"]["responses"]
+
+
+# -- the reviewers' probes, as given (operator strings, emails of every shape, a talker's ID) ----------------
+
+EMAIL_PROBES = ["Casey <a@x", "Casey <a@x.org> note", "Casey <a@x.org> and Bob", "Casey@Example.ORG;",
+                "Casey <casey@example.org>", "casey@example.org", "josé@example.org", "a@exämple.org", "a@localhost",
+                "a@[10.0.0.1]", "x@y.org@z.org", "Reopened by <a@b.org>@c.org; was closed", "a@b a@b a@b"]
+ID_PROBES = ["rid 41228", "Radio  41228", "radio-41228", "radio\t41228", "radio #41228", "unit 41228", "ID 41228",
+             "radio 41228"]
+
+
+@pytest.mark.parametrize("probe", EMAIL_PROBES)
+def test_no_email_form_survives_scrub_or_name_of(probe):
+    for out in (scrub(probe), name_of(probe), scrub(probe, True), scrub(probe, identity=True),
+                name_of(f"{probe} <x@y.org>")):
+        assert "@" not in out, (probe, out)
+
+
+@pytest.mark.parametrize("probe, scrubbed, name", [
+    ("Casey <a@x", "Casey", "Casey"), ("Casey <a@x.org> note", "Casey note", "Casey note"),
+    ("Casey <a@x.org> and Bob", "Casey and Bob", "Casey and Bob"), ("Casey@Example.ORG;", "an operator", ""),
+    ("Casey <casey@example.org>", "Casey", "Casey"), ("casey@example.org", "an operator", ""),
+    ("josé@example.org", "an operator", ""), ("a@localhost", "an operator", ""), ("a@[10.0.0.1]", "an operator", ""),
+    ("x@y.org@z.org", "an operator", ""), ("Lt. Ruiz", "Lt. Ruiz", "Lt. Ruiz"),
+    ("40 Example Rd @ Sample Market", "40 Example Rd @ Sample Market", "40 Example Rd @ Sample Market"),
+    ("note <5 min> more", "note more", "note more")])
+def test_scrub_and_name_of_exact_outputs(probe, scrubbed, name):
+    assert scrub(probe) == scrubbed and name_of(probe) == name
+
+
+@pytest.mark.parametrize("probe", ID_PROBES)
+def test_every_radio_id_form_is_masked_in_an_alarms_words_and_identity_fields(probe):
+    for out in (scrub(probe, True), scrub(probe, identity=True), scrub(f"EMERGENCY: {probe} mayday on FG1", True)):
+        assert "41228" not in out and "unidentified radio" in out, (probe, out)
+
+
+def test_the_mask_is_for_identity_fields_and_alarm_words_only():
+    assert scrub("41228", identity=True) == "an unidentified radio" and scrub("41228", True) == "41228"
+    assert scrub("12345 Example Ave, radio 41228 said", False) == "12345 Example Ave, radio 41228 said"   # as written
+    assert scrub("E64 (77A4)", identity=True) == "E64 (77A4)"
+
+
+@pytest.mark.parametrize("junk", ["a" * 2000, "<" * 2000, "a." * 1000, "-" * 2000, "<a " * 700, "a@" * 1000,
+                                  "<a@" * 700, ("a" * 60 + ".") * 33, " " * 2000, "@" * 2000])
+def test_adversarial_input_is_handled_in_linear_time(junk):
+    """No tight clock: the inputs are 2000 characters of the shapes that make a backtracking pattern cubic, and the
+    patterns here are linear, so these finish at once; the check is on the output (and that they finish at all)."""
+    for out in (scrub(junk), scrub(junk, True, True), name_of(junk)):
+        assert isinstance(out, str) and "@" not in out
+
+
+def test_odd_operator_strings_and_a_bare_numeric_talker_never_reach_the_api(tmp_path):
+    c, ids = seed(tmp_path, calls=4)
+    c.ids = ids
+    v1 = v1_for(c)
+    ops = ["Casey <a@x", "Casey <casey@example.org> note", "Casey@Example.ORG;"]
+    for n, op in enumerate(ops):
+        t = tx(f"FG1-{n}", "Engine 60 mayday", rig="E60", unit="E60 P1", radio_id="6401", at=c.clock() - 1)
+        c.record_traffic(t)
+        a = c.alarms.on_traffic(t)
+        for step in (lambda: c.alarm_ack(a["id"], {"operator": op}),
+                     lambda: c.alarm_clear(a["id"], {"operator": op}),
+                     lambda: c.close(ids[1 + n], {"operator": op, "disposition": "NO ACTION"}),
+                     lambda: c.reopen(ids[1 + n], {"operator": op})):
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - the CAD may refuse an odd operator: what it did write is what is checked
+                pass
+        c.clock.t += 2
+    t = tx("FG1-ID", "mayday mayday", rig="", unit="41228", radio_id="41228", at=c.clock() - 1)     # who() = "41228"
+    c.record_traffic(t)
+    a = c.alarms.on_traffic(t)
+    assert c.alarms.get(a["id"])["who"] == "41228"                                      # (the CAD says it bare)
+    c.clock.t += 2
+    for who in ("val", "jordan", "casey"):
+        text = whole_api(v1, c, who)
+        assert "@" not in text and "41228" not in text, who
+    assert get(v1, "/api/v1/alarms")[1]["items"][0]["who"] == "an unidentified radio"
+
+
+def test_a_named_places_at_sign_survives(tmp_path):
+    c, ids = seed(tmp_path, calls=1)
+    c.ids = ids
+    c.update(ids[0], {"address": "40 Example Rd @ Sample Market", "place": "Sample Market", "operator": "Casey"})
+    c.clock.t += 2
+    v1 = v1_for(c)
+    assert "40 Example Rd @ Sample Market" in whole_api(v1, c, "val")
