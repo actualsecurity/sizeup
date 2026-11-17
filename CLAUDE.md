@@ -49,7 +49,7 @@ the tests), `docs/cloud.md` (flows, handoff, health, every layer), `deploy/stati
 | `sizeup/stt.py`, `transcribe.py` (also `Display`: vocabulary phrases without AWS's hyphens), `stt_vocab.py`, `sttcatchup.py`, `channels.py` | speech-to-text: the whisper queue, Amazon Transcribe (budgets, watchdog, breaker), vocabularies, shed clips caught up, per-channel engine choice |
 | `sizeup/talkgroups.py`, `tiers.py`, `sourcekeys.py` | talkgroup switches, tiers of other P25 systems, one key per radio source and who may see context rows |
 | `sizeup/cad/` | the CAD: `store.py` (SQLite, `tx()`), `service.py`, `api.py`, dispatcher, run cards, alarms, settings, activity log, the airport |
-| `sizeup/cad/sources.py`, `automode.py`, `sizeup/sources/` | incident sources ranked and matched, dispatch modes, the station's adapter interface and runner |
+| `sizeup/cad/sources.py`, `pagematch.py`, `automode.py`, `sizeup/sources/` | incident sources ranked and matched (a page scored against the feed's incident: `pagematch.py`), dispatch modes, the station's adapter interface and runner |
 | `sizeup/cad/comms.py`, `radiolog.py`, `statushints.py` | the radio log (rows, links, change log, views), the per-incident radio log, status suggestions |
 | `sizeup/cad/history.py`, `premise.py`, `preplan.py`, `preplan_docs.py`, `sizeup/attachments.py` | address history and search, premise notes, pre-plan points, site documents, incident attachments |
 | `sizeup/cad/routes.py`, `mapview.py`, `sizeup/roadgraph.py` | rig positions and probable routes on the road graph |

@@ -1283,11 +1283,11 @@ def test_county_groups_still_show_beside_another_systems(two):
     assert {r["group"] for r in county} == {"Fire/EMS"} and {r["system"] for r in county} == {"westchester"}
     assert {r["tg"] for r in county} == {307, 301} and len(other) == len(MRRS.talkgroups)
     assert all(r["system"] == "mrrs" and r["tier"] in tiers.TIERS for r in other)
-    # Settings > Radios groups by the group name alone for the county's (as before: its sections, order and colours)
-    # and by system + group for another system's, so neither swallows the other
+    # Settings > Radios groups by system first (County P25, then each other system), then by group within it, so
+    # neither swallows the other (tests/test_channels_by_system.py runs it)
     js = (ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
-    assert 'const gk = (r.tier_set ? `${r.system}\\u0001` : "") + (r.group || "");' in js
-    assert "key: (x) => `g:${x.g}`" in js and "show(gsw, !other);" in js
+    assert 'const id = r.tier_set ? r.system || "?" : "";' in js and ".map(([g, list]) => ({ g: `${id}\\u0001${g}`" in js
+    assert "key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`)" in js and "show(gsw, !x.other);" in js
 
 
 def test_no_ids_hub_caps_and_queue_stats(tmp_path):

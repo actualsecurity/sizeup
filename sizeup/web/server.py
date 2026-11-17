@@ -10,8 +10,9 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
-POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
@@ -935,6 +936,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         if got is None:
                             raise ValueError("source: p25:<system>:<talkgroup>")
                         tier = body.get("tier")
+                        # (the county's too: its system says it is the county's even where the number is also
+                        # another system's; the hub sends it bare to a station from before #409)
                         err = set_talkgroup(got[1], body.get("record"), body.get("main"),
                                             None if tier is None else str(tier), got[0])
                     else:
@@ -1373,6 +1376,14 @@ class WebServer:
         threading.Thread(target=run, name="drain", daemon=True).start()
 
     def shutdown(self) -> None:
+        """Stop serving (tests; a deploy drains instead). The station's long poll ends now, empty, as in drain():
+        left waiting, its request thread would answer up to 25 s later, after the server was gone (#665). Every request
+        after this one gets 503 and its connection closed (a station still running backs off; without it, on its
+        kept-alive connection, it would poll again at once, get [] at once, and so on, thousands a second)."""
+        self.gate.draining.set()
+        jobs = getattr(self.station, "jobs", None)
+        if jobs is not None and hasattr(jobs, "close"):
+            jobs.close()
         self.broadcaster.stop()
         if self.cad_broadcaster:
             self.cad_broadcaster.stop()

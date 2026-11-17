@@ -6,7 +6,7 @@ import json
 import pytest
 
 from sizeup.cad.api import CadApi
-from sizeup.cad.feed import DEFAULT_PHRASES, Matcher, load_cfg
+from sizeup.cad.feed import DEFAULT_PHRASES, DEFAULT_RAISE_WORDS, Matcher, load_cfg, read_rye
 from sizeup.cad.lists import ListsError, load
 from sizeup.cad.lists import DEFAULT_PATH
 from tests.test_radios import Clock, _event_with, cad, tx
@@ -29,6 +29,7 @@ def test_data_file_phrases_and_defaults(tmp_path):
     cfg = load_cfg(load())
     assert cfg.talkgroups == (307,) and cfg.limit == 6 and cfg.title == "60 Control · Fire/EMS 15"
     assert cfg.phrases == ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
+    assert cfg.short == ("PC", "RB") and cfg.raise_words == DEFAULT_RAISE_WORDS
     # PCFD's and Rye Brook's fire units, not Rye's mutual aid, PD, EMS or agencies
     assert {"E60", "L31", "TL2", "R40", "2391", "2398", "2662", "E14", "L30"} <= set(cfg.units)
     assert not {"E191", "L25", "77A4", "PCPD", "60CAD", "DPW"} & set(cfg.units)
@@ -37,7 +38,7 @@ def test_data_file_phrases_and_defaults(tmp_path):
     two = load_cfg(load(lists_with(tmp_path, {"talkgroups": [307, 333], "phrases": ["Port Chester", "Kingsland"]})))
     assert two.talkgroups == (307, 333) and two.phrases == ("Port Chester", "Kingsland")
     for bad in ({"talkgroups": []}, {"talkgroups": ["307"]}, {"limit": 0}, {"phrases": "Port Chester"},
-                {"phrases": [""]}, [307]):
+                {"phrases": [""]}, [307], {"raise_words": "base"}, {"raise_words": [""]}, {"short_names": ["P C"]}):
         with pytest.raises(ListsError, match="comms_feed"):
             load_cfg(load(lists_with(tmp_path, bad)))
 
@@ -68,6 +69,217 @@ def test_data_file_phrases_and_defaults(tmp_path):
 def test_matcher_phrases_unit_codes_and_spoken_forms(text, why):
     cfg = load_cfg(load())
     assert Matcher(cfg.phrases, cfg.units).match(text) == why
+
+
+@pytest.mark.parametrize("text,ours", [
+    # another department's headquarters is never ours (Fire/EMS 15, 2026-11-17: Rye FD's, flagged PC)
+    ("60s to right headquarters right face.", False),           # STT's "right" for Rye: "60's to Rye headquarters, Rye base"
+    ("16 Rye headquarters.", False),
+    ("Harrison headquarters", False),
+    ("Rye FD headquarters", False),
+    ("Rye F.D. headquarters", False),
+    ("Rye's headquarters", False),
+    ("Purchase fire headquarters", False),                      # the CAD's alias: Harrison
+    ("White Plains headquarters", False),                       # the county's towns
+    ("Scarsdale headquarters", False),
+    ("Harrison, 60 Control, contact headquarters", False),      # bare, but to another department
+    ("60 Control to Harrison, call your headquarters", False),
+    ("Rye. Headquarters, 60 Control", False),
+    ("60s to right face.", False),
+    # ours: bare, or named ours
+    ("60 Control to headquarters", True),
+    ("Port Chester headquarters", True),
+    ("Rye Brook headquarters", True),
+    ("PC headquarters", True),
+    ("Rye headquarters, Engine 60 respond", True),              # our unit named
+    ("Engine 60, 60 Control", True),
+    ("Harrison Avenue, 60 Control to headquarters", True),      # a street, not an addressee
+    ("All right headquarters, copy", True),                     # "all right" is never Rye
+    ("Right, headquarters, copy", True),
+    ("60 Control to headquarters, fire alarm in Rye", True),
+    # the addressee decides: a bare base among them is ours, whatever other departments' bases come later
+    ("60 Control to headquarters, can you send an engine to cover Rye headquarters", True),
+    ("60 Control to headquarters relocate an engine to Purchase headquarters", True),
+    ("Rye and headquarters, 60 Control, mutual aid", True),
+    ("Headquarters and Harrison headquarters, 60 Control", True),
+    ("60s to Rye headquarters, have them cover headquarters", False),
+    ("Harrison headquarters and Rye headquarters, 60 Control, mutual aid", False),
+    # "right" is Rye only at the addressee: an acknowledgement whose comma STT dropped stays ours
+    ("That's right headquarters, go ahead", True),
+    ("Copy right headquarters 60 Control", True),
+    ("OK right headquarters", True),
+    ("Yeah right headquarters", True),
+    ("Right face, 60 Control to headquarters", True),
+    ("Right headquarters, 60 Control", False),
+    ("60 to right headquarters", False),
+    # another service's headquarters is never a fire department's
+    ("redirect Village PD headquarters", False),
+    ("Rye PD headquarters", False),
+    ("Port Chester police headquarters", True),           # "Port Chester" is a phrase of its own
+    ("units to the EMS headquarters", False),
+    ("Sample Ambulance headquarters", False),
+])
+def test_another_departments_headquarters_is_not_ours(text, ours):
+    cfg = load_cfg(load())
+    for m in (Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours), Matcher(cfg.phrases, cfg.units)):
+        assert bool(m.match(text)) is ours, text
+        assert bool(m.match(text, "60 Ctrl OP 1", "")) is ours, text
+
+
+@pytest.mark.parametrize("text,why", [
+    # our short names at the addressee, or followed by a raise word: 60 Control raising us
+    ("60s to PC base", "PC"),
+    ("60 Control to PC base", "PC"),
+    ("60 Control to PC field", "PC"),
+    ("60 Control to PC", "PC"),
+    ("60 Control to PC fire", "PC"),
+    ("60s to PC Command", "PC"),
+    ("60 Control to RB", "RB"),
+    ("60 Control, P.C. base", "PC"),
+    ("60s to P C base", "PC"),
+    ("60s to PC central", "PC"),
+    ("PC, 60 Control", "PC"),
+    ("RB, 60 Control", "RB"),
+    ("Rye Brook, 60 Control", "Rye Brook"),
+    ("Harrison and PC, 60 Control, mutual aid", "PC"),
+    ("RB units respond", "RB"),
+    ("60 Control to R.B. chiefs", "RB"),
+    ("contact the PC duty officer", "PC"),
+    ("RBFD, call the desk", "RBFD"),                      # with FD: ours anywhere
+    ("PC FD on the way", "PCFD"),
+    # never inside another word, another town's, the police, nor a bare PC that raises no one
+    ("EpiPen administered PC", ""),
+    ("UPC code on the box", ""),
+    ("EPC base", ""),
+    ("PCPD on scene", ""),
+    ("RBPD 1 on location", ""),
+    ("60 Control to PC PD", ""),
+    ("60 Control to RB police", ""),
+    ("60 Control to PC Ambulance", ""),                   # the ambulance (PC Rye EMS), not PCFD
+    ("60 Control to PC EMS", ""),
+    ("PC Rye EMS, 60 Control", ""),
+    ("Rye PC base", ""),
+    ("Harrison base", ""),
+    ("the pc base", ""),                                  # capitals only
+    ("60 Control to Harrison, RB", ""),
+])
+def test_our_short_names_at_the_addressee_or_before_a_raise_word(text, why):
+    cfg = load_cfg(load())
+    assert Matcher.of(cfg).match(text) == why
+    assert Matcher(cfg.phrases, cfg.units).match(text) == why          # the defaults: PC, RB, DEFAULT_RAISE_WORDS
+
+
+def test_short_names_never_count_on_a_page_and_ems_raises_no_one():
+    cfg = load_cfg(load())
+    m = Matcher.of(cfg)
+    assert "EMS" not in cfg.raise_words and "ambulance" not in cfg.raise_words
+    assert m.match("transport by PC Rye EMS") == m.match("PC ambulance on scene") == m.match("PC EMS 40 on scene") == ""
+    assert m.match("60s to PC base", short=False) == ""
+    assert m.match("60s to PC base, Engine 60", short=False) == "E60"
+    assert m.match("Port Chester, 60 Control", short=False) == "Port Chester"
+
+
+@pytest.mark.parametrize("talker,why", [
+    ("PC-EMS5-M", ""),                  # the ambulance's radios: another agency, a number after
+    ("PC AMB 1", ""),
+    ("PC AMBO 2", ""),
+    ("PC Medic 3", ""),
+    ("PCPD3", ""),
+    ("PC CAR 1", ""),                   # an alias is never an addressee: only with FD
+    ("PC", ""),
+    ("RB 14", ""),
+    ("PCFD-2391", "PCFD"),
+    ("PC-FD 7", "PCFD"),
+    ("PC FD", "PCFD"),
+    ("RBFD-1", "RBFD"),
+])
+def test_a_talkers_alias_is_ours_only_with_fd(talker, why):
+    cfg = load_cfg(load())
+    for m in (Matcher.of(cfg), Matcher(cfg.phrases, cfg.units)):
+        assert m.match("in service", talker, "") == why, talker
+        assert m.match("60s to PC base", talker, "") == (why or "PC")     # the text still counts
+    assert Matcher.of(cfg).match("on location", "PC AMB 1", "E60") == "E60"  # one of our units: its rig
+
+
+@pytest.mark.parametrize("text", ["PC-EMS5 on scene", "60 Control to PC AMB 1", "PC Ambo 2 transporting",
+                                  "60 Control to PC Medic 3", "PC-PD3 on location"])
+def test_another_agencys_numbered_units_are_not_ours(text):
+    assert Matcher.of(load_cfg(load())).match(text) == ""
+
+
+def test_short_names_and_raise_words_come_from_the_lists(tmp_path):
+    d = dict(DATA)
+    d["joint_response"] = {"Rye Brook": {**DATA["joint_response"]["Rye Brook"], "tag": "SV"}}
+    d["comms_feed"] = {**DATA["comms_feed"], "raise_words": ["garage"], "short_names": ["PCV"]}
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cfg = load_cfg(load(p))
+    m = Matcher.of(cfg)
+    assert cfg.short == ("PC", "SV", "PCV") and cfg.raise_words == ("garage",)
+    assert m.match("60 Control to SV") == "SV" and m.match("send it to SV garage") == "SV"
+    assert m.match("PCV garage") == "PCV" and m.match("send it to PC base") == ""      # base isn't a raise word here
+    assert m.match("60 Control to RB") == ""                                           # the tag is SV now
+
+
+def test_rye_heard_as_right_is_read_for_the_decision_only():
+    assert read_rye("60s to right headquarters right face.") == "60s to Rye headquarters Rye base."
+    assert read_rye("right HQ") == "Rye HQ" and read_rye("right base") == "Rye base"
+    assert read_rye("turn right face the house") == "turn right face the house"     # no base, not the addressee
+    assert read_rye("all right headquarters") == "all right headquarters"
+    assert read_rye("on your right base of the stairs") == "on your right base of the stairs"
+    assert read_rye("60 Control to right face.") == "60 Control to Rye base."
+    assert read_rye("Right headquarters, 60 Control") == "Rye headquarters, 60 Control"
+    for ack in ("That's right headquarters, go ahead", "Copy right headquarters 60 Control", "OK right headquarters",
+                "Yeah right headquarters", "Right face, 60 Control to headquarters", "60 Control to right side"):
+        assert read_rye(ack) == ack
+
+
+def test_whose_base_looks_only_just_before_each_base():
+    cfg = load_cfg(load())
+    m = Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours)
+    long = "60 Control to headquarters " + "words of a long transmission " * 4000 + "cover Rye headquarters"
+    assert m.match(long) == "headquarters"
+    import time
+    t0 = time.perf_counter()
+    m.match("standing by " + "Rye headquarters and " * 5000)
+    assert time.perf_counter() - t0 < 2.0
+
+
+def test_whose_base_follows_the_lists_towns_and_joint_response(tmp_path):
+    d = dict(DATA)
+    d["geo_town_aliases"] = {**DATA["geo_town_aliases"], "sampleton": "Sampleton"}
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cfg = load_cfg(load(p))
+    m = Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours)
+    assert cfg.ours == {"Port Chester", "Rye Brook"}
+    assert m.match("Sampleton headquarters") == "" and m.match("Rye Brook headquarters") == "Rye Brook"
+
+
+def test_the_feed_row_and_possible_incoming_skip_another_departments_headquarters(tmp_path):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t = clock.t
+    c.record_traffic(tx("307-h-call_1-t0", t + 1, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60s to right headquarters right face."))
+    c.record_traffic(tx("307-h-call_2-t0", t + 2, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "16 Rye headquarters."))
+    c.record_traffic(tx("307-h-call_3-t0", t + 3, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60 Control to headquarters"))
+    pc = {r["id"]: r["pc"] for r in c.state()["feed"]["rows"]}
+    assert pc == {"307-h-call_3-t0": "headquarters", "307-h-call_2-t0": "", "307-h-call_1-t0": ""}
+    assert c.sources.consider_radio("307-h-call_1-t0") is None and c.sources.consider_radio("307-h-call_2-t0") is None
+    n = c.sources.consider_radio("307-h-call_3-t0")
+    assert n["text"] == "Calling headquarters: 60 Control to headquarters"
+    assert [x["text"] for x in c.sources.state()["incoming"]] == [n["text"]]
+    c.record_traffic(tx("307-h-call_4-t0", t + 4, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60s to PC base"))
+    assert c.state()["feed"]["rows"][0]["pc"] == "PC"
+    assert c.sources.consider_radio("307-h-call_4-t0")["text"] == "Calling PC: 60s to PC base"
+    # a page is judged by its tones: "PC ..." on South 2 is the ambulance's (PC Rye EMS), never a notice of ours
+    for k, said in enumerate(("6 PC RMS 2 Sample Drive, disoriented. PC RMS to Sample Drive 11:31.",
+                              "60 old PC Rye EMS 40 Example Avenue, unknown medical. PC EMS 40 Example Avenue.",
+                              "60s to PC base")):
+        c.record_traffic(tx(f"S2-{k}", t + 10 + k, "South 2", "", "60 Control", None, said))
+        assert c.sources.consider_radio(f"S2-{k}") is None, said
+    c.record_traffic(tx("S2-9", t + 20, "South 2", "", "60 Control", None, "Port Chester, stand by for a page"))
+    assert c.sources.consider_radio("S2-9")["text"] == "Port Chester, stand by for a page"     # the full name still is
 
 
 def test_matcher_talker_and_rig():

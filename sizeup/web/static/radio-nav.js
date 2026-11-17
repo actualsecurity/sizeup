@@ -177,6 +177,18 @@ window.RadioNav = (() => {
   const idOf = (s) => (s.talkgroup !== undefined && s.talkgroup !== null ? `TG ${s.talkgroup}` : s.mhz ? `${s.mhz} MHz` : "");
   const draftOf = (rows, custom) => folders(rows, custom).map((g) => ({ id: g.id, name: g.name, section: g.section, items: g.sources.map((s) => s.key) }));
   const holder = (d, key) => d.find((f) => f.items.includes(key));
+  // Two stored layouts with the same folders (null: none)
+  const sameFolders = (a, b) => JSON.stringify((a && a.folders) || []) === JSON.stringify((b && b.folders) || []);
+  // The names saved meanwhile (theirs), with this edit's own changes from where it began (start -> mine) over them
+  function mergedNames(start, mine, theirs) {
+    const out = { ...theirs };
+    for (const k of new Set([...Object.keys(start), ...Object.keys(mine)])) {
+      const was = String(start[k] || "").trim(), now = String(mine[k] || "").trim();
+      if (was === now) continue;
+      if (now) out[k] = now; else delete out[k];
+    }
+    return out;
+  }
   // a channel into folder `to`, before `before` (a key in it) or at its end
   function moveItem(d, key, to, before = "") {
     const from = holder(d, key), dest = d.find((f) => f.id === to);
@@ -599,7 +611,8 @@ window.RadioNav = (() => {
   }
   function editStart() {
     if (!mayEdit() || st.edit) return;
-    st.edit = { folders: draftOf(st.src, st.layout), names: { ...((st.layout && st.layout.names) || {}) }, base: st.layout ? st.layout.rev : "", error: "", busy: false, focus: "" };
+    st.edit = { folders: draftOf(st.src, st.layout), names: { ...((st.layout && st.layout.names) || {}) }, base: st.layout ? st.layout.rev : "", error: "", busy: false, focus: "",
+                start: st.layout };                    // (what the edit began from: a name set meanwhile is merged at Save)
     st.railSig = "";
     renderRail();
     renderEdit();
@@ -761,9 +774,21 @@ window.RadioNav = (() => {
       sources(true);
     } catch (x) {
       e.busy = false;
+      // Someone else saved meanwhile. Only names (Settings > Radios > Channels names one at a time) and not the
+      // folders: theirs kept, this edit's own name changes over them, saved once more
+      if (/changed meanwhile/.test(x.message) && !e.merged && st.edit === e && await mergeNames(e)) return editSave();
       e.error = x.message;
       if (st.edit === e) renderEdit();
     }
+  }
+  async function mergeNames(e) {
+    let fresh;
+    try { fresh = (await api("GET", "/api/cad/comms/sources")).folders || null; } catch (_) { return false; }
+    if (st.edit !== e || !sameFolders(fresh, e.start)) return false;
+    e.names = mergedNames((e.start && e.start.names) || {}, e.names, (fresh && fresh.names) || {});
+    e.base = fresh ? fresh.rev : "";
+    e.merged = true;
+    return true;
   }
   // Drag and drop (desktop): a channel before another, or onto a folder (its end); a folder before another
   function dragTarget(t) {

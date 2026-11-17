@@ -4,13 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # GitHub's merge queue (not enabled: docs/cloud.md "Back-to-back merges"). Inert until a ruleset turns it on.
+  merge_group:
 
 permissions:
   contents: read
 
+# A PR's new push cancels its older run. A run on main is NEVER cancelled or queued behind another: each has its own
+# group (the run id), so merging PRs back to back tests every merge to the end, and deploy.yml (which starts when
+# one passes) deploys the newest commit that passed. One shared group for main would cancel them: GitHub keeps at
+# most one pending run per group even without cancel-in-progress.
 concurrency:
-  group: test-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('test-{0}', github.ref) || format('test-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pytest:
@@ -33,6 +39,8 @@ jobs:
           echo "${LITESTREAM_SHA256_AMD64}  /tmp/litestream.tgz" | sha256sum -c -
           sudo tar -xzf /tmp/litestream.tgz -C /usr/local/bin litestream
           litestream version
+      # Tests marked @pytest.mark.flaky (known flakes, each with its issue) get one retry on failure: "R" in the
+      # progress, "N rerun" in the totals and a warning annotation (tests/conftest.py). Any other failure is final.
       - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile
 
   image:
