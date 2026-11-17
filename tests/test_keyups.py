@@ -263,7 +263,7 @@ def both_ids(a):
 
 def tap_run(audio, mdc=mdc_ids, **kw):
     """Segments through a squelch with the live tap on it, as App._segment gets them: (segment, the IDs the tap hands
-    its row, the tap's "ID not decoded", its live alarm key), and the alarms the tap raised."""
+    its row, the tap's "ID not decoded", its live alarm key, an emergency among those IDs), and the alarms raised."""
     from sizeup.radio.fm import Channel
     from sizeup.radio.tap import LiveTap, TapSquelch
     clock = {"t": 1000.0}
@@ -275,14 +275,15 @@ def tap_run(audio, mdc=mdc_ids, **kw):
     for i in range(0, len(audio) - FRAME + 1, FRAME):
         clock["t"] += FRAME / RATE
         if (s := sq.feed(audio[i:i + FRAME])) is not None:      # (the row is made now: NfmReceiver._deliver)
-            out.append((s, [h for h, _e in tap.ids("FG1", s.start, s.end)], tap.burst("FG1", s.start, s.end),
-                        tap.alarm_key("FG1", s.start, s.end)))
+            got = tap.ids("FG1", s.start, s.end)
+            out.append((s, [h for h, _e in got], tap.burst("FG1", s.start, s.end), tap.alarm_key("FG1", s.start, s.end),
+                        any(e for _h, e in got)))
     return out, alarms
 
 
 def tapped(audio, **kw):
     """Segments through a squelch with the live tap on it, each with the IDs the tap hands its row (App._segment)."""
-    return [(s, i) for s, i, _b, _a in tap_run(audio, **kw)[0]]
+    return [(s, i) for s, i, *_ in tap_run(audio, **kw)[0]]
 
 
 def test_the_tap_never_hands_a_cut_piece_the_radio_before_it():
@@ -315,10 +316,10 @@ def test_a_short_key_up_with_no_id_never_takes_the_next_radios_pre_id(talk, gap)
     # #672: A talks briefly and sends no ID; B keys up 0.12-0.3 s later with its pre-ID. The squelch holds the cut until
     # B has min_open_s, and A's key-up window was still open: B's pre-ID was decoded onto A's row
     audio = np.concatenate([hiss(3.0), unit(talk), hiss(gap), unit(1.5, pre=B_ID), hiss(2.0)])
-    (main, main_ids, _b, _a), = tap_run(audio, drop_db=10.0)[0]
+    (main, main_ids, *_), = tap_run(audio, drop_db=10.0)[0]
     # (main: one row, B's ID from the tap; at 0.9 s B's burst ends past A's 1.5 s window, so the bug never showed)
     assert main_ids == ([f"{B_ID:04X}"] if talk < 0.9 else [])
-    ((a, ida, burst_a, _), (b, idb, _, _)), _alarms = tap_run(audio, **TRAFFIC)
+    ((a, ida, burst_a, *_), (b, idb, *_)), _alarms = tap_run(audio, **TRAFFIC)
     assert b.split in ("id", "gap") and ida == [] and idb == [f"{B_ID:04X}"]
     assert not burst_a                                                  # A sent none: not "ID not decoded" either
 
@@ -328,9 +329,9 @@ def test_a_short_key_up_with_no_id_never_takes_the_next_radios_fleetsync_id(gap)
     burst = fleetsync.encode(100, 2001, "pre-id")                 # invented fleet / unit
     b_tx = np.concatenate([quiet(0.15), burst, quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
     audio = np.concatenate([hiss(3.0), unit(0.6), hiss(gap), b_tx, hiss(2.0)])
-    (_m, main_ids, _b, _a), = tap_run(audio, mdc=both_ids, drop_db=10.0)[0]
+    (_m, main_ids, *_), = tap_run(audio, mdc=both_ids, drop_db=10.0)[0]
     assert main_ids == ["100-2001"]
-    ((a, ida, burst_a, _), (b, idb, _, _)), _alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    ((a, ida, burst_a, *_), (b, idb, *_)), _alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
     assert ida == [] and idb == ["100-2001"] and not burst_a
 
 
@@ -339,9 +340,43 @@ def test_the_next_radios_emergency_alarm_is_raised_once_and_goes_with_its_row():
     # once, as before, and only once; B's row takes it over, A's has neither the ID nor the alarm
     b_tx = np.concatenate([quiet(0.15), mdc(B_ID, (0x00, 0x80)), quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
     audio = np.concatenate([hiss(3.0), unit(0.6), hiss(0.12), b_tx, hiss(2.0)])
-    ((a, ida, _, alarm_a), (b, idb, _, alarm_b)), alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    ((a, ida, _, alarm_a, _), (b, idb, _, alarm_b, em_b)), alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
     assert ida == [] and alarm_a == "" and idb == [f"{B_ID:04X}"]
-    assert len(alarms) == 1 and alarms[0][1] == [(f"{B_ID:04X}", True)] and alarm_b == "alarm-1"
+    assert len(alarms) == 1 and alarms[0][1] == [(f"{B_ID:04X}", True)] and alarm_b == "alarm-1" and em_b
+
+
+def ramped(burst, ramp_s=0.1):
+    """B keying up with its ID burst at once, its carrier still rising out of the hiss for ramp_s (the E63 case the
+    pre-roll is for): the squelch counts the carrier back partway into the burst."""
+    n = int(RATE * ramp_s)
+    burst = np.concatenate([burst, np.zeros(max(0, n - len(burst)))])
+    env = np.full(len(burst), 0.4 * 10 ** (-45 / 20))
+    env[:n] = 0.4 * np.linspace(1.0, 10 ** (-45 / 20), n)
+    rise = burst + env * np.random.default_rng(7).standard_normal(len(burst))
+    return np.concatenate([rise, quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
+
+
+@pytest.mark.parametrize("gap", [0.2, 0.3])
+@pytest.mark.parametrize("op", [PRE, (0x00, 0x80)], ids=["pre-id", "emergency"])
+def test_the_next_radios_id_goes_with_it_when_its_burst_began_on_a_rising_carrier(gap, op):
+    # B's carrier back (the squelch's new carrier) only partway into its burst: B's own buffer can't decode it; the ID
+    # the tap decoded across the cut is B's row's, with the emergency and the alarm raised for it (once)
+    audio = np.concatenate([hiss(3.0), unit(0.6), hiss(gap), ramped(mdc(B_ID, op)), hiss(2.0)])
+    ((a, ida, burst_a, alarm_a, em_a), (b, idb, _, alarm_b, em_b)), alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    assert b.split == "gap" and ida == [] and not burst_a and alarm_a == "" and not em_a
+    assert idb == [f"{B_ID:04X}"]
+    if op == PRE:
+        assert not em_b and alarm_b == "" and alarms == []
+    else:
+        assert em_b and alarm_b == "alarm-1" and len(alarms) == 1
+
+
+def test_the_drop_before_the_next_key_up_is_not_the_first_ones():
+    # B's burst starts in the drop the cut was made at (its carrier rising for 0.2 s): measured up to the carrier back,
+    # A's frames held part of it ("ID not decoded" on A's row); A's own end there is where the drop began
+    audio = np.concatenate([hiss(3.0), unit(0.6), hiss(0.2), ramped(mdc(B_ID), 0.2), hiss(2.0)])
+    ((a, ida, burst_a, *_), (b, idb, *_)), _alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    assert b.split == "gap" and ida == [] and not burst_a and idb == [f"{B_ID:04X}"]
 
 
 def test_each_key_up_keeps_its_own_ids_through_the_tap():
@@ -364,8 +399,8 @@ def test_a_held_cut_never_made_leaves_the_short_carriers_id_as_main():
     # the cut is never made, one row, and the tap hands it the burst's ID exactly as main does
     audio = np.concatenate([hiss(3.0), unit(0.6), hiss(0.3), quiet(0.05), mdc(B_ID), quiet(0.1), hiss(2.0)])
     main, new = tap_run(audio, drop_db=10.0)[0], tap_run(audio, **TRAFFIC)[0]
-    assert len(new) == 1 and [(s.start, s.end, i, b) for s, i, b, _a in new] == [(s.start, s.end, i, b)
-                                                                                 for s, i, b, _a in main]
+    assert len(new) == 1 and [(s.start, s.end, i, b) for s, i, b, *_ in new] == [(s.start, s.end, i, b)
+                                                                                 for s, i, b, *_ in main]
     assert new[0][1] == [f"{B_ID:04X}"]
 
 
@@ -635,3 +670,29 @@ def test_each_piece_is_its_own_row_with_its_own_id_and_linked(tmp_path):
     assert [(k, i, c) for k, i, _l, c in sent_events] == [("traffic", ta.id, ta.id), ("traffic", tb.id, tb.id)]
     assert sent_events[1][2] == {"parent": ta.id, "prev": ta.id, "split": "gap"}
     assert app.clip(ta.id) != app.clip(tb.id)
+
+
+def test_the_next_radios_emergency_is_its_rows_with_the_live_alarm(tmp_path):
+    # through App: the tap (App._mdc, App._fm_emergency) and App._segment, B's emergency burst on a rising carrier
+    # right after A's short no-ID key-up: one alarm at key-up, B's row is the emergency and keeps that alarm's key
+    from sizeup.app import App
+    from sizeup.radio.fm import Channel
+    from sizeup.radio.tap import TapSquelch
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    app._kind = {"FG1": "traffic"}
+    alarms, rows = [], []
+    app._alarm_now = lambda t: alarms.append(t)
+    app._stt = lambda t, audio, engine, label: rows.append(t)
+    clock = {"t": 1000.0}
+    sq = TapSquelch(NoiseSquelch(clock=lambda: clock["t"], **TRAFFIC), app.tap, Channel(453.0375, "FG1"))
+    audio = np.concatenate([hiss(3.0), unit(0.6), hiss(0.2), ramped(mdc(B_ID, (0x00, 0x80))), hiss(2.0)])
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        if (s := sq.feed(audio[i:i + FRAME])) is not None:
+            app._segment(Channel(453.0375, "FG1"), s)
+    ta, tb = rows
+    live = alarms[0]                                    # raised by the tap at the key-up, before either row
+    assert ta.radio_id == "" and not getattr(ta, "emergency", False) and getattr(ta, "id_note", "") != "undecoded"
+    assert tb.radio_id == f"{B_ID:04X}" and tb.emergency and tb.alarm_key == live.id
+    assert [t.id for t in alarms] == [live.id, tb.id]   # the row's own alarm carries the live one's key
