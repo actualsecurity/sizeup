@@ -34,8 +34,9 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               pre-roll, up to PREROLL_FRAMES); so is one fully dropped for 0.1 s or more whose every frame back is
               jump_db over the level it had (another, stronger transmitter: upward only, a fade recovers on a ramp). A
               weak carrier (under 6 dB) never reads as fully dropped: its dips stay inside the hang, as before. The
-              piece before a cut needs MIN_FRAMES of carrier (else nothing is cut), the one after is kept by the same
-              rule as any transmission, and they are linked (Segment.split, prev_start, first_start; radio/fm.py).
+              piece before a cut needs MIN_FRAMES of carrier (else nothing is cut), and the cut is held until the new
+              carrier has MIN_FRAMES too: a reply that ends sooner stays in the transmission, as without key-ups (no
+              blip row, nothing lost). The pieces are linked (Segment.split, prev_start, first_start; radio/fm.py).
     lengths   under 0.6 s of carrier (MIN_FRAMES, the carrier's own frames: not the pre-roll) is a blip, not kept;
               anything over 30 s (MAX_FRAMES) is split.
     AGC       the envelope over its own carrier (agc()): the voice as modulation depth, held through a carrier that
@@ -160,6 +161,9 @@ class CarrierSquelch:
         self.jump_db = jump_db if jump_db and jump_db > 0 else None
         self._cands: list[tuple[int, int]] = []     # (first frame under close, frame the carrier came back)
         self._piece: tuple[float | None, float | None, str] | None = None   # (first piece's start, prev, why)
+        self._hold: tuple[int, int, str] | None = None   # a key-up found, not cut until its carrier held MIN_FRAMES
+        self._hold_on = 0                                # ... its frames over the close level so far
+        self._hold_off = 0                               # ... and under it in a row (SHORT_GAP_FRAMES: it ended)
         self.close_db = max(0.0, self.open_db - HYSTERESIS_DB)
         # #270: the sustained-weak open (a ground transmitter far under the aircraft overhead): weak_db held for
         # WEAK_HOLD_FRAMES. It closes like any other (close_db), kept under weak_db so it doesn't chop.
@@ -241,9 +245,13 @@ class CarrierSquelch:
         if on:
             self._levels.append(level)
         if self._cands and len(self._frames) - self._cands[0][1] >= AM_RETURN_FRAMES:
-            cut, seg = self._keyup(self._cands.pop(0))
-            if cut:
-                return seg
+            self._keyup(self._cands.pop(0))
+        elif self._hold is not None and self._hold_off < SHORT_GAP_FRAMES:   # (its own carrier: not one after it)
+            self._hold_on, self._hold_off = (self._hold_on + 1, 0) if on else (self._hold_on, self._hold_off + 1)
+        if self._hold is not None and self._hold_on >= MIN_FRAMES:
+            g0, g1, why = self._hold
+            self._hold = None
+            return self._cut(g0, g1, why)
         if self._quiet > HANG_FRAMES:
             return self._close("quiet")
         if len(self._frames) >= MAX_FRAMES:
@@ -260,10 +268,10 @@ class CarrierSquelch:
         self._levels = run[-len(pre):] + [level] if run and pre else [level]
         self._pre = deque(maxlen=PREROLL_FRAMES + WEAK_HOLD_FRAMES)
         self._run, self._quiet, self._opened = [], 0, how
-        self._cands, self._piece = [], None
+        self._cands, self._piece, self._hold = [], None, None
 
-    def _keyup(self, cand: tuple[int, int]) -> tuple[bool, Segment | None]:
-        """The carrier came back at frame g1 after dropping at g0: a new key-up (module doc)? -> (cut, first piece)."""
+    def _keyup(self, cand: tuple[int, int]) -> tuple[bool, None]:
+        """The carrier came back at frame g1 after dropping at g0: a new key-up (module doc)? Held (self._hold) if so."""
         g0, g1 = cand
         lv = [float(np.mean(f)) for f in self._frames]
         ret = lv[g1:g1 + AM_RETURN_FRAMES]
@@ -280,6 +288,16 @@ class CarrierSquelch:
             why = "level"
         if not why:
             return False, None
+        # Held, not cut yet: only once the new carrier is a transmission of its own (MIN_FRAMES). A reply that ends
+        # sooner stays in this one, as without key-ups: no audio is lost to a blip's rule (_close).
+        self._hold, self._hold_off = (g0, g1, why), 0
+        self._hold_on = sum(self._over(x, self.close_db) for x in lv[g1:])
+        return False, None
+
+    def _cut(self, g0: int, g1: int, why: str) -> Segment | None:
+        """Cut the open transmission at the drop g0..g1 (a held key-up, _keyup): the first piece back, the rest open."""
+        lv = [float(np.mean(f)) for f in self._frames]
+        before = [x for x in lv[self._npre:g0] if self._over(x, self.close_db)]
         frames, start, npre, opened, piece = self._frames, self._start, self._npre, self._opened, self._piece
         tail = min(g1 - g0, TAIL_FRAMES)
         seg = self._make(frames[:g0 + tail], before, start, npre, opened, tail, "key-up", piece)
@@ -292,7 +310,7 @@ class CarrierSquelch:
             self._piece = (piece[0], piece[1], why) if piece else None
         else:
             self._piece = (seg.first_start, seg.start, why)
-        return True, seg
+        return seg
 
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped with the squelch open: what was heard, now."""
@@ -303,7 +321,7 @@ class CarrierSquelch:
         frames = self._frames[: len(self._frames) - (self._quiet - tail)]
         levels, start, npre, opened, piece = self._levels, self._start, self._npre, self._opened, self._piece
         self._frames, self._levels, self._quiet, self._npre, self._opened = [], [], 0, 0, "carrier"
-        self._cands, self._piece = [], None
+        self._cands, self._piece, self._hold = [], None, None   # (a key-up still held: not cut, one transmission)
         return self._make(frames, levels, start, npre, opened, tail, reason, piece)
 
     def _make(self, frames: list[np.ndarray], levels: list[float], start: float, npre: int, opened: str, tail: int,

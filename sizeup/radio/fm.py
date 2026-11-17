@@ -39,7 +39,9 @@ once what came back is a new key-up rather than a fade:
              often a fade recovering as another radio (a gap or an ID still cuts it).
 
 A cut needs speech or an ID burst before it (a dead carrier, or flutter before an APX's late pre-ID, is no key-up of its
-own: it stays with what follows), and each piece is kept by the same minimum as any transmission (min_open_s). A piece
+own: it stays with what follows), and is held until the new carrier has min_open_s of its own: a reply that ends sooner
+stays in the transmission, as without key-ups (no blip row, nothing lost); the piece before is delivered that much
+later. A piece
 that came from a cut is never dropped as a background carrier (drop_db's rise and background rules keep it).
 
 Paging (South 2) is off by default (config: jump_db 0): a simulcast page fades to hiss and comes back stronger mid-page
@@ -288,6 +290,7 @@ class NoiseSquelch:
         self.jump_db = jump_db if jump_db and jump_db > 0 else None
         self._cands: list[list] = []        # [first frame under close_db, frame it came back, return checked]
         self._piece: tuple[float | None, float | None, str] | None = None   # this piece: (first start, prev, why)
+        self._hold: tuple[int, int, str] | None = None   # a key-up found, not cut until it held min_open_s (_hold_cut)
         # the last one closed: (start, its recording's first piece's start, quieting, a tone ringing into its end)
         self._last: tuple[float, float | None, float, bool] | None = None
         self.min_frames = min_frames(min_open_s)
@@ -433,7 +436,7 @@ class NoiseSquelch:
                     self._resume()
             return None
         self._track(frame, q, spec, lvl)
-        if self._cands:
+        if self._cands or self._hold is not None:
             cut, seg = self._keyup_check()
             if cut:
                 return seg
@@ -443,7 +446,7 @@ class NoiseSquelch:
             if self._level is not None:
                 self._drop_run = self._drop_run + 1 if q < self._level - self.drop_db else 0
                 self._rise_run = self._rise_run + 1 if q >= self._level + self.drop_db else 0
-                if self._rise_run >= RISE_FRAMES and not any(not c[2] for c in self._cands):
+                if self._rise_run >= RISE_FRAMES and not any(not c[2] for c in self._cands) and self._hold is None:
                     # A stronger carrier came up over this one: what came before was the background. (Not while a
                     # drop under close_db just before it is still being looked at: that is a new key-up, keyups)
                     n = len(self._frames) - RISE_FRAMES
@@ -519,6 +522,10 @@ class NoiseSquelch:
         level, id: the module doc) cuts the transmission at the drop. -> (cut, the piece before it or None)."""
         k = len(self._frames)
         paging = self.keyups == "paging"
+        if self._hold is not None and self._hold_frames() >= self.min_frames:
+            g0, g1, why = self._hold
+            self._hold = None
+            return True, self._split(g0, g1, why)
         for c in list(self._cands):
             g0, g1, checked, level = c
             if k - g1 > EDGE_SEARCH or (paging and checked):
@@ -547,11 +554,41 @@ class NoiseSquelch:
                         why = "level"
                 if not why and not paging and g1 > 0 and self._post_id(g0):
                     why = "id"
-                if why and (g1 == 0 or self._worth(g0)):
-                    return True, self._split(g0, g1, why)
+                if why and g1 == 0:
+                    return True, self._split(g0, g1, why)       # (a continuation: nothing to cut, only its link)
+                if why and self._worth(g0):
+                    self._hold_cut(c, why)
+                    continue
             if not paging and k - g1 in PRE_ID_AT and self._pre_id(g1, k) and (g1 == 0 or self._worth(g0)):
-                return True, self._split(g0, g1, "id")
+                if g1 == 0:
+                    return True, self._split(g0, g1, "id")
+                self._hold_cut(c, "id")
         return False, None
+
+    def _hold_cut(self, c: list, why: str) -> None:
+        """A key-up found at candidate c: held, not cut yet, until its carrier is a transmission of its own (min_open_s
+        of it, ID bursts not counted). A reply that ends sooner stays in this transmission, as without key-ups: no
+        audio is lost to the minimum, and no row is a blip. A later key-up found before then takes its place (the short
+        one stays with the transmission before it)."""
+        self._hold = (c[0], c[1], why)
+        if c in self._cands:
+            self._cands.remove(c)
+
+    def _hold_frames(self) -> int:
+        """Frames of carrier (at close_db, not an ID burst) the held key-up has had since it came back, up to its own
+        end (a drop of SHORT_GAP_FRAMES: what comes after is another key-up's, never counted as this one's)."""
+        g1 = self._hold[1]
+        idl = self._idlike if len(self._idlike) == len(self._frames) else [False] * len(self._frames)
+        n = off = 0
+        for v, b in zip(self._qs[g1:], idl[g1:]):
+            if v < self.close_db:
+                off += 1
+                if off >= SHORT_GAP_FRAMES:
+                    break
+                continue
+            off = 0
+            n += not b
+        return n
 
     def _worth(self, g0: int) -> bool:
         """What came before the drop at g0 is a key-up of its own: speech on it, or an ID burst. (Dead carrier, or
@@ -678,7 +715,7 @@ class NoiseSquelch:
         self._idlike = [False]              # per frame: ID-band heavy (traffic key-ups only)
         self._last_content = -1
         self._cont_left, self._cont_run = 0, []
-        self._cands, self._piece = [], None
+        self._cands, self._piece, self._hold = [], None, None
 
     def _resume(self) -> None:
         """The transmission just opened came back inside the continuation window: it continues the last."""
@@ -698,7 +735,7 @@ class NoiseSquelch:
         """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
         frames, qs, start = self._frames[:n], self._qs[:n], self._start
         live, cont, breaks = self._live, self.continuing, [b for b in self._breaks if b[1] < n]
-        piece = self._piece
+        piece, self._hold = self._piece, None         # (a key-up still held: never cut, one transmission as before)
         ring = self.keyups == "paging" and self._ringing(n)     # (a continuation after it: not a key-up of its own)
         self._frames, self._qs, self.open, self.continuing = [], [], False, False
         self._closed_n = self._n

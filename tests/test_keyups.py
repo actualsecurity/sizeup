@@ -194,11 +194,31 @@ def test_dead_carrier_then_a_late_pre_id_is_no_row_of_its_own():
     assert len(segs) == 1 and segs[0].first_start is None and ids(segs[0]) == [B_ID]
 
 
-def test_a_kerchunk_after_a_cut_is_no_row():
-    # A talks, 0.3 s gone, 0.2 s of someone else's carrier (under min_open_s): A alone, as a squelch-only open would be
-    audio = np.concatenate([hiss(3.0), unit(2.0), hiss(0.3), quiet(0.2), hiss(2.0)])
-    segs = run_squelch(audio, **TRAFFIC)
-    assert len(segs) == 1 and segs[0].end - segs[0].start == pytest.approx(2.25, abs=0.1)
+def same(a, b):
+    """Two runs of segments are the same transmissions: times, reasons and audio."""
+    return len(a) == len(b) and all((x.start, x.end, x.reason) == (y.start, y.end, y.reason)
+                                    and np.array_equal(x.audio, y.audio) for x, y in zip(a, b))
+
+
+@pytest.mark.parametrize("reply", [0.15, 0.25])
+def test_a_short_reply_after_a_gap_is_held_and_kept_as_main_keeps_it(reply):
+    # A talks, 0.3 s gone, a carrier shorter than min_open_s (0.3 s) ends the exchange: the cut is held, never made,
+    # and the whole recording is the one transmission main makes (the reply's audio in it, no blip row)
+    audio = np.concatenate([hiss(3.0), unit(2.0), hiss(0.3), voice_like(reply) + quiet(reply), hiss(2.0)])
+    main, new = run_squelch(audio, drop_db=10.0), run_squelch(audio, **TRAFFIC)
+    assert len(new) == 1 and same(main, new) and new[0].first_start is None
+
+
+def test_a_short_reply_then_another_key_up_in_the_hang():
+    # A, 0.3 s, B for 0.2 s (under min_open_s), 0.3 s, C: B stays with A (as main has it), C is cut off as its own
+    audio = np.concatenate([hiss(3.0), unit(2.0), hiss(0.3), voice_like(0.2) + quiet(0.2), hiss(0.3), unit(1.5),
+                            hiss(2.0)])
+    (main,) = run_squelch(audio, drop_db=10.0)
+    ab, c = run_squelch(audio, **TRAFFIC)
+    assert ab.start == main.start and c.end == main.end and c.split == "gap" and c.prev_start == ab.start
+    n = len(ab.audio)
+    assert np.array_equal(ab.audio, main.audio[:n])                     # A, the gap and B: nothing of B lost
+    assert ab.end - ab.start == pytest.approx(2.25 + 0.3 + 0.2, abs=0.1)
 
 
 def test_a_back_and_forth_is_every_key_up_with_its_neighbours_linked():
@@ -253,6 +273,14 @@ def test_the_tap_never_hands_a_cut_piece_the_radio_before_it():
     audio = np.concatenate([hiss(3.0), unit(2.0, pre=A_ID), hiss(0.3), unit(1.5, pre=B_ID), hiss(2.0)])
     (a, ida), (b, idb) = tapped(audio, **TRAFFIC)
     assert ida == [f"{A_ID:04X}"] and idb == [f"{B_ID:04X}"]
+
+
+def test_a_cut_that_is_never_made_leaves_the_ids_as_main():
+    # A (its pre-ID), 0.3 s, a 0.2 s carrier with no ID: one transmission, with A's ID, exactly as main
+    audio = np.concatenate([hiss(3.0), unit(2.0, pre=A_ID), hiss(0.3), voice_like(0.2) + quiet(0.2), hiss(2.0)])
+    main, new = tapped(audio, drop_db=10.0), tapped(audio, **TRAFFIC)
+    assert [(s.start, s.end, i) for s, i in new] == [(s.start, s.end, i) for s, i in main]
+    assert [i for _s, i in new] == [[f"{A_ID:04X}"]]
 
 
 def test_a_key_up_with_no_id_after_one_with_an_id_takes_none():
@@ -402,15 +430,44 @@ def test_a_heterodyne_on_the_second_key_up_is_notched_in_that_piece_only():
     assert beat_hz(b) and not beat_hz(a)                          # (the stand-in voice is a 400 Hz tone: notched too)
 
 
-def test_a_kerchunk_after_a_cut_is_not_kept_but_an_answer_is():
-    # after a cut, a piece is kept by the same 0.6 s of carrier as any transmission: a 0.4 s kerchunk is no row ...
-    levels = [(5, 0.01, False), (2.0, 0.08, True), (0.2, 0.01, False), (0.4, 0.04, True), (3, 0.01, False)]
-    (a,) = am(levels, **AIRBAND)
-    assert a.reason == "key-up" and a.end - a.start == pytest.approx(2.6, abs=0.1)
-    # ... a 0.8 s answer is
-    levels = [(5, 0.01, False), (2.0, 0.08, True), (0.2, 0.01, False), (0.8, 0.04, True), (3, 0.01, False)]
-    a, b = am(levels, **AIRBAND)
-    assert b.split == "gap"
+def am_both(levels):
+    """The same envelope through the squelch without key-ups (main) and with: (main's segments, these)."""
+    clock = {"t": 1000.0}
+    sq0 = CarrierSquelch(3.5, clock=lambda: clock["t"])
+    sq1 = CarrierSquelch(3.5, clock=lambda: clock["t"], **AIRBAND)
+    out0, out1 = [], []
+    for f in envelope(levels, np.random.default_rng(7)):
+        clock["t"] += FRAME / RATE
+        if (x := sq0.feed(f)) is not None:
+            out0.append(x)
+        if (y := sq1.feed(f)) is not None:
+            out1.append(y)
+    return out0, out1
+
+
+@pytest.mark.parametrize("reply", [0.3, 0.4, 0.5])
+def test_a_short_readback_after_the_tower_is_one_transmission_as_main(reply):
+    # tower, 0.25 s gone, a pilot's readback under 0.6 s of carrier, then nothing: the cut is held and never made
+    main, new = am_both([(5, 0.01, False), (2.0, 0.08, True), (0.25, 0.01, False), (reply, 0.04, True),
+                         (3, 0.01, False)])
+    assert len(new) == 1 and same(main, new) and new[0].first_start is None
+
+
+@pytest.mark.parametrize("reply", [0.6, 0.8])
+def test_a_readback_of_0_6_s_or_more_is_its_own(reply):
+    main, new = am_both([(5, 0.01, False), (2.0, 0.08, True), (0.25, 0.01, False), (reply, 0.04, True),
+                         (3, 0.01, False)])
+    assert len(main) == 1 and len(new) == 2 and new[1].split == "gap"
+    assert new[0].reason == "key-up" and new[0].end - new[0].start == pytest.approx(0.4 + 2.0 + 0.2, abs=0.1)
+
+
+def test_a_short_readback_then_another_key_up_in_the_hang():
+    # tower, 0.25 s, a 0.3 s readback, 0.25 s, the tower again: the readback stays with the first, the second is cut
+    main, new = am_both([(5, 0.01, False), (2.0, 0.08, True), (0.25, 0.01, False), (0.3, 0.04, True),
+                         (0.25, 0.01, False), (1.5, 0.08, True), (3, 0.01, False)])
+    assert len(main) == 1 and len(new) == 2 and new[1].split == "gap"
+    assert new[0].start == main[0].start and new[1].end == pytest.approx(main[0].end, abs=1e-6)
+    assert new[0].end - new[0].start == pytest.approx(0.4 + 2.0 + 0.25 + 0.3 + 0.2, abs=0.1)
 
 
 def test_a_fade_recovering_on_a_ramp_is_not_cut():
