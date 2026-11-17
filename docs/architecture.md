@@ -130,6 +130,7 @@ of a new or changed transcript:
 | Alarms | Emergency button (P25, MDC, FleetSync) and mayday keywords on our fire channels | `cad/alarms.py` |
 | Airport pre-alerts | ATC rules on airband transcripts; multi-transmission watches; "alert level N" on the fire radio | `atc.py`, `airport_watch.py`, `cad/airport_alerts.py` |
 | Radio intelligence | Rule packs over other systems' transcripts (`Comms.on_context_text`) | `sizeup/intel/` |
+| Pre-alert context | One read-only bundle per pre-alert (why, transmissions and audio, before / after, place, site history, now, outcome): the More info page (`/cad#prealert/<kind>/<id>`) and, later, inference | `context_bundle.py`, `static/prealert-info.js` |
 | Search | FTS5 index over incidents, the chronology and the radio log | `cad/history.py` |
 
 The radio log has a change log (`radio_changes`) so pages fetch only what changed, named views (`ours`, `police`,
