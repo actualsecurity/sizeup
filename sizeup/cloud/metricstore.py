@@ -64,6 +64,7 @@ SNAPSHOT_S = 3 * 3600.0         # a copy to the bucket this often, once settled
 FIRST_UPLOAD_S = 900.0          # ... the first this long after settling
 BACKOFF_S = (30.0, 1800.0)      # settling or an upload failed: again in 30 s, doubling to 30 min
 BACKUP_TURN_S = 30.0            # the backup thread's look
+RENAME_CHUNK = 20000            # a station renamed: its rows moved this many a transaction
 UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
 COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
@@ -337,29 +338,56 @@ class MetricStore:
             out["resend_from"] = self.resend_from          # this store lost what came after: again, please
         return out
 
-    def rename_station(self, old: str, new: str) -> int:
-        """A station renamed on the hub (sizeup/cloud/stations.py set_shared_id): its rows move from `old` to `new`, in one
-        transaction, so its graphs go on with their history under the new id. Rows the new id has already (it posted
-        under both) are kept once (raw and events: the same key is the same record); a series spans both; an hour both
-        had rolled up is rolled again from raw at the janitor's next turn. The rows moved; fence.FencedWrite when this
-        task isn't the leader. Nothing kept yet: 0, and no file made."""
+    def rename_station(self, old: str, new: str, chunk: int = RENAME_CHUNK) -> int:
+        """A station renamed on the hub (sizeup/cloud/hub.py HubApp.apply_station_renames, from the renames in hub.sqlite):
+        its rows move from `old` to `new`, so its graphs go on with their history under the new id. In chunks of
+        `chunk` rows, each its own transaction (the writer's lock let go between them: the station's posts go on), in
+        primary-key order. Rows the new id has already (it posted under both) are kept once (raw and events: the same
+        key is the same record); a series spans both; an hour both had rolled up is rolled again from raw at the
+        janitor's next turn. The rows moved (0: nothing under the old id; no file made). fence.FencedWrite when this
+        task isn't the leader."""
         old, new = _text(old, 64), _text(new, 64)
         if not old or not new or old == new or not self._exists():
             return 0
+        if not any(self._read(f"SELECT 1 FROM {t} WHERE station = ? LIMIT 1", (old,))
+                   for t in ("series", "raw", "events", "hourly")):
+            return 0                               # (an index lookup each: cheap at every janitor turn)
         if not self.may_write():
             fence_mod.refuse("station metrics")
+        both = {(s_, h) for s_, h in self._read(
+            "SELECT DISTINCT o.subject, o.hour FROM hourly o JOIN hourly n ON n.station = ? AND n.subject = o.subject "
+            "AND n.hour = o.hour WHERE o.station = ?", (new, old))}
+        n = 0
+        for table, key, rest in (("raw", ("subject", "kind", "at"), ("doc",)),
+                                 ("events", ("subject", "at", "ev"), ("detail",)),
+                                 ("hourly", ("subject", "metric", "hour"), ("n", "lo", "p50", "p90", "hi"))):
+            k, cols = ", ".join(key), ", ".join(key + rest)
+            while True:
+                with self._lock:
+                    if not self.may_write():
+                        fence_mod.refuse("station metrics")
+                    db = self._open()
+                    # the chunk: the old id's first `chunk` rows in key order, up to (not past) the next one's key
+                    edge = db.execute(f"SELECT {k} FROM {table} WHERE station = ? ORDER BY {k} LIMIT 1 OFFSET ?",
+                                      (old, chunk)).fetchone()
+                    where = "station = ?" + (f" AND ({k}) < ({', '.join('?' * len(key))})" if edge else "")
+                    args = (old, *edge) if edge else (old,)
+                    db.execute("BEGIN")
+                    try:
+                        n += db.execute(f"INSERT OR IGNORE INTO {table} (station, {cols}) SELECT ?, {cols} FROM {table} "
+                                        f"WHERE {where}", (new, *args)).rowcount
+                        db.execute(f"DELETE FROM {table} WHERE {where}", args)
+                        db.execute("COMMIT")
+                    except Exception:
+                        if db.in_transaction:
+                            db.execute("ROLLBACK")
+                        raise
+                if not edge:
+                    break
         with self._lock:
             db = self._open()
             db.execute("BEGIN")
             try:
-                both = db.execute("SELECT DISTINCT o.subject, o.hour FROM hourly o JOIN hourly n ON n.station = ? AND "
-                                  "n.subject = o.subject AND n.hour = o.hour WHERE o.station = ?", (new, old)).fetchall()
-                n = 0
-                for table, cols in (("raw", "subject, kind, at, doc"), ("events", "subject, at, ev, detail"),
-                                    ("hourly", "subject, metric, hour, n, lo, p50, p90, hi")):
-                    n += db.execute(f"INSERT OR IGNORE INTO {table} (station, {cols}) SELECT ?, {cols} FROM {table} "
-                                    "WHERE station = ?", (new, old)).rowcount
-                    db.execute(f"DELETE FROM {table} WHERE station = ?", (old,))
                 db.execute("INSERT INTO series (station, subject, kind, first, last) SELECT ?, subject, kind, first, last "
                            "FROM series WHERE station = ? ON CONFLICT(station, subject, kind) DO UPDATE SET "
                            "first = MIN(first, excluded.first), last = MAX(last, excluded.last)", (new, old))
@@ -369,10 +397,16 @@ class MetricStore:
                 if db.in_transaction:
                     db.execute("ROLLBACK")
                 raise
-            self._dirty = {(new if st == old else st, s, h) for st, s, h in self._dirty} | {(new, s, h) for s, h in both}
+            self._dirty = {(new if st == old else st, s_, h) for st, s_, h in self._dirty} | \
+                {(new, s_, h) for s_, h in both}
         if old in self._told:
             self._told.add(new)
         return n
+
+    def copy_soon(self) -> None:
+        """A copy to the bucket at the backup thread's next turn (after a rename: a takeover then restores it renamed)."""
+        if self.settled and self._next_upload is not None:
+            self._next_upload = min(self._next_upload, self.clock())
 
     # -- the rollups, the retention ---------------------------------------------------------------------------------
 

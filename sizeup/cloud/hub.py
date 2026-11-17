@@ -496,14 +496,14 @@ class Hub:
 
     def _station_renamed(self, old: str, new: str) -> None:
         """The shared token's station renamed (StationRegistry.set_shared_id): what the hub keys by the id moves with
-        it. Its status now (the next post says so too), and the station's signal metrics (metrics.sqlite). Its CloudWatch
+        it. Its status now (the next post says so too); the station's signal metrics in the background, never on the
+        admin's request (HubApp.apply_station_renames: chunked, from the renames kept in hub.sqlite). Its CloudWatch
         streams are named per id and day: new ones get the new id, the old ones stay in the group the Logs view reads."""
         if isinstance(self.status, dict) and self.status.get("id") == old:
             self.status = dict(self.status, id=new)
-        store = getattr(self.app, "metric_store", None)
-        if store is not None:
-            n = store.rename_station(old, new)
-            self.log(f"stations: station metrics: {n} row(s) moved from {old} to {new}")
+        move = getattr(self.app, "apply_station_renames", None)
+        if move is not None:
+            threading.Thread(target=move, name="station-rename", daemon=True).start()
 
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
         if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
@@ -596,7 +596,7 @@ class Hub:
             if sid:
                 st["id"] = sid                     # the authenticated id (what Health shows), never only the claimed one
             if p is not None and p.via == "shared":
-                self.stations.reconfigured(st.get("config_id"))   # its config says the current id: aliases dropped
+                self.stations.reconfigured(claimed, st.get("config_id"))   # posting as the current id from its config
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
                 self.talkgroups = tgs
@@ -926,6 +926,7 @@ class HubApp(App):
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
+        self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
@@ -1891,13 +1892,37 @@ class HubApp(App):
                                 "key IN (?, ?) AND at >= ? AND at < ? ORDER BY at LIMIT 500",
                                 (f"squelch/{subject}", f"channel/{subject}", t0, t1))
 
+    def apply_station_renames(self) -> int:
+        """The shared token's renames (hub.sqlite meta "station_renames", StationRegistry.renames) applied to the station's
+        signal metrics: each former id's rows moved to the id it is now, in chunks, never on an admin's request. Run
+        after a rename, at the janitor's turn, and once the store settles (a takeover restores a copy that may be from
+        before a rename: metrics.sqlite isn't replicated). Moved anything: a copy goes up soon. The rows moved."""
+        store = getattr(self, "metric_store", None)
+        if store is None or not store.settled or not self._renaming.acquire(blocking=False):
+            return 0
+        try:
+            n = 0
+            for old, new in self.hub.stations.renames().items():
+                m = store.rename_station(old, new)
+                if m:
+                    self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
+                n += m
+            if n:
+                store.copy_soon()
+            return n
+        except fence_mod.FencedWrite:
+            return 0                               # not the leader now: the next one does it
+        finally:
+            self._renaming.release()
+
     def _metrics_backup(self) -> None:
         """The station metrics' copies (sizeup/cloud/metricstore.py backup_turn): settle from the bucket, then a copy
         every 3 h. The leader's only (the store checks); never takes anything down."""
         from sizeup.cloud.metricstore import BACKUP_TURN_S
         while not self._stopping.wait(BACKUP_TURN_S):
             try:
-                self.metric_store.backup_turn()
+                if self.metric_store.backup_turn() in ("restored", "none"):
+                    self.apply_station_renames()   # settled from a copy: a rename since it was made, again
             except Exception as e:  # noqa: BLE001
                 self.hub.log(f"metrics: backup error: {type(e).__name__}: {e}")
 
@@ -1907,7 +1932,8 @@ class HubApp(App):
                 self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
-            try:                                  # the station metrics: rollups, retention
+            try:                                  # the station metrics: renames, rollups, retention
+                self.apply_station_renames()
                 self.metric_store.maintain()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")

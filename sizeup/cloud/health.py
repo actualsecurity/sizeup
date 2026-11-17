@@ -12,8 +12,9 @@ notice when it clears:
     silent        no state post for [alerts] silent_min (3)                                critical
     id_mismatch   "Station rejected: id mismatch (station says X, token is Y)": the        critical
                   station's posts refused (401 id_mismatch) in the last MISMATCH_HOLD_S
-                  (sizeup/cloud/stations.py): it is up and trying, but the hub won't take
-                  it (its [station] id isn't its token's). Decided on the hub's own data
+                  (sizeup/cloud/stations.py; two or more): it is up and trying, but the hub
+                  won't take it (its [station] id isn't its token's). Decided on the hub's own
+                  data; pushed once it has gone on MISMATCH_NOTIFY_S (45 s)
     behind        on another build than the hub's for behind_min (15)                      warning
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
@@ -163,7 +164,9 @@ STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waitin
 STT_CLEAR_S = 120.0         # ... until the oldest waits less than this ...
 STT_CLEAR_HOLD_S = 900.0    # ... for this long: one episode, however the queue wobbles (#300)
 STT_NOTIFY_S = 1200.0       # pushed only while the oldest has waited this long (a shorter one: the panel, no push)
-NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S}   # alerts pushed only once they are this old (from their since)
+MISMATCH_NOTIFY_S = 45.0    # "Station rejected": pushed only once it has gone on this long (a rename's in-flight post
+                            # never pushes)
+NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S, "id_mismatch": MISMATCH_NOTIFY_S}   # pushed only this old (from since)
 BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
 SETTLE_S = 15 * 60.0        # #340: "Recovered" only once an alert has stayed clear this long; back sooner: one episode
 SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
@@ -877,6 +880,8 @@ class StationHealth:
                         "it in the next deploy", "since": self.__dict__.setdefault("_skip_since", now)}
         reg = getattr(self.hub, "stations", None)               # the hub's own: its posts refused as another id
         mm = reg.mismatch() if reg is not None and hasattr(reg, "mismatch") else None
+        if mm and mm.get("n", 0) < 2:
+            mm = None                                            # one refusal is no episode (a post in flight)
         if mm:
             out["id_mismatch"] = {
                 "severity": "critical",

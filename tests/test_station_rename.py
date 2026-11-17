@@ -21,9 +21,9 @@ from sizeup.cloud.access import Identity
 from sizeup.cloud.client import HubClient
 from sizeup.cloud.hubstore import MonitorDb
 from sizeup.cloud.metrics import PATH
-from sizeup.cloud.stations import ConfirmNeeded, StationRegistry
+from sizeup.cloud.stations import ConfirmNeeded, StationError, StationRegistry
 from tests.test_cad import make_cad
-from tests.test_cloud import TOKEN, HubRun, call, hub_cfg, station_cfg
+from tests.test_cloud import TOKEN, HubRun, call, hub_cfg, station_cfg, wait
 from tests.test_roles import CASEY, people
 from tests.test_station_identity import SHARED, cli_env, lease, refused, registry
 from tests.test_station_metrics import T0, fg1_segment, floors, store
@@ -41,7 +41,8 @@ def test_a_rename_while_the_shared_station_is_live_asks_first_and_never_locks_it
                             "taking station-a from it and moves its history. Change anyway?")
     assert reg.legacy_id() == "station-a"                            # refused: nothing changed
     assert reg.set_shared_id("station-b", "casey", confirm=True) == ("station-a", "station-b")
-    assert any("(confirmed: it was live)" in m for m in logs)
+    assert any("(confirmed)" in m for m in logs)
+    assert reg.renames() == {"station-a": "station-b"}               # its history moves (the hub's job)
     p = reg.resolve(SHARED)
     assert p.id == "station-b"
     assert reg.claim(p, "station-a") == "station-b"                  # its config still says station-a: taken, as b
@@ -66,9 +67,20 @@ def test_not_live_no_question_and_the_aliases_go_once_the_station_is_reconfigure
     assert reg.claim(reg.resolve(SHARED), "station-a") == "station-c"
     reg.set_shared_id("station-a")                                   # back: never its own alias
     assert reg.aliases() == ["station-b", "station-c"]
-    reg.reconfigured("station-b")                                    # its config says an old one: kept
+    reg.reconfigured("station-a", "station-b")                       # its config says an old one: kept
+    reg.reconfigured("station-b", "station-a")                       # it still posts as a former one: kept
+    clock.t += st_mod.ALIAS_DROP_S + 1
+    reg.reconfigured("station-b", "station-a")
     assert reg.aliases() == ["station-b", "station-c"]
-    reg.reconfigured("station-a")                                    # its config says the current one: dropped
+    reg.reconfigured("station-a", "station-a")                       # both the current one: the clock starts
+    clock.t += st_mod.ALIAS_DROP_S / 2
+    reg.reconfigured("station-c", "station-a")                       # a former one again (in flight): starts over
+    reg.reconfigured("station-a", "station-a")
+    clock.t += st_mod.ALIAS_DROP_S - 1
+    reg.reconfigured("station-a", "station-a")
+    assert reg.aliases() == ["station-b", "station-c"]
+    clock.t += 2
+    reg.reconfigured("station-a", "station-a")                       # an hour of it: dropped
     assert reg.aliases() == [] and any("is reconfigured" in m for m in logs)
     assert refused(reg.claim, reg.resolve(SHARED), "station-c") == "id_mismatch"
     reg.set_shared_id("station-b")
@@ -149,7 +161,8 @@ def test_renaming_the_live_station_keeps_it_working_moves_its_history_and_it_ado
             reg.set_shared_id("station-b", "casey")
         reg.set_shared_id("station-b", "casey", confirm=True)
         assert hub.app.hub.status["id"] == "station-b"               # at once, before its next post
-        assert {x["station"] for x in hub.app.metric_store.index()["series"]} == {"station-b"}   # its history moved
+        assert wait(lambda: {x["station"] for x in hub.app.metric_store.index()["series"]} == {"station-b"}, 10)
+        # (its history: moved in the background, off the admin's request)
         # the station, still configured station-a: every post taken, and told its id
         for path, body in (("/api/station/state", {"at": time.time(), "status": st.link.status(False)}),
                            ("/api/station/events", {"epoch": "e1", "station": "station-a", "events": []}),
@@ -175,9 +188,13 @@ def test_renaming_the_live_station_keeps_it_working_moves_its_history_and_it_ado
         link._next = 0.0
         link.step(client, now=time.time() + 2)
         assert link.error == "" and {x["station"] for x in hub.app.metric_store.index()["series"]} == {"station-b"}
-        # reconfigured to station-b: the alias goes; an id the token never had is refused throughout
-        assert call(hub.url + "/api/station/state", "POST",
-                    {"at": time.time(), "status": {"id": "station-b", "config_id": "station-b"}})[0] == 200
+        assert st.station.state()["station_id"] == "station-b" and st.station.state()["config_id"] == "station-a"
+        # reconfigured to station-b, posting as it for an hour: the alias goes; an id the token never had is refused
+        reconf = {"at": time.time(), "status": {"id": "station-b", "config_id": "station-b"}}
+        assert call(hub.url + "/api/station/state", "POST", reconf)[0] == 200
+        assert reg.aliases() == ["station-a"]                        # not yet: what it stamped before may be in flight
+        reg._reconf_since -= st_mod.ALIAS_DROP_S
+        assert call(hub.url + "/api/station/state", "POST", reconf)[0] == 200
         assert reg.aliases() == []
         code, out = call(hub.url + "/api/station/state", "POST", {"at": time.time(), "status": {"id": "station-a"}})
         assert code == 401 and out["reason"] == "id_mismatch"
@@ -193,7 +210,10 @@ def test_a_station_refused_for_its_id_is_a_health_alert_naming_both_ids_logged_o
     try:
         h = hub.app.health
         assert "id_mismatch" not in h.conditions(h.model(), time.time())[0]
-        for _ in range(3):
+        call(hub.url + "/api/station/state", "POST", {"at": time.time(), "status": {"id": "station-a"}})
+        assert "id_mismatch" not in h.conditions(h.model(), time.time())[0]      # one post in flight: no episode
+        assert health_mod.NOTIFY_AFTER["id_mismatch"] == health_mod.MISMATCH_NOTIFY_S >= 30    # pushed only if it lasts
+        for _ in range(2):
             code, out = call(hub.url + "/api/station/state", "POST", {"at": time.time(), "status": {"id": "station-a"}})
             assert code == 401 and out["reason"] == "id_mismatch"
         alerts, _ = h.conditions(h.model(), time.time())
@@ -238,7 +258,7 @@ def test_the_card_gets_a_question_while_live_and_the_confirmed_change_is_audited
     assert "e.confirm && await UI.confirm(e.message" in src and "{ ...body, confirm: true }" in src
 
 
-def test_the_cli_asks_for_force_while_live_and_moves_the_metrics_too(tmp_path, capsys, monkeypatch):
+def test_the_cli_asks_for_force_while_live_and_leaves_the_metrics_move_to_the_hub(tmp_path, capsys, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     hub_reg = StationRegistry(MonitorDb(state / "hub.sqlite"), shared=SHARED, legacy_id="station-a")
@@ -253,8 +273,124 @@ def test_the_cli_asks_for_force_while_live_and_moves_the_metrics_too(tmp_path, c
     assert "station-a is connected with this token right now" in capsys.readouterr().err
     assert st_mod.main(["--state", str(state), "reset-shared-id", "--id", "station-b", "--force"]) == 0
     printed = capsys.readouterr().out
-    assert "2 row(s) moved from station-a to station-b" in printed and "also takes station-a" in printed
+    assert "also takes station-a" in printed and "the hub moves them to the new id" in printed
     assert hub_reg.legacy_id() == "station-b" and hub_reg.claim(hub_reg.resolve(SHARED), "station-a") == "station-b"
+    # the CLI never writes metrics.sqlite (the hub's: one writer, its re-rolls kept): it logged the rename for the hub
     s2, _ = store(state)
-    assert {x["station"] for x in s2.index()["series"]} == {"station-b"}
+    assert {x["station"] for x in s2.index()["series"]} == {"station-a"}
     s2.close()
+    assert hub_reg.renames() == {"station-a": "station-b"}
+
+
+# -- the review's cases --------------------------------------------------------------------------------------------------
+
+def test_a_rename_back_keeps_the_former_id_while_the_station_still_sends_it(tmp_path):
+    """station-a (its config) renamed to station-b, adopted, then back to station-a: what it still sends as station-b
+    (in flight, spooled) is taken until it has posted as station-a, from its config, for ALIAS_DROP_S."""
+    reg, clock, _ = registry(tmp_path, legacy_id="station-a")
+    reg.set_shared_id("station-b")
+    p = reg.resolve(SHARED)
+    assert reg.claim(p, "station-b") == "station-b"                  # it adopted station-b
+    reg.set_shared_id("station-a")                                   # back to its config's
+    p = reg.resolve(SHARED)
+    reg.reconfigured("station-b", "station-a")                       # its config says the current id: not enough
+    assert reg.aliases() == ["station-b"] and reg.claim(p, "station-b") == "station-a"
+    reg.reconfigured("station-a", "station-a")
+    assert reg.claim(p, "station-b") == "station-a"                  # a log batch stamped station-b: still taken
+    assert reg.renames() == {"station-b": "station-a"}               # (a -> b -> a: only b's rows move back)
+
+
+def test_a_spooled_log_batch_is_stamped_with_the_station_id_when_sent(tmp_path):
+    from sizeup.cloud import logship
+    from tests.test_station_logs import shipper
+    s, c = shipper(tmp_path)
+    s.station = "station-a"
+    s.step()
+    s.now[0] += logship.BATCH_S
+    s.spool(force=True)                                              # spooled as station-a, then the hub renames it
+    s.station = "station-b"                                          # (StationLink.adopt)
+    while s._batches():
+        assert s.send(s.now[0]) == "sent"
+    assert c.sent and all(b["station"] == "station-b" and b["batch"].startswith("station-b-") for _, b in c.sent)
+
+
+def test_renaming_to_an_own_token_station_asks_and_two_live_machines_are_refused(tmp_path):
+    reg, clock, _ = registry(tmp_path, legacy_id="station-a")
+    own = reg.resolve(reg.add("station-b"))
+    q = reg.rename_question("station-a", "station-b")                # neither live: still asked (it merges them)
+    assert q == ("station-b has its own token: the shared token's station becomes that station (its history isn't "
+                 "moved). Change anyway?")
+    reg.touch(reg.resolve(SHARED))
+    reg.touch(own)                                                   # both connected: two machines
+    with pytest.raises(StationError, match="two stations can't share an id"):
+        reg.set_shared_id("station-b", confirm=True)
+    assert reg.legacy_id() == "station-a"
+    clock.t += st_mod.RENAME_LIVE_S + st_mod.TOUCH_S + 1
+    reg._used.clear()
+    reg.shared_last = None
+    with pytest.raises(ConfirmNeeded):
+        reg.set_shared_id("station-b")
+    reg.set_shared_id("station-b", confirm=True)                     # the same machine moving to its own token
+    assert reg.legacy_id() == "station-b" and reg.renames() == {}    # nothing merged into the own-token station's
+
+
+def test_a_rename_that_would_forget_a_former_id_asks(tmp_path):
+    reg, clock, _ = registry(tmp_path, legacy_id="station-0")
+    for i in range(1, st_mod.ALIASES_MAX + 1):
+        reg.set_shared_id(f"station-{i}")
+    assert len(reg.aliases()) == st_mod.ALIASES_MAX
+    q = reg.rename_question(reg.legacy_id(), "station-x")
+    assert q.startswith("station-0 will no longer be taken from the shared token") and q.endswith("Change anyway?")
+    with pytest.raises(ConfirmNeeded):
+        reg.set_shared_id("station-x")
+    reg.set_shared_id("station-x", confirm=True)
+    assert "station-0" not in reg.aliases() and len(reg.aliases()) == st_mod.ALIASES_MAX
+
+
+def test_the_renames_follow_chains_and_undo_a_rename_back(tmp_path):
+    reg, clock, _ = registry(tmp_path, legacy_id="station-a")
+    reg.set_shared_id("station-b")
+    reg.set_shared_id("station-c")
+    assert reg.renames() == {"station-a": "station-c", "station-b": "station-c"}
+    reg.set_shared_id("station-a")
+    assert reg.renames() == {"station-b": "station-a", "station-c": "station-a"}
+
+
+def test_clearing_an_override_equal_to_the_config_is_audited(tmp_path):
+    cad = make_cad(tmp_path)
+    people(cad)
+    reg, clock, _ = registry(tmp_path, legacy_id="station-a")
+    cad.stations = reg
+    api, me = CadApi(cad), Identity(email=CASEY)
+    reg.mdb.put(st_mod.META_LEGACY, "station-a")                      # an override that says what the config says
+    assert api.post("/api/cad/stations", json.dumps({"action": "shared_id", "id": ""}).encode(), me)[0] == 200
+    assert reg.mdb.get(st_mod.META_LEGACY, "") == ""
+    rows = [(r["key"], r["old"], r["new"]) for r in cad.settings.audit_log("system")]
+    assert ("stations/shared token id", "station-a", "station-a (override cleared: the config's)") in rows
+
+
+def test_the_metrics_move_in_chunks_and_again_after_a_takeover_restores_an_older_copy(tmp_path):
+    s, clock = store(tmp_path)
+    s.ingest("station-a", floors(T0, list(range(1, 8))) + floors(T0 + 3600, [5.0, 6.0]))
+    s.maintain()
+    whole, _ = store(tmp_path / "whole")
+    whole.ingest("station-a", floors(T0, list(range(1, 8))) + floors(T0 + 3600, [5.0, 6.0]))
+    whole.maintain()
+    assert s.rename_station("station-a", "station-b", chunk=2) == whole.rename_station("station-a", "station-b")
+    q = {"subject": "FG1", "from": T0, "to": T0 + 7200, "res": "hour", "metric": "idle_q90"}
+    assert s.query(q)["rows"] == whole.query(q)["rows"] and s.query(q)["station"] == "station-b"
+    # the hub: the renames in hub.sqlite applied to a store that came back from a copy made before the rename
+    hub = HubRun(hub_cfg(tmp_path / "hub", cloud_legacy_station_id="station-a"))
+    try:
+        reg, ms = hub.app.hub.stations, hub.app.metric_store
+        now = (time.time() // 3600 - 2) * 3600
+        assert ms.ingest("station-a", floors(now, [1.0]))["accepted"] == 1
+        reg.set_shared_id("station-b")
+        assert wait(lambda: {x["station"] for x in ms.index()["series"]} == {"station-b"}, 10)
+        ms.ingest("station-a", floors(now - 600, [2.0]))             # a restored copy's pre-rename rows
+        ms._next_upload = time.time() + 9999
+        assert hub.app.apply_station_renames() == 1
+        assert {x["station"] for x in ms.index()["series"]} == {"station-b"} and ms._next_upload <= time.time()
+        assert hub.app.apply_station_renames() == 0                   # nothing left: an index lookup per table
+    finally:
+        hub.close()

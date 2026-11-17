@@ -693,7 +693,8 @@ accepted until the multi-station work lands; Add is for the existing station's o
    token's, or be absent (an older station leaves it out of some posts), or, on the shared token, one of its former
    ids (a renamed station's: [Renaming the shared token's station](#renaming-the-shared-tokens-station)). Another id
    is a `401` with reason `id_mismatch`, logged at most once a minute with both ids (never the token), and Health
-   raises **Station rejected: id mismatch (station says X, token is Y)** (critical) while it goes on.
+   raises **Station rejected: id mismatch (station says X, token is Y)** (critical) while it goes on (from the second
+   refusal; pushed once it has gone on 45 s).
 4. What follows uses the **authenticated** id: the CloudWatch log stream (`<id>-<date>`, `cwlogs.py`), the station
    id Health shows. A claimed id alone is never trusted.
 5. Last used: kept in memory and written to `hub.sqlite` at most every 5 minutes.
@@ -776,29 +777,39 @@ where it is: `station-a` to `station-b`) is one step and never refuses it:
    connected the card asks: "station-a is connected with this token right now. It becomes station-b: the hub keeps
    taking station-a from it and moves its history. Change anyway?" Change.
 2. That's it. From the station's next state post (seconds) the hub answers with `station: station-b` and the station
-   adopts it (`StationLink.adopt`): its events, status, logs and metrics say `station-b`. Health and the card show
-   `station-b`; the row says "was station-a".
+   adopts it (`StationLink.adopt`): its events, status, logs and metrics say `station-b`, and log batches spooled
+   before are stamped `station-b` when they go up. Health and the card show `station-b`; the row says "was
+   station-a". The station's own page shows `station-b (config station-a)`.
 3. **Optional, any time later:** set `[station] id = "station-b"` in the station's `/etc/sizeup/config.toml` and restart
-   it. The station reports its config's id (`config_id`); once that is the new one the hub stops taking `station-a`
-   (logged).
+   it. The station reports its config's id (`config_id`); once it has posted as `station-b` with its config saying
+   so for an hour, the hub stops taking `station-a` (logged). Until then anything still stamped `station-a` (in
+   flight, spooled) is taken.
+
+The card also asks first when the new id has **its own token** (the shared token's station becomes that station; its
+history isn't moved into it), and when a rename would forget a former id (at most 8 are kept). Renaming to the id of
+an own-token station that is connected while the shared token's station is connected too is refused: two machines
+can't share an id. Each confirmed change says why in the Settings audit.
 
 What moves with the id, and how:
 
 | keyed by the id | after a rename |
 |---|---|
-| who the shared token is (`hub.sqlite` meta `station_legacy_id`) | the new id; the old one kept as an alias (`station_legacy_aliases`, up to 8): still taken from the shared token, as the new id. They were that token's ids already, so nothing new can use it; an id it never had is still refused |
+| who the shared token is (`hub.sqlite` meta `station_legacy_id`) | the new id; the old one kept as an alias (`station_legacy_aliases`): still taken from the shared token, as the new id. They were that token's ids already, so nothing new can use it; an id it never had is still refused |
 | the station's status (Health) | the new id at once |
-| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved to the new id in one transaction (`MetricStore.rename_station`); an hour both ids had is rolled up again |
+| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved by the hub in the background, in chunks (`MetricStore.rename_station`), from the renames kept in `hub.sqlite` (meta `station_renames`, replicated): after the rename, at each janitor turn and once a takeover has restored its copy (`metrics.sqlite` isn't replicated, so a copy from before the rename is moved again); a copy goes up soon after. An hour both ids had is rolled up again. Not when the new id is an own-token station's |
 | CloudWatch log streams (`<id>-<date>`) | new streams get the new id; the old ones stay in `/sizeup/station`, which the Logs view reads whole |
 | the station's own token (`sz1.<id>.…`) | can't be renamed (the id is in the token). A station on its own token under the old id is refused (`multi_station_off`) after the rename until it has a token for the new id: the confirm says so ("... will be rejected until it's reconfigured to station-b") |
 
 Why aliases and adoption, not a station config change: a station's `/etc/sizeup/config.toml` is never rewritten,
 and an older release after a switch back still starts with the config's id. The adopted id is memory only; a
 restart starts with the config's, which the alias still takes, and is told again. Clearing the id (empty: learned
-from the next post) drops the aliases. The CLI (`reset-shared-id --id`) does the same, metrics included.
+from the next post) drops the aliases. The CLI (`reset-shared-id --id ... [--force]`) does the same; it never writes
+`metrics.sqlite` (the hub moves them at its next turn).
 
-If a station is refused anyway (Health: **Station rejected: id mismatch**), the alert names both ids: Set id to the
-one the station says, or fix its `[station] id`.
+A station only adopts an id from a post the hub **took**. One refused as another id (`id_mismatch`) is never told
+the id to post as: otherwise a second machine given the shared token would quietly become the station. Health raises
+**Station rejected: id mismatch (station says X, token is Y)** instead (from the second refusal, pushed once it has
+gone on 45 s): Set id to the one the station says, or fix its `[station] id`.
 
 ### Moving the existing station to its own token
 

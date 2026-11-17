@@ -55,21 +55,28 @@ Until multi-station (per-station state, outbox cursors, jobs: design A2-A4) the 
 
 Renaming the shared token's station (an admin's shared_id, Settings > Station > Stations: e.g. to name it for where it
 is) never locks it out. The hub is the source of truth for the id:
-    aliases     the ids it had before (hub.sqlite meta "station_legacy_aliases", at most ALIASES_MAX) are still taken
-                from the shared token, as the current id: a station whose [station] id still says the old one keeps
-                working, and everything it sends is kept under the new one. They were that token's ids already, so
-                this widens nothing; a never-seen id is still refused (id_mismatch). An alias is dropped once the
-                station reports its config's id ("config_id" in its status) is the current one (it was reconfigured),
-                and all of them when the id is cleared back to "learned"
+    aliases     the ids it had before (hub.sqlite meta "station_legacy_aliases", at most ALIASES_MAX: a rename that
+                would forget one asks first) are still taken from the shared token, as the current id: a station whose
+                [station] id still says the old one keeps working, and everything it sends is kept under the new one.
+                They were that token's ids already, so this widens nothing; a never-seen id is still refused
+                (id_mismatch). They are dropped once the station has posted as the current id, with its config saying
+                it too ("config_id" in its status), for ALIAS_DROP_S (it was reconfigured, and what it had stamped with
+                a former id has gone up), and all of them when the id is cleared back to "learned"
     adoption    the hub answers each state post with the id it took it as ("station"); the station sends that id from
-                then on (sizeup/cloud/station.py StationLink.adopt: its events, status, logs and metrics)
-    history     on_rename(old, new): the hub moves what it keys by the id (its status, the station's signal metrics,
-                sizeup/cloud/metricstore.py rename_station). The station's CloudWatch streams are <id>-<date>: new ones
-                are named for the new id, the old ones stay in the same group (the Logs view reads the group)
-    confirm     a rename while the old id was live (RENAME_LIVE_S) is refused unless the request says confirm (the
-                card asks; the CLI's --force), and the audit says it was confirmed. A station on its OWN token under the
-                old id is refused (multi_station_off) after the rename until it has a token for the new id: the
-                confirm says so
+                then on (sizeup/cloud/station.py StationLink.adopt: its events, status, logs and metrics; spooled log
+                batches are stamped again when sent, sizeup/cloud/logship.py). Only from a post the hub took: a
+                machine refused as another id never learns the id to pose as (Health says both ids instead)
+    history     the hub's status moves at once (on_rename). The station's signal metrics (metrics.sqlite, not
+                replicated) move in the background, in chunks (sizeup/cloud/metricstore.py rename_station), from the
+                renames kept in hub.sqlite (meta "station_renames", renames()), after each rename and at each janitor
+                turn, so a takeover's copy restored from before a rename moves too. Not when the new id is a station's
+                own token's (then it is that station: nothing merged). The CloudWatch streams are <id>-<date>: new ones
+                get the new id, the old ones stay in the same group (the Logs view reads the group)
+    confirm     rename_question: a rename while the old id was live (RENAME_LIVE_S), to an id that has its own token,
+                or that forgets a former id is refused unless the request says confirm (the card asks; the CLI's
+                --force), and the audit says why it was confirmed. A station on its OWN token under the old id is
+                refused (multi_station_off) after the rename until it has a token for the new id: the confirm says so.
+                Renaming to a live own-token station's id while the shared token's is live too is refused outright
 A request whose payload names an id the token isn't (id_mismatch) is kept (mismatch()): Health raises "Station
 rejected: id mismatch" while it goes on (sizeup/cloud/health.py), and the hub logs it at most once a minute.
 """
@@ -79,6 +86,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -102,9 +110,12 @@ OTHERS_SHOWN_S = 3600.0     # another station refused (multi-station off): said 
 RENAME_LIVE_S = 600.0       # the shared token's station seen this recently: changing its id asks for confirm
 MISMATCH_HOLD_S = 120.0     # an id_mismatch refusal this recent: Health's "Station rejected" holds (the station retries
                             # every few seconds, so a gap this long means it stopped)
-ALIASES_MAX = 8             # the shared token's former ids kept (the oldest dropped first)
+ALIASES_MAX = 8             # the shared token's former ids kept (the oldest dropped first: the confirm says so)
+ALIAS_DROP_S = 3600.0       # the station posting as the current id, from its config, this long: former ids dropped
+RENAMES_MAX = 32            # the renames whose history the hub moves (hub.sqlite meta), the newest kept
 META_LEGACY = "station_legacy_id"
 META_ALIASES = "station_legacy_aliases"
+META_RENAMES = "station_renames"
 META_RETIRED = "station_shared_retired"
 META_SHARED_USED = "station_shared_used"
 _DUMMY = hashlib.sha256(b"sizeup: no such station").hexdigest()
@@ -185,6 +196,7 @@ class StationRegistry:
         self._others: dict[str, float] = {}       # other stations refused (multi-station off): id -> when
         self._mismatch: dict | None = None        # the last id_mismatch refusal: {said, token, at, since, n}
         self.on_rename: Callable[[str, str], None] | None = None   # the hub's: move what it keys by the id
+        self._reconf_since: float | None = None   # reconfigured(): posting as the current id from its config since
         self._lock = threading.Lock()
 
     # -- the database -------------------------------------------------------------------------------------------
@@ -261,38 +273,94 @@ class StationRegistry:
                 return "own", now - used
         return None
 
+    def _own(self, sid: str) -> bool:
+        """sid is a station with its own (not revoked) token."""
+        row = self.row(sid) if sid and ID.fullmatch(sid) else None
+        return row is not None and row["revoked"] is None
+
     def rename_question(self, old: str, new: str) -> str | None:
-        """The confirm the card asks before the shared token's station changes from old to new (None: nothing live)."""
-        if not old or old == new:
-            return None
-        how = self.live(old)
-        if how is None:
+        """The confirm the card asks before the shared token's station changes from old to new (None: nothing to ask).
+        Asked when: the old id is live (seen within RENAME_LIVE_S); the new id is a station's own token's (the shared
+        token's station becomes that one, its history not moved); a former id would be forgotten (ALIASES_MAX).
+        StationError when the new id's own-token station is live while the shared token's is too: two machines."""
+        if old == new:
             return None
         to = new or "the id it posts next"
-        if how[0] == "own":
-            return (f"{old} is connected with its own token right now and will be rejected until it's reconfigured to "
-                    f"{to} (a token for {to}). Change anyway?")
-        return (f"{old} is connected with this token right now. It becomes {to}: the hub keeps taking {old} from it "
-                f"and moves its history. Change anyway?" if new else
-                f"{old} is connected with this token right now. Its id is learned again from its next post. "
-                "Change anyway?")
+        how = self.live(old) if old else None
+        bits = []
+        if new and self._own(new):
+            if how is not None and how[0] == "shared" and (other := self.live(new)) is not None and other[0] == "own":
+                raise StationError(f"{new} is connected with its own token and {old} with the shared one: two stations "
+                                   "can't share an id (revoke one, or rename to another id)")
+            bits.append(f"{new} has its own token: the shared token's station becomes that station (its history isn't "
+                        "moved).")
+        if how is not None and how[0] == "own":
+            bits.append(f"{old} is connected with its own token right now and will be rejected until it's reconfigured "
+                        f"to {to} (a token for {to}).")
+        elif how is not None:
+            bits.append(f"{old} is connected with this token right now. It becomes {to}: the hub keeps taking {old} "
+                        f"from it" + ("." if new and self._own(new) else " and moves its history.") if new else
+                        f"{old} is connected with this token right now. Its id is learned again from its next post.")
+        if new and old:
+            kept = [a for a in self.aliases() + [old] if a != new]
+            if len(kept) > ALIASES_MAX:
+                gone = kept[:-ALIASES_MAX]
+                bits.append(f"{', '.join(gone)} will no longer be taken from the shared token (at most {ALIASES_MAX} "
+                            "former ids).")
+        return " ".join(bits) + " Change anyway?" if bits else None
+
+    def renames(self) -> dict[str, str]:
+        """The shared token's renames whose history moves (hub.sqlite meta "station_renames", replicated): each former
+        id -> the id it is now, chains followed (a -> b -> c: a and b -> c), a rename back undone (a -> b -> a: b -> a
+        only). The hub applies them to metrics.sqlite (not replicated) after each rename and after a takeover's
+        settle, so a copy restored from before a rename still ends up under the current id."""
+        try:
+            log = json.loads(self.mdb.get(META_RENAMES, "") or "[]")
+        except ValueError:
+            return {}
+        out: dict[str, str] = {}
+        for e in log if isinstance(log, list) else []:
+            if not isinstance(e, dict):
+                continue
+            f, t = str(e.get("from") or ""), str(e.get("to") or "")
+            if not f or not t:
+                continue
+            for k, v in list(out.items()):
+                if v == f:
+                    out[k] = t
+            out[f] = t
+        return {k: v for k, v in out.items() if k != v}
+
+    def _log_rename(self, old: str, new: str) -> None:
+        try:
+            log = json.loads(self.mdb.get(META_RENAMES, "") or "[]")
+        except ValueError:
+            log = []
+        log = [e for e in (log if isinstance(log, list) else []) if isinstance(e, dict)]
+        log.append({"from": old, "to": new, "at": round(self.clock(), 3)})
+        self.mdb.put(META_RENAMES, json.dumps(log[-RENAMES_MAX:], separators=(",", ":")))
 
     def set_shared_id(self, sid: str = "", by: str = "", confirm: bool = False) -> tuple[str, str]:
         """An admin's change of the shared token's station: sid sets it (outranking [cloud] legacy_station_id); "" clears
         a set or learned one, back to the config's or, with none there, learned again from the next post. (old, new).
-        The old id stays an alias (still taken from the shared token: never a lockout) and on_rename moves the history.
-        ConfirmNeeded while the old id is live (rename_question) unless confirm."""
+        The old id stays an alias (still taken from the shared token: never a lockout), the rename is logged for the
+        history's move (renames(); not when the new id is an own token's station) and on_rename tells the hub.
+        ConfirmNeeded for rename_question's cases unless confirm; StationError for two live machines on one id."""
         sid = str(sid or "").strip()
         if sid and (len(sid) > 64 or not sid.isprintable()):
             raise StationError("id: the station's [station] id, at most 64 characters")
         old = self.legacy_id()
-        if sid == old:
+        had = self.mdb.get(META_LEGACY, "")
+        if sid == old and (sid or not had):
             return old, old
-        ask = self.rename_question(old, sid or self.configured_legacy)     # ("": back to the config's, or learned)
+        target = sid or self.configured_legacy          # ("": back to the config's, or learned)
+        ask = self.rename_question(old, target)
         if ask and not confirm:
             raise ConfirmNeeded(ask)
+        own_new = bool(target) and self._own(target)
         with self._lock:
             self._pinned = None
+            self._reconf_since = None
             with self.mdb._lock:
                 if sid:
                     self.mdb.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
@@ -301,25 +369,43 @@ class StationRegistry:
                     self.mdb.db.execute("DELETE FROM meta WHERE key = ?", (META_LEGACY,))
             new = self.legacy_id()
             # the old id stays the shared token's (an alias); cleared to "learned", the next post's id is it: none kept
-            self._set_aliases([a for a in self.aliases() + [old] if a != new] if new else [])
+            kept = [a for a in self.aliases() + [old] if a != new] if new else []
+            if len(kept) > ALIASES_MAX:
+                self.log(f"stations: {', '.join(kept[:-ALIASES_MAX])} no longer taken from the shared token "
+                         f"(at most {ALIASES_MAX} former ids)")
+            self._set_aliases(kept)
+            if old and new and old != new and not own_new:
+                self._log_rename(old, new)
         self._others.pop(new, None)
         self.log(f"stations: the shared token's station is {new or '(learned from its next post)'} now "
-                 f"(was {old or 'none'}), by {by or 'someone'}" + (" (confirmed: it was live)" if ask else ""))
+                 f"(was {old or 'none'}{', an override cleared' if old == new else ''}), by {by or 'someone'}"
+                 + (" (confirmed)" if ask else "")
+                 + (f" ({new} has its own token: history not moved)" if own_new and old != new else ""))
         if old and new and old != new and self.on_rename is not None:
             try:
                 self.on_rename(old, new)
             except Exception as e:  # noqa: BLE001 - the id is changed; what couldn't move is said, never a lockout
-                self.log(f"stations: {old} -> {new}: history not moved: {type(e).__name__}: {e}")
+                self.log(f"stations: {old} -> {new}: hub not told: {type(e).__name__}: {e}")
         return old, new
 
-    def reconfigured(self, config_id) -> None:
-        """The shared token's station reports its config's [station] id: once that is the current id, the aliases
-        aren't needed (it was reconfigured), so they are dropped."""
+    def reconfigured(self, claimed, config_id) -> None:
+        """The shared token's station's status: the id it posted as (claimed) and its config's [station] id. Once both
+        have been the current id for ALIAS_DROP_S (it was reconfigured, and anything it still had stamped with a former
+        id has gone up), the former ids aren't needed and are dropped. Anything else starts that clock again."""
         cur = self.legacy_id()
-        if isinstance(config_id, str) and cur and config_id == cur and self.aliases():
+        now = self.clock()
+        with self._lock:
+            if not (cur and isinstance(claimed, str) and claimed == cur and config_id == cur) or not self.aliases():
+                self._reconf_since = None
+                return
+            if self._reconf_since is None:
+                self._reconf_since = now
+            if now - self._reconf_since < ALIAS_DROP_S:
+                return
             dropped = self.aliases()
             self._set_aliases([])
-            self.log(f"stations: {cur} is reconfigured: {', '.join(dropped)} no longer taken from the shared token")
+            self._reconf_since = None
+        self.log(f"stations: {cur} is reconfigured: {', '.join(dropped)} no longer taken from the shared token")
 
     def primary(self, p: Principal) -> str:
         """The one station this hub takes until multi-station (per-station state, cursors, jobs) lands: the shared
@@ -630,11 +716,16 @@ class StationRegistry:
             return {"ok": True}
         if a == "shared_id":
             sid = str(body.get("id") or "").strip()
-            ask = self.rename_question(self.legacy_id(), sid or self.configured_legacy)
+            cur, had = self.legacy_id(), self.mdb.get(META_LEGACY, "")
+            target = sid or self.configured_legacy
+            why = [w for w, on in ((f"{cur} was connected", cur != target and self.live(cur) is not None),
+                                   (f"{target} has its own token", bool(target) and cur != target and self._own(target)))
+                   if on]
             old, new = self.set_shared_id(sid, by, confirm=body.get("confirm") is True)
-            if old != new:
+            if old != new or (not sid and had):           # (clearing an override equal to the config's: said too)
                 note("stations/shared token id", old or None, (new or "(learned from its next post)")
-                     + (f" (confirmed: {old} was connected)" if ask else ""))
+                     + (" (override cleared: the config's)" if old == new else "")
+                     + (f" (confirmed: {', '.join(why)})" if why and body.get("confirm") is True else ""))
             return {"ok": True, "station": new, "aliases": self.aliases()}
         raise StationError("action: add, rename, rotate, revoke, retire_shared, restore_shared or shared_id")
 
@@ -718,15 +809,6 @@ def main(argv: list[str] | None = None) -> int:
     from sizeup.cloud.hubstore import MonitorDb
     shared = os.environ.get("SIZEUP_STATION_TOKEN", "").strip()
     reg = StationRegistry(MonitorDb(path), shared=shared, legacy_id=_config_legacy(a.config), log=lambda s: None)
-    if a.cmd == "reset-shared-id" and (Path(a.state) / "metrics.sqlite").is_file():
-        def moved(old: str, new: str) -> None:      # the station's signal metrics, under the new id (as the hub does)
-            from sizeup.cloud.metricstore import MetricStore
-            ms = MetricStore(Path(a.state) / "metrics.sqlite", log=lambda s: None)
-            try:
-                print(f"station metrics: {ms.rename_station(old, new)} row(s) moved from {old} to {new}")
-            finally:
-                ms.close()
-        reg.on_rename = moved
 
     def note(key, old, new) -> None:
         cad = Path(a.state) / "cad.sqlite"
@@ -772,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "reset-shared-id":
         print(f"shared token's station: {out['station'] or '(learned from its next post)'}"
               + (f" (also takes {', '.join(out['aliases'])})" if out.get("aliases") else ""))
+        if reg.renames():
+            print("station metrics: the hub moves them to the new id at its next turn (within 10 min)")
     else:
         print("done")
     return 0
