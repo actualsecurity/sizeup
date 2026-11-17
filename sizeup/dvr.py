@@ -293,6 +293,13 @@ def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
 
 
 class Dvr:
+    """Lock order (#644): every path takes them in this order, never the other way round, and lets go of a later one
+    before it takes an earlier one again:
+        _scanning (follow() only tries it: never waits for it) -> _disk -> _lock -> the state's own lock
+        _parked_lock -> _lock
+    So nothing that holds _lock calls what takes _disk (wanted(): follow() moves a folder under _disk; _room, _write,
+    evict): it is called with no lock held and only its answer is kept under _lock (pin, tick)."""
+
     def __init__(self, roads, root: str | Path, window_s: float = WINDOW_S, max_bytes: int = MAX_BYTES,
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
                  max_cameras: int = MAX_CAMERAS, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
@@ -316,7 +323,7 @@ class Dvr:
         self._rescan: threading.Thread | None = None
         self._scanning = threading.Lock()         # a folder's listing and merge (_scan_dir) vs follow()'s moves
         self._ensuring: dict[str, threading.Lock] = {}   # cid -> its folder being read on demand (_ensure)
-        self._twin_logged: set[int] = set()
+        self._twin_logged: set[tuple[str, int]] = set()   # (camera, key): "two segments under key" said once
         self._folders: set[str] | None = None     # the camera folders at resume() (what the state's bytes may count)
         self._checked_at = -1e18                  # the state last brought up to date (checkpoint)
         self._state_read = False                  # the state file read (resume, _offsets)
@@ -353,6 +360,7 @@ class Dvr:
         self._free_read: tuple[float, int, int] | None = None   # (when, free bytes, total_bytes() then): _free_after
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
+            self._clean_parked_tmp()
             self._offsets()
             self._scanned.set()
             self._indexed.set()
@@ -464,8 +472,8 @@ class Dvr:
                 other = [x for x in files if x[3] != keep[3]]
                 same = [x[3] for x in other if abs(x[0] - keep[0]) <= max(keep[1], 1.0)]
                 twins += same
-                if len(same) < len(other) and key not in self._twin_logged:
-                    self._twin_logged.add(key)
+                if len(same) < len(other) and (name, key) not in self._twin_logged:
+                    self._twin_logged.add((name, key))
                     self.log(f"dvr: {name}: two segments under key {key} at different times: both kept")
             if c["segs"]:
                 last = max(c["segs"])
@@ -736,8 +744,9 @@ class Dvr:
             pins = dict(self.pins)
         self.save_pins(pins)
         self.log(f"dvr: {cid} {'kept' if on else 'no longer kept'}")
+        wanted = self.wanted()                            # (no lock held: follow() takes _disk, then _lock; #644)
         with self._lock:
-            self._wanted = self.wanted()
+            self._wanted = wanted
         self.roads._changed()
         return self.status(cid)
 
@@ -1156,6 +1165,7 @@ class Dvr:
         self._scan()
         self._offsets()
         self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
         self._rescanned_at = self.clock()
         self._scanned.set()
         self._indexed.set()
@@ -1218,6 +1228,7 @@ class Dvr:
         """After resume(): the whole index from the folders, merged with what was recorded meanwhile."""
         t = time.monotonic()
         self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
         try:
             self._scan(first=True)
         except Exception as e:  # pragma: no cover - an unreadable folder: what was read stands
@@ -1479,6 +1490,25 @@ class Dvr:
                     self.parked[cid] = q
             except (KeyError, TypeError, ValueError):
                 continue
+
+    def _clean_parked_tmp(self, stale_s: float = STALE_TMP_S) -> None:
+        """(#603) A temp file of PARKED_FILE left by a writer killed while writing it (.parked.<pid>.tmp at the root):
+        gone once stale_s old, only by a task that may write. Never PARKED_FILE itself, never a fresh one (a write
+        under way: ours under _parked_lock, or another task's)."""
+        if not self.may_write():
+            return
+        stem = Path(PARKED_FILE).stem
+        with self._parked_lock:
+            try:
+                found = [f for f in os.scandir(self.root) if f.name.startswith(f"{stem}.") and f.name.endswith(".tmp")]
+            except OSError:
+                return
+            for f in found:
+                try:
+                    if time.time() - f.stat().st_mtime > stale_s:
+                        Path(f.path).unlink(missing_ok=True)
+                except OSError:
+                    continue
 
     def _save_parked(self) -> None:
         """PARKED_FILE written whole (a temp file renamed), only by the leader (may_write); the list copied under the

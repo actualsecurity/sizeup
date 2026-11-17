@@ -11,7 +11,9 @@ while others record.
 from __future__ import annotations
 
 import json
+import os
 import random
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -501,3 +503,24 @@ def test_a_trial_round_that_fails_says_nothing(tmp_path):
     n = len(d.logs)
     assert d._check(DEAD, r.camera(DEAD), trial=True) is False
     assert DEAD in d.parked and d.logs[n:] == []
+
+
+def test_a_parked_temp_file_left_by_a_killed_writer_goes_once_stale(tmp_path):
+    """#644 (#603): .parked.<pid>.tmp left at the DVR root by a task killed while writing it goes once STALE_TMP_S old,
+    as the state's own temp files do; never PARKED_FILE, never a fresh one (a write under way), never on a standby."""
+    root = tmp_path / "dvr"
+    root.mkdir()
+    old, fresh, keep = root / ".parked.4242.tmp", root / ".parked.4343.tmp", root / PARKED_FILE
+    for p in (old, fresh, keep):
+        p.write_text("{}")
+    past = time.time() - dvr_mod.STALE_TMP_S - 5
+    os.utime(old, (past, past))
+    os.utime(keep, (past, past))
+    r, d, f, clock = setup(tmp_path, may_write=lambda: False)     # a standby: leaves it
+    assert old.exists()
+    d.may_write = lambda: True
+    d._clean_parked_tmp()
+    assert not old.exists() and fresh.exists() and keep.exists()
+    os.utime(fresh, (past, past))                                  # the leader's start (not shared: the index read)
+    setup(tmp_path)
+    assert not fresh.exists() and keep.exists()
