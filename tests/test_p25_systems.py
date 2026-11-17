@@ -1160,7 +1160,7 @@ def test_the_station_keeps_context_out_of_an_older_hub_and_out_of_the_fire_audio
     sent = []
 
     class Box:
-        def add(self, kind, data, audio, context=False, stt=None):
+        def add(self, kind, data, audio, context=False):
             sent.append((kind, data.get("id"), context))
 
     link = StationLink.__new__(StationLink)
