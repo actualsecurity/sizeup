@@ -545,6 +545,14 @@ def test_another_segment_under_a_key_is_never_deleted_and_nothing_is_written_aft
     old._scan()
     assert mine.exists() and other.exists() and not twin.exists()
     assert any("two segments under key" in m for m in old.logs)
+    # (#644) said once per camera and key: the same key on another camera is said for that one too
+    elsewhere = tmp_path / "efs" / "OTHER1"
+    elsewhere.mkdir()
+    for x in (mine, other):
+        (elsewhere / x.name).write_bytes(x.read_bytes())
+    old._scan()
+    said = [m for m in old.logs if "two segments under key" in m]
+    assert len(said) == 2 and any(m.startswith("dvr: OTHER1:") for m in said)
     # stopped: a round still under way writes nothing after the last checkpoint
     assert old._stop.is_set() and old._write(CAM, key + 1, clock.t, 4.0, b"\x47" * 188) is False
     assert not list((tmp_path / "efs" / CAM).glob(f"{key + 1}_*"))
@@ -770,7 +778,8 @@ def test_a_handover_on_the_same_stream_is_no_discontinuity(tmp_path):
 
 def test_a_parked_cameras_folder_is_read_only_by_its_trial_round_and_its_file_is_left_alone(tmp_path, monkeypatch):
     """(#550 with #596) a parked camera: no round, so its folder isn't read for one; its check's trial round is a real
-    round (its folder read first). The parked list and its temp file beside the recordings: never ours to clean."""
+    round (its folder read first). The parked list beside the recordings: never cleaned; a temp file of it left by a
+    killed writer goes once stale (#644), a fresh one (a write under way) stays."""
     r, f, clock, old = recorded(tmp_path)
     parked = tmp_path / "efs" / dvr_mod.PARKED_FILE
     parked.write_text("{}")
@@ -778,6 +787,8 @@ def test_a_parked_cameras_folder_is_read_only_by_its_trial_round_and_its_file_is
     their_tmp.write_text("{")
     for p in (parked, their_tmp):
         os.utime(p, (time.time() - 3600,) * 2)
+    writing = tmp_path / "efs" / ".parked.8.tmp"
+    writing.write_text("{")
     new = leader(r, tmp_path, clock)
     assert new.resume()
     (tmp_path / "efs" / STATE_FILE).unlink()                 # (not in the state: its folder read before a round)
@@ -794,7 +805,140 @@ def test_a_parked_cameras_folder_is_read_only_by_its_trial_round_and_its_file_is
     new.index_rest()
     new._started_at, new._rescanned_at = clock.t, clock.t - dvr_mod.RESCAN_S
     new.tick(wait_all=True)
-    assert parked.exists() and their_tmp.exists()
+    assert parked.exists() and not their_tmp.exists() and writing.exists()
+
+
+class _Ordered:
+    """A lock that notes, per thread, which of the DVR's locks are held when it is taken (#644)."""
+
+    def __init__(self, name, held, seen):
+        self.name, self.held, self.seen, self.real = name, held, seen, threading.RLock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        stack = self.held.__dict__.setdefault("stack", [])
+        for other in stack:
+            if other != self.name:
+                self.seen.add((other, self.name))
+        ok = self.real.acquire(blocking, timeout)
+        if ok:
+            stack.append(self.name)
+        return ok
+
+    def release(self):
+        self.held.stack.reverse()
+        self.held.stack.remove(self.name)
+        self.held.stack.reverse()
+        self.real.release()
+
+    __enter__ = acquire
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def test_a_keep_with_a_camera_merge_pending_takes_the_disk_lock_before_the_main_one(tmp_path):
+    """#644: pin() worked out what to record (wanted(): follow() moves a merged camera's folder under _disk) while it
+    held _lock, the reverse of _write, _room, evict and stop() (_disk, then _lock): a Keep and a write at the same
+    moment could each wait for the other. Every path takes _disk first."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    step(d, f, clock, 2)
+    held, seen = threading.local(), set()
+    d._lock, d._disk = _Ordered("_lock", held, seen), _Ordered("_disk", held, seen)
+    r.aliases = lambda: {CAM: "NEWX"}                       # the camera merge, pending at the Keep
+    d.pin(CAM, True)
+    assert (tmp_path / "dvr" / "NEWX").is_dir()             # follow() ran under the Keep
+    step(d, f, clock, 2)
+    d.evict()
+    d.stop()
+    assert ("_disk", "_lock") in seen and ("_lock", "_disk") not in seen
+
+
+def test_a_keep_and_a_write_at_the_same_moment_never_wait_on_each_other(tmp_path, monkeypatch):
+    """#644, as two threads: a write holds _disk and is about to take _lock while a Keep with a merge pending runs.
+    Before the fix the Keep held _lock and waited for _disk: neither got on (the join timed out)."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    step(d, f, clock, 2)
+    r.aliases = lambda: {CAM: "NEWX"}
+    in_keep, wrote = threading.Event(), []
+    real_pins = d._pins_now
+
+    def pins_now():                                         # the Keep, under way: the write goes now
+        out = real_pins()
+        in_keep.set()
+        time.sleep(0.2)
+        return out
+    monkeypatch.setattr(d, "_pins_now", pins_now)
+
+    def write():
+        assert in_keep.wait(5)
+        with d._disk:
+            time.sleep(0.1)
+            with d._lock:
+                wrote.append(True)
+    w = threading.Thread(target=write, daemon=True)
+    k = threading.Thread(target=d.pin, args=(CAM, True), daemon=True)
+    w.start()
+    k.start()
+    w.join(5)
+    k.join(5)
+    assert not w.is_alive() and not k.is_alive() and wrote == [True]
+
+
+def test_checkpoint_counts_no_bytes_for_a_camera_evicted_from_the_index(tmp_path):
+    """#644: a camera whose recording went (older than the window, nobody wanting it now) has 0 bytes in the state, so
+    a new leader never counts them against the cap."""
+    r, d, f, clock = setup(tmp_path, area=None)
+    d = leader(r, tmp_path, clock, window_s=60)
+    d.scan_now()
+    d.pins = {CAM}
+    step(d, f, clock, 3)
+    d.checkpoint(force=True)
+    path = tmp_path / "efs" / STATE_FILE
+    assert json.loads(path.read_text())["cameras"][CAM]["bytes"] == d.total_bytes() > 0
+    d.pins = {}
+    clock.t += 120                                          # all of it older than the window
+    d._wanted = {}
+    assert d.evict() > 0 and CAM not in d._cams
+    d.checkpoint(force=True)
+    assert json.loads(path.read_text())["cameras"][CAM]["bytes"] == 0
+
+
+def test_two_keeps_at_once_keep_the_newest_answer(tmp_path, monkeypatch):
+    """#644: wanted() runs with no lock held, so two Keeps (or a Keep and a tick) overlap. The one begun later wins:
+    a Keep that began first and ends last never puts back an answer without the other's camera."""
+    r, d, f, clock = setup(tmp_path)
+    other = next(c["id"] for c in r.merged("cameras") if c.get("video") and c["id"] != CAM and dvr_mod.CAM_RE.fullmatch(c["id"]))
+    first_in, second_done = threading.Event(), threading.Event()
+    real = Dvr.wanted
+
+    def wanted(self):
+        out = real(self)
+        if threading.current_thread().name == "first":
+            first_in.set()                              # its answer (without the other camera) worked out ...
+            assert second_done.wait(5)                  # ... and kept only after the second Keep's
+        return out
+    monkeypatch.setattr(Dvr, "wanted", wanted)
+    a = threading.Thread(target=d.pin, args=(CAM, True), name="first", daemon=True)
+    a.start()
+    assert first_in.wait(5)
+    st = d.pin(other, True)
+    second_done.set()
+    a.join(5)
+    assert not a.is_alive() and st["recording"]
+    assert set(d._wanted) == {CAM, other} and d.status(other)["recording"]
+    # a tick begun before a Keep and ended after it: the Keep's answer stands too
+    d.pin(other, False)
+    first_in.clear()
+    second_done.clear()
+    t = threading.Thread(target=d.tick, name="first", daemon=True)
+    t.start()
+    assert first_in.wait(5)
+    d.pin(other, True)
+    second_done.set()
+    t.join(5)
+    assert not t.is_alive() and set(d._wanted) == {CAM, other}
 
 
 def test_an_app_without_a_state_folder_has_no_dvr_and_writes_nothing_where_it_runs(tmp_path, monkeypatch):
