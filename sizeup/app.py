@@ -3708,6 +3708,8 @@ class App:
             lent = self.reception.lent()
             moves: dict[str, str] = {}
             for sd in [s for s in self._own if antenna.of_sdr(self.groups, s) is None]:
+                if lent and lent[0] == sd or self._gfail.get(sd, 0.0) > time.monotonic():
+                    continue
                 if sd in here:                      # its group is gone (groups changed): its own job again
                     moves[sd] = self._own[sd]
                 else:
@@ -3716,11 +3718,12 @@ class App:
                 usable = [s for s in g.sdrs if self._group_view(s, self._group_usable_now(s, here, devs))]
                 if settling:
                     continue
-                for s in [s for s in g.sdrs if s not in usable and s in self._own]:
+                for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
-                spares = [s for s in usable if own.get(s) == OFF_MODE and self.cfg.sdr_auto_assign
-                          and self.set_by.get(s) != "person" and s not in self._auto_skip]
+                # (a group is the admin's consent to moves inside it: spares with auto_assign off too)
+                spares = [s for s in usable if own.get(s) == OFF_MODE and self.set_by.get(s) != "person"
+                          and s not in self._auto_skip]
                 plan, short = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job,
                                            self._group_runnable)
                 if short != self._gshort.get(g.name, []):
@@ -3736,6 +3739,8 @@ class App:
                         moves[s] = job
             if moves:
                 self._groups_apply(moves)
+            for s in [s for s, m in self._own.items() if self.assign.get(s, OFF_MODE) == m]:
+                del self._own[s]                    # (a person picked the job it stood in with: its own now)
 
     def _settle_own(self, sd: str) -> None:
         """A stand-in that can't run any more (unplugged, or its group gone while it is): what it ran stops there and
@@ -3775,12 +3780,20 @@ class App:
                 head = f"sdr: group {g.name if g else '(none)'}: SDR {self.sdr_name(sd)}: {old} -> {job}"
                 if not ok:
                     self._gfail[sd] = time.monotonic() + GROUP_RETRY_S
+                    self._gusable[sd], self._gseen[sd] = False, (False, time.monotonic())   # (not tried every tick)
                     log(f"{head} didn't start: Off, tried again in {GROUP_RETRY_S:.0f} s")
                 elif job == own[sd]:
                     log(f"{head} (its own job again)")
                 else:
                     who = [self.sdr_name(o) for o in (g.sdrs if g else ()) if o != sd and self._own_of(o) == job]
                     log(f"{head} (for SDR {', '.join(who) or '?'}; its own {own[sd]} until then)")
+            # a job a stand-in gave up whose dongle is in no group now (groups changed during a shortage): its program
+            # waits on that dongle again, as any job's does, and resumes when it is plugged back in
+            for job in {j for j, _sd in stops} - set(self.assign[s] for s in moves):
+                o = next((o for o, m in self.assign.items() if m == job and antenna.of_sdr(self.groups, o) is None
+                          and o not in self._own), None)
+                if o is not None and self._program_on(job) is None and self._start_mode(job, o):
+                    log(f"sdr: {job} waits on SDR {self.sdr_name(o)} again (no antenna group)")
         finally:
             self.switching = False
         self._save_modes()
@@ -3824,6 +3837,9 @@ class App:
                 return f"couldn't keep the groups: {e}"
             self.groups = gs
             self._gshort = {k: v for k, v in self._gshort.items() if any(g.name == k for g in gs)}
+            for s in [s for s in self._gseen if antenna.of_sdr(gs, s) is None]:
+                self._gseen.pop(s, None)
+                self._gusable.pop(s, None)
             log("sdr: antenna groups: " + ("; ".join(
                 f"{g.name}: SDR {', '.join(self.sdr_name(s) for s in g.sdrs)} · {' > '.join(g.jobs)}" for g in gs)
                 or "none"))
@@ -4041,8 +4057,10 @@ class App:
         if why:
             return f"SDR {self.sdr_name(sdr)}: {why}"
         g = antenna.of_sdr(self.groups, sdr)
-        if g is not None or sdr in self._own:
+        if g is not None:
             return self._set_group_mode(g, mode, sdr, by)
+        if sdr in self._own:                     # a stand-in whose group is gone: its own job first, then as always
+            self._groups_reconcile()
         with self._mode_lock:
             dup = mode != OFF_MODE and any(o != sdr and m == mode for o, m in self.assign.items())
             if self.assign.get(sdr, OFF_MODE) == mode and not dup:
@@ -4094,6 +4112,8 @@ class App:
                 self.set_by.pop(o, None)
             log(f"SDR {self.sdr_name(sdr)}: {self._own_of(sdr)} -> {mode}" + (f" (group {g.name})" if g else ""))
             self._own[sdr] = mode
+            if self.assign.get(sdr, OFF_MODE) == mode:
+                del self._own[sdr]                       # it stood in with that job: its own now
             self.set_by[sdr] = by
             self._gfail.pop(sdr, None)
             if g is None or not self._group_view(sdr, self._group_usable_now(

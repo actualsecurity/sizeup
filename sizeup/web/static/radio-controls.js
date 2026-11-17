@@ -944,6 +944,11 @@ window.RadioControls = (() => {
     show(box, !!(sdr && sdr.shared));
     if (!sdr || !sdr.shared) return;
     const groups = sdr.groups || [];
+    // the group being edited, by its name (the list may change under the editor: another admin, the hub)
+    if (ag.edit && ag.edit.was !== null) {
+      const k = groups.findIndex((g) => g.name === ag.edit.was);
+      if (k < 0) { ag.edit = null; ag.error = "the group changed elsewhere: edit it again"; } else ag.edit.i = k;
+    }
     const key = JSON.stringify([groups, ag.edit, ag.busy, ag.error, ro(), (sdr.sdrs || []).map((d) => [d.serial, d.name]), sdr.modes]);
     if (key === ag.key) return;
     // never rebuilt under the person's typing: the name field keeps its focus and caret
@@ -973,7 +978,7 @@ window.RadioControls = (() => {
         const ed = el("button", "sm quiet", "Edit");
         ed.type = "button";
         ed.disabled = ag.busy || !!ag.edit;
-        ed.addEventListener("click", () => { ag.edit = { i, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs] }; ag.error = ""; renderGroups(); });
+        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs] }; ag.error = ""; renderGroups(); });
         line.append(ed);
       }
       kids.push(line);
@@ -984,7 +989,7 @@ window.RadioControls = (() => {
       add.type = "button";
       add.title = "Lock dongles on one antenna feed to the jobs it carries";
       add.disabled = ag.busy;
-      add.addEventListener("click", () => { ag.edit = { i: -1, name: "", sdrs: [], jobs: [] }; ag.error = ""; renderGroups(); });
+      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [] }; ag.error = ""; renderGroups(); });
       kids.push(add);
     }
     if (ag.error && !ag.edit) kids.push(el("div", "sdr-err", ag.error));
@@ -1001,7 +1006,8 @@ window.RadioControls = (() => {
     name.addEventListener("input", () => { e.name = name.value; });
     const sdrs = el("div", "ag-pick");
     sdrs.append(el("span", "dim", "SDRs"));
-    for (const d of sdr.sdrs || []) {
+    const known = sdr.sdrs || [];        // (a member not shown now, unplugged and Off, can still be taken out)
+    for (const d of [...known, ...e.sdrs.filter((s) => !known.some((x) => x.serial === s)).map((s) => ({ serial: s, mode: "unplugged" }))]) {
       if (takenSdr.has(d.serial)) continue;
       const l = el("label", "ag-chk");
       const c = el("input");

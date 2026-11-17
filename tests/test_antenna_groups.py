@@ -415,3 +415,52 @@ def test_the_station_page_posts_groups_and_gets_the_reason_when_refused(rig, mon
         assert code == 200 and "sdr" in st
     finally:
         server.shutdown()
+
+
+def test_auto_assign_off_a_person_moving_a_job_during_a_shortage_leaves_no_dongle_idle(rig):
+    plugged, logs, make = rig
+    app = grouped(make, sdr_auto_assign=False)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-a"]                  # the county's dongle gone
+    app._sdr_arrivals()
+    assert on(app, P25) == "uhf-c" and on(app, "South 2") == "uhf-b"
+    assert app.set_mode("FG1", "uhf-b") is None                           # FG1 is V4's now; V3 #3's own is Off
+    assert {j: on(app, j) for j in (P25, "South 2", "FG1")} in (
+        {P25: "uhf-c", "South 2": None, "FG1": None}, {P25: "uhf-b", "South 2": None, "FG1": None},
+        {P25: "uhf-c", "South 2": None, "FG1": "uhf-b"}, {P25: "uhf-b", "South 2": None, "FG1": "uhf-c"})
+    assert sum(1 for s in ("uhf-b", "uhf-c") if app.assign.get(s, "Off") != "Off") == 2   # both run something
+
+
+def test_a_group_deleted_during_a_shortage_its_job_waits_on_its_own_dongle_again(rig):
+    plugged, logs, make = rig
+    app = grouped(make, sdr_auto_assign=False)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c"
+    assert app.set_antenna_groups([GROUPS[1]]) is None                    # UHF deleted
+    assert on(app, "FG1") == "uhf-c" and on(app, "South 2") == "uhf-b" and not app._own   # waits for V4, as before
+    assert "sdr: South 2 waits on SDR V4 again (no antenna group)" in logs
+
+
+def test_picking_the_job_a_stand_in_runs_makes_it_its_own(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert app.set_mode("South 2", "uhf-c") is None                       # moves South 2 here for good
+    assert not app._own and app.assign["uhf-c"] == "South 2" and app.assign.get("uhf-b") == "Off"
+    plugged.insert(1, DONGLES[1])
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c" and app.assign.get("uhf-b") == "FG1"     # back: the group's free job (auto)
+
+
+def test_a_reception_test_lends_a_grouped_dongle_only_to_its_groups_jobs(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    for sd in ("m700-a", "m700-b", "spare-1"):
+        assert app.set_mode("Off", sd) is None
+    err = app.reception.start({"system": "mrrs", "jobs": ["MRRS 773"], "sdr": "spare-1", "minutes": 15})
+    assert err == "MRRS 773 is locked to 700: SDR m700-a, m700-b"
+    # a stand-in is never lent (its rows: a fire job is "protected" first, another system's job "runs ..." first)
+    assert app.set_mode("Off", "uhf-c") is None
+    app._own["uhf-c"] = "FG1"                                  # (as if it stood in with no job of its own running)
+    assert {r["serial"]: r for r in app.reception.dongles()}["uhf-c"]["refuse"] == "standing in (antenna group)"
