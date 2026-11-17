@@ -32,6 +32,7 @@ from sizeup.cad.service import Cad, Settings
 from sizeup.cloud.access import Identity
 from tests.test_atc import PLANES, T0, Clock
 from tests.test_cad import make_cad
+from tests.test_intel import Clock as IntelClock
 from tests.test_intel import FakeNotifier, ctx_row, example_locate
 from tests.test_roles import CASEY, JORDAN, VAL, people
 
@@ -92,7 +93,9 @@ def test_an_airport_prealert_bundle_has_its_transmissions_audio_place_site_and_o
     assert trig["HPNTower-2"]["context"] and not trig["HPNTower-2"]["has_audio"]          # audio expired
     assert trig["HPNTower-3"]["has_audio"] and trig["HPNTower-3"]["matched"] == ["brush fire"]
     assert trig["HPNTower-3"]["text"] == ("Westchester tower, JetBlue 1234, we see what looks like a brush fire off the "
-                                          "departure end, maybe a mile")
+                                          "departure end, maybe a mile")             # as transcribed (the row's hover)
+    assert trig["HPNTower-3"].get("shown", trig["HPNTower-3"]["text"]) == (trig["HPNTower-3"].get("atc_text")
+                                                                         or trig["HPNTower-3"]["text"])
     assert trig["HPNTower-3"]["channel"] == "HPN Tower" and trig["HPNTower-3"]["transcript_kept"]
     ba = d["before_after"]
     assert [t["id"] for t in ba["items"]] == ["HPNTower-2", "HPNTower-3", "HPNTower-4", "HPNTower-5"]   # oldest first
@@ -112,6 +115,41 @@ def test_an_airport_prealert_bundle_has_its_transmissions_audio_place_site_and_o
     assert after["outcome"]["note"] == "controlled burn" and after["outcome"]["at"] == clock.t
     assert after["cursor"] != again["cursor"]
     json.dumps(after)                                                          # plain, serialisable data
+
+
+def test_the_airports_approximate_point_is_never_a_building(airport):
+    """ATC's point is a guess from the words: no address key, notes, pre-plan points or calls near it as site history,
+    only the AIRPORT events (before it); "now" still measures from it."""
+    cad, say, clock, kept = airport
+    a = say(3, "Westchester tower, JetBlue 1234, we see what looks like a brush fire off the departure end, maybe a mile", 5)
+    loc = a["data"]["location"]
+    clock.t = T0 - 3600                          # an unrelated call right on the guessed point, with a note, earlier
+    near = cad.create({"type": "MVA", "address": "1 Example Rd", "lat": loc["lat"], "lon": loc["lon"], "operator": "Lt. Example"})
+    cad.premise.create({"incident_id": near["id"], "text": "Gate code on file", "operator": "Lt. Example"})
+    clock.t = T0 + 60
+    later = cad.create({"type": "AIRPORT", "operator": "Lt. Example"})                     # after it: not its history
+    d = context_bundle.build(cad, "airport", a["id"])
+    assert d["place"]["point"]["approx"] and d["place"]["key"] == {} and d["place"]["nearby"] == {}
+    assert d["site_history"]["key"] == {} and d["site_history"]["calls"]["items"] == []
+    assert d["site_history"]["notes"]["items"] == [] and "approximate" in d["site_history"]["notes"]["empty"]
+    assert {c["id"] for c in d["now"]["calls"]["items"]} == {near["id"], later["id"]}    # now: what is open near it
+
+
+def test_the_window_keeps_the_nearest_each_side_of_the_trigger(airport):
+    cad, say, clock, kept = airport
+    for i in range(40):                          # 40 before and 40 after, 5 s apart: more than the caps each side
+        cad.comms.record({"id": f"HPNTower-b{i}", "source": "HPN Tower", "start": T0 - 5 * (i + 1), "end": T0 - 5 * (i + 1) + 2,
+                          "text": f"before {i}", "mhz": 118.575, "status": "done", "model": "whisper"})
+        cad.comms.record({"id": f"HPNTower-a{i}", "source": "HPN Tower", "start": T0 + 10 + 5 * (i + 1),
+                          "end": T0 + 12 + 5 * (i + 1), "text": f"after {i}", "mhz": 118.575, "status": "done", "model": "whisper"})
+    a = say(1, "Westchester tower, JetBlue 1234, we see what looks like a brush fire off the departure end, maybe a mile", 2)
+    ba = context_bundle.build(cad, "airport", a["id"])["before_after"]
+    ids = [t["id"] for t in ba["items"]]
+    assert ids[:30] == [f"HPNTower-b{i}" for i in reversed(range(30))]                    # the nearest 30, oldest first
+    assert ids[30] == "HPNTower-1" and ba["items"][30]["evidence"]
+    assert ids[31:] == [f"HPNTower-a{i}" for i in range(30)]
+    assert ba["capped"] == {"before": True, "after": True}
+    assert [t["start"] for t in ba["items"]] == sorted(t["start"] for t in ba["items"])
 
 
 def test_a_transmission_gone_from_the_radio_log_keeps_the_prealerts_own_copy(airport):
@@ -139,21 +177,24 @@ def test_an_unknown_prealert_or_kind_is_a_404(airport):
 
 @pytest.fixture
 def intel(tmp_path):
-    cad = make_cad(tmp_path)
+    clock = IntelClock(T0)
+    cad = make_cad(tmp_path, clock=clock)
     people(cad)
     cad.intel.notifier, cad.intel.locate = FakeNotifier(), example_locate
-    t0 = cad.clock()
-    # an earlier call at that corner, with a comment
+    # an earlier call at that corner, with a comment, a day before
+    clock.t = T0 - 86400
     old = cad.create({"type": "MVA", "address": "Sample St & Test Rd", "lat": 41.01, "lon": -73.67, "operator": "Lt. Example"})
     cad.note(old["id"], {"text": "two cars, no injuries", "operator": "Lt. Example"})
     cad.close(old["id"], {"disposition": "COMPLETE", "operator": "Lt. Example"})
     cad.premise.create({"incident_id": old["id"], "text": "Blind corner: stage on Sample St", "operator": "Lt. Example"})
+    clock.t = t0 = T0
     cad.comms.record(ctx_row("c0-t0", "unit 3 on patrol", t0 - 120))
     cad.comms.record(ctx_row("c1-t0", "shots fired at Sample St and Test Rd", t0))
     cad.intel.consider("c1-t0")
     cad.intel.drain()
     cad.comms.record(ctx_row("c2-t0", "copy, units responding", t0 + 30))
     [ev] = cad.intel.events.open_events()
+    clock.t = T0 + 60
     return cad, ev, old
 
 
@@ -220,6 +261,8 @@ def test_an_intel_bundle_has_the_full_transcripts_hits_place_site_history_and_vo
     cad.intel_admin.dismiss(ev.id, {"operator": "Jordan Example"})
     o = get(api, f"/api/cad/prealerts/intel/{ev.id}", VAL)[1]["outcome"]
     assert o["status"] == "dismissed" and o["by"] == "Jordan Example"
+    assert [f["verdict"] for f in o["feedback"]] == ["noise", "useful"] and all("operator" not in f for f in o["feedback"])
+    o = get(api, f"/api/cad/prealerts/intel/{ev.id}", CASEY)[1]["outcome"]      # who voted: admins
     assert [(f["verdict"], f["operator"]) for f in o["feedback"]] == [("noise", "Jordan Example"), ("useful", "Val Example")]
 
 
@@ -278,7 +321,7 @@ global.UI = { toast() {} };
 global.fmtTime = (u) => `T${Math.round(u)}`;
 global.cad = { scene: null };
 // the CAD's row (cad.js radioRow), as far as the page relies on it: the play button or "Audio expired", the text
-global.radioRow = (t) => { const li = el("li", "rt"); const b = el("button", "play", t.has_audio === false ? "–" : "▶");
+global.radioRow = (t, ctx) => { const li = el("li", "rt"); li.dataset.scope = (ctx || {}).scope; const b = el("button", "play", t.has_audio === false ? "–" : "▶");
   b.title = t.has_audio === false ? "Audio expired" : "Play"; li.append(b, el("div", "txt", t.text)); return li; };
 """
 
@@ -331,14 +374,74 @@ def bundle_for_page(intel_fixture):
         return context_bundle.build(cad, "intel", ev.id, admin=True)
 
 
-def test_another_systems_transmissions_need_a_reader_who_may_see_them(intel):
-    """Built with nobody signed in (a background caller that set no reader): the words of another P25 system's
-    transmissions are left out, as everywhere (comms); only their ids, and that they are not this reader's."""
+def test_build_fails_closed_for_a_caller_that_set_no_reader(intel):
+    """build() called directly (the push, inference) with no reader who may see another system's traffic: no radio
+    pre-alert at all, never one with the words left out silently."""
+    from sizeup import sourcekeys
     cad, ev, _old = intel
-    d = context_bundle.build(cad, "intel", ev.id)
-    [t] = d["trigger"]["items"]
-    assert t["text"] == "" and not t["transcript_kept"] and d["before_after"]["items"] == []
-    assert "shots fired" not in json.dumps(d)
+    with pytest.raises(context_bundle.NotFound):
+        context_bundle.build(cad, "intel", ev.id)
+    with sourcekeys.request_context(None), pytest.raises(context_bundle.NotFound):
+        context_bundle.build(cad, "intel", ev.id, admin=True)
+    with sourcekeys.request_context(Identity(email=VAL)):
+        assert context_bundle.build(cad, "intel", ev.id)["trigger"]["items"][0]["text"].startswith("shots fired")
+
+
+def signed(cad, kind, pid, admin=False):
+    from sizeup import sourcekeys
+    with sourcekeys.request_context(Identity(email=CASEY if admin else VAL)):
+        return context_bundle.build(cad, kind, pid, admin=admin)
+
+
+def test_non_admins_see_only_the_rules_the_event_fired_on_or_that_map_or_push(intel):
+    """A transmission's hits include rules being tuned (shadow, below threshold, an admin's local.* ones): an admin
+    sees them all, anyone else only the ones the event fired on or that map or push now."""
+    cad, ev, _old = intel
+    fired = {r[0] for r in ev.rules}
+    with cad.store.tx() as db:
+        for rid in ("local.secret_words", "pd.retired_rule"):
+            db.execute("INSERT INTO intel_hits (traffic_id, rule_id, rule_rev, weight, category, pack, event_id, at) "
+                       "VALUES ('c1-t0', ?, 1, 0.3, 'weapons', 'police', NULL, ?)", (rid, cad.clock()))
+    shadowed = next(r for r in cad.intel.pack("police").rules if r.id not in fired)
+    shadowed.mode = "shadow"
+    with cad.store.tx() as db:
+        db.execute("INSERT INTO intel_hits (traffic_id, rule_id, rule_rev, weight, category, pack, event_id, at) "
+                   "VALUES ('c1-t0', ?, 1, 0.2, 'weapons', 'police', NULL, ?)", (shadowed.id, cad.clock()))
+    seen = {h["id"] for h in signed(cad, "intel", ev.id)["trigger"]["items"][0]["rules"]}
+    assert seen == fired
+    every = {h["id"] for h in signed(cad, "intel", ev.id, admin=True)["trigger"]["items"][0]["rules"]}
+    assert every == fired | {"local.secret_words", "pd.retired_rule", shadowed.id}
+
+
+def test_recomputed_phrases_say_they_are_the_current_rules_and_flag_a_change(intel):
+    cad, ev, _old = intel
+    w = signed(cad, "intel", ev.id, admin=True)["why"]
+    assert w["matched_from"] == "current rules" and w["rules_changed"] is False and w["matched"]
+    with cad.store.tx() as db:
+        db.execute("UPDATE intel_events SET ruleset_hash = 'feedfacecafe' WHERE id = ?", (ev.id,))
+    assert signed(cad, "intel", ev.id, admin=True)["why"]["rules_changed"] is True
+
+
+def test_earlier_lists_are_strictly_before_the_prealert(intel):
+    """Site history and the earlier pre-alerts are the ones before this pre-alert, not before the page is read; an
+    earlier shadow one only for an admin."""
+    from sizeup.intel.model import Event
+    cad, ev, old = intel
+    later = cad.create({"type": "MVA", "address": "Sample St & Test Rd", "lat": 41.01, "lon": -73.67, "operator": "Lt. Example"})
+    place = dict(pack="police", category="weapons", label_full="Sample St & Test Rd, Rye", lat=41.01, lon=-73.67,
+                 precision="intersection", confirmed=True, status="ended", level="medium")
+    before = cad.intel.events.save(Event(**place, first_at=ev.first_at - 3600, last_at=ev.first_at - 3600, mode="push",
+                                         updated_at=ev.first_at - 3600))
+    tuned = cad.intel.events.save(Event(**place, first_at=ev.first_at - 1800, last_at=ev.first_at - 1800, mode="shadow",
+                                        updated_at=ev.first_at - 1800))
+    after = cad.intel.events.save(Event(**place, first_at=ev.first_at + 30, last_at=ev.first_at + 30, mode="push",
+                                        updated_at=ev.first_at + 30))
+    d = signed(cad, "intel", ev.id)
+    assert [c["id"] for c in d["site_history"]["calls"]["items"]] == [old["id"]] and later["id"] != old["id"]
+    assert [p["id"] for p in d["site_history"]["prealerts"]["items"]] == [before.id]
+    a = signed(cad, "intel", ev.id, admin=True)
+    assert [p["id"] for p in a["site_history"]["prealerts"]["items"]] == [tuned.id, before.id] and after.id not in {
+        p["id"] for p in a["site_history"]["prealerts"]["items"]}
 
 
 @needs_node
@@ -354,6 +457,7 @@ global.api = async () => IN;
   const shown = Object.fromEntries(S.map((id) => [id, !$("#" + id).hidden]));
   const plays = $("#pi-around").all().filter((e) => e.tagName === "BUTTON" && e.classList.contains("play")).map((b) => b.title);
   const ev = $("#pi-around").find("pi-ev").length;
+  const scopes = ["pi-trigger", "pi-around"].map((id) => [...new Set($("#" + id).find("rt").map((li) => li.dataset.scope))]);
   const before = Object.fromEntries(S.map((id) => [id, $("#" + id).children[0]]));
   PrealertInfo.render(JSON.parse(JSON.stringify(IN)));                    // the same again (a poll): nothing redrawn
   const same = S.filter((id) => $("#" + id).children[0] === before[id]);
@@ -361,7 +465,7 @@ global.api = async () => IN;
   changed.outcome.status = "dismissed"; changed.outcome.by = "Jordan Example"; changed.now.as_of += 60;
   PrealertInfo.render(changed);
   const redrawn = S.filter((id) => $("#" + id).children[0] !== before[id]);
-  console.log(JSON.stringify({{ text, shown, plays, ev, same, redrawn, title: $("#pi-title").textContent,
+  console.log(JSON.stringify({{ text, shown, plays, ev, scopes, same, redrawn, title: $("#pi-title").textContent,
                                outcome: $("#pi-outcome").textContent, bad: PrealertInfo.parse("phone/1"), ok: PrealertInfo.parse("intel/12"),
                                href: PrealertInfo.href("airport", 3) }}));
 }})();
@@ -372,6 +476,7 @@ global.api = async () => IN;
     assert "shots fired at Sample St and Test Rd" in out["text"]["pi-trigger"]           # the full transcript
     assert "copy, units responding" in out["text"]["pi-around"]
     assert out["plays"] == ["Audio expired", "Play", "Audio expired"] and out["ev"] == 1
+    assert out["scopes"] == [["pi-heard"], ["pi-around"]]                                  # a menu each (txMenu's key)
     assert "two cars, no injuries" in out["text"]["pi-site"] and "COMPLETE" in out["text"]["pi-site"]
     assert "Sample St & Test Rd, Rye" in out["text"]["pi-place"]
     assert "pd.shots" in out["text"]["pi-why"] and "Matched" in out["text"]["pi-why"]

@@ -90,11 +90,12 @@ window.PrealertInfo = (() => {
     return b;
   }
   // a transmission: the CAD's own row (play, or "Audio expired"; time, unit, channel, the whole transcript)
-  function tx(t, opts = {}) {
+  // scope: the list's own ("pi-heard", "pi-around"): one transmission in both lists keeps a menu each (txMenu's key)
+  function tx(t, scope) {
     const row = { kind: "radio", start: t.start, end: t.end, ...t };
-    const li = typeof radioRow === "function" ? radioRow(row, { scope: "prealert" }) : el("li", "rt", t.text);
+    const li = typeof radioRow === "function" ? radioRow(row, { scope }) : el("li", "rt", t.shown || t.text);
     li.classList.add("pi-tx");
-    if (t.evidence || opts.evidence) li.classList.add("pi-ev");
+    if (t.evidence) li.classList.add("pi-ev");
     if (t.context) { li.classList.add("pi-ctx"); li.title = "Heard just before the one that matched"; }
     if ((t.matched || []).length) {
       const m = el("div", "pi-hit small", `Matched: ${t.matched.join(" · ")}`);
@@ -109,9 +110,9 @@ window.PrealertInfo = (() => {
     if (t.kept) li.append(el("div", "pi-kept dim small", t.kept));
     return li;
   }
-  function txList(items) {
+  function txList(items, scope) {
     const ol = el("ol", "list log radio-log pi-txs");
-    ol.append(...items.map((t) => tx(t)));
+    ol.append(...items.map((t) => tx(t, scope)));
     return ol;
   }
 
@@ -130,8 +131,11 @@ window.PrealertInfo = (() => {
       : `${w.score.level} ${pct(w.score.confidence)}` + (w.score.pushed !== undefined && w.score.pushed !== null ? ` · pushed at ${pct(w.score.pushed)}` : "");
     const kids = [head("Why"), dl([
       [d.event.kind === "intel" ? "Rules" : "Kinds", rules.length ? rules : "", w.ruleset_hash ? `Rule set ${w.ruleset_hash}` : ""],
-      ["Matched", (w.matched || []).length ? chips(w.matched, "chip pi-word") : (w.phrases_hidden ? "rule phrases: admins" : ""),
-        w.phrases_hidden ? "The rules' phrases are for admins (Settings > System > Intel)" : "Words heard that the rules matched"],
+      ["Matched", (w.matched || []).length ? [...chips(w.matched, "chip pi-word"), ...(w.rules_changed ? [el("span", "warn small", "rules changed")] : [])]
+        : (w.phrases_hidden ? "rule phrases: admins" : ""),
+        w.phrases_hidden ? "The rules' phrases are for admins (Settings > System > Intel)"
+          : w.matched_from ? `Phrases found again with the ${w.matched_from}` + (w.rules_changed ? `; the rules changed since it fired (rule set ${w.ruleset_hash})` : "")
+          : "Words heard that the rules matched"],
       ["Score", score, d.event.kind === "intel" ? "WHAT: how sure it is this kind of call; WHERE: how sure the place is" : "The pre-alert's own confidence (not the aircraft match's)"],
       ["Mode", s.mode || "", "off · shadow (counted only) · log · map · push"],
       ["Model", s.suggested ? `${s.suggested}?` : "", "The model's reading, not the rules': never pushed"],
@@ -142,14 +146,15 @@ window.PrealertInfo = (() => {
   }
   function trigger(d) {
     const t = d.trigger;
-    return [head("Heard", `${t.items.length} tx`, "The transmissions that raised it"), t.items.length ? txList(t.items) : none(t.empty)];
+    return [head("Heard", `${t.items.length} tx`, "The transmissions that raised it"), t.items.length ? txList(t.items, "pi-heard") : none(t.empty)];
   }
   function around(d) {
     const b = d.before_after;
     const span = `±${Math.round((b.window_s || 0) / 60)} min` + ((b.channels || []).length ? ` · ${b.channels.join(", ")}` : "")
-      + ((b.related_channels || []).length ? ` + ${b.related_channels.join(", ")}` : "") + (b.capped ? " · first 60" : "");
+      + ((b.related_channels || []).length ? ` + ${b.related_channels.join(", ")}` : "")
+      + (b.capped && (b.capped.before || b.capped.after) ? " · nearest 30 each side" : "");
     return [head("Timeline", span, "Everything on the same channels (and their talkgroup group) around it; the ones that raised it marked"),
-      b.items.length ? txList(b.items) : none(b.empty)];
+      b.items.length ? txList(b.items, "pi-around") : none(b.empty)];
   }
   function place(d) {
     const p = d.place;

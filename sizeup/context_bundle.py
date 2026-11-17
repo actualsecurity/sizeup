@@ -27,12 +27,15 @@ The bundle (SCHEMA_VERSION; every section says why it is empty in "empty", "" wh
                   the transcript's own and shown to every reader
     trigger       the evidence transmissions: time, channel, talker / unit, the full transcript, has_audio (the clip's
                   audio is played from /api/audio/<id>.wav while the hub keeps it), the words each matched
-    before_after  the same and related channels (WINDOW_S each side, per source) around the trigger, oldest first
+    before_after  the same and related channels (WINDOW_S each side, per source) around the trigger, oldest first: the
+                  nearest CAP["before"] before the first evidence and CAP["after"] from it on
     place         the point (approximate when it is), the words or the gazetteer's label, other readings, and what is
-                  near: pre-plan points (hydrants, Knox boxes ... as entered), cameras (when the app wired a lookup)
-    site_history  the calls at that address or site (the address key, as History here; the airport: its events),
-                  newest first, with their comments, disposition, units and times; the earlier pre-alerts there; the
-                  address notes (premise notes the reader may see)
+                  near: pre-plan points (hydrants, Knox boxes ... as entered), cameras (when the app wired a lookup).
+                  Only for a site: an intel place the words pin down and confirm; never ATC's approximate point
+    site_history  strictly before the pre-alert: the calls at that address or site (the address key, as History here;
+                  the airport: its AIRPORT events), newest first, with their comments, disposition, units and times;
+                  the earlier pre-alerts there; the address notes (premise notes the reader may see). Rule hits a
+                  non-admin sees: the rules the event fired on, or ones that map or push now
     now           open calls near it and the units on them; for the airport, the aircraft as recorded with the alert
                   (only those it names: the traffic around it is not kept)
     outcome       accepted / dismissed / expired / ended, by whom and when; the event it made or is near; the verdicts
@@ -45,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from sizeup import sourcekeys
 from sizeup.cad import addrkey
 from sizeup.cad.store import CadError
 
@@ -53,7 +57,7 @@ KINDS = ("airport", "intel")
 OPEN = ("queued", "pending", "active")
 # before / after the trigger, each side, per source (airport_alerts' source, or "intel"); a caller may pass its own
 WINDOW_S = {"atc": 300.0, "radio": 300.0, "adsb": 600.0, "intel": 600.0}
-CAP = {"trigger": 12, "before_after": 60, "site_calls": 10, "comments": 5, "site_prealerts": 10, "notes": 10,
+CAP = {"trigger": 12, "before": 30, "after": 30, "site_calls": 10, "comments": 5, "site_prealerts": 10, "notes": 10,
        "preplan": 12, "cameras": 3, "now_calls": 10, "feedback": 20, "related_channels": 6}
 SITE_YEARS = 5                  # site history goes back this far at most
 NOW_NEAR_M = 1500.0             # "now": open calls this close to the point
@@ -97,17 +101,19 @@ def _incident(cad, iid) -> dict | None:
 # -- transmissions ----------------------------------------------------------------------------------------------------
 
 TX_KEYS = ("id", "start", "end", "channel", "source", "system", "service", "talkgroup", "talker", "radio_id", "rig",
-           "dispatcher", "model", "status", "emergency", "atc_text", "fixed_text", "mhz")
+           "dispatcher", "model", "status", "emergency", "atc_text", "fixed_text", "fixes", "atc_snaps", "atc_weak",
+           "carrier_db", "mhz", "voice_at")
 
 
 def _tx(cad, r: dict) -> dict:
-    """A transmission as the bundle carries it: the transcript in full ("text": as shown; "heard": as transcribed when
-    that differs), whether its audio is still kept."""
-    out = {k: r.get(k) for k in TX_KEYS if r.get(k) not in (None, "")}
-    shown = r.get("atc_text") or r.get("fixed_text") or r.get("text") or ""
-    out["text"] = shown
-    if r.get("text") and r.get("text") != shown:
-        out["heard"] = r["text"]
+    """A transmission as the bundle carries it: the transcript in full ("text": as transcribed, so the row's "As
+    transcribed" hover has it; "shown": the written form when that differs: ATC's, the status words put back), whether
+    its audio is still kept."""
+    out = {k: r.get(k) for k in TX_KEYS if r.get(k) not in (None, "", [])}
+    out["text"] = r.get("text") or ""
+    shown = r.get("atc_text") or r.get("fixed_text") or out["text"]
+    if shown != out["text"]:
+        out["shown"] = shown
     out["transcript_kept"] = True
     out["has_audio"] = bool(cad.has_clip(r["id"]))
     return out
@@ -128,8 +134,19 @@ def _by_ids(cad, ids: list[str]) -> dict[str, dict]:
     return {r["id"]: r for r in rows}
 
 
+def _fetch_asc(cad, where: list, args: list, limit: int) -> list[dict]:
+    """comms._fetch, oldest first: the same gate (another system's rows only for a reader who may see them)."""
+    if not cad.comms._sees_context():
+        where = list(where) + [f"+t.system IN {sourcekeys.OURS_SQL}"]
+    rows = cad.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t WHERE " + " AND ".join(f"({w})" for w in where)
+                       + " ORDER BY t.start ASC LIMIT ?", (*args, limit))
+    cad.comms._decorate(rows)
+    return rows
+
+
 def _window(cad, found: list[dict], window_s: float, evidence: set[str]) -> dict:
-    """The same and related channels (the same system and talkgroup group) around the trigger, oldest first."""
+    """The same and related channels (the same system and talkgroup group) around the trigger, oldest first: up to
+    CAP["before"] before the first evidence (the nearest ones) and CAP["after"] from it on (the evidence among them)."""
     if not found:
         return {"window_s": window_s, "channels": [], "items": [], "empty": "no transmission to look around"}
     lo = min(r["start"] for r in found) - window_s
@@ -145,16 +162,21 @@ def _window(cad, found: list[dict], window_s: float, evidence: set[str]) -> dict
         args += [system, group]
     if not ors:
         return {"window_s": window_s, "channels": [], "items": [], "empty": "no channel to look on"}
-    rows = _rows(cad, ["t.start BETWEEN ? AND ?", " OR ".join(ors)], [lo, hi, *args], CAP["before_after"])
+    first = min(r["start"] for r in found)
+    before = _rows(cad, ["t.start >= ? AND t.start < ?", " OR ".join(ors)], [lo, first, *args], CAP["before"])
+    after = _fetch_asc(cad, ["t.start >= ? AND t.start <= ?", " OR ".join(ors)], [first, hi, *args],
+                       CAP["after"] + len(evidence))
+    rows = list(reversed(before)) + after
     items = []
-    for r in reversed(rows):
+    for r in rows:
         t = _tx(cad, r)
         t["evidence"] = r["id"] in evidence
         t["related"] = r.get("channel") not in chans
         items.append(t)
     related = list(dict.fromkeys(r["channel"] for r in rows if r.get("channel") not in chans))
     return {"window_s": window_s, "from": lo, "to": hi, "channels": chans, "related_channels": related,
-            "capped": len(rows) >= CAP["before_after"], "items": items,
+            "capped": {"before": len(before) >= CAP["before"], "after": len(after) >= CAP["after"] + len(evidence)},
+            "items": items,
             "empty": "" if items else f"nothing else heard within {window_s / 60:g} min"}
 
 
@@ -193,8 +215,9 @@ def _nearby(cad, key: dict, lat, lon, may: str) -> dict:
     return out
 
 
-def _site_calls(cad, key: dict, lat, lon, airport: bool, place_name: str, now: float) -> dict:
-    since = now - SITE_YEARS * 365 * 86400
+def _site_calls(cad, key: dict, lat, lon, airport: bool, place_name: str, at: float) -> dict:
+    """The calls at the site strictly before the pre-alert (at), at most SITE_YEARS back, newest first."""
+    since = at - SITE_YEARS * 365 * 86400
     rows: list[dict] = []
     basis = []
     if key.get("bldg_key") or lat is not None:
@@ -206,18 +229,19 @@ def _site_calls(cad, key: dict, lat, lon, airport: bool, place_name: str, now: f
     if airport:
         seen = {r["id"] for r in rows}
         rows += [r for r in cad.store.q("SELECT id, number, created_at, closed_at, type, subtype, disposition, status, address, "
-                                        "addr_label, lat, lon FROM incidents WHERE type = 'AIRPORT' AND number IS NOT NULL "
-                                        "AND created_at >= ? ORDER BY created_at DESC LIMIT ?", (since, CAP["site_calls"]))
+                                        "addr_label, lat, lon FROM incidents WHERE created_at >= ? AND created_at < ? AND type = "
+                                        "'AIRPORT' AND number IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+                                        (since, at, CAP["site_calls"]))
                  if r["id"] not in seen]
         basis.append("airport events")
     if place_name:
         seen = {r["id"] for r in rows}
         rows += [r for r in cad.store.q("SELECT id, number, created_at, closed_at, type, subtype, disposition, status, address, "
-                                        "addr_label, lat, lon FROM incidents WHERE place = ? COLLATE NOCASE AND number IS NOT "
-                                        "NULL AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
-                                        (place_name, since, CAP["site_calls"])) if r["id"] not in seen]
+                                        "addr_label, lat, lon FROM incidents WHERE created_at >= ? AND created_at < ? AND place = ? "
+                                        "COLLATE NOCASE AND number IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+                                        (since, at, place_name, CAP["site_calls"])) if r["id"] not in seen]
         basis.append("common place")
-    rows = sorted((r for r in rows if r["created_at"] >= since), key=lambda r: (-r["created_at"], -r["id"]))
+    rows = sorted((r for r in rows if since <= r["created_at"] < at), key=lambda r: (-r["created_at"], -r["id"]))
     total = len(rows)
     rows = rows[:CAP["site_calls"]]
     ids = [r["id"] for r in rows]
@@ -311,7 +335,9 @@ def _airport(cad, pid: int, admin: bool, may: str, now: float, windows: dict) ->
     loc = d.get("location") or {}
     placed = loc.get("lat") is not None and loc.get("lon") is not None
     lat, lon = (float(loc["lat"]), float(loc["lon"])) if placed else (None, None)
-    key = _site(cad, "", lat, lon) if placed else {}
+    # an ATC point is a guess from the words (hundreds of metres to a mile or more): never a building. Site history is
+    # the airport's own events; no address key, notes or pre-plan points from the guess (intel's exact-place gate)
+    key: dict = {}
     site_lat, site_lon = lat, lon
     pts = [x for x in d.get("aircraft") or [] if x.get("lat") is not None]
     if not placed and pts:                       # no point from the words: the named aircraft's fix, for "now" only
@@ -331,17 +357,18 @@ def _airport(cad, pid: int, admin: bool, may: str, now: float, windows: dict) ->
         "before_after": _window(cad, list(found.values()), window_s, evidence),
         "place": {"point": ({"lat": lat, "lon": lon, "radius_m": loc.get("radius_m"), "approx": True} if placed else None),
                   "label": loc.get("basis") or "", "basis": loc.get("basis") or "", "phrases": d.get("phrases") or [],
-                  "alts": [], "key": key, "nearby": _nearby(cad, key, lat, lon, may) if placed else {},
+                  "alts": [], "key": key, "nearby": {},
+                  "nearby_empty": "an approximate point: nothing looked up near it",
                   "empty": "" if placed else ("not placed: " + (loc.get("basis") or "no location words"))},
         "site_history": {
             "site": "HPN airport", "key": key,
-            "calls": _site_calls(cad, key, lat, lon, True, "", now),
+            "calls": _site_calls(cad, key, None, None, True, "", a["at"]),
             "prealerts": _empty([{k: r.get(k) for k in ("id", "at", "title", "status", "source_name", "level")}
-                                 for r in cad.airport_alerts._rows("a.id != ? AND a.at >= ?",
-                                                                   (a["id"], now - SITE_YEARS * 365 * 86400),
+                                 for r in cad.airport_alerts._rows("a.at < ? AND a.at >= ? AND a.id != ?",
+                                                                   (a["at"], a["at"] - SITE_YEARS * 365 * 86400, a["id"]),
                                                                    CAP["site_prealerts"])],
                                 "no earlier airport pre-alerts kept (90 days)"),
-            "notes": _notes(cad, key, lat, lon, may) if placed else _empty([], "no point to match notes on"),
+            "notes": _empty([], "an approximate point: no address to match notes on"),
         },
         "now": {**_now(cad, site_lat, site_lon, True, now),
                 "aircraft": {"items": d.get("aircraft") or [], "as_recorded": True,
@@ -375,6 +402,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
     if not admin and e["mode"] not in ("map", "push"):          # shadow and log: rules being tuned, the admins' only
         raise NotFound(f"no radio pre-alert {pid}")
     raw = rows[0]
+    fired = {str(r[0]) for r in e["rules"] or []}
     ids = list(raw["traffic_ids"])[-CAP["trigger"]:]
     found = _by_ids(cad, ids)
     hits: dict[str, list[dict]] = {}
@@ -383,12 +411,20 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         hits.setdefault(h["traffic_id"], []).append({"id": h["rule_id"], "weight": h["weight"]})
     pack = cad.intel.pack(e["pack"])
     by_rule = {r.id: r for r in pack.rules} if pack else {}
+
+    def shown_rule(rid: str) -> bool:
+        """A hit a non-admin may see: a rule the event fired on, or one that maps or pushes now (never a shadow,
+        log or below-threshold rule being tuned, nor an admin's own local.* one)."""
+        if admin or rid in fired:
+            return True
+        r = by_rule.get(rid)
+        return r is not None and not rid.startswith("local.") and r.enabled and r.mode in ("map", "push")
     trigger = []
     for tid in ids:
         r = found.get(tid)
         t = _tx(cad, r) if r else {"id": tid, "transcript_kept": False, "has_audio": bool(cad.has_clip(tid)), "text": "",
                                    "kept": "gone from the radio log (or another system's, not this reader's)"}
-        t["rules"] = sorted(hits.get(tid, []), key=lambda h: -h["weight"])
+        t["rules"] = sorted((h for h in hits.get(tid, []) if shown_rule(h["id"])), key=lambda h: -h["weight"])
         if admin and r is not None:
             t["matched"] = list(dict.fromkeys(p for h in t["rules"] if h["id"] in by_rule
                                               for p in _matched_phrases(by_rule[h["id"]], r.get("text") or "")))
@@ -399,20 +435,23 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         why = "no transmissions"
     lat, lon = e["lat"], e["lon"]
     placed = lat is not None and lon is not None and e["precision"] != "none"
-    exact = placed and e["precision"] in ("address", "intersection", "block", "landmark")
+    # a site: a place the words pin down (and agree on); else no address key, notes, pre-plan points or earlier calls
+    exact = placed and e["precision"] in ("address", "intersection", "block", "landmark") and bool(e["confirmed"])
     key = _site(cad, e["place"], lat, lon) if exact else {}
-    prior = cad.store.q("SELECT id, first_at, category, label_full, status, level, lat, lon FROM intel_events WHERE id != ? "
-                        "AND first_at >= ? AND (label_full = ? COLLATE NOCASE OR (lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)) "
-                        "ORDER BY first_at DESC LIMIT ?",
-                        (e["id"], now - SITE_YEARS * 365 * 86400, e["place"] or "\x00",
-                         *(addrkey.bbox(lat, lon) if exact else (1, 0, 1, 0)), CAP["site_prealerts"] * 3)) if exact else []
+    # the earlier ones at the same place, strictly before this one (intel_events has no index on first_at or the place:
+    # a scan of its 90 days, bounded by the LIMIT after the filter)
+    modes = "" if admin else " AND mode IN ('map', 'push')"
+    prior = cad.store.q("SELECT id, first_at, category, label_full, status, level, lat, lon, mode FROM intel_events WHERE "
+                        "first_at < ? AND first_at >= ? AND id != ?" + modes + " AND (label_full = ? COLLATE NOCASE OR "
+                        "(lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)) ORDER BY first_at DESC LIMIT ?",
+                        (e["first_at"], e["first_at"] - SITE_YEARS * 365 * 86400, e["id"], e["place"] or "\x00",
+                         *addrkey.bbox(lat, lon), CAP["site_prealerts"] * 3)) if exact else []
     prior = [p for p in prior if (e["place"] and (p["label_full"] or "").lower() == e["place"].lower())
              or (p["lat"] is not None and addrkey.meters(lat, lon, p["lat"], p["lon"]) <= addrkey.GROUP_M)]
-    if not admin:
-        prior = [p for p in prior if cad.store.one("SELECT mode FROM intel_events WHERE id = ?", (p["id"],))["mode"]
-                 in ("map", "push")]
     feedback = cad.store.q("SELECT verdict, operator, at, corrected_category FROM intel_feedback WHERE event_id = ? "
-                           "ORDER BY at DESC LIMIT ?", (e["id"], CAP["feedback"]))
+                           "ORDER BY at DESC, id DESC LIMIT ?", (e["id"], CAP["feedback"]))
+    votes = [dict(f) if admin else {k: f[k] for k in ("verdict", "at", "corrected_category")} for f in feedback]   # who: admins
+    now_hash = cad.intel.ruleset_hash() if hasattr(cad.intel, "ruleset_hash") else ""
     status_by = e.get("dismissed_by") or ""
     out = {
         "summary": {"title": " · ".join(x for x in (e["pack_label"], e["label"], e["town"]) if x), "detail": e["note"],
@@ -427,6 +466,9 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                 "score": {"what": e["what"], "where": e["where"], "level": e["level"], "precision": e["precision"],
                           "confirmed": e["confirmed"]},
                 "ruleset_hash": raw.get("ruleset_hash") or "", "phrases_hidden": not admin,
+                # the phrases are found again with the rules as they are now: the event may have fired under others
+                "matched_from": "current rules",
+                "rules_changed": bool(raw.get("ruleset_hash")) and raw.get("ruleset_hash") != now_hash,
                 "empty": "" if e["rules"] else "no rules recorded"},
         "trigger": _empty(trigger, why),
         "before_after": _window(cad, list(found.values()), float(windows.get("intel", 600.0)), set(ids)),
@@ -437,8 +479,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                   "empty": "" if placed else "location not heard"},
         "site_history": {
             "site": e["place"] if exact else "", "key": key,
-            "calls": (_site_calls(cad, key, lat, lon, False, e["place"] if e["precision"] == "landmark" else "", now)
-                      if exact else _empty([], f"place too coarse ({e['precision']}) for a site")),
+            "calls": (_site_calls(cad, key, lat, lon, False, e["place"] if e["precision"] == "landmark" else "", e["first_at"])
+                      if exact else _empty([], f"place too coarse or unconfirmed ({e['precision']}) for a site")),
             "prealerts": _empty([dict(p) for p in prior[:CAP["site_prealerts"]]],
                                 "no earlier radio pre-alerts there (kept 90 days)" if exact else "no site"),
             "notes": _notes(cad, key, lat, lon, may) if exact else _empty([], "no site"),
@@ -448,7 +490,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         "outcome": {"status": e["status"], "at": raw["updated_at"] if e["status"] != "open" else None, "by": status_by,
                     "note": e["note"], "acknowledged": None, "incident": _incident(cad, raw.get("incident_id")),
                     "near_incident": _incident(cad, e.get("near_incident")),
-                    "feedback": [dict(f) for f in feedback], "pushed": e["pushed_at"] is not None,
+                    "feedback": votes, "pushed": e["pushed_at"] is not None,
                     "pushed_at": e["pushed_at"], "suppressed": e["suppressed"]},
     }
     rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0]
@@ -461,6 +503,9 @@ def build(cad, kind: str, pid: int, *, admin: bool = False, may: str = "viewer",
     standing for address notes and pre-plan points (premise.py / preplan.py visibility)."""
     if kind not in KINDS:
         raise NotFound(f"kind: one of {', '.join(KINDS)}")
+    if kind == "intel" and not sourcekeys.may_see_context(cad.comms.context_broadcast):
+        # fails closed for every caller (the push, inference): another system's traffic only for a reader who may see it
+        raise NotFound(f"no radio pre-alert {pid}")
     now = cad.clock() if now is None else float(now)
     w = {**WINDOW_S, **(windows or {})}
     body, rev = (_airport if kind == "airport" else _intel)(cad, int(pid), admin, may, now, w)
