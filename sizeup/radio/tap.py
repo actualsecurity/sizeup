@@ -239,6 +239,8 @@ class LiveTap:
             c.ids, c.done = list(found), True
             if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
                 c.alarm = self._raised(c) or self.on_emergency(label, c.since, list(found)) or "raised"
+            if c.looked and self.log is not None:   # (how often a burst began before the pre-roll: #694)
+                self.log(f"{label}: radio ID decoded from before the squelch opened (look-back)")
             if c.shown:
                 self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
 
