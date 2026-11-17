@@ -1,0 +1,9 @@
+{"do": "scenario", "t0": "night", "why": "NY Approach's schedule at its boundaries (07:00 to 126.4, 23:00 to 120.8): a hand-off to 120.8 one second before and at 07:00, and to 120.8 one second before and at 23:00 (the Where line of each aircraft's pre-alert)."}
+{"do": "air", "t": 14390, "id": "tx-14390", "ch": "HPN Tower", "dur": 4, "text": "November one zero one alfa alfa, going around, we have a flap failure, we have to run a checklist"}
+{"do": "air", "t": 14391, "id": "tx-14391", "ch": "HPN Tower", "dur": 4, "text": "November two zero two bravo bravo, going around, we have a flap failure, we have to run a checklist"}
+{"do": "air", "t": 14399, "id": "ho-0659", "ch": "HPN Tower", "dur": 4, "text": "November one zero one alfa alfa, contact New York approach one two zero point eight"}
+{"do": "air", "t": 14400, "id": "ho-0700", "ch": "HPN Tower", "dur": 4, "text": "November two zero two bravo bravo, contact New York approach one two zero point eight"}
+{"do": "air", "t": 71990, "id": "tx-71990", "ch": "HPN Tower", "dur": 4, "text": "November three zero three charlie charlie, going around, we have a flap failure, we have to run a checklist"}
+{"do": "air", "t": 71991, "id": "tx-71991", "ch": "HPN Tower", "dur": 4, "text": "November four zero four delta delta, going around, we have a flap failure, we have to run a checklist"}
+{"do": "air", "t": 71999, "id": "ho-2259", "ch": "HPN Tower", "dur": 4, "text": "November three zero three charlie charlie, contact New York approach one two zero point eight"}
+{"do": "air", "t": 72000, "id": "ho-2300", "ch": "HPN Tower", "dur": 4, "text": "November four zero four delta delta, contact New York approach one two zero point eight"}

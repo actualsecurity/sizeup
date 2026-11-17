@@ -1,0 +1,5 @@
+{"do": "scenario", "t0": "day", "why": "The same subject (acft:N123AB, heard, no aircraft picture) on another channel: added to the open pre-alert up to dedupe_s (300 s, inclusive) after its last addition, a new one 301 s after; additions never push and name it only when they rank higher or are more confident."}
+{"do": "air", "t": 5, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "Westchester tower, November one two three alfa bravo, we hit a couple of birds on departure"}
+{"do": "air", "t": 200, "id": "app-1", "ch": "NY App 126.4/120.8", "dur": 4, "text": "New York approach, November one two three alfa bravo, we just got lasered, green laser from the ground"}
+{"do": "air", "t": 500, "id": "app-2", "ch": "NY App 126.4/120.8", "dur": 4, "text": "November one two three alfa bravo, that laser again, green laser off the left side"}
+{"do": "air", "t": 801, "id": "app-3", "ch": "NY App 126.4/120.8", "dur": 4, "text": "November one two three alfa bravo, lasered again, green laser from the ground"}

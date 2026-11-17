@@ -1,0 +1,7 @@
+{"do": "scenario", "t0": "day", "why": "An alert level's pre-alert expires like any other while no incident of it is open (Alert 1, a standby: kept at 1800 s, expired at 1801 s), but never while its incident is open (#369: Alert 2's queued incident)."}
+{"do": "radio", "t": 0, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, runway 16"}
+{"do": "read", "t": 1800}
+{"do": "read", "t": 1801}
+{"do": "radio", "t": 2000, "id": "fire-2", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34"}
+{"do": "read", "t": 3801}
+{"do": "read", "t": 9000}

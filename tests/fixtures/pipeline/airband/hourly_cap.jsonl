@@ -1,0 +1,20 @@
+{"do": "scenario", "t0": "day", "why": "At most max_per_hour (8) new ATC pre-alerts an hour (counted by when each was raised, whatever its status): the 9th is added to the latest open one (logged), and with none open it is dropped (logged); once the first falls out of the hour, a new one again."}
+{"do": "air", "t": 0, "id": "cap-1", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November one zero one alfa alfa"}
+{"do": "air", "t": 150, "id": "cap-2", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November two zero two bravo bravo"}
+{"do": "air", "t": 300, "id": "cap-3", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November three zero three charlie charlie"}
+{"do": "air", "t": 450, "id": "cap-4", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November four zero four delta delta"}
+{"do": "air", "t": 600, "id": "cap-5", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November five zero five echo echo"}
+{"do": "air", "t": 750, "id": "cap-6", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November six zero six foxtrot foxtrot"}
+{"do": "air", "t": 900, "id": "cap-7", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November seven zero seven golf golf"}
+{"do": "air", "t": 1050, "id": "cap-8", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November eight zero eight hotel hotel"}
+{"do": "air", "t": 1200, "id": "cap-9", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November niner zero niner india india"}
+{"do": "dismiss", "t": 1250, "alert": "A1", "operator": "Disp One"}
+{"do": "dismiss", "t": 1251, "alert": "A2", "operator": "Disp One"}
+{"do": "dismiss", "t": 1252, "alert": "A3", "operator": "Disp One"}
+{"do": "dismiss", "t": 1253, "alert": "A4", "operator": "Disp One"}
+{"do": "dismiss", "t": 1254, "alert": "A5", "operator": "Disp One"}
+{"do": "dismiss", "t": 1255, "alert": "A6", "operator": "Disp One"}
+{"do": "dismiss", "t": 1256, "alert": "A7", "operator": "Disp One"}
+{"do": "dismiss", "t": 1257, "alert": "A8", "operator": "Disp One"}
+{"do": "air", "t": 1350, "id": "cap-10", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November one one one juliett juliett"}
+{"do": "air", "t": 3601, "id": "cap-11", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November one two one kilo kilo"}

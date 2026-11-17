@@ -1,0 +1,121 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "radio",
+    "t": 0,
+    "id": "ops-1"
+   },
+   "decisions": [
+    {
+     "watch": "60 Control",
+     "id": "ops-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 30,
+    "id": "fire-1"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 2 · King Air · RWY 16",
+      "confidence": 1.0,
+      "rank": 6,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-1",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN Alert 2 · King Air · RWY 16 (1.00)",
+    "airport_watch: airport watch: HPN Alert 2 · King Air · RWY 16 (pre-alert #A1)",
+    "airport_alerts: airport pre-alert: 1 on event I1",
+    "airport_watch: airport watch: HPN Alert 2 · King Air · RWY 16: event I1 queued"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 150,
+    "id": "fire-2"
+   },
+   "decisions": [
+    {
+     "add_to": "A1",
+     "alert": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 3 · King Air · smoke · RWY 16",
+      "confidence": 1.0,
+      "rank": 7,
+      "push": true,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-2",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: HPN Alert 3 · King Air · smoke · RWY 16 (pre-alert #A1)"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 400,
+    "id": "fire-3"
+   },
+   "decisions": [
+    {
+     "add_to": "A1",
+     "alert": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 1 · standby · King Air · smoke · RWY 16",
+      "confidence": 1.0,
+      "rank": 5,
+      "push": true,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-3",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: HPN Alert 1 · standby · King Air · smoke · RWY 16 (pre-alert #A1)"
+   ]
+  }
+ ]
+}

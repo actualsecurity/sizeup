@@ -1,0 +1,249 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 1000,
+    "id": "old-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-1",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N123AB, engine failure",
+     "hits": null,
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "old-1",
+     "record": {
+      "role": "unknown",
+      "talker": {
+       "callsign": "",
+       "status": ""
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1010,
+    "id": "old-2"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-2",
+     "ch": "HPN Tower",
+     "fed": "We just got lasered on a two mile final, green laser from the ground",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.55,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "laser",
+      "subject": "laser",
+      "group": "HPN Tower",
+      "title": "HPN ATC: laser strike (laser strike)",
+      "confidence": 0.55,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "old-2",
+     "record": null
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-2",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: laser strike (laser strike) (0.55)"
+   ]
+  },
+  {
+   "step": {
+    "do": "retext",
+    "t": 1020,
+    "id": "old-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-1",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N123AB, engine fire",
+     "hits": null,
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "old-1",
+     "record": {
+      "role": "unknown",
+      "talker": {
+       "callsign": "",
+       "status": ""
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1200,
+    "id": "late-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "late-1",
+     "ch": "HPN Tower",
+     "fed": "N456CD is going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "late-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N456CD",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N456CD",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N456CD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "late-1",
+     "row": "A2"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: go-around · flaps, checklist · N456CD (0.75)",
+    "airport_watch: airport watch: N456CD: goaround -> pre-alert #A2 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1500,
+    "id": "late-2"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "late-2",
+     "ch": "HPN Tower",
+     "fed": "N789EF is going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "late-2",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N789EF",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N789EF",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N789EF",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "late-2",
+     "row": null
+    }
+   ]
+  }
+ ]
+}
