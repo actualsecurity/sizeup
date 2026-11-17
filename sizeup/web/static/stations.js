@@ -5,6 +5,7 @@
 // (audited as confirmed). The shared token's former ids ("aliases") are still taken from it. add and rotate
 // answer the new token and its status token, shown here ONCE (kept in this page's memory until Done, never stored) with
 // a copy button. Its own card and poll, so typing is never wiped by another panel's render.
+"use strict";
 const StationsCard = (() => {
   const POLL_MS = 15000;
   const LIVE_S = 30;                       // used this recently: "now"

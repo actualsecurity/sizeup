@@ -252,3 +252,4 @@ stt-corrections*.jsonl
 
 # a local station config beside config.toml (docs/development.md)
 /config.station.toml
+sizeup/web/static/bundle/

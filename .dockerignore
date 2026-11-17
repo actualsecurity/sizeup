@@ -26,3 +26,4 @@ deploy/hub/*.sqlite*
 Dockerfile
 .dockerignore
 .DS_Store
+sizeup/web/static/bundle/
