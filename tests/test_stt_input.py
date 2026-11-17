@@ -432,8 +432,10 @@ def test_stt_inputs_wait_while_any_event_waits_and_go_gzipped_after(tmp_path):
         assert wait(lambda: stt_rows(st, t.id), 10)
         time.sleep(1.0)
         assert hub.stt_posts == [] and st.link.outbox.pending()[0] >= 1     # the event can't go: neither may its blob
+        st.link.adopt("st-renamed")                     # the hub renamed it (#660): its STT posts say the new id too
         hub.down = False
         assert wait(lambda: hub.stt_posts and not st.link.outbox.stt_pending()[0], 15)
+        assert hub.stt_posts[0][0]["station"] == "st-renamed"
         assert st.link.outbox.pending()[0] == 0
         body, gz = hub.stt_posts[0]
         assert gz and body["items"][0]["id"] == t.id and body["items"][0]["stt"]["format"] == "flac"
