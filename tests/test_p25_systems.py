@@ -58,6 +58,41 @@ def test_mrrs_is_defined_as_listed_and_runs_on_two_dongle_jobs():
     assert MRRS.capture_dir.endswith("captures/p25-mrrs")           # never the county's capture directory
 
 
+MRRS_VOICE_HEARD_MHZ = (771.13, 771.23, 771.778, 772.03, 772.48, 772.97, 773.22)     # measured on air, not listed
+ROLLOFF_HZ = 150_000            # an RTL-SDR's response falls off near the edges of its span: keep channels this far in
+DC_HZ = 25_000                  # and this far from its center (the DC spike)
+
+
+def tr_window(center: float, rate: float) -> tuple[float, float]:
+    """The span trunk-recorder takes a channel in on (its Source::set_min_max): center ± (rate/2 − if1/2), if1 being
+    the rate over the decimation it picks for that rate."""
+    decim = 24000
+    for if_freq in (24000, 25000, 32000):
+        if rate % if_freq:
+            continue
+        q = int(rate // if_freq)
+        if q & 1:
+            continue
+        decim = q // 4 if q >= 40 and q % 4 == 0 else q // 2
+    half = rate / 2 - (rate / decim) / 2
+    return center - half, center + half
+
+
+def test_mrrs_sources_take_in_every_frequency_with_room_from_the_dongle_edges_and_center():
+    assert tr_window(770_000_000, 2_400_000) == (768_850_000, 771_150_000)          # ±1.15 MHz at 2.4 MS/s
+    conf = json.loads((TR / "systems" / "mrrs" / "config.json").read_text())
+    srcs = [(float(s["center"]), float(s["rate"])) for s in conf["sources"]]
+    for f in [*MRRS.frequencies, *(round(m * 1e6) for m in MRRS_VOICE_HEARD_MHZ)]:
+        # trunk-recorder records a channel on the FIRST source whose window takes it in
+        picked = next(((c, r) for c, r in srcs if tr_window(c, r)[0] <= f <= tr_window(c, r)[1]), None)
+        assert picked, f"{f / 1e6:.5f} MHz: no source takes it in"
+        c, r = picked
+        assert min(f - (c - r / 2), (c + r / 2) - f) >= ROLLOFF_HZ, f"{f / 1e6:.5f} MHz: near the edge of {c / 1e6}"
+        assert abs(f - c) > DC_HZ, f"{f / 1e6:.5f} MHz: on the DC spike of {c / 1e6}"
+    # either dongle alone still runs the control channels on its side (sizeup's covers(), for the runtime config)
+    assert len(MRRS.covered([0])) + len(MRRS.covered([1])) == len(MRRS.frequencies)
+
+
 def test_talkgroups_file_gives_tier_service_and_department():
     t = MRRS.talkgroups
     assert (t[PD]["tier"], t[PD]["service"], t[PD]["group"]) == ("alert", "police", "Police")
@@ -212,7 +247,7 @@ def test_runtime_config_has_only_the_sources_with_a_dongle_and_the_channels_they
     assert argv == ["/x/trunk-recorder", "--config=config.runtime.json"]
     rt = json.loads((d / "config.runtime.json").read_text())
     assert "sizeup" not in rt and [s["device"] for s in rt["sources"]] == ["rtl=3"]
-    assert rt["sources"][0]["center"] == 773081250
+    assert rt["sources"][0]["center"] == 772721875
     assert rt["systems"][0]["control_channels"] == [772481250, 773031250, 773681250]
     assert rt["systems"][0]["unitScript"].endswith("unit-event.sh") and rt["systems"][0]["talkgroupsFile"] == "talkgroups.runtime.csv"
     head = (d / "talkgroups.runtime.csv").read_text().splitlines()
@@ -499,7 +534,7 @@ def test_dongles_are_given_to_a_system_in_settings_never_by_auto_assign(two):
     st = app.state()
     assert [r["label"] for r in st["radios"]][:3] == ["FG1", "Fire/EMS 15", "MRRS"]
     sysrow = st["p25_systems"][0]
-    assert [(j["job"], j["sdr"], j["mhz"]) for j in sysrow["jobs"]] == [("MRRS 770", "pd-b", 770.3125), ("MRRS 773", "fg", 773.08125)]
+    assert [(j["job"], j["sdr"], j["mhz"]) for j in sysrow["jobs"]] == [("MRRS 770", "pd-b", 770.52188), ("MRRS 773", "fg", 772.72187)]
     assert len(sysrow["covered"]) == 7 and sysrow["name"] == "mrrs" and sysrow["site"]["nac"] == "051"
     assert app.recorder.on() == "pd-a"                                           # the county's: as it was
     assert app.set_mode("Off", "fg") is None

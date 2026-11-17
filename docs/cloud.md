@@ -2474,18 +2474,25 @@ incident by a rule, never an incident source.
 | System | Metro-25 / MTA MRRS, P25 Phase II (TDMA), 700 MHz, system IDs 26D and 26E, WACN 91FE8 |
 | Site | Zone 3 Simulcast (southern Westchester), RFSS 81, site 81, NAC 051 |
 | Frequencies | 769.90625, 770.18125, 770.46875, 770.71875, 772.48125, 773.03125, 773.68125 MHz. Which are control channels is not confirmed (769.90625 was the last one reported): trunk-recorder tries the list |
-| Span | ~3.8 MHz: two 2.4 MHz RTL-SDRs (jobs `MRRS 770` and `MRRS 773`), or one wider SDR |
+| Span | ~3.8 MHz: two 2.4 MHz RTL-SDRs (jobs `MRRS 770` and `MRRS 773`, centers 770.521875 and 772.721875 MHz), or one wider SDR |
+| Voice heard | 771.13, 771.23, ~771.78, 772.03, 772.48, 772.97, 773.22 MHz (measured; not listed). Covered too, see below |
 
 All of it is data, in `deploy/trunk-recorder/systems/mrrs/`: `config.json` (trunk-recorder's config plus a `"sizeup"`
 block with the label, one job name per source and the site facts) and `talkgroups.csv`. Another system is another
 directory. Adding a talkgroup is one line.
 
 **Hardware**: two more RTL-SDRs and a 700 MHz antenna. The site is simulcast, so `modulation: qpsk` (CQPSK/LSM) as on
-the county system, and Phase II (TDMA). Port Chester is a known weak spot for this site (the nearest subsite is in
-Harrison, beside the railroad): a directional 700 MHz antenna aimed at the Harrison subsite is the fix being
-bought, and an LNA near the
-700 MHz cell bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first
-(#410).
+the county system, and Phase II (TDMA). Reception of this site is marginal at the station: a 700/800 MHz antenna on
+its own feed (no shared UHF splitting) put the control channel about +20 dB over the floor at gain 40 and decoded
+reliably; the shared antenna through splitters gave about +12 dB and did not decode. An LNA near the 700 MHz cell
+bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first (#410).
+
+**Tuning**: trunk-recorder records a channel on the first source (in `config.json` order) whose window takes it in,
+center ± (rate/2 − 50 kHz) at 2.4 MS/s. The two centers are chosen so every listed and heard frequency lands on a
+source at least 150 kHz in from that dongle's edge (the RTL-SDR roll-off) and over 25 kHz from its center (the DC
+spike); the one 100 kHz band where source 0 hands over (771.57–771.67 MHz) sits in the gap between 771.23 and 771.78.
+`tests/test_p25_systems.py` checks it. The job names keep their old "770" / "773" (claims and assignments on the
+station carry them).
 
 ### How it runs
 

@@ -121,8 +121,8 @@ numbers are of the rest.
 `"controlWarnRate": -1`, which MRRS's `config.json` sets; a build that ignores it logs only the bad ones). Then the
 rate can't be judged and the grade comes from the site and the grants: both seen = Good, one = Marginal, never None.
 
-The hint (hover the verdict) says what to try, e.g. "Control channel decodes 40% of the time: try a directional (yagi)
-antenna toward Harrison". The antenna advice and the watched talkgroups are the system's own
+The hint (hover the verdict) says what to try, e.g. "Control channel decodes 40% of the time: try a 700/800 MHz
+antenna on its own feed …". The antenna advice and the watched talkgroups are the system's own
 (`"sizeup"."reception"` in `deploy/trunk-recorder/systems/<name>/config.json`). A test of both sides takes its best
 side's verdict.
 
