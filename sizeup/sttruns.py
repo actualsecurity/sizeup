@@ -10,7 +10,8 @@ works as before; this is next to it, keyed by the same clip id.
                             start, end], ...] where the engine gives them), channel, class, clip_end, queued_at,
                             engine_start, done_at (the hub's clock), wait_s (queued -> the engine took it) and run_s
                             (the engine's own time; the station's whisper measures both itself), keyup (a cut
-                            transmission's {parent, prev, split} as the radio sends it, JSON; "" for a whole one). Rows older than KEEP_DAYS are pruned by the hub's
+                            transmission's {parent, prev, split} as the radio sends it, JSON; "" for a whole one), call_id
+                            and turn (a P25 call split per transmission: its call and 0-based turn). Rows older than KEEP_DAYS are pruned by the hub's
                             janitor, in small batches
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
                             the engines that wrote it (Settings > Station > Health). The pre-alert channels' target:
@@ -33,11 +34,12 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS stt_runs (
   worker TEXT NOT NULL DEFAULT '', prompt_v TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'text',
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', confidence REAL, words TEXT NOT NULL DEFAULT '',
   channel TEXT NOT NULL DEFAULT '', class TEXT NOT NULL DEFAULT '', clip_end REAL, queued_at REAL, engine_start REAL,
-  done_at REAL NOT NULL, wait_s REAL, run_s REAL, keyup TEXT NOT NULL DEFAULT '');
+  done_at REAL NOT NULL, wait_s REAL, run_s REAL, keyup TEXT NOT NULL DEFAULT '', call_id TEXT NOT NULL DEFAULT '',
+  turn INTEGER);
 CREATE INDEX IF NOT EXISTS stt_runs_clip ON stt_runs (clip_id);
 CREATE INDEX IF NOT EXISTS stt_runs_done ON stt_runs (done_at);"""
 COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "status", "confidence", "words",
-           "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup")
+           "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn")
 ENGINES = ("gpu-worker", "aws", "station-whisper")
 ROLES = ("text", "alt", "late", "rerun", "catchup")
 KEEP_DAYS = 90.0
@@ -92,14 +94,15 @@ class Runs:
             prompt_v: str = "", role: str = "text", confidence: float | None = None, words: list | None = None,
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
-            run_s: float | None = None, keyup: dict | None = None) -> bool:
+            run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None) -> bool:
         """One transcript. True when it was written."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], float(confidence) if isinstance(confidence, (int, float)) else None,
                json.dumps(words[:WORDS_MAX], separators=(",", ":")) if words else "", str(channel or "")[:60],
                str(cls or "")[:20], clip_end, queued_at, engine_start, self.clock() if done_at is None else done_at,
-               _sec(wait_s), _sec(run_s), _keyup(keyup))
+               _sec(wait_s), _sec(run_s), _keyup(keyup), str(call_id or "")[:128],
+               int(turn) if isinstance(turn, int) and not isinstance(turn, bool) else None)
         try:
             with self.store.tx() as db:
                 if not self._made:              # (statement by statement: executescript would commit)

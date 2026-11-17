@@ -117,6 +117,9 @@ def test_a_lease_that_runs_out_falls_back_and_the_late_answer_is_refused():
     job = p.claim("gpu-1", 0)
     lease_s = BUDGETS[URGENT][1] + sttpool.PER_AUDIO_S * 4.0
     assert job.public()["lease_s"] == lease_s and job.public()["audio"].endswith(f"/{job.lease}/audio")
+    assert job.public()["fast"] is True                       # a short lease: one greedy pass, no temperature fallback
+    p.submit(j.job("b", LOW))
+    assert p.claim("gpu-1", 0).public()["fast"] is False
     assert p.job_for("gpu-1", job.lease) is job and p.job_for("gpu-2", job.lease) is None    # its holder's only
     clock.t += lease_s
     assert p.tick() == 1 and p.drain() == 1 and "lease ran out" in j.fell["a"]
@@ -725,6 +728,10 @@ def test_runs_are_pruned_after_their_keep_and_a_failure_to_write_never_stops_a_t
     # a cut transmission's piece (the radio's key-up split): kept with its run, for grouping later
     assert runs.add("FG1-2", "gpu-worker", keyup={"parent": "FG1-1", "prev": "FG1-1", "split": "gap", "x": 1})
     assert runs.of("FG1-2")[0]["keyup"] == {"parent": "FG1-1", "prev": "FG1-1", "split": "gap"}
+    # a P25 call split per transmission: its call and turn
+    assert runs.add("9211-1794-call_4-t1", "gpu-worker", call_id="9211-1794-call_4", turn=1)
+    got = runs.of("9211-1794-call_4-t1")[0]
+    assert (got["call_id"], got["turn"]) == ("9211-1794-call_4", 1)
 
 
 # -- the baseline's gaps: the queue each minute, wait and run per transcript, AWS denied -------------------------------

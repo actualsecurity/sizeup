@@ -1546,7 +1546,8 @@ class HubApp(App):
                               channel=key, cls=sttpool.class_key(cls) if cls is not None else "", clip_end=clip_end,
                               queued_at=queued_at, engine_start=engine_start, done_at=now, wait_s=wait_s,
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
-                              keyup=getattr(item, "keyup", None))     # (a cut transmission's piece, the radio's split)
+                              keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
+                              call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None))
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping

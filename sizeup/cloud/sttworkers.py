@@ -21,7 +21,8 @@ token_revoked); 409 {error} for a lease that is gone.
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
     POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version} -> {ok, pool_on}
     POST /api/station/stt/claim                   {wait <= 25, state, model} -> {job: {lease, id, kind, channel, class,
-                                                  prompt, seconds, lease_s, cap_at, audio} | null}
+                                                  prompt, seconds, lease_s, cap_at, fast, audio} | null}; fast: one
+                                                  greedy pass (temperature_inc 0), the short-lease classes
     GET  /api/station/stt/jobs/<lease>/audio      audio/wav: 16 kHz mono 16-bit, padded, as whisper-server takes it
     POST /api/station/stt/jobs/<lease>/extend     {} -> {ok, lease_s, cap_at}
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,

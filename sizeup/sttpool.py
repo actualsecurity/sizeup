@@ -50,6 +50,9 @@ WINDOW_S = 7200.0         # done jobs kept for the numbers (Health), seconds
 STATES = ("online", "gaming", "paused")
 REASONS = ("unclaimed", "lease", "released", "no_worker", "error")   # why a job fell back
 CLASSES = tuple(BUDGETS)
+# the short-lease classes: one greedy pass (whisper-server's temperature_inc 0, as the station's WhisperClient fast=True),
+# so a hard clip is never decoded five more times past its lease
+FAST_CLASSES = tuple(c for c, (_w, _l, cap) in BUDGETS.items() if cap <= 10.0)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
 
@@ -91,7 +94,7 @@ class Job:
         return {"lease": self.lease, "id": self.id, "kind": self.kind, "channel": self.channel,
                 "class": class_key(self.cls), "prompt": self.prompt, "seconds": round(self.seconds, 2),
                 "lease_s": round(max(0.0, self.expires - (self.claimed_at or 0.0)), 1), "cap_at": self.cap_at,
-                "audio": f"/api/station/stt/jobs/{self.lease}/audio"}
+                "fast": self.cls in FAST_CLASSES, "audio": f"/api/station/stt/jobs/{self.lease}/audio"}
 
 
 @dataclass
