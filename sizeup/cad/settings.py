@@ -3119,6 +3119,13 @@ class Editor:
         self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
+        from sizeup.intel.admin import clean_value
+        intel = ov.get("intel") or {}
+        for k, v in list(intel.items()):  # as Settings > System > Intel takes it: a bad value refuses the whole file
+            try:                          # (policy.settings() would read it as the default without a word)
+                intel[k] = clean_value(k, v, intel)
+            except CadError as e:
+                raise CadError(f"overrides.intel.{k}: {str(e).split(': ', 1)[-1]}") from None
         if ADDR_SECTION in ov:            # sizeup/geo/localaddr.py: a point that can't be placed is skipped, in the notes
             ov[ADDR_SECTION], more = self._import_addresses(ov[ADDR_SECTION])
             self._import_notes = list(getattr(self, "_import_notes", None) or []) + more
@@ -3364,4 +3371,6 @@ class Editor:
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
+        if getattr(self.cad, "intel", None) is not None and any(c["store"] in INTEL_SECTIONS for c in changes):
+            self.cad.intel.reload()          # the intel switches (push, push_pii, the caps) live now, as after their own op
         return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}
