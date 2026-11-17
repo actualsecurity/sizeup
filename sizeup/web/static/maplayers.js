@@ -1107,9 +1107,10 @@ window.MapLayers = (() => {
     const d = viewer.dvr, el = viewer.el;
     if (!d) return;
     const mins = d.from && d.to ? Math.round((d.to - d.from) / 60) : 0;
-    el.rec.textContent = d.recording ? "● Rec" : mins ? "Rec off" : "No recording";
+    el.rec.textContent = d.recording ? "● Rec" : d.parked ? "Parked" : mins ? "Rec off" : "No recording";
     el.rec.classList.toggle("on", !!d.recording);
-    el.rec.title = (d.recording ? `Recording: ${(d.why || []).map((w) => WHY[w] || w).join(", ")}` : "Not recording now")
+    el.rec.title = (d.recording ? `Recording: ${(d.why || []).map((w) => WHY[w] || w).join(", ")}`
+      : d.parked ? `Not recording: ${d.parked.why} since ${fmtTime(d.parked.since)}, looked at again ${fmtTime(d.parked.next)}` : "Not recording now")
       + (mins ? `. ${mins} min kept (up to ${Math.round(d.window_s / 60)}), on the hub only` : "");
     el.range.disabled = !(d.from && d.to);
     if (d.from && d.to) {

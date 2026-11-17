@@ -24,7 +24,8 @@ The sink (no side effect happens in the engine itself):
 
     sink.hit(Hit)                 every hit: shadow, below threshold and suppressed-by-mode too
     sink.event(Event, change)     raised | updated | ended | expired
-    sink.push(Event, Decision)    the policy's verdict; Decision.message is the composed, scrubbed push when would_push
+    sink.push(Event, Decision)    the policy's verdict; Decision.message is the composed push when would_push (scrubbed
+                                  only with push_pii off)
     sink.clear(tid, keep)         optional: a re-transcription, the rules that no longer hit tid
     sink.digest(events)           optional: the events held over a rate cap, when a digest is due
 
@@ -39,7 +40,8 @@ How a row becomes an event, per pack whose scope it is in:
      (subject = pack:category:place), else a new one;
   4. WHERE: the window's words through locate() (only while not confirmed);
   5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
-     store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what. The rules'
+     store, never shown or pushed); policy.decide() says whether to push, push.compose() (+ scrub() with push_pii
+     off) what. The rules'
      rung is the highest mode M such that the rules at M or above ALONE (their weights, every cue whatever its mode,
      every damper) reach the threshold: a rule at a lower mode adds to WHAT but never lifts the event over its mode, so
      raising one weak rule to push never makes the strong ones beside it push (#535 review). With every rule of a
@@ -1076,7 +1078,8 @@ class IntelEngine:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
             msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful)
-            why = push_mod.scrub(msg, self._who(pack, ev))
+            # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
+            why = "" if self.policy.cfg.get("push_pii", True) else push_mod.scrub(msg, self._who(pack, ev))
             if why:
                 self.log(f"intel: push of event {ev.id} withheld by the scrub ({why})")
                 d = Decision(d.mode, False, "scrub", d.priority)

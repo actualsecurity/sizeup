@@ -268,7 +268,8 @@ pushed. It never creates an incident.
    (below).
 5. The policy decides whether to push: a mode ladder (off / shadow / log / map / push), a kill switch, quiet hours,
    rate caps and re-push limits (`policy.py`).
-6. The push is composed from an allow-list of fields and scrubbed; a failed scrub sends nothing (`push.py`). It carries
+6. The push is composed from an allow-list of fields; with `push_pii` off it is also scrubbed and a failed scrub sends
+   nothing (`push.py`; on by default: no scrub, access to the output is limited instead). It carries
    a **Listen** link and a ntfy "Listen" button (`listen.py`, `notify.py` `actions`).
 
 **Listen** (`listen.py`; on by default, needs `SIZEUP_AUDIO_BUCKET`): the event's transmissions plus the same source's
@@ -342,6 +343,13 @@ place it, but a county feed location naming it still gets its address. The impor
   street when its ends are at most 20 apart (`RANGE_SPAN`), else at its two ends. A name made by hand counts when it
   was pinned at an address. Only the place search's own answer and the location box get them, never a location typed
   and not picked (`PlaceIndex.places_at`),
+- on the maps: **Common places** in every map's Layers box (`static/common-places.js`, off by default, remembered like
+  the other layers). One point per spot from `GET /api/cad/places/map` (GeoJSON, `commonplaces.map_points`, cached
+  until the names change, ETag; read only, viewers too): a site once, at its primary; names at one address together
+  ("Example Burger +1"); hand-made names too; a name with no point never. A small dot from zoom 14, the names from 16
+  as a map symbol layer whose labels give way to each other (no DOM marks: ~1,000 points). A click on a dot or a name
+  shows each name there, its addresses (all of a site's) and its town; on the new call's map a click there is "what
+  is here", as anywhere. The state's `places_rev` moves with any change to the names, and the layer asks again,
 - by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Quillberry Marina", "the
   community hall in Sample Town"). A name of one word, or of common words only (`sizeup/geo/commonwords.py`), needs
   its town said beside it; another town said beside it is that town's; a house number said always wins, the name only
@@ -467,7 +475,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | Station link | A bearer token per station (`sz1.<id>.<secret>`, 256 random bits), plus an Access service token, which only Cloudflare's edge checks: the hub itself checks the bearer alone. The hub keeps only each token's SHA-256 (hub.sqlite `stations`, `cloud/stations.py`) and turns the bearer into the station id it proves before reading any body (`cloud/hub.py` `_principal`, constant-time). A payload naming another station id is refused. The older shared token (`SIZEUP_STATION_TOKEN`) still works as one station until an admin retires it. Admins add, rotate and revoke stations in Settings > Station > Stations (audited, the token shown once). With no token configured and no station added the hub refuses every station call. [How station authentication works](cloud.md#how-station-authentication-works). |
 | Adapter credentials | The incident-source adapter runs only on the station, and only the station can read its credentials: systemd credentials, never environment variables (`sizeup/procenv.py`). A credential kept in SSM is read by the station's own IAM user (`cloud/adapterssm.py`). The hub can write one, never read it: an admin may type a new adapter password into Settings > Station > Adapter, and the hub puts it into SSM as a new version (`cloud/adapterpass.py`, #465). The value is kept out of logs, the audit, answers and errors. The hub's roles are denied reading and decrypting that parameter by the department's setup scripts, which are outside this repo. A failing adapter reports only the exception type. |
 | Context and police rows | The hub's pages and API serve another system's rows, text, ids and audio only to a verified signed-in person (`sourcekeys.may_see_context`). The station's own page, all-in-one and a hub without Access serve none. Their words are never written to a log. The one way such audio leaves without a sign-in is an intel push's Listen link (next row). |
-| Pushes | An intel push carries the category, town, address or block, time and level. Never transcript words, a talker, a radio ID, a plate or a person's name. A scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL to the event's stitched audio, with no sign-in: whoever holds the link can play it until it expires; random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
+| Pushes | An intel push carries the category, town, address or block, time and level: no transcript words, talker or radio ID among its fields. Not scrubbed by default (`push_pii`, admin decision 2026-11-17: access is limited instead; ntfy topics are readable by anyone who knows the name); with it off, a scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL to the event's stitched audio, with no sign-in: whoever holds the link can play it until it expires; random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
 | Station logs | Read by a separate user with no network (`cloud/logread.py`), scrubbed on the station with its credential values, scrubbed again on the hub (`logscrub.py`, `cloud/logship.py`, `cloud/cwlogs.py`, [`station-logs.md`](station-logs.md)). |
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |

@@ -1,0 +1,721 @@
+"""Antenna groups (sizeup/radio/groups.py): dongles on one antenna feed locked to the jobs it carries, by priority.
+
+The station as it is cabled: a UHF feed (the county's P25 Fire/EMS 15, South 2 paging, FG1) on three dongles, a
+700/800 MHz feed on two for MRRS (the system as shipped, deploy/trunk-recorder/systems/mrrs: two sources, one job
+each), and dongles on no group (FG2 here). Fakes only, as tests/test_sdr_auto_assign.py: the USB list is a Python list,
+rtl_fm and trunk-recorder don't exist, claims live in a temp dir (conftest.py). Serials and names are made up."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+
+import pytest
+
+import sizeup.app as appmod
+import sizeup.radio.claims as claims
+from sizeup.config import ChannelCfg
+from sizeup.radio import groups as antenna
+from sizeup.radio import systems
+from sizeup.radio.recorder import TrunkRecorder
+from tests.test_app import cfg as app_cfg
+from tests.test_p25_systems import MRRS, system_dir
+
+P25 = "Fire/EMS 15"
+UHF = ["uhf-a", "uhf-b", "uhf-c"]
+M700 = ["m700-a", "m700-b"]
+DONGLES = [(0, "RTL2838UHIDIR", "uhf-a"), (1, "Blog V4", "uhf-b"), (2, "RTL2838UHIDIR", "uhf-c"),
+           (3, "RTL2838UHIDIR", "m700-a"), (4, "RTL2838UHIDIR", "m700-b"), (5, "RTL2838UHIDIR", "spare-1")]
+GROUPS = [{"name": "UHF", "sdrs": UHF, "jobs": [P25, "South 2", "FG1"]},
+          {"name": "700", "sdrs": M700, "jobs": ["MRRS 770", "MRRS 773"]}]
+
+
+# -- the plan alone ----------------------------------------------------------------------------------------------------
+
+G = antenna.Group("UHF", ("a", "b", "c"), (P25, "South 2", "FG1", "FG2"))
+OWN = {"a": P25, "b": "South 2", "c": "FG1"}
+FIRE = {P25, "South 2", "FG1", "FG2"}.__contains__
+
+
+def test_every_dongle_there_runs_the_admins_mapping_as_it_is():
+    assert antenna.plan(G, OWN, ["a", "b", "c"]) == (OWN, [])
+    # the mapping wins over the order while nothing is missing: FG1 picked above South 2's place stays
+    assert antenna.plan(G, {"a": "FG1", "b": P25, "c": "FG2"}, ["a", "b", "c"]) == (
+        {"a": "FG1", "b": P25, "c": "FG2"}, [])
+
+
+@pytest.mark.parametrize("gone, want, short", [
+    ("c", {"a": P25, "b": "South 2"}, ["FG1"]),             # the lowest gone: nothing moves
+    ("b", {"a": P25, "c": "South 2"}, ["FG1"]),             # South 2's dongle gone: FG1 gives its dongle up
+    ("a", {"b": "South 2", "c": P25}, ["FG1"]),             # the county's: FG1's dongle runs it
+])
+def test_one_dongle_gone_the_rest_run_the_highest_jobs(gone, want, short):
+    usable = [s for s in "abc" if s != gone]
+    assert antenna.plan(G, OWN, usable, fire=FIRE) == (want, short)
+
+
+def test_two_gone_one_left_runs_the_highest_and_a_spare_stands_in_first():
+    assert antenna.plan(G, OWN, ["c"]) == ({"c": P25}, ["South 2", "FG1"])
+    assert antenna.plan(G, OWN, []) == ({}, [P25, "South 2", "FG1"])
+    g4 = antenna.Group("UHF", ("a", "b", "c", "d"), G.jobs)
+    # d has no job of its own: it takes South 2 and FG1 keeps running
+    assert antenna.plan(g4, OWN, ["a", "c", "d"], spares=["d"]) == ({"a": P25, "c": "FG1", "d": "South 2"}, [])
+    # ... but not when it isn't a spare (a person switched it Off: handed to another app)
+    assert antenna.plan(g4, OWN, ["a", "c", "d"]) == ({"a": P25, "c": "South 2", "d": "Off"}, ["FG1"])
+
+
+def test_a_stand_in_already_running_the_job_keeps_it():
+    g4 = antenna.Group("UHF", ("a", "b", "c", "d", "e"), G.jobs)
+    got, _ = antenna.plan(g4, OWN, ["a", "c", "d", "e"], spares=["d", "e"], current={"e": "South 2"})
+    assert got["e"] == "South 2" and got["d"] == "Off"
+
+
+def test_a_fire_job_never_gives_its_dongle_to_a_job_that_isnt_one():
+    g = antenna.Group("mixed", ("a", "b"), ("MRRS 770", P25))
+    own = {"a": "MRRS 770", "b": P25}
+    assert antenna.plan(g, own, ["b"], fire=FIRE) == ({"b": P25}, ["MRRS 770"])
+    assert antenna.plan(g, own, ["a"], fire=FIRE) == ({"a": "MRRS 770"}, [P25])       # (nothing lower to take)
+
+
+def test_the_countys_dongle_is_taken_only_for_a_higher_job_of_its_own_group():
+    own = {"a": "South 2", "b": P25}
+    low = antenna.Group("UHF", ("a", "b"), (P25, "South 2"))
+    assert antenna.plan(low, own, ["b"], fire=FIRE) == ({"b": P25}, ["South 2"])       # the county's is higher
+    high = antenna.Group("UHF", ("a", "b"), ("South 2", P25))
+    assert antenna.plan(high, own, ["b"], fire=FIRE) == ({"b": "South 2"}, [P25])      # the admin put paging first
+
+
+def test_a_job_that_cant_run_on_what_it_would_have_is_left():
+    g = antenna.Group("700", ("a", "b"), ("MRRS 770", "MRRS 773"))
+    own = {"a": "MRRS 770", "b": "MRRS 773"}
+    never = lambda job, on: job != "MRRS 770"                    # noqa: E731 - as if 770 alone covered no control channel
+    assert antenna.plan(g, own, ["b"], runnable=never) == ({"b": "MRRS 773"}, ["MRRS 770"])
+
+
+def test_each_side_of_mrrs_alone_covers_control_channels_of_its_own():
+    # the shipped system: one dongle per side; either alone still decodes a site (reduced coverage)
+    assert MRRS.jobs == ("MRRS 770", "MRRS 773")
+    assert len(MRRS.covered([0])) == 4 and len(MRRS.covered([1])) == 3
+
+
+@pytest.mark.parametrize("raw, why", [
+    ({"name": "UHF"}, "a list"),
+    ([{"name": "", "sdrs": ["a"], "jobs": ["FG1"]}], "group name"),
+    ([{"name": "UHF", "sdrs": [], "jobs": ["FG1"]}], "1-16 dongles"),
+    ([{"name": "UHF", "sdrs": ["a"], "jobs": []}], "at least one job"),
+    ([{"name": "UHF", "sdrs": ["a"], "jobs": ["Off"]}], "at least one job"),
+    ([{"name": "UHF", "sdrs": ["a", "a"], "jobs": ["FG1"]}], "listed twice"),
+    ([{"name": "UHF", "sdrs": ["a"], "jobs": ["FG1"]}, {"name": "uhf", "sdrs": ["b"], "jobs": ["FG2"]}], "two groups"),
+    ([{"name": "A", "sdrs": ["a"], "jobs": ["FG1"]}, {"name": "B", "sdrs": ["a"], "jobs": ["FG2"]}], "one group each"),
+    ([{"name": "A", "sdrs": ["a"], "jobs": ["FG1"]}, {"name": "B", "sdrs": ["b"], "jobs": ["FG1"]}], "one group each"),
+])
+def test_parse_refuses_what_cant_be_a_group(raw, why):
+    got, err = antenna.parse(raw)
+    assert got == [] and why in err
+
+
+# -- the station ---------------------------------------------------------------------------------------------------------
+
+@pytest.fixture
+def rig(tmp_path, monkeypatch):
+    """(plugged list to edit, log lines, make(**cfg changes) -> App, not started). Every app is stopped."""
+    d = system_dir(tmp_path)
+    plugged: list[tuple[int, str, str]] = list(DONGLES)
+    logs: list[str] = []
+    apps: list = []
+    monkeypatch.setattr(appmod, "SWITCH_PAUSE_S", 0.0)
+    monkeypatch.setattr(appmod, "SDR_WATCH_S", 3600.0)          # tests look for themselves
+    monkeypatch.setattr(appmod, "SDR_SETTLE_S", 0.0)
+    monkeypatch.setattr(appmod, "GROUP_HOLD_S", 0.0)            # (the hold has its own test)
+    monkeypatch.setattr(appmod, "log", logs.append)
+    monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: list(plugged))
+    monkeypatch.setattr(appmod.sdr_lookup, "resolve", lambda serial, *a: next((i for i, _p, s in plugged if s == serial), None))
+    monkeypatch.setattr(TrunkRecorder, "one_dongle", lambda self: (True, ""))
+    (tmp_path / "clips").mkdir(exist_ok=True)
+    system = systems.discover(d.parent.parent, {307})[0]
+    base = replace(app_cfg(tmp_path), rtl_fm=str(tmp_path / "no-rtl_fm"),
+                   channels=(ChannelCfg("South 2", 470.2, "paging"), ChannelCfg("FG1", 453.0375, "traffic"),
+                             ChannelCfg("FG2", 458.0375, "traffic")),
+                   sdr_auto=True, sdr_auto_assign=True, sdr_names={"uhf-a": "V3 #1", "uhf-b": "V4", "uhf-c": "V3 #3"},
+                   p25_dir=str(tmp_path / "captures" / "p25"), p25_talkgroups={307: P25},
+                   p25_recorder=str(tmp_path / "no-trunk-recorder") + " --config=config.json",
+                   p25_recorder_dir=str(d.parent.parent), p25_systems=(system,))
+
+    def make(**kw):
+        app = appmod.App(replace(base, **kw))
+        apps.append(app)
+        return app
+
+    yield plugged, logs, make
+    for a in apps:
+        a.stop()
+
+
+def mapped(app) -> None:
+    """The admin's mapping on the station today: UHF a/b/c = Fire/EMS 15, South 2, FG1; MRRS 770/773; FG2 elsewhere."""
+    for job, sd in ((P25, "uhf-a"), ("South 2", "uhf-b"), ("FG1", "uhf-c"), ("MRRS 770", "m700-a"),
+                    ("MRRS 773", "m700-b"), ("FG2", "spare-1")):
+        assert app.set_mode(job, sd, confirm=True) is None, job
+
+
+def on(app, job):
+    return app._program_on(job)
+
+
+def grouped(make, **kw):
+    app = make(**kw).start()
+    mapped(app)
+    assert app.set_antenna_groups(GROUPS) is None
+    return app
+
+
+def test_creating_groups_moves_nothing_and_survives_a_restart(rig, tmp_path):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    before = dict(app.assign)
+    assert app.set_antenna_groups(GROUPS) is None
+    assert app.assign == before and {j: on(app, j) for j in before.values()} == {m: s for s, m in before.items()}
+    assert "sdr: antenna groups: UHF: SDR V3 #1, V4, V3 #3 · Fire/EMS 15 > South 2 > FG1; 700: SDR m700-a, m700-b · " \
+           "MRRS 770 > MRRS 773" in logs
+    saved = json.loads((tmp_path / "antenna_groups.json").read_text())
+    assert saved["groups"] == GROUPS
+    rows = {r["serial"]: r for r in app.sdr()["sdrs"]}
+    assert rows["uhf-b"]["group"] == "UHF" and "group" not in rows["spare-1"]
+    assert app.sdr()["groups"][0] == {**GROUPS[0], "usable": UHF, "short": [], "unowned": [], "conflicts": {}}
+    app.stop()
+    again = make().start()
+    assert [g.row() for g in again.groups] == GROUPS and again.assign == before
+    assert again.set_antenna_groups([]) is None and again.groups == [] and again.sdr()["groups"] == []
+
+
+def test_a_grouped_dongle_runs_only_its_groups_jobs_and_a_groups_job_only_there(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    assert app.set_mode("FG2", "uhf-c") == "SDR V3 #3 is locked to UHF: Fire/EMS 15, South 2, FG1"
+    assert app.set_mode("MRRS 770", "uhf-a", confirm=True).startswith("SDR V3 #1 is locked to UHF")
+    assert app.set_mode("FG1", "spare-1") == "FG1 is locked to UHF: SDR V3 #1, V4, V3 #3"
+    assert app.set_mode("MRRS 773", "spare-1", confirm=True) == "MRRS 773 is locked to 700: SDR m700-a, m700-b"
+    assert app.assign["uhf-c"] == "FG1" and app.assign["spare-1"] == "FG2"           # nothing moved
+    # within the group it is a job pick as anywhere: FG1 moves to V4, whose South 2 ... is V3 #3's job no more
+    assert app.set_mode("FG1", "uhf-b") is None
+    assert (app.assign["uhf-b"], app.assign["uhf-c"], on(app, "FG1")) == ("FG1", "Off", "uhf-b")
+    assert "SDR V3 #3: FG1 -> Off (moving to V4)" in logs
+    assert app.set_mode("Off", "uhf-a") is None and on(app, P25) is None              # Off is always allowed
+
+
+def test_saving_groups_that_dont_fit_what_runs_is_refused(rig, tmp_path):
+    plugged, logs, make = rig
+    (tmp_path / "state").mkdir()
+    app = make(cad_db=str(tmp_path / "state" / "cad.sqlite")).start()
+    mapped(app)
+    bad = [{"name": "UHF", "sdrs": UHF, "jobs": [P25, "South 2"]}]
+    assert app.set_antenna_groups(bad) == "SDR V3 #3 runs FG1: add FG1 to UHF, or switch SDR V3 #3 first"
+    bad = [{"name": "UHF", "sdrs": ["uhf-a", "uhf-b"], "jobs": [P25, "South 2", "FG1"]}]
+    assert app.set_antenna_groups(bad) == "FG1 runs on SDR V3 #3: add it to UHF, or switch it first"
+    assert app.set_antenna_groups([{"name": "X", "sdrs": ["nope"], "jobs": ["FG2"]}]) == "X: no SDR 'nope' here"
+    assert app.set_antenna_groups([{"name": "X", "sdrs": ["spare-1"], "jobs": ["HPN"]}]) == "X: no job 'HPN' here"
+    assert app.groups == [] and not any("antenna groups:" in x for x in logs)
+    assert app.set_mode("Off", "spare-1") is None
+    assert app.set_adsb_receiver("spare-1") is None                                     # reserved for ADS-B now
+    assert "reserved" in app.set_antenna_groups([{"name": "X", "sdrs": ["spare-1"], "jobs": ["FG2"]}])
+    assert app.set_antenna_groups(GROUPS) is None
+    assert "in antenna group UHF" in app.set_adsb_receiver("uhf-a")
+
+
+def test_unplugged_the_rest_run_the_higher_jobs_and_the_mapping_comes_back(rig, tmp_path):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]                   # South 2's dongle unplugged
+    app._sdr_arrivals()
+    assert (on(app, "South 2"), on(app, P25), on(app, "FG1")) == ("uhf-c", "uhf-a", None)
+    assert app.assign["uhf-c"] == "South 2" and app._own == {"uhf-c": "FG1"}
+    assert "sdr: group UHF: short of dongles (SDR V4): FG1 not running" in logs
+    assert "sdr: group UHF: SDR V3 #3: FG1 -> South 2 (for SDR V4; its own FG1 until then)" in logs
+    # saved as the admin left it: a restart (or a switch back to an older release) starts the mapping
+    saved = json.loads((tmp_path / "sdr_modes.json").read_text())
+    assert (saved["uhf-b"], saved["uhf-c"]) == ("South 2", "FG1")
+    rows = {r["serial"]: r for r in app.sdr()["sdrs"]}
+    assert rows["uhf-c"]["own"] == "FG1" and rows["uhf-c"]["for"] == ["uhf-b"] and rows["uhf-b"]["on"] == "uhf-c"
+    assert app.sdr()["groups"][0]["short"] == ["FG1"] and app.sdr()["groups"][0]["usable"] == ["uhf-a", "uhf-c"]
+    st = {r["label"]: r["state"] for r in app.radio_status()}
+    assert st["FG1"] == "off" and st["South 2"] != "off"
+    app._sdr_arrivals()                                                    # looked at again: nothing more moves
+    assert app.assign["uhf-c"] == "South 2" and logs.count("sdr: group UHF: SDR V3 #3: FG1 -> South 2 "
+                                                           "(for SDR V4; its own FG1 until then)") == 1
+    plugged.insert(1, DONGLES[1])                                          # back
+    app._sdr_arrivals()
+    assert (on(app, "South 2"), on(app, "FG1"), on(app, P25)) == ("uhf-b", "uhf-c", "uhf-a")
+    assert app._own == {} and app.assign["uhf-c"] == "FG1" and app.sdr()["groups"][0]["short"] == []
+    assert "sdr: group UHF: SDR V3 #3: South 2 -> FG1 (its own job again)" in logs
+    assert "sdr: group UHF: every job running" in logs
+
+
+def test_the_countys_dongle_gone_its_recorder_moves_inside_the_group_only(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-a"]
+    app._sdr_arrivals()
+    assert on(app, P25) == "uhf-c" and on(app, "South 2") == "uhf-b" and on(app, "FG1") is None
+    assert on(app, "FG2") == "spare-1" and on(app, "MRRS 770") == "m700-a"           # never outside the group
+    plugged.insert(0, DONGLES[0])
+    app._sdr_arrivals()
+    assert (on(app, P25), on(app, "FG1")) == ("uhf-a", "uhf-c")
+
+
+def test_mrrs_on_one_dongle_runs_its_higher_side_and_the_county_is_never_touched(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    rt = app.systems["mrrs"]
+    plugged[:] = [d for d in plugged if d[2] != "m700-a"]
+    app._sdr_arrivals()
+    assert (rt.recorder.source_on(0), rt.recorder.source_on(1)) == ("m700-b", None)      # 770 side on what is left
+    assert app.sdr()["groups"][1]["short"] == ["MRRS 773"] and on(app, P25) == "uhf-a"
+    plugged[:] = [d for d in plugged if d[2] != "m700-b"]                                # both gone
+    app._sdr_arrivals()
+    assert rt.recorder.source_on(0) is None and rt.recorder.source_on(1) is None
+    assert app._own == {} and (app.assign["m700-a"], app.assign["m700-b"]) == ("MRRS 770", "MRRS 773")
+    plugged[:] = list(DONGLES)
+    app._sdr_arrivals()
+    assert (rt.recorder.source_on(0), rt.recorder.source_on(1)) == ("m700-a", "m700-b")
+    assert app.state()["p25_systems"][0]["jobs"][0]["sdr"] == "m700-a"
+
+
+def test_ungrouped_dongles_and_jobs_behave_as_before_beside_groups(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "spare-1"]                # FG2's dongle (no group) unplugged
+    app._sdr_arrivals()
+    assert app.assign["spare-1"] == "FG2" and not app._own                 # unplugging moves nothing, as always
+    plugged.append((6, "RTL2838UHIDIR", "spare-2"))                       # a new dongle: auto-assign as before ...
+    assert app._sdr_arrivals() == ["FG2"]                                  # ... FG2's dongle is gone: it takes FG2
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]                  # a group short of a dongle
+    app._sdr_arrivals()
+    plugged.append((7, "RTL2838UHIDIR", "spare-3"))                       # never given the group's missing job
+    assert app._sdr_arrivals() == [] and app.assign.get("spare-3", "Off") == "Off"
+    assert "sdr: spare-3 → Off (auto: FG1, Fire/EMS 15, South 2, FG2 already covered)" in logs
+
+
+def test_a_new_dongle_in_a_group_gets_the_groups_free_job_and_stands_in_as_a_spare(rig):
+    plugged, logs, make = rig
+    groups = [{"name": "UHF", "sdrs": [*UHF, "spare-1"], "jobs": [P25, "South 2", "FG1", "FG2"]}]
+    app = make().start()
+    for job, sd in ((P25, "uhf-a"), ("South 2", "uhf-b"), ("FG1", "uhf-c"), ("Off", "spare-1"), ("Off", "m700-a"),
+                    ("Off", "m700-b")):
+        assert app.set_mode(job, sd) is None
+    app.set_by.pop("spare-1")                                             # an Off nobody picked (a new dongle)
+    assert app.set_antenna_groups(groups) is None
+    assert app.assign.get("spare-1", "Off") == "Off"                      # (auto-assign looks at arrivals only)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "spare-1" and on(app, "FG1") == "uhf-c"  # the spare stands in: FG1 keeps running
+    assert app._own == {"spare-1": "Off"} and app.sdr()["groups"][0]["short"] == []
+    plugged.insert(1, DONGLES[1])
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-b" and app.assign.get("spare-1") == "Off" and not app._own
+    assert app.set_mode("Off", "spare-1") is None                         # a person's Off: never a spare
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c" and app.assign.get("spare-1", "Off") == "Off"
+    app.stop()
+    plugged[:] = list(DONGLES)
+    fresh = make()
+    fresh.set_by.clear()
+    fresh.assign["spare-1"] = "Off"
+    fresh.start()                                                          # an Off spare arriving: the group's free job
+    assert fresh.assign["spare-1"] == "FG2" and fresh.set_by["spare-1"] == "auto"
+
+
+def test_a_person_picking_during_a_shortage_sets_the_mapping_and_the_plan_runs_it(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert app.assign["uhf-c"] == "South 2"
+    assert app.set_mode("Off", "uhf-b") is None                            # the gone dongle's job given up
+    assert on(app, "FG1") == "uhf-c" and not app._own and app.assign["uhf-b"] == "Off"
+    assert app.sdr()["groups"][0]["short"] == []
+
+
+def test_a_short_glitch_moves_nothing(rig, monkeypatch):
+    plugged, logs, make = rig
+    monkeypatch.setattr(appmod, "GROUP_HOLD_S", 3600.0)
+    app = grouped(make)
+    app._sdr_arrivals()
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    plugged.insert(1, DONGLES[1])
+    app._sdr_arrivals()
+    assert app.assign["uhf-c"] == "FG1" and not app._own and on(app, "South 2") == "uhf-b"
+
+
+def test_another_apps_dongle_is_never_taken_and_its_job_stands_in_elsewhere(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    assert app.set_mode("Off", "uhf-b") is None                            # a person hands V4 to shortfinal ...
+    claims.DIR.mkdir(parents=True, exist_ok=True)
+    (claims.DIR / "uhf-b.json").write_text(json.dumps({"app": "shortfinal", "pid": 1, "mode": "scan", "since": 0}))
+    app._sdr_arrivals()
+    assert app.assign["uhf-b"] == "Off" and on(app, "FG1") == "uhf-c" and not app._own   # ... and nothing moves
+
+
+def test_the_hub_sends_groups_to_the_station_and_audits_them(tmp_path):
+    from sizeup.cad.api import needs, summarize
+    from sizeup.cloud.station import CALLS
+    assert "set_antenna_groups" in CALLS and needs("/api/antenna-groups") == "admin"
+    s, _ = summarize("/api/antenna-groups", {"groups": GROUPS}, {}, None)
+    assert s == "Antenna groups: UHF (3 SDRs: Fire/EMS 15 > South 2 > FG1); 700 (2 SDRs: MRRS 770 > MRRS 773)"
+    assert summarize("/api/antenna-groups", {"groups": []}, {}, None)[0] == "Antenna groups: none"
+    from sizeup.cloud.hub import HubApp
+    assert HubApp.set_antenna_groups.__doc__
+
+
+def test_health_says_a_group_is_short_and_where_its_job_runs():
+    from sizeup.cloud.health import JOB_GRACE_S
+    from tests.test_health import Rig, station_status
+    r = Rig()
+    st = station_status()
+    # the station's report (App.sdr()) while South 2's dongle is gone: its stand-in runs South 2, FG1 doesn't run
+    st["sdr"]["sdrs"][0].update(present=False, group="UHF", on="00000102")
+    st["sdr"]["sdrs"][1].update(mode="South 2", group="UHF", own="FG1", **{"for": ["00000101"]})
+    st["sdr"]["sdrs"][2].update(group="UHF")
+    st["sdr"]["groups"] = [{"name": "UHF", "sdrs": ["00000101", "00000102", "00000103"],
+                            "jobs": ["Fire/EMS 15", "South 2", "FG1"], "usable": ["00000102", "00000103"],
+                            "short": ["FG1"]}]
+    r.at(0, status=st)
+    m = r.h.model()
+    assert m["groups"] == [{"name": "UHF", "sdrs": ["101", "102", "103"], "usable": 2,
+                            "jobs": ["Fire/EMS 15", "South 2", "FG1"], "short": ["FG1"], "unowned": [],
+                            "conflicts": {}}]
+    assert [(d["name"], d["group"], d["own"], d["on"]) for d in m["dongles"]] == [
+        ("101", "UHF", "", "00000102"), ("102", "UHF", "FG1", ""), ("103", "UHF", "", "")]
+    (a,) = r.h.alerts()
+    assert a["key"] == "sdr:00000101" and a["text"] == ("dongle 101 (00000101) unplugged or not found · South 2 on SDR 102 "
+                                                        "(UHF)")
+    r.at(JOB_GRACE_S + 1, status=st)
+    g = next(a for a in r.h.alerts() if a["key"] == "group:UHF")
+    assert (g["severity"], g["title"], g["text"]) == ("warning", "Antenna group UHF short", "2 of 3 SDRs · not running: FG1")
+    assert g["who"]["channel"] == "FG1"
+    r.at(JOB_GRACE_S + 10, status=station_status())                          # back: both clear
+    assert r.keys() == []
+
+
+def test_the_station_page_posts_groups_and_gets_the_reason_when_refused(rig, monkeypatch):
+    from tests.test_p25_systems import _get, _post, _serve
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    server, url = _serve(app, monkeypatch, access=False)
+    try:
+        code, body = _post(url + "/api/antenna-groups", {"groups": [{"name": "UHF", "sdrs": UHF, "jobs": [P25]}]})
+        assert code == 400 and json.loads(body)["error"].startswith("SDR V4 runs South 2: add South 2 to UHF")
+        assert _post(url + "/api/antenna-groups", {"groups": "UHF"})[0] == 400
+        assert _post(url + "/api/antenna-groups", {"groups": GROUPS}) == (200, b'{"ok":true}')
+        assert [g["name"] for g in app.state()["sdr"]["groups"]] == ["UHF", "700"]
+        code, st = _get(url + "/api/state")
+        assert code == 200 and "sdr" in st
+    finally:
+        server.shutdown()
+
+
+def test_auto_assign_off_a_person_moving_a_job_during_a_shortage_leaves_no_dongle_idle(rig):
+    plugged, logs, make = rig
+    app = grouped(make, sdr_auto_assign=False)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-a"]                  # the county's dongle gone
+    app._sdr_arrivals()
+    assert on(app, P25) == "uhf-c" and on(app, "South 2") == "uhf-b"
+    assert app.set_mode("FG1", "uhf-b") is None                           # FG1 is V4's now; V3 #3's own is Off
+    assert {j: on(app, j) for j in (P25, "South 2", "FG1")} in (
+        {P25: "uhf-c", "South 2": None, "FG1": None}, {P25: "uhf-b", "South 2": None, "FG1": None},
+        {P25: "uhf-c", "South 2": None, "FG1": "uhf-b"}, {P25: "uhf-b", "South 2": None, "FG1": "uhf-c"})
+    assert sum(1 for s in ("uhf-b", "uhf-c") if app.assign.get(s, "Off") != "Off") == 2   # both run something
+
+
+def test_a_group_deleted_during_a_shortage_its_job_waits_on_its_own_dongle_again(rig):
+    plugged, logs, make = rig
+    app = grouped(make, sdr_auto_assign=False)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c"
+    assert app.set_antenna_groups([GROUPS[1]]) == "confirm: Saving stops South 2 (a dongle of its group is gone)."
+    assert app.groups == [antenna.Group("UHF", tuple(UHF), (P25, "South 2", "FG1")), antenna.Group(
+        "700", tuple(M700), ("MRRS 770", "MRRS 773"))]                     # nothing saved without the confirm
+    assert app.set_antenna_groups([GROUPS[1]], confirm="Saving stops South 2 (a dongle of its group is gone).") is None
+    assert on(app, "FG1") == "uhf-c" and on(app, "South 2") == "uhf-b" and not app._own   # waits for V4, as before
+    assert "sdr: South 2 waits on SDR V4 again (no antenna group)" in logs
+
+
+def test_picking_the_job_a_stand_in_runs_makes_it_its_own(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert app.set_mode("South 2", "uhf-c") is None                       # moves South 2 here for good
+    assert not app._own and app.assign["uhf-c"] == "South 2" and app.assign.get("uhf-b") == "Off"
+    plugged.insert(1, DONGLES[1])
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c" and app.assign.get("uhf-b") == "FG1"     # back: the group's free job (auto)
+
+
+def test_a_reception_test_lends_a_grouped_dongle_only_to_its_groups_jobs(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    for sd in ("m700-a", "m700-b", "spare-1"):
+        assert app.set_mode("Off", sd) is None
+    err = app.reception.start({"system": "mrrs", "jobs": ["MRRS 773"], "sdr": "spare-1", "minutes": 15})
+    assert err == "MRRS 773 is locked to 700: SDR m700-a, m700-b"
+    # a stand-in is never lent (its rows: a fire job is "protected" first, another system's job "runs ..." first)
+    assert app.set_mode("Off", "uhf-c") is None
+    app._own["uhf-c"] = "FG1"                                  # (as if it stood in with no job of its own running)
+    assert {r["serial"]: r for r in app.reception.dongles()}["uhf-c"]["refuse"] == "standing in (antenna group)"
+
+
+# -- the safety review (#609): renamed dongles, boot, restarts, flapping, saves, order, shared serials -------------------
+
+def test_sdr_serial_moves_a_renamed_dongle_in_its_antenna_group_too(tmp_path):
+    from tests.test_sdr_serial import P25 as SP25, V3_2, V4, Station
+    from sizeup.radio import sdrserial
+    s = Station(tmp_path, [V4, V3_2])
+    (s.state / "captures" / "sdr_modes.json").write_text(json.dumps({"00000001": SP25, "_set_by": {"00000001": "person"}}))
+    groups = s.state / "captures" / "antenna_groups.json"
+    groups.write_text(json.dumps({"groups": [{"name": "UHF", "sdrs": ["v4", "00000001"], "jobs": [SP25, "South 2"]}]}))
+    assert sdrserial.main(["1", "v3-2", "--yes"], s.env) == 0, s.text()
+    assert json.loads(groups.read_text())["groups"] == [{"name": "UHF", "sdrs": ["v4", "v3-2"], "jobs": [SP25, "South 2"]}]
+    assert "antenna_groups.json: v3-2 is in antenna group UHF instead of 00000001" in s.text()
+
+
+def test_a_fire_job_saved_against_the_groups_keeps_running_and_says_so(rig, tmp_path):
+    plugged, logs, make = rig
+    app = grouped(make)
+    app.stop()
+    # as an older sdr-serial left it: the county's job moved to the new serial, the group still names the old one
+    modes = json.loads((tmp_path / "sdr_modes.json").read_text())
+    modes["uhf-new"] = modes.pop("uhf-a")
+    (tmp_path / "sdr_modes.json").write_text(json.dumps(modes))
+    plugged[0] = (0, "RTL2838UHIDIR", "uhf-new")
+    again = make().start()
+    assert on(again, P25) == "uhf-new" and again.assign["uhf-new"] == P25        # never turned Off by a lock
+    assert any("CRITICAL uhf-new runs Fire/EMS 15 against the antenna groups" in x for x in logs)
+    again._sdr_arrivals()
+    assert on(again, P25) == "uhf-new"                                              # and never planned away
+    g = again.sdr()["groups"][0]
+    assert g["conflicts"] == {"uhf-new": P25} and g["unowned"] == []
+    assert "add it to UHF" in again.set_antenna_groups(GROUPS)                      # the fix: the group, by hand
+    fixed = [{**GROUPS[0], "sdrs": ["uhf-new", "uhf-b", "uhf-c"]}, GROUPS[1]]
+    assert again.set_antenna_groups(fixed) is None and again.sdr()["groups"][0]["conflicts"] == {}
+
+
+def test_a_group_listing_a_job_no_dongle_has_is_shown(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    assert app.set_mode("Off", "uhf-c") is None                                    # FG1: nobody's now
+    assert app.sdr()["groups"][0]["unowned"] == ["FG1"]
+
+
+def test_a_dongle_attaching_late_at_boot_moves_nothing(rig, monkeypatch):
+    plugged, logs, make = rig
+    app = grouped(make)
+    app.stop()
+    monkeypatch.setattr(appmod, "GROUP_HOLD_S", 3600.0)
+    plugged[:] = [d for d in DONGLES if d[2] != "uhf-a"]                    # the county's dongle not attached yet
+    again = make().start()
+    starts = []
+    real = again._start_mode
+    monkeypatch.setattr(again, "_start_mode", lambda m, s: starts.append((m, s)) or real(m, s))
+    again._sdr_arrivals()
+    plugged.insert(0, DONGLES[0])                                           # attached a few seconds later
+    again._sdr_arrivals()
+    assert not again._own and starts == [] and on(again, P25) == "uhf-a" and on(again, "FG1") == "uhf-c"
+
+
+def test_a_restart_during_a_fallback_resumes_the_stand_in_and_never_gives_the_job_to_the_gone_dongle(rig, tmp_path):
+    plugged, logs, make = rig
+    app = grouped(make)
+    plugged[:] = [d for d in plugged if d[2] != "uhf-a"]                  # the county's dongle gone
+    app._sdr_arrivals()
+    assert on(app, P25) == "uhf-c" and app._own == {"uhf-c": "FG1"}
+    assert json.loads((tmp_path / antenna.STANDINS).read_text()) == {"uhf-c": P25}
+    assert json.loads((tmp_path / "sdr_modes.json").read_text())["uhf-c"] == "FG1"   # an older release: the mapping
+    app.stop()
+    again = make().start()                                                  # an update: still gone
+    assert on(again, P25) == "uhf-c" and again._own == {"uhf-c": "FG1"} and again.assign["uhf-a"] == P25
+    assert "sdr: group UHF: SDR V3 #3 runs Fire/EMS 15 again for SDR V3 #1 (as when sizeup stopped)" in logs
+    again._sdr_arrivals()
+    assert on(again, P25) == "uhf-c" and on(again, "FG1") is None
+    plugged.insert(0, DONGLES[0])                                           # back
+    again._sdr_arrivals()
+    assert on(again, P25) == "uhf-a" and on(again, "FG1") == "uhf-c" and not again._own
+    assert not (tmp_path / antenna.STANDINS).exists()
+
+
+def test_a_flapping_dongle_gets_its_job_back_only_after_staying_longer_each_time(rig, monkeypatch):
+    plugged, logs, make = rig
+    app = grouped(make)
+    moves = []
+    real = app._start_mode
+    monkeypatch.setattr(app, "_start_mode", lambda m, s: (moves.append((m, s)) if m == P25 else None) or real(m, s))
+    for _ in range(5):                                                      # gone, back, gone, back ...
+        plugged[:] = [d for d in plugged if d[2] != "uhf-a"]
+        app._sdr_arrivals()
+        plugged.insert(0, DONGLES[0])
+        app._sdr_arrivals()
+    # once back at once (first return), then held 2 min: the county stays on its working stand-in
+    assert moves == [(P25, "uhf-c"), (P25, "uhf-a"), (P25, "uhf-c")], moves
+    assert on(app, P25) == "uhf-c" and app._gflap["uhf-a"][0] == 1
+    assert any("gone again" in x and "stayed 120 s" in x for x in logs)
+
+
+def test_the_county_given_another_dongle_while_it_waits_starts_at_once(tmp_path):
+    from tests.test_p25_systems import ask_county, service
+    county, _mrrs, pop, _logs, _d = service(tmp_path)
+    ask_county(tmp_path, sdr="gone-one")
+    assert county.step(100.0)["state"] == "absent"
+    county.next_start = 100.0 + 15.0                                        # as trunk-recorder's "device gone" left it
+    ask_county(tmp_path, sdr="pd-a", seq=2)                                 # a stand-in
+    assert county.step(101.0)["state"] == "ok" and len(pop.started) == 1
+
+
+def test_a_save_that_would_stop_a_running_fire_job_or_ranks_fire_jobs_wrong_is_asked_twice(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    swapped = [{**GROUPS[0], "jobs": ["South 2", P25, "FG1"]}, GROUPS[1]]
+    why = app.set_antenna_groups(swapped)
+    assert why == ("confirm: UHF ranks Fire/EMS 15 below South 2: in a fallback the higher one takes the other's "
+                   "dongle.") and app.groups[0].jobs == (P25, "South 2", "FG1")
+    assert app.set_antenna_groups(swapped, confirm=why[9:]) is None and app.groups[0].jobs == ("South 2", P25, "FG1")
+    assert app.set_antenna_groups(GROUPS) is None
+    plugged[:] = [d for d in plugged if d[2] != "uhf-a"]
+    app._sdr_arrivals()
+    out = [{**GROUPS[0], "sdrs": ["uhf-a", "uhf-b"]}, GROUPS[1]]          # the stand-in taken out of the group
+    assert app.set_antenna_groups(out).startswith("FG1 runs on SDR V3 #3")  # (what it owns doesn't fit: refused)
+    assert on(app, P25) == "uhf-c"
+    # a new order in a shortage: South 2, running on the stand-in, would stop
+    plugged.insert(0, DONGLES[0])
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c"
+    why = app.set_antenna_groups([{**GROUPS[0], "jobs": [P25, "FG1", "South 2"]}, GROUPS[1]])
+    assert why.startswith("confirm: Saving stops South 2 (a dongle of its group is gone). UHF ranks South 2 below FG1")
+    assert on(app, "South 2") == "uhf-c" and app.groups[0].jobs == (P25, "South 2", "FG1")
+
+
+def test_a_shared_serial_leaves_a_running_program_where_it_is(rig, monkeypatch):
+    plugged, logs, make = rig
+    app = grouped(make)
+    monkeypatch.setattr(app, "_job_state", lambda job: "ok")
+    plugged.append((6, "RTL2838UHIDIR", "uhf-b"))                         # a second dongle on V4's serial (#242)
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-b" and not app._own                    # running: kept
+    monkeypatch.setattr(app, "_job_state", lambda job: "down")
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c" and app._own == {"uhf-c": "FG1"}    # can't run there: stood in for
+
+
+def test_a_corrupt_groups_file_is_said_loudly_and_shown(rig, tmp_path):
+    from tests.test_health import Rig, station_status
+    plugged, logs, make = rig
+    (tmp_path / "antenna_groups.json").write_text("{not json")
+    app = make()
+    assert app.groups == [] and app.sdr()["groups_problem"] == "antenna_groups.json unreadable (JSONDecodeError)"
+    assert any(x.startswith("sdr: CRITICAL antenna groups dropped") for x in logs)
+    r = Rig()
+    st = station_status()
+    st["sdr"]["groups_problem"] = app.sdr()["groups_problem"]
+    r.at(0, status=st)
+    (a,) = r.h.alerts()
+    assert a["key"] == "group" and a["title"] == "Antenna groups dropped" and "every dongle unlocked" in a["text"]
+
+
+
+# -- the re-review (#609 at ec0e5fd): a confirm for one ask only, stale stand-ins, a person's switch starts fresh --------
+
+def test_a_confirm_is_for_the_ask_confirmed_and_a_changed_ask_comes_back(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    swapped = [{**GROUPS[0], "jobs": ["South 2", P25, "FG1"]}, GROUPS[1]]
+    first = app.set_antenna_groups(swapped)[9:]
+    assert first == "UHF ranks Fire/EMS 15 below South 2: in a fallback the higher one takes the other's dongle."
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]                   # meanwhile South 2's dongle drops
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c"
+    reorder = [{**GROUPS[0], "jobs": [P25, "FG1", "South 2"]}, GROUPS[1]]
+    ask = app.set_antenna_groups(reorder)[9:]
+    assert ask.startswith("Saving stops South 2")
+    # the person confirmed an earlier, other ask: refused, with the ask as it is now
+    assert app.set_antenna_groups(reorder, confirm="UHF ranks South 2 below FG1: in a fallback the higher one takes "
+                                                   "the other's dongle.") == "confirm: " + ask
+    assert app.set_antenna_groups(reorder, confirm=True) == "confirm: " + ask        # (no blanket yes)
+    assert on(app, "South 2") == "uhf-c" and app.groups[0].jobs == (P25, "South 2", "FG1")
+    assert app.set_antenna_groups(reorder, confirm=ask) is None and on(app, "South 2") is None
+    assert f"sdr: antenna groups saved with a confirm: {ask}" in logs
+    from sizeup.cad.api import summarize
+    s, _ = summarize("/api/antenna-groups", {"groups": reorder, "confirm": ask}, {}, None)
+    assert s.endswith(f"· confirmed: {ask}") and s.startswith("Antenna groups: UHF (3 SDRs: Fire/EMS 15 > FG1 > South 2)")
+
+
+def test_the_station_page_sends_the_ask_back_word_for_word(rig, monkeypatch):
+    from tests.test_p25_systems import _post, _serve
+    plugged, logs, make = rig
+    app = grouped(make)
+    server, url = _serve(app, monkeypatch, access=False)
+    try:
+        swapped = [{**GROUPS[0], "jobs": ["South 2", P25, "FG1"]}, GROUPS[1]]
+        code, body = _post(url + "/api/antenna-groups", {"groups": swapped})
+        ask = json.loads(body)["error"]
+        assert code == 400 and ask.startswith("confirm: UHF ranks")
+        assert _post(url + "/api/antenna-groups", {"groups": swapped, "confirm": True})[0] == 400
+        assert _post(url + "/api/antenna-groups", {"groups": swapped, "confirm": ask[9:]}) == (200, b'{"ok":true}')
+    finally:
+        server.shutdown()
+    js = (appmod.ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
+    assert "postGroups(groups, ask)" in js and "{ confirm }" in js
+
+
+def test_a_stale_stand_in_is_not_resumed_when_it_isnt_plugged_in(rig, tmp_path):
+    plugged, logs, make = rig
+    app = grouped(make)
+    app.stop()
+    (tmp_path / antenna.STANDINS).write_text(json.dumps({"uhf-c": P25}))    # it stood in for V3 #1 when sizeup stopped
+    plugged[:] = [d for d in DONGLES if d[2] != "uhf-c"]                  # now the stand-in is gone, V3 #1 is back
+    again = make().start()
+    assert on(again, P25) == "uhf-a" and not again._own                     # at once, on its own dongle
+    assert not any("runs Fire/EMS 15 again" in x for x in logs)
+
+
+@pytest.mark.parametrize("group, held", [(False, False), (True, True)])
+def test_a_persons_switch_starts_a_flapping_system_fresh_and_a_group_move_keeps_its_hold(tmp_path, group, held):
+    from tests.test_p25_systems import ask_system, service
+    base = tmp_path
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    _county, mrrs, pop, _logs, _d = service(base, found=lambda usb=usb: list(usb))
+    ask_system(base, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    usb.remove((1, "pd-a"))
+    for t in (106.0, 107.0, 108.0, 109.0):
+        mrrs.step(t)
+    mrrs.flaps, mrrs.hold_until = 2, 400.0                              # as a flapping dongle left it
+    from pathlib import Path
+    from sizeup.radio import trunkrecd
+    p = Path(trunkrecd.system_state_path("mrrs", str(base / "state" / "p25_recorder.json")))
+    ask_system(base, {0: "pd-b"}, seq=2)
+    if group:                                                            # as SystemUnitRecorder writes a group move
+        w = json.loads(p.read_text())
+        p.write_text(json.dumps({**w, "group": True}))
+    st = mrrs.step(120.0)
+    assert (st["state"] == "absent" and "held back" in st["detail"]) == held, st
+    assert mrrs.flaps == (2 if group else 0)
+    if group:
+        assert mrrs.step(401.0)["state"] == "ok" and len(pop.started) == 2
+
+
+def test_the_stations_recorder_marks_a_group_move_in_the_systems_wish(rig, tmp_path):
+    from sizeup.radio.recorder import SystemUnitRecorder
+    plugged, logs, make = rig
+    rec = SystemUnitRecorder("mrrs", "MRRS", "trunk-recorder --config=config.json", str(tmp_path),
+                             state_path=str(tmp_path / "w.json"), status_path=str(tmp_path / "s.json"), wait_s=0.0)
+    rec.sources = {0: (type("F", (), {"serial": "m700-b", "label": "x"})(), "MRRS 770")}
+    rec._write_state(True)
+    assert "group" not in json.loads((tmp_path / "w.json").read_text())
+    rec.group_move = True
+    rec._write_state(True)
+    assert json.loads((tmp_path / "w.json").read_text())["group"] is True

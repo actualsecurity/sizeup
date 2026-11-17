@@ -163,6 +163,10 @@ window.IntelSettings = (() => {
     // the kill switch and the caps
     const [lab, cb] = sCheck("Push", s.push, "Off: detection and the map go on, nothing is pushed");
     cb.addEventListener("change", () => post({ action: "set", key: "push", value: cb.checked }, cb.checked ? "Intel pushes on" : "Intel pushes off"));
+    // PII in intel pushes (policy.py push_pii; admin decision 2026-11-17): on, no scrub; off, the scrub as before
+    const [plab, pcb] = sCheck("PII", s.push_pii, "On: intel pushes are not scrubbed (names, plates may appear). "
+      + "Off: a push the PII scrub catches is withheld. Push topics are readable by anyone who knows the topic name");
+    pcb.addEventListener("change", () => post({ action: "set", key: "push_pii", value: pcb.checked }, pcb.checked ? "PII in pushes on" : "PII in pushes off"));
     const counts = el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`);
     counts.dataset.live = "counts";          // (settings.js sCardSwap: patched in place, never a reason to swap the card)
     counts.title = "The last 24 hours: events made, pushed, and held: not pushed for any reason (shadow mode, pushes off, "
@@ -174,7 +178,7 @@ window.IntelSettings = (() => {
       field("repush min", num(s.repush_min, 0, 1440, 1, set("repush_min"), "Minutes between pushes of one event")),
       field("max age min", num(s.max_age_min, 1, 1440, 1, set("max_age_min"), "A transmission older than this is never a pre-alert (a restart replays nothing)",
         "Minutes: a transmission older than this is never a pre-alert (a restart replays nothing)")),
-    ], counts));
+    ], plab, counts));
     // the push's "Listen" link (sizeup/intel/listen.py): the audio around the alert, behind a short-lived link
     const ls = d.listen || {};
     const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");

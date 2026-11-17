@@ -147,6 +147,24 @@ const StationHealth = (() => {
         d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
+    const dv = d.dvr;
+    if (dv && !dv.error) {          // the camera DVR (#550, sizeup/dvr.py panel()): its slots, and the cameras parked
+      const hm = (t) => (t ? fmtTime(t) : "—");
+      // over 24 h ago: always with its date ("11/08 20:01"; fmtTime leaves it out only for today)
+      const day = (t) => (t && serverNow() - t > 86400 && typeof fmtRecv === "function" ? fmtRecv(t).slice(0, 11) : hm(t));
+      const hd = el("h3", "hl-sub", "Camera DVR");
+      hd.title = `A camera failing ${dv.park_min} min without a break (${dv.park_404_min} min of master-playlist 404s) is `
+        + `parked (only while other cameras record): no recording, its slot goes to the next camera. Looked at after `
+        + `${dv.first_check_min} min, then less often up to every ${dv.check_min} min, and a real recording round once a day; back on its own when it answers`;
+      const rows = [["Recording", `${dv.recording} of ${dv.max}` + (dv.stopped ? ` · ${dv.stopped}` : ""), dv.stopped ? "hl-bad" : ""]];
+      for (const p of dv.parked || []) rows.push(["Parked", `${p.id} · ${p.why} since ${day(p.since)} · next check ${hm(p.next)}`, "hl-warn"]);
+      const box = dl(rows);
+      box.querySelectorAll("dd.hl-warn").forEach((x, i) => {
+        const p = dv.parked[i];
+        x.title = `Parked ${hm(p.at)}, last looked at ${hm(p.checked)}. ${hd.title}`;
+      });
+      kids.push(hd, box);
+    }
     if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
       const box = el("div", "hl-hints");
       for (const x of d.intel) {
@@ -296,11 +314,17 @@ const StationHealth = (() => {
       dupe.title = "deploy/station/README.md \"Two dongles, one serial\"";
       kids.push(dupe);
     }
-    kids.push(table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
-      (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.job,
+    kids.push(table(["SDR", "Serial", "Plugged in", "Group", "Job", "Running", "Restarts", "Detail"],
+      (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
+        x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
         [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
         x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));
+    if ((h.groups || []).length) {       // antenna groups (sizeup/radio/groups.py): short of dongles, what doesn't run
+      kids.push(table(["Antenna group", "SDRs", "Jobs (priority)", "Not running"], h.groups.map((g) => [g.name,
+        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""], g.jobs.join(" › "),
+        [g.short.join(", ") || "—", g.short.length ? "hl-bad" : "dim"]]), ""));
+    }
     if ((h.usb || []).length) {
       const dup = new Set((h.duplicates || []).map((x) => x.serial));
       kids.push(table(["Index", "Serial", "Product"], h.usb.map((u) => [`#${u.index}`, [u.serial || "(none)", dup.has(u.serial) ? "hl-bad" : ""],

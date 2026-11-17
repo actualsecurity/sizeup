@@ -74,6 +74,7 @@ window.RadioControls = (() => {
       n.sdr = el("div", "sdrs");
       n.dups = el("div", "sdr-dups");                // two dongles, one serial (#242): the fix
       n.adsb = el("div", "adsb-box");
+      n.ag = el("div", "ag");                        // antenna groups: dongles locked to jobs (sizeup/radio/groups.py)
       n.tgSum = el("span", "dim small");
       n.filter = el("input", "tg-filter");
       Object.assign(n.filter, { type: "search", placeholder: "Filter", autocomplete: "off", spellcheck: false });
@@ -116,7 +117,9 @@ window.RadioControls = (() => {
              + "behind the 1090 MHz filter and LNA, chosen by its serial. Only its decoder (readsb) uses it; no channel and "
              + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.\nTwo dongles with one serial "
              + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
-             + "dongles says how.", n.radios, n.dups, n.sdr, n.adsb, n.storage)),
+             + "dongles says how.\nAntenna group: dongles on one antenna feed, locked to its jobs (highest priority first). "
+             + "A grouped dongle runs only those; they run only on its dongles. One gone: the rest run the higher "
+             + "jobs; back: each its own again.", n.radios, n.dups, n.sdr, n.ag, n.adsb, n.storage)),
         ...(n.rxCard ? [n.rxCard] : []),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
@@ -159,6 +162,7 @@ window.RadioControls = (() => {
     renderRadios();
     renderIncident();
     renderSdr();
+    renderGroups();
     renderAdsb();
     renderStorage();
     renderTalkgroups();
@@ -263,7 +267,11 @@ window.RadioControls = (() => {
     if (!sdr || !sdr.shared) return;
     const list = sdr.sdrs || [{ serial: "", mode: sdr.mode, present: true }];
     const modes = sdr.modes || [];
-    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|");
+    const groups = sdr.groups || [];
+    // antenna groups: a grouped dongle offers only its group's jobs (and Off); another dongle never a group's job
+    const allowed = (x, m) => { const g = groups.find((y) => y.sdrs.includes(x.serial));
+      return m === "Off" || (g ? g.jobs.includes(m) : !groups.some((y) => y.jobs.includes(m))); };
+    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|") + "#" + JSON.stringify(groups.map((g) => [g.sdrs, g.jobs]));
     if (box.dataset.key !== key) {
       box.replaceChildren();
       for (const x of list) {
@@ -271,7 +279,7 @@ window.RadioControls = (() => {
         const row = el("div", "seg sdr-row");
         row.dataset.sdr = x.serial;
         const btns = el("div", "sdr-btns");
-        for (const m of modes) {
+        for (const m of modes.filter((m) => allowed(x, m))) {
           const b = el("button", "", m);
           b.type = "button";
           b.dataset.mode = m;
@@ -283,7 +291,9 @@ window.RadioControls = (() => {
         ad.title = "Reserve this dongle for the ADS-B receiver (its filter and LNA): its decoder only, never a channel";
         ad.addEventListener("click", () => setAdsb(x.serial, x.name || x.serial));
         btns.append(ad);
-        row.append(el("span", "dim sdr-label", ""), btns, el("span", "sdr-err"));
+        const lab = el("span", "dim sdr-label");
+        lab.append(el("span", "sdr-name"), el("span", "pill sdr-grp"));
+        row.append(lab, btns, el("span", "sdr-err"));
         box.append(row);
       }
       box.dataset.key = key;
@@ -294,19 +304,34 @@ window.RadioControls = (() => {
       row.classList.toggle("absent", !x.present);
       row.classList.toggle("held", !!x.held_by);
       row.classList.toggle("ambiguous", !!x.ambiguous);
-      setText(row.querySelector(".sdr-label"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+      const grp = (sdr.groups || []).find((g) => g.name === x.group) || null;
+      const nameOf = (s) => { const o = list.find((d) => d.serial === s); return o ? o.name || o.serial : s; };
+      const badge = row.querySelector(".sdr-grp");
+      badge.hidden = !grp;
+      if (grp && badge.dataset.g !== grp.name) {
+        badge.dataset.g = grp.name;
+        badge.replaceChildren(...(window.Icon ? [Icon("lock", "sm")] : []), grp.name);
+      }
+      if (grp) badge.title = `Antenna group ${grp.name}: ${grp.jobs.join(" > ")} (highest priority first)`;
+      setText(row.querySelector(".sdr-name"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
-              + (x.set_by === "auto" && x.mode !== "Off" ? ` · ${x.mode} · auto` : ""));   // given by [radio] auto_assign
+              + (x.set_by === "auto" && x.mode !== "Off" && !x.own ? ` · ${x.mode} · auto` : "")   // given by [radio] auto_assign
+              + (x.own ? ` · for ${(x.for || []).map(nameOf).join(", ") || "?"}` : "")      // a group's stand-in
+              + (x.on ? ` · on ${nameOf(x.on)}` : ""));
       setText(row.querySelector(".sdr-err"), st.sdrError);
       const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
       const who = x.set_by === "auto" ? `${x.mode} set automatically when it was plugged in`
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
-      row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "");
+      row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
+        + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
+        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "");
+
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
-        const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m);
+        // (an antenna group's: the gone dongle whose job a stand-in runs isn't "elsewhere")
+        const there = m !== "Off" && list.find((o) => o.serial !== x.serial && o.mode === m && o.on !== x.serial && x.on !== o.serial);
         // #275: the job's frequency now on the dongle running it ("NY App 126.4/120.8 · 126.4")
         const now = m === x.mode && sdr.now && sdr.now[m];
         setText(b, now ? `${m} · ${now}` : m);
@@ -320,7 +345,7 @@ window.RadioControls = (() => {
       row.classList.toggle("lent", !!x.lent);
       const ad = row.querySelector(".adsb-use");
       if (ad) {                                       // offered only while no dongle is reserved for ADS-B
-        ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro();
+        ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro() || !!x.group;   // (never a grouped one)
         ad.disabled = st.adsbBusy;
       }
     }
@@ -898,6 +923,184 @@ window.RadioControls = (() => {
       clearTimeout(timer);
       st.sdrBusy = false;
       renderSdr();
+    }
+  }
+
+  // ---- antenna groups (sizeup/radio/groups.py) --------------------------------------------------------------------
+  // One line per group: its lock badge, its dongles there now, its jobs in priority order (a job without a dongle in
+  // the warning colour). An admin edits one at a time inline: name, dongles, jobs ordered with the arrows. The whole
+  // list goes to POST /api/antenna-groups (the hub sends it to the station, which refuses what doesn't fit now).
+
+  const ag = { edit: null, busy: false, error: "", key: "" };
+
+  function agSdrName(sdr, s) {
+    const o = ((sdr && sdr.sdrs) || []).find((d) => d.serial === s);
+    return o ? o.name || o.serial : s;
+  }
+
+  function renderGroups() {
+    const sdr = st.state && st.state.sdr, box = st.n.ag;
+    if (!box) return;
+    show(box, !!(sdr && sdr.shared));
+    if (!sdr || !sdr.shared) return;
+    const groups = sdr.groups || [];
+    // the group being edited, by its name (the list may change under the editor: another admin, the hub)
+    if (ag.edit && ag.edit.was !== null) {
+      const k = groups.findIndex((g) => g.name === ag.edit.was);
+      if (k < 0) { ag.edit = null; ag.error = "the group changed elsewhere: edit it again"; } else ag.edit.i = k;
+    }
+    const key = JSON.stringify([groups, ag.edit, ag.busy, ag.error, ro(), (sdr.sdrs || []).map((d) => [d.serial, d.name]), sdr.modes]);
+    if (key === ag.key) return;
+    // never rebuilt under the person's typing: the name field keeps its focus and caret
+    if (ag.edit && box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;
+    ag.key = key;
+    const kids = [];
+    groups.forEach((g, i) => {
+      if (ag.edit && ag.edit.i === i) { kids.push(agEditor(sdr, groups)); return; }
+      const line = el("div", "ag-line");
+      const badge = el("span", "pill sdr-grp");
+      badge.append(...(window.Icon ? [Icon("lock", "sm")] : []), g.name);
+      badge.title = `Antenna group ${g.name}: ${g.sdrs.map((s) => agSdrName(sdr, s)).join(", ")}`;
+      const n = (g.usable || []).length;
+      const sd = el("span", n < g.sdrs.length ? "ag-sdrs warn" : "ag-sdrs dim", `${n}/${g.sdrs.length} SDRs`);
+      sd.title = g.sdrs.map((s) => `${agSdrName(sdr, s)}: ${(g.usable || []).includes(s) ? "running" : "gone, held or lent"}`).join("\n");
+      const jobs = el("span", "ag-jobs");
+      g.jobs.forEach((j, k) => {
+        if (k) jobs.append(el("span", "dim", " › "));
+        const off = (g.short || []).includes(j);
+        const t = el("span", off ? "warn" : "", j);
+        if (off) t.title = `${j}: not running (its dongle is gone and no lower job's dongle could take it)`;
+        jobs.append(t);
+      });
+      jobs.title = "Priority order: with a dongle gone, the higher jobs run";
+      line.append(badge, sd, jobs);
+      if (!ro()) {
+        const ed = el("button", "sm quiet", "Edit");
+        ed.type = "button";
+        ed.disabled = ag.busy || !!ag.edit;
+        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs] }; ag.error = ""; renderGroups(); });
+        line.append(ed);
+      }
+      kids.push(line);
+    });
+    if (ag.edit && ag.edit.i === -1) kids.push(agEditor(sdr, groups));
+    if (!ro() && !ag.edit) {
+      const add = el("button", "sm quiet ag-add", "+ Antenna group");
+      add.type = "button";
+      add.title = "Lock dongles on one antenna feed to the jobs it carries";
+      add.disabled = ag.busy;
+      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [] }; ag.error = ""; renderGroups(); });
+      kids.push(add);
+    }
+    if (ag.error && !ag.edit) kids.push(el("div", "sdr-err", ag.error));
+    box.replaceChildren(...kids);
+  }
+
+  function agEditor(sdr, groups) {
+    const e = ag.edit, others = groups.filter((_g, k) => k !== e.i);
+    const takenSdr = new Set(others.flatMap((g) => g.sdrs)), takenJob = new Set(others.flatMap((g) => g.jobs));
+    const form = el("div", "ag-edit");
+    const name = el("input", "sm ag-name");
+    Object.assign(name, { type: "text", value: e.name, maxLength: 24, placeholder: "Name (e.g. UHF)", autocomplete: "off", spellcheck: false });
+    name.setAttribute("aria-label", "Group name");
+    name.addEventListener("input", () => { e.name = name.value; });
+    const sdrs = el("div", "ag-pick");
+    sdrs.append(el("span", "dim", "SDRs"));
+    const known = sdr.sdrs || [];        // (a member not shown now, unplugged and Off, can still be taken out)
+    for (const d of [...known, ...e.sdrs.filter((s) => !known.some((x) => x.serial === s)).map((s) => ({ serial: s, mode: "unplugged" }))]) {
+      if (takenSdr.has(d.serial)) continue;
+      const l = el("label", "ag-chk");
+      const c = el("input");
+      c.type = "checkbox";
+      c.checked = e.sdrs.includes(d.serial);
+      c.addEventListener("change", () => { e.sdrs = c.checked ? [...e.sdrs, d.serial] : e.sdrs.filter((s) => s !== d.serial); });
+      l.title = `${d.serial}${d.product ? `, ${d.product}` : ""} · now ${d.mode}`;
+      l.append(c, ` ${d.name || d.serial}`);
+      sdrs.append(l);
+    }
+    const jobs = el("ol", "ag-order");
+    e.jobs.forEach((j, k) => {
+      const li = el("li", "ag-job");
+      const mv = (d) => { const t = e.jobs.slice(); [t[k], t[k + d]] = [t[k + d], t[k]]; e.jobs = t; ag.key = ""; renderGroups(); };
+      const up = el("button", "sm quiet", "↑"), dn = el("button", "sm quiet", "↓"), x = el("button", "sm quiet", "✕");
+      for (const b of [up, dn, x]) b.type = "button";
+      up.disabled = k === 0;
+      dn.disabled = k === e.jobs.length - 1;
+      up.setAttribute("aria-label", `${j} up`);
+      dn.setAttribute("aria-label", `${j} down`);
+      x.setAttribute("aria-label", `Remove ${j}`);
+      up.addEventListener("click", () => mv(-1));
+      dn.addEventListener("click", () => mv(1));
+      x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); ag.key = ""; renderGroups(); });
+      li.append(el("span", "", `${k + 1}. ${j}`), up, dn, x);
+      jobs.append(li);
+    });
+    const add = el("select", "sm ag-addjob");
+    add.setAttribute("aria-label", "Add a job");
+    add.append(new Option("+ Job", ""));
+    for (const m of (sdr.modes || []).filter((m) => m !== "Off" && !takenJob.has(m) && !e.jobs.includes(m))) add.append(new Option(m, m));
+    add.addEventListener("change", () => { if (add.value) { e.jobs = [...e.jobs, add.value]; ag.key = ""; renderGroups(); } });
+    const btns = el("div", "row");
+    const save = el("button", "sm primary", "Save"), cancel = el("button", "sm quiet", "Cancel");
+    for (const b of [save, cancel]) { b.type = "button"; b.disabled = ag.busy; }
+    save.addEventListener("click", () => {
+      const g = { name: e.name.trim(), sdrs: e.sdrs, jobs: e.jobs };
+      const all = groups.map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs }));
+      if (e.i === -1) all.push(g); else all[e.i] = g;
+      postGroups(all);
+    });
+    cancel.addEventListener("click", () => { ag.edit = null; ag.error = ""; renderGroups(); });
+    btns.append(save, cancel);
+    if (e.i !== -1) {
+      const del = el("button", "sm danger-quiet", "Delete");
+      del.type = "button";
+      del.disabled = ag.busy;
+      del.addEventListener("click", async () => {
+        if (await UI.confirm(`Delete antenna group ${groups[e.i].name}? Its dongles and jobs are free again.`, { ok: "Delete", danger: true })) {
+          postGroups(groups.filter((_g, k) => k !== e.i).map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs })));
+        }
+      });
+      btns.append(del);
+    }
+    form.append(name, sdrs, el("div", "dim small", "Jobs, highest priority first"), jobs, add, btns);
+    if (ag.error) form.append(el("div", "sdr-err", ag.error));
+    return form;
+  }
+
+  async function postGroups(groups, confirm) {    // confirm: the station's ask, word for word, as confirmed
+    if (ag.busy || ro()) return;
+    ag.busy = true;
+    ag.error = "";
+    ag.key = "";
+    renderGroups();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+      const r = await fetch("/api/antenna-groups", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                     body: JSON.stringify({ groups, ...(confirm ? { confirm } : {}) }),
+                                                     signal: ctl.signal });
+      if (r.ok) ag.edit = null;
+      else {
+        const why = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
+        // a save that stops a running fire job, or ranks fire jobs against the pinned order: the person says so to
+        // that very ask; if the station's ask changed meanwhile (a dongle dropped) it comes back and is asked again
+        if (why.startsWith("confirm: ") && why.slice(9) !== confirm) {
+          clearTimeout(timer);
+          ag.busy = false;
+          const ask = why.slice(9);
+          if (await UI.confirm((confirm ? "Changed since: " : "") + ask, { ok: "Save anyway", danger: true })) return postGroups(groups, ask);
+          ag.key = "";
+          return renderGroups();
+        }
+        ag.error = why;
+      }
+    } catch (e) {
+      ag.error = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
+    } finally {
+      clearTimeout(timer);
+      ag.busy = false;
+      ag.key = "";
+      renderGroups();
     }
   }
 
