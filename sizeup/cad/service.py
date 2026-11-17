@@ -303,6 +303,7 @@ class Cad:
         # hub: the station's), and each P25 system's label ({name: label}). Without them: what the log itself says.
         self.source_rows: Callable[[], list[dict]] = lambda: []
         self.source_systems: Callable[[], dict[str, str]] = lambda: {}
+        self.source_freqs: Callable[[], dict[str, str]] = lambda: {}      # an FM / airband channel's MHz, by its label
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at, heading?, speed?, source?}}
         # from a future AVL feed (IamResponding, Red Alert, an iPad app; #358). The single input: no provider sets
         # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
@@ -1856,7 +1857,8 @@ class Cad:
     def comms_sources(self, q: dict | None = None) -> dict:
         """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
         [{key, system, system_label, group, name, service, tier, ours, mutable, encrypted, department, talkgroup, last,
-        counts, emergency, stuck}], folders: {rev, folders} | null}. ?rev= a tree's rev: {unchanged: true, rev, live}
+        counts, emergency, stuck, mhz}], folders: {rev, folders, names?} | null}. mhz: an FM / airband channel's
+        frequency (its hover, #607), null for a talkgroup. ?rev= a tree's rev: {unchanged: true, rev, live}
         while nothing was logged and the minute is the same (the page asks every few seconds).
 
         A source: every one in the log or the activity table, and every known talkgroup that is ours, was heard, or is
@@ -1888,6 +1890,10 @@ class Cad:
             county = sourcekeys.COUNTY
             labels = {"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}}
             info = {str(r.get("source")): r for r in self.source_rows() if r.get("source")}
+            try:
+                freqs = self.source_freqs()
+            except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the tree
+                freqs = {}
             seen = {r["source"]: r for r in self.comms.sources_seen()}
             counts = self.comms.minute_counts(now)
             ems = self.comms.emergencies(now)
@@ -1918,7 +1924,8 @@ class Cad:
                             "mutable": not (ours or (svc == "fire" and system in sourcekeys.OURS_SYSTEMS)),
                             "department": str(i.get("department") or ""), "talkgroup": got[1] if got else None,
                             "last": last, "counts": counts.get(key) or [], "emergency": em.get("emergency", ""),
-                            "stuck": em.get("stuck", "")})
+                            "stuck": em.get("stuck", ""),
+                            "mhz": None if got else freqs.get(key.split(":", 1)[-1])})
             order = {"analog": 1, "airband": 3}
             out.sort(key=lambda r: (0 if r["system"] == county else order.get(r["system"], 2), r["system"],
                                     not r["ours"], r["group"], r["name"]))

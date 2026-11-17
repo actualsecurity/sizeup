@@ -958,7 +958,8 @@ class Editor:
         return {**out, "radio_emergencies": self.em_page()}
 
     def _folders_op(self, action: str, body: dict, op: str) -> dict:
-        """set {folders: [{id, name, section, items}], base?} | reset {base?}: the Radio page's folders (#607), admins,
+        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | reset {base?}: the Radio page's
+        folders and channel names (#607), admins,
         audited as Radios. base: the rev the edit started from (radiofolders.rev; "" the default): someone else saved
         meanwhile -> refused, nothing written."""
         cur = radiofolders.stored(self.overrides())
@@ -968,7 +969,7 @@ class Editor:
         if action == "reset":
             v = None
         elif action == "set":
-            v = radiofolders.clean({"folders": body.get("folders")})
+            v = radiofolders.clean({"folders": body.get("folders"), "names": body.get("names")})
             if not self.cad.comms._sees_context():
                 v = radiofolders.merge_hidden(v, cur)
         else:

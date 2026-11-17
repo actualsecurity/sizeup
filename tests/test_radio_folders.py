@@ -47,6 +47,42 @@ def test_clean_keeps_the_shape_and_drops_what_isnt_a_channel():
             radiofolders.clean(bad)
 
 
+def test_names_are_checked_and_dropped_quietly_for_what_isnt_a_channel():
+    got = radiofolders.clean({"folders": [], "names": {"fm:FG1": "  Fire   ground ", "nonsense": "X", "p25:westchester:1234": "",
+                                                       "air:Tower": "Tower cab"}})
+    assert got == {"folders": [], "names": {"air:Tower": "Tower cab", "fm:FG1": "Fire ground"}}
+    assert radiofolders.clean({"folders": [], "names": {}}) == {"folders": []}          # none: no key at all
+    for bad, why in (({"folders": [], "names": ["fm:FG1"]}, "names"), ({"folders": [], "names": {"fm:FG1": 7}}, "text"),
+                     ({"folders": [], "names": {"fm:FG1": "A" * 41}}, "at most 40")):
+        with pytest.raises(Exception, match=why):
+            radiofolders.clean(bad)
+
+
+def test_names_are_saved_with_the_folders_audited_and_only_shown(tmp_path):
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True
+    cad.settings_post("radio_folders", {"action": "set", "base": "", "folders": LAYOUT["folders"],
+                                        "names": {"fm:FG1": "Fire ground 1", "p25:metro:9001": "Dispatch North",
+                                                  "p25:metro:9999": "Not heard lately", "junk": "x"}, "operator": "Lt. Test"})
+    names = cad.comms_sources()["folders"]["names"]
+    assert names == {"fm:FG1": "Fire ground 1", "p25:metro:9001": "Dispatch North", "p25:metro:9999": "Not heard lately"}
+    a = [r for r in cad.settings.audit_log("radios") if r["key"] == "radio_folders/layout"][0]
+    assert "fm:FG1 → Fire ground 1" in a["new"]
+    # the sources themselves (and so the log, the alarms, the rules, the exports) keep their own names
+    assert all(s["name"] != "Fire ground 1" for s in cad.comms_sources()["sources"])
+    # a rename alone, from an edit started before it: refused
+    with pytest.raises(Exception, match="changed meanwhile"):
+        cad.settings_post("radio_folders", {"action": "set", "base": "", "folders": LAYOUT["folders"], "names": {"fm:FG1": "Y"},
+                                            "operator": "Lt. Other"})
+    assert cad.settings_export()["overrides"]["radio_folders"]["layout"]["names"]["fm:FG1"] == "Fire ground 1"
+    # a reader who may not see another system: none of its names
+    code, raw, _ = CadApi(cad).get("/api/cad/comms/sources", "", None)
+    assert json.loads(raw)["folders"]["names"] == {"fm:FG1": "Fire ground 1"}
+    rev = radiofolders.rev(cad.radio_folders)
+    cad.settings_post("radio_folders", {"action": "reset", "base": rev, "operator": "Lt. Test"})
+    assert cad.comms_sources()["folders"] is None
+
+
 def test_the_folders_are_an_admin_setting_audited_exported_and_in_the_tree(tmp_path):
     cad = make_cad(tmp_path)
     cad.comms.context_broadcast = True          # as on the hub behind Access: every reader is signed in (#419)
@@ -240,6 +276,39 @@ const fold = (rows, custom) => N.folders(rows, custom).map((g) => [g.id, g.name,
   cad.state.radio_folders = "r9";
   cad.hooks.forEach((h) => h()); await drain(); cad.hooks.forEach((h) => h()); await drain();
   out.pushed = { asked: calls.filter((c) => c.includes("/sources")).length - n0, rev: st.layout.rev };
+
+  // ---- a channel's name on the rail (display only) ----
+  current = { rev: "r9", folders: [] };
+  global.api = (method, path, body) => {
+    if (method === "POST") { posted.push([path, body]); current = body.action === "reset" ? null : { rev: "r5", folders: body.folders, ...(body.names ? { names: body.names } : {}) };
+                             return Promise.resolve({ ok: true, radio_folders: current }); }
+    if (path.startsWith("/api/cad/comms/sources")) { calls.push(path); return Promise.resolve({ rev: "y" + calls.length, now: NOW, minutes: 60, live: [],
+      sources: SRC.map((x) => (x.key === "fm:FG1" ? { ...x, mhz: "154.1" } : x.key === "p25:metro:9001" ? { ...x, talkgroup: 9001 } : x)), folders: current }); }
+    return real(method, path, body);
+  };
+  global.RadioView = { ...RadioView, row: (t) => { const li = new El("li", "rt"); const meta = new El("div", "meta"); meta.append(new El("span", "chip src", t.channel)); li.append(meta); return li; } };
+  T.sources(true); await drain();
+  $("#rn-edit").fire("click");
+  const chname = (k) => editTree().find((c) => c.dataset && c.dataset.chname === k);
+  out.nameField = { value: chname("p25:metro:9001").value, placeholder: chname("p25:metro:9001").placeholder, title: chname("fm:FG1").title };
+  const typed = (k, v) => { const n = chname(k); n.value = v; $("#rn-tree").fire("input", { target: n }); };
+  typed("p25:metro:9001", "  Dispatch North "); typed("fm:FG1", "Fire Ground"); typed("fm:FG1", "   ");
+  click(btn("save")); await drain();
+  out.namesPosted = posted.slice(-1)[0][1];
+  T.set({ view: "police", source: "" }); await drain();
+  const railRow = walk($("#rn-tree")).find((c) => c.dataset && c.dataset.source === "p25:metro:9001");
+  const fgRow = walk($("#rn-tree")).find((c) => c.dataset && c.dataset.source === "fm:FG1");
+  const chips = walk($("#rn-list")).filter((c) => c.className === "chip src");
+  out.named = { rail: railRow.text, title: railRow.title, fgTitle: fgRow.title, chips: chips.map((c) => [c.textContent, c.title]),
+                kept: st.rows.filter((t) => t.source === "p25:metro:9001").map((t) => t.channel)[0], asked: last("view") };
+  T.set({ source: "p25:metro:9001" }); await drain();
+  out.crumb = $("#rn-crumb").textContent;
+  out.sourceAsked = last("source");
+  // Reset: the names go too, and the setting is dropped
+  $("#rn-edit").fire("click"); click(btn("reset"));
+  out.resetField = chname("p25:metro:9001").value;
+  click(btn("save")); await drain();
+  out.namesReset = posted.slice(-1)[0][1];
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e.stack); process.exit(1); });
 """
@@ -326,3 +395,33 @@ def test_edit_is_for_admins_and_saves_once_for_everyone(nav):
     assert nav["refused"] == {"editing": True, "error": "the folders were changed meanwhile"}
     assert nav["cancelled"] is None
     assert nav["pushed"] == {"asked": 1, "rev": "r9"}
+
+
+def test_a_channels_name_on_the_rail_is_display_only(nav):
+    f = nav["nameField"]
+    assert f["value"] == "" and f["placeholder"] == "PD Dispatch" and f["title"].startswith("FG1 (154.1 MHz)")
+    p = nav["namesPosted"]
+    assert p["action"] == "set" and p["names"] == {"p25:metro:9001": "Dispatch North"}       # trimmed; blank: its own
+    n = nav["named"]
+    assert "Dispatch North" in n["rail"] and "PD Dispatch" not in n["rail"]
+    assert n["title"].startswith("PD Dispatch (TG 9001)") and n["fgTitle"].startswith("FG1 (154.1 MHz)")
+    # the list's channel chip: the name shown, the real one in the hover; the row itself (filters, links) untouched
+    assert n["chips"] and all(c == ["Dispatch North", "p25:metro:9001"] for c in n["chips"])
+    assert n["kept"] == "p25:metro:9001" and n["asked"] == "police"
+    assert nav["crumb"].endswith("› Dispatch North") and nav["sourceAsked"] == "p25:metro:9001"    # the hub asked by key
+    assert nav["resetField"] == "" and nav["namesReset"]["action"] == "reset"
+
+
+def test_a_channels_frequency_and_talkgroup_number_come_with_the_tree(tmp_path):
+    """For the hover beside a renamed channel: the FM / airband channel's MHz (the app's config), a talkgroup's number."""
+    from tests.test_radios import Clock, cad, tx
+    clock = Clock()
+    c = cad(tmp_path, clock, airband=("Tower",))
+    c.main_tg = lambda tg: tg == 307
+    c.record_traffic(tx("fg-1", clock.t - 50, rig="E63"))
+    c.record_traffic(dict(tx("twr-1", clock.t - 30, "Tower"), mhz=119.7))
+    c.record_traffic(dict(tx("307-1-call_1-t0", clock.t - 40, "Fire/EMS 15", "E60", "E60", 307), ours=True, group="Fire"))
+    c.source_freqs = lambda: {"FG1": "154.1", "Tower": "118.575"}
+    by = {s["key"]: s for s in c.comms_sources()["sources"]}
+    assert by["fm:FG1"]["mhz"] == "154.1" and by["air:Tower"]["mhz"] == "118.575"
+    assert by["p25:westchester:307"]["mhz"] is None and by["p25:westchester:307"]["talkgroup"] == 307

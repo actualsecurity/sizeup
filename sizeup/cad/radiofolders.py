@@ -8,13 +8,19 @@ Set: settings_overrides section "radio_folders", key "layout" ->
 
     {"folders": [{"id": "d:westchester:Fire", "name": "County fire", "section": "County",
                   "items": ["p25:westchester:1234", ...]},
-                 {"id": "u:k3x9q2", "name": "Fireground", "section": "", "items": ["fm:FG1", ...]}, ...]}
+                 {"id": "u:k3x9q2", "name": "Fireground", "section": "", "items": ["fm:FG1", ...]}, ...],
+     "names": {"fm:FG1": "Fireground 1", "p25:westchester:1234": "County fire ops"}}
 
     id       "d:<system>:<group>" a default folder (renamed, moved: a new talkgroup of that group still lands in it), or
              "u:<random>" one an admin made
     name     the folder's name (1 to 40 characters)
     section  the heading over it (folders in a row with the same heading share one; "" none)
     items    source keys (sizeup/sourcekeys.py: fm:, air:, p25:), in order; each in one folder only (the first wins)
+    names    (optional) a channel's or talkgroup's name on the rail (1 to 40 characters; none: its own). Display only:
+             the rail's rows, the crumb and the channel chip of the rail's list show it, the original name and its
+             talkgroup number or frequency in the hover. Keys, the radio log, recordings, the station's config, the
+             alarms, pre-alert rules, exports and every match keep the real label and number: a rename changes nothing
+             but what the rail says
 
 The folders and their order as listed. A source in no folder (a talkgroup heard for the first time, one never placed)
 goes to its default folder: there if that folder is listed, else that folder made again next to its heading's last
@@ -67,8 +73,8 @@ def context_key(k: str) -> bool:
 def clean(v) -> dict:
     """The layout as stored, or CadError for a shape that isn't one. An item that isn't a source key, or one already
     in an earlier folder, is dropped (not an error): the rail shows each source once."""
-    if not isinstance(v, dict) or set(v) - {"folders"} or not isinstance(v.get("folders"), list):
-        raise CadError("layout: {folders: [{id, name, section, items}]}")
+    if not isinstance(v, dict) or set(v) - {"folders", "names"} or not isinstance(v.get("folders"), list):
+        raise CadError("layout: {folders: [{id, name, section, items}], names?: {key: name}}")
     fs = v["folders"]
     if len(fs) > MAX_FOLDERS:
         raise CadError(f"folders: at most {MAX_FOLDERS}")
@@ -94,7 +100,19 @@ def clean(v) -> dict:
                     "section": _name(f.get("section"), f"folders[{i}].section", False), "items": keep})
     if len(seen) > MAX_ITEMS:
         raise CadError(f"folders: at most {MAX_ITEMS} channels in all")
-    return {"folders": out}
+    raw = v.get("names")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise CadError("names: {source key: name}")
+    if len(raw) > MAX_ITEMS:
+        raise CadError(f"names: at most {MAX_ITEMS}")
+    names = {}
+    for k, n in raw.items():
+        n = _name(n, f"names[{k!r}]" if is_key(k) else "names", False)
+        if is_key(k) and n:                      # not a source key: dropped; blank: its own name
+            names[k] = n
+    return {"folders": out, **({"names": dict(sorted(names.items()))} if names else {})}
 
 
 def rev(layout: dict | None) -> str:
@@ -134,7 +152,8 @@ def for_viewer(layout: dict | None, sees_context: bool = True, hidden_labels=())
         if (f["items"] and not items) or context_folder(f["id"]):
             continue
         folders.append({**f, "items": items, "section": "" if f["section"].lower() in hide else f["section"]})
-    return {"rev": rev(layout), "folders": folders}
+    names = {k: n for k, n in (layout.get("names") or {}).items() if sees_context or not context_key(k)}
+    return {"rev": rev(layout), "folders": folders, **({"names": names} if names else {})}
 
 
 def merge_hidden(new: dict, old: dict | None) -> dict:
@@ -159,7 +178,11 @@ def merge_hidden(new: dict, old: dict | None) -> dict:
         placed.update(hidden)
         if f["id"] in by:
             prev = f["id"]
-    return clean({"folders": out})
+    names = dict(new.get("names") or {})
+    for k, n in (old.get("names") or {}).items():          # the names of what they were never shown
+        if context_key(k):
+            names.setdefault(k, n)
+    return clean({"folders": out, "names": names})
 
 
 def summary(layout: dict | None) -> str:
@@ -167,4 +190,6 @@ def summary(layout: dict | None) -> str:
     if not layout:
         return "default"
     s = ", ".join(f"{f['name']} ({len(f['items'])})" for f in layout["folders"]) or "no folders"
+    if layout.get("names"):
+        s += "; names: " + ", ".join(f"{k} → {n}" for k, n in layout["names"].items())
     return s if len(s) <= 400 else s[:399] + "…"

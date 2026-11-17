@@ -141,12 +141,13 @@ window.RadioNav = (() => {
   // whose emergencies (not ours) stand out
   function model(sources, p, now, live = new Set(), windows = {}, loud = loudServices(), custom = null) {
     const pins = new Set(p.pins), mutes = new Set(mutesFor(p.mutes, sources));
+    const names = (custom && custom.names) || {};       // the admins' names for the rail (#607): display only
     const rows = sources.map((s) => {
       const mute = mutes.has(s.key);
       const t = TIER[s.tier] || null;
       const until = windows[s.key] || null;
       const em = s.emergency || "";
-      return { ...s, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
+      return { ...s, name: names[s.key] || s.name, orig: s.name, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
                live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S,
                // quiet: someone else's emergency (or its window alone) on a service that is known and doesn't
                // stand out; a source with no service is never quiet
@@ -172,6 +173,8 @@ window.RadioNav = (() => {
   }
 
   // ---- pure: Edit's draft ([{id, name, section, items: [keys]}]) and what it does to it -------------------------
+  // what a channel really is, for its hover: the talkgroup's number, an FM / airband channel's frequency
+  const idOf = (s) => (s.talkgroup !== undefined && s.talkgroup !== null ? `TG ${s.talkgroup}` : s.mhz ? `${s.mhz} MHz` : "");
   const draftOf = (rows, custom) => folders(rows, custom).map((g) => ({ id: g.id, name: g.name, section: g.section, items: g.sources.map((s) => s.key) }));
   const holder = (d, key) => d.find((f) => f.items.includes(key));
   // a channel into folder `to`, before `before` (a key in it) or at its end
@@ -464,7 +467,8 @@ window.RadioNav = (() => {
     const b = el("button", "rn-name quiet");
     b.type = "button";
     b.dataset.source = s.key;
-    b.title = [`${s.system_label || s.system} › ${s.group || "Other"}`, s.tip, s.department].filter(Boolean).join(" · ");
+    b.title = [`${s.orig || s.name}${idOf(s) ? ` (${idOf(s)})` : ""}`, `${s.system_label || s.system} › ${s.group || "Other"}`, s.tip,
+               s.department].filter(Boolean).join(" · ");
     b.append(dot(s), el("span", "trunc", s.name));
     if (s.code) b.append(el("span", "rn-tier", s.code));
     if (s.em) b.append(emChip(s.em, "EM", emText(s), s.quiet));
@@ -595,7 +599,7 @@ window.RadioNav = (() => {
   }
   function editStart() {
     if (!mayEdit() || st.edit) return;
-    st.edit = { folders: draftOf(st.src, st.layout), base: st.layout ? st.layout.rev : "", error: "", busy: false, focus: "" };
+    st.edit = { folders: draftOf(st.src, st.layout), names: { ...((st.layout && st.layout.names) || {}) }, base: st.layout ? st.layout.rev : "", error: "", busy: false, focus: "" };
     st.railSig = "";
     renderRail();
     renderEdit();
@@ -662,7 +666,15 @@ window.RadioNav = (() => {
       box.append(head, sec);
       if (!f.items.length) box.append(el("div", "rn-edempty dim", "Empty"));
       f.items.forEach((k, j) => {
-        const s = name.get(k) || { name: k };
+        const s = name.get(k) || { name: k }, shown = e.names[k] || s.name;
+        const nm = el("input", "rn-edch");                // its name on the rail (blank: its own)
+        nm.type = "text";
+        nm.value = e.names[k] || "";
+        nm.placeholder = s.name;
+        nm.maxLength = 40;
+        nm.dataset.chname = k;
+        nm.setAttribute("aria-label", `Name of ${s.name}`);
+        nm.title = `${s.name}${idOf(s) ? ` (${idOf(s)})` : ""}: the name on the rail (blank: its own)`;
         const row = el("div", "rn-edi");
         row.dataset.k = k;
         const g = el("span", "rn-grip", "⠿");
@@ -671,14 +683,13 @@ window.RadioNav = (() => {
         g.title = "Drag to move";
         const to = el("select", "rn-edto");
         to.dataset.move = k;
-        to.setAttribute("aria-label", `Move ${s.name} to`);
+        to.setAttribute("aria-label", `Move ${shown} to`);
         to.title = "Move to folder";
         to.append(...d.map((x) => new Option(x.name || "(no name)", x.id)));
         to.value = f.id;
         const first = i === 0 && j === 0, lastOne = i === d.length - 1 && j === f.items.length - 1;
-        row.append(g, el("span", "trunc", s.name), el("span", "spacer"),
-                   iconBtn("▲", `Move ${s.name} up`, { ed: "iup", id: k }, first),
-                   iconBtn("▼", `Move ${s.name} down`, { ed: "idown", id: k }, lastOne), to);
+        row.append(g, nm, iconBtn("▲", `Move ${shown} up`, { ed: "iup", id: k }, first),
+                   iconBtn("▼", `Move ${shown} down`, { ed: "idown", id: k }, lastOne), to);
         box.append(row);
       });
       out.push(box);
@@ -703,6 +714,7 @@ window.RadioNav = (() => {
       e.focus = `[data-name="${f.id}"]`;
     } else if (act === "reset") {
       e.folders = draftOf(st.src, null);
+      e.names = {};
     } else if (act === "fdel") {
       const i = d.findIndex((f) => f.id === id);
       if (i >= 0 && !d[i].items.length) d.splice(i, 1);
@@ -728,7 +740,11 @@ window.RadioNav = (() => {
       for (const k of t ? f.items : []) if (!have.has(k)) { t.items.push(k); have.add(k); auto = false; }
     }
     auto = auto || !!e.reset;
-    const body = auto ? { action: "reset", base: e.base } : { action: "set", base: e.base, folders: d };
+    // the channels' names (those not in the tree now kept too, as their placings); blank: its own
+    const names = {};
+    for (const [k, v] of Object.entries(e.names)) if (String(v).trim()) names[k] = String(v).trim();
+    if (Object.keys(names).length && !e.reset) auto = false;
+    const body = auto ? { action: "reset", base: e.base } : { action: "set", base: e.base, folders: d, names };
     const op = typeof operator === "function" ? operator() : "";
     if (op) body.operator = op;
     e.busy = true;
@@ -835,8 +851,20 @@ window.RadioNav = (() => {
     fill($("#rn-event"), "Any incident", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
          st.f.event);
   }
+  // the admins' name for its channel (#607) on the row's channel chip: display only (filters, menus and links keep the
+  // real one); the real one in the hover
+  const shownName = (t) => (st.layout && st.layout.names && t.source && st.layout.names[t.source]) || "";
+  function srcChip(n) {
+    if (n.classList && n.classList.contains("chip") && n.classList.contains("src")) return n;
+    for (const c of n.children || []) { const x = srcChip(c); if (x) return x; }
+    return null;
+  }
   function fillRow(li, t) {
-    const n = RadioView.row(t);
+    const n = RadioView.row(t), nm = shownName(t), chip = nm && srcChip(n);
+    if (chip) {
+      chip.textContent = nm;
+      chip.title = `${t.channel}${t.talkgroup !== undefined && t.talkgroup !== null ? ` (TG ${t.talkgroup})` : ""}`;
+    }
     li.className = n.className;
     li.replaceChildren(...n.childNodes);
   }
@@ -848,7 +876,7 @@ window.RadioNav = (() => {
     renderChips();
     if (document.activeElement !== $("#rn-q")) $("#rn-q").value = st.f.q;
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : `${st.rows.filter((t) => t.kind !== "note").length} TX${st.older ? "+" : ""}`);
-    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: RadioView.rowSig, make: () => el("li"), fill: fillRow,
+    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t) + shownName(t), make: () => el("li"), fill: fillRow,
                                        empty: narrowed() ? "None match" : "None" });
     show($("#rn-older"), st.older);
   }
@@ -962,7 +990,13 @@ window.RadioNav = (() => {
     const tree = $("#rn-tree"), marks = new Set();
     const unmark = () => { for (const n of marks) n.classList.remove("rn-drop"); marks.clear(); };
     tree.addEventListener("input", (e) => {
-      const t = e.target, f = st.edit && !st.edit.busy && st.edit.folders.find((x) => x.id === (t.dataset.name || t.dataset.sec));
+      const t = e.target;
+      if (st.edit && !st.edit.busy && t.dataset.chname) {
+        if (t.value.trim()) st.edit.names[t.dataset.chname] = t.value; else delete st.edit.names[t.dataset.chname];
+        st.edit.reset = false;
+        return;
+      }
+      const f = st.edit && !st.edit.busy && st.edit.folders.find((x) => x.id === (t.dataset.name || t.dataset.sec));
       if (!f) return;
       if (t.dataset.name) f.name = t.value; else f.section = t.value;
       st.edit.reset = false;
