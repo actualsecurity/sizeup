@@ -134,7 +134,6 @@ def test_another_departments_headquarters_is_not_ours(text, ours):
     ("60 Control to PC", "PC"),
     ("60 Control to PC fire", "PC"),
     ("60s to PC Command", "PC"),
-    ("60 Control to PC Ambulance", "PC"),
     ("60 Control to RB", "RB"),
     ("60 Control, P.C. base", "PC"),
     ("60s to P C base", "PC"),
@@ -156,6 +155,9 @@ def test_another_departments_headquarters_is_not_ours(text, ours):
     ("RBPD 1 on location", ""),
     ("60 Control to PC PD", ""),
     ("60 Control to RB police", ""),
+    ("60 Control to PC Ambulance", ""),                   # the ambulance (PC Rye EMS), not PCFD
+    ("60 Control to PC EMS", ""),
+    ("PC Rye EMS, 60 Control", ""),
     ("Rye PC base", ""),
     ("Harrison base", ""),
     ("the pc base", ""),                                  # capitals only
@@ -165,6 +167,16 @@ def test_our_short_names_at_the_addressee_or_before_a_raise_word(text, why):
     cfg = load_cfg(load())
     assert Matcher.of(cfg).match(text) == why
     assert Matcher(cfg.phrases, cfg.units).match(text) == why          # the defaults: PC, RB, DEFAULT_RAISE_WORDS
+
+
+def test_short_names_never_count_on_a_page_and_ems_raises_no_one():
+    cfg = load_cfg(load())
+    m = Matcher.of(cfg)
+    assert "EMS" not in cfg.raise_words and "ambulance" not in cfg.raise_words
+    assert m.match("transport by PC Rye EMS") == m.match("PC ambulance on scene") == m.match("PC EMS 40 on scene") == ""
+    assert m.match("60s to PC base", short=False) == ""
+    assert m.match("60s to PC base, Engine 60", short=False) == "E60"
+    assert m.match("Port Chester, 60 Control", short=False) == "Port Chester"
 
 
 def test_short_names_and_raise_words_come_from_the_lists(tmp_path):
@@ -232,6 +244,14 @@ def test_the_feed_row_and_possible_incoming_skip_another_departments_headquarter
     c.record_traffic(tx("307-h-call_4-t0", t + 4, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60s to PC base"))
     assert c.state()["feed"]["rows"][0]["pc"] == "PC"
     assert c.sources.consider_radio("307-h-call_4-t0")["text"] == "Calling PC: 60s to PC base"
+    # a page is judged by its tones: "PC ..." on South 2 is the ambulance's (PC Rye EMS), never a notice of ours
+    for k, said in enumerate(("6 PC RMS 2 Sample Drive, disoriented. PC RMS to Sample Drive 11:31.",
+                              "60 old PC Rye EMS 40 Example Avenue, unknown medical. PC EMS 40 Example Avenue.",
+                              "60s to PC base")):
+        c.record_traffic(tx(f"S2-{k}", t + 10 + k, "South 2", "", "60 Control", None, said))
+        assert c.sources.consider_radio(f"S2-{k}") is None, said
+    c.record_traffic(tx("S2-9", t + 20, "South 2", "", "60 Control", None, "Port Chester, stand by for a page"))
+    assert c.sources.consider_radio("S2-9")["text"] == "Port Chester, stand by for a page"     # the full name still is
 
 
 def test_matcher_talker_and_rig():

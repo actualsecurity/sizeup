@@ -837,7 +837,8 @@
     "such a unit's turn in the same call. A \"headquarters\" / \"HQ\" / \"base\" phrase counts only bare or named ours",
     "(\"Port Chester headquarters\"), never another town's (\"Rye headquarters\": the towns below and the county's).",
     "Our short names (PC: the home town's initials; RB: joint_response tags; more in short_names) count at the",
-    "addressee (\"60 Control to PC\", \"RB, 60 Control\") or followed by one of raise_words (\"PC base\", \"RB units\")."
+    "addressee (\"60 Control to PC\", \"RB, 60 Control\") or followed by one of raise_words (\"PC base\", \"RB units\"),",
+    "never on a page (judged by its tones: \"PC Rye EMS\" is the ambulance's)."
   ],
   "comms_feed": {
     "title": "60 Control · Fire/EMS 15",
@@ -845,8 +846,8 @@
     "limit": 6,
     "phrases": ["Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters"],
     "raise_words": ["base", "field", "fire", "FD", "F.D.", "department", "command", "units", "headquarters", "HQ",
-                    "quarters", "station", "firehouse", "house", "dispatch", "central", "EMS", "ambulance", "alarm",
-                    "desk", "chief", "chiefs", "duty officer", "engine", "ladder", "rescue", "tower"]
+                    "quarters", "station", "firehouse", "house", "dispatch", "central", "alarm", "desk", "chief",
+                    "chiefs", "duty officer", "engine", "ladder", "rescue", "tower"]
   },
   "_unit_placeholders": [
     "unit_placeholders: the codes (a regular expression) that are a department's placeholder on the county's",

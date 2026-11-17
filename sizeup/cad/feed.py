@@ -58,10 +58,11 @@ DEFAULT_LIMIT = 6
 MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
 # The words after one of our short names ("PC", "RB": short_names) that make it 60 Control raising us ("60s to PC base",
-# "PC Command", "RB units"); the data file's comms_feed.raise_words replaces them.
+# "PC Command", "RB units"); the data file's comms_feed.raise_words replaces them. Never EMS / ambulance: "PC Rye EMS"
+# is another agency (the ambulance), not PCFD.
 DEFAULT_RAISE_WORDS = ("base", "field", "fire", "FD", "F.D.", "department", "command", "units", "headquarters", "HQ",
-                       "quarters", "station", "firehouse", "house", "dispatch", "central", "EMS", "ambulance", "alarm",
-                       "desk", "chief", "chiefs", "duty officer", "engine", "ladder", "rescue", "tower")
+                       "quarters", "station", "firehouse", "house", "dispatch", "central", "alarm", "desk", "chief",
+                       "chiefs", "duty officer", "engine", "ladder", "rescue", "tower")
 PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
 # A chief's code (all digits, "2391") heard as a number is never a house number read out before a street ("2391 Example
 # Drive", unless a command or status word follows: "2391 Example Drive command" is the chief naming his command), a
@@ -108,7 +109,8 @@ QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dot
 WHOSE_WINDOW = 120                       # how far before a base its qualifier is looked for (characters)
 # who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
 ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
-AGENCY_AFTER = re.compile(r"[\s-]*(?:P\.?\s?D\.?|police)(?![\w])", re.I)    # "PC PD", "RB Police": not a fire dept's
+# another agency of the same town: "PC PD", "RB Police", "PC EMS", "PC Ambulance", "PC Rye EMS" (the ambulance)
+AGENCY_AFTER = re.compile(r"[\s-]*(?:rye\s+)?(?:P\.?\s?D\.?|police|E\.?\s?M\.?\s?S\.?|ambulance|V\.?A\.?C\.?)(?![\w])", re.I)
 ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
 # the words an addressee list is made of besides town names: "Rye and headquarters", "16 Rye FD headquarters"
 ADDRESSEE_WORDS = QUALIFIER_FILLER | AGENCY_FILLER | {"and", "head", "headquarters", "quarters", "hq", "h", "q", "base"}
@@ -431,12 +433,13 @@ class Matcher:
         """One of our short names said as 60 Control raising us: "PC" / "RB" (as written or "P.C.", "P C") at the
         addressee ("60 Control to PC", "60s to RB", "PC, 60 Control", "Harrison and PC, 60 Control"), or followed by a
         raise word ("PC base", "P.C. Command", "RB units", "PC Ambulance"); with FD it is ours anywhere ("RBFD", "PC
-        FD"). Never inside another word ("PCPD", "UPC"), another town's ("Rye PC base"), nor police ("PC PD")."""
+        FD"). Never inside another word ("PCPD", "UPC"), another town's ("Rye PC base"), nor another agency ("PC PD",
+        "PC EMS", "PC Ambulance", "PC Rye EMS")."""
         lead = end = None
         for n, rx in self.short:
             for m in rx.finditer(text):
                 if AGENCY_AFTER.match(text, m.end()):
-                    continue                                           # "PC PD": the police
+                    continue                                           # "PC PD", "PC EMS": another agency
                 w = self._whose(text[max(0, m.start() - WHOSE_WINDOW):m.start()])
                 if w and w not in self.ours:
                     continue                                           # another town's ("Rye PC base")
@@ -449,7 +452,9 @@ class Matcher:
                     return n
         return ""
 
-    def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
+    def match(self, text: str = "", talker: str = "", rig: str = "", short: bool = True) -> str:
+        """short=False: our short names don't count (a page: judged by its tones, sizeup/cad/sources.py consider_radio;
+        "6 PC Rye EMS ..." is the ambulance's page). The full names (phrases) and units do."""
         for r in (x.strip() for x in (rig or "").split(",")):
             if r in self.codes:
                 return r
@@ -457,7 +462,7 @@ class Matcher:
         for p, rx, base in self.phrases:
             if (any(self._base_ours(s, rx) for s in (talker or "", text or "")) if base else rx.search(hay)):
                 return p
-        for s in (talker or "", text or ""):
+        for s in (talker or "", text or "") if short else ():
             if s and (n := self._short_ours(s)):
                 return n
         found = [(m.start(), c) for c, rx in self.units if (m := rx.search(hay))]
