@@ -636,5 +636,6 @@ window.Preplan = (() => {
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && st.edit && !ev.defaultPrevented) cancelEdit(); });
   if ($("#sv-pp-add")) $("#sv-pp-add").addEventListener("click", searchAdd);
   if ($("#sv-pp-csv")) $("#sv-pp-csv").href = "/api/cad/preplan.csv";
-  return { ...api_, card, search, closeSearch, edit, cancelEdit };
+  const editing = () => !!st.edit;                      // placing or moving a point: the map is the editor's
+  return { ...api_, card, search, closeSearch, edit, cancelEdit, editing };
 })();

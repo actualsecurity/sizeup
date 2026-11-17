@@ -101,6 +101,18 @@ def test_cached_until_the_names_change_and_the_state_says_when(cad):
     assert [f["properties"]["label"] for f in layer(cad)[1]["features"]] == ["the Annex"]
 
 
+def test_the_version_is_read_without_copying_the_names(cad, monkeypatch):
+    rev = cad.settings.places_rev()
+    monkeypatch.setattr(cad.settings, "local_places", lambda: pytest.fail("copied the names"))
+    assert cad.settings.places_rev() == rev
+    assert cad.state()["places_rev"] == rev
+
+
+def test_preplan_says_while_a_point_is_being_placed():
+    src = (STATIC / "preplan.js").read_text()
+    assert "const editing = () => !!st.edit;" in src and "cancelEdit, editing };" in src
+
+
 def test_read_only_viewers_too_like_the_place_search(cad):
     people(cad)
     assert layer(cad, Identity(email=VAL))[0] == 200
@@ -190,6 +202,31 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
   c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: () => null } } });
   await flush();
   out.info = rec.info.map((a) => [a[0], a[1], a[2].map((l) => [l.tagName, l.className, l.textContent]), a[3], a[4]]);
+  // anything drawn over the dot keeps its click: a pre-plan point, a firehouse (topmost first); a base map label never
+  out.over = {};
+  const over = { preplan: { source: "pp-points", layer: { id: "pp-icons", type: "symbol" } },
+                 firehouse: { source: "firehouses", layer: { id: "firehouse", type: "symbol" } },
+                 camera: { source: "ml-cameras", layer: { id: "ml-cameras", type: "symbol" } },
+                 fill: { source: "gis-parcels", layer: { id: "gis-parcels", type: "fill" } },
+                 base: { source: "base", layer: { id: "poi-label", type: "symbol" } } };
+  for (const [k, f] of Object.entries(over)) {
+    rec.info = [];
+    c.map.hits = [f, { id: 0, source: "cp-places", layer: { id: "cp-dot", type: "circle" } }];
+    c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: () => null } } });
+    await flush();
+    out.over[k] = rec.info.length;
+  }
+  // a pre-plan point being placed: the map is the editor's
+  rec.info = [];
+  global.Preplan = { editing: () => true };
+  c.map.hits = [{ id: 0, source: "cp-places", layer: { id: "cp-dot", type: "circle" } }];
+  c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: () => null } } });
+  await flush();
+  out.placing = rec.info.length;
+  global.Preplan = { editing: () => false };
+  c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: () => null } } });
+  await flush();
+  out.notPlacing = rec.info.length;
   // a rig's or a pin's mark (a DOM marker) keeps its click
   rec.info = [];
   c.map.emit("click", { point: [1, 2], originalEvent: { target: { closest: (s) => (s === ".maplibregl-marker" ? {} : null) } } });
@@ -239,6 +276,8 @@ def test_the_layer_in_a_fake_page(tmp_path, cad):
     assert o["info"] == [["2 places", PC, [["B", "cp-name", "Example Burger"], ["DIV", "", "120 Example Avenue"],
                                            ["B", "cp-name", "Sample Fitness"], ["DIV", "", "120 Example Ave"]],
                           "Common places", "cp-info"]]
+    assert o["over"] == {"preplan": 0, "firehouse": 0, "camera": 0, "fill": 0, "base": 1}
+    assert o["placing"] == 0 and o["notPlacing"] == 1
     assert o["markerClick"] == 0 and o["callMapClick"] == 0
     assert o["again"] == 1
     assert o["noGlyphs"] == ["cp-dot"]

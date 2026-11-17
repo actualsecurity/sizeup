@@ -10,7 +10,8 @@
 //              on a busy block; zoom in and the hidden ones show). Map layers, never DOM marks: ~1,000 points cost
 //              nothing to pan. Under the rigs' lines, the routes and the firehouses.
 //   A click    on a dot or a name: a small box with each name at that spot, its addresses (all of a site's) and its
-//              town. Not on the new call's map: a click there is "what is here" (newcall-map.js), which lists the
+//              town; anything drawn over it there (a pre-plan point, a firehouse, a camera) keeps its own click, and nothing
+//              while a pre-plan point is being placed. Not on the new call's map: a click there is "what is here" (newcall-map.js), which lists the
 //              names at that address and offers each as the location. A rig or a call pin (DOM marks) keep their own
 //              clicks; a right-click / long press is Street View's (streetview.js) as before.
 //   Data       asked when a map turns the layer on, then again only when the state's places_rev moves (a name added,
@@ -117,13 +118,18 @@ window.CommonPlaces = (() => {
       const src = this.map.getSource(SRC);
       if (src) src.setData(st.data);
     }
+    // a click on a dot or a name: its box, unless anything drawn over it is there too (a pre-plan point, a firehouse, a
+    // camera, a hydrant: theirs, as gislayers.js yields to the highway layers), or a pre-plan point is being placed
     clicked(e) {
       if (this.callMap || !this.added || !this.isOn() || !st.data) return;
+      if (window.Preplan && Preplan.editing && Preplan.editing()) return;
       const t = e.originalEvent && e.originalEvent.target;
       if (t && t.closest && t.closest(".maplibregl-marker")) return;          // a rig, a call pin: theirs
-      const layers = IDS.filter((id) => this.map.getLayer(id));
-      const hit = this.map.queryRenderedFeatures(e.point, { layers })[0];
-      if (!hit) return;
+      const all = this.map.queryRenderedFeatures(e.point) || [];               // topmost first
+      const mark = (f) => f.source !== "base" && f.layer && (f.layer.type === "symbol" || f.layer.type === "circle");
+      if (all.some((f) => mark(f) && !IDS.includes(f.layer.id))) return;
+      const hit = all.find((f) => f.layer && IDS.includes(f.layer.id));
+      if (!hit || all.indexOf(hit) !== all.findIndex((f) => f.source !== "base")) return;
       const f = st.data.features.find((x) => x.id === hit.id) || null;
       if (!f) return;
       setTimeout(() => this.show(f.properties), 0);    // after the map's own click (it closes the boxes)
