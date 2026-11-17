@@ -724,10 +724,11 @@ class App:
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
         # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
         # is the leader's app: the standby's warm app (prewarm) never gets here.
-        if cfg.roads_dvr and cfg.roads_enabled:
+        # Only with a folder for it (#661): the state folder's dvr/ (cad_db) or dvr_dir; an in-memory app (cad_db "",
+        # the tests) has none, and never records into the working directory.
+        if cfg.roads_dvr and cfg.roads_enabled and (cfg.roads_dvr_dir or cfg.cad_db):
             from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
-            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else Path(cfg.cad_db).parent / "dvr"
             fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
             shared = cfg.roads_dvr_shared == "on" or bool(fs)
             if shared:

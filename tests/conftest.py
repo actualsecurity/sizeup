@@ -1,7 +1,9 @@
 import json
 import os
+import subprocess
 import threading
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -30,8 +32,38 @@ def pytest_runtest_setup(item):
     _note_leaks(item.nodeid)                 # (before this test's fixtures: the last one's teardown is done)
 
 
+# -- files a test leaves in the repo tree (#661): the run fails ------------------------------------------------------
+# A test writes under its tmp_path, never beside the code: an app built without a state folder once recorded the DVR's
+# state into ./dvr/ of whatever worktree ran the suite. What git sees as new (untracked or ignored) at the end of the
+# run and not at its start fails it; caches are left out. Only the controller (an xdist worker shares the tree).
+
+_ROOT = Path(__file__).resolve().parent.parent
+_CACHES = ("__pycache__/", ".pytest_cache/", ".hypothesis/", ".ruff_cache/", ".mypy_cache/")
+_tree: dict = {"before": None, "new": []}
+
+
+def _untracked() -> set[str] | None:
+    try:
+        out = subprocess.run(["git", "-C", str(_ROOT), "status", "--porcelain=v1", "-z", "--ignored"],
+                             capture_output=True, timeout=30, check=True).stdout.decode(errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None                                      # (not a git checkout: no check)
+    return {e[3:] for e in out.split("\0") if e[:3] in ("?? ", "!! ")
+            and not any(c in e[3:] or e[3:].endswith(c.rstrip("/")) for c in _CACHES) and not e.endswith(".pyc")}
+
+
+def pytest_sessionstart(session):
+    if not hasattr(session.config, "workerinput"):
+        _tree["before"] = _untracked()
+
+
 def pytest_sessionfinish(session):
     _note_leaks(None)
+    if not hasattr(session.config, "workerinput") and _tree["before"] is not None:
+        after = _untracked()
+        _tree["new"] = sorted((after or set()) - _tree["before"])
+        if _tree["new"] and session.exitstatus == 0:
+            session.exitstatus = 1
     if hasattr(session.config, "workeroutput"):                     # an xdist worker: to the controller
         session.config.workeroutput["thread_leaks"] = json.dumps(_leaks)
 
@@ -44,6 +76,11 @@ def pytest_testnodedown(node, error):
 def pytest_terminal_summary(terminalreporter):         # the one summary hook: both reports (a second def would replace this)
     _thread_report(terminalreporter)
     _flaky_report(terminalreporter)
+    if _tree["new"]:
+        terminalreporter.write_sep("!", f"tests left {len(_tree['new'])} new file(s) in the repo tree (#661): "
+                                        "write under tmp_path", red=True)
+        for p in _tree["new"]:
+            terminalreporter.write_line(f"  {p}")
 
 
 def _thread_report(terminalreporter):

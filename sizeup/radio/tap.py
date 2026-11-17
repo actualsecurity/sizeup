@@ -25,6 +25,16 @@ a post-ID at release that differs is kept next to it, never instead of it. A key
 is looked at once more for a burst that was there but didn't decode (radio/fm.py id_burst_frames: both tones of
 an MDC / FleetSync pair, well over the dead air): burst() hands that to the finished transmission, which says
 "ID not decoded" rather than "no ID sent" (#163).
+
+A carrier the squelch cuts in two (radio/fm.py key-ups: a second radio keyed before the hang ran out; or a stronger
+carrier over a background) was decoded as one until the cut was made: the squelch holds a key-up cut until the new
+carrier has min_open_s of its own, and the first carrier's key-up window, still open when it sent no ID, decoded the
+second radio's pre-ID onto it (#672: the first row named the wrong unit). So on a cut, the first carrier's IDs, its
+"ID not decoded" flag and its emergency alarm are what its own frames hold (pre-roll up to the drop the cut was made
+at), decoded again only when the decode that found them reached past that point. An ID that was the next radio's
+moves to the next carrier, its alarm too (raised once, at once): that carrier's own buffer starts where the squelch
+counts it back, and a burst that began while it was still rising out of the hiss doesn't decode there again. A held
+cut that is never made changes nothing: one carrier, its IDs exactly as without key-ups.
 """
 
 from __future__ import annotations
@@ -51,7 +61,9 @@ class _Chan:
     pre: deque = field(default_factory=lambda: deque(maxlen=PREROLL_FRAMES))
     open: bool = False
     since: float = 0.0
-    buf: list = field(default_factory=list)     # pre-roll + the first MDC_WINDOW_S of this carrier
+    buf: list = field(default_factory=list)     # pre-roll + the first MDC_WINDOW_S of this carrier (kept to its end)
+    t0: float = 0.0                             # when buf[0] began (on the squelch's clock: since + frames)
+    hold: tuple | None = None                   # the squelch's held key-up cut (drop start, carrier back), its frames
     n: int = 0                                  # frames of this carrier so far
     ids: list = field(default_factory=list)     # [(unit hex, emergency)] decoded live
     done: bool = False                          # stop decoding (found, or past the window)
@@ -108,7 +120,8 @@ class LiveTap:
         """One frame, after squelch.feed(frame) (TapSquelch). Never raises."""
         try:
             self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)),
-                        bool(getattr(squelch, "keyed", squelch.open)), getattr(squelch, "_frames", None))
+                        bool(getattr(squelch, "keyed", squelch.open)), getattr(squelch, "_frames", None),
+                        getattr(squelch, "_hold", None))
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
@@ -132,7 +145,7 @@ class LiveTap:
                 self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
 
     def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True,
-               frames: list | None = None) -> None:
+               frames: list | None = None, hold: tuple | None = None) -> None:
         kind = self.kind(label)
         with self._lock:
             c = self._ch.setdefault(label, _Chan())
@@ -141,11 +154,16 @@ class LiveTap:
                 # carrier over a background): the new one's frames so far are the squelch's since its start, never
                 # the pre-roll of the carrier before it.
                 cut = c.open and bool(frames)
+                moved, alarm = self._own(c, since) if cut and kind == "traffic" else ([], "")
                 self._ended(c)
-                c.open, c.since, c.n, c.ids, c.done, c.alarm, c.burst, c.shown = True, since, 0, [], False, "", False, False
+                c.open, c.since, c.n, c.alarm, c.burst, c.shown = True, since, 0, alarm, False, False
+                c.ids, c.done = moved, bool(moved)      # (the next radio's ID decoded across the cut: this carrier's)
                 c.buf = list(frames[:-1]) if cut else list(c.pre)
                 c.n = len(c.buf) if cut else 0
+                # buf[len(buf)] is this frame, the squelch's frames[-1] (a reopen hands it several at once)
+                c.t0 = since + ((len(frames) if frames else 1) - 1 - len(c.buf)) * FRAME / RATE
                 c.pre.clear()
+            c.hold = tuple(hold[:2]) if is_open and hold else None
             if not is_open:
                 was = c.open
                 if was:
@@ -184,13 +202,35 @@ class LiveTap:
         found = self.mdc(audio)
         if past:
             c.burst = not found and any(id_burst_frames(audio))     # once per carrier, at the window's end
-            c.done, c.buf = True, []
+            c.done = True
         if found:
-            c.ids, c.done, c.buf = list(found), True, []
+            c.ids, c.done = list(found), True
             if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
                 c.alarm = self.on_emergency(label, c.since, list(found)) or "raised"
             if c.shown:
                 self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
+
+    def _own(self, c: _Chan, since: float) -> tuple[list, str]:
+        """The open carrier is cut, the next one starting at since: its IDs, burst flag and alarm become what its own
+        frames hold (up to the drop the squelch held the cut at, else up to since), if the decode that set them reached
+        past that point (#672: the next radio's pre-ID decoded onto it while the squelch held the cut).
+        -> (the IDs and the alarm key that move on with the next carrier)."""
+        until, step = since, FRAME / RATE
+        if c.hold is not None and abs(c.since + c.hold[1] * step - since) < step / 2:
+            until = c.since + c.hold[0] * step          # the cut made is the one held: its drop began at g0
+        k = round((until - c.t0) / step)
+        if self.mdc is None or k >= len(c.buf):
+            return [], ""                   # every decode was of its own frames (or none ran): as it was
+        own = c.buf[:max(0, k)]
+        audio = np.concatenate(own).astype(np.float32) if own else np.zeros(0, np.float32)
+        ids = list(self.mdc(audio)) if len(own) >= MDC_MIN_FRAMES else []
+        moved = [x for x in c.ids if x not in ids]
+        c.ids, c.done = ids, True
+        c.burst = not ids and len(own) >= MDC_MIN_FRAMES and any(id_burst_frames(audio))
+        if c.alarm and any(e for _h, e in moved) and not any(e for _h, e in ids):
+            alarm, c.alarm = c.alarm, ""    # raised for the next radio's button: that carrier's, not raised again
+            return moved, alarm
+        return moved, ""
 
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
