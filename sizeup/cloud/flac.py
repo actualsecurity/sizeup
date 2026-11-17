@@ -276,26 +276,42 @@ def _fixed(warm: np.ndarray, res: np.ndarray, order: int) -> np.ndarray:
     return d
 
 
-def decode(data: bytes) -> tuple[np.ndarray, int]:
-    """A FLAC stream (the subset encode() writes, see above) -> (int16 samples, rate)."""
+MAX_SAMPLES = 16000 * 600            # decode()'s default bound: 10 minutes at 16 kHz (the STT input is far shorter)
+
+
+def info(data: bytes) -> tuple[int, int, bytes, int]:
+    """A stream's STREAMINFO: (rate, total samples, the samples' MD5, where the frames start). FlacError if it has
+    none, or isn't mono 16-bit. Cheap: nothing is decoded (the hub checks a blob with it before keeping it)."""
     if data[:4] != b"fLaC":
         raise FlacError("not FLAC")
-    at, info = 4, None
+    at, got = 4, None
     while True:
         if at + 4 > len(data):
             raise FlacError("truncated metadata")
         last, kind, size = data[at] >> 7, data[at] & 0x7F, int.from_bytes(data[at + 1:at + 4], "big")
         if kind == 0:
-            info = data[at + 4:at + 4 + size]
+            got = data[at + 4:at + 4 + size]
         at += 4 + size
         if last:
             break
-    if info is None or len(info) < 34:
+    if got is None or len(got) < 34:
         raise FlacError("no STREAMINFO")
-    packed = int.from_bytes(info[10:18], "big")
+    packed = int.from_bytes(got[10:18], "big")
     rate, chans, bps, total = packed >> 44, ((packed >> 41) & 7) + 1, ((packed >> 36) & 31) + 1, packed & ((1 << 36) - 1)
     if chans != 1 or bps != 16:
         raise FlacError(f"{chans} channel(s), {bps} bits: mono 16-bit only")
+    return rate, total, bytes(got[18:34]), at
+
+
+def decode(data: bytes, max_samples: int = MAX_SAMPLES) -> tuple[np.ndarray, int]:
+    """A FLAC stream (the subset encode() writes, see above) -> (int16 samples, rate). Bounded: a stream that says (or
+    turns out to hold) more than max_samples, a frame longer than what is left of its total, or one without its MD5
+    is refused before anything big is made (a few KB of crafted FLAC could otherwise ask for gigabytes)."""
+    rate, total, md5, at = info(data)
+    if total > max_samples:
+        raise FlacError(f"{total} samples: over the {max_samples} this reads")
+    if md5 == bytes(16):
+        raise FlacError("no MD5 (every stream encode() writes has one)")
     r = _Reader(data[at:])
     out: list[np.ndarray] = []
     got = 0
@@ -325,6 +341,8 @@ def decode(data: bytes) -> tuple[np.ndarray, int]:
             n = 256 << (bs_code - 8)
         else:
             raise FlacError("reserved block size")
+        if n > total - got:
+            raise FlacError(f"a frame of {n} samples, only {total - got} left")
         if rate_code == 12:
             r.read(8)
         elif rate_code in (13, 14):
@@ -362,6 +380,6 @@ def decode(data: bytes) -> tuple[np.ndarray, int]:
     if pcm.min(initial=0) < -32768 or pcm.max(initial=0) > 32767:
         raise FlacError("samples out of range")
     pcm = pcm.astype("<i2")
-    if info[18:34] != bytes(16) and hashlib.md5(pcm.tobytes()).digest() != info[18:34]:
+    if hashlib.md5(pcm.tobytes()).digest() != md5:
         raise FlacError("MD5 mismatch")
     return pcm.astype(np.int16), int(rate)
