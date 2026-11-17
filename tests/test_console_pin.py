@@ -5,8 +5,10 @@ any mobile change. A later mobile change that alters one of them fails here; an 
     SIZEUP_PIN_WRITE=1 .venv/bin/python -m pytest tests/test_console_pin.py
 
 Routes are the string literals in the three files that serve them (the server's if-chain, the CAD's and the station
-hub's tables), so a route added, removed or renamed shows up too. The responses come from a real hub run in this
-process with an empty database (nothing here is a real incident), the clock-dependent parts normalised.
+hub's tables). The route half is a SUBSET check: every pinned route must still be there, so a route removed or renamed
+fails, but a route ADDED passes. Many branches add console routes in parallel; an equality check would fail every
+unrelated pull request and conflict on the fixture. The sample responses are exact (status, headers, body).
+The responses come from a real hub run in this process with an empty database (nothing here is a real incident), the clock-dependent parts normalised.
 
 The one intended console change of the mobile work (#619) is the last sample: an /api/cad request carrying
 `Authorization: Bearer <fake>` is a 401 in the console's JSON shape (a device token is not for the console). It was
@@ -46,6 +48,11 @@ def route_table() -> list[str]:
     return sorted(out)
 
 
+def missing_routes(pinned: list[str], now: list[str]) -> list[str]:
+    """The pinned routes that are no longer served: removed or changed. Added routes are not reported."""
+    return sorted(set(pinned) - set(now))
+
+
 def normal(b: bytes) -> str:
     s = b.decode("utf-8", "replace")
     s = re.sub(r'("(?:at|ts|time|server_time|now|started|built|uptime_s|since)":\s*)[0-9.eE+-]+', r"\1T", s)
@@ -82,9 +89,19 @@ def test_the_consoles_routes_and_responses_are_pinned(hub):
     if os.environ.get("SIZEUP_PIN_WRITE"):
         PIN.write_text(json.dumps(now, indent=1, sort_keys=True) + "\n")
     pinned = json.loads(PIN.read_text())
-    assert now["routes"] == pinned["routes"]
+    assert missing_routes(pinned["routes"], now["routes"]) == []
     for k, v in pinned["responses"].items():
         assert now["responses"][k] == v, k
+
+
+def test_the_route_check_catches_a_removed_route_and_allows_an_added_one():
+    pinned = json.loads(PIN.read_text())["routes"]
+    code = route_table()
+    assert missing_routes(pinned, code) == []
+    assert missing_routes(pinned + ["sizeup/cad/api.py: /api/cad/not-served"], code) == \
+        ["sizeup/cad/api.py: /api/cad/not-served"]                       # a pinned route the code lacks: caught
+    assert missing_routes(pinned, [r for r in code if not r.endswith(": /healthz")]) != []    # one removed: caught
+    assert missing_routes(pinned, code + ["sizeup/cad/api.py: /api/cad/a-new-route"]) == []   # one added: passes
 
 
 def test_the_pin_has_teeth():
