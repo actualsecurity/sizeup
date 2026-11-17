@@ -1055,10 +1055,12 @@ One append-only log of references `(seq, epoch, kind, id, rev, at)` (no payload,
   A fenced task answers the existing 503 and writes nothing.
 - **After a restore, reset.** The epoch lives in `hub.sqlite`, so restoring an older copy brings the old epoch back. The log
   checks itself against the CAD at its first run and resets (a new epoch: every app gets a 409 and resnapshots) when the
-  CAD is older than the log has seen, names another epoch, or a clean drain reached a head the log has not. A `hub.sqlite`
-  restored to a point after the last clean drain cannot be told from a crash. **Runbook: after restoring `hub.sqlite` or
-  `cad.sqlite` from Litestream, call `ChangeLog.reset()`** (or delete the `mobile_changelog*` tables with the hub stopped:
-  the next run makes a new epoch).
+  CAD is older than the log has seen (lower max ids), names another epoch, or a clean drain reached a head the log has not.
+  **Runbook: after restoring `hub.sqlite` or `cad.sqlite` from Litestream, stop the hub, delete the `mobile_changelog*`
+  tables from `hub.sqlite`, start it:** the next run makes a new epoch. (`ChangeLog.reset()` does the same in code; there is
+  no operator command for it.) **Not detectable:** a CAD restore that keeps the same max ids, and a `hub.sqlite` restored to a
+  point after the last clean drain (it looks like a crash): only the runbook covers them. A missing clean marker (a fenced or
+  failed write, or the flag off at the drain) also looks like a crash to the next start.
 - **Retention:** 7 days and at most 100,000 rows, pruned hourly in passes of 5,000 rows; an older cursor is a 410 (`oldest`),
   another epoch (or a cursor ahead of the log) a 409.
 - **Streams:** 2 per device and `[mobile] max_streams` overall (429 `too_many_streams`), 15 s heartbeats, a bounded queue

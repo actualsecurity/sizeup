@@ -485,9 +485,11 @@ class Recorder:
             t.join(5)
         self.flush()
         try:
-            if self.anchor is not None and self._ready:
+            if self.anchor is not None and self._ready and self.active():
                 self.log.mark_clean(self.anchor)
         except Exception:  # noqa: BLE001 - FencedWrite or closed: nothing to say
+            # (a clean marker that could not be written, or was not because the flag is off, looks like a crash to the
+            # next start: it only loses the "older hub.sqlite" check, never a cursor)
             pass
 
 
@@ -528,7 +530,8 @@ def cad_follow(store) -> list[tuple[str, Callable[[dict], dict]]]:
 
 def cad_anchor(store) -> Anchor:
     """The CAD's meta and high-water ids: the highest id of each table whose rows come with a followed change (ids
-    only grow on one database, so a lower one is an older database)."""
+    only grow on one database, so a lower one is an older database). Assumes ids never fall: a future retention DELETE
+    of the newest rows would only cause a harmless reset)."""
     def hw() -> list:
         tables = ("incidents", "events", "unit_history", "dispatches")
         r = store.q("SELECT " + ", ".join(f"(SELECT IFNULL(MAX(id), 0) FROM {t}) AS {t}" for t in tables))[0]
@@ -543,7 +546,7 @@ class Feed:
     visible(principal, change) -> bool: may this person be told of this reference. FAILS CLOSED: with none supplied
     nothing is shown and the routes answer 503 `unavailable`, so the sign-in work (#558, PR 2) must supply it from the
     person's role and sourcekeys before the `stream` flag is turned on. valid(principal) -> bool: is the device still
-    signed in (a revoked one is cut off mid-stream); default always true until PR 2's resolver supplies it."""
+    signed in (a revoked one is cut off mid-stream). Both fail closed: with either missing the routes answer 503."""
 
     def __init__(self, log: ChangeLog, follow: list | None = None, active: Callable[[], bool] = lambda: True,
                  visible: Callable[[object, Change], bool] | None = None, kinds: frozenset = MOBILE_KINDS,
@@ -552,7 +555,7 @@ class Feed:
                  valid: Callable[[object], bool] | None = None, anchor: Anchor | None = None,
                  version: Callable[[], int] | None = None):
         self.log, self.kinds, self.visible, self.fence_ok = log, kinds, visible, fence_ok
-        self.valid = valid or (lambda principal: True)
+        self.valid = valid
         self.heartbeat_s, self.tick_s, self.queue = heartbeat_s, tick_s, queue
         self._subs: set[Subscription] = set()
         self._mu = threading.Lock()
@@ -580,7 +583,8 @@ class Feed:
         return False
 
     def serving(self) -> bool:
-        return self.visible is not None
+        """Both a visibility predicate and a device check are supplied: else the feed is not served (fail closed)."""
+        return self.visible is not None and self.valid is not None
 
     def subscribe(self) -> Subscription:
         s = Subscription(self.queue)

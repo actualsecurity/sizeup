@@ -27,7 +27,7 @@ import json
 import time
 from typing import Callable
 
-from .changelog import BACKLOG_ROWS, RETRY_MS, VALID_EVERY_S, Feed, public
+from .changelog import BACKLOG_ROWS, RETRY_MS, VALID_EVERY_S, ChangeLogClosed, Feed, public
 from .changes import DIGITS, one, parse_cursor, problem, unavailable
 
 MIN_WAIT_S = 0.01              # never a zero wait: a loop with nothing to wait for would spin
@@ -87,26 +87,13 @@ class Body:
     def run(self, write: Callable[[bytes], None], stop: Callable[[], bool] = lambda: False) -> str:
         """Write until the client goes (write raises: left to the caller), `stop()` or ours says so. Returns why it
         ended (for the log and the close event)."""
-        feed, log = self.plan.feed, self.plan.feed.log
+        feed = self.plan.feed
         sub = feed.subscribe()
         try:
-            epoch = log.epoch
-            last = self.plan.after if self.plan.after is not None else log.head()
-            write(b"retry: %d\n" % RETRY_MS + PAD + event("hello", {"epoch": epoch, "head": log.head(),
-                                                                   "server_time": time.time()}))
-            beat = time.monotonic()
-            last, why = self._backlog(write, last, epoch, stop, sub)         # what the cursor missed: from the database
-            while not why:                                                    # then only what the recorder announces
-                for c in sub.get(self._next_wait(beat)):
-                    # (the backlog read may have had it already)
-                    if c.seq > last and c.kind in feed.kinds:
-                        last = c.seq
-                        if self._tell(write, c, epoch):
-                            beat = time.monotonic()
-                if time.monotonic() - beat >= feed.heartbeat_s:
-                    write(event("heartbeat", {"server_time": time.time()}))
-                    beat = time.monotonic()
-                why = self._why(stop, sub, epoch)
+            try:
+                why = self._serve(write, stop, sub)
+            except ChangeLogClosed:              # the feed was closed (a drain) under an open stream
+                why = "stopping"
             try:
                 write(event("close", {"reason": why, "server_time": time.time()}))
             except Exception:  # noqa: BLE001 - the client may be gone: that is the end anyway
@@ -114,6 +101,26 @@ class Body:
             return why
         finally:
             feed.unsubscribe(sub)
+
+    def _serve(self, write, stop, sub) -> str:
+        feed, log = self.plan.feed, self.plan.feed.log
+        epoch = log.epoch
+        last = self.plan.after if self.plan.after is not None else log.head()
+        write(b"retry: %d\n" % RETRY_MS + PAD + event("hello", {"epoch": epoch, "head": log.head(),
+                                                               "server_time": time.time()}))
+        beat = time.monotonic()
+        last, why = self._backlog(write, last, epoch, stop, sub)             # what the cursor missed: from the database
+        while not why:                                                        # then only what the recorder announces
+            for c in sub.get(self._next_wait(beat)):
+                if c.seq > last and c.kind in feed.kinds:         # (the backlog read may have had it already)
+                    last = c.seq
+                    if self._tell(write, c, epoch):
+                        beat = time.monotonic()
+            if time.monotonic() - beat >= feed.heartbeat_s:
+                write(event("heartbeat", {"server_time": time.time()}))
+                beat = time.monotonic()
+            why = self._why(stop, sub, epoch)
+        return why
 
     def _tell(self, write, c, epoch: str) -> bool:
         feed = self.plan.feed
@@ -141,6 +148,12 @@ class Body:
         return min(feed.tick_s, max(MIN_WAIT_S, feed.heartbeat_s - (time.monotonic() - beat)))
 
     def _why(self, stop, sub, epoch) -> str:
+        try:
+            return self._why_open(stop, sub, epoch)
+        except ChangeLogClosed:                  # the feed was closed (a drain) under an open stream
+            return "stopping"
+
+    def _why_open(self, stop, sub, epoch) -> str:
         feed = self.plan.feed
         if self._stop() or stop() or sub.closed:
             return "stopping"
@@ -152,6 +165,6 @@ class Body:
             return "epoch_changed"
         if time.monotonic() - self._valid_at >= VALID_EVERY_S:
             self._valid_at = time.monotonic()
-            if not feed.valid(self.plan.principal):
+            if feed.valid is None or not feed.valid(self.plan.principal):
                 return "revoked"
         return ""

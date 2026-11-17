@@ -29,7 +29,7 @@ EPOCH_CHANGED = "the change log started over: load a snapshot again"
 
 def problem(status: int, code: str, message: str, retry_after_s: int | None = None, **extra) -> tuple[int, dict]:
     """An error in v1's envelope with the fields a resync needs beside code and message."""
-    return status, envelope(code, message, retry_after_s, extra)
+    return status, envelope(code, message, retry_after_s, extra=extra)
 
 
 def one(q: dict, name: str) -> str | None:

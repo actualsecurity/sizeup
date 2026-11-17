@@ -38,6 +38,11 @@ class Box:
         return Switches(lambda: self.enabled, lambda: self.flags, **kw)
 
 
+def signed_in(principal) -> bool:
+    """A device check that accepts every device (PR 2 supplies the real one: revoked and deactivated are refused)."""
+    return True
+
+
 def everyone(principal, change) -> bool:
     """A visibility predicate that shows every reference (PR 2 supplies the real one from role and sourcekeys)."""
     return True
@@ -55,7 +60,8 @@ class Rig:
         self.box = box or Box()
         self.fence = [True]
         self.log = ChangeLog(tmp_path / "hub.sqlite", lambda: self.fence[0], clock=self.clock)
-        kw = dict(batch_s=0.02, heartbeat_s=0.3, tick_s=0.05, fence_ok=lambda: self.fence[0], visible=everyone)
+        kw = dict(batch_s=0.02, heartbeat_s=0.3, tick_s=0.05, fence_ok=lambda: self.fence[0], visible=everyone,
+                  valid=signed_in)
         kw.update(feed_kw)
         self.feed = Feed(self.log, cad_follow(self.store), lambda: self.box.switches().allows("stream"), **kw)
         self.feed.bind(self.store)
@@ -293,7 +299,7 @@ def test_a_cursor_resumes_across_a_handoff_without_a_resnapshot(tmp_path):
     r.feed.close()
     r.store.set_unit_status(uid(r.cad, "L31"), "RS", "Lt. Ruiz")        # a change nobody logged (the old task is gone)
     r.log = ChangeLog(tmp_path / "hub.sqlite", clock=r.clock)                 # the new task
-    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone)
+    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone, valid=signed_in)
     r.feed.bind(r.store)
     r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
     try:
@@ -485,7 +491,7 @@ def hub(tmp_path):
                     if h.get("X-Test-Device") else None)
     v1 = srv.httpd.RequestHandlerClass.v1
     v1.changes.heartbeat_s, v1.changes.tick_s, v1.changes.recorder.batch_s = 0.3, 0.05, 0.02
-    v1.changes.visible = everyone
+    v1.changes.visible, v1.changes.valid = everyone, signed_in
     v1.changes.recorder.prepare()             # the recorder's first run (a reader is told 503 until it has been)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     h = type("Hub", (), {})()
@@ -560,7 +566,7 @@ def test_resume_across_a_handoff_the_new_task_serves_the_same_cursor(hub):
     wait_for(lambda: hub.head())
     epoch, head = hub.feed.log.epoch, hub.head()
     nxt = Feed(ChangeLog(hub.path / "hub.sqlite"), cad_follow(hub.cad.store), lambda: True, tick_s=0.05,
-               visible=everyone)
+               visible=everyone, valid=signed_in)
     nxt.bind(hub.cad.store)
     nxt.recorder.prepare()
     v1 = V1(switches=hub.box.switches(), resolver=lambda h: ME, changes=nxt)
@@ -854,25 +860,26 @@ def test_a_commit_while_the_baseline_scans_never_deadlocks_the_cad(tmp_path):
     r.feed.recorder.anchor = anchor._replace(get=lambda key: (in_scan.set(), anchor.get(key))[1])
     prepare = r.feed.recorder.prepare
 
-    def baseline():
-        prepare()
+    holds_cad_lock = threading.Event()
 
     def commit():
         with r.store.tx() as db:                      # holds the CAD's lock...
             db.execute("UPDATE units SET notes = notes")
-            assert in_scan.wait(10)                   # ...until the baseline is about to scan...
-            time.sleep(0.3)                           # ...and is blocked on that lock; the commit's poke follows
-    a = threading.Thread(target=baseline, daemon=True)
+            holds_cad_lock.set()
+            assert in_scan.wait(10)                   # ...until the baseline is about to call into the CAD...
+            time.sleep(0.3)                           # ...and is blocked on that lock. (The one sleep: nothing outside
+            #                                           sqlite can say "blocked on a lock"; the commit's poke follows.)
     b = threading.Thread(target=commit, daemon=True)
+    a = threading.Thread(target=prepare, daemon=True)
     b.start()
-    time.sleep(0.05)
+    assert holds_cad_lock.wait(10)                    # the baseline starts only once the commit holds the CAD's lock
     a.start()
     a.join(10)
     b.join(10)
-    try:
-        assert not a.is_alive() and not b.is_alive(), "the CAD's commit and the baseline wait on each other"
-    finally:
-        r.close()
+    stuck = a.is_alive() or b.is_alive()
+    if not stuck:
+        r.close()                                     # (a deadlocked rig is left: closing waits on its locks)
+    assert not stuck, "the CAD's commit and the baseline wait on each other"
 
 
 def make_old_copy(hub_path: Path, to: Path) -> None:
@@ -892,7 +899,7 @@ def swap_in(new: Path, hub_path: Path) -> None:
 def next_task(r: Rig) -> Rig:
     """The next task on the same CAD and the (possibly restored) hub.sqlite: a new log, feed and V1, prepared."""
     r.log = ChangeLog(r.path / "hub.sqlite", clock=r.clock)
-    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone)
+    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone, valid=signed_in)
     r.feed.bind(r.store)
     r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
     r.feed.recorder.prepare()
@@ -931,7 +938,7 @@ def test_a_different_or_older_cad_against_the_same_log_is_a_new_epoch(tmp_path):
     older = Rig(tmp_path / "two")
     (tmp_path / "one" / "hub.sqlite").replace(tmp_path / "two" / "hub.sqlite")
     older.log = ChangeLog(tmp_path / "two" / "hub.sqlite", clock=older.clock)
-    older.feed = Feed(older.log, cad_follow(older.store), lambda: True, visible=everyone)
+    older.feed = Feed(older.log, cad_follow(older.store), lambda: True, visible=everyone, valid=signed_in)
     older.feed.bind(older.store)
     older.v1.changes = older.feed
     older.feed.recorder.prepare()
@@ -1103,3 +1110,63 @@ def test_an_unavailable_answer_carries_a_retry_after_header_that_matches_its_bod
     v1 = V1(switches=Box().switches(), resolver=lambda h: ME, changes=None)
     status, body, _, h = v1.respond("GET", "/api/v1/changes", "", {})
     assert status == 503 and h["Retry-After"] == str(json.loads(body)["error"]["retry_after_s"]) == "30"
+
+
+def test_the_feed_is_served_only_with_both_a_visibility_predicate_and_a_device_check(tmp_path):
+    r = Rig(tmp_path, valid=None)
+    try:
+        r.settle()
+        assert not r.feed.serving()                                   # visible without valid: still closed
+        for path in ("/api/v1/changes", "/api/v1/stream"):
+            status, body, h = r.get("after=0", path=path)
+            assert status == 503 and body["error"]["code"] == "unavailable"
+        r.feed.valid = signed_in
+        assert r.feed.serving() and r.get("after=0")[0] == 200
+        r.feed.visible = None
+        assert not r.feed.serving()
+    finally:
+        r.close()
+
+
+def test_extra_fields_are_in_the_envelope_by_keyword_only(rig):
+    from sizeup.api.v1.errors import body, envelope
+    assert envelope("epoch_changed", "m", extra={"epoch": "abc"}) == {"error": {"code": "epoch_changed", "message": "m",
+                                                                                 "epoch": "abc"}}
+    with pytest.raises(TypeError):
+        envelope("c", "m", 5, {"epoch": "abc"})                       # not positional: a merge cannot misplace it
+    assert json.loads(body("cursor_too_old", "m", extra={"oldest": 7}))["error"]["oldest"] == 7
+    _, b, _ = rig.get("after=1&epoch=deadbeef0000")
+    assert b["error"]["epoch"] == rig.log.epoch
+    rig.incident()
+    rig.settle()
+    rig.log.retention_s = 1.0
+    rig.clock.t += 10
+    rig.store.set_unit_status(uid(rig.cad, "E63"), "OL", "Lt. Ruiz")
+    rig.settle()
+    rig.log.prune(force=True)
+    _, b, _ = rig.get("after=0")
+    assert b["error"]["code"] == "cursor_too_old" and b["error"]["oldest"] == rig.log.floor() > 0
+
+
+def test_a_drain_with_the_flag_off_leaves_no_clean_marker(tmp_path):
+    r = Rig(tmp_path, live=True)
+    r.feed.recorder.prepare()
+    r.store.set_unit_status(uid(r.cad, "E63"), "OL", "Lt. Ruiz")
+    wait_for(lambda: r.log.head())
+    r.box.flags["stream"] = False
+    r.feed.close()
+    assert r.store.meta_get("mobile_log_clean") is None
+    r.store.shutdown()
+
+
+def test_a_stream_whose_feed_is_closed_under_it_says_stopping(rig):
+    status, body, _, _ = rig.v1.respond("GET", "/api/v1/stream", "", {})
+    written = []
+
+    def write(raw):
+        written.append(raw)
+        if b"event: hello" in raw:
+            rig.feed.log.close()                                      # the drain closes the log under the open stream
+    why = body.run(write)
+    body.close()
+    assert why == "stopping" and b'"reason":"stopping"' in written[-1]

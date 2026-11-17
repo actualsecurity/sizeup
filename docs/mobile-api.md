@@ -371,7 +371,7 @@ declared type. So: **foreground stream + background push + cursor resume.**
 | App in foreground | `GET /api/v1/stream?after=<seq>&epoch=<e>` (SSE). Events `change` = a reference `{seq, epoch, kind: incident\|unit, id, rev, at, server_time}` (no payload, no `op`: a deletion is an empty `rev`), each with `id: <epoch>-<seq>`; resume with `Last-Event-ID`. An `event: heartbeat` every 15 s (not 1 s state pushes). Filtered per principal (kinds, and a visibility predicate PR 2 supplies: until then the feed is not served) |
 | Backgrounded or killed | APNs/FCM ([§4](#4-pushes-to-the-app)). The push carries a reference (kind, id), not the object |
 | Back to foreground | `GET /api/v1/changes?after=<cursor>&limit=500`, then reopen the stream. `410 {oldest}` means the cursor is too old: resnapshot with `GET /api/v1/snapshot` (active incidents, units, open alarms) |
-| Bad network | The same `changes` endpoint as a long poll (`&wait=25`, under Cloudflare's 100 s) |
+| Bad network | The same `changes` endpoint as a long poll (`&wait=25`, under Cloudflare's 100 s) (planned, not in #561) |
 
 **Why not reuse the console's `Broadcaster`:** its ids reset on every handoff; it holds no history; its payload is the
 UI blob, the same for every viewer; and it pushes every second even when idle, which costs a phone radio wake-ups.
@@ -393,6 +393,8 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
   **DEVIATION from the design:** the SSE `id` and `Last-Event-ID` carry `<epoch>-<seq>` (not a bare cursor), so
   EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works.
   `rev` is a hash of the whole row: a confirmation oracle only for a row someone could already guess, no practical attack.
+  The log's `rev` must equal the reads' GET `rev` (pending: `cad_follow` will hash the reads serializer's output once PR 4
+  lands; until then the log `rev` is a changed-marker only, not comparable with a GET's).
   **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view (the log takes kinds per
   consumer for it), `meta.epoch` (still null), and per-person filtering: `Feed.visible` fails closed, so `changes` and
   `stream` answer 503 `unavailable` until PR 2's resolver supplies a predicate from the person's role and sourcekeys (and

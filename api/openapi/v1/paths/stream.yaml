@@ -47,7 +47,7 @@ get:
           schema:
             $ref: ../schemas/Error.yaml
     "400":
-      description: "Bad input: error.code is bad_cursor (after is digits only) or bad_limit."
+      description: "Bad input: error.code is bad_cursor (after is digits only)."
       content:
         application/json:
           schema:

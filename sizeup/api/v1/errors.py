@@ -6,7 +6,7 @@ import json
 JSON = "application/json"
 
 
-def envelope(code: str, message: str, retry_after_s: int | None = None, extra: dict | None = None) -> dict:
+def envelope(code: str, message: str, retry_after_s: int | None = None, *, extra: dict | None = None) -> dict:
     """The error object. extra: fields a client needs beside the code (epoch_changed: epoch; cursor_too_old: oldest)."""
     err: dict = {"code": code, "message": message, **(extra or {})}
     if retry_after_s is not None:
@@ -14,14 +14,14 @@ def envelope(code: str, message: str, retry_after_s: int | None = None, extra: d
     return {"error": err}
 
 
-def body(code: str, message: str, retry_after_s: int | None = None, extra: dict | None = None) -> bytes:
-    return json.dumps(envelope(code, message, retry_after_s, extra), separators=(",", ":")).encode()
+def body(code: str, message: str, retry_after_s: int | None = None, *, extra: dict | None = None) -> bytes:
+    return json.dumps(envelope(code, message, retry_after_s, extra=extra), separators=(",", ":")).encode()
 
 
 def error(status: int, code: str, message: str, retry_after_s: int | None = None,
-          headers: dict | None = None, extra: dict | None = None) -> tuple[int, bytes, str, dict]:
+          headers: dict | None = None, *, extra: dict | None = None) -> tuple[int, bytes, str, dict]:
     """(status, body, content type, headers). Never cached; Retry-After is sent with retry_after_s."""
     h = {"Cache-Control": "no-store", **(headers or {})}
     if retry_after_s is not None:
         h["Retry-After"] = str(retry_after_s)
-    return status, body(code, message, retry_after_s, extra), JSON, h
+    return status, body(code, message, retry_after_s, extra=extra), JSON, h
