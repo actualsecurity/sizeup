@@ -26,6 +26,7 @@ FCM_APP = f"arn:aws:sns:us-east-1:{ACCT}:app/GCM/example-android"
 APPS = snsmod.Apps(SANDBOX_APP, PROD_APP, FCM_APP)
 IOS_TOKEN = "0123456789abcdef" * 4
 FCM_TOKEN = "fXyz1234567:APA91bExampleTokenExampleToken_-0123456789"
+INTEL_LABELS = frozenset({"PD", "Smoke / fire reported", "Smoke reported", "Port Chester"})   # packs' labels and towns
 UNITS = {"E64": "Engine 64", "L31": "Ladder 31"}         # the CAD's units list, as the lookup answers
 NOON = 1767268800.0              # 2026-01-01 12:00 UTC = 07:00 America/New_York
 NIGHT = NOON + 15 * 3600         # 03:00 America/New_York
@@ -139,7 +140,8 @@ class Rig:
         self.service = svc.PushService(PushDevices(self.db, clock=lambda: self.now[0]), apps,
                                        snsmod.Sns("us-east-1", fake.url, lambda: CREDS), settings=lambda: self.policy,
                                        role_of=self.PEOPLE.get, clock=lambda: self.now[0], log=self.logs.append,
-                                       device_active=lambda device_id: True, unit_of=UNITS.get)
+                                       device_active=lambda device_id: True, unit_of=UNITS.get,
+                                       intel_labels=lambda: INTEL_LABELS)
 
     def device(self, n: int, email: str, platform="ios", env="sandbox", prefs=None, quiet=None):
         token = IOS_TOKEN[:-2] + f"{n:02d}" if platform == "ios" else FCM_TOKEN + str(n)

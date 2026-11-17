@@ -4837,7 +4837,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     if cfg.cloud_role != "station" and cfg.cad_db:       # device push (#563): nothing sent or written until it is on
         from sizeup.push.wire import wire as wire_push
         wire_push(app.pushes, Path(cfg.cad_db).parent, mobile, app.cad.store,
-                  may_write=app.fence.ok if app.fence is not None else None, log=log)
+                  may_write=app.fence.ok if app.fence is not None else None, log=log, intel=app.cad.intel)
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
                        station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),

@@ -36,7 +36,21 @@ def unit_for(store, code: str) -> str | None:
     return None if r is None else (r["spoken"] or r["title"] or "")
 
 
-def wire(pushes, state_dir: str | Path, switches, store, may_write=None, log=print, env=None, device_active=None):
+def intel_labels(intel) -> frozenset:
+    """Every part an intel push title is built from (sizeup/intel/push.py compose: the pack's label, the category's label
+    or key, the town): the loaded packs' labels and the CAD's town names. Read at every intel push (packs reload)."""
+    from sizeup.intel.rules import town_names
+    out = set(town_names().values())
+    for p in getattr(intel, "packs", None) or []:
+        out.add(p.label)
+        for key, cat in (p.categories or {}).items():
+            out.update({str(key), str((cat or {}).get("label") or "")})
+    out.discard("")
+    return frozenset(out)
+
+
+def wire(pushes, state_dir: str | Path, switches, store, may_write=None, log=print, env=None, device_active=None,
+         intel=None):
     """Build and install the service. pushes: notify.Pushes. state_dir: where hub.sqlite lives. switches: the app's
     api.v1 Switches (the `push` flag). store: the CAD store, read for a person's role. Returns the PushService."""
     def devices_policy() -> dict:
@@ -45,7 +59,8 @@ def wire(pushes, state_dir: str | Path, switches, store, may_write=None, log=pri
     devices = PushDevices(Path(state_dir) / "hub.sqlite", may_write=may_write, log=log)
     svc = service.PushService(devices, sns.Apps.from_env(env), settings=devices_policy,
                               active=lambda: switches.allows("push"), role_of=lambda e: role_for(store, e),
-                              device_active=device_active, log=log, unit_of=lambda c: unit_for(store, c))
+                              device_active=device_active, log=log, unit_of=lambda c: unit_for(store, c),
+                              intel_labels=lambda: intel_labels(intel))
     if device_active is None:
         log("push: device_active not wired (#558): revoked devices keep receiving pushes; push stays off until the "
             "`push` flag has a source and the sign-in wires it")

@@ -16,7 +16,7 @@ import pytest
 from sizeup import notify
 from sizeup.cad.airport_alerts import AirportAlert
 from sizeup.push import content
-from sizeup.push.wire import unit_for
+from sizeup.push.wire import intel_labels, unit_for
 from tests.test_alarms import make_cad, tx, uid
 from tests.test_health import Rig as HealthRig
 from tests.test_health import radio, station_status
@@ -62,7 +62,8 @@ def assert_none_of(fake, extra=()):
 
 # -- the alarms: units and the typed address ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("radio_id,unit,rig_code", [("4821", "4821", ""), ("41228", "41228", ""), ("4821", "J. Doe", ""),
+@pytest.mark.parametrize("radio_id,unit,rig_code", [("4821", "4821", ""), ("41228", "41228", ""),
+                                                      ("4821", "J. Doe", ""),
                                                       ("4821", "Jane Doe", "E64")])
 def test_an_alarms_unit_is_named_only_when_it_is_on_the_cads_list(rig, fake, tmp_path, radio_id, unit, rig_code):
     cad = make_cad(tmp_path)
@@ -92,14 +93,74 @@ def test_the_cads_unit_codes_still_appear(rig, fake, tmp_path):
     assert "Jane" not in title and "P1" not in title
 
 
-@pytest.mark.parametrize("address,shown", [("100 S Ridge St", True), ("Rt 22 & Example Ave", True),
-                                            ("Example Ave, 100 blk", True), ("I-95 NB Exit 8", True),
-                                            ("call John Smith at 100 Main", False),
-                                            ("call John Smith at 100 Main St", False),
-                                            ("caller says 914-555-0123 100 Example Ave", False),
-                                            ("100 Example Ave " + "x" * 80, False), ("", False)])
-def test_an_address_is_shown_only_when_it_looks_like_one(address, shown):
-    assert content.place_ok(address) is shown
+LEGIT = ["100 S Ridge St", "100 N Ridge St", "12 O'Brien Ave", "2210 Boston Post Rd, Port Chester", "45A Elm Street",
+         "1 Park Ave", "100 Example Ave", "9 Old Kings Hwy", "300 W. Main St"]
+JUNK = ["John Smith St", "Casey Rivera Ave", "Mary Jones Road", "Main St Jane Doe", "123 Elm St Casey Rivera",
+        "123 Main St and Jane Doe", "100 Main St 41228", "100 Main St 555 0147", "100 Main St (call 914-555-0123)",
+        "call John Smith at 100 Main", "call John Smith at 100 Main St", "caller says 914-555-0123 100 Example Ave",
+        "Rt 22 & Example Ave", "I-95 NB Exit 8", "Example Ave, 100 blk", "123456 Main St", "100 Main", "",
+        " ".join(["Abcdefgh"] * 7) + " St", "100 " + "Abcdefgh " * 5 + "St", "100 Main St, Jane Doe 41228"]
+
+
+@pytest.mark.parametrize("address", LEGIT)
+def test_an_address_of_the_strict_shape_is_shown(address):
+    assert content.place_ok(address) is True
+
+
+@pytest.mark.parametrize("address", JUNK)
+def test_anything_else_is_not_an_address_a_phone_is_told(address):
+    assert content.place_ok(address) is False
+
+
+def test_the_address_check_is_linear_on_adversarial_input():
+    start = time.time()
+    for s in ("1 " + "A " * 50_000 + "St", "1" * 100_000, "1 A-" * 25_000,
+              "1 " + "A'-" * 40_000 + " St, " + "B " * 40_000):
+        assert content.place_ok(s) is False
+    assert time.time() - start < 1.0
+
+
+def test_a_rejected_address_is_in_neither_the_title_nor_the_body(rig, fake):
+    rig.device(1, "admin@example.org", prefs={"dispatch": True})
+    for i, junk in enumerate(JUNK[:8]):
+        rig.now[0] += 100
+        rig.service.deliver("alerts", "MAYDAY", "x", 5, {"incident": "26-000015", "address": junk})
+        a = fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]
+        assert a == {"title": "MAYDAY \u00b7 26-000015", "body": "Open sizeup for details"}, junk
+    rig.now[0] += 100
+    rig.service.deliver("alerts", "MAYDAY", "x", 5, {"incident": "26-000015", "address": "100 N Ridge St"})
+    a = fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]
+    assert a == {"title": "MAYDAY \u00b7 26-000015 100 N Ridge St", "body": "100 N Ridge St"}
+
+
+@pytest.mark.parametrize("name,sent", [("Engine 64", "X9 (Engine 64)"),
+                                       ("Rescue 6 - Station 2", "X9 (Rescue 6 - Station 2)"),
+                                       ("jane.doe@example.com", "X9"), ("Chief 41228", "X9"), ("A" * 300, "X9"),
+                                       ("Engine 64, Jane Doe", "X9"), ("", "X9")])
+def test_a_units_display_name_is_sent_only_when_it_is_plain_and_short(rig, fake, name, sent):
+    rig.service.unit_of = lambda code: name if code == "X9" else None
+    rig.device(1, "admin@example.org")
+    rig.service.deliver("alerts", "MAYDAY", "x", 5, {"units": [("X9", "")]})
+    title = fake.published()[0]["message"]["APNS_SANDBOX"]["aps"]["alert"]["title"]
+    assert title == f"MAYDAY \u00b7 {sent}" and "@" not in title and len(title) < 80
+
+
+def test_an_event_number_that_is_not_a_reference_becomes_a_random_one():
+    assert content.message_id("alerts", who={"incident": "26-000015"}) == "26-000015"
+    for bad in ("call John Smith", "26-000015 Jane Doe", "x" * 65, "a b", "jane@example.com"):
+        mid = content.message_id("alerts", who={"incident": bad})
+        assert mid.startswith("alerts:") and bad not in mid
+    assert content.message_id("alerts", who={"incident": "x" * 64}) == "x" * 64
+
+
+@pytest.mark.parametrize("title", ["PD \u00b7 Jane Doe, 41228", "PD \u00b7 Smoke / fire reported \u00b7 Jane Doe",
+                                   "Jane Doe \u00b7 Smoke / fire reported \u00b7 Port Chester", "PD", ""])
+def test_an_intel_title_not_made_of_pack_labels_and_a_town_is_generic(rig, fake, title):
+    rig.device(1, "admin@example.org")
+    rig.service.deliver("intel", title, "100 Example Ave \u00b7 14:32 \u00b7 high", 4)
+    a = fake.published()[0]["message"]["APNS_SANDBOX"]["aps"]["alert"]
+    assert (a["title"], a["body"]) == content.GENERIC["intel"]
+    assert_none_of(fake)
 
 
 def test_a_dispatchers_typed_free_text_address_never_reaches_the_phone(rig, fake, tmp_path):
@@ -179,6 +240,7 @@ def test_an_intel_push_composed_from_a_transcript_naming_people_carries_none_of_
     extra = ("\nListen: https://bucket.example.org/listen/abc.m4a?X-Amz-Signature=zz"
              "\ncall John Smith 914-555-0123 plate ABC1234 radio 4821")
     sent = [dict(m, body=m["body"] + extra, who=None) for m in msgs]
+    rig.service.intel_labels = lambda: intel_labels(e)                  # the engine's real packs, and the CAD's towns
     rig.device(1, "admin@example.org")
     through_pushes(rig, notify.INTEL, sent)
     assert_none_of(fake, ("jane", "respond", "reports", "7654321", "Listen", "http"))

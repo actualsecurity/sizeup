@@ -4,38 +4,38 @@ NOTHING FREE-TEXT REACHES A PHONE. The caller's body is free text for several ki
 heard, a radio ID, the units named and who acknowledged; a health alert's carries serials and details), and no check
 can tell a name from a word. So the phone's text is built from an ALLOW-LIST, per kind (device_text):
 
-    alerts, dispatch  title = the headline the code chose ("MAYDAY", "Acknowledged: MAYDAY", a call type) plus the
-                      structured Who: units, channel, the CAD event number, the address (notify.compose);
-                      body = the address, else a generic line. Never the caller's body, the talker, the radio ID,
-                      the dongle, the detail.
+    alerts            title = a headline rebuilt from fixed words (headline()) plus the structured Who: the units on the
+                      CAD's list, the channel, the CAD event number, the address if it has the strict shape
+                      (notify.compose); body = that address, else a generic line. Never the caller's body, the
+                      talker, the radio ID, the dongle, the detail.
+    dispatch          generic title and body until a producer exists (none does): nothing is known to be safe.
     status            the alert's fixed sentence without its configured names (STATUS_TITLES); body always generic.
-    intel             title (the rule pack's and category's labels, the town); body: only the pieces of the engine's
-                      composed body (sizeup/intel/push.py: place, time, level; never a transcript) that look like what
-                      they should: a time, a level word, "location not heard", a place with a number or a street word.
-                      Anything else, and its Listen link, is dropped. (A place is the gazetteer's label: a street named
-                      after a person passes, which ntfy says too.)
+    intel             title only when every " \u00b7 " part is a loaded rule pack's label (pack or category) or a town
+                      (the intel_labels hook, wire.intel_labels: sizeup/intel/push.py compose builds it from exactly
+                      those), else generic; body: only the pieces of the engine's composed body (place, time, level;
+                      never a transcript) that look like what they should: a time, a level word, "location not
+                      heard", a place with a number or a street word. Anything else, and its Listen link, is dropped.
+
+The address (place_ok): by SHAPE only, since a dispatcher types it (sizeup/cad/service.py, up to 200 characters). A house
+number (required), an optional direction, up to three capitalised street-name words, a street type, an optional
+", Town": at most 50 characters, nothing after the street type but the town (so no digit group, no parentheses, no
+trailing words). Anything else is not sent: the body is generic and the title has no address. A unit's display name
+(unit_name_ok): at most 30 characters of letters, digits and " .'-", no run of four digits, no "@"; else the code alone.
 
 Where each title comes from (read in the code; the device title is rebuilt from FIXED words, never copied):
-    alarms       sizeup/cad/alarms.py `_push`: `what(a).upper()` = "EMERGENCY BUTTON (<via>)" and the matched
-    KEYWORDS (config,
-                 never the transcript), or "AIRCRAFT EMERGENCY: SQUAWK ..." (adsb), with DRILL / Ended / Acknowledged.
-                 headline() keeps only the segments it knows; the rest is dropped.
-    airport      sizeup/cad/airport_alerts.py `_push` sends `r["title"]`: built by sizeup/atc.py `_title`,
-    airport_watch.py
-                 `level_title` and `_alert`, airport_alerts.py `describe` from ATC speech (callsigns, a place), the rule
-                 packs and ADS-B; `update()` takes `title[:200]` from those same sources (no dispatcher edits it).
-                 Only the
-                 fixed lead is kept ("HPN ATC pre-alert", "HPN Alert N", "AIRCRAFT EMERGENCY"): never the callsign,
-                 type or
-                 place.
-    status       sizeup/cloud/health.py `_push`: `a["title"]` is a fixed sentence in code plus configured names (channel
-                 labels, dongle names, jobs, groups, databases); STATUS_TITLES keeps the fixed sentence and drops the
-                 name, and the Who (station name, detail) is not sent at all.
-    intel        sizeup/intel/push.py `compose`: the rule pack's and category's labels and the town: title_ok() too.
-    dispatch     no producer yet; title_ok().
-Units: only a configured unit (the CAD's units list, `unit_of`) survives, by its first token and with the list's own
-name: an alias, a radio ID, a talker or a person-style name is dropped. The address: place_ok() (an incident's address
-is typed by a dispatcher, sizeup/cad/service.py, up to 200 characters of free text).
+    alarms     sizeup/cad/alarms.py `_push`: `what(a).upper()` = "EMERGENCY BUTTON (<via>)" and the matched KEYWORDS
+               (config, never the transcript), or "AIRCRAFT EMERGENCY: SQUAWK ..." (adsb), with DRILL / Ended /
+               Acknowledged. headline() keeps only the segments it knows; the rest is dropped.
+    airport    sizeup/cad/airport_alerts.py `_push` sends `r["title"]`: built by sizeup/atc.py `_title`,
+               airport_watch.py `level_title` and `_alert`, airport_alerts.py `describe` from ATC speech (callsigns, a
+               place), the rule packs and ADS-B; `update()` takes `title[:200]` from those same sources (no dispatcher
+               edits it). Only the fixed lead is kept ("HPN ATC pre-alert", "HPN Alert N", "AIRCRAFT EMERGENCY"):
+               never the callsign, type or place.
+    status     sizeup/cloud/health.py `_push`: `a["title"]` is a fixed sentence in code plus configured names (channel
+               labels, dongle names, jobs, groups, databases); STATUS_TITLES keeps the sentence and drops the name, and
+               the Who (station name, detail) is not sent at all.
+    intel      sizeup/intel/push.py `compose`: the pack's label, the category's label (or key), the town.
+    dispatch   no producer yet.
 
 Then the intel `scrub()` (radio IDs of 6+ digits, plate-like tokens, dates) runs over what is left, as a last net
 under the allow-list: a text that still fails is replaced by the generic one (a mayday must still page), never sent.
@@ -76,6 +76,7 @@ PHONE = re.compile(r"\b\d{3}[-. ]?\d{3}[-. ]\d{4}\b|\b\d{3}[-.]\d{4}\b")
 PLACE = re.compile(r"^\d+[A-Za-z]?\s+[A-Za-z]|\b(?:st|street|ave|avenue|rd|road|blvd|dr|drive|ln|lane|ct|court|pl|"
                    r"place|pkwy|parkway|hwy|way|ter|terrace|cir|circle|exit|route|rt|bridge|tpke|turnpike|expy|sq|"
                    r"square|blk)\b", re.I)
+ID_OK = re.compile(r"[\w.:-]{1,64}")                      # a reference the app may be handed (an event number)
 INTEL_ID = re.compile(r"[?&]intel=([\w.-]{1,40})")
 _OPEN = "Open sizeup for details"
 GENERIC = {"alerts": ("sizeup alert", _OPEN), "intel": ("Radio pre-alert", _OPEN), "status": ("System alert", _OPEN),
@@ -123,11 +124,20 @@ def title_ok(title: str) -> bool:
     return bool(PLAIN.fullmatch(title or "")) and not URL.search(title)
 
 
-def headline(kind: str, title: str) -> str | None:
+def headline(kind: str, title: str, intel_labels=None) -> str | None:
     """The fixed headline for a title, or None (then the generic one). alerts: rebuilt from known words only (module
-    doc);
-    other kinds: the title as is when title_ok()."""
+    doc); status: STATUS_TITLES; intel: only a title whose every " \u00b7 " part is a label of the loaded rule packs or
+    a town (intel_labels), as sizeup/intel/push.py compose builds it; dispatch: always None (no producer yet, so
+    nothing is known to be safe: its device title stays generic until one exists)."""
     title = str(title or "").strip()
+    if kind == "dispatch":
+        return None
+    if kind == "intel":
+        if re.fullmatch(r"\d{1,4} more pre-alerts \(over the hourly limit\)", title):     # the engine's digest
+            return title
+        parts = title.split(" \u00b7 ")
+        ok = intel_labels is not None and 2 <= len(parts) <= 3 and all(p in intel_labels for p in parts)
+        return title if ok else None
     if kind == "status":
         m = re.match(r"^(Still: |Recovered: )?(.*?)( \d+ s| \d+ min| \d+ h \d+ min)?$", title)
         for pat, out in STATUS_TITLES:
@@ -135,7 +145,7 @@ def headline(kind: str, title: str) -> str | None:
                 return f"{m.group(1) or ''}{out}{m.group(3) or ''}"
         return None
     if kind != "alerts":
-        return title if title_ok(title) else None
+        return None
     m = FLAGS.match(title)
     flags, rest = m.group(0), title[m.end():]
     if rest.upper().startswith("AIRCRAFT EMERGENCY"):
@@ -157,13 +167,32 @@ def headline(kind: str, title: str) -> str | None:
     return (flags + " + ".join(known)) if known else None
 
 
+STREET_TYPES = ("St", "Street", "Ave", "Avenue", "Rd", "Road", "Blvd", "Boulevard", "Dr", "Drive", "Ln", "Lane",
+                "Ct", "Court", "Pl", "Place", "Pkwy", "Parkway", "Hwy", "Highway", "Way", "Ter", "Terrace", "Cir",
+                "Circle", "Sq", "Square", "Trl", "Trail", "Tpke", "Turnpike", "Expy", "Expressway", "Pike", "Row", "Path",
+                "Walk")
+# A house number (required), an optional direction, at most 3 capitalised street-name words, a street type as the last
+# word, an optional ", Town". Every quantifier is bounded and the length is capped first: linear on any input.
+ADDRESS = re.compile(r"\d{1,5}[A-Za-z]?\s+(?:[NSEW]\.?\s+)?(?:[A-Z][A-Za-z'-]{0,24}\s+){0,3}(?:%s)\.?"
+                     r"(?:,\s*[A-Z][A-Za-z .'-]{1,24})?" % "|".join(STREET_TYPES))
+ADDRESS_MAX = 50
+UNIT_NAME = re.compile(r"[A-Za-z0-9 .'-]{1,30}")
+
+
 def place_ok(address: str) -> bool:
-    """An address a phone may be told: at most 80 characters of letters, digits and address punctuation, led by a house
-    number or holding a street word, every word a number or capitalised (or and / of / block): not a sentence."""
+    """An address a phone may be told, by SHAPE only: a house number, an optional direction, up to three capitalised
+    street-name words, a street type, an optional ", Town"; at most 50 characters; nothing after the street type but the
+    town, so no digits (no radio ID or split phone number), no parentheses, no trailing words. An address of any other
+    shape ("Main St Jane Doe", "John Smith St" with no house number, an intersection) is the generic body: the app
+    fetches the place after unlock."""
     a = (address or "").strip()
-    if not a or len(a) > 80 or not re.fullmatch(r"[A-Za-z0-9 .,'&/#-]+", a) or not PLACE.search(a) or PHONE.search(a):
-        return False
-    return all(w[0].isupper() or w[0].isdigit() or w in "&/" or w in LOWER_OK for w in a.replace(",", " ").split())
+    return 0 < len(a) <= ADDRESS_MAX and ADDRESS.fullmatch(a) is not None
+
+
+def unit_name_ok(name: str) -> bool:
+    """The CAD list's display name for a unit: at most 30 characters of letters, digits, space . ' -, no run of four digits
+    and no "@" (a name typed into the list can be anything: otherwise the code is sent alone)."""
+    return UNIT_NAME.fullmatch(name or "") is not None and not re.search(r"\d{4}", name) and "@" not in name
 
 
 def _who(kind: str, who, unit_of=None):
@@ -178,8 +207,8 @@ def _who(kind: str, who, unit_of=None):
         token = (u[0] if u else "").split()[:1]
         code = token[0] if token else ""
         name = unit_of(code) if unit_of is not None and code and not code.isdigit() else None
-        if name is not None and (code, name) not in units:
-            units.append((code, name))
+        if name is not None and (code, name if unit_name_ok(name) else "") not in units:
+            units.append((code, name if unit_name_ok(name) else ""))
     addr = w.address if place_ok(w.address) else ""
     return (dataclasses.replace(w, talker="", dongle="", detail="", station="", units=tuple(units), address=addr),
             w.talker.strip())
@@ -191,11 +220,11 @@ def _intel_body(body: str) -> str:
     return " \u00b7 ".join(x for x in segs if x and not URL.search(x) and (INTEL_FIXED.match(x) or PLACE.search(x)))
 
 
-def device_text(kind: str, title: str, body: str, who=None, unit_of=None) -> tuple[str, str, str]:
+def device_text(kind: str, title: str, body: str, who=None, unit_of=None, intel_labels=None) -> tuple[str, str, str]:
     """(title, body, why): the text a phone may get, from the allow-list in the module doc. why is "" when it passed
     the scrub, else a category (never the text) and the text is the generic one."""
     w, talker = _who(kind, who, unit_of)
-    head = headline(kind, title)
+    head = headline(kind, title, intel_labels)
     if head is None:
         return GENERIC[kind][0], GENERIC[kind][1], "title"
     t = URL.sub("", notify.compose(head, w)).strip()[:TITLE_MAX]
@@ -218,8 +247,8 @@ def message_id(kind: str, click: str = "", who=None, ref: str = "") -> str:
     if ref:
         return str(ref)[:64]
     w = notify.Who.of(who)
-    if w is not None and w.incident.strip():
-        return w.incident.strip()[:64]
+    if w is not None and ID_OK.fullmatch(w.incident.strip()):
+        return w.incident.strip()
     m = INTEL_ID.search(click or "")
     if m:
         return f"intel:{m.group(1)}"

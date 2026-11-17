@@ -107,14 +107,14 @@ def test_intel_keeps_the_place_time_and_level_and_drops_everything_else(rig, fak
     assert_clean(fake)
 
 
-def test_dispatch_is_structured_fields_only(rig, fake):
+def test_dispatch_stays_generic_until_it_has_a_producer(rig, fake):
     rig.device(1, "admin@example.org", prefs={"dispatch": True})
     rig.policy = {"dispatch": {"on": True}}
-    rig.service.deliver("dispatch", "Structure fire", "caller John Smith, plate ABC1234, 914-555-0123, radio 4821", 3,
+    rig.service.deliver("dispatch", "Structure Fire - Jane Doe", "caller John Smith, plate ABC1234, 914-555-0123", 3,
                         {"talker": "radio 4821", "units": [("E64", "Engine 64")], "incident": "26-000015",
                          "address": "100 Example Ave"})
-    a = fake.published()[0]["message"]["APNS_SANDBOX"]["aps"]["alert"]
-    assert a == {"title": "Structure fire · E64 (Engine 64) · 26-000015 100 Example Ave", "body": "100 Example Ave"}
+    pay = fake.published()[0]["message"]["APNS_SANDBOX"]
+    assert pay["aps"]["alert"] == {"title": "Dispatch", "body": "Open sizeup for details"} and pay["id"] == "26-000015"
     assert_clean(fake)
 
 

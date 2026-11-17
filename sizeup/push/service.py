@@ -139,7 +139,8 @@ class PushService:
                  settings: Callable[[], dict] | None = None, active: Callable[[], bool] | None = None,
                  role_of: Callable[[str], str | None] | None = None,
                  device_active: Callable[[str], bool] | None = None, clock=time.time, log=print,
-                 mono: Callable[[], float] = time.monotonic, unit_of: Callable[[str], str | None] | None = None):
+                 mono: Callable[[], float] = time.monotonic, unit_of: Callable[[str], str | None] | None = None,
+                 intel_labels: Callable[[], frozenset] | None = None):
         self.devices, self.apps, self.sns = devices, apps, sns
         self.settings = settings or (lambda: {})
         self.active = active or (lambda: True)
@@ -149,6 +150,8 @@ class PushService:
         self.device_active_wired = device_active is not None      # not wired: registering warns once (register())
         # a unit code -> the CAD list's own name, None when it is not a unit; none given: no unit is named on a phone
         self.unit_of = unit_of or (lambda code: None)
+        # the rule packs' labels and the towns an intel title is built from (wire.intel_labels); none: a generic title
+        self.intel_labels = intel_labels or (lambda: frozenset())
         self.clock, self.log, self.mono = clock, log, mono
         self._sent: dict[str, deque] = {k: deque() for k in content.KINDS}
         self._q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
@@ -342,7 +345,8 @@ class PushService:
         rows = self._audience(kind, self.clock())
         if not rows:
             return 0
-        t, b, why = content.device_text(kind, title, body, who, self.unit_of)
+        t, b, why = content.device_text(kind, title, body, who, self.unit_of,
+                                                self.intel_labels() if kind == "intel" else None)
         if why:
             self._say(f"scrub-{kind}", f"push: {kind}: text held back ({why}): generic push")
         mid = content.message_id(kind, click, who, ref)
