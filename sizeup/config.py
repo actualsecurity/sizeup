@@ -10,10 +10,10 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.cloud.access import team_host
 from sizeup.polly import DEFAULT_VOICE as POLLY_DEFAULT
 from sizeup.polly import VOICES as POLLY_VOICES
-from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.radio.tones import ToneCode
 from sizeup.tts import DEFAULT_PYTHON, KOKORO_VOICES
 
@@ -549,6 +549,10 @@ def _cloud(data: dict) -> dict:
                 cloud_legacy_station_id=legacy_id, **_keychain(cl))
 
 
+MOBILE_REQUESTS_RANGE = (1, 64)       # [mobile] max_requests
+MOBILE_STREAMS_RANGE = (0, 64)        # [mobile] max_streams
+
+
 def _mobile(data: dict, role: str) -> dict:
     """[mobile] -> Config fields. No section = off. A hub (or all-in-one) key: a station's config never has one, and a
     release that doesn't know the section refuses the file (CLAUDE.md, the station rule)."""
@@ -560,14 +564,15 @@ def _mobile(data: dict, role: str) -> dict:
     enabled = mo.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("mobile.enabled: true or false")
-    nums = {}
-    for k, d, lo, hi in (("max_requests", DEFAULT_MAX_REQUESTS, 1, 64), ("max_streams", DEFAULT_MAX_STREAMS, 0, 64)):
-        v = mo.get(k, d)
-        if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
-            raise ConfigError(f"mobile.{k}: a whole number, {lo} to {hi}")
-        nums[k] = v
-    return dict(mobile_enabled=enabled, mobile_max_requests=nums["max_requests"],
-                mobile_max_streams=nums["max_streams"])
+
+    def whole(key: str, default: int, bounds: tuple[int, int]) -> int:
+        v = mo.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, int) or not bounds[0] <= v <= bounds[1]:
+            raise ConfigError(f"mobile.{key}: a whole number, {bounds[0]} to {bounds[1]}")
+        return v
+    return dict(mobile_enabled=enabled,
+                mobile_max_requests=whole("max_requests", DEFAULT_MAX_REQUESTS, MOBILE_REQUESTS_RANGE),
+                mobile_max_streams=whole("max_streams", DEFAULT_MAX_STREAMS, MOBILE_STREAMS_RANGE))
 
 
 def _prealert(data: dict) -> dict:

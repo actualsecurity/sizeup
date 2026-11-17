@@ -10,7 +10,9 @@ so v1 load cannot starve the console on the hub's one small task (#446).
 - at most 2 concurrent streams per device.
 
 The address is Cf-Connecting-Ip, which is only trustworthy when the origin is reachable only through Cloudflare (the
-hub's tunnel); anywhere else a client can pick it, and only the shared buckets hold."""
+hub's tunnel); anywhere else a client can pick it, and only the shared buckets hold. Without Cloudflare in front, a
+client that rotates the header can starve `meta` and the anonymous bucket, and one flooder with no header shares the
+tunnel's single address bucket with every other such caller."""
 from __future__ import annotations
 
 import math
@@ -71,14 +73,14 @@ class Limits:
         for k in idle:
             del buckets[k]
 
-    def admit(self, principal: str | None, write: bool, peer: str = "", public: bool = False) -> int:
-        """0: go on. Else the Retry-After seconds (a 429). principal: the device's key, None: unauthenticated.
+    def admit(self, device: str | None, write: bool, peer: str = "", public: bool = False) -> int:
+        """0: go on. Else the Retry-After seconds (a 429). device: the device's key, None: unauthenticated.
         public: the route needs no token (meta), so it has its own shared bucket."""
         now = self.clock()
         with self._lock:
-            if principal:
+            if device:
                 rate, burst = (WRITE_RATE, WRITE_BURST) if write else (READ_RATE, READ_BURST)
-                return self._take(self._devices, f"{'w' if write else 'r'}:{principal}", rate, burst, now)
+                return self._take(self._devices, f"{'w' if write else 'r'}:{device}", rate, burst, now)
             wait = self._take(self._ips, peer or "-", ANON_RATE, ANON_BURST, now)     # its own address first
             if wait:
                 return wait

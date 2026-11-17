@@ -560,17 +560,20 @@ the dispatchers use. Every change stays inert or harmless to the browser console
 
 | Safeguard | Where |
 |---|---|
-| Master switch, off by default | `[mobile] enabled = false` ([cloud.md](cloud.md#the-apps-api-switches-mobile-619)). Off: every `/api/v1/*` path but `GET /api/v1/meta` is a 404 in v1's envelope; no database, token key or push is touched. Checked on every request, read from the config at start: a change needs a restart |
+| Master switch, off by default | `[mobile] enabled = false` ([cloud.md](cloud.md#the-apps-api-switches-mobile-619)). Off: every `/api/v1/*` path but `GET /api/v1/meta` is a 404 in v1's envelope; no database, token key or push is touched. Read once at start from the config: a change needs a restart (a Settings-backed switch, like intel's policy, is the planned follow-up) |
 | Per-feature flags | `meta.features`: auth, reads, stream, writes, push, media, responders, each off until proven, and code-driven until a feature's pull request wires a source (for example `[mobile] features = [...]` or a settings policy). A route names its flag (`routes.py`); flag off = as if absent. A test enforces that every route declares its flag and who may call it |
 | A v1 failure stays in v1 | `handler.respond` runs every route inside one try/except: the exception class is logged (never a token, header or body) and the answer is a 500 in v1's envelope |
 | Caps | v1's share of concurrent requests (503 busy), per-principal token buckets (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`; no principal: per address), 2 streams per device and a cap on all (enforced when streaming lands; none yet); in memory, no thread, no database work |
 | Console unchanged | `tests/test_console_pin.py` pins the `/api/cad`, `/api/station` and `/healthz` route tables and sample responses |
 | Fail closed | `principal.py` is the resolver seam (section 1.4): a route that needs a `device` is a 401 until #558; v1 never hands a handler a `CadApi`; a bearer is refused on `/api/cad/*`; Access is not v1's door (a cookie never makes a principal) |
 
-Turn it off: `[mobile] enabled = false` and a restart (`meta.features` then reads all false: no app release). Undo: revert
+Rollback: an older release refuses a config file that has `[mobile]`, so a rollback reverts the code and the config together. Turn it off: `[mobile] enabled = false` and a restart (`meta.features` then reads all false: no app release). Undo: revert
 the pull request; a table a feature created lazily may stay, nothing reads it once the flag is off. The Cloudflare Bypass
 for `/api/v1/` is added by a person only after these tests are merged, and checked with `curl` (no cookie on
 `/api/cad/state` still gets Access's login; none on `/api/v1/meta` reaches the hub).
+
+For the sign-in PR (#558): when the first device route lands, add a test that a principal below the route's `role` is
+refused, and run the route-table assertions (flag, role, need) over every route it adds.
 
 ---
 

@@ -1,6 +1,6 @@
-"""The route table of /api/v1: (method, path template, handler, need, flag, role). tests/test_api_v1.py asserts that the set of
-(method, path) here equals the spec's `paths` (api/openapi/v1/), both ways, so the served API and the promised one
-cannot drift.
+"""The route table of /api/v1: (method, path template, handler, need, flag, role). tests/test_api_v1.py asserts that
+the set of (method, path) here equals the spec's `paths` (api/openapi/v1/), both ways, so the served API and the
+promised one cannot drift.
 
 need: who may call it. "device" is a signed-in device's token (#558, not built yet: every such route is a 401 until
 then, principal.py). "public" answers without a token, and is kept to the design's short list (docs/mobile-api.md
@@ -8,8 +8,9 @@ section 3.3, PUBLIC below): it reveals nothing beyond versions.
 flag: the feature flag the route needs (switches.FEATURES; "" only for a public route that is served even when mobile
 is off, which is meta alone). A route whose flag is off, or any route when [mobile] enabled is false, answers 404 as
 if it did not exist.
-role: the least console role the person behind the device needs ("read", "dispatch" or "admin", as CadApi.needs names
-them); "" for a public route, which has no person. Checked by the route-table test, enforced once sign-in exists."""
+role: the least `CadApi.needs` level ("read", "dispatch" or "admin") the person's console role must reach (not
+Settings' person roles: admin, dispatcher, viewer); "" for a public route, which has no person. Checked by the
+route-table test, enforced once sign-in exists."""
 from __future__ import annotations
 
 import time

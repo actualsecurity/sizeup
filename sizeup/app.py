@@ -61,6 +61,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
@@ -98,7 +99,6 @@ from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
-from sizeup.api.v1.switches import Switches
 
 ROOT = Path(__file__).resolve().parent.parent
 # MTA TrainTime's fast rate (#362): emergency incidents, active or pending, created or changed (anything logged) since ?

@@ -120,7 +120,8 @@ def test_retry_after_is_in_the_header_and_the_envelope():
 
 def test_access_is_not_v1s_door(hub):
     """/api/v1 is its own door (a device's token, #619): no Access person is asked for, so a request with none gets
-    meta (public) and the envelope's 404 elsewhere, never the console's 401 page; a handler is reached by a token only."""
+    meta (public) and the envelope's 404 elsewhere, never the console's 401 page; a handler is reached by a token
+    only."""
     status, _, body = call(hub, "/api/v1/meta", who=None)
     assert status == 200
     conforms(status, body, "GET", "/api/v1/meta")

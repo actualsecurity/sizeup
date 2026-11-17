@@ -3,14 +3,16 @@
 
 Order, so that a v1 problem never reaches the console (docs/mobile-api.md "Sharing the production hub"):
  1. a path too long: 414;
- 2. the master switch ([mobile] enabled) or the route's feature flag off: 404, as if the path did not exist. Meta is
-    the one path served with mobile off. Nothing below this line runs, so no database or key is touched;
+ 2. the master switch ([mobile] enabled) off: 404, as if the path did not exist. Meta is the one path served with
+    mobile off;
  3. no such route 404, a wrong method 405;
- 4. who: a route that needs a device gets the principal resolver's answer (principal.py). A request with no principal
+ 4. the matched route's feature flag off: the same 404. Nothing up to here runs a resolver, a handler or any
+    database or key work;
+ 5. who: a route that needs a device gets the principal resolver's answer (principal.py). A request with no principal
     is rate limited per address, one with a principal per device (limits.py): 429 + Retry-After. Then no principal
     on a device route: 401;
- 5. v1's share of concurrent requests: 503 + Retry-After when it is used up;
- 6. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
+ 6. v1's share of concurrent requests: 503 + Retry-After when it is used up;
+ 7. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
 from __future__ import annotations
 
 import json
@@ -99,9 +101,9 @@ class V1:
             principal = self.resolver(headers)
             if not person(principal):             # fail closed: not a device of a person, whatever the resolver said
                 principal = None
-        # (a flood of bad tokens is limited per address too)
-        wait = self.limits.admit(principal.device if principal else None, route.method not in ("GET", "HEAD"), peer,
-                                 route.need == "public")
+        # a flood of bad tokens is limited per address too
+        wait = self.limits.admit(principal.device if principal else None, write=route.method != "GET", peer=peer,
+                                 public=route.need == "public")
         if wait:
             return error(429, "rate_limited", "too many requests: slow down", wait)
         if route.need == "device" and principal is None:

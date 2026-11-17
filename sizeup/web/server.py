@@ -493,7 +493,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if v1.handles(path):             # the app's API: a device's own token is its only door (#619), never Access
                 return True
             if path.startswith("/api/cad/") and (self.headers.get("Authorization") or "")[:7].lower() == "bearer ":
-                self.close_connection = True     # a device's token is not for the console: refused, whoever is signed in
+                # a device's token is not for the console: refused, whoever is signed in, and in the console's own
+                # {"error": ...} shape, not v1's envelope
+                self.close_connection = True
                 self._send(401, b'{"error":"a device token is not for the console"}', "application/json")
                 return False
             if access is None or path == "/healthz" or path.startswith("/api/station/"):

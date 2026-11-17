@@ -287,10 +287,9 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # access_aud = ""                    # the Access application's AUD tag, hex (env SIZEUP_ACCESS_AUD)
 # status_token = ""                  # env SIZEUP_STATUS_TOKEN: 16+ characters, never the station token
 
-# [mobile]: the app's API, /api/v1 (docs/mobile-api.md "Sharing the production hub"). The hub's own section: never a
-# station's (a station's config refuses it). Off: /api/v1 answers 404 beside `GET /api/v1/meta`, and nothing reads a
-# token key, creates a table or sends a push. Checked on every request but read
-# at start: a change needs a restart (no app release).
+# [mobile]: the app's API, /api/v1 (docs/mobile-api.md "Sharing the production hub"). The hub's own section: never
+# a station's (a station's config refuses it). Off: /api/v1 answers 404 beside `GET /api/v1/meta`, and nothing
+# reads a token key, creates a table or sends a push. Read once at start: a change needs a restart (no app release).
 # max_requests: v1's share of concurrent requests (1 to 64); max_streams: of open streams, 2 a device (0 to 64).
 [mobile]
 enabled = false

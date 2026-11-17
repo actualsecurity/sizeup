@@ -289,7 +289,7 @@ def test_one_flooding_address_does_not_429_another_nor_drain_the_shared_bucket()
     assert [lim.admit(None, False, "203.0.113.5") for _ in range(15)] == [0] * 15
     assert all(lim.admit(None, False, "203.0.113.5") > 0 for _ in range(500))      # the flood is refused at its address
     assert lim.admit(None, False, "203.0.113.6") == 0                               # another address: unaffected
-    assert lim._shared["anon"].tokens > 80                                          # ... and the shared bucket is intact
+    assert lim._shared["anon"].tokens > 80                              # ... and the shared bucket is intact
 
 
 def test_device_buckets_survive_a_flood_of_made_up_addresses():
@@ -304,7 +304,7 @@ def test_device_buckets_survive_a_flood_of_made_up_addresses():
 def test_a_flood_of_bad_tokens_does_not_starve_meta():
     v1 = V1(table([]), switches=Box(reads=True).switches(), limits=Limits(clock=Clock()))
     for i in range(300):
-        v1.respond("GET", "/api/v1/things", "", {}, f"198.51.100.{i % 250}")        # bad tokens: the shared bucket drains
+        v1.respond("GET", "/api/v1/things", "", {}, f"198.51.100.{i % 250}")    # bad tokens: the shared bucket drains
     assert v1.respond("GET", "/api/v1/things", "", {}, "198.51.100.251")[0] == 429
     assert v1.respond("GET", "/api/v1/meta", "", {}, "192.0.2.77")[0] == 200       # an app's launch still works
 
@@ -349,7 +349,8 @@ def test_a_device_route_is_a_401_until_there_are_devices():
     seen = []
     v1 = V1(table(seen), switches=Box(reads=True, writes=True).switches())
     for method in ("GET", "POST"):
-        assert err(v1.respond(method, "/api/v1/things", "", {"Authorization": "Bearer abc.def.ghi"}))[:2] == (401, "unauthorized")
+        r = v1.respond(method, "/api/v1/things", "", {"Authorization": "Bearer abc.def.ghi"})
+        assert err(r)[:2] == (401, "unauthorized")
     assert seen == []
 
 
@@ -397,7 +398,6 @@ def test_v1_does_not_ask_for_access_and_the_console_still_does():
         srv.shutdown()
 
 
-EXPECTED_WITHOUT_BEARER = {"/api/cad/whoami": 404, "/api/cad/state": 404, "/api/cad/nope": 404}   # (no CAD here)
 
 
 @pytest.mark.parametrize("path", ["/api/cad/whoami", "/api/cad/state", "/api/cad/nope"])
@@ -414,8 +414,9 @@ def test_a_device_bearer_is_refused_on_the_console(path, tmp_path):
             status, _, body = http(url, path, headers=hdrs)
             assert status == 401 and b"device token" in body
         status, _, _ = http(url, path, headers={"X-Test-User": "m@e.org"})
-        assert status == EXPECTED_WITHOUT_BEARER[path]                    # the console's own answer without a bearer
-        assert http(url, path, "POST", {"Authorization": "Bearer x", "Content-Type": "application/json"}, b"{}")[0] == 401
+        assert status == 404                  # the console's own answer without a bearer (no CAD here)
+        post = {"Authorization": "Bearer x", "Content-Type": "application/json"}
+        assert http(url, path, "POST", post, b"{}")[0] == 401
     finally:
         srv.shutdown()
 
