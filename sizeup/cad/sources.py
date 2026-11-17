@@ -54,6 +54,17 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                changed (units, location) sweeps a page card left queued for it, as "closed" does, only when this match
                meets the join bar (never a note's evidence), with one line on the incident; the CAD enriches it as for
                a page that joined (on_page_swept)
+    scored     (sizeup/cad/pagematch.py) a page none of the above joins is scored against the open feed incidents
+               dispatched up to pagematch.WINDOW_S before it. It joins only the one such incident, on exactly its
+               street, with a house number, from a fresh feed, within SAME_CALL_S, nothing against it, and the place
+               itself on the page: its name (the feed's "@NAME", the common place at its address, #575) or its house
+               number (the same, or said twice). A cross street, the family of call or being the only call never
+               suffice. "Page hh:mm matched by: ..." on its timeline (page, rematch_page, a card swept when the feed
+               comes after it). Weaker but plausible: the card is made exactly as before and offers "Merge into #N"
+               (page_merges only: no note; merge_page, a person; unmerge_page undoes it).
+               A strict rules' match is never joined when the page is mutual aid to an event that isn't, says it is in
+               or goes to another town, or (no house number in common) names another of the department's places on
+               that street (_vetoed: noted)
     same call  a match must also be the same call (SAME_CALL_S; PAGE_LAG_S after for a "misheard" one): a page joins a feed's incident only when the feed's
                dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
                feed event never joins an incident made after it ended, nor one made more than SAME_CALL_S after its
@@ -128,11 +139,13 @@ import threading
 import time
 from pathlib import Path
 from datetime import datetime
+from collections import OrderedDict
 from statistics import median
 from typing import Callable
 
+from sizeup.cad import pagematch
 from sizeup.cad.fuzzy import STREET_SIM, misread, name_sim, snap
-from sizeup.cad.store import OPEN, TZ
+from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.dispatch import split_joined
 from sizeup.fence import FencedWrite
 from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
@@ -178,6 +191,7 @@ BACKFILL_BATCH = 50                    # ... then this many rows at a time (back
 BACKFILL_PAUSE_S = 0.5                 # ... with this pause between batches: the console's requests come first
 BACKFILL_RETRY_S = 30.0                # ... and, not the leader (FencedWrite): looked at again this often
 PANEL_MAX = 50
+CROSS_CACHE = 256                      # the map's block cross streets kept for this many incidents (pagematch)
 MANUAL_FIELDS = ("type", "location", "pin")
 
 SCHEMA = """
@@ -233,6 +247,19 @@ CREATE TABLE IF NOT EXISTS incoming (
   until REAL NOT NULL,
   status TEXT NOT NULL DEFAULT 'open',  -- open | matched | expired
   incident_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS page_merges (      -- a page's own card and the feed's incident it may be (pagematch.py)
+  card_id INTEGER NOT NULL,             -- the page's card
+  into_id INTEGER NOT NULL,             -- the feed's incident
+  ref TEXT NOT NULL,                    -- the page's report (source_reports, source 'paging')
+  why TEXT NOT NULL DEFAULT '',         -- the evidence, as the card says it
+  offered_at REAL NOT NULL,
+  merged_at REAL,                       -- a person merged it (merge_page); NULL: offered, or the merge undone
+  merged_by TEXT NOT NULL DEFAULT '',
+  undone_at REAL,
+  undone_by TEXT NOT NULL DEFAULT '',
+  undo TEXT NOT NULL DEFAULT '',        -- what the merge changed on the feed's incident, to put back (unmerge_page)
+  PRIMARY KEY (card_id, into_id)
 );
 """
 
@@ -2118,6 +2145,8 @@ class Sources:
             inc, similar = self.match_all(PAGING, at, location, units, typ, towns=data.get("towns") or ())
             if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, [inc]                   # another call there: the page's own incident, noted
+            if inc is not None and self._has_feed(inc["id"]) and self._vetoed(inc, location, rec):
+                inc, similar = None, [inc]                   # another business, another town, mutual aid: noted
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
                                          str((data.get("f") or {}).get("subtype") or ""), heard_aircraft(data))
@@ -2129,6 +2158,14 @@ class Sources:
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=inc["id"])
                 self._page_attached(inc, rec)
                 return "attached", inc["id"]
+            ev = self.page_feed(at, location, rec)           # the strict rules found none: scored (pagematch)
+            if ev is not None and ev.decision == "strong":
+                self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=ev.inc["id"])
+                self._page_attached(ev.inc, rec)
+                self._matched_by(ev, rec)
+                return "attached", ev.inc["id"]
+            if ev is not None:                               # weak: the card offers the merge, nothing else changes
+                rec["merge_offer"] = {"into": ev.inc["id"], "why": ev.why}    # (created_by_page: page_merges only)
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
             return "create", ([inc] if inc is not None else similar)
 
@@ -2191,6 +2228,13 @@ class Sources:
             db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, ref))
         for other in ([similar] if isinstance(similar, dict) else similar or []):
             self._possibly(iid, other)
+        rep = self._report(PAGING, ref)
+        offer = json.loads(rep["data"] or "{}").get("merge_offer") if rep else None
+        if isinstance(offer, dict) and isinstance(offer.get("into"), int):   # the score's "weak": a merge offered
+            try:
+                self._offer(iid, self.store.incident(offer["into"]), ref, list(offer.get("why") or []))
+            except CadError:
+                pass
 
     def rematch_page(self, ref: str, iid: int, at: float, location: str, units, data: dict) -> tuple[str, int | None]:
         """A repeat of a page that made its own incident (iid) with less than it says now (#365: the tones half, a
@@ -2209,22 +2253,33 @@ class Sources:
             inc, similar = self.match_all(PAGING, at, location, units, typ, exclude=iid, towns=data.get("towns") or ())
             if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, [inc]
+            if inc is not None and self._has_feed(inc["id"]) and self._vetoed(inc, location, rec):
+                inc, similar = None, [inc]
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
                                          str((data.get("f") or {}).get("subtype") or ""), heard_aircraft(data))
                 if al is not None and al["id"] != iid:
                     inc = al
-            if inc is not None and (self._has_feed(inc["id"]) or inc["source"] == ALERT_SOURCE) \
-                    and not self._touched_page(iid, data.get("ref") or ""):
+            ev = None
+            join = inc if inc is not None and (self._has_feed(inc["id"]) or inc["source"] == ALERT_SOURCE) else None
+            if join is None:
+                ev = self.page_feed(at, location, rec, exclude=iid)     # scored (pagematch), as page() does
+                if ev is not None and ev.decision == "strong":
+                    join = ev.inc
+            if join is not None and not self._touched_page(iid, data.get("ref") or ""):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
                 with self.store.tx() as db:
-                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (inc["id"], PAGING, ref))
-                    self.store._event(db, iid, "feed", f"Page attached to {_ref(inc)}", at=self.clock())
-                self._page_attached(inc, rec)
-                self._moved(iid, inc["id"])
-                self.store.dismiss(iid, operator=PAGING_LABEL, reason=f"attached to {_ref(inc)}")
-                self.log(f"incident sources: page event {iid} attached to event {inc['id']}, dismissed")
-                return "attached", inc["id"]
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (join["id"], PAGING, ref))
+                    self.store._event(db, iid, "feed", f"Page attached to {_ref(join)}", at=self.clock())
+                self._page_attached(join, rec)
+                if ev is not None and ev.decision == "strong":
+                    self._matched_by(ev, rec, card=iid)
+                self._moved(iid, join["id"])
+                self.store.dismiss(iid, operator=PAGING_LABEL, reason=f"attached to {_ref(join)}")
+                self.log(f"incident sources: page event {iid} attached to event {join['id']}, dismissed")
+                return "attached", join["id"]
+            if ev is not None:                               # weak, or strong on a card a person touched: the button
+                self._offer(iid, ev.inc, ref, ev.why)        # only (page_merges); the notes below are main's
             n = 0
             for other in ([inc] if inc is not None else similar):
                 if not self._noted(iid, other):
@@ -2264,6 +2319,14 @@ class Sources:
                                              heard_aircraft(d) or str(p.get("acft_type") or ""))
                     if al is not None and al["id"] == iid:
                         out.append(p)
+                elif (best is None or not self._has_feed(best["id"])) and inc["source"] != ALERT_SOURCE:
+                    rec = dict(d, at=rep["first_seen"])      # scored (pagematch), as page() does
+                    ev = self.page_feed(rep["first_seen"], d.get("location") or match_address(p), rec, exclude=p["id"])
+                    if ev is not None and ev.inc["id"] == iid:
+                        if ev.decision == "strong":
+                            out.append(dict(p, _scored=ev))
+                        else:
+                            self._offer(p["id"], ev.inc, rep["ref"], ev.why)
         return out
 
     def _sweep_pages(self, iid: int, cards: list[dict], closed: bool = True) -> int:
@@ -2274,6 +2337,7 @@ class Sources:
         n = 0
         with self._lock:
             for p in cards:
+                scored = p.get("_scored")                    # pagematch's "strong": the evidence goes on the timeline
                 p = self.store.incident(p["id"])
                 rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
                 if p["status"] != "queued" or rep is None or self._touched_page(p["id"], p["source_ref"]):
@@ -2289,6 +2353,8 @@ class Sources:
                     self.store._event(db, iid, "feed", f"Page card {_ref(p)} merged into this: the same call{why}",
                                       at=self.clock())
                 self._page_attached(inc, rec)
+                if scored is not None:
+                    self._matched_by(scored, rec, card=p["id"])
                 self._moved(p["id"], iid)
                 if self.on_page_swept is not None:
                     try:
@@ -2332,6 +2398,481 @@ class Sources:
         with self.store.tx() as db:
             self.store._event(db, inc["id"], "feed", f"Page {_hm(rec['at'])} attached{rel}: "
                               + "; ".join(x for x in (rec.get("type_heard", ""), rec.get("location", "")) if x), at=self.clock())
+
+    # -- a page scored against the feed's incident (sizeup/cad/pagematch.py) -------------------------------------------
+
+    def page_feed(self, at: float, location: str, data: dict, exclude: int | None = None) -> pagematch.Evidence | None:
+        """The feed's incident a page is, scored (pagematch: "strong" joins, "weak" offers a merge), after the strict
+        rules found none. None: no open feed incident in the window, or none on the page's street."""
+        self._towns()
+        rows = self.store.q(f"SELECT * FROM incidents WHERE status IN ({','.join('?' * len(OPEN))}) AND created_at "
+                            "BETWEEN ? AND ?", (*OPEN, at - MATCH_WINDOW_S, at + MATCH_WINDOW_S))
+        cands = []
+        for inc in rows:
+            if inc["id"] == exclude:
+                continue
+            r = self._best_feed(inc["id"])
+            if r is None:
+                continue
+            d = json.loads(r["data"] or "{}")
+            ended = (d.get("times") or {}).get("in_service")
+            if d.get("closed") or (ended is not None and ended < at):
+                continue                                     # over: another call
+            disp = self._disp(d) or r["first_seen"]
+            if -pagematch.AFTER_S <= at - disp <= pagematch.WINDOW_S:
+                cands.append((inc, r, d, at - disp))
+        if not cands:
+            return None
+        evs = []
+        for inc, r, d, lag in cands:
+            e = self._evidence(inc, d, location, data)
+            e.lag_s, e.fresh = lag, self._feed_fresh(r["source"])
+            evs.append(e)
+        return pagematch.decide(evs)
+
+    def _feed_fresh(self, source: str) -> bool:
+        """The feed's last report says "ok" and came within REPORT_STALE_S (the hub's clock): not backing off, failing
+        or silent. A strong join needs it: with a stale feed the page's own event may simply not be listed yet."""
+        r = self.store.one("SELECT state, COALESCE(received, at) AS got FROM source_health WHERE source = ?", (source,))
+        return r is not None and r["state"] == "ok" and self.clock() - r["got"] <= REPORT_STALE_S
+
+    def _vetoed(self, inc: dict, location: str, rec: dict) -> bool:
+        """A strict rules' match a page's own words say is another call (never joined, noted). Always: a town the page
+        says the call is in or goes to ("in Sample Village", "to the Town of Sample, ...", "412 Sample Rd, Sample")
+        that isn't the event's (nor, when the event names none, one of our tones' towns), whatever else matches; but
+        two of our own tones' towns are one for our exact (or doubled) house number (a second municipality of ours
+        often shares the first's postal town: the county's town field and the spoken one differ for one building).
+        Unless the house number is ours exactly or the county lists a unit the page names that isn't one of our own
+        (ours are on both for any call of ours: no proof; another department's is, the county may keep the other
+        town's type when it adds ours): a mutual-aid page ("mutual aid") with no town stated against an event that
+        isn't; another of the department's places on that street named (the common places, #575); or the feed's own
+        name, said without our number, when the places list has it on that street too or in a town the page names.
+        Cheap: no cross streets."""
+        r = self._best_feed(inc["id"])
+        if r is None:
+            return False
+        e = self._evidence(inc, json.loads(r["data"] or "{}"), location, rec, cross=False)
+        # mutual aid: never over our own number, nor when the county lists a unit the page names (it may keep the
+        # other town's type when it adds ours)
+        if e.town == "differ" and not (e.town_ours and e.number in ("exact", "doubled")):
+            return True                                      # another town said: whatever else matches (two of our
+        #                                                      own towns for our exact number: the same building)
+        proof = e.number == "exact" or e.units == "common"   # (a unit of ours on both proves nothing: "own")
+        return not proof and (e.mutual == "differ" or bool(e.other_place) or e.elsewhere_near)
+
+    def _evidence(self, inc: dict, d: dict, location: str, data: dict, cross: bool = True) -> pagematch.Evidence:
+        """One feed incident against a page (data: the page's record: f, lines, towns, units). cross False: no cross
+        streets (the map's block is never read). A town counts only where the page says the call is."""
+        e = pagematch.Evidence(inc=inc)
+        f = data.get("f") or {}
+        text = " ".join(str(x) for x in data.get("lines") or []) or str(data.get("text") or "")
+        towns = tuple(data.get("towns") or ())
+        raw = str(d.get("location") or "")
+        e.taken = self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source = ? LIMIT 1",
+                                 (inc["id"], PAGING)) is not None
+        if pagematch.mutual_aid(text, f.get("type") or "") and not pagematch.mutual_aid(str(d.get("type") or ""),
+                                                                                         inc["type"]):
+            e.mutual = "differ"
+        ft = _town(raw) or _town(match_address(inc)) or _town(inc["address"] or "")
+        ours = {str(t).lower() for t in towns}
+        where, named = self._said_towns(text, [*towns, *([ft] if ft else [])])   # only where the call is ("in / to
+        said = {*where, *([_town(location)] if _town(location) else [])}         # <town>"): a landmark is no evidence
+        home = {ft} if ft else ours
+        if said and home and said - home:
+            e.town = "differ"
+            e.town_ours = bool(ours) and said | home <= ours     # both ours: one building, two municipalities' names
+        theirs = [x for x in dict.fromkeys([match_address(inc), inc["place_address"] or "", inc["geo_label"] or "", raw,
+                                            self._match_location(raw, d) if raw else ""])
+                  if x and (place_key(x) or (None,))[0] == "addr"]
+        kp = place_key(location)
+        if kp is None or kp[0] != "addr":
+            return e
+        mine = [place_key(x) for x in theirs if _towns_agree(location, x)]
+        on = [kt for kt in mine if pagematch.exact_street(kp[2:], kt[2:])]
+        if on:
+            e.street = "same"
+        else:
+            where_t = tuple(dict.fromkeys(t for t in (_town(location), *towns, *(_town(x) for x in theirs)) if t))
+            how, st = snap_street(location, where_t)
+            on = [kt for kt in mine if how == "snap" and pagematch.exact_street(st, kt[2:])]
+            if on:
+                e.street = "snapped"
+        if not e.street:
+            return e
+        e.feed_numbered = any(kt[1] for kt in on)
+        half = halved(location)
+        hn = (place_key(half) or ("", ""))[1] if half else ""
+        fits = {pagematch.number_fit(kp[1], kt[1], hn) for kt in on}
+        e.number = next((x for x in ("exact", "doubled", "misread", "near", "other") if x in fits), "")
+        # the named place: the feed's own ("@NAME"), the department's common place at its address (and its aliases)
+        words = pagematch.name_words(text)
+        ours, other, ambiguous, near = self._place_names(inc, raw, d, theirs, kp, {*where, *named, *said})
+        e.place = next((n for n in ours if pagematch.says_name(words, n)), "")
+        if not e.place:
+            e.other_place = next((n for n in other if pagematch.says_name(words, n)), "")
+        if not e.place and not e.other_place and e.number not in ("exact", "doubled"):
+            e.elsewhere = next((n for n in ambiguous if pagematch.says_name(words, n)), "")
+            e.elsewhere_near = bool(e.elsewhere) and any(pagematch.says_name(words, n) for n in near)
+        mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
+        if mine_x:                                           # the feed's only when the page says some
+            feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
+            if feed_x:
+                e.cross = "match" if mine_x & feed_x else "differ"
+        pf, ff = pagematch.families(f.get("type") or "", f.get("subtype") or ""), pagematch.families(inc["type"], inc["subtype"])
+        if pf and ff:
+            e.family = "same" if pf & ff else "differ"
+        mu = split_units(drop_departments(data.get("units") or []))
+        fu = split_units(drop_departments(self._units_of(inc["id"])))
+        if mu and fu:
+            common = units_match(mu, fu)                     # differ: one building, two calls; own: only ours shared
+            e.units = "common" if common - self._own_units() else "own" if common else "differ"
+        return e
+
+    WHO = {"fire", "department", "departments", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac"}
+
+    @staticmethod
+    def _said_towns(text: str, longer=()) -> tuple[set, set]:
+        """(the known towns a page's words say the call is in or goes to; every known town it names anywhere else).
+        Where: "in / to (the) (city / town / village of) <town>", or a street then ", <town>" ("412 Sample Rd,
+        Sample", "Sample Rd, City of Sample"), with the town ending the phrase: then a comma, a
+        stop, the end, a house number, "for" or "mutual aid" ("in Sample Village.", "to the City of Sample, ...", "to
+        Sample for a cover"). A town followed by a noun is a landmark, not where ("to the Sample Ridge plaza", "the
+        Sample Brook side of the building", "by the Sample border"): named only. Never who ("Sample Village Fire
+        Department", "Sample and Other Village fire departments": a department word right after it, or after "and
+        <town>"; never "..., structure fire" past a comma), nor
+        a street of that name ("Sample Village Road"). longer: town names (our tones' towns, the feed's) a town
+        read here may be the first part of, its rest heard after a stop or a comma ("Sample. Brook." / "Sample,
+        Brook" for Sample Brook): read as that longer town."""
+        toks = re.findall(r"[a-z0-9]+|[.,;:!?]", (text or "").lower())
+        longs = sorted({tuple(re.findall(r"[a-z0-9]+", str(x).lower())) for x in longer or ()} - {()}, key=len,
+                       reverse=True)
+        street = {*ABBR, *SUFFIXES, "lane", "terrace", "plaza", "square", "way", "turnpike", "crescent"}
+        where, named = set(), set()
+        i = 0
+        while i < len(toks):
+            t = next((t for t in TOWNS if tuple(toks[i:i + len(t)]) == t), None)    # longest first
+            if t is None:
+                i += 1
+                continue
+            j = i + len(t)
+            for big in longs:                                # a longer town of ours split by speech-to-text
+                if len(big) > len(t) and big[:len(t)] == t:
+                    rest, m = list(big[len(t):]), j
+                    while rest and m < len(toks):
+                        if not toks[m].isalnum():
+                            m += 1
+                        elif toks[m] == rest[0]:
+                            rest.pop(0)
+                            m += 1
+                        else:
+                            break
+                    if not rest and m > j:
+                        t, j = big, m
+                        break
+            nxt = toks[j] if j < len(toks) else ""
+            seq = []                                         # the words after it, to the next stop or comma
+            for w in toks[j:j + 4]:
+                if not w.isalnum():
+                    break
+                seq.append(w)
+            who = bool(seq) and (seq[0] in Sources.WHO or (seq[0] == "and" and bool(Sources.WHO & set(seq[1:]))))
+            if not who and nxt not in street:
+                k = i                                        # "(the) city / town / village of" before it
+                if k >= 2 and toks[k - 1] == "of" and toks[k - 2] in ("village", "town", "city"):
+                    k -= 2
+                if k >= 1 and toks[k - 1] == "the":         # (also a town listed as "city of ...")
+                    k -= 1
+                ends = nxt == "" or not nxt.isalnum() or nxt.isdigit() or nxt == "for" or toks[j:j + 2] == ["mutual", "aid"]
+                lead = toks[k - 1] if k >= 1 else ""
+                after_street = lead == "," and k >= 2 and toks[k - 2] in street   # "412 Sample Rd, Sample"
+                (where if (lead in ("in", "to") or after_street) and ends else named).add(TOWN_OF.get(t, " ".join(t)))
+            i = j
+        return where, named
+
+    def _place_names(self, inc: dict, raw: str, d: dict, theirs: list[str], kp: tuple,
+                     towns=()) -> tuple[list[str], list[str], list[str], list[str]]:
+        """(the names of the feed's place: its "@NAME", the incident's place, the common places at its address and
+        their aliases, each only when it names that place alone; the common places' names elsewhere on the page's
+        street; the feed's names the places list also has at another address, anywhere: ambiguous; those of them
+        with that other address on the page's street or in one of the towns the page names: ambiguous here). A name
+        that is only town names, department or agency words, or the page's street's words ("PORT CHESTER", "SAMPLE
+        POST" on Sample Post Rd, "FIRE DEPARTMENT") is never a place's name here."""
+        ours = [x for x in (inc["place"] or "", location_extras(raw)[1] if raw else "") if x]
+        cp = self.common_place(raw, d) if raw else None
+        if cp:
+            ours += [cp.get("label") or "", cp.get("name") or "", *(cp.get("aliases") or [])]
+        fn = getattr(self.cad, "local_places", None)
+        try:
+            rows = fn() if fn is not None else []
+        except Exception:  # noqa: BLE001 - no names: nothing said either way
+            rows = []
+        numbered = [x for x in theirs if (place_key(x) or ("", ""))[1]]
+        street = {*kp[4], *(w for w in (kp[3],) if w)}
+        towns = {str(t).lower() for t in towns or () if t}
+        key = lambda n: pagematch.name_key_of(n) if self._names_a_place(n, street) else ""
+        elsewhere: set[str] = set()                          # names at another address than the feed's, anywhere
+        near: set[str] = set()                               # ... on the page's street or in a town it names
+        other: list[str] = []
+        for r in rows or ():
+            addr = str(r.get("address") or "")
+            names = [r.get("label") or "", r.get("name") or "", *(r.get("aliases") or [])]
+            if addr and any(same_place(addr, x) for x in numbered):
+                ours.extend(names)
+                continue
+            k = place_key(addr) if addr else None
+            on_street = k is not None and k[0] == "addr" and _same_street(k[2:], kp[2:])
+            in_town = bool(towns & {str(r.get("muni") or "").lower(), _town(addr)} - {""})
+            for n in names:
+                if key(n):
+                    elsewhere.add(key(n))
+                    if on_street or in_town:
+                        near.add(key(n))
+            if on_street:
+                other.extend(names)
+        ours = [n for n in dict.fromkeys(ours) if key(n)]
+        mine = {key(n) for n in ours}
+        return ([n for n in ours if key(n) not in elsewhere],
+                [n for n in dict.fromkeys(other) if key(n) and key(n) not in mine],
+                [n for n in ours if key(n) in elsewhere], [n for n in ours if key(n) in near])
+
+    def _own_units(self) -> set[str]:
+        """Our own apparatus on the boards (normalised): no department or joint town of another, not mutual aid."""
+        L = self.cad.lists
+        out = set()
+        try:
+            for code, _b, _k in L.board_units():
+                u = L.unit(code)
+                if not u.get("department") and not u.get("joint") and not u.get("mutual_aid"):
+                    out.add(norm_unit(code))
+        except (AttributeError, TypeError):
+            pass
+        return out
+
+    AGENCY = {"fire", "department", "departments", "dept", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac",
+              "village", "town", "city", "county", "hall", "station", "hq", "headquarters", "engine", "ladder",
+              "rescue", "company", "co", "corps", "control", "dispatch", "center", "centre"}
+
+    @staticmethod
+    def _names_a_place(name: str, street: set) -> bool:
+        """A name with a word of its own: not only town names (the lists' and the county's), department or agency
+        words (and their codes: "PCFD", "RBPD"), or the street's own words (street: its name words and suffix;
+        suffixes and their words too)."""
+        towns = {w for k in (*TOWN_OF, *county_towns()) for w in k}
+        plain = street | SUFFIXES | set(ABBR) | set(ABBR.values())
+        agency = lambda w: w in Sources.AGENCY or bool(re.fullmatch(r"[a-z]{1,4}(?:fd|pd|vac|ems)", w))   # PCFD, RBPD
+        return any(w not in towns and not agency(w) and w not in plain for w in pagematch.name_words(name))
+
+    @staticmethod
+    def _cross_names(text: str) -> set:
+        """'Example Avenue and Specimen Street' -> {the two streets' names} (_street's name words)."""
+        out = set()
+        for piece in re.split(r"\s+(?:and|&)\s+|\s*[&/,]\s*", text or "", flags=re.I):
+            name = _street(piece)[3] if piece.strip() else frozenset()
+            if name:
+                out.add(name)
+        return out
+
+    def _block_cross(self, inc: dict) -> str:
+        """The cross streets of the feed's address's block, from the map (Cad.detail_source), as found before; ''
+        until then. Never looked up here (under the lock, a first page building the map's blocks): a thread of its own
+        finds it, once per incident and address, for the next page."""
+        src = getattr(self.cad, "detail_source", None)
+        if src is None or inc["lat"] is None or inc["lon"] is None:
+            return ""
+        key = (inc["id"], inc["address"] or "", inc["lat"], inc["lon"])
+        cache = self.__dict__.setdefault("_crosses", OrderedDict())
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key] or ""
+        cache[key] = None                                    # asked: found by the thread
+        while len(cache) > CROSS_CACHE:                      # bounded: the least recently asked go
+            cache.popitem(last=False)
+        street = re.sub(r"^\s*\d+\S*\s+", "", street_part(inc["address"] or "").split(",")[0])
+
+        def find() -> None:
+            try:
+                got = str((src({"kind": "address", "lat": key[2], "lon": key[3], "street": street}) or {})
+                          .get("cross") or "")
+            except Exception:  # noqa: BLE001 - no block: no cross streets to compare
+                got = ""
+            if key in cache:                                 # (not dropped meanwhile)
+                cache[key] = got
+        threading.Thread(target=find, name="page-cross", daemon=True).start()
+        return ""
+
+    def _matched_by(self, ev: pagematch.Evidence, rec: dict, card: int | None = None) -> None:
+        """A page joined a feed's incident on the score (pagematch): the evidence on its timeline; the log has the
+        kinds only (never a location)."""
+        with self.store.tx() as db:
+            self.store._event(db, ev.inc["id"], "feed", f"Page {_hm(rec['at'])} matched by: {', '.join(ev.why)}"[:2000],
+                              at=self.clock())
+        self.log(f"incident sources: page {'card ' + str(card) + ' ' if card else ''}attached to event {ev.inc['id']} "
+                 f"(scored: {', '.join(ev.kinds())})")
+
+    def _offer(self, card: int, into: dict, ref: str, why: list[str]) -> None:
+        """A page's card may be the feed's incident (pagematch "weak"): the card offers "Merge into #N", once. Only
+        page_merges: never a timeline line or a "possibly the same" note (the dispatch mode and the sweeps read
+        those: they stay as they would be without the offer)."""
+        with self.store.tx() as db:
+            db.execute("INSERT OR IGNORE INTO page_merges (card_id, into_id, ref, why, offered_at) VALUES (?, ?, ?, ?, ?)",
+                       (card, into["id"], ref, "; ".join(why)[:500], self.clock()))
+
+    def merge_page(self, card: int, into: int, operator: str = "") -> dict:
+        """A person merges a page's own card into the feed's incident (the card's "Merge into #N"): its page report
+        moves there (its clip, transcript, tones, cross streets: as a page that joined; 60 Control mode's units as
+        AutoDispatch.on_page does for any page), the card is dismissed, both timelines say who. Refused: a card that
+        isn't a page's own queued one, one with units on it (dismissing would clear them), an incident with no feed or
+        not open. What it changes on the incident (its cross street, its scope, the page's audio links) is kept in
+        page_merges.undo for unmerge_page."""
+        with self._lock:
+            c, t = self.store.incident(card), self.store.incident(into)
+            rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, card))
+            if card == into or c["source"] != PAGE_SOURCE or rep is None or self._has_feed(card):
+                raise CadError("Not a page's own card")
+            if c["status"] != "queued":
+                raise CadError(f"Event {c['status']}: only a queued page merges")
+            if t["status"] not in OPEN or not self._has_feed(into):
+                raise CadError(f"{_ref(t)}: not an open CAD feed event")
+            if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND cleared_at IS NULL LIMIT 1", (card,)):
+                raise CadError("Units are on this page: clear them first")
+            now = self.clock()
+            who = re.sub(r"\s*<[^<>]*>\s*$", "", operator or "").strip()
+            by = f" by {who}" if who else ""
+            rec = dict(json.loads(rep["data"] or "{}"), at=rep["first_seen"])
+            pages = [str(x) for x in rec.get("pages") or [] if x]
+            had = self._page_links(into, pages)
+            scope_before = self._scope_row(into)
+            with self.store.tx() as db:
+                db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (into, PAGING, rep["ref"]))
+                self.store._event(db, card, "feed", f"Merged into {_ref(t)}{by}", operator or "", at=now)
+                self.store._event(db, into, "feed", f"Page card {_ref(c)} merged into this{by}", operator or "", at=now)
+            self._page_attached(t, rec)
+            self._moved(card, into)
+            if self.on_page_swept is not None:
+                try:
+                    self.on_page_swept(c, into, rec)
+                except Exception as e:  # noqa: BLE001 - the merge stands whatever a listener does
+                    self.log(f"incident sources: page merged: {type(e).__name__}")
+            after = self.store.incident(into)
+            undo = {"cross_before": t["cross_street"] or "", "cross_after": after["cross_street"] or "",
+                    "scope_before": scope_before, "scope_after": self._scope_row(into),
+                    "links": sorted(set(self._page_links(into, pages)) - set(had))}
+            with self.store.tx() as db:
+                db.execute("INSERT INTO page_merges (card_id, into_id, ref, why, offered_at, merged_at, merged_by, undo) "
+                           "VALUES (?, ?, ?, '', ?, ?, ?, ?) ON CONFLICT(card_id, into_id) DO UPDATE SET merged_at = "
+                           "excluded.merged_at, merged_by = excluded.merged_by, undone_at = NULL, undone_by = '', "
+                           "ref = excluded.ref, undo = excluded.undo",
+                           (card, into, rep["ref"], now, now, operator or "", json.dumps(undo, default=str)))
+            self.store.dismiss(card, operator=operator or "", reason=f"merged into {_ref(t)}")
+            self.log(f"incident sources: page event {card} merged into event {into} by a person")
+            return self.store.incident(into)
+
+    def _page_links(self, iid: int, pages: list[str]) -> list[str]:
+        """The page clips (radio_links why 'page') of these on the incident."""
+        if not pages:
+            return []
+        return [r["traffic_id"] for r in self.store.q(
+            f"SELECT traffic_id FROM radio_links WHERE incident_id = ? AND why = 'page' AND traffic_id IN "
+            f"({','.join('?' * len(pages))})", (iid, *pages))]
+
+    def _scope_row(self, iid: int) -> dict | None:
+        try:
+            r = self.store.one("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,))
+        except Exception:  # noqa: BLE001 - no scope table (a bare store): nothing to put back
+            return None
+        return dict(r) if r is not None else None
+
+    def unmerge_page(self, card: int, operator: str = "") -> dict:
+        """A merge undone (merge_page): the page's report back on its own card, the card back in the queue (queued,
+        to accept or dismiss), and what the merge changed on the feed's incident put back when nothing changed it
+        since: its cross street, its scope (full department / units, #370), the page's audio links. What stays, and
+        why: the timeline lines (the record of what happened, and a line saying it was undone), and units 60 Control
+        mode dispatched there (that call is real: a person clears them)."""
+        with self._lock:
+            m = self.store.one("SELECT * FROM page_merges WHERE card_id = ? AND merged_at IS NOT NULL AND undone_at IS NULL "
+                               "ORDER BY merged_at DESC LIMIT 1", (card,))
+            c = self.store.incident(card)
+            if m is None or c["status"] != "dismissed":
+                raise CadError("Not a merged page")
+            t = self.store.incident(m["into_id"])
+            now = self.clock()
+            who = re.sub(r"\s*<[^<>]*>\s*$", "", operator or "").strip()
+            by = f" by {who}" if who else ""
+            with self.store.lock:                            # (reentrant: no other write between the three)
+                if self.store.one("SELECT 1 AS x FROM source_reports WHERE source = ? AND ref = ? AND incident_id = ?",
+                                  (PAGING, m["ref"], m["into_id"])) is None:
+                    raise CadError(f"The page is no longer on {_ref(t)}: nothing to undo")
+                self.store.reopen(card, operator or "")     # the card first: never a report on a dismissed card
+                with self.store.tx() as db:
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ? AND incident_id = ?",
+                               (card, PAGING, m["ref"], m["into_id"]))
+            undo = json.loads(m["undo"] or "{}")
+            self._put_back(t, undo)
+            with self.store.tx() as db:
+                db.execute("UPDATE page_merges SET merged_at = NULL, merged_by = '', undone_at = ?, undone_by = ? "
+                           "WHERE card_id = ? AND into_id = ?", (now, operator or "", card, m["into_id"]))
+                self.store._event(db, card, "feed", f"Merge into {_ref(t)} undone{by}: on its own again", operator or "", at=now)
+                self.store._event(db, t["id"], "feed", f"Page card {_ref(c)} taken back out{by}", operator or "", at=now)
+            self.log(f"incident sources: page event {card} merge into event {t['id']} undone")
+            return self.store.incident(card)
+
+    def _put_back(self, t: dict, undo: dict) -> None:
+        """unmerge_page: the feed's incident as it was before the merge, field by field, where nothing changed since."""
+        iid = t["id"]
+        if (undo.get("cross_after") or "") != (undo.get("cross_before") or "") \
+                and (t["cross_street"] or "") == undo.get("cross_after") and "location" not in self.manual(iid):
+            try:
+                self.store.update_incident(iid, {"cross_street": undo.get("cross_before") or ""}, operator="Paging", log=False)
+            except CadError:
+                pass
+        sc = getattr(self.cad, "scope", None)
+        before, after = undo.get("scope_before"), undo.get("scope_after")
+        if before != after and self._scope_row(iid) == after:
+            full = sc.full(iid) if sc is not None else False
+            with self.store.tx() as db:
+                if before is None:
+                    db.execute("DELETE FROM dispatch_scope WHERE incident_id = ?", (iid,))
+                else:
+                    cols = list(before)
+                    db.execute(f"INSERT OR REPLACE INTO dispatch_scope ({', '.join(cols)}) VALUES "
+                               f"({', '.join('?' * len(cols))})", [before[k] for k in cols])
+            if sc is not None and full and not sc.full(iid):
+                sc._narrowed(iid)                            # what only the full department linked, taken back
+        links = [str(x) for x in undo.get("links") or []]
+        if links:
+            comms = self.cad.comms
+            with self.store.tx() as db:
+                n = db.execute(f"DELETE FROM radio_links WHERE incident_id = ? AND why = 'page' AND traffic_id IN "
+                               f"({','.join('?' * len(links))})", (iid, *links)).rowcount
+                for x in links:
+                    comms.touch(x)                           # (inside its transaction: comms.py)
+                if n:
+                    comms.rev += 1
+
+    def merge_state(self, incs: list[dict]) -> None:
+        """Each page card's merge (decorate): merge_offer {into, ref, address, why} on a queued one the score offered
+        it for (the incident still open), merged_into {into, ref} on one a person merged (its undo)."""
+        ids = [i["id"] for i in incs if i.get("source") == PAGE_SOURCE and i.get("status") in ("queued", "dismissed")]
+        if not ids:
+            return
+        by = {i["id"]: i for i in incs}
+        rows = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            rows += self.store.q(f"SELECT * FROM page_merges WHERE card_id IN ({','.join('?' * len(part))}) "
+                                 "ORDER BY offered_at", part)
+        for r in rows:
+            card = by[r["card_id"]]
+            t = by.get(r["into_id"])
+            if t is None:
+                try:
+                    t = self.store.incident(r["into_id"])
+                except CadError:
+                    continue
+            if card["status"] == "queued" and r["merged_at"] is None and t["status"] in OPEN and "merge_offer" not in card:
+                card["merge_offer"] = {"into": t["id"], "ref": _ref(t), "address": t["address"] or "", "why": r["why"]}
+            elif card["status"] == "dismissed" and r["merged_at"] is not None and r["undone_at"] is None:
+                card["merged_into"] = {"into": t["id"], "ref": _ref(t)}
 
     # -- the ticker ----------------------------------------------------------------------------------------------------
 
@@ -2558,6 +3099,7 @@ class Sources:
             if "location" in h and loc and not same_place(loc, match_address(inc)):
                 use["location"] = self.normal(loc, d)        # shown (the button's hover): as it would be stored
             inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
+        self.merge_state(incs)                               # a page card's "Merge into #N" and its undo
         return incs
 
     # -- pre-alerts: possible incoming ------------------------------------------------------------------------------------
