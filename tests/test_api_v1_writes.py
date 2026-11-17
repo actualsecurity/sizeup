@@ -960,3 +960,15 @@ def test_if_match_is_ignored_on_an_alarm_ack_by_design(rig):
     one on an ack is not a 412."""
     status, out, _ = rig.post(f"/api/v1/alarms/{rig.alarm['id']}/ack", headers={"If-Match": "stale-rev-0000"})
     assert status == 200 and out["alarm"]["ack_at"] is not None
+
+
+def test_an_incident_summary_in_a_write_answer_carries_last_event_id_like_the_list(both):
+    r, url = both
+    status, out = write(url, note_path(r.shut["id"]), {"text": "late"})
+    assert status == 409
+    listed = item(get(r, url, "/api/v1/incidents"), id=str(r.shut["id"]))
+    assert out["current"] == listed and isinstance(listed["last_event_id"], int)
+    before = item(get(r, url, "/api/v1/incidents"), id=str(r.open["id"]))["last_event_id"]
+    assert write(url, note_path(r.open["id"]), {"text": "one more line"}, key="last-event-001")[0] == 201
+    after = item(get(r, url, "/api/v1/incidents"), id=str(r.open["id"]))["last_event_id"]
+    assert after > before
