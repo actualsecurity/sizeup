@@ -334,8 +334,110 @@
   },
   {
    "step": {
+    "do": "picture",
+    "t": 230
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 240,
+    "id": "twr-5"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-5",
+     "ch": "HPN Tower",
+     "fed": "Westchester traffic JBU1234 3 mile final for runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-5",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "JBU1234",
+       "hex": "b01234"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-5",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 290
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 300,
+    "id": "twr-6"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-6",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 12 34 mile final, runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-6",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU1234",
+       "hex": "b01234"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-6",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
     "do": "read",
-    "t": 200
+    "t": 320
    }
   }
  ]

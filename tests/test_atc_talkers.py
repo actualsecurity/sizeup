@@ -256,7 +256,10 @@ def heard_as(text, ix=XIX):
     ("Xyzair 123, 25 miles out", "XYZ123"),
     ("Xyzair 1 2 3 25 miles out", "XYZ123"),
     ("Xyzair 123 25 mile final", "XYZ123"),
-    ("Xyzair 12 25 miles out", "XYZ12"),
+    ("Xyzair 12 25 miles out", "XYZ1225"),                     # within a flight number's 4: joined (XYZ12 the other)
+    # a whole number before the distance or the unit's own number: the flight number's end ("JetBlue 12 34")
+    ("Xyzair 12 34 mile final", "XYZ1234"),
+    ("Xyzair 12 34 3 thousand", "XYZ1234"),
     # spoken: a short flight and its distance read as before, nothing on ADS-B to say otherwise
     ("Xyzair one two three four mile final", "XYZ123"),
     ("Xyzair one two three four, two mile final", "XYZ1234"),
@@ -335,6 +338,53 @@ def test_the_written_form_never_joins_a_distance_to_the_flight_number(heard, wri
     assert atc_normalize(heard) == written
     m, = atc.find_mentions(T.clauses(written), IX)
     assert m.text == written.split()[0].replace("JetBlue", "JBU") + written.split()[1]
+
+
+X1, X1234 = plane("x1", "XYZ1"), plane("x1234", "XYZ1234")
+
+
+@pytest.mark.parametrize("text, planes, callsign", [
+    ("XYZ1234 3 mile final", [X12, X1234], "XYZ1234"),
+    ("Westchester traffic XYZ1234 mile final for runway 34 Westchester.", [X1, X1234], "XYZ1234"),
+    ("Westchester traffic XYZ1234 mile final for runway 34 Westchester.", [X1], "XYZ1234"),   # never fewer digits
+    ("XYZ123 4 mile final", [X1, X123], "XYZ123"),
+])
+def test_a_written_flight_keeps_its_digits_whoever_else_is_around(text, planes, callsign):
+    m, = atc.find_mentions(T.clauses(text), XIX)
+    assert (m.text, m.alts) == (callsign, ())                        # no shorter reading to pick
+    assert atc.reading(m, planes, known=["XYZ1"]).text == callsign
+    assert atc.attribute(text, XIX, planes).spoken == callsign
+
+
+def test_xyz123_4_mile_final_with_xyz1_and_xyz1234_around_is_never_xyz1():
+    a = atc.attribute("XYZ123 4 mile final", XIX, [X1, X1234])
+    assert a.spoken == "XYZ123" and a.callsign == "XYZ1234" and a.confidence == 0.7   # one digit off, as for any
+    r = rec_x("XYZ123 4 mile final", [X1, X1234])["aircraft"]
+    assert (r["spoken"], r["callsign"], r["status"]) == ("XYZ123", "XYZ1234", "probable")
+
+
+JBU12, JBU1234 = plane("j12", "JBU12"), plane("j1234", "JBU1234")
+
+
+@pytest.mark.parametrize("heard, planes, callsign, conf", [
+    ("JetBlue 12 34 mile final", [JBU1234], "JBU1234", 1.0),
+    ("JetBlue 12 34 mile final", [JBU12, JBU1234], "JBU1234", 1.0),  # the reading found first, when on ADS-B
+    ("JetBlue 12 34 mile final", [JBU12], "JBU12", 1.0),              # ... else the other on ADS-B (34 miles out?)
+    ("JetBlue 12 34 3 thousand", [JBU1234], "JBU1234", 1.0),
+    ("JetBlue 12 34 cleared to land", [JBU1234], "JBU1234", 1.0),    # no unit: joined in the written form, as before
+])
+def test_a_flight_number_said_in_groups_before_a_unit(heard, planes, callsign, conf):
+    text = atc_normalize(heard)                                       # the written form, as the app reads it
+    a = atc.attribute(text, IX, planes)
+    assert (a.callsign, a.confidence) == (callsign, conf)
+    r = rec(text, planes)["aircraft"]
+    assert (r["callsign"], r["status"]) == (callsign, "confirmed")
+
+
+def test_a_flight_number_said_in_groups_then_a_comma():
+    # the talker keeps the comma (clauses); the pre-alert's raw words never did, before #650 too: not changed here
+    r = rec(atc_normalize("JetBlue 12 34, 3 thousand"), [JBU1234])["aircraft"]
+    assert (r["callsign"], r["status"]) == ("JBU1234", "confirmed")
 
 
 def test_adsb_ranks_above_a_recent_talker():
