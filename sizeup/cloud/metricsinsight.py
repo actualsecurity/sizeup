@@ -5,9 +5,10 @@ Health warnings, and the compact 24 h lines Health draws. The hub's; admins only
 Suggested squelch (suggest(); FM traffic channels can apply it, paging and AM get it for information only). It must
 never make a channel worse: when in doubt, the running Open stays and Apply isn't offered.
 
-    window     the last SUGGEST_DAYS, or from the channel's last RF_EVENTS event (a dongle moved, a gain, unplugged /
-               back) when that is nearer: what it heard before says nothing about now. Under MIN_FLOOR_MIN minutes
-               (24 h) in the window: "not enough data (since <event>)"
+    window     the last SUGGEST_DAYS, or from the channel's last RF event (rf_events(): a dongle moved, a gain; back
+               from Off or plugged back in only on another dongle than before) when that is nearer: what it heard
+               before says nothing about now. Under MIN_FLOOR_MIN minutes (24 h) in the window: "not enough data
+               (since <event>)"
     noise      the p90 of each idle minute's q90 (the squelch closed the whole minute, open_s == 0): how far the hiss
                alone quiets itself on nine minutes in ten; the idle max: the p90 of each idle minute's max
     open       ceil(noise + margin_db) (Settings, default 3 dB), clamped to the Squelch card's range
@@ -24,7 +25,10 @@ never make a channel worse: when in doubt, the running Open stays and Apply isn'
     close      open minus the running hysteresis (Open - Close), in its range, under the open
     paging     the same numbers, information only: its squelch is read-only (a high Open would mute the pages); never
                above the running Open, and capped PAGING_GAP_DB (not WEAK_GAP_DB) under its weak pages
-    Apply      sends what it was worked out for (expect: the running Open / Close); the hub refuses it if another runs now
+    Apply      sends what it was worked out for (expect: the suggestion's own cur_open / cur_close); the hub refuses it
+               if another runs now, or if the channel's suggestion no longer offers Apply (Insight.applicable())
+    restart    a station squelch event within SETTLE_S of its restart that only puts back what ran before it is no
+               squelch change (restart_echoes(): no settling after every restart)
     limit      the quieting is measured against the receiver's own hiss reference, which follows the floor (radio/fm.py):
                a uniform rise of the noise moves both and can read as less than it is. The AM floor (dBFS) and the
                transmissions' own levels (the "tx_q" shift) don't have that limit
@@ -40,15 +44,17 @@ never a push; mutable like the alerts, Settings > System > Push notifications):
         FM       the idle minutes' q90 median up more than shift_db; the noise opens a minute (the median of half-hour
                  means, over OPENS_BINS half hours at least: one burst of static is one half hour) up opens_x times and
                  at least OPENS_MIN (neither after a squelch change alone: the Open itself moves both; with an SDR
-                 change minutes before or after it, they are checked); a traffic channel's kept voice quieting (median,
-                 TXQ_MIN each side) down more than shift_db (a cable's or a splitter's loss)
+                 change minutes before or after it, they are checked); a traffic channel's kept voice quieting (the
+                 median of half-hour medians, TXQ_MIN each side, over OPENS_BINS half hours: a fire's hour of portables
+                 never moves it) down more than shift_db (a cable's or a splitter's loss; not after a restart alone)
         AM       the floor (dBFS) median up more than shift_db
         traffic  the transmissions an hour (the median of half-hour counts: a fire's hour of traffic moves it
                  little) against the same clock hours the day before (a quiet night after a busy evening is no shift):
                  rate_x times fewer, from at least RATE_MIN; or the kept noise key-ups rate_x times more, to at least
                  RATE_MIN (what a gain, a squelch or interference brings)
         paging   the pages' quieting at open, median down more than shift_db over at least PAGES_MIN pages after
-                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few; never from before the event before)
+                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few; never from before the event before; not after
+                 a restart alone)
         P25      the control channel's decode rate median down more than cc_drop_pct %
     with no event, a drift check once a day: the last DRIFT_S's hourly medians against the DRIFT_BEFORE_S before, the
     same thresholds (FM idle q90, AM floor, P25 decode rate). A step a day old moves neither median: no warning
@@ -61,6 +67,7 @@ MAX_EVENTS events a subject; the suggestions are kept CACHE_S. Nothing here runs
 from __future__ import annotations
 
 import math
+import re
 import threading
 from urllib.parse import quote
 import time
@@ -88,7 +95,7 @@ PAGING_GAP_DB = 3.0            # ... a paging channel's (information only, conse
 CHATTER_PER_MIN = 2.0          # noise opens a minute: chattering (sizeup/channels.py CHATTER_PER_MIN)
 MAX_LOWER_DB = 2.0             # a lower Open: at most this much a step
 SETTLING_S = 6 * 3600.0        # after a squelch change: no Apply, no chatter rule, this long
-RF_EVENTS = ("sdr", "gain", "unplug", "back", "on")   # what changes what a channel hears: its suggestion starts after
+RF_EVENTS = ("sdr", "gain")   # what changes what a channel hears: its suggestion starts after (and rf_events())
 REAL_KINDS = ("voice", "burst", "page")
 STEP = 0.5                     # the Squelch card's step (sizeup/channels.py SQUELCH)
 OPEN_RANGE, CLOSE_RANGE = (4.0, 30.0), (2.0, 28.0)
@@ -311,6 +318,61 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
 
 # -- the shifts -------------------------------------------------------------------------------------------------------
 
+def _sdr_of(ev: dict) -> str | None:
+    """The dongle an event names: "sdr" (SDR a -> b): b; "on" / "back" (SDR x): x; None when it names none."""
+    d = str(ev.get("detail") or "")
+    if not d.startswith("SDR "):
+        return None
+    s = d.rsplit("->", 1)[-1].strip() if ev.get("ev") == "sdr" else d[4:].strip()
+    return s if s and s != "none" else None
+
+
+def rf_events(evs: list[dict]) -> list[dict]:
+    """Of a channel's events (oldest first), those that change what it hears: an SDR change, a gain change; "on" (back
+    from Off: a shared dongle handed over, every few hours) and "back" (plugged in again) only on another dongle than
+    the one before (the station sends "sdr" for that too: this is the hub's own check). "unplug" never on its own: the
+    dongle that comes back says whether anything changed (#686: a channel handed over every day still gets one)."""
+    out, cur = [], None
+    for e in evs:
+        ev = e.get("ev")
+        if ev in ("on", "back"):
+            s = _sdr_of(e)
+            if s and cur is not None and s != cur:
+                out.append(e)
+            cur = s or cur
+        elif ev in RF_EVENTS:
+            out.append(e)
+            if ev == "sdr":
+                cur = _sdr_of(e)
+    return out
+
+
+_SQ = re.compile(r"^open (-?[\d.]+) close (-?[\d.]+)")
+
+
+def restart_echoes(evs: list[dict], before: Callable[[float], dict]) -> list[dict]:
+    """evs without the station's squelch events that only put back what ran before a restart (#686): one within
+    SETTLE_S after the station's "start" whose Open / Close are what the floor records said ran just before it
+    (before(t): the settings in force at t). The station keeps the hub's squelch and runs it from its first look, so
+    a restart logs none; one whose own Settings store lost it would log the hub's push as a change, and 6 h of
+    settling would follow every restart."""
+    starts = [e["at"] for e in evs if e.get("ev") == "start" and isinstance(e.get("at"), (int, float))]
+    if not starts:
+        return evs
+    out = []
+    for e in evs:
+        if e.get("ev") == "squelch" and e.get("source", "station") == "station" and isinstance(e.get("at"), (int, float)):
+            st = max((t for t in starts if 0 <= e["at"] - t <= SETTLE_S), default=None)
+            m = _SQ.match(str(e.get("detail") or ""))
+            if st is not None and m:
+                was = before(st) or {}
+                o, c = _num(was.get("open")), _num(was.get("close"))
+                if o is not None and c is not None and abs(o - float(m[1])) < 0.01 and abs(c - float(m[2])) < 0.01:
+                    continue
+        out.append(e)
+    return out
+
+
 def _event_name(ev: dict) -> str:
     return EVENTS.get(ev.get("ev"), str(ev.get("ev") or "event"))
 
@@ -402,20 +464,34 @@ def check_channel(before: list[dict], after: list[dict], btx: list[dict], atx: l
     return out
 
 
+def _level(docs: list[dict], kinds: tuple, key: str, binned: bool) -> tuple[float | None, int, int]:
+    """The transmissions' level: (the median, or binned: the median of each half hour's median; their count; the
+    half hours)."""
+    bins: dict[int, list[float]] = {}
+    for d in docs:
+        if d.get("kind") in kinds and (v := _num(d.get(key))) is not None:
+            bins.setdefault(int(d["at"] // RATE_BIN_S), []).append(v)
+    vals = [v for b in bins.values() for v in b]
+    if not binned:
+        return median(vals), len(vals), len(bins)
+    return median([median(b) for b in bins.values()]), len(vals), len(bins)
+
+
 def check_levels(btx: list[dict], atx: list[dict], cfg: dict, paging: bool) -> list[dict]:
     """The transmissions' own level, before against after: a paging channel's pages at open (a splitter's loss), a
-    traffic channel's kept voice quieting (a cable's or a splitter's loss: every carrier weaker)."""
+    traffic channel's kept voice quieting (a cable's or a splitter's loss: every carrier weaker). Traffic: the median
+    of half-hour medians, over OPENS_BINS half hours each side at least (an hour of portables on a working fire is two
+    half hours, never the median, #686); pages are few: their median."""
     kinds, key, n_min = (("page",), "qo", PAGES_MIN) if paging else (("voice", "burst"), "q", TXQ_MIN)
-    bq = [v for d in btx if d.get("kind") in kinds and (v := _num(d.get(key))) is not None]
-    aq = [v for d in atx if d.get("kind") in kinds and (v := _num(d.get(key))) is not None]
-    if len(bq) >= n_min and len(aq) >= n_min:
-        b, a = median(bq), median(aq)
+    b, nb, hb = _level(btx, kinds, key, not paging)
+    a, na, ha = _level(atx, kinds, key, not paging)
+    if nb >= n_min and na >= n_min and (paging or (hb >= OPENS_BINS and ha >= OPENS_BINS)):
         if b - a > cfg["shift_db"]:
             if paging:
                 return [{"metric": "tx_q_open", "before": _r(b), "after": _r(a),
-                         "text": f"pages open at {a:.1f} dB (was {b:.1f}, {len(aq)} pages)"}]
+                         "text": f"pages open at {a:.1f} dB (was {b:.1f}, {na} pages)"}]
             return [{"metric": "tx_q", "before": _r(b), "after": _r(a),
-                     "text": f"transmissions at {a:.1f} dB (was {b:.1f}, {len(aq)} tx)"}]
+                     "text": f"transmissions at {a:.1f} dB (was {b:.1f}, {na} tx)"}]
     return []
 
 
@@ -462,14 +538,14 @@ class Insight:
     # -- suggestions ------------------------------------------------------------------------------------------------
 
     def suggestion(self, station: str, subject: str, now: float | None = None) -> dict:
-        """The channel's suggestion over its window: the last SUGGEST_DAYS, or from its last RF_EVENTS event (a dongle
-        moved, a gain, unplugged / back: what it hears changed, so what came before says nothing about now). Kept
-        CACHE_S, and worked out again at once when a newer event arrives (the key has the newest event's time)."""
+        """The channel's suggestion over its window: the last SUGGEST_DAYS, or from its last RF event (rf_events(): a
+        dongle moved, a gain: what it hears changed, so what came before says nothing about now). Kept CACHE_S, and
+        worked out again at once when a newer event arrives (the key has the newest event's time)."""
         now = self.clock() if now is None else now
         t0 = now - SUGGEST_DAYS * 86400.0
-        evs = [e for e in self.store.events(station, subject, t0, now + 60) if e.get("subject") == subject or
-               e.get("source") == "audit"]
-        rf = [e for e in evs if e.get("ev") in RF_EVENTS]
+        evs = self._events(station, subject, t0, now + 60)
+        evs = [e for e in evs if e.get("subject") == subject or e.get("source") == "audit"]
+        rf = rf_events(evs)
         sq = [e["at"] for e in evs if _is_squelch(e)]
         newest = max((e["at"] or 0 for e in evs), default=0.0)
         key = (station, subject)
@@ -486,6 +562,38 @@ class Insight:
         with self._lock:
             self._sugg[key] = (now, out)
         return out
+
+    def _events(self, station: str, subject: str, t0: float, t1: float) -> list[dict]:
+        """The store's events without a restart's echo of the squelch (restart_echoes())."""
+        evs = self.store.events(station, subject, t0, t1)
+        before = getattr(self.store, "settings_before", None)
+        if before is None or not any(e.get("ev") == "start" for e in evs):
+            return evs
+        return restart_echoes(evs, lambda t: before(station, subject, t))
+
+    def _live(self, now: float) -> list[tuple[str, str]]:
+        """(station, subject) of each series with floor records in the suggestion's window (SUGGEST_DAYS): an old or
+        renamed station id still in the 30 days kept never stands beside the one that reports the channel now (#686)."""
+        t0 = now - SUGGEST_DAYS * 86400.0
+        return sorted({(s["station"], s["subject"]) for s in self.store.index()["series"]
+                       if s["kind"] == "floor" and s["subject"] != "station" and (s.get("last") is None or s["last"] >= t0)})
+
+    def applicable(self, subject: str, expect: dict, now: float | None = None) -> str:
+        """An Apply from the Squelch card, checked again here (#686): "" when the channel's suggestion still offers
+        Apply and was worked out for the Open / Close in `expect` (the suggestion's own cur_open / cur_close), else
+        why not."""
+        now = self.clock() if now is None else now
+        rows = [r for r in (self.suggestion(st, s, now) for st, s in self._live(now) if s == subject) if r.get("minutes")]
+        if len(rows) != 1:
+            return f"{subject}: {'no suggestion' if not rows else 'two stations report it'} now, look again"
+        s = rows[0]
+        if not s.get("apply"):
+            return f"{subject}: the suggestion isn't offered now ({s.get('warn') or s.get('info') or s.get('why') or 'no change'})"
+        for f, k in (("open_db", "cur_open"), ("close_db", "cur_close")):
+            e, c = _num((expect or {}).get(f)), _num(s.get(k))
+            if e is None or c is None or abs(e - c) > 0.01:
+                return f"{subject}: the suggestion was worked out for Open {s.get('cur_open')} / Close {s.get('cur_close')}, look again"
+        return ""
 
     def forget(self, subject: str) -> None:
         """A channel's squelch changed (Settings): its suggestion worked out again at the next look."""
@@ -504,9 +612,10 @@ class Insight:
             self._drift = [dict(f, station=new) if f.get("station") == old else f for f in self._drift]
 
     def squelch(self, now: float | None = None) -> dict:
-        """view=squelch: each FM / AM channel's suggestion (Settings > Radios > Squelch and Signal)."""
+        """view=squelch: each FM / AM channel's suggestion (Settings > Radios > Squelch and Signal); a station with no
+        floor records of it in the window left out (_live)."""
         now = self.clock() if now is None else now
-        rows = [self.suggestion(st, s, now) for (st, s), kinds in sorted(self._series().items()) if "floor" in kinds]
+        rows = [self.suggestion(st, s, now) for st, s in self._live(now)]
         return {"channels": rows, "settings": self.cfg(), "at": now}
 
     # -- the shifts -------------------------------------------------------------------------------------------------
@@ -542,14 +651,15 @@ class Insight:
         return found
 
     def _subject(self, station: str, subject: str, kinds: set[str], cfg: dict, now: float) -> list[dict]:
-        evs = clusters(self.store.events(station, subject, now - WARN_S - BEFORE_S, now + 60))
+        evs = clusters(self._events(station, subject, now - WARN_S - BEFORE_S, now + 60))
         recent = [c for c in evs if c["at"] >= now - WARN_S][-MAX_EVENTS:]
         out: dict[str, dict] = {}
         meta = self._meta(station, subject, now) if "floor" in kinds else {}
         def run(b0: float, b1: float, a0: float, a1: float, p1: float, squelch: bool, prev: list[float],
-                avoid: list[float]) -> list[dict]:
+                avoid: list[float], levels: bool = True) -> list[dict]:
             """prev: the events before b1 (the windows start after them); avoid: every event time (the rates'
-            same-hours-yesterday window must hold none)."""
+            same-hours-yesterday window must hold none); levels: the transmissions' own level checked (not after a
+            restart alone: it changes nothing on the air, and the traffic after it is whatever happens then)."""
             hits = []
             if "cc" in kinds:
                 hits += check_cc(self.store.docs(station, subject, "cc", b0, b1),
@@ -564,7 +674,7 @@ class Insight:
                 tb = self.store.docs(station, subject, "tx", y0, y1) if same else None
                 ta = self.store.docs(station, subject, "tx", a0, a1)
                 hits += check_channel(fb, fa, tb, ta, (y0, y1), (a0, a1), meta, cfg, squelch)
-                if not meta.get("am"):              # the level: from the event before at most (never another's)
+                if levels and not meta.get("am"):   # the level: from the event before at most (never another's)
                     l0 = max(b1 - PAGE_BEFORE_S, prev[-1] + SETTLE_S if prev else 0.0)
                     hits += check_levels(self.store.docs(station, subject, "tx", l0, b1),
                                          self.store.docs(station, subject, "tx", a0, p1), cfg, meta.get("kind") == "paging")
@@ -580,14 +690,15 @@ class Insight:
                 continue
             p1 = min(now, c["at"] + PAGE_AFTER_S, later[0]["at"] if later else now)      # (pages: a longer after)
             alls = [p["at"] for p in evs]
-            hits = run(b0, c["at"], a0, a1, p1, c["squelch"] and not c["rf"], prev, alls)
+            levels = c["names"] != [EVENTS["start"]]
+            hits = run(b0, c["at"], a0, a1, p1, c["squelch"] and not c["rf"], prev, alls, levels)
             if hits and later:
                 # still so now? from the newest event on (a dongle moved back: no); a squelch change since: the idle
                 # can't tell any more, so only what it still shows stays
                 s0 = later[-1]["at"] + SETTLE_S
                 if now - s0 >= MIN_AFTER_S:
                     still = {h["metric"] for h in run(b0, c["at"], s0, now, now, (c["squelch"] and not c["rf"])
-                                                      or any(p["squelch"] for p in later), prev, alls)}
+                                                      or any(p["squelch"] for p in later), prev, alls, levels)}
                     hits = [h for h in hits if h["metric"] in still]
             for h in hits:
                 if h["metric"] in out:

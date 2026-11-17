@@ -789,10 +789,11 @@ class MetricStore:
             "SELECT hour, n, lo, p50, p90, hi FROM hourly WHERE station = ? AND subject = ? AND metric = ? AND hour >= ? "
             "AND hour < ? ORDER BY hour", (station, subject, metric, int(t0 // 3600), int(math.ceil(t1 / 3600))))]
 
-    def _settings_before(self, station: str, subject: str, t0: float) -> dict:
-        """The settings of the last floor record before t0 that had them (the station sends them every 15 min)."""
+    def _settings_before(self, station: str, subject: str, t0: float, back_s: float = 1800.0) -> dict:
+        """The settings of the last floor record before t0 (at most back_s before) that had them (the station sends
+        them every 15 min)."""
         for (doc,) in self._read("SELECT doc FROM raw WHERE station = ? AND subject = ? AND kind = 'floor' AND at < ? "
-                                 "AND at >= ? ORDER BY at DESC LIMIT 30", (station, subject, t0, t0 - 1800.0)):
+                                 "AND at >= ? ORDER BY at DESC LIMIT 30", (station, subject, t0, t0 - back_s)):
             try:
                 d = json.loads(doc)
             except ValueError:
@@ -800,6 +801,11 @@ class MetricStore:
             if any(f in d for f in SETTINGS):
                 return {f: d[f] for f in SETTINGS if f in d}
         return {}
+
+    def settings_before(self, station: str, subject: str, t0: float) -> dict:
+        """What ran before t0 (a restart: the day before it at most), from the floor records (metricsinsight.py's
+        restart echo, #686)."""
+        return self._settings_before(station, subject, t0, 86400.0)
 
     def events(self, station: str, subject: str, t0: float, t1: float) -> list[dict]:
         """The subject's events and the station's own (a restart, records dropped), and the Settings audit's changes to
