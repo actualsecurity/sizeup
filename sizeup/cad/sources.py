@@ -3117,7 +3117,13 @@ class Sources:
         feed._refresh()
         if t["talkgroup"] not in feed.cfg.talkgroups and not (t["talkgroup"] is None and t["channel"] in feed.paging):
             return None
-        why = feed.matcher.match(t["text"])
+        from sizeup.cad.comms import page_kind
+        try:
+            tones = json.loads(t["tones"] or "[]")
+        except (TypeError, ValueError):
+            tones = []
+        page = bool(page_kind(tones, t["channel"] or "", feed.paging))
+        why = feed.matcher.match(t["text"], short=not page)       # a page: by its tones, never "PC ..." (PC Rye EMS's)
         if not why:
             return None
         ann = INCOMING.search(t["text"])
