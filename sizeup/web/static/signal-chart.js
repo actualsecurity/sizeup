@@ -58,12 +58,22 @@ window.SignalChart = (() => {
                                                 hourCycle: "h23", timeZone: TZ() }).format(new Date(t * 1000));
     } catch (_) { return new Date(t * 1000).toISOString().slice(0, 16); }
   }
-  // Time ticks on whole hours / days.
+  // The console's zone's offset from UTC at t (s), so day and multi-hour ticks fall on local midnights and hours.
+  function tzOffset(t) {
+    try {
+      const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: TZ(), hourCycle: "h23", year: "numeric",
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        .formatToParts(new Date(t * 1000)).map((x) => [x.type, x.value]));
+      return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) / 1000) - Math.floor(t);
+    } catch (_) { return 0; }
+  }
+  // Time ticks on whole hours / local days.
   function timeTicks(x0, x1, n) {
     const span = x1 - x0;
     const step = [900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 259200, 604800].find((x) => span / x <= n) || 604800;
+    const off = step >= 3600 ? tzOffset(x0) : 0;
     const out = [];
-    for (let t = Math.ceil(x0 / step) * step; t <= x1; t += step) out.push(t);
+    for (let t = Math.ceil((x0 + off) / step) * step - off; t <= x1; t += step) out.push(t);
     return out;
   }
 
@@ -370,5 +380,5 @@ window.SignalChart = (() => {
     return svg;
   }
 
-  return { plot, spark, legend, ticks, timeTicks };
+  return { plot, spark, legend, ticks, timeTicks, tzOffset };
 })();

@@ -71,10 +71,13 @@ def test_fg1_like_channel_gets_ceil_noise_p90_plus_margin_and_no_real_traffic_un
     assert 9.3 <= noise <= 9.9                                       # the idle sits at 8-10 dB
     assert out["state"] == "ok" and out["noise_p90"] == round(noise, 1)
     assert out["open"] == math.ceil(noise + 3) == 13
-    assert out["close"] == 9.0                                       # the running 4 dB of hysteresis kept
-    assert out["under"] == 0 and out["real"] == 212 and not out["capped"]
+    tails = min(d["qc"] for d in transmissions(NOW - 7 * DAY, 7 * DAY, qos))
+    # Close: the running 4 dB of hysteresis would be 9, but never above the real tails' own quieting at close - 1
+    assert out["close"] == min(9.0, math.floor((tails - 1) * 2) / 2) and out["cut_tails"] == 0
+    assert out["under"] == 0 and out["real"] == 212 and not out["capped"] and out["warn"] == ""
     assert out["apply"] and out["info"] == ""                       # a traffic channel: an admin may apply it
-    assert out["why"].startswith(f"noise p90 {noise:.1f} dB (10,080 idle min, 7 d) + 3 → 13 · 0/212 real under 13")
+    assert out["why"].startswith(f"noise p90 {noise:.1f} dB, idle max p90 {out['noise_max_p90']:.1f} (10,080 idle min, "
+                                 "7 d) + 3 → 13 · 0/212 real under 13 · weakest ")
     assert sum(out["hist"]["idle"]["n"]) == 10080 and sum(out["hist"]["real"]["n"]) == 212
 
 
@@ -84,12 +87,90 @@ def test_it_is_never_above_the_weak_traffic_the_channel_really_carries():
     weak = [r.uniform(12.0, 12.6) for _ in range(30)]               # the weakest real key-ups: 12 dB at open
     qos = weak + [r.uniform(15, 30) for _ in range(270)]
     out = mi.suggest(floor, transmissions(NOW - 7 * DAY, 7 * DAY, qos), CFG, NOW)
-    assert out["capped"] and "would miss weak traffic: 30 of 300 under" in out["why"]
-    assert out["open"] < min(weak) and out["open"] == math.floor((mi.pct(qos, 2) - 1.0) * 2) / 2 == 11.0
-    assert out["under"] == 0                                          # none of the real traffic is under it
-    # an admin who allows 10% (Settings): those 30 of 300 are within it, so it isn't capped, and says so
+    # the weakest real key-ups (12 dB) sit under noise + margin (13): no Open serves both, the running one stays
+    assert out["warn"] == "weak traffic overlaps the noise: 30 of 300 real under 13" and not out["apply"]
+    assert out["open"] == 10.0 and out["under"] == 0 and out["open"] < min(weak)
+    # an admin who allows 10% (Settings): those 30 of 300 are within it, and the count says so
     out = mi.suggest(floor, transmissions(NOW - 7 * DAY, 7 * DAY, qos), {**CFG, "miss_pct": 10.0}, NOW)
     assert out["open"] == 13.0 and not out["capped"] and out["under"] == 30 and "30/300 real under 13" in out["why"]
+
+
+def test_scenario_a_weak_traffic_in_the_noise_never_pulls_open_under_the_noise():
+    # review scenario A: noise p90 ~10.3, real key-ups at 8 dB at open: the old cap suggested 7, under the noise
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(9.7, 0.45))
+    qos = [8.0] * 10 + [random.Random(k).uniform(15, 30) for k in range(200)]
+    out = mi.suggest(floor, transmissions(NOW - 7 * DAY, 7 * DAY, qos), CFG, NOW)
+    assert out["noise_p90"] >= 10.2 and out["open"] == 10.0 and not out["apply"]
+    assert out["warn"].startswith("weak traffic overlaps the noise")
+
+
+def test_scenario_b_a_chattering_channel_never_gets_a_lower_suggestion():
+    # review scenario B: chattering on a running 10; a weak key-up at 10.4 used to cap it to 9
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(5.5, 0.4), noise=lambda k, r: 3)
+    qos = [10.4] * 3 + [random.Random(k).uniform(15, 30) for k in range(100)]
+    out = mi.suggest(floor, transmissions(NOW - 7 * DAY, 7 * DAY, qos), CFG, NOW)
+    assert out["open"] >= 10.0 and not out["apply"]
+
+
+def test_a_lower_suggestion_stays_over_the_idle_max_and_moves_two_db_a_step():
+    quiet = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(4.0, 0.3),
+                          settings={"kind": "traffic", "open": 14.0, "close": 10.0})
+    tx = transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 50)
+    out = mi.suggest(quiet, tx, CFG, NOW)
+    assert out["base"] == 8.0 and out["open"] == 12.0 and out["apply"]            # 14 -> 12, not 8 at once
+    spiky = [dict(d, qmax=round(d["q90"] + 7.0, 1)) for d in quiet]               # the hiss spikes to ~11.4
+    out = mi.suggest(spiky, tx, CFG, NOW)
+    assert out["noise_max_p90"] >= 11.0 and out["open"] == 12.0 > out["noise_max_p90"]   # never into the idle max
+    spiky10 = [dict(d, qmax=round(d["q90"] + 7.0, 1)) for d in floor_minutes(NOW - 7 * DAY, 7 * 1440,
+                                                                         q90=lambda k, r: r.gauss(4.0, 0.3))]
+    out = mi.suggest(spiky10, tx, CFG, NOW)                                          # running 10: not lowered at all
+    assert out["open"] == 10.0 and out["same"] and not out["apply"]
+
+
+def test_a_raised_close_never_cuts_the_real_tails():
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440)
+    tx = [dict(d, qc=7.5) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 50)]
+    out = mi.suggest(floor, tx, CFG, NOW)
+    assert out["open"] == 13.0 and out["close"] == 6.5 and out["cut_tails"] == 0   # held under the tails (7.5 - 1)
+    assert "Close held under the tails" in out["why"]
+
+
+def test_after_a_squelch_change_it_settles_and_counts_the_chatter_only_since():
+    sq = NOW - 2 * 3600
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(5.5, 0.4),
+                          noise=lambda k, r: 3 if NOW - 7 * DAY + 60 * k < sq else 0)
+    tx = transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 50)
+    out = mi.suggest(floor, tx, CFG, NOW, squelch_at=sq)
+    assert out["warn"].startswith("settling: squelch changed") and not out["apply"] and "chattering" not in out["why"]
+    out = mi.suggest(floor, tx, CFG, NOW + 8 * 3600, squelch_at=sq)                  # 10 h on: quiet since the change
+    assert out["opens_p50"] == 0 and "chattering" not in out["why"] and out["warn"] == ""
+
+
+def _rf_store(tmp_path, ev_at, before_q, after_q, before_tx, after_tx):
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(
+        before_q if NOW - 7 * DAY + 60 * k < ev_at else after_q, 0.4)))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, ev_at - (NOW - 7 * DAY), before_tx)
+        + transmissions(ev_at + 600, NOW - ev_at - 600, after_tx, seed=5))
+    put(s, "FG1", [ev("FG1", ev_at, "sdr", "SDR 00000102 -> 00000105")])
+    return mi.Insight(s, clock=lambda: NOW, log=lambda m: None)
+
+
+def test_scenario_e_a_rewire_that_raised_the_noise_starts_the_window_again(tmp_path):
+    # the noise rose 20 h ago with a dongle change: 6 days of the old, quiet floor would suggest an Open under the hiss
+    ins = _rf_store(tmp_path, NOW - 20 * 3600, 4.0, 9.0, [20.0] * 200, [20.0] * 30)
+    out = ins.suggestion("pcfd-hq", "FG1")
+    assert out["state"] == "short" and out["why"].startswith("not enough data since SDR change ")
+    assert out["since"]["ev"] == "sdr" and not out["apply"]
+
+
+def test_scenario_f_old_strong_traffic_never_masks_new_weak_traffic(tmp_path):
+    # strong traffic until a dongle change 3 days ago, weak since: only what came after counts
+    ins = _rf_store(tmp_path, NOW - 3 * DAY, 9.0, 9.0, [25.0] * 300, [12.5] * 30)
+    ins.section = lambda: {"miss_pct": 10.0}                   # (10% allowed: 30 of 330 would have slipped through)
+    out = ins.suggestion("pcfd-hq", "FG1")
+    assert out["real"] == 30 and out["days"] == 3.0 and out["warn"].startswith("weak traffic overlaps the noise")
+    assert not out["apply"]
 
 
 def test_under_a_day_of_data_is_not_enough():
@@ -407,3 +488,72 @@ def test_the_thresholds_are_a_settings_section_audited_as_radios(tmp_path):
     n = len(cad.store.q("SELECT 1 FROM settings_audit"))
     cad.settings_post("signal_metrics", {"action": "reset", "key": "shift_db", "operator": "KM"})
     assert len(cad.store.q("SELECT 1 FROM settings_audit")) == n                  # nothing changed: nothing audited
+
+
+# -- the review's shift scenarios (#685) ------------------------------------------------------------------------------
+
+def test_one_burst_of_static_after_a_restart_is_not_a_noise_opens_shift(tmp_path):
+    t = NOW - 4 * 3600
+    s, _ = store(tmp_path)
+    burst = lambda k, r: 10 if t + 600 <= t - DAY + 60 * k < t + 1800 else (1 if r.random() < 0.1 else 0)
+    put(s, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60), noise=burst))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    assert mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn() == []
+
+
+def test_pages_are_never_blamed_on_a_later_event_than_the_one_that_moved_them(tmp_path):
+    t1, t2 = NOW - 40 * 3600, NOW - 20 * 3600              # the splitter (sdr) at t1; a gain change that did nothing at t2
+    s, _ = store(tmp_path)
+    put(s, "South 2", floor_minutes(NOW - 7 * DAY, 7 * 1440, kind="paging"))
+    put(s, "South 2", transmissions(NOW - 7 * DAY, 5 * DAY, [24.0, 23.5, 25.1, 24.4, 23.9, 24.2], kind="page")
+        + transmissions(t1 + 600, t2 - t1 - 1200, [19.0, 18.5, 18.8, 19.2], kind="page", seed=8)
+        + transmissions(t2 + 600, NOW - t2 - 600, [18.9, 19.1, 18.7, 19.0], kind="page", seed=9))
+    put(s, "South 2", [ev("South 2", t1, "sdr", "SDR 00000102 -> 00000104"), ev("South 2", t2, "gain", "36.4 -> 38.6")])
+    found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
+    assert [(f["metric"], f["event"]) for f in found] == [("tx_q_open", "sdr")]
+
+
+def test_an_sdr_change_with_a_squelch_edit_minutes_later_is_still_checked(tmp_path):
+    t = NOW - 3 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", stepped(t, 5.0, 9.2))
+    put(s, "FG1", [ev("FG1", t, "sdr", "SDR 00000102 -> 00000105"),
+                   ev("FG1", t + 300, "squelch", "open 11 close 7 min 0.3 (was open 10 close 6 min 0.3)")])
+    found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
+    assert [f["metric"] for f in found] == ["idle_q90"] and found[0]["text"].endswith("(SDR change, squelch change)")
+
+
+def test_a_traffic_channel_whose_transmissions_come_in_weaker_is_warned(tmp_path):
+    t = NOW - 30 * 3600                                    # a cable swapped: every carrier ~7 dB weaker since
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60)))
+    put(s, "FG1", transmissions(t - DAY, DAY, [22.0 + (k % 5) * 0.4 for k in range(40)])
+        + transmissions(t + 600, NOW - t - 600, [15.0 + (k % 5) * 0.4 for k in range(40)], seed=7))
+    put(s, "FG1", [ev("FG1", t, "back", "SDR 00000102")])
+    found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
+    assert [f["metric"] for f in found] == ["tx_q"]
+    assert found[0]["text"].startswith("transmissions at 15.") and "(was 22." in found[0]["text"]
+
+
+def test_since_says_the_day_for_an_event_before_today():
+    from sizeup import tz
+    assert mi._when(NOW - 60, NOW) == tz.hhmm(NOW - 60)
+    old = NOW - 2 * DAY
+    assert mi._when(old, NOW) == tz.clock(old, "%b %d %H:%M").replace(" 0", " ", 1) and len(mi._when(old, NOW)) > 5
+
+
+def test_apply_is_refused_unless_the_squelch_it_was_for_still_runs_and_a_reset_forgets_it(tmp_path):
+    from sizeup.app import App
+    from sizeup.cad.store import CadError
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    forgot = []
+    app.cad.station_metrics_insight = type("I", (), {"forget": lambda self, k: forgot.append(k)})()
+    body = {"action": "set", "key": "FG1", "open_db": 13, "close_db": 9, "operator": "admin@example.org"}
+    with pytest.raises(CadError, match="FG1 now runs Open 10.0 / Close 6.0"):
+        app.cad.settings.post("squelch", {**body, "expect": {"open_db": 12, "close_db": 8}})
+    assert app._receiver("FG1").open_db == 10.0
+    app.cad.settings.post("squelch", {**body, "expect": {"open_db": 10, "close_db": 6}})
+    assert app._receiver("FG1").open_db == 13.0 and forgot == ["FG1"]
+    app.cad.settings.post("squelch", {"action": "reset", "key": "FG1", "operator": "admin@example.org"})
+    assert forgot == ["FG1", "FG1"]

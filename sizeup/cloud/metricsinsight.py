@@ -2,24 +2,32 @@
 channel from weeks of its own noise and traffic, the shifts after an event (a rewire, a dongle moved, a restart) as
 Health warnings, and the compact 24 h lines Health draws. The hub's; admins only (GET /api/cad/metrics?view=...).
 
-Suggested squelch (suggest(); FM traffic channels can apply it, paging and AM get it for information only):
+Suggested squelch (suggest(); FM traffic channels can apply it, paging and AM get it for information only). It must
+never make a channel worse: when in doubt, the running Open stays and Apply isn't offered.
 
-    noise      the p90, over the last SUGGEST_DAYS, of each idle minute's q90 (the squelch closed the whole minute,
-               open_s == 0): how far the hiss alone quiets itself on nine minutes in ten. Needs MIN_FLOOR_MIN minutes
-               (24 h) of floor records, else "not enough data"
+    window     the last SUGGEST_DAYS, or from the channel's last RF_EVENTS event (a dongle moved, a gain, unplugged /
+               back) when that is nearer: what it heard before says nothing about now. Under MIN_FLOOR_MIN minutes
+               (24 h) in the window: "not enough data (since <event>)"
+    noise      the p90 of each idle minute's q90 (the squelch closed the whole minute, open_s == 0): how far the hiss
+               alone quiets itself on nine minutes in ten; the idle max: the p90 of each idle minute's max
     open       ceil(noise + margin_db) (Settings, default 3 dB), clamped to the Squelch card's range
-    check      against the real transmissions kept over the same days (voice, a radio-ID burst, a page: never the
-               "noise" kind), each at its quieting at open ("qo", else "q"): if more than miss_pct (default 2%) of them
-               are under that open, it is capped at that percentile of theirs minus WEAK_GAP_DB and flagged "would miss
-               weak traffic". So it never sits above the weak traffic the channel really carries
-    raise      only with at least MIN_REAL_TX real transmissions to check it against; with fewer, never above the
-               Open running now ("too few to check a raise")
-    chatter    the idle minutes only exist below the Open (an excursion over it opens the squelch, and that minute
-               isn't idle): a channel chattering (its noise opens' median at CHATTER_PER_MIN or more) reads low, so it
-               is never suggested lower than it runs, and at least one dB higher (then look again)
-    close      open minus the running hysteresis (Open - Close), at least the range's lowest, under the open
+    weak       the real transmissions in the window (voice, an ID burst, a page: never the "noise" kind), each at its
+               quieting at open ("qo", else "q"). By default (miss_pct 0) none may be under the Open: more than miss_pct
+               under it and the cap (their percentile - WEAK_GAP_DB) lands under noise + margin: "weak traffic overlaps
+               the noise", the running Open stays, no Apply
+    raise      only with MIN_REAL_TX real transmissions to check it against; one that would still leave any under it:
+               no Apply (the count in the warning). A raised Close stays under the real tails' quieting at close (qc)
+    lower      never into the idle max, and at most MAX_LOWER_DB a step (look again after)
+    chatter    the noise opens' median since the last squelch change (an hour of minutes at least): at CHATTER_PER_MIN or
+               more the idle reads low (an excursion over the Open opens it, so that minute isn't idle), so it is never
+               suggested lower, and +1 dB. For SETTLING_S after a squelch change: no chatter rule, no Apply
+    close      open minus the running hysteresis (Open - Close), in its range, under the open
     paging     the same numbers, information only: its squelch is read-only (a high Open would mute the pages); never
                above the running Open, and capped PAGING_GAP_DB (not WEAK_GAP_DB) under its weak pages
+    Apply      sends what it was worked out for (expect: the running Open / Close); the hub refuses it if another runs now
+    limit      the quieting is measured against the receiver's own hiss reference, which follows the floor (radio/fm.py):
+               a uniform rise of the noise moves both and can read as less than it is. The AM floor (dBFS) and the
+               transmissions' own levels (the "tx_q" shift) don't have that limit
 
 Shift warnings (shifts(); the hub's janitor runs it every 10 min, Health shows the result as "metrics_shift" hints,
 never a push; mutable like the alerts, Settings > System > Push notifications):
@@ -29,15 +37,18 @@ never a push; mutable like the alerts, Settings > System > Push notifications):
     MIN_AFTER_S of data, never past the next event) against the BEFORE_S before it (never before the event before);
     with later events, what it found must still show from the newest one on (a dongle moved back: no warning; a squelch
     change since: the idle checks can't tell any more):
-        FM       the idle minutes' q90 median up more than shift_db; the noise opens a minute up opens_x times and at
-                 least OPENS_MIN (neither after a squelch change: the Open itself moves both)
+        FM       the idle minutes' q90 median up more than shift_db; the noise opens a minute (the median of half-hour
+                 means, over OPENS_BINS half hours at least: one burst of static is one half hour) up opens_x times and
+                 at least OPENS_MIN (neither after a squelch change alone: the Open itself moves both; with an SDR
+                 change minutes before or after it, they are checked); a traffic channel's kept voice quieting (median,
+                 TXQ_MIN each side) down more than shift_db (a cable's or a splitter's loss)
         AM       the floor (dBFS) median up more than shift_db
         traffic  the transmissions an hour (the median of half-hour counts: a fire's hour of traffic moves it
                  little) against the same clock hours the day before (a quiet night after a busy evening is no shift):
                  rate_x times fewer, from at least RATE_MIN; or the kept noise key-ups rate_x times more, to at least
                  RATE_MIN (what a gain, a squelch or interference brings)
         paging   the pages' quieting at open, median down more than shift_db over at least PAGES_MIN pages after
-                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few)
+                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few; never from before the event before)
         P25      the control channel's decode rate median down more than cc_drop_pct %
     with no event, a drift check once a day: the last DRIFT_S's hourly medians against the DRIFT_BEFORE_S before, the
     same thresholds (FM idle q90, AM floor, P25 decode rate). A step a day old moves neither median: no warning
@@ -58,7 +69,7 @@ from typing import Callable
 from sizeup import tz
 
 SECTION = "signal_metrics"     # the CAD settings section (sizeup/cad/settings.py), audited as Radios
-DEFAULTS = {"margin_db": 3.0, "miss_pct": 2.0, "shift_db": 3.0, "opens_x": 3.0, "rate_x": 3.0, "cc_drop_pct": 30.0}
+DEFAULTS = {"margin_db": 3.0, "miss_pct": 0.0, "shift_db": 3.0, "opens_x": 3.0, "rate_x": 3.0, "cc_drop_pct": 30.0}
 LIMITS = {"margin_db": (1.0, 10.0), "miss_pct": (0.0, 10.0), "shift_db": (1.0, 15.0), "opens_x": (1.5, 20.0),
           "rate_x": (1.5, 20.0), "cc_drop_pct": (5.0, 90.0)}
 LABELS = {"margin_db": "Suggested Open: margin over the noise p90 (dB)",
@@ -75,6 +86,9 @@ MIN_REAL_TX = 20               # real transmissions to check a raise against
 WEAK_GAP_DB = 1.0              # capped this far under the weak traffic's percentile
 PAGING_GAP_DB = 3.0            # ... a paging channel's (information only, conservative)
 CHATTER_PER_MIN = 2.0          # noise opens a minute: chattering (sizeup/channels.py CHATTER_PER_MIN)
+MAX_LOWER_DB = 2.0             # a lower Open: at most this much a step
+SETTLING_S = 6 * 3600.0        # after a squelch change: no Apply, no chatter rule, this long
+RF_EVENTS = ("sdr", "gain", "unplug", "back", "on")   # what changes what a channel hears: its suggestion starts after
 REAL_KINDS = ("voice", "burst", "page")
 STEP = 0.5                     # the Squelch card's step (sizeup/channels.py SQUELCH)
 OPEN_RANGE, CLOSE_RANGE = (4.0, 30.0), (2.0, 28.0)
@@ -93,6 +107,8 @@ OPENS_MIN = 0.5
 RATE_MIN = 4.0                 # transmissions an hour (the medians') to say a rate moved
 RATE_BIN_S = 1800.0
 PAGES_MIN = 3
+TXQ_MIN = 8                    # kept voice transmissions each side, for their level
+OPENS_BINS = 3                 # half hours after an event, for the noise opens' median
 PAGE_BEFORE_S, PAGE_AFTER_S = 7 * 86400.0, 72 * 3600.0
 DRIFT_S, DRIFT_BEFORE_S = 7 * 86400.0, 21 * 86400.0
 DRIFT_EVERY_S = 86400.0
@@ -166,72 +182,130 @@ def _step_down(v: float) -> float:
 
 # -- the suggested squelch --------------------------------------------------------------------------------------------
 
-def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: float = SUGGEST_DAYS * 86400.0) -> dict:
-    """A channel's suggested squelch from its floor and tx records (oldest first) over span_s. {state: "ok" | "short",
-    open, close, apply (an admin may apply it: a traffic FM channel, and it differs), info (why not: paging, AM), the
-    numbers it used (noise_p90, noise_max_p90, idle_min, minutes, real, under, weak, cur_open, cur_close, capped, ...),
-    why (one line: the numbers), hist {idle, real, noise} (STEP-wide bins of q90 / qo / q)}."""
+def _when(t: float, now: float) -> str:
+    """"14:05" today, "Nov 15 14:05" on another day (the console's time zone)."""
+    if tz.clock(t, "%Y-%m-%d") == tz.clock(now, "%Y-%m-%d"):
+        return tz.hhmm(t)
+    return tz.clock(t, "%b %d %H:%M").replace(" 0", " ", 1)
+
+
+def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: float = SUGGEST_DAYS * 86400.0,
+            since: dict | None = None, squelch_at: float | None = None) -> dict:
+    """A channel's suggested squelch from its floor and tx records (oldest first) over its window: the last span_s, or
+    from `since` (the last event that changed what the channel hears: {at, ev}) when that is nearer. squelch_at: the
+    last squelch change (the chatter is counted from it; Apply waits SETTLING_S after it).
+
+    Never makes a channel worse: when in doubt the running Open stays and Apply isn't offered. {state: "ok" | "short",
+    open, close, apply, info (why it is information only: paging, AM), warn (why it isn't offered: weak traffic overlaps
+    the noise, a raise would miss transmissions, settling), the numbers it used, why (one line), hist}."""
     cfg = settings(cfg)
     st = _settings_now(floor)
     kind = str(st.get("kind") or "")
     am = bool(st.get("am"))
+    paging = kind == "paging"
     cur_o, cur_c = _num(st.get("open")), _num(st.get("close"))
     idle = [d for d in floor if _num(d.get("q90")) is not None and not d.get("open_s")]
     q90 = [float(d["q90"]) for d in idle]
     qmax = [float(d["qmax"]) for d in idle if _num(d.get("qmax")) is not None]
     real = [d for d in tx if d.get("kind") in REAL_KINDS]
     rq = [v for d in real if (v := _num(d.get("qo") if d.get("qo") is not None else d.get("q"))) is not None]
+    rc = [v for d in real if (v := _num(d.get("qc"))) is not None]
     nq = [v for d in tx if d.get("kind") == "noise" and (v := _num(d.get("q"))) is not None]
-    opens = [v for d in floor if (v := _num(d.get("noise"))) is not None]
+    sq_from = (squelch_at + SETTLE_S) if squelch_at is not None else None
+    opens = [v for d in floor if (sq_from is None or d["at"] >= sq_from) and (v := _num(d.get("noise"))) is not None]
+    days = round(min(span_s, now - since["at"]) / 86400.0 if since else span_s / 86400.0, 1)
     out: dict = {"subject": "", "kind": kind, "am": am, "minutes": len(floor), "idle_min": len(idle), "real": len(rq),
                  "noise_tx": len(nq), "cur_open": cur_o, "cur_close": cur_c, "margin_db": cfg["margin_db"],
-                 "miss_pct": cfg["miss_pct"], "days": round(span_s / 86400.0, 1),
+                 "miss_pct": cfg["miss_pct"], "days": days, "warn": "", "info": "", "apply": False,
+                 "since": {"at": since["at"], "ev": since["ev"]} if since else None,
                  "hist": {"idle": _hist(q90), "real": _hist(rq), "noise": _hist(nq)}}
     if len(floor) < MIN_FLOOR_MIN or len(idle) < MIN_IDLE_MIN:
         hrs = len(floor) / 60.0
-        out.update(state="short", apply=False, why=f"not enough data: {hrs:.0f} h of {MIN_FLOOR_MIN / 60:.0f} h"
+        out.update(state="short", why=(f"not enough data since {EVENTS.get(since['ev'], since['ev'])} {_when(since['at'], now)}"
+                                       if since else "not enough data") + f": {hrs:.0f} h of {MIN_FLOOR_MIN / 60:.0f} h"
                    + (f", {len(idle)} idle min" if len(floor) >= MIN_FLOOR_MIN else ""))
         return out
     noise = pct(q90, 90)
-    out["noise_p90"] = _r(noise)
-    out["noise_max_p90"] = _r(pct(qmax, 90))
-    paging = kind == "paging"
-    want = float(math.ceil(noise + cfg["margin_db"] - 1e-9))
-    notes = []
-    chatter = median(opens) or 0.0
+    nmax = pct(qmax, 90) if qmax else noise
+    out["noise_p90"], out["noise_max_p90"] = _r(noise), _r(nmax)
+    base = float(math.ceil(noise + cfg["margin_db"] - 1e-9))
+    out["base"] = base
+    gap = PAGING_GAP_DB if paging else WEAK_GAP_DB
+    notes: list[str] = []
+    warn = ""
+    chatter = median(opens) if len(opens) >= 60 else None    # an hour of minutes since the last squelch change
     out["opens_p50"] = _r(chatter, 2)
-    if chatter >= CHATTER_PER_MIN and cur_o is not None and want < cur_o + 1:
+    settling = squelch_at is not None and now - squelch_at < SETTLING_S
+    chattering = chatter is not None and chatter >= CHATTER_PER_MIN and not settling
+    want = base
+    if chattering and cur_o is not None and want < cur_o + 1:
         want = cur_o + 1.0
         notes.append(f"chattering {chatter:g}/min: idle reads low; +1 dB, look again")
-    gap = PAGING_GAP_DB if paging else WEAK_GAP_DB
-    capped = False
-    if rq:
-        weak = pct(rq, cfg["miss_pct"]) if cfg["miss_pct"] > 0 else min(rq)
-        out["weak"] = _r(weak)
-        under = sum(1 for v in rq if v < want)
-        if under > len(rq) * cfg["miss_pct"] / 100.0:
-            want, capped = _step_down(weak - gap), True
-            notes.append(f"would miss weak traffic: {under} of {len(rq)} under")
     lo, hi = OPEN_RANGE
     want = min(max(want, lo), hi)
-    if cur_o is not None and want > cur_o and (paging or len(rq) < MIN_REAL_TX):
-        notes.append("paging: never above the running Open" if paging else f"{len(rq)} real tx: too few to check a raise")
-        want = cur_o
+    capped = False
+    under = sum(1 for v in rq if v < want)
+    allowed = len(rq) * cfg["miss_pct"] / 100.0
+    if rq and under > allowed:
+        weak = pct(rq, cfg["miss_pct"]) if cfg["miss_pct"] > 0 else min(rq)
+        out["weak"] = _r(weak)
+        cap = _step_down(weak - gap)
+        if cap < base:
+            # the weakest real traffic sits in the noise (+ margin): no Open serves both; the one running stays
+            warn = f"weak traffic overlaps the noise: {under} of {len(rq)} real under {want:g}"
+            want = cur_o if cur_o is not None else want
+        else:
+            want, capped = cap, True
+            notes.append(f"capped under weak traffic: {under} of {len(rq)} were under {base:g}")
+    elif rq:
+        out["weak"] = _r(pct(rq, cfg["miss_pct"]) if cfg["miss_pct"] > 0 else min(rq))
+    if cur_o is not None and not warn:
+        if want < cur_o:
+            if chattering:
+                want = cur_o                               # chattering: never lower
+            else:
+                # lower: never into the idle max, at most MAX_LOWER_DB a step (look again after)
+                floor_max = _step_up(nmax + STEP)
+                want = max(want, floor_max, cur_o - MAX_LOWER_DB)
+                if want >= cur_o:
+                    want = cur_o
+                elif want > base:
+                    notes.append(f"lowered at most {MAX_LOWER_DB:g} dB a step, over the idle max {nmax:.1f}")
+        elif want > cur_o:
+            if paging:
+                notes.append("paging: never above the running Open")
+                want = cur_o
+            elif len(rq) < MIN_REAL_TX:
+                notes.append(f"{len(rq)} real tx: too few to check a raise")
+                want = cur_o
     out["under"] = sum(1 for v in rq if v < want)
+    if not warn and cur_o is not None and want > cur_o and out["under"] > allowed:
+        warn = f"a raise to {want:g} would miss {out['under']} of {len(rq)} real transmissions"
     hyst = (cur_o - cur_c) if cur_o is not None and cur_c is not None and cur_o > cur_c else 4.0
     close = min(CLOSE_RANGE[1], max(CLOSE_RANGE[0], _step_down(want - hyst)))
+    if cur_c is not None and close > cur_c and rc:
+        # a raised Close cuts a transmission's tail sooner: never above the real tails' own quieting at close
+        tail = _step_down(min(rc) - gap)
+        if close > max(tail, cur_c):
+            close = max(tail, cur_c)
+            notes.append(f"Close held under the tails (qc min {min(rc):.1f})")
     if close >= want:
         close = want - STEP
+    out["cut_tails"] = sum(1 for v in rc if v < close) if cur_c is not None and close > cur_c else 0
     out.update(state="ok", open=_r(want), close=_r(close), capped=capped,
                same=cur_o is not None and abs(want - cur_o) < STEP / 2 and (cur_c is None or abs(close - cur_c) < STEP / 2))
-    info = "paging: read-only" if paging else "AM: no squelch setting here" if am else \
+    out["info"] = "paging: read-only" if paging else "AM: no squelch setting here" if am else \
         "" if kind in ("traffic", "") else f"{kind}: read-only"
-    out["info"] = info
-    out["apply"] = not info and not out["same"]
-    out["why"] = (f"noise p90 {noise:.1f} dB ({len(idle):,} idle min, {out['days']:g} d) + {cfg['margin_db']:g} "
-                  f"→ {math.ceil(noise + cfg['margin_db'] - 1e-9):g} · {out['under']}/{len(rq)} real under {want:g}"
-                  + (f" · weak p{cfg['miss_pct']:g} {out['weak']:.1f}" if "weak" in out else "")
-                  + "".join(f" · {n}" for n in notes))
+    if settling and not warn:
+        warn = f"settling: squelch changed {_when(squelch_at, now)}"
+    out["warn"] = warn
+    out["apply"] = not out["info"] and not warn and not out["same"] and cur_o is not None
+    out["why"] = (f"noise p90 {noise:.1f} dB, idle max p90 {nmax:.1f} ({len(idle):,} idle min, {days:g} d"
+                  + (f" since {EVENTS.get(since['ev'], since['ev'])}" if since else "") + f") + {cfg['margin_db']:g} "
+                  f"→ {base:g} · {out['under']}/{len(rq)} real under {want:g}"
+                  + ((f" · weak p{cfg['miss_pct']:g} {out['weak']:.1f}" if cfg["miss_pct"] else f" · weakest {out['weak']:.1f}")
+                     if "weak" in out else "")
+                  + "".join(f" · {n}" for n in notes) + (f" · {warn}" if warn else ""))
     return out
 
 
@@ -247,7 +321,8 @@ def _is_squelch(ev: dict) -> bool:
 
 def clusters(events: list[dict]) -> list[dict]:
     """The events that can explain a shift (EVENTS; of the Settings audit's, a squelch change), oldest first, those within MERGE_S of the first of a run merged
-    into it: {at, ev, names, squelch (one of them changed the squelch), detail}."""
+    into it: {at, ev, names, squelch (one of them changed the squelch), rf (one of them is something else: an SDR
+    change with a squelch edit minutes later is still checked as an SDR change), detail}."""
     out: list[dict] = []
     for e in sorted((e for e in events if e.get("ev") in EVENTS and isinstance(e.get("at"), (int, float))
                      and (e["ev"] != "setting" or _is_squelch(e))), key=lambda e: e["at"]):   # (record / transcribe: no)
@@ -256,9 +331,10 @@ def clusters(events: list[dict]) -> list[dict]:
             if _event_name(e) not in c["names"]:
                 c["names"].append(_event_name(e))
             c["squelch"] = c["squelch"] or _is_squelch(e)
+            c["rf"] = c["rf"] or not _is_squelch(e)
             continue
         out.append({"at": float(e["at"]), "ev": e["ev"], "names": [_event_name(e)], "squelch": _is_squelch(e),
-                    "detail": str(e.get("detail") or "")[:120], "by": e.get("by") or ""})
+                    "rf": not _is_squelch(e), "detail": str(e.get("detail") or "")[:120], "by": e.get("by") or ""})
     return out
 
 
@@ -268,6 +344,15 @@ def _vals(docs: list[dict], key: str, idle: bool = False) -> list[float]:
 
 def _mean(vals: list[float]) -> float | None:
     return sum(vals) / len(vals) if vals else None
+
+
+def _half_hours(docs: list[dict], key: str) -> list[float]:
+    """The mean of `key` in each half hour that has records (at least 10 of them)."""
+    bins: dict[int, list[float]] = {}
+    for d in docs:
+        if (v := _num(d.get(key))) is not None:
+            bins.setdefault(int(d["at"] // RATE_BIN_S), []).append(v)
+    return [sum(v) / len(v) for v in bins.values() if len(v) >= 10]
 
 
 def _rates(tx: list[dict], t0: float, t1: float) -> float:
@@ -296,9 +381,10 @@ def check_channel(before: list[dict], after: list[dict], btx: list[dict], atx: l
         b, a = median(bi), median(ai)
         if len(bi) >= 60 and len(ai) >= 30 and a - b > cfg["shift_db"]:
             out.append({"metric": "idle_q90", "before": _r(b), "after": _r(a), "text": f"idle quieting +{a - b:.1f} dB"})
-        bo, ao = _mean(_vals(before, "noise")), _mean(_vals(after, "noise"))
-        if bo is not None and ao is not None and len(_vals(after, "noise")) >= 30 and ao >= OPENS_MIN \
-                and ao >= cfg["opens_x"] * bo:
+        # the median of half-hour means: one burst of static after a restart is one half hour, never the median
+        bh, ah = _half_hours(before, "noise"), _half_hours(after, "noise")
+        bo, ao = median(bh), median(ah)
+        if bo is not None and ao is not None and len(ah) >= OPENS_BINS and ao >= OPENS_MIN and ao >= cfg["opens_x"] * bo:
             out.append({"metric": "noise_opens", "before": _r(bo, 2), "after": _r(ao, 2),
                         "text": f"noise opens {ao:.1f}/min (was {bo:.1f})"})
     if btx is not None and meta.get("kind") != "paging" and len(after) >= MIN_AFTER_S / 60:   # (it ran)
@@ -316,15 +402,20 @@ def check_channel(before: list[dict], after: list[dict], btx: list[dict], atx: l
     return out
 
 
-def check_pages(btx: list[dict], atx: list[dict], cfg: dict) -> list[dict]:
-    """A paging channel's pages: their quieting at open, before against after."""
-    bq = [v for d in btx if d.get("kind") == "page" and (v := _num(d.get("qo"))) is not None]
-    aq = [v for d in atx if d.get("kind") == "page" and (v := _num(d.get("qo"))) is not None]
-    if len(bq) >= PAGES_MIN and len(aq) >= PAGES_MIN:
+def check_levels(btx: list[dict], atx: list[dict], cfg: dict, paging: bool) -> list[dict]:
+    """The transmissions' own level, before against after: a paging channel's pages at open (a splitter's loss), a
+    traffic channel's kept voice quieting (a cable's or a splitter's loss: every carrier weaker)."""
+    kinds, key, n_min = (("page",), "qo", PAGES_MIN) if paging else (("voice", "burst"), "q", TXQ_MIN)
+    bq = [v for d in btx if d.get("kind") in kinds and (v := _num(d.get(key))) is not None]
+    aq = [v for d in atx if d.get("kind") in kinds and (v := _num(d.get(key))) is not None]
+    if len(bq) >= n_min and len(aq) >= n_min:
         b, a = median(bq), median(aq)
         if b - a > cfg["shift_db"]:
-            return [{"metric": "tx_q_open", "before": _r(b), "after": _r(a),
-                     "text": f"pages open at {a:.1f} dB (was {b:.1f}, {len(aq)} pages)"}]
+            if paging:
+                return [{"metric": "tx_q_open", "before": _r(b), "after": _r(a),
+                         "text": f"pages open at {a:.1f} dB (was {b:.1f}, {len(aq)} pages)"}]
+            return [{"metric": "tx_q", "before": _r(b), "after": _r(a),
+                     "text": f"transmissions at {a:.1f} dB (was {b:.1f}, {len(aq)} tx)"}]
     return []
 
 
@@ -371,17 +462,27 @@ class Insight:
     # -- suggestions ------------------------------------------------------------------------------------------------
 
     def suggestion(self, station: str, subject: str, now: float | None = None) -> dict:
+        """The channel's suggestion over its window: the last SUGGEST_DAYS, or from its last RF_EVENTS event (a dongle
+        moved, a gain, unplugged / back: what it hears changed, so what came before says nothing about now). Kept
+        CACHE_S, and worked out again at once when a newer event arrives (the key has the newest event's time)."""
         now = self.clock() if now is None else now
+        t0 = now - SUGGEST_DAYS * 86400.0
+        evs = [e for e in self.store.events(station, subject, t0, now + 60) if e.get("subject") == subject or
+               e.get("source") == "audit"]
+        rf = [e for e in evs if e.get("ev") in RF_EVENTS]
+        sq = [e["at"] for e in evs if _is_squelch(e)]
+        newest = max((e["at"] or 0 for e in evs), default=0.0)
         key = (station, subject)
         with self._lock:
             hit = self._sugg.get(key)
-        if hit and now - hit[0] < CACHE_S:
+        if hit and now - hit[0] < CACHE_S and hit[1].get("_ev") == newest:
             return hit[1]
-        t0 = now - SUGGEST_DAYS * 86400.0                 # (read outside the lock: Health's sparks never wait on it)
-        floor = self.store.docs(station, subject, "floor", t0, now + 60, MAX_DOCS, newest=True)
-        tx = self.store.docs(station, subject, "tx", t0, now + 60, MAX_DOCS, newest=True)
-        out = suggest(floor, tx, self.cfg(), now)
-        out.update(subject=subject, station=station, at=now)
+        since = {"at": rf[-1]["at"], "ev": rf[-1]["ev"]} if rf else None
+        w0 = max(t0, since["at"] + SETTLE_S) if since else t0      # (read outside the lock: Health's sparks never wait)
+        floor = self.store.docs(station, subject, "floor", w0, now + 60, MAX_DOCS, newest=True)
+        tx = self.store.docs(station, subject, "tx", w0, now + 60, MAX_DOCS, newest=True)
+        out = suggest(floor, tx, self.cfg(), now, since=since, squelch_at=sq[-1] if sq else None)
+        out.update(subject=subject, station=station, at=now, _ev=newest)
         with self._lock:
             self._sugg[key] = (now, out)
         return out
@@ -435,7 +536,10 @@ class Insight:
         recent = [c for c in evs if c["at"] >= now - WARN_S][-MAX_EVENTS:]
         out: dict[str, dict] = {}
         meta = self._meta(station, subject, now) if "floor" in kinds else {}
-        def run(b0: float, b1: float, a0: float, a1: float, p1: float, squelch: bool, prev: list[float]) -> list[dict]:
+        def run(b0: float, b1: float, a0: float, a1: float, p1: float, squelch: bool, prev: list[float],
+                avoid: list[float]) -> list[dict]:
+            """prev: the events before b1 (the windows start after them); avoid: every event time (the rates'
+            same-hours-yesterday window must hold none)."""
             hits = []
             if "cc" in kinds:
                 hits += check_cc(self.store.docs(station, subject, "cc", b0, b1),
@@ -446,13 +550,14 @@ class Insight:
                 # the transmissions: the same clock hours the day before (traffic follows the day: a quiet night after
                 # a busy evening isn't a shift); not when another event falls in those hours
                 y0, y1 = a0 - 86400.0, a1 - 86400.0
-                same = not any(y0 - SETTLE_S <= p <= y1 for p in prev)
+                same = not any(y0 - SETTLE_S <= p <= y1 for p in avoid)
                 tb = self.store.docs(station, subject, "tx", y0, y1) if same else None
                 ta = self.store.docs(station, subject, "tx", a0, a1)
                 hits += check_channel(fb, fa, tb, ta, (y0, y1), (a0, a1), meta, cfg, squelch)
-                if meta.get("kind") == "paging":
-                    hits += check_pages(self.store.docs(station, subject, "tx", b1 - PAGE_BEFORE_S, b1),
-                                        self.store.docs(station, subject, "tx", a0, p1), cfg)
+                if not meta.get("am"):              # the level: from the event before at most (never another's)
+                    l0 = max(b1 - PAGE_BEFORE_S, prev[-1] + SETTLE_S if prev else 0.0)
+                    hits += check_levels(self.store.docs(station, subject, "tx", l0, b1),
+                                         self.store.docs(station, subject, "tx", a0, p1), cfg, meta.get("kind") == "paging")
             return hits
 
         for c in reversed(recent):                  # the newest event first: it explains what is now
@@ -464,21 +569,22 @@ class Insight:
             if a1 - a0 < MIN_AFTER_S or c["at"] - b0 < 3600:
                 continue
             p1 = min(now, c["at"] + PAGE_AFTER_S, later[0]["at"] if later else now)      # (pages: a longer after)
-            hits = run(b0, c["at"], a0, a1, p1, c["squelch"], prev)
+            alls = [p["at"] for p in evs]
+            hits = run(b0, c["at"], a0, a1, p1, c["squelch"] and not c["rf"], prev, alls)
             if hits and later:
                 # still so now? from the newest event on (a dongle moved back: no); a squelch change since: the idle
                 # can't tell any more, so only what it still shows stays
                 s0 = later[-1]["at"] + SETTLE_S
                 if now - s0 >= MIN_AFTER_S:
-                    still = {h["metric"] for h in run(b0, c["at"], s0, now, now, c["squelch"] or any(p["squelch"] for p in later),
-                                                      prev + [p["at"] for p in later])}
+                    still = {h["metric"] for h in run(b0, c["at"], s0, now, now, (c["squelch"] and not c["rf"])
+                                                      or any(p["squelch"] for p in later), prev, alls)}
                     hits = [h for h in hits if h["metric"] in still]
             for h in hits:
                 if h["metric"] in out:
                     continue                          # a newer event explains it already
                 out[h["metric"]] = {**h, "subject": subject, "station": station, "at": c["at"], "event": c["ev"],
                                     "names": c["names"], "detail": c["detail"], "by": c["by"],
-                                    "text": f"{h['text']} since {tz.hhmm(c['at'])} ({', '.join(c['names'])})"}
+                                    "text": f"{h['text']} since {_when(c['at'], now)} ({', '.join(c['names'])})"}
         return list(out.values())
 
     def _drifted(self, station: str, subject: str, kinds: set[str], cfg: dict, now: float) -> list[dict]:

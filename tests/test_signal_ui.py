@@ -121,7 +121,7 @@ def api_data(tmp_path):
     fl = [dict(r, s="FG1") for r in floor_minutes(NOW - 2 * DAY, 2 * 1440)]
     tx = [dict(r, s="FG1") for r in transmissions(NOW - DAY, DAY, [15 + (k % 15) for k in range(60)])]
     cc = [{"k": "cc", "s": "p25", "at": a, "n": 20, "state": "ok", "rate": 40.0, "lo": 36.0, "hi": 44.0,
-           **({"unc": {"851.0125": 2}} if a % 3600 == 0 else {})} for a in range(int(NOW - DAY), int(NOW), 60)]
+           **({"unc": {"773.68125": 2}} if a % 3600 == 0 else {})} for a in range(int(NOW - DAY), int(NOW), 60)]
     evs = [{"k": "ev", "s": "FG1", "at": NOW - 3 * 3600, "ev": "sdr", "d": "SDR 00000102 -> 00000105"},
            {"k": "ev", "s": "p25", "at": NOW - 5 * 3600, "ev": "cc_lost", "d": ""},
            {"k": "ev", "s": "p25", "at": NOW - 4 * 3600, "ev": "cc_back", "d": ""}]
@@ -224,7 +224,8 @@ def squelch_data(admin=True, status=200):
             "squelch": {"channels": [row("FG1", "traffic"), row("South 2", "paging"), row("FG2", "traffic", (13.0, 9.0))],
                         "ranges": {}, "sync": {}},
             "fetch": {"/api/cad/metrics?view=squelch": {"status": status, "body": {"channels": [
-                {**sugg, "subject": "FG1"}, {**page, "subject": "South 2"}, {**sugg, "subject": "FG2"}]}
+                {**sugg, "subject": "FG1", "station": "pcfd-hq"}, {**page, "subject": "South 2", "station": "pcfd-hq"},
+                {**sugg, "subject": "FG2", "station": "pcfd-hq"}]}
                 if status == 200 else {"error": "Admins only"}}}}
 
 
@@ -236,9 +237,25 @@ def test_suggested_with_apply_for_an_admin_on_a_traffic_channel_and_it_posts_the
     assert fg1[0][0] == "13 dB Apply" and fg1[0][1].startswith("Suggested Open 13 / Close 9 dB\nnoise p90 ")
     assert south[0][0] == "10 dB info"                                 # paging: the numbers, never Apply
     assert out["applies"] == 1
-    assert out["asked"] == "FG1: Open 10 → 13 dB, Close 6 → 9 dB?"
-    assert out["posted"] == [["/api/cad/settings/squelch",
-                              {"action": "set", "key": "FG1", "open_db": 13, "close_db": 9, "operator": "KM"}]]
+    assert out["asked"] == "FG1: Open 10 → 13 dB, Close 6 → 9 dB? 0 of 212 real transmissions under 13 dB"
+    # what it was worked out for goes with it: the server refuses it if the squelch running now is another
+    assert out["posted"] == [["/api/cad/settings/squelch", {"action": "set", "key": "FG1", "open_db": 13, "close_db": 9,
+                                                            "expect": {"open_db": 10, "close_db": 6}, "operator": "KM"}]]
+
+
+def test_no_apply_when_in_doubt_weak_traffic_settling_or_a_squelch_that_moved(tmp_path):
+    data = squelch_data()
+    chans = data["fetch"]["/api/cad/metrics?view=squelch"]["body"]["channels"]
+    weak = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440), transmissions(NOW - 7 * DAY, 7 * DAY, [12.2] * 30 + [20.0] * 200),
+                      mi.DEFAULTS, NOW)
+    chans[0] = {**weak, "subject": "FG1", "station": "pcfd-hq"}
+    data["squelch"]["channels"].append({**data["squelch"]["channels"][0], "key": "FG3",
+                                        "running": {"open_db": 11.0, "close_db": 7.0, "min_open_s": 0.3}})
+    chans.append({**chans[2], "subject": "FG3"})                 # worked out for 10 / 6; 11 / 7 runs now
+    out = run(tmp_path, SQUELCH, data)
+    fg1, _south, _fg2, fg3 = out["cells"]
+    assert fg1[0][0] == "10 dB weak traffic overlaps the noise" and out["applies"] == 0
+    assert fg3[0][0] == "13 dB settling"
 
 
 def test_no_suggestions_for_someone_who_isnt_an_admin_or_off_the_hub(tmp_path):
@@ -279,3 +296,15 @@ console.log(JSON.stringify({ hint: text(hints), links, sparks }));
     assert out["links"] == [["Chart", "#settings/radios/signal?s=FG1&at=1799989200"]]
     assert out["sparks"] == [["#settings/radios/signal?s=p25", ["p25 decode rate 24 h · now 40 msg/s"]],
                              ["#settings/radios/signal?s=FG1", ["Idle q90 24 h · now 9 dB", "Noise opens/min 24 h · now 0.1"]]]
+
+
+def test_seven_days_tick_on_local_midnights(tmp_path):
+    out = run(tmp_path, r"""
+load("signal-chart.js");
+const t0 = 1800000000 - 7 * 86400;
+const ticks = window.SignalChart.timeTicks(t0, 1800000000, 7);
+const hm = (t) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit",
+                                                      hourCycle: "h23" }).format(new Date(t * 1000));
+console.log(JSON.stringify(ticks.map(hm)));
+""", {"now": NOW, "fetch": {}})
+    assert len(out) == 7 and set(out) == {"00:00"}                    # the console's midnights, not UTC's

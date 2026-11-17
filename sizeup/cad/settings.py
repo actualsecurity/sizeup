@@ -2170,7 +2170,9 @@ class Editor:
         return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
 
     def _squelch_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
+        refused unless that is what runs now: a suggestion applied from Settings > Radios > Squelch, #606) | reset {key}.
+        Audited."""
         ctx = self.cad.radio_ctx
         locked = ctx.channels_locked() if ctx is not None else ""
         if locked:
@@ -2180,6 +2182,15 @@ class Editor:
         dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
         if action == "set":
             self._squelch_editable(key)
+            exp = body.get("expect")
+            if exp is not None:                       # #606: applied from a suggestion worked out for what ran then
+                rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+                run = (rows.get(key) or {}).get("running") or {}
+                if not isinstance(exp, dict) or any(not isinstance(exp.get(f), (int, float)) or isinstance(exp.get(f), bool)
+                                                    or run.get(f) is None or abs(float(run[f]) - float(exp[f])) > 0.01
+                                                    for f in ("open_db", "close_db")):
+                    raise CadError(f"{key} now runs Open {run.get('open_db')} / Close {run.get('close_db')}: "
+                                   "not what the suggestion was for, look again")
             try:
                 vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
             except ValueError as e:
@@ -2206,6 +2217,9 @@ class Editor:
                 return {"ok": True}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
                                [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         else:
             raise CadError("action: set or reset")
         if ctx is not None:

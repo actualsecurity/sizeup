@@ -45,19 +45,26 @@ window.SquelchPanel = (() => {
   }
 
   // the suggestions (admins; the hub's): {key: suggestion}; none (not the hub, not an admin): the column stays empty
+  // keyed by subject; a subject two stations report is left out (which one would Apply set?)
   async function suggest() {
     st.suggAt = Date.now();
     try {
       const r = await fetch("/api/cad/metrics?view=squelch", { headers: { Accept: "application/json" } });
-      st.sugg = r.ok ? Object.fromEntries(((await r.json()).channels || []).map((c) => [c.subject, c])) : null;
+      if (!r.ok) { st.sugg = null; return; }
+      const by = {};
+      for (const c of (await r.json()).channels || []) by[c.subject] = c.subject in by ? null : c;
+      st.sugg = by;
     } catch (_) { st.sugg = null; }
   }
 
   async function apply(c, s) {
+    const run = c.running || {};
+    // the server refuses it unless this is still what runs (expect): a suggestion is for the squelch it saw
     const body = { action: "set", key: c.key, open_db: s.open, close_db: s.close,
-      operator: typeof operator === "function" ? operator() : "" };
-    const ok = !window.UI || !UI.confirm ? true : await UI.confirm(`${c.key}: Open ${db(c.running.open_db)} → ${db(s.open)} dB, `
-      + `Close ${db(c.running.close_db)} → ${db(s.close)} dB?`, { ok: "Apply" });
+      expect: { open_db: run.open_db, close_db: run.close_db }, operator: typeof operator === "function" ? operator() : "" };
+    const ok = !window.UI || !UI.confirm ? true : await UI.confirm(`${c.key}: Open ${db(run.open_db)} → ${db(s.open)} dB, `
+      + `Close ${db(run.close_db)} → ${db(s.close)} dB? ${s.under ?? 0} of ${s.real ?? 0} real transmissions under ${db(s.open)} dB`
+      + (s.cut_tails ? `, ${s.cut_tails} tails cut sooner` : ""), { ok: "Apply" });
     if (!ok) return;
     try {
       await api("POST", "/api/cad/settings/squelch", body);
@@ -70,7 +77,9 @@ window.SquelchPanel = (() => {
     poll();
   }
 
-  // "13 dB" (and Apply for a traffic channel an admin may set), the numbers it used on hover
+  // "13 dB" (and Apply for a traffic channel an admin may set), the numbers it used on hover. Never offered when in
+  // doubt: weak traffic in the noise, a raise that would miss transmissions, settling after a change, or a squelch
+  // that runs differently from what the suggestion saw
   function suggCell(c) {
     const td = el("td", "sq-sugg");
     td.dataset.l = "Suggested";
@@ -81,18 +90,27 @@ window.SquelchPanel = (() => {
       td.title = s.why || "";
       return td;
     }
-    const v = el("span", s.capped ? "warn" : "", `${db(s.open)} dB`);
+    const v = el("span", s.warn || s.capped ? "warn" : "", `${db(s.open)} dB`);
     v.title = `Suggested Open ${db(s.open)} / Close ${db(s.close)} dB\n${s.why}`;
     td.append(v);
-    // what runs now (the station's own report, seconds after an Apply), not what the 10-min-old suggestion saw
     const run = c.running || {};
-    const same = run.open_db !== null && run.open_db !== undefined ? Math.abs(run.open_db - s.open) < 0.25
-      && Math.abs((run.close_db ?? s.close) - s.close) < 0.25 : s.same;
+    const known = run.open_db !== null && run.open_db !== undefined;
+    const near = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined && Math.abs(a - b) < 0.25;
+    const same = known ? near(run.open_db, s.open) && (run.close_db == null || near(run.close_db, s.close)) : s.same;
+    const stale = known && !(near(run.open_db, s.cur_open) && (run.close_db == null || near(run.close_db, s.cur_close)));
     if (!c.editable) {
       td.append(" ", el("span", "dim small", "info"));
+    } else if (s.warn) {                   // (first: "= now" would hide why the running one stays)
+      const w = el("span", "warn small", s.warn.split(":")[0]);
+      w.title = s.warn;
+      td.append(" ", w);
     } else if (same) {
       td.append(" ", el("span", "dim small", "= now"));
-    } else if (!s.info && !ro()) {
+    } else if (stale) {
+      const w = el("span", "dim small", "settling");
+      w.title = `Runs Open ${db(run.open_db)} / Close ${db(run.close_db)} now; the suggestion saw ${db(s.cur_open)} / ${db(s.cur_close)}`;
+      td.append(" ", w);
+    } else if (s.apply && !ro()) {
       const b = el("button", "mini", "Apply");
       b.type = "button";
       b.title = `Set ${c.key} Open ${db(s.open)} / Close ${db(s.close)} dB (audited)`;

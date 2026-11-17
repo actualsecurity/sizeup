@@ -515,8 +515,9 @@ function sRadios() {
 // Settings > Radios > Signal (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
 // warnings' thresholds. Admins, audited as Radios; the hub only (the metrics are the hub's).
 function sSignalThresholds(d) {
-  const card = sCard(sCardHead("Thresholds", "", sHelp("Suggested Open: the idle quieting's p90 over 7 days plus the margin, "
-    + "never above the weakest real transmissions (more than the % under it: capped 1 dB under them). Shift warnings: "
+  const card = sCard(sCardHead("Thresholds", "", sHelp("Suggested Open: the idle quieting's p90 (7 days, or since the last "
+    + "dongle / gain change) plus the margin, never above more than the % of real transmissions (0: none); in doubt, none "
+    + "is offered. Shift warnings: "
     + "after an SDR, gain, squelch, plug or restart event, the 6 h after against the day before; a Health hint, never a push.")));
   card.id = "s-signal-thresholds";
   for (const [key, v] of Object.entries(d)) {

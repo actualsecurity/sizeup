@@ -91,7 +91,7 @@ window.SignalPanel = (() => {
       st.index = await get("/api/cad/metrics");
       try {
         const sq = await get("/api/cad/metrics?view=squelch");
-        st.sugg = Object.fromEntries((sq.channels || []).map((c) => [c.subject, c]));
+        st.sugg = Object.fromEntries((sq.channels || []).map((c) => [`${c.station}\u0000${c.subject}`, c]));
       } catch (_) { st.sugg = {}; }
       const [t0, t1] = window_();
       const r = res();
@@ -333,15 +333,16 @@ window.SignalPanel = (() => {
     if (!sug) return null;
     if (sug.state !== "ok") { const s = el("span", "dim small", sug.why || "not enough data"); return s; }
     const txt = sug.am ? `Idle q90 p90 ${r1(sug.noise_p90)} dB` : `Suggested ${r1(sug.open)} / ${r1(sug.close)} dB`
-      + (num(sug.cur_open) !== null ? ` · now ${r1(sug.cur_open)} / ${r1(sug.cur_close)}` : "") + (sug.info ? ` · ${sug.info}` : "");
-    const s = el("span", `small${sug.capped ? " warn" : ""}`, txt);
+      + (num(sug.cur_open) !== null ? ` · now ${r1(sug.cur_open)} / ${r1(sug.cur_close)}` : "") + (sug.info ? ` · ${sug.info}` : "")
+      + (sug.warn ? ` · ${sug.warn.split(":")[0]}` : "");
+    const s = el("span", `small${sug.capped || sug.warn ? " warn" : ""}`, txt);
     s.title = sug.why || "";
     return s;
   }
 
   function card(x) {
     const d = st.data[x.subject] || {};
-    const sug = st.sugg[x.subject];
+    const sug = st.sugg[`${x.station}\u0000${x.subject}`];
     const c = el("section", "card sg-card");
     c.dataset.subject = x.subject;
     const head = el("div", "card-head");
