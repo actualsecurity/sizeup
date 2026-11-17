@@ -66,6 +66,11 @@ Reset to default = drop the override (one item, or a whole section).
                                    key: name}}: the Radio page rail's folders, set for the department, and the channels'
                                    display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
                                    name from Settings > Radios > Channels); not set: the automatic grouping
+    radio_services                 key a source key (qualified: p25:<system>:<tg>, fm:<label>, air:<label>) -> fire | police
+                                   | ems | transit | air | other: that source's service whatever its talkgroups file or
+                                   its group's words say (sizeup/sourcekeys.py; admins, from Settings > Radios > Channels
+                                   or the rail's Edit); not set: automatic. A change re-tags its rows of the last
+                                   RETAG_DAYS (Cad.retag_services, audited with the count)
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -176,6 +181,11 @@ PAGE_SECTION[EM_SECTION] = "radios"
 # as Radios. key "layout" -> {folders: [{id, name, section, items}]}; not set: the automatic grouping.
 FOLDERS_SECTION = radiofolders.SECTION
 PAGE_SECTION[FOLDERS_SECTION] = "radios"
+# A source's service chosen by the admins (fire, police, ...: sizeup/sourcekeys.py), over its talkgroups file's column
+# and its group's words: Settings > Radios > Channels and the rail's Edit, audited as Radios. key a qualified source key
+# -> a service; not set: automatic.
+SVC_SECTION = "radio_services"
+PAGE_SECTION[SVC_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
 LOGS_SECTION = cwlogs.SECTION
@@ -469,6 +479,7 @@ class Editor:
         """At start: the saved edits over the data file. If they no longer fit it (the file changed
         under them), the file alone, said in the log: nothing is lost, Settings shows the edits."""
         ov = self.overrides()
+        self._use_services(ov)                  # (whatever the lists make of the rest: a source's tag never waits)
         if not ov:
             return
         try:
@@ -496,7 +507,13 @@ class Editor:
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
+        self._use_services(ov)
         self.cad._state = None
+
+    def _use_services(self, ov: dict) -> None:
+        """The admins' service per source: the CAD's copy (the pages) and the process's (every row tagged from now)."""
+        self.cad.radio_services = sourcekeys.clean_services(ov.get(SVC_SECTION))
+        sourcekeys.set_service_overrides(self.cad.radio_services)
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
                 check=None, extra_sql=None) -> dict:
@@ -527,6 +544,11 @@ class Editor:
         self._use(L, trial)
         self.store.sync_units()          # new / retired / moved units, statuses: on the boards now
         self.store.rev += 1
+        # a source's service chosen or put back (here, or by an import): its recent rows re-tagged, off this thread
+        was, now_s = sourcekeys.clean_services(ov.get(SVC_SECTION)), sourcekeys.clean_services(trial.get(SVC_SECTION))
+        moved = sorted(k for k in set(was) | set(now_s) if was.get(k) != now_s.get(k))
+        if moved:
+            self.cad.retag_services(moved, operator)
         return {"ok": True}
 
     @staticmethod
@@ -958,6 +980,51 @@ class Editor:
                            [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
         return {**out, "radio_emergencies": self.em_page()}
 
+    def services_page(self, cur: dict | None = None) -> dict:
+        """{source key: service} the admins chose, as this reader may know of them (another system's: signed in only)."""
+        cur = self.cad.radio_services if cur is None else cur
+        sees = self.cad.comms._sees_context()
+        return {k: v for k, v in cur.items() if sees or not radiofolders.context_key(k)}
+
+    def _services_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, service} | set_many {services: {key: service}}: a source's service (fire | police | ems | transit |
+        air | other), over its talkgroups file's column and its group's words; "automatic" (or blank): none chosen.
+        Admins, audited as Radios (radio_services/<key>, old -> new); the source's rows of the last RETAG_DAYS re-tagged
+        off this thread, the count audited when done (Cad.retag_services)."""
+        if action == "set":
+            want = {body.get("key"): body.get("service")}
+        elif action == "set_many":
+            want = body.get("services")
+            if not isinstance(want, dict) or not want:
+                raise CadError("services: {source key: service}")
+            if len(want) > radiofolders.MAX_ITEMS:
+                raise CadError(f"services: at most {radiofolders.MAX_ITEMS}")
+        else:
+            raise CadError("action: set or set_many")
+        cur = sourcekeys.clean_services(self.section(SVC_SECTION))
+        new = dict(cur)
+        sees = self.cad.comms._sees_context()
+        for raw, svc in want.items():
+            if not radiofolders.is_key(raw):
+                raise CadError("key: a source key (fm:<label>, air:<label>, p25:<system>:<talkgroup>)")
+            key = sourcekeys.service_key(raw)
+            if radiofolders.context_key(key) and not sees:
+                raise CadError("key: another system's talkgroup (sign in to change it)")
+            svc = sourcekeys.AUTOMATIC if svc in (None, "") else svc
+            if svc != sourcekeys.AUTOMATIC and svc not in sourcekeys.SERVICES:
+                raise CadError(f"service: {sourcekeys.AUTOMATIC} or one of {', '.join(sourcekeys.SERVICES)}")
+            if svc == sourcekeys.AUTOMATIC:
+                new.pop(key, None)
+            else:
+                new[key] = svc
+        moved = sorted(k for k in set(cur) | set(new) if cur.get(k) != new.get(k))
+        if not moved:                                   # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_services": self.services_page()}
+        out = self._commit([(SVC_SECTION, k, new[k] if k in new else REMOVE) for k in moved], op,
+                           [("radios", f"{SVC_SECTION}/{k}", cur.get(k, sourcekeys.AUTOMATIC), new.get(k, sourcekeys.AUTOMATIC))
+                            for k in moved])
+        return {**out, "radio_services": self.services_page()}
+
     def _folders_op(self, action: str, body: dict, op: str) -> dict:
         """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | name {key, name, base?} | reset
         {base?}: the Radio page's folders and channel names (#607; name: one channel's alone, Settings > Radios >
@@ -1167,7 +1234,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FOLDERS_SECTION: self._folders_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -3185,6 +3252,10 @@ class Editor:
                 f[radiofolders.KEY] = radiofolders.clean(f[radiofolders.KEY])
             except CadError as x:
                 raise CadError(f"overrides.{FOLDERS_SECTION}.{x}") from None
+        for k, v in (ov.get(SVC_SECTION) or {}).items():      # a source's service (sizeup/sourcekeys.py)
+            if not radiofolders.is_key(k) or sourcekeys.service_key(k) != k or v not in sourcekeys.SERVICES:
+                raise CadError(f"overrides.{SVC_SECTION}: {k!r} -> {v!r} (a qualified source key -> "
+                               f"{' | '.join(sourcekeys.SERVICES)})")
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")

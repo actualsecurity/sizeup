@@ -18,6 +18,8 @@
                        The hub answers with its build: Watch (autoupdate.py) passes it to the
                        station's auto-updater once it holds still; this station's version and the
                        updater's last result go up in the status ("version")
+                       ... and the admins' service per source ("services": sizeup/sourcekeys.py), kept beside the
+                       outbox (hub_services.json) so a station starting while the hub is away tags as it did
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
     logs thread        POST /api/station/logs: this station's journal (sizeup-logread hands it over: logread.py),
@@ -55,7 +57,7 @@ from typing import Callable
 
 import numpy as np
 
-from sizeup import tz
+from sizeup import sourcekeys, tz
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
@@ -138,6 +140,13 @@ class StationLink:
                 self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))
         except (OSError, ValueError, TypeError):
             pass
+        # the admins' service per source, as the hub last sent it (sourcekeys.set_service_overrides): kept beside it too
+        self._services_file = self._caps_file.with_name("hub_services.json") if self._caps_file is not None else None
+        try:
+            if self._services_file is not None and self._services_file.is_file():
+                self._set_services(json.loads(self._services_file.read_text()), keep=False)
+        except (OSError, ValueError, TypeError):
+            pass
         self._client = client or (lambda timeout: HubClient(cfg.cloud_hub_url, cfg.cloud_token, cfg.cloud_access_id,
                                                             cfg.cloud_access_secret, timeout))
         self._stop = threading.Event()
@@ -181,6 +190,23 @@ class StationLink:
                     self._caps_file.write_text(json.dumps(sorted(caps)))
             except OSError:
                 pass
+
+    def _set_services(self, m, keep: bool = True) -> None:
+        """The hub's service per source (its answer's "services"): every row tagged here from now on uses it, the
+        station's own CAD's never; kept beside the outbox when it changed."""
+        if not isinstance(m, dict):
+            return
+        m = sourcekeys.clean_services(m)
+        if m == sourcekeys.service_overrides() and sourcekeys._service_from_hub:
+            return
+        sourcekeys.set_service_overrides(m, hub=True)
+        f = getattr(self, "_services_file", None)
+        if keep and f is not None:
+            try:
+                f.write_text(json.dumps(m))
+            except OSError:
+                pass
+        self.log(f"hub link: service per source from the hub: {len(m)} chosen")
 
     def emit(self, kind: str, data: dict, clip: str | None = None) -> None:
         # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
@@ -390,6 +416,7 @@ class StationLink:
                 self.updates.hub(r.get("build") if isinstance(r, dict) else None)
                 if isinstance(r, dict):
                     self._set_caps(r.get("caps"))
+                    self._set_services(r.get("services"))      # (a hub before this sends none: kept as they were)
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:

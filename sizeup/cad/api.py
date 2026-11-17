@@ -307,6 +307,11 @@ POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, sec
                                           base?} | reset {base?}}: the Radio page rail's folders for everyone (#607,
                                           sizeup/cad/radiofolders.py; name: one channel's display name, blank its own,
                                           also from Settings > Radios > Channels); admins
+POST /api/cad/settings/radio_services     {action: set {key, service} | set_many {services: {key: service}}}: a source's
+                                          service (fire | police | ems | transit | air | other; automatic: none chosen)
+                                          over its talkgroups file's and its words (sizeup/sourcekeys.py); its rows of
+                                          the last 30 days re-tagged, off the request; from Settings > Radios > Channels
+                                          and the rail's Edit; admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins

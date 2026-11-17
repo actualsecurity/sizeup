@@ -46,6 +46,12 @@ const S_RC_NAMES = {
   save: async (key, name) => (await api("POST", "/api/cad/settings/radio_folders", { action: "name", key, name, operator: operator() }))
     .radio_folders || { rev: "", names: {} },
 };
+// ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
+const S_RC_SERVICES = {
+  load: async () => (await api("GET", "/api/cad/comms/sources")).services || {},
+  save: async (key, service) => (await api("POST", "/api/cad/settings/radio_services", { action: "set", key, service, operator: operator() }))
+    .radio_services || {},
+};
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
@@ -503,7 +509,7 @@ function sRadioTab() {
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
   // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES });
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
 }

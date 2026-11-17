@@ -99,6 +99,7 @@ SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per reque
 COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
 SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
 BRANCH_MAX = 64                       # a group or tier resolved to its sources: at most this many index walks
+RETAG_BATCH = 500                     # retag(): rows per transaction when a source's service changes
 CHANGES_MAX = 400                     # ?changed=: more transmissions changed than this since the cursor: reload
 CHANGES_KEPT = 50000                  # radio_changes rows kept (prune): a cursor older than those is told to reload
 EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: uncleared ones this recent
@@ -291,8 +292,10 @@ class Comms:
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
-            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire
+            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire.
+            # The admins' service for the source wins over either (sourcekeys.overridden: Settings > Radios > Channels)
             given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            given = sources.overridden(skey, given)
             src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
             disp = 0 if other else disp          # "60 Ctrl ..." is the county's dispatcher, never another system's
@@ -381,6 +384,35 @@ class Comms:
             return db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', service = 'air', "
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
+
+    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
+        """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
+        that differ, `batch` at a time, each batch its own transaction (the store's lock is let go between them). The
+        Radio page's readers who may know of that source ask afresh (another P25 system's: only those who may see it).
+        The number changed."""
+        if not source or service not in sources.SERVICES:
+            return 0
+        got = sources.parse(source)
+        system = got[0] if got else "airband" if source.startswith("air:") else "analog"
+        context = sources.is_context({"system": system})
+        total = 0
+        while True:
+            with self.store.tx() as db:
+                n = db.execute("UPDATE radio_traffic SET service = ? WHERE id IN (SELECT id FROM radio_traffic "
+                               "WHERE source = ? AND start >= ? AND service != ? LIMIT ?)",
+                               (service, source, float(since), service, int(batch))).rowcount
+                if n:
+                    if context:
+                        self.touch("reset", system)      # (that system's readers only: rev_for, the change log)
+                        self.quiet()
+                    else:
+                        self.touch_reset()
+                    self.rev += 1
+            total += n
+            if n < batch:
+                return total
+            if pause:
+                time.sleep(pause)
 
     def activity(self, source: str, minute: int, calls: int, radios=(), seconds: float = 0.0) -> None:
         """Key-ups on a source that leaves no transmission rows (an encrypted talkgroup, #409): {source, minute,

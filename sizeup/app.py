@@ -1614,7 +1614,9 @@ class App:
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
-                t.group, t.service = info.get("group") or "", info.get("service") or "other"  # type: ignore[attr-defined]
+                # its service: the admins' for this source (Settings > Radios > Channels), else its file's (#409)
+                t.group = info.get("group") or ""  # type: ignore[attr-defined]
+                t.service = sources.overridden(t.source_key, info.get("service") or "other")  # type: ignore[attr-defined]
                 t.dept = info.get("department") or ""  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -2067,18 +2069,22 @@ class App:
         service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
         talkgroups and the analog channels are worked out here."""
         if getattr(t, "system", ""):
+            # (its service as the station tagged it, the admins' choice over it: a station that hasn't the hub's yet)
             return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
-                    "service": getattr(t, "service", ""), "ours": False, "dept": getattr(t, "dept", ""),
+                    "service": sources.overridden(getattr(t, "source_key", ""), getattr(t, "service", "")),
+                    "ours": False, "dept": getattr(t, "dept", ""),
                     "tier": getattr(t, "tier", "")}
         if t.talkgroup is None:
             kind = next((c.kind for c in self.cfg.channels if c.label == t.source), "")
             air = kind == "airband"
             return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
-                    "group": "Airband" if air else "Analog", "service": sources.service(kind=kind or "traffic"),
+                    "group": "Airband" if air else "Analog",
+                    "service": sources.service(kind=kind or "traffic", key=sources.fm(t.source, kind)),
                     "ours": not air, "dept": "", "tier": ""}
         info = self.tg.info.get(t.talkgroup, {})
         return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
-                "group": info.get("group") or "", "service": sources.service(info.get("group") or ""),
+                "group": info.get("group") or "",
+                "service": sources.service(info.get("group") or "", key=sources.p25(self.tg.county, t.talkgroup)),
                 "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
 
     def _backfill(self) -> None:

@@ -105,6 +105,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
   - [The rail's folders (#607)](#the-rails-folders-607)
+  - [A source's service, chosen by the admins](#a-sources-service-chosen-by-the-admins)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -2725,6 +2726,26 @@ order (ours first, then by name). A heading with one folder of its own name (Ana
 
 Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
 folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
+
+### A source's service, chosen by the admins
+
+`sizeup/sourcekeys.py` (`set_service_overrides`, `overridden`), settings section `radio_services`
+(`sizeup/cad/settings.py`), `Cad.retag_services` / `Comms.retag`, `static/radio-controls.js`, `static/radio-nav.js`.
+
+A source's service (fire, police, EMS, transit, air, other) puts it in a view (Police, EMS, Transit, Air), the filters,
+the emergency prominence and intel's scopes. Automatic: the talkgroups file's `Service` column, else the group's words
+(`SERVICE_WORDS`); an FM channel is fire, an airband one air. An admin can choose it per source instead.
+
+| | |
+|---|---|
+| Where | a small select beside the rename pencil in Settings > Radios > Channels (one at a time), and on each channel's row in the rail's Edit (sent with Save, before the folders). **Auto (Transit)** names what automatic gives. Admins only; never on the station's own page |
+| Stored | settings section `radio_services`: `{qualified source key: service}` (`p25:<system>:<tg>`, `fm:<label>`, `air:<label>`; `tg:307` is kept as `p25:westchester:307`). The same number on two systems is two keys. `POST /api/cad/settings/radio_services {action: set, key, service} \| {action: set_many, services}`; `automatic` removes the choice. Audited as Radios (`radio_services/<key>`, old → new), exported and imported with the rest |
+| Wins over | the file's column and the words, wherever a service is worked out: `Comms.record` (every row written), `App._row_source`, `App._call_system` (another system's rows, and so its speech-to-text profile), `TalkgroupPrefs.state()` (`service`, with `service_auto` beside it), `Cad.comms_sources` (`service`, `service_auto`; `services`: the choices this reader may know of) |
+| The station | the hub's answer to `POST /api/station/state` carries `services`. The station tags its rows and picks its speech-to-text profile by them, keeps them in `hub_services.json` beside the outbox (a start while the hub is away tags as before), and from then on never takes its own CAD's. A hub before this sends none (kept as they were); a station before this ignores them, and the hub applies them to its rows anyway |
+| Re-tag | a change (or an import) re-tags that source's rows of the last 30 days (`RETAG_DAYS`), 500 a transaction, off the request's thread, one source at a time, only on the CAD of record (a fenced task: nothing). Back to automatic recomputes them (the station's row: the file's column, else the words). The count is audited (`radio_services/<key>/retag`: `{service, rows, days}`). The Radio page's readers are told to ask afresh (another system's: only those who may see it). Older rows keep their tag |
+| Who sees it | the choices come with the tree; another system's only for a reader who may see it. The state push carries their rev (`radio_services`): the rail and the Channels tab ask again when it moves |
+
+Tests: `tests/test_service_override.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 

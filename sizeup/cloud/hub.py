@@ -10,8 +10,9 @@ runs on a bare Linux box with Python + numpy.
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size, its version -> {ok, build}: the hub's own
-                                  build (SIZEUP_BUILD), which the station follows (autoupdate.py)
+                                  progress, outbox size, its version -> {ok, build, caps, services}: the
+                                  hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py);
+                                  services: the admins' service per source (sourcekeys.set_service_overrides)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
                                   (jobs: tts, call, sources_reset: an incident source's reset(), #301)
@@ -591,7 +592,10 @@ class Hub:
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
+        # services: the admins' service per source (settings radio_services, sizeup/sourcekeys.py): the station tags
+        # its rows (and picks its speech-to-text profile) as the hub does; a station before this ignores it
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"],     # (#409: what this hub knows)
+                           "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {})})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
