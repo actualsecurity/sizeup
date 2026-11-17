@@ -12,6 +12,18 @@ from tests.test_atc import envelope
 from tests.test_page import PAGING, PLAN, held_pages, hiss, keyed, run_squelch, south2_page, strong, tone, voice_like
 
 TRAFFIC = dict(drop_db=10.0, keyups="traffic", split_s=0.2, jump_db=10.0)      # config defaults, kind = "traffic"
+
+
+@pytest.fixture(autouse=True)
+def own_noise(request, monkeypatch):
+    """Each test (each parameter set) its own fixed noise. hiss() and keyed() draw from tests.test_page.rng, one stream
+    for the whole process, so a result here depended on which tests ran before it (the order, xdist's split): some
+    cases sit near what the decoders and the "ID not decoded" check can take."""
+    import zlib
+
+    import tests.test_page as page
+    monkeypatch.setattr(page, "rng", np.random.default_rng(zlib.crc32(request.node.name.encode())))
+
 PAGING_K = dict(PAGING, keyups="paging", jump_db=12.0)       # paging opted in (off by default: jump_db 0)
 AIRBAND = dict(split_s=0.15, jump_db=6.0)                                       # ... kind = "airband"
 A_ID, B_ID = 0x2468, 0x1357                    # invented MDC unit IDs
