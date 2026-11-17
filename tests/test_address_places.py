@@ -63,6 +63,8 @@ def places(cad, q, limit=8):
     ("151-149 EXAMPLE AVE", [(149, "", "", ("example", "ave")), (151, "", "", ("example", "ave"))]),   # reversed
     ("149-51 EXAMPLE AVE", [(149, "", "", ("example", "ave")), (151, "", "", ("example", "ave"))]),    # the end's digits
     ("120-123 EXAMPLE AVE", [(n, "", "", ("example", "ave")) for n in (120, 121, 122, 123)]),          # both sides
+    ("199-01 EXAMPLE AVE", [(199, "", "", ("example", "ave")), (201, "", "", ("example", "ave"))]),   # past a hundred
+    ("98-102 EXAMPLE AVE", [(n, "", "", ("example", "ave")) for n in (98, 100, 102)]),
     ("100-160 EXAMPLE AVE", [(100, "", "", ("example", "ave")), (160, "", "", ("example", "ave"))]),   # long: the ends
     ("North Example Ave", []), ("12", []), ("", []),
 ])
@@ -164,6 +166,17 @@ def test_another_towns_name_across_the_town_line_is_not_it():
     assert [n for _r, n in ix.at("120 Example Ave", *here, town=PC)] == ["Sample Fitness"]
     assert ix.at("120 Example Ave", *there, town="rb", town_of={"rb": RB}.get) == []         # the CAD's name for it
     assert [n for _r, n in ix.at("120 Example Ave", *here, town="")] == ["Sample Fitness"]  # unknown: distance only
+
+
+def test_a_name_the_import_placed_at_a_neighbours_point_is_offered_there():
+    """Two villages sharing a postal town: the import takes the neighbour's address point for the row's own town
+    (commonplaces.locate_address, NEAR_TOWN_KM) and keeps the row's town; typed, that address is the neighbour's."""
+    point = (41.0027, -73.68)
+    rows = [{"key": "county/sample hall @ 120 example ave", "name": "SAMPLE HALL", "label": "Sample Hall",
+             "address": "120 EXAMPLE AVE", "at": "120 Example Ave", "lat": point[0], "lon": point[1], "muni": PC}]
+    ix = AddressPlaces(rows)
+    assert [n for _r, n in ix.at("120 Example Ave", *point, town=RB)] == ["Sample Hall"]
+    assert ix.at("120 Example Ave", point[0] + 0.001, point[1], town=RB) == []        # ~110 m off, another town
 
 
 @pytest.fixture()

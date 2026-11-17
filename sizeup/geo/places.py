@@ -239,6 +239,8 @@ def near_bonus(lat: float, lon: float, near: tuple[float, float] | None) -> floa
 
 SAME_ADDRESS_KM = 0.5           # a name at "12 Example Ave" is the typed one only this close to its point: the same
                                 # number on a same-named street in another town is farther off
+SAME_POINT_KM = 0.05            # a name this close to the address's point is at it whatever the town it is filed under
+                                # (the import takes a neighbour's point for the row's own town: commonplaces.NEAR_TOWN_KM)
 _RANGE = re.compile(r"\s*(\d{1,6})\s*-\s*(\d{1,6})(?=\s+[a-z])", re.I)    # "149-151 EXAMPLE AVE" (not "189-1/2")
 
 
@@ -246,12 +248,18 @@ RANGE_SPAN = 20                 # a range ("149-151", "151-149", "149-51") is ke
                                 # of the street when its ends are at most this far apart; a longer one under its two ends
 
 
-def _range_numbers(lo: int, hi: int) -> list[int]:
-    """'149-151' -> [149, 151]; '151-149' the same; '149-51' (the last digits) -> 149..151; '120-126' -> 120, 122,
-    124, 126; ends of another parity ('120-125'): each number between; a range over RANGE_SPAN: its two ends."""
-    if hi < lo and len(str(hi)) < len(str(lo)):           # "149-51": the end's last digits
-        full = int(str(lo)[:len(str(lo)) - len(str(hi))] + str(hi))
-        hi = full if full >= lo else hi
+def _range_numbers(lo: int, hi: int, hi_text: str = "") -> list[int]:
+    """'149-151' -> [149, 151]; '151-149' the same; '149-51' (the end's last digits) -> 149..151, '199-01' (past a
+    hundred) -> 199..201; '120-126' -> 120, 122, 124, 126; ends of another parity ('120-125'): each number between; a
+    range over RANGE_SPAN: its two ends. hi_text: the end as written (its leading zeros: "01")."""
+    end = hi_text or str(hi)
+    if hi < lo and len(end) < len(str(lo)):               # "149-51", "199-01": the end's last digits
+        step = 10 ** len(end)
+        full = lo - lo % step + hi
+        if full < lo:
+            full += step                                  # "199-01": into the next hundred
+        if full - lo <= RANGE_SPAN:
+            hi = full
     lo, hi = min(lo, hi), max(lo, hi)
     if hi - lo > RANGE_SPAN:
         return [lo, hi]
@@ -270,7 +278,7 @@ def address_keys(text: str) -> list[tuple]:
         street = tuple(norm_tokens(t[m.end():]))
         if not lo or not hi or not street:
             return []
-        return [(n, "", "", street) for n in _range_numbers(lo, hi)]
+        return [(n, "", "", street) for n in _range_numbers(lo, hi, m.group(2))]
     sp = split_address(t)
     if not sp:
         return []
@@ -310,7 +318,8 @@ class AddressPlaces:
         """The names at an address (its point: lat, lon; its town, as the gazetteer or the CAD names it), one per place
         (a site once: the entry at that very address, else its primary), alphabetical -> [(row, its name as shown)].
         A name counts only near the point (SAME_ADDRESS_KM) and, when both towns are known, in the address's town
-        (town_of: the gazetteer's town as the CAD names it): the same street across a town line is not it."""
+        (town_of: the gazetteer's town as the CAD names it): the same street across a town line is not it; one at the
+        very point (SAME_POINT_KM) is, whatever its town (the import located it at a neighbour's point)."""
         want = ((town_of(town) if town_of else town) or town or "").lower()
         found: dict[str, tuple[int, dict]] = {}        # the place (its site, else the entry) -> (rank, row)
         for k in address_keys(address):
@@ -319,8 +328,8 @@ class AddressPlaces:
                 if dist_km(lat, lon, r["lat"], r["lon"]) > SAME_ADDRESS_KM:
                     continue
                 muni = (r.get("muni") or "").lower()
-                if want and muni and muni != want:
-                    continue
+                if want and muni and muni != want and dist_km(lat, lon, r["lat"], r["lon"]) > SAME_POINT_KM:
+                    continue                           # another town's, across the line (not the very point)
                 place = r.get("site") or r.get("key") or f"{r['name']}|{i}"
                 rank = 0 if k in self.own[i] else 1
                 if place not in found or rank < found[place][0]:
