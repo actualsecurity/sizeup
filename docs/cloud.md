@@ -464,6 +464,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
 | Feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime) and the phone pre-alert (Tapout; "not configured" until its topic is set): ok / fallback and why, last read | the trains look coarse |
+| Intel | each rule pack's in scope / considered (24 h), and a warning row "Intel pushes: no intel topic set" (or "refused: same as the alerts or status topic") while pre-alerts have no topic of their own: never pushed | pre-alerts reach nobody's phone |
 | Station | connected or offline, last state post, clock skew, sizeup and machine up since, host | "Station offline" |
 | Version | station and hub builds, the update state, the last update with its timings and log line, failed builds, the adapter (with Reset when a source is failing) | after a deploy; "Station behind" |
 | Outbox and system | events waiting and the oldest, clips dropped, CPU, load, memory, disk, temperature | "events backing up", "disk full" |
@@ -510,10 +511,16 @@ Three kinds (`sizeup/notify.py` `route()`):
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices; the airport pre-alerts (HPN ATC, #233), once each |
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), the replica and task-failure pushes ([Replica checks](#replica-checks)), and every recovery notice |
-| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. A channel of its own only (admin, 2026-11-17): no intel topic, no intel pushes |
 
-Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
-("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
+Only one of alerts / status set: both kinds go to it. Intel never falls back: with no topic of its own its pushes are
+not sent (each event counted "held", unsent), the startup line says "intel → off (no intel topic set)", and
+Settings > Station > Health shows a warning row "Intel pushes: no intel topic set" (never a push about it). An intel
+topic equal to the alerts or status topic (trimmed, case aside) is refused: Settings won't save it ("the intel topic
+must differ from the alerts and status topics"), nor an alerts / status topic equal to the intel one; one from SSM /
+env / the config file is dropped at startup with a log line ("notify: config: ... refused"), and the sender refuses
+the pair again at every push. The app logs at startup where each kind goes
+("notify: alerts → topic set (SSM), status → topic set (SSM), intel → off (no intel topic set)"), never the names.
 
 **Settings > System > Push notifications** (admins only) changes each topic, and the ntfy server, without a
 restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
@@ -3183,8 +3190,8 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 | `move_min` | 5 | a moving incident pushes its new place at most this often |
 | `quiet_from`, `quiet_to` | none | local "HH:MM": no pushes in between |
 
-**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic, else the
-alerts'): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
+**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
+no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
 high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
 fails the scrub is not sent (suppressed "scrub", logged without the text). It opens

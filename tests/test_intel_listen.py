@@ -244,7 +244,7 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
         r = Radio()
         r.add("t1", now, 1.0, 500)
         b = FakeBucket()
-        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", log=lambda m: None)
+        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", intel_topic="pcfd-xmpl-intel-thread", log=lambda m: None)
         e = cad.intel
         e.notifier, e.locate = p.notifier(notify.INTEL), example_locate
         e.listen = listen(r, b, Clock(now + 1))
@@ -259,7 +259,7 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
         body = m["body"]
         [act] = body["actions"]
         assert act["action"] == "view" and act["label"] == "Listen" and act["url"].startswith("https://bucket.example/listen/")
-        assert body["message"].endswith(f"Listen: {act['url']}") and body["topic"] == "pcfd-xmpl-alerts"
+        assert body["message"].endswith(f"Listen: {act['url']}") and body["topic"] == "pcfd-xmpl-intel-thread"
     finally:
         ntfy.close()
 
