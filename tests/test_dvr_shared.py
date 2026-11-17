@@ -480,3 +480,133 @@ def test_a_killed_writers_temp_files_go_once_they_are_stale(tmp_path):
     new._started_at, new._rescanned_at = clock.t, clock.t - dvr_mod.RESCAN_S
     new.tick(wait_all=True)                                      # the rescans: off the recording's thread
     assert not dead.exists() and mine.exists()
+
+
+def test_a_camera_merge_never_moves_a_folder_while_a_rescan_reads_it(tmp_path, monkeypatch):
+    """The rescan lists the old id's folder, follow() would move it and its record, then the rescan's merge would make
+    the old id again from its listing: twice the bytes, a playlist of files that aren't there. follow() waits."""
+    r, d, f, clock = setup(tmp_path, area=None)
+    d = leader(r, tmp_path, clock)
+    d.scan_now()
+    step(d, f, clock, 2)
+    r.aliases = lambda: {CAM: "NEWX"}
+    real, during = d._read_dir, []
+
+    def listing_then_move(path):
+        out = real(path)
+        if path.name == CAM:
+            during.append(d.follow())                       # the camera merge, between the listing and the merge
+        return out
+    monkeypatch.setattr(d, "_read_dir", listing_then_move)
+    d._scan()
+    assert during == [[]] and CAM in d._cams                 # not under the rescan
+    monkeypatch.setattr(d, "_read_dir", real)
+    assert d.follow() == [CAM]
+    d._scan()
+    assert CAM not in d._cams and d.total_bytes() == d._segs(d._cams["NEWX"]).bytes
+    assert all(d._file("NEWX", k).exists() for k in d._cams["NEWX"]["segs"])
+
+
+def test_bytes_of_a_camera_gone_from_the_index_never_hold_up_a_takeover(tmp_path):
+    r, f, clock, old = recorded(tmp_path)
+    path = tmp_path / "efs" / STATE_FILE
+    state = json.loads(path.read_text())
+    have = state["cameras"][CAM]["bytes"]
+    state["cameras"]["GONE1"] = {"last": 5, "end": clock.t, "offset": 0, "bytes": 10 ** 6}   # moved away, no folder
+    path.write_text(json.dumps(state))
+    new = leader(r, tmp_path, clock, max_bytes=have + 200_000)
+    assert new.resume()
+    f.advance()
+    clock.t += 4
+    assert new.tick() == 1 and new.stopped == ""             # its bytes not counted: there's no folder of it
+    # once the index is whole, the state counts nothing for a camera not in it; a moved camera's record goes
+    new.index_rest()
+    new.checkpoint(force=True)
+    assert json.loads(path.read_text())["cameras"]["GONE1"]["bytes"] == 0
+    r.aliases = lambda: {CAM: "NEWX"}
+    assert new.follow() == [CAM]
+    new.checkpoint(force=True)
+    cams = json.loads(path.read_text())["cameras"]
+    assert CAM not in cams and cams["NEWX"]["last"] == new._cams["NEWX"]["last"]
+
+
+def test_another_segment_under_a_key_is_never_deleted_and_nothing_is_written_after_the_last_checkpoint(tmp_path):
+    """The folder ran ahead of the state across an origin restart: the same key holds other, older video. Two files
+    of a key a segment or more apart are both kept; the same segment twice (starts close) is kept once."""
+    r, f, clock, old = recorded(tmp_path)
+    key = max(old._cams[CAM]["segs"])
+    t0, dur, size = old._cams[CAM]["segs"][key]
+    mine = old._file(CAM, key)
+    other = mine.with_name(dvr_mod._name(key, t0 - 60, dur, size))
+    other.write_bytes(mine.read_bytes())
+    twin = mine.with_name(dvr_mod._name(key, t0 + 0.4, dur, size))
+    twin.write_bytes(mine.read_bytes())
+    old._scan()
+    assert mine.exists() and other.exists() and not twin.exists()
+    assert any("two segments under key" in m for m in old.logs)
+    # stopped: a round still under way writes nothing after the last checkpoint
+    assert old._stop.is_set() and old._write(CAM, key + 1, clock.t, 4.0, b"\x47" * 188) is False
+    assert not list((tmp_path / "efs" / CAM).glob(f"{key + 1}_*"))
+
+
+def test_many_viewers_while_indexing_read_a_folder_once_and_one_that_cant_be_listed_is_asked_again(tmp_path, monkeypatch):
+    r, f, clock, old = recorded(tmp_path)
+    new = leader(r, tmp_path, clock)
+    assert new.resume()
+    real, calls = new._read_dir, []
+
+    def failing(path):
+        calls.append(path.name)
+        return None
+    monkeypatch.setattr(new, "_read_dir", failing)
+    assert new.status(CAM)["segments"] == 0 and CAM not in new._indexed_cams      # not listable: not taken as read
+    gate = threading.Event()
+
+    def slow(path):
+        calls.append(path.name)
+        assert gate.wait(10)
+        return real(path)
+    monkeypatch.setattr(new, "_read_dir", slow)
+    calls.clear()
+    seen = []
+    threads = [threading.Thread(target=lambda: seen.append(new.status(CAM)["segments"])) for _ in range(5)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    gate.set()
+    for t in threads:
+        t.join(10)
+    assert calls == [CAM] and seen == [old.status(CAM)["segments"]] * 5
+
+
+def test_the_state_is_written_one_at_a_time_kept_fresh_and_a_leaked_temp_goes(tmp_path):
+    r, f, clock, old = recorded(tmp_path)
+    path = tmp_path / "efs" / STATE_FILE
+    leaked = path.with_name(f".{STATE_FILE}.7-dead.tmp")
+    leaked.write_text("{")
+    os.utime(leaked, (time.time() - dvr_mod.STALE_TMP_S - 5,) * 2)
+    new = leader(r, tmp_path, clock)
+    assert new.resume()
+    new.index_rest()
+    assert not leaked.exists()
+    errors = []
+
+    def many():
+        try:
+            for _ in range(30):
+                new.checkpoint(force=True)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    threads = [threading.Thread(target=many) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == [] and json.loads(path.read_text())["v"] == 1
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+    # a quiet DVR (nothing recorded, nothing changed): written again within a minute, so a takeover finds it fresh
+    at = json.loads(path.read_text())["at"]
+    new.wanted = lambda: {}
+    clock.t += dvrstate.REFRESH_S + 1
+    new.tick()
+    assert json.loads(path.read_text())["at"] > at
