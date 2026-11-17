@@ -17,6 +17,15 @@ more than that and the sync is gone (2026-10-13 13:17, E63 on FG1: the talker on
 from the post-ID). The frames before the open are only hiss and the start of the carrier; packets are
 CRC-checked, so hiss can't make an ID.
 
+The ID look-back (#694): a carrier that rises slowly opens the squelch only once it quiets the hiss open_db, and a burst
+sent at key-up can begin more than the pre-roll before that (a 0.4 s ramp: ~0.3 s), so its sync was lost, and an
+emergency press raised no alarm. So the first two decode steps also read ID_LOOKBACK_FRAMES (0.4 s) of the channel
+before the carrier's buffer, whatever the squelch made of them (hiss, the drop before a key-up cut, the weak tail of the
+carrier before). An ID found only that way is taken when its burst ran on into the pre-roll (the last 0.2 s before the
+carrier): one that ended before that is the carrier before's, or a weak radio's that never opened the squelch, and
+is left, unless it is an emergency no carrier just before raised (that alarms, on this key-up's row). The clip, the
+pre-roll and the "ID not decoded" check (#163) are as they were: only the decode looks further back.
+
 Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 1.7 s of audio and
 runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found; tones
 are one FFT per frame, on the paging channel only, while it is open. The IDs found live are handed to
@@ -34,7 +43,9 @@ second radio's pre-ID onto it (#672: the first row named the wrong unit). So on 
 at), decoded again only when the decode that found them reached past that point. An ID that was the next radio's
 moves to the next carrier, its alarm too (raised once, at once): that carrier's own buffer starts where the squelch
 counts it back, and a burst that began while it was still rising out of the hiss doesn't decode there again. A held
-cut that is never made changes nothing: one carrier, its IDs exactly as without key-ups.
+cut that is never made changes nothing: one carrier, its IDs exactly as without key-ups. When the squelch cuts a
+background off a stronger carrier and makes no row of it (fm.py's rise rule: a carrier still rising, #695), what was
+decoded there goes on with the stronger carrier, alarm and all.
 """
 
 from __future__ import annotations
@@ -50,6 +61,9 @@ import numpy as np
 from sizeup.radio.fm import FRAME, RATE, id_burst_frames
 
 PREROLL_FRAMES = 4      # 0.2 s read before the squelch opened (the start of a key-up burst)
+ID_LOOKBACK_FRAMES = 8  # 0.4 s more before a carrier's buffer, for the ID decode only (a slowly rising carrier, #694)
+LOOKBACK_STEPS = 2      # ... in its first two decode steps (a burst that ran into the pre-roll is whole by then)
+HIST_FRAMES = 64        # a traffic channel's latest frames, open or not: where the look-back comes from
 MDC_WINDOW_S = 1.5      # pre-IDs come in the first second (older radios at key-up, APX 0.3-0.8 s in)
 MDC_EVERY = 4           # decode every 4 frames (0.2 s) of it
 MDC_MIN_FRAMES = 4      # ... once there is this much (a burst is ~175 ms)
@@ -63,6 +77,12 @@ class _Chan:
     since: float = 0.0
     buf: list = field(default_factory=list)     # pre-roll + the first MDC_WINDOW_S of this carrier (kept to its end)
     t0: float = 0.0                             # when buf[0] began (on the squelch's clock: since + frames)
+    hist: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))
+    back: list = field(default_factory=list)    # the ID look-back: the channel's frames just before buf (#694)
+    old: int = 0                                # ... how many of back + buf began before the pre-roll
+    before: list | None = None                  # the IDs in those alone (looked at once, when needed)
+    steps: int = 0                              # decode steps run for this carrier
+    looked: list = field(default_factory=list)  # IDs found only with the look-back
     hold: tuple | None = None                   # the squelch's held key-up cut (drop start, carrier back), its frames
     n: int = 0                                  # frames of this carrier so far
     ids: list = field(default_factory=list)     # [(unit hex, emergency)] decoded live
@@ -82,7 +102,7 @@ class TapSquelch:
 
     def feed(self, frame: np.ndarray):
         seg = self._sq.feed(frame)
-        self._tap.frame(self._ch, frame, self._sq)
+        self._tap.frame(self._ch, frame, self._sq, seg is not None)
         return seg
 
     def flush(self, reason: str = "stopped"):
@@ -116,12 +136,12 @@ class LiveTap:
         receiver.new_squelch = lambda: TapSquelch(make(), self, receiver.channel)
         receiver.squelch = receiver.new_squelch()
 
-    def frame(self, channel, frame: np.ndarray, squelch) -> None:
-        """One frame, after squelch.feed(frame) (TapSquelch). Never raises."""
+    def frame(self, channel, frame: np.ndarray, squelch, made: bool = True) -> None:
+        """One frame, after squelch.feed(frame) (TapSquelch; made: that feed returned a transmission). Never raises."""
         try:
             self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)),
                         bool(getattr(squelch, "keyed", squelch.open)), getattr(squelch, "_frames", None),
-                        getattr(squelch, "_hold", None))
+                        getattr(squelch, "_hold", None), made)
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
@@ -135,8 +155,10 @@ class LiveTap:
                 was = c is not None and c.open
                 if was:
                     self._ended(c)
-                    c.open, c.buf = False, []
+                    c.open, c.buf, c.back = False, [], []
                     c.pre.clear()
+                if c is not None:
+                    c.hist.clear()      # (what comes next doesn't follow on from it)
             if was and self.kind(channel.label) == "paging" and self.paging is not None:
                 self.paging.close(channel.label)
         except Exception as e:  # the tap must never stop the receiver
@@ -145,7 +167,7 @@ class LiveTap:
                 self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
 
     def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True,
-               frames: list | None = None, hold: tuple | None = None) -> None:
+               frames: list | None = None, hold: tuple | None = None, made: bool = True) -> None:
         kind = self.kind(label)
         with self._lock:
             c = self._ch.setdefault(label, _Chan())
@@ -155,6 +177,12 @@ class LiveTap:
                 # the pre-roll of the carrier before it.
                 cut = c.open and bool(frames)
                 moved, alarm = self._own(c, since) if cut and kind == "traffic" else ([], "")
+                rise = cut and kind == "traffic" and not made and not self._held(c, since)
+                if rise and since - c.since <= MDC_WINDOW_S:
+                    # The stronger carrier over the one before (fm.py's rise rule), and the squelch made no row of that:
+                    # it was the start of this one, still rising (#694, #695). What was decoded there is this one's.
+                    moved += [x for x in c.ids if x not in moved]
+                    alarm, c.ids, c.alarm = alarm or c.alarm, [], ""
                 self._ended(c)
                 c.open, c.since, c.n, c.alarm, c.burst, c.shown = True, since, 0, alarm, False, False
                 c.ids, c.done = moved, bool(moved)      # (the next radio's ID decoded across the cut: this carrier's)
@@ -163,6 +191,7 @@ class LiveTap:
                 # buf[len(buf)] is this frame, the squelch's frames[-1] (a reopen hands it several at once)
                 c.t0 = since + ((len(frames) if frames else 1) - 1 - len(c.buf)) * FRAME / RATE
                 c.pre.clear()
+                self._look_back(c, since)
             c.hold = tuple(hold[:2]) if is_open and hold else None
             if not is_open:
                 was = c.open
@@ -172,6 +201,8 @@ class LiveTap:
                 c.pre.append(frame)
             else:
                 c.n += 1
+            if kind == "traffic":
+                c.hist.append(frame)
         if not is_open:
             if was and kind == "paging" and self.paging is not None:
                 self.paging.close(label)
@@ -199,14 +230,15 @@ class LiveTap:
         if not past and (c.n < MDC_MIN_FRAMES or c.n % MDC_EVERY):
             return
         audio = np.concatenate(c.buf).astype(np.float32)
-        found = self.mdc(audio)
+        c.steps += 1
+        found = self._decode(c, c.buf, audio, back=c.steps <= LOOKBACK_STEPS)
         if past:
             c.burst = not found and any(id_burst_frames(audio))     # once per carrier, at the window's end
             c.done = True
         if found:
             c.ids, c.done = list(found), True
             if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
-                c.alarm = self.on_emergency(label, c.since, list(found)) or "raised"
+                c.alarm = self._raised(c) or self.on_emergency(label, c.since, list(found)) or "raised"
             if c.shown:
                 self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
 
@@ -223,7 +255,7 @@ class LiveTap:
             return [], ""                   # every decode was of its own frames (or none ran): as it was
         own = c.buf[:max(0, k)]
         audio = np.concatenate(own).astype(np.float32) if own else np.zeros(0, np.float32)
-        ids = list(self.mdc(audio)) if len(own) >= MDC_MIN_FRAMES else []
+        ids = self._decode(c, own, audio, back=bool(c.looked)) if len(own) >= MDC_MIN_FRAMES else []
         moved = [x for x in c.ids if x not in ids]
         c.ids, c.done = ids, True
         c.burst = not ids and len(own) >= MDC_MIN_FRAMES and any(id_burst_frames(audio))
@@ -231,6 +263,47 @@ class LiveTap:
             alarm, c.alarm = c.alarm, ""    # raised for the next radio's button: that carrier's, not raised again
             return moved, alarm
         return moved, ""
+
+    def _held(self, c: _Chan, since: float) -> bool:
+        """The cut made at since is the key-up cut the squelch held (not the stronger carrier over a background)."""
+        step = FRAME / RATE
+        return c.hold is not None and abs(c.since + c.hold[1] * step - since) < step / 2
+
+    def _look_back(self, c: _Chan, since: float) -> None:
+        """The carrier just begun at since (its buf, t0 set): its ID look-back, the channel's frames just before buf."""
+        n, h = len(c.buf), list(c.hist)
+        c.back, c.old, c.before, c.steps, c.looked = [], 0, None, 0, []
+        if n and (len(h) < n or h[-1] is not c.buf[-1]):
+            return              # (not the frames the tap saw last: never guess)
+        c.back = h[:len(h) - n][-ID_LOOKBACK_FRAMES:]
+        ahead = max(0, round((since - c.t0) * RATE / FRAME))      # buf's frames before since (its pre-roll)
+        c.old = max(0, len(c.back) + ahead - PREROLL_FRAMES)
+
+    def _decode(self, c: _Chan, frames: list, audio: np.ndarray, back: bool = True) -> list:
+        """The IDs in these frames of the carrier (from buf[0]; audio: them joined), and with back, the IDs of a burst
+        that began in its look-back and ran on into its pre-roll (#694). One that ended before that is not this
+        carrier's, unless it is an emergency the carrier before didn't raise."""
+        found = list(self.mdc(audio))
+        if not (back and c.back):
+            return found
+        lead = c.back + list(frames)
+        more = [x for x in self.mdc(np.concatenate(lead).astype(np.float32)) if x not in found]
+        if more:
+            if c.before is None:
+                old = (c.back + c.buf)[:c.old]
+                c.before = list(self.mdc(np.concatenate(old).astype(np.float32))) if old else []
+            more = [x for x in more if x not in c.before or (x[1] and not self._raised(c, [x]))]
+            c.looked += [x for x in more if x not in c.looked]
+        return found + more
+
+    def _raised(self, c: _Chan, found: list | None = None) -> str:
+        """The alarm the carrier just before raised for an emergency found here only with the look-back (that burst ran
+        across both: one press, one alarm) ("" none)."""
+        em = [x for x in (c.looked if found is None else found) if x[1]]
+        if not em or not c.last or self.clock() - c.last[-1][2] > MDC_WINDOW_S:
+            return ""
+        prev = c.last[-1]
+        return prev[3] if prev[3] and any(x in prev[1] for x in em) else ""
 
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
