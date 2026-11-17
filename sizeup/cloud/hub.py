@@ -902,6 +902,11 @@ class HubApp(App):
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
+        # #606: the suggested squelch, Health's sparks (GET /api/cad/metrics?view=) and the shift warnings (Health hints)
+        from sizeup.cloud.metricsinsight import SECTION as SIGNAL_SECTION, Insight
+        self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
+        self.cad.station_metrics_insight = self.metric_insight
+        self.health.shifts = self.metric_insight.hints
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
@@ -1887,6 +1892,10 @@ class HubApp(App):
                 self.metric_store.maintain()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
+            try:                                  # ... then the shift checks (#606): Health's warnings, never a push
+                self.metric_insight.turn()
+            except Exception as e:  # noqa: BLE001 - never takes anything down
+                self.hub.log(f"metrics: shift check error: {type(e).__name__}: {e}")
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
