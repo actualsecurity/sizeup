@@ -86,8 +86,8 @@ Leave it running for step 7, then stop it with Ctrl+C.
 `worker.py` is pinned to a commit. Check its hash after the download:
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/COMMIT/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq 'SHA256'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/17af71f6193fa17c02c69a7043939ea1dc41f918/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '62FEDC29E0A9639E6A0D89D8C63E0D34C378F178553E70E0B9FE828C247E2B8E'   # True
 notepad "$d\worker.toml"
 ```
 

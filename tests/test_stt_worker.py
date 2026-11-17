@@ -1279,3 +1279,15 @@ def test_hub_takes_back_on_gaming_and_heartbeats_go_on_while_decoding(tmp_path, 
         wait_for(lambda: w.counts["lost"] + w.counts["released"] == 1, what="handed back or lost")
     assert ("already taken the job back" in caplog.text) == (w.counts["lost"] == 1)
     assert "release failed" not in caplog.text and not hub.accepted()
+
+
+def test_the_readme_pins_this_worker_py():
+    """The README's download is pinned to a commit and a SHA256: the hash must be this worker.py's. A change to
+    worker.py needs a README change (the commit that has it, and its hash)."""
+    import hashlib
+    import re
+    readme = (WORKER_PY.parent / "README.md").read_text()
+    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/worker\.py", readme)
+    assert m, "the README downloads worker.py from a pinned commit"
+    digest = hashlib.sha256(WORKER_PY.read_bytes()).hexdigest().upper()
+    assert digest in readme, f"README: worker.py's SHA256 is now {digest} (pin the commit that has it)"
