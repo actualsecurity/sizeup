@@ -939,3 +939,21 @@ def test_two_keeps_at_once_keep_the_newest_answer(tmp_path, monkeypatch):
     second_done.set()
     t.join(5)
     assert not t.is_alive() and set(d._wanted) == {CAM, other}
+
+
+def test_an_app_without_a_state_folder_has_no_dvr_and_writes_nothing_where_it_runs(tmp_path, monkeypatch):
+    """(#661) an in-memory app (cad_db "", the tests) once recorded into ./dvr/ of the working directory, its state
+    file left in every worktree that ran the suite: now no folder, no DVR. The state folder's dvr/ or dvr_dir as before."""
+    from dataclasses import replace
+
+    from sizeup.app import App
+    from tests.appcfg import cfg
+    monkeypatch.chdir(tmp_path)
+    app = App(cfg(tmp_path))
+    assert app.roads.dvr is None and app.attachments.dvr() is None
+    app.stop()
+    assert not (tmp_path / "dvr").exists()
+    app = App(replace(cfg(tmp_path), cad_db=str(tmp_path / "state" / "cad.sqlite")))
+    assert app.roads.dvr.root == tmp_path / "state" / "dvr"
+    app = App(replace(cfg(tmp_path), roads_dvr_dir=str(tmp_path / "efs")))
+    assert app.roads.dvr.root == tmp_path / "efs"

@@ -465,4 +465,72 @@
   /* Settings > Radios > Squelch (squelch-panel.js) */
   .sq-table .sq-in { inline-size: 5.5em; }
   .sq-table td.warn { color: var(--warn); font-weight: 600; }
+  .sq-table .sq-sugg { white-space: nowrap; }
+  .sq-table .sq-sugg .warn { color: var(--warn); }
+
+  /* Settings > Radios > Signal (signal-panel.js, signal-chart.js; #606): small SVG charts on the tokens */
+  .sg-panel { display: flex; flex-direction: column; gap: var(--gutter); }
+  .sg-ctl { flex-wrap: wrap; gap: var(--s-2); }
+  .sg-pick { min-inline-size: 8rem; }
+  .sg-card { display: flex; flex-direction: column; gap: var(--s-1); }
+  .sg-card .card-head .warn { color: var(--warn); }
+  .sg-fig { position: relative; margin: 0; min-inline-size: 0; }
+  .sg-svg { display: block; max-inline-size: 100%; block-size: auto; overflow: visible; }
+  .sg-svg text { font-family: var(--font); font-size: var(--fs-2xs); fill: var(--dim); font-variant-numeric: tabular-nums; }
+  .sg-svg .sg-dl { fill: var(--text-2); }
+  .sg-grid line { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+  .sg-band { fill: var(--dim); fill-opacity: 0.18; stroke: none; }
+  .sg-line, .sg-step, .sg-hline, .sg-vline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .sg-line.sg-c1 { stroke: var(--viz-1); }
+  .sg-band.sg-idle { fill: var(--dim); }
+  .sg-line.sg-max { stroke: var(--dim); stroke-width: 1; }
+  .sg-step.sg-open, .sg-vline.sg-open { stroke: var(--text-2); stroke-width: 1.5; }
+  .sg-step.sg-close { stroke: var(--text-2); stroke-width: 1; stroke-opacity: 0.55; }
+  .sg-hline.sg-sugg, .sg-vline.sg-sugg { stroke: var(--viz-4); stroke-width: 1.5; stroke-dasharray: 5 3; }
+  .sg-vline.sg-max { stroke: var(--dim); stroke-width: 1; }
+  .sg-dots, .sg-whisker { stroke: var(--raised); stroke-width: 1; }
+  .sg-voice { fill: var(--viz-1); }
+  .sg-page { fill: var(--viz-2); }
+  .sg-burst { fill: var(--viz-3); }
+  .sg-noise { fill: var(--dim); fill-opacity: 0.7; }
+  .sg-close-dot { fill: none; stroke: var(--viz-2); stroke-width: 1.5; }
+  .sg-whisker.sg-wl { stroke-width: 1.5; }
+  .sg-whisker.sg-voice.sg-wl { stroke: var(--viz-1); }
+  .sg-whisker.sg-page.sg-wl { stroke: var(--viz-2); }
+  .sg-bars, .sg-stack { stroke: none; }
+  .sg-noisebar { fill: var(--dim); }
+  .sg-idle-bar { fill: var(--dim); fill-opacity: 0.55; }
+  .sg-bars.sg-voice { fill-opacity: 0.75; }
+  .sg-spans.sg-lost { fill: var(--err); fill-opacity: 0.12; }
+  .sg-evl { stroke: var(--line-strong); stroke-width: 1; }
+  .sg-evm { fill: var(--text-2); }
+  .sg-ev { cursor: default; }
+  .sg-ev:hover .sg-evl, .sg-ev:focus .sg-evl { stroke: var(--text-2); }
+  .sg-cross { stroke: var(--line-hover); stroke-width: 1; pointer-events: none; }
+  .sg-none { fill: var(--dim); }
+  .sg-tip {
+    position: absolute; inset-block-start: 0; z-index: var(--z-tooltip); min-inline-size: 9rem; max-inline-size: 22rem;
+    padding: var(--s-1) var(--s-2); border: var(--bw) solid var(--line-strong); border-radius: var(--radius);
+    background: var(--panel); box-shadow: var(--elev-1); font-size: var(--fs-xs); line-height: var(--lh-xs); pointer-events: none;
+  }
+  .sg-tip-h { color: var(--dim); }
+  .sg-tip-r { display: flex; align-items: center; gap: var(--s-1); }
+  .sg-tip-v { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sg-tip-v { flex: none; min-inline-size: 2.5rem; }
+  .sg-tip-n { color: var(--dim); white-space: nowrap; }
+  .sg-key { flex: none; display: inline-block; inline-size: var(--s-3); block-size: var(--s-0); background: var(--dim); }
+  .sg-key.fill { block-size: var(--s-2); border-radius: var(--radius-s); }
+  .sg-key.dot { inline-size: var(--s-2); block-size: var(--s-2); border-radius: 50%; }
+  .sg-key.sg-voice, .sg-key.sg-c1 { background: var(--viz-1); }
+  .sg-key.sg-page { background: var(--viz-2); }
+  .sg-key.sg-burst { background: var(--viz-3); }
+  .sg-key.sg-sugg { background: var(--viz-4); }
+  .sg-key.sg-open { background: var(--text-2); }
+  .sg-key.sg-lost { background: var(--err); }
+  .sg-legend { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--text-2); }
+  .sg-li { display: inline-flex; align-items: center; gap: var(--s-1); }
+  .sg-spark { flex: none; vertical-align: middle; }
+  .sg-sp { fill: none; stroke: var(--viz-1); stroke-width: 1.5; stroke-linejoin: round; }
+  .sg-sp-noise .sg-sp { stroke: var(--dim); }
+  .sg-spd { fill: var(--text-2); }
 }

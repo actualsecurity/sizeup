@@ -100,6 +100,8 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "idle_qmax":    ("floor", lambda d: True, lambda d: d.get("qmax")),
     "noise_opens":  ("floor", lambda d: True, lambda d: d.get("noise")),
     "open_s":       ("floor", lambda d: True, lambda d: d.get("open_s")),
+    "sq_open":      ("floor", lambda d: True, lambda d: d.get("open")),      # the squelch as running (sent when it
+    "sq_close":     ("floor", lambda d: True, lambda d: d.get("close")),     # changes and every 15 min): #606's steps
     "tx_q":         ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("q")),
     "tx_q_open":    ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qo")),
     "tx_q_close":   ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qc")),
@@ -749,9 +751,10 @@ class MetricStore:
             out["rows"] = rows[:MAX_ROWS]
         else:
             metric = one("metric")
-            if metric is not None and metric not in METRICS:
-                raise MetricsError(f"metric: one of {', '.join(METRICS)}")
-            ms = [metric] if metric else [m for m, (k, _w, _v) in METRICS.items() if not kind or k == kind]
+            picked = [m for m in str(metric).split(",") if m] if metric is not None else []      # one, or "a,b,c"
+            if metric is not None and (not picked or len(picked) > len(METRICS) or any(m not in METRICS for m in picked)):
+                raise MetricsError(f"metric: one of {', '.join(METRICS)} (or several, comma-separated)")
+            ms = list(dict.fromkeys(picked)) if picked else [m for m, (k, _w, _v) in METRICS.items() if not kind or k == kind]
             rows = []
             for m in ms:
                 rows += [{"metric": m, "at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi}
@@ -763,6 +766,28 @@ class MetricStore:
             out["rows"] = rows[:MAX_ROWS]
         out["events"] = self.events(station, subject, t0, t1)
         return out
+
+    def docs(self, station: str, subject: str, kind: str, t0: float, t1: float, limit: int = MAX_ROWS,
+             newest: bool = False) -> list[dict]:
+        """One series' raw records in [t0, t1), oldest first, at most `limit` (the oldest kept, or the newest with
+        newest=True: one seek of the primary key either way): {"at", ...its numbers}. A floor record's settings as
+        sent (not carried forward). For sizeup/cloud/metricsinsight.py (the suggestions, the shift checks), never
+        the alert path."""
+        out = []
+        for at, doc in self._read("SELECT at, doc FROM raw WHERE station = ? AND subject = ? AND kind = ? AND at >= ? "
+                                  f"AND at < ? ORDER BY at {'DESC' if newest else ''} LIMIT ?",
+                                  (station, subject, kind, t0, t1, max(0, int(limit)))):
+            try:
+                out.append({"at": at, **json.loads(doc)})
+            except ValueError:
+                continue
+        return out[::-1] if newest else out
+
+    def hours(self, station: str, subject: str, metric: str, t0: float, t1: float) -> list[dict]:
+        """One metric's hourly rollups in [t0, t1): [{at, n, lo, p50, p90, hi}] (the drift check)."""
+        return [{"at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi} for h, n, lo, p50, p90, hi in self._read(
+            "SELECT hour, n, lo, p50, p90, hi FROM hourly WHERE station = ? AND subject = ? AND metric = ? AND hour >= ? "
+            "AND hour < ? ORDER BY hour", (station, subject, metric, int(t0 // 3600), int(math.ceil(t1 / 3600))))]
 
     def _settings_before(self, station: str, subject: str, t0: float) -> dict:
         """The settings of the last floor record before t0 that had them (the station sends them every 15 min)."""

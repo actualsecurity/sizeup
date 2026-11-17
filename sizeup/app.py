@@ -724,10 +724,11 @@ class App:
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
         # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
         # is the leader's app: the standby's warm app (prewarm) never gets here.
-        if cfg.roads_dvr and cfg.roads_enabled:
+        # Only with a folder for it (#661): the state folder's dvr/ (cad_db) or dvr_dir; an in-memory app (cad_db "",
+        # the tests) has none, and never records into the working directory.
+        if cfg.roads_dvr and cfg.roads_enabled and (cfg.roads_dvr_dir or cfg.cad_db):
             from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
-            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else Path(cfg.cad_db).parent / "dvr"
             fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
             shared = cfg.roads_dvr_shared == "on" or bool(fs)
             if shared:
@@ -2682,6 +2683,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
+        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2696,6 +2698,18 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
+
+    def _stt_input(self, item, audio: np.ndarray | None) -> None:
+        """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
+        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
+        link = self.link
+        if link is None or audio is None or not hasattr(link, "stt_input"):
+            return
+        try:
+            link.stt_input(item, audio)
+        except Exception as e:  # never in the radio path's way (the hub falls back to the clip)
+            log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_priority(self, item, key: str) -> int:
         """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first
