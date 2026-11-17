@@ -766,3 +766,32 @@ def test_a_handover_on_the_same_stream_is_no_discontinuity(tmp_path):
     assert new.resume()
     new.tick()
     assert sorted(k for k in new._cams[CAM]["segs"]) == [last + 1] and not new._new_stream(CAM, last + 1)
+
+
+def test_a_parked_cameras_folder_is_read_only_by_its_trial_round_and_its_file_is_left_alone(tmp_path, monkeypatch):
+    """(#550 with #596) a parked camera: no round, so its folder isn't read for one; its check's trial round is a real
+    round (its folder read first). The parked list and its temp file beside the recordings: never ours to clean."""
+    r, f, clock, old = recorded(tmp_path)
+    parked = tmp_path / "efs" / dvr_mod.PARKED_FILE
+    parked.write_text("{}")
+    their_tmp = tmp_path / "efs" / ".parked.7.tmp"
+    their_tmp.write_text("{")
+    for p in (parked, their_tmp):
+        os.utime(p, (time.time() - 3600,) * 2)
+    new = leader(r, tmp_path, clock)
+    assert new.resume()
+    (tmp_path / "efs" / STATE_FILE).unlink()                 # (not in the state: its folder read before a round)
+    new._resumed.clear()
+    read = []
+    real = new._ensure
+    monkeypatch.setattr(new, "_ensure", lambda cid: (read.append(cid), real(cid)))
+    new.parked[CAM] = {"why": "no stream", "since": clock.t, "at": clock.t, "checked": clock.t, "next": clock.t}
+    assert new.record_once(CAM) == 0 and read == []
+    f.advance()
+    clock.t += 4
+    assert new.record_once(CAM, trial=True) == 1 and read == [CAM]
+    new.parked.clear()
+    new.index_rest()
+    new._started_at, new._rescanned_at = clock.t, clock.t - dvr_mod.RESCAN_S
+    new.tick(wait_all=True)
+    assert parked.exists() and their_tmp.exists()

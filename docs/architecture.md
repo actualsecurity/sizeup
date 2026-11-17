@@ -341,6 +341,13 @@ place it, but a county feed location naming it still gets its address. The impor
   street when its ends are at most 20 apart (`RANGE_SPAN`), else at its two ends. A name made by hand counts when it
   was pinned at an address. Only the place search's own answer and the location box get them, never a location typed
   and not picked (`PlaceIndex.places_at`),
+- on the maps: **Common places** in every map's Layers box (`static/common-places.js`, off by default, remembered like
+  the other layers). One point per spot from `GET /api/cad/places/map` (GeoJSON, `commonplaces.map_points`, cached
+  until the names change, ETag; read only, viewers too): a site once, at its primary; names at one address together
+  ("Example Burger +1"); hand-made names too; a name with no point never. A small dot from zoom 14, the names from 16
+  as a map symbol layer whose labels give way to each other (no DOM marks: ~1,000 points). A click on a dot or a name
+  shows each name there, its addresses (all of a site's) and its town; on the new call's map a click there is "what
+  is here", as anywhere. The state's `places_rev` moves with any change to the names, and the layer asks again,
 - by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Quillberry Marina", "the
   community hall in Sample Town"). A name of one word, or of common words only (`sizeup/geo/commonwords.py`), needs
   its town said beside it; another town said beside it is that town's; a house number said always wins, the name only

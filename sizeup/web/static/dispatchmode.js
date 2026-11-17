@@ -12,7 +12,7 @@
 
 window.DispatchMode = (() => {
   const TIPS = {
-    "60control": "60 Control dispatching: County feed incidents accepted; units, statuses and closing follow the feed and the radio",
+    "60control": "60 Control dispatching: County feed incidents accepted; units, statuses and closing follow the feed and the radio; no dispatch from here",
     pcfd: "PCFD dispatching: County feed incidents queued; dispatch and progress by hand",
   };
 
