@@ -17,14 +17,19 @@ anything weaker is only a button for a person.
                   - nothing against it (below)
                   - and the PLACE ITSELF: the named place (the feed's "@NAME", the department's common place at the
                     feed's address or its aliases, #575/#584/#612) said on the page, or the house number the same or
-                    said twice and run together ("412412" for 412). A cross street, the family of call or being the
-                    only open call are supporting evidence only (shown), never enough
+                    said twice and run together ("412412" for 412). A name the places list also has at another
+                    address (a chain's two stores) never is, and one that is only town names, department or agency
+                    words or the street's own words ("PORT CHESTER", "SAMPLE POST" on Sample Post Rd) is no name. A
+                    cross street, the family of call or being the only open call are supporting evidence only (shown),
+                    never enough
     against     on the street as typed, any house number but the same or doubled (one digit off, "418" or "413" for
                 412, is the house next door); on a misheard street another number ("near" stays neutral there, a digit
-                in or out is for it); another of the department's places on that street named; cross streets with none
-                in common; types of no common family; apparatus on both sides, none in common (one building, two
-                calls); another town named; a mutual-aid page ("mutual aid", "to the City of ...") against an event
-                that is not mutual aid
+                in or out is for it); another of the department's places on that street named, or the feed's own name
+                when the list has it elsewhere too and the page says no number of ours; cross streets with none in
+                common; types of no common family; apparatus on both sides, none in common (one building, two calls);
+                another town the page says the call is in or goes to ("in / to <town>": a town named as a landmark,
+                "by the Sample border", is no evidence); a mutual-aid page ("mutual aid", "to the City of ...")
+                against an event that is not mutual aid
     weak        the street the same (or snapped), not strong, at most one thing against it and never another house
                 number, another town or mutual aid: the page makes its own card exactly as before (its notes, the
                 dispatch mode's handling unchanged), and the card shows "Merge into #N" (a person decides,
@@ -126,7 +131,7 @@ class Evidence:
     other_place: str = ""                             # another place on that street said on the page (against)
     cross: str = ""                                   # "" | "match" | "differ"
     family: str = ""                                  # "" | "same" | "differ"
-    units: str = ""                                   # "" | "differ" (both name apparatus, none in common)
+    units: str = ""                                   # "" | "common" | "differ" (both name apparatus, none in common)
     town: str = ""                                    # "" | "differ"
     mutual: str = ""                                  # "" | "differ" (a mutual-aid page, an event that isn't)
     fresh: bool = False                               # the feed's last report ok and recent

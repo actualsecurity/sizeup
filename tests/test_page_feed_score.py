@@ -465,6 +465,108 @@ def test_the_maps_cross_streets_are_never_looked_up_under_the_lock(tmp_path, mon
     assert src._block_cross(inc) == "Example Ave and Specimen St" and asked == ["page-cross"]
 
 
+# -- the second review of #684: a name alone, mutual aid with our unit, towns as landmarks ----------------------------
+
+
+def strong_or_offer(rig, p, a) -> str:
+    """'joined', 'offered' or 'separate' for the page's card p against the feed's incident a."""
+    if p == a:
+        return "joined"
+    return "offered" if (state_inc(rig, p).get("merge_offer") or {}).get("into") == a else "separate"
+
+
+def test_a_chains_two_stores_on_the_street_are_never_the_place_itself(tmp_path, monkeypatch):
+    """SAMPLE PHARMACY at 412 and at 88 on the same road; the feed's alarm at the one at 412; a structure fire paged at
+    "Sample Post Road, Sample Pharmacy" with no number: which store? Never joined (an offer at most)."""
+    lost_number(monkeypatch)
+    rig = Rig(tmp_path)
+    rig.cad.local_places = lambda: [
+        {"key": "cp:1", "name": "SAMPLE PHARMACY", "aliases": [], "address": "412 SAMPLE POST RD", "muni": "port chester"},
+        {"key": "cp:2", "name": "SAMPLE PHARMACY", "aliases": [], "address": "88 SAMPLE POST RD", "muni": "port chester"}]
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD : @SAMPLE PHARMACY", ("PCFD",), typ="ALARM/COMM")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, full response, structure fire, Sample Post Road, Sample Pharmacy. "
+                       "Time out 1431.")["id"]
+    assert strong_or_offer(rig, p, a) in ("offered", "separate")
+    assert not any(" matched by: " in x for x in feed_lines(rig, a))
+    ev = rig.cad.sources.page_feed(rig.clock.t, "Sample Post Road",
+                                   {"f": {"type": "STRU"}, "lines": ["structure fire, Sample Post Road, Sample Pharmacy"]})
+    assert ev.place == "" and "also elsewhere" in ev.other_place                  # named without our number: against
+
+
+def test_a_chain_store_with_our_number_said_still_joins(tmp_path):
+    """The same chain, the page saying 412: the number is the place itself (the strict same-place rule)."""
+    rig = Rig(tmp_path)
+    rig.cad.local_places = lambda: [
+        {"key": "cp:1", "name": "SAMPLE PHARMACY", "aliases": [], "address": "412 SAMPLE POST RD", "muni": "port chester"},
+        {"key": "cp:2", "name": "SAMPLE PHARMACY", "aliases": [], "address": "88 SAMPLE POST RD", "muni": "port chester"}]
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD : @SAMPLE PHARMACY", ("PCFD",), typ="ALARM/COMM")
+    rig.at(60)
+    assert rig.page("p1", PAGE.replace("Sample Fitness", "Sample Pharmacy"))["id"] == a
+
+
+@pytest.mark.parametrize("place", [
+    {"name": "VILLAGE HALL", "aliases": ["PORT CHESTER"]},                      # a town's name as an alias
+    {"name": "SAMPLE POST", "aliases": []},                                     # the street's own words
+    {"name": "PORT CHESTER FIRE DEPARTMENT", "aliases": ["PCFD HQ"]},          # town and department words
+])
+def test_names_of_towns_departments_or_the_street_are_no_place(tmp_path, monkeypatch, place):
+    """Every page says "Port Chester Fire Department" and the street: a place named so is never the place itself."""
+    lost_number(monkeypatch)
+    rig = Rig(tmp_path)
+    rig.cad.local_places = lambda: [{"key": "cp:1", "address": "412 SAMPLE POST RD", "muni": "port chester", **place}]
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("PCFD",), typ="INVEST/GAS-ODOR")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, full response, odor of gas, Sample Post Road. PCFD HQ notified. "
+                       "Time out 1431.")["id"]
+    assert strong_or_offer(rig, p, a) != "joined"
+    assert not any(" matched by: " in x for x in feed_lines(rig, a))
+
+
+def test_mutual_aid_with_our_unit_on_the_county_event_joins_as_on_main(tmp_path):
+    """The county kept the other town's type when it added E60: the page names E60, at our number. Joined, as main did."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("E60",), typ="STRU/COMM")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, Engine 60, mutual aid, structure fire, 412 Sample Post Road. "
+                       "Time out 1431.")["id"]
+    assert p == a and paging_on(rig) == a
+
+
+def test_mutual_aid_sharing_a_unit_without_our_number_joins_too(tmp_path):
+    """No house number said (a street only), E60 on both: the mutual-aid words never veto it."""
+    rig = Rig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("E60",), typ="STRU/COMM")
+    rig.at(60)
+    src = rig.cad.sources
+    rec = {"f": {"type": "MA"}, "lines": ["Engine 60, mutual aid, structure fire, Sample Post Road"], "units": ["Engine 60"],
+           "towns": ["Port Chester", "Rye Brook"]}
+    assert not src._vetoed(rig.cad.store.incident(a), "Sample Post Road", rec)
+    assert src._vetoed(rig.cad.store.incident(a), "Sample Post Road", dict(rec, units=["Engine 62"]))
+
+
+def test_a_town_named_as_a_landmark_is_no_evidence(tmp_path, monkeypatch):
+    """"by the Rye border": where it is near, not where it is. The scenario still joins on the score."""
+    lost_number(monkeypatch)
+    rig = Rig(tmp_path)
+    places(rig)
+    a = feed_event(rig, "A1", FEED_AT, ("PCFD",), typ="INVEST/GAS-ODOR")
+    rig.at(60)
+    assert rig.page("p1", PAGE.replace("Specimen Street.", "Specimen Street, by the Rye border."))["id"] == a
+    assert any(" matched by: " in x for x in feed_lines(rig, a))
+
+
+def test_the_cross_street_cache_is_bounded(tmp_path, monkeypatch):
+    from sizeup.cad import sources
+    monkeypatch.setattr(sources, "CROSS_CACHE", 3)
+    rig = Rig(tmp_path)
+    rig.cad.detail_source = lambda m: {"cross": "Example Ave and Specimen St"}
+    src = rig.cad.sources
+    for i in range(10):
+        src._block_cross({"id": i, "address": f"{i} Sample Post Rd", "lat": 41.0, "lon": -73.66})
+    assert len(src._crosses) == 3 and {k[0] for k in src._crosses} == {7, 8, 9}
+
+
 # -- the merge a person makes, and its undo --------------------------------------------------------------------------
 
 

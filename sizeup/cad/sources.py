@@ -139,6 +139,7 @@ import threading
 import time
 from pathlib import Path
 from datetime import datetime
+from collections import OrderedDict
 from statistics import median
 from typing import Callable
 
@@ -190,6 +191,7 @@ BACKFILL_BATCH = 50                    # ... then this many rows at a time (back
 BACKFILL_PAUSE_S = 0.5                 # ... with this pause between batches: the console's requests come first
 BACKFILL_RETRY_S = 30.0                # ... and, not the leader (FencedWrite): looked at again this often
 PANEL_MAX = 50
+CROSS_CACHE = 256                      # the map's block cross streets kept for this many incidents (pagematch)
 MANUAL_FIELDS = ("type", "location", "pin")
 
 SCHEMA = """
@@ -2436,20 +2438,23 @@ class Sources:
 
     def _vetoed(self, inc: dict, location: str, rec: dict) -> bool:
         """A strict rules' match a page's own words say is another call: a mutual-aid page ("mutual aid", "to the City
-        of ...") against an event that isn't; a town the page says it is in ("in Sample Village", "to the Town of ...")
+        of ...") against an event that isn't (unless the house number is ours exactly, or the county lists a unit the
+        page names); a town the page says it is in ("in Sample Village", "to the Town of ...")
         that isn't the event's; or, with no house number in common (a street only, a doubled number), another of the
         department's places on that street named (the common places, #575). Never joined (noted). Cheap: no cross
         streets."""
         r = self._best_feed(inc["id"])
         if r is None:
             return False
-        e = self._evidence(inc, json.loads(r["data"] or "{}"), location, rec, cross=False, said_only=True)
-        return e.mutual == "differ" or e.town == "differ" or (e.number != "exact" and bool(e.other_place))
+        e = self._evidence(inc, json.loads(r["data"] or "{}"), location, rec, cross=False)
+        # mutual aid: never over our own number, nor when the county lists a unit the page names (it may keep the
+        # other town's type when it adds ours)
+        mutual = e.mutual == "differ" and e.number != "exact" and e.units != "common"
+        return mutual or e.town == "differ" or (e.number != "exact" and bool(e.other_place))
 
-    def _evidence(self, inc: dict, d: dict, location: str, data: dict, cross: bool = True,
-                  said_only: bool = False) -> pagematch.Evidence:
+    def _evidence(self, inc: dict, d: dict, location: str, data: dict, cross: bool = True) -> pagematch.Evidence:
         """One feed incident against a page (data: the page's record: f, lines, towns, units). cross False: no cross
-        streets (the map's block is never read); said_only: a town counts only where the page says the call is."""
+        streets (the map's block is never read). A town counts only where the page says the call is."""
         e = pagematch.Evidence(inc=inc)
         f = data.get("f") or {}
         text = " ".join(str(x) for x in data.get("lines") or []) or str(data.get("text") or "")
@@ -2461,8 +2466,8 @@ class Sources:
                                                                                          inc["type"]):
             e.mutual = "differ"
         ft = _town(raw) or _town(match_address(inc)) or _town(inc["address"] or "")
-        where, named = self._said_towns(text)
-        said = {*where, *([] if said_only else named), *([_town(location)] if _town(location) else [])}
+        where, _named = self._said_towns(text)               # only where the call is ("in / to <town>"): a town
+        said = {*where, *([_town(location)] if _town(location) else [])}   # named as a landmark is no evidence
         home = {ft} if ft else {str(t).lower() for t in towns}
         if said and home and said - home:
             e.town = "differ"
@@ -2491,10 +2496,12 @@ class Sources:
         e.number = next((x for x in ("exact", "doubled", "misread", "near", "other") if x in fits), "")
         # the named place: the feed's own ("@NAME"), the department's common place at its address (and its aliases)
         words = pagematch.name_words(text)
-        ours, other = self._place_names(inc, raw, d, theirs, kp)
+        ours, other, ambiguous = self._place_names(inc, raw, d, theirs, kp)
         e.place = next((n for n in ours if pagematch.says_name(words, n)), "")
         if not e.place:
             e.other_place = next((n for n in other if pagematch.says_name(words, n)), "")
+        if not e.place and not e.other_place and e.number not in ("exact", "doubled"):
+            e.other_place = next((f"{n} (also elsewhere)" for n in ambiguous if pagematch.says_name(words, n)), "")
         mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
         if mine_x:                                           # the feed's only when the page says some
             feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
@@ -2505,8 +2512,8 @@ class Sources:
             e.family = "same" if pf & ff else "differ"
         mu = split_units(drop_departments(data.get("units") or []))
         fu = split_units(drop_departments(self._units_of(inc["id"])))
-        if mu and fu and not units_match(mu, fu):
-            e.units = "differ"                               # one building, two calls: other apparatus on each
+        if mu and fu:
+            e.units = "common" if units_match(mu, fu) else "differ"    # differ: one building, two calls
         return e
 
     WHO = {"fire", "department", "departments", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac"}
@@ -2531,36 +2538,65 @@ class Sources:
                 k = i                                        # "(the) city / town / village of" before it
                 if k >= 2 and words[k - 1] == "of" and words[k - 2] in ("village", "town", "city"):
                     k -= 2
-                    if k >= 1 and words[k - 1] == "the":
-                        k -= 1
+                if k >= 1 and words[k - 1] == "the":         # (also a town listed as "city of ...")
+                    k -= 1
                 (where if k >= 1 and words[k - 1] in ("in", "to") else named).add(TOWN_OF[t])
             i = j
         return where, named
 
-    def _place_names(self, inc: dict, raw: str, d: dict, theirs: list[str], kp: tuple) -> tuple[list[str], list[str]]:
+    def _place_names(self, inc: dict, raw: str, d: dict, theirs: list[str],
+                     kp: tuple) -> tuple[list[str], list[str], list[str]]:
         """(the names of the feed's place: its "@NAME", the incident's place, the common places at its address and
-        their aliases; the common places' names elsewhere on the page's street)."""
+        their aliases, each only when it names that place alone; the common places' names elsewhere on the page's
+        street; the feed's names the places list also has at another address, anywhere: ambiguous). A name that is
+        only town names, department or agency words, or the page's street's words ("PORT CHESTER", "SAMPLE POST" on
+        Sample Post Rd, "FIRE DEPARTMENT") is never a place's name here."""
         ours = [x for x in (inc["place"] or "", location_extras(raw)[1] if raw else "") if x]
         cp = self.common_place(raw, d) if raw else None
         if cp:
             ours += [cp.get("label") or "", cp.get("name") or "", *(cp.get("aliases") or [])]
-        other: list[str] = []
         fn = getattr(self.cad, "local_places", None)
         try:
             rows = fn() if fn is not None else []
         except Exception:  # noqa: BLE001 - no names: nothing said either way
             rows = []
         numbered = [x for x in theirs if (place_key(x) or ("", ""))[1]]
+        street = {*kp[4], *(w for w in (kp[3],) if w)}
+        key = lambda n: pagematch.name_key_of(n) if self._names_a_place(n, street) else ""
+        elsewhere: dict[str, int] = {}                       # name -> places with it at another address than the feed's
+        other: list[str] = []
         for r in rows or ():
             addr = str(r.get("address") or "")
-            k = place_key(addr) if addr else None
-            if k is None or k[0] != "addr" or not _same_street(k[2:], kp[2:]):
-                continue
             names = [r.get("label") or "", r.get("name") or "", *(r.get("aliases") or [])]
-            (ours if any(same_place(addr, x) for x in numbered) else other).extend(names)
-        ours = [n for n in dict.fromkeys(ours) if n]
-        mine = {pagematch.name_key_of(n) for n in ours}
-        return ours, [n for n in dict.fromkeys(other) if n and pagematch.name_key_of(n) not in mine]
+            here = bool(addr) and any(same_place(addr, x) for x in numbered)
+            if here:
+                ours.extend(names)
+                continue
+            for n in names:
+                if key(n):
+                    elsewhere[key(n)] = elsewhere.get(key(n), 0) + 1
+            k = place_key(addr) if addr else None
+            if k is not None and k[0] == "addr" and _same_street(k[2:], kp[2:]):
+                other.extend(names)
+        ours = [n for n in dict.fromkeys(ours) if key(n)]
+        mine = {key(n) for n in ours}
+        ambiguous = [n for n in ours if key(n) in elsewhere]
+        return ([n for n in ours if key(n) not in elsewhere],
+                [n for n in dict.fromkeys(other) if key(n) and key(n) not in mine], ambiguous)
+
+    AGENCY = {"fire", "department", "departments", "dept", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac",
+              "village", "town", "city", "county", "hall", "station", "hq", "headquarters", "engine", "ladder",
+              "rescue", "company", "co", "corps", "control", "dispatch", "center", "centre"}
+
+    @staticmethod
+    def _names_a_place(name: str, street: set) -> bool:
+        """A name with a word of its own: not only town names (the lists' and the county's), department or agency
+        words (and their codes: "PCFD", "RBPD"), or the street's own words (street: its name words and suffix;
+        suffixes and their words too)."""
+        towns = {w for k in (*TOWN_OF, *county_towns()) for w in k}
+        plain = street | SUFFIXES | set(ABBR) | set(ABBR.values())
+        agency = lambda w: w in Sources.AGENCY or bool(re.fullmatch(r"[a-z]{1,4}(?:fd|pd|vac|ems)", w))   # PCFD, RBPD
+        return any(w not in towns and not agency(w) and w not in plain for w in pagematch.name_words(name))
 
     @staticmethod
     def _cross_names(text: str) -> set:
@@ -2580,18 +2616,23 @@ class Sources:
         if src is None or inc["lat"] is None or inc["lon"] is None:
             return ""
         key = (inc["id"], inc["address"] or "", inc["lat"], inc["lon"])
-        cache = self.__dict__.setdefault("_crosses", {})
+        cache = self.__dict__.setdefault("_crosses", OrderedDict())
         if key in cache:
+            cache.move_to_end(key)
             return cache[key] or ""
         cache[key] = None                                    # asked: found by the thread
+        while len(cache) > CROSS_CACHE:                      # bounded: the least recently asked go
+            cache.popitem(last=False)
         street = re.sub(r"^\s*\d+\S*\s+", "", street_part(inc["address"] or "").split(",")[0])
 
         def find() -> None:
             try:
-                cache[key] = str((src({"kind": "address", "lat": key[2], "lon": key[3], "street": street}) or {})
-                                 .get("cross") or "")
+                got = str((src({"kind": "address", "lat": key[2], "lon": key[3], "street": street}) or {})
+                          .get("cross") or "")
             except Exception:  # noqa: BLE001 - no block: no cross streets to compare
-                cache[key] = ""
+                got = ""
+            if key in cache:                                 # (not dropped meanwhile)
+                cache[key] = got
         threading.Thread(target=find, name="page-cross", daemon=True).start()
         return ""
 
@@ -2693,12 +2734,14 @@ class Sources:
             now = self.clock()
             who = re.sub(r"\s*<[^<>]*>\s*$", "", operator or "").strip()
             by = f" by {who}" if who else ""
-            with self.store.tx() as db:
-                moved = db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ? AND incident_id = ?",
-                                   (card, PAGING, m["ref"], m["into_id"])).rowcount
-            if moved != 1:
-                raise CadError(f"The page is no longer on {_ref(t)}: nothing to undo")
-            self.store.reopen(card, operator or "")
+            with self.store.lock:                            # (reentrant: no other write between the three)
+                if self.store.one("SELECT 1 AS x FROM source_reports WHERE source = ? AND ref = ? AND incident_id = ?",
+                                  (PAGING, m["ref"], m["into_id"])) is None:
+                    raise CadError(f"The page is no longer on {_ref(t)}: nothing to undo")
+                self.store.reopen(card, operator or "")     # the card first: never a report on a dismissed card
+                with self.store.tx() as db:
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ? AND incident_id = ?",
+                               (card, PAGING, m["ref"], m["into_id"]))
             undo = json.loads(m["undo"] or "{}")
             self._put_back(t, undo)
             with self.store.tx() as db:
