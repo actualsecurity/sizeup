@@ -246,8 +246,9 @@ window.NewCallMap = (() => {
   async function clicked(e) {
     if (!isOpen() || !st.rm) return;
     const map = st.rm.map;
-    // another layer's mark (a camera, a hydrant, a firehouse) has its own box
-    const marks = map.queryRenderedFeatures(e.point).filter((f) => f.source !== "base" && !String(f.layer.id).startsWith("nc-")
+    // another layer's mark (a camera, a hydrant, a firehouse) has its own box; a common place's (common-places.js) is
+    // what is here, as any point
+    const marks = map.queryRenderedFeatures(e.point).filter((f) => f.source !== "base" && !/^(nc|cp)-/.test(String(f.layer.id))
       && (f.layer.type === "symbol" || f.layer.type === "circle"));
     if (marks.length) return;
     const { lat, lng } = e.lngLat;

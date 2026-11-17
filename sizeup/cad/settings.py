@@ -1369,6 +1369,11 @@ class Editor:
             self._places_cache = got
         return [dict(r) for r in got[2]]
 
+    def places_rev(self) -> str:
+        """The place names' version (how many, the last change, their size): moves with every change to them."""
+        self.local_places()
+        return json.dumps(self._places_cache[1])
+
     def _places_op(self, action: str, body: dict, op: str) -> dict:
         cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
         if action == "delete":
