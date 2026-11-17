@@ -86,9 +86,9 @@ def test_a_burning_smell_with_the_fd_notified_is_a_fire_pre_alert_at_the_address
 def test_the_other_ways_dispatch_says_it(gaz, text):
     e, sink = engine(gaz)
     e.feed(row("c1-t1", text, e.clock(), **TALK))
-    [ev] = fire_calls(sink)
+    [(ev, _d)] = [(p, d) for p, d in sink.pushes if d.would_push]           # one pre-alert ("smoke in the hallway" is
+    assert ev.category in ("fire_call", "fire_report")                      # the police pack's fire_report: it wins)
     assert ev.label_full == "40 Example Pl, Port Chester" and ev.mode == "push"
-    assert [d.would_push for p, d in sink.pushes if p.category == "fire_call"] == [True]
 
 
 @pytest.mark.parametrize("text", [
@@ -180,6 +180,7 @@ def test_the_hub_starts_the_intel_thread_and_reads_context_rows(tmp_path):
     from sizeup.cloud.hub import HubApp
     from tests.test_cloud import hub_cfg
     app = HubApp(hub_cfg(tmp_path), log=lambda m: None)
+    app.start_layers = app.start_sources = lambda: None        # no map layers or sources: nothing reaches the network
     try:
         app.start()
         e = app.cad.intel
@@ -196,3 +197,143 @@ def test_the_hub_starts_the_intel_thread_and_reads_context_rows(tmp_path):
     finally:
         app.stop()
     assert e._stop.is_set()                                # its thread ends at its next wait
+
+
+# -- a held call is placed only by its own words or its read-back (review of #640) --------------------------------------
+
+UNPLACED = "Caller states they smell something burning, I'll be notifying the FD."
+
+
+def held(gaz, clock):
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", UNPLACED, clock(), **TALK))
+    [ev] = fire_calls(sink)
+    assert ev.suppressed == "unplaced" and ev.mode == "log"
+    return e, sink
+
+
+@pytest.mark.parametrize("text, talk", [
+    ("Car 9 respond to 21 Sample Street, I have a neighbor dispute.", TALK),           # the same console, its next job
+    ("Car 9, I'm at 21 Sample Street, checking on a house, I have them coming out.", TALK),   # no rule words at all
+    ("I'm at 21 Sample Street, I'll check the house, having them come out.", {"talker": "CAR-31", "radio_id": "7000456"}),
+])
+def test_another_job_never_places_or_pushes_a_held_call(gaz, text, talk):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 30
+    e.feed(row("c2-t1", text, clock(), **talk))
+    [ev] = e.events.open_events()
+    assert ev.category == "fire_call" and ev.suppressed == "unplaced" and ev.precision == "none"
+    assert "Sample" not in ev.label_full and not any(d.would_push for _p, d in sink.pushes)
+
+
+def test_the_tie_words_are_the_categorys_own_list(gaz):
+    e, _sink = engine(gaz)
+    words = e.category_words(e.pack("police"), "fire_call")
+    assert {"smell", "burning", "smoke"} <= words
+    assert not words & {"have", "having", "come", "check", "being", "been", "something", "start", "send", "home",
+                        "house", "building", "store", "room", "request", "route", "fire", "department"}
+
+
+def test_the_dispatchers_address_only_read_back_after_the_window_places_and_pushes_it(gaz):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 150                                        # past the 120 s window: the call-out's hits have aged out
+    e.feed(row("c1-t2", "That's going to be 40 Example Place.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.mode == "push" and ev.suppressed == ""
+    [(_p, d)] = [(p, d) for p, d in sink.pushes if d.would_push]
+    assert d.message["title"] == "PD · Burning smell / FD notified · Port Chester"
+
+
+def test_a_read_back_by_another_talker_or_too_late_does_not_place_it(gaz):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 30
+    e.feed(row("c1-t2", "That's going to be 40 Example Place.", clock(), talker="CAR-31", radio_id="7000456"))
+    clock.t += 400
+    e.feed(row("c1-t3", "That's going to be 40 Example Place.", clock(), **TALK))      # past RELEASE_S
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
+
+
+def test_placed_late_by_its_own_words_updates_it_at_log_unpushed(gaz):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 400                                        # more than 5 minutes after the call-out
+    e.feed(row("c1-t2", "That burning smell is at 40 Example Place, FD is en route.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.suppressed == "placed_late" and ev.mode == "log"
+    assert not any(d.would_push for _p, d in sink.pushes)
+    clock.t += 20
+    e.feed(row("c1-t3", "40 Example Place, still a smell of something burning, FD en route.", clock(), **TALK))
+    assert not any(d.would_push for _p, d in sink.pushes)                            # never pushed after that
+
+
+# -- one pre-alert per call: fire_report wins over fire_call --------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Respond to 40 Example Place, caller reports a fire in the house.",
+    "Respond to 40 Example Place, pot left on the stove, smoke in the apartment.",
+    "Respond to 40 Example Place, smoke condition from a chimney, notifying the FD.",
+])
+def test_one_push_when_both_fire_categories_hit(gaz, text):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_report"]
+    assert [ev.category for ev in e.events.open_events()] == ["fire_report"]
+
+
+def test_a_fire_report_after_a_fire_call_takes_it_over_without_a_second_push(gaz):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", CALL, clock(), **TALK))
+    clock.t += 30
+    e.feed(row("c1-t2", "40 Example Place, flames showing from the house.", clock(), **TALK))
+    assert [ev.category for ev in e.events.open_events()] == ["fire_report"]
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]       # the one push, already out
+    clock.t += 30
+    e.feed(row("c1-t3", "Respond to 40 Example Place, smell of something burning, FD en route.", clock(), **TALK))
+    assert len([d for _p, d in sink.pushes if d.would_push]) == 1
+
+
+def test_a_held_fire_call_taken_over_by_a_fire_report_pushes_once_as_that(gaz):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 20
+    e.feed(row("c1-t2", "Caller now says there are flames showing.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.category == "fire_report"
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_report"]
+
+
+# -- rule edges ---------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Respond to 40 Example Place, people smoking in the hallway, a smell of smoke.",
+    "Respond to 40 Example Place, kids smoking out back, they smell smoke in the hallway.",
+    "Respond to 40 Example Place, a car burning rubber doing donuts, smell of burning.",
+    "Respond to 40 Example Place, negative smoke, an odor of something burning earlier.",
+])
+def test_more_not_fire_calls(gaz, text):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert fire_calls(sink) == []
+
+
+def test_a_small_fire_already_out_with_the_fd_notified_still_fires(gaz):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", "Respond to 40 Example Place, a small fire in the kitchen, it's out, FD notified.", e.clock(),
+               **TALK))
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
+# -- stop() -------------------------------------------------------------------------------------------------------------
+
+def test_stop_ends_the_thread_within_a_second():
+    e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=None, clock=Clock())
+    e.start()
+    assert e._thread.is_alive()
+    t0 = time.monotonic()
+    e.stop()
+    assert time.monotonic() - t0 < 1.5 and not e._thread.is_alive()

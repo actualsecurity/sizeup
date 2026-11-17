@@ -57,7 +57,10 @@ How a row becomes an event, per pack whose scope it is in:
                       our own scene is what a crew most needs to hear.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
      A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
-     (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere.
+     (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
+     own words or a read-back of the held call place it (_may_place); placed more than RELEASE_S after the call-out it
+     stays at log ("placed_late"). A category with "defer_to" is never raised beside that category (_deferred), and an
+     event of that category takes its open event over: one pre-alert per call.
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -100,12 +103,16 @@ NEAR_INCIDENT_M = 150.0                # an event this close to one of our open 
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
+RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
+                                       # place found later than this updates the event at log ("placed_late"), unpushed
+STOP_JOIN_S = 1.0                      # stop(): how long the thread may take to finish the row in hand
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
                           "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
                           "circle", "highway", "hwy", "plaza", "square"})
 STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
               "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
 QUEUE_MAX = 5000
+WHO_MAX = 500                          # unplaced events whose talkers and units are kept past the window
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
            "alt_text, model FROM radio_traffic WHERE id = ?")
@@ -209,6 +216,7 @@ class IntelEngine:
         self._ticked = 0.0
         self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
         self._catwords: dict[tuple[str, str], set] = {}
+        self._who_of: dict = {}               # unplaced event id -> (talkers, units) of its own transmissions
         self.counters = counters_mod.Counters(self.clock)
         self._summed = self.clock()           # the hourly log line: the first an hour after start
         self._summed_at: dict = {}            # the overall totals at that line
@@ -286,9 +294,19 @@ class IntelEngine:
         self._restore()
         self._thread = threading.Thread(target=self._run, name="intel", daemon=True)
         self._thread.start()
+        self.log("intel: engine started (" + ", ".join(f"{p.name} {p.mode}" for p in self.packs) + ")")
 
     def stop(self) -> None:
+        """No more rows: the thread ends after the one in hand (at most STOP_JOIN_S waited for, so a push it was making
+        never lands after a drain has begun, and a slow one never holds the drain up)."""
         self._stop.set()
+        t = self._thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            try:
+                self._q.put_nowait("")       # wakes its wait at once ("" is no row)
+            except queue.Full:
+                pass
+            t.join(STOP_JOIN_S)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -297,9 +315,10 @@ class IntelEngine:
             except queue.Empty:
                 tid = None
             try:
-                if tid is not None:
+                if tid and not self._stop.is_set():
                     self._one(tid)
-                self._maybe_tick()
+                if not self._stop.is_set():
+                    self._maybe_tick()
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the thread
                 self.errors += 1
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
@@ -542,7 +561,7 @@ class IntelEngine:
                 continue                      # a candidate this row says nothing about: left as it is
             over = True
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
-            if mode == "off":
+            if mode == "off" or self._deferred(pack, cat, cats, key, at, win.entries[tid]):
                 continue
             ev = self._raise(pack, row, key, cat, cd, what, contrib, mode, win, at, tid)
             if ev is not None:
@@ -556,7 +575,8 @@ class IntelEngine:
             for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
                 moving = self._moving(pack, ev, win.entries[tid])
                 if (ev.category not in event_of and (not ev.confirmed or moving) and self.locate is not None
-                        and self._same_job(pack, ev, win.entries[tid], ws, mine)):
+                        and (self._may_place(pack, ev, win.entries[tid], False) if ev.suppressed == "unplaced"
+                             else self._same_job(pack, ev, win.entries[tid], ws, mine))):
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
@@ -655,6 +675,8 @@ class IntelEngine:
     def category_words(self, pack, cat: str) -> set:
         """The telling words of a category's rules ("smoke", "flames", "shots" ...)."""
         k = (pack.name, cat)
+        if k not in self._catwords and pack.category(cat).get("words"):
+            self._catwords[k] = set(pack.category(cat)["words"])     # its own list (fire_call: never "have", "check")
         if k not in self._catwords:
             out = set()
             for r in pack.rules:
@@ -778,6 +800,9 @@ class IntelEngine:
         a hold ends (a moving event leaving our incident's place)."""
         if not pack.area and not pack.category(ev.category).get("place"):
             return
+        if ev.suppressed == "placed_late" and ev.pushed_at is None:
+            ev.mode = lowest(ev.mode, "log")  # placed too late to be a pre-alert: stays at log
+            return
         if pack.area:
             ev.near_incident = self._incident(ev)
         why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
@@ -786,10 +811,73 @@ class IntelEngine:
         if why and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")
             ev.suppressed = why
-        elif ev.suppressed in ("out_of_area", "near_incident", "unplaced"):
+        elif ev.suppressed == "unplaced":
+            # placed: the mode its rules raised it at (the window may have let the call-out go: never None here),
+            # unless the place came too long after the call-out to be a pre-alert
+            if ev.last_at - ev.first_at > RELEASE_S:
+                ev.suppressed = "placed_late"
+                ev.mode = lowest(ev.mode, "log")
+            else:
+                ev.suppressed = ""
+                ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
+        elif ev.suppressed in ("out_of_area", "near_incident"):
             ev.suppressed = ""
             if mode is not None:
                 ev.mode = max(ev.mode, mode, key=mode_rank)
+
+    def _event_mode(self, pack, ev: Event) -> str:
+        """The mode the event's own rules (ev.rules, with their weights then) give it: pack, category and rung."""
+        by = {r.id: r for r in pack.rules}
+        got = [(float(w), "", by[i]) for i, _v, w in ev.rules if i in by]
+        pos = [x for x in got if x[2].category == ev.category and x[0] > 0]
+        cues = [x for x in got if x[2].category == rules_mod.WILD and x[0] > 0]
+        damp = [x for x in got if x[0] < 0]
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        return lowest(pack.mode, cd.get("mode", "push"), rung(pos, damp, thr, cues)) if pos else "log"
+
+    def _may_place(self, pack, ev: Event, entry, speaks: bool) -> bool:
+        """An "unplaced" event takes a place only from a row that says its category itself, or from a read-back of
+        the held call: within RELEASE_S of it, no other job's cue (no hit of another category, no dispatch cue, no
+        unit the call never named), and said by the call's own talker (the dispatcher repeating the address) or by a
+        unit the call named. Never by a talker's next job ("car 9 respond to ..., a dispute")."""
+        if speaks:
+            return True
+        if entry.at - ev.first_at > RELEASE_S or any(r.category != ev.category for r, _w in entry.hits):
+            return False
+        talkers, units = self._held_who(pack, ev)
+        if entry.units - units:
+            return False
+        return bool(entry.talker and entry.talker in talkers) or bool(entry.units & units)
+
+    def _held_who(self, pack, ev: Event) -> tuple[set, frozenset]:
+        """The talkers and units of an unplaced event's own transmissions (kept past the window, _note_who)."""
+        talkers, units = self._who_of.get(ev.id, (set(), frozenset()))
+        mine = [e for e in self._event_entries(pack, ev)]
+        return (talkers | {e.talker for e in mine if e.talker},
+                units | frozenset(u for e in mine for u in e.units))
+
+    def _note_who(self, pack, ev: Event) -> None:
+        if ev.suppressed == "unplaced" and ev.id is not None:
+            self._who_of[ev.id] = self._held_who(pack, ev)
+            while len(self._who_of) > WHO_MAX:
+                self._who_of.pop(next(iter(self._who_of)))
+        else:
+            self._who_of.pop(ev.id, None)
+
+    def _deferred(self, pack, cat: str, cats: dict, key: str, at: float, entry) -> bool:
+        """One pre-alert per call: a category that defers to another ("defer_to": fire_call to fire_report) is not
+        raised while that one is over its threshold in this window, or has an open event on this source at this place
+        (or either has none). The other way round, _raise takes the deferring category's open event over."""
+        to = pack.category(cat).get("defer_to")
+        if not to:
+            return False
+        tcd = pack.category(to)
+        thr = tcd.get("threshold") if tcd.get("threshold") is not None else pack.threshold
+        if to in cats and cats[to][0] >= thr:
+            return True
+        return any(e.precision == "none" or entry.place is None or same_place(entry.place, e.place())
+                   for e in self._open_for(pack, to, key, at, self._merge_span(pack)))
 
     def _unplaced(self, pack, ev: Event) -> str:
         """A "place": true category (rules.py): "unplaced" until the event has a place a crew can drive to (PLACED),
@@ -839,7 +927,12 @@ class IntelEngine:
         rp = entry.place if speaks else None
         fresh = bool(NEW_CALL.search(entry.text))
         ev, moved, reopened = None, False, False
-        for e in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+        span = self._merge_span(pack)
+        under = [e for e in self._open_for(pack, None, key, at, span)               # a deferring category's call:
+                 if e.category != cat and pack.category(e.category).get("defer_to") == cat]   # taken over (one per call)
+        for e in self._open_for(pack, cat, key, at, span) + under:
+            if e.suppressed == "unplaced" and not self._may_place(pack, e, entry, speaks):
+                continue                      # a held call takes only its own words or its read-back
             ep = e.place() if e.precision != "none" else None
             if rp is not None and ep is not None and same_place(rp, ep):
                 ev = e                        # the same place again ("another caller ...": more of the same)
@@ -847,8 +940,8 @@ class IntelEngine:
                 continue                      # "new call": another place, or none said: a new incident
             elif rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
                 ev = e                        # no place said ("still smoke showing"): the open one (#492 re-check)
-            elif rp is not None and ep is None and e.last_at >= at - pack.window_s:
-                ev = e                        # the place, right after a call-out that had none
+            elif rp is not None and ep is None and (e.last_at >= at - pack.window_s or e.suppressed == "unplaced"):
+                ev = e                        # the place, right after a call-out that had none (or held for one)
             elif (rp is not None and ep is not None and self._moving(pack, e, entry)
                   and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
                 ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
@@ -883,6 +976,10 @@ class IntelEngine:
                     mode = lowest(mode, "log")
                     break
         before = copy.deepcopy(ev) if ev is not None else None
+        if ev is not None and ev.category != cat:
+            ev.category = cat                 # a deferring category's call, now this one's (one pre-alert per call)
+            if ev.suppressed == "unplaced":
+                ev.suppressed = ""            # (held for its old category's sake: _hold judges it as this one)
         rules = sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in contrib})
         if ev is None:
             ev = Event(domain=pack.domain, pack=pack.name, category=cat, source_key=key,
@@ -910,6 +1007,7 @@ class IntelEngine:
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
         self.events.save(ev)
+        self._note_who(pack, ev)
         self._after(pack, ev, change, now, before, moved=moved and before is not None and before.precision != "none"
                     and not same_place(before.place(), ev.place()))
         return ev
@@ -936,6 +1034,7 @@ class IntelEngine:
             return None
         ev.updated_at = self.clock()
         self.events.save(ev)
+        self._note_who(pack, ev)
         self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
         return ev
 
