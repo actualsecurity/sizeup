@@ -150,6 +150,11 @@ def test_the_window_keeps_the_nearest_each_side_of_the_trigger(airport):
     assert ids[31:] == [f"HPNTower-a{i}" for i in range(30)]
     assert ba["capped"] == {"before": True, "after": True}
     assert [t["start"] for t in ba["items"]] == sorted(t["start"] for t in ba["items"])
+    # oldest first through comms' own fetch (one context gate), never anything but ASC / DESC in the SQL
+    asc = cad.comms._fetch(["t.channel = ?"], ["HPN Tower"], 3, order="ASC")
+    assert [r["id"] for r in asc] == ["HPNTower-b39", "HPNTower-b38", "HPNTower-b37"]
+    with pytest.raises(ValueError):
+        cad.comms._fetch([], [], 1, order="start; DROP TABLE x")
 
 
 def test_a_transmission_gone_from_the_radio_log_keeps_the_prealerts_own_copy(airport):
@@ -413,6 +418,47 @@ def test_non_admins_see_only_the_rules_the_event_fired_on_or_that_map_or_push(in
     assert every == fired | {"local.secret_words", "pd.retired_rule", shadowed.id}
 
 
+def test_a_category_in_shadow_hides_its_rules_from_non_admins(intel):
+    """The rung a hit's rule really has is the engine's: the lowest of the pack's, its category's and its own mode."""
+    cad, ev, _old = intel
+    pack = cad.intel.pack("police")
+    fired = {r[0] for r in ev.rules}
+    other = next(r for r in pack.rules if r.id not in fired and r.enabled and r.mode in ("map", "push")
+                 and not r.id.startswith("local.") and pack.category(r.category).get("mode", "push") in ("map", "push"))
+    with cad.store.tx() as db:
+        db.execute("INSERT INTO intel_hits (traffic_id, rule_id, rule_rev, weight, category, pack, event_id, at) "
+                   "VALUES ('c1-t0', ?, 1, 0.2, ?, 'police', NULL, ?)", (other.id, other.category, cad.clock()))
+    seen = lambda: {h["id"] for h in signed(cad, "intel", ev.id)["trigger"]["items"][0]["rules"]}     # noqa: E731
+    assert other.id in seen()                                     # it maps or pushes: anyone sees it
+    pack.categories[other.category]["mode"] = "shadow"            # its category being tuned
+    assert other.id not in seen() and seen() >= fired
+    assert other.id in {h["id"] for h in signed(cad, "intel", ev.id, admin=True)["trigger"]["items"][0]["rules"]}
+
+
+@pytest.mark.parametrize("precision, confirmed, where, alts, site, unconfirmed", [
+    ("intersection", True, 0.9, [], True, False),
+    ("address", False, 0.8, [], True, True),            # "respond to 120 Example Ave": sure, the only reading
+    ("landmark", False, 0.75, [], True, True),
+    ("address", False, 0.7, [], False, False),          # not sure enough
+    ("address", False, 0.9, [{"label": "120 Example Ave, Rye", "lat": 41.0, "lon": -73.68}], False, False),   # two readings
+    ("block", True, 0.9, [], False, False),             # a stretch of street, never a building
+    ("street", True, 0.9, [], False, False),
+])
+def test_a_site_is_a_confirmed_place_or_a_sure_unconfirmed_one(intel, precision, confirmed, where, alts, site, unconfirmed):
+    cad, ev, old = intel
+    with cad.store.tx() as db:
+        db.execute("UPDATE intel_events SET precision = ?, confirmed = ?, where_score = ?, alts = ? WHERE id = ?",
+                   (precision, int(confirmed), where, json.dumps(alts), ev.id))
+    d = signed(cad, "intel", ev.id)
+    sh = d["site_history"]
+    if site:
+        assert [c["id"] for c in sh["calls"]["items"]] == [old["id"]] and sh["notes"]["items"]
+        assert sh["unconfirmed"] is unconfirmed and d["place"]["site_unconfirmed"] is unconfirmed
+    else:
+        assert sh["calls"]["items"] == [] and sh["notes"]["items"] == [] and sh["key"] == {} and not sh["unconfirmed"]
+        assert sh["calls"]["empty"]
+
+
 def test_recomputed_phrases_say_they_are_the_current_rules_and_flag_a_change(intel):
     cad, ev, _old = intel
     w = signed(cad, "intel", ev.id, admin=True)["why"]
@@ -465,7 +511,11 @@ global.api = async () => IN;
   changed.outcome.status = "dismissed"; changed.outcome.by = "Jordan Example"; changed.now.as_of += 60;
   PrealertInfo.render(changed);
   const redrawn = S.filter((id) => $("#" + id).children[0] !== before[id]);
-  console.log(JSON.stringify({{ text, shown, plays, ev, scopes, same, redrawn, title: $("#pi-title").textContent,
+  const unsure = JSON.parse(JSON.stringify(changed)); unsure.site_history.unconfirmed = true;
+  PrealertInfo.render(unsure);
+  const siteHead = $("#pi-site").children[0];
+  const unconfirmed = [siteHead.textContent, siteHead.children[0].title];
+  console.log(JSON.stringify({{ text, shown, plays, ev, scopes, same, redrawn, unconfirmed, title: $("#pi-title").textContent,
                                outcome: $("#pi-outcome").textContent, bad: PrealertInfo.parse("phone/1"), ok: PrealertInfo.parse("intel/12"),
                                href: PrealertInfo.href("airport", 3) }}));
 }})();
@@ -482,4 +532,5 @@ global.api = async () => IN;
     assert "pd.shots" in out["text"]["pi-why"] and "Matched" in out["text"]["pi-why"]
     assert len(out["same"]) == 7 and out["redrawn"] == ["pi-outcome"]                  # idempotent; "now"'s clock ignored
     assert "Dismissed · Jordan Example" in out["outcome"]
+    assert "unconfirmed place" in out["unconfirmed"][0] and "Unconfirmed place" in out["unconfirmed"][1]
     assert out["bad"] is None and out["ok"] == {"kind": "intel", "id": 12} and out["href"] == "#prealert/airport/3"

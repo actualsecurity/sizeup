@@ -176,7 +176,9 @@ window.PrealertInfo = (() => {
   }
   function site(d) {
     const s = d.site_history;
-    const kids = [head("Site history", s.site || "", "Earlier calls at this address or site (5 years), its earlier pre-alerts and its address notes")];
+    const kids = [head("Site history", s.site ? `${s.site}${s.unconfirmed ? " · unconfirmed place" : ""}` : "",
+      "Earlier calls at this address or site (5 years), its earlier pre-alerts and its address notes"
+      + (s.unconfirmed ? "\nUnconfirmed place: the words didn't confirm it, but it was the only reading and a sure one" : ""))];
     const calls = s.calls || { items: [] };
     if (calls.items.length) {
       const ol = el("ol", "list pi-calls");

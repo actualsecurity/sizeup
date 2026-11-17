@@ -31,7 +31,8 @@ The bundle (SCHEMA_VERSION; every section says why it is empty in "empty", "" wh
                   nearest CAP["before"] before the first evidence and CAP["after"] from it on
     place         the point (approximate when it is), the words or the gazetteer's label, other readings, and what is
                   near: pre-plan points (hydrants, Knox boxes ... as entered), cameras (when the app wired a lookup).
-                  Only for a site: an intel place the words pin down and confirm; never ATC's approximate point
+                  Only for a site (SITE_PRECISIONS): an intel place confirmed, or unconfirmed but sure with no other
+                  reading ("unconfirmed": true); never ATC's approximate point
     site_history  strictly before the pre-alert: the calls at that address or site (the address key, as History here;
                   the airport: its AIRPORT events), newest first, with their comments, disposition, units and times;
                   the earlier pre-alerts there; the address notes (premise notes the reader may see). Rule hits a
@@ -51,6 +52,7 @@ import json
 from sizeup import sourcekeys
 from sizeup.cad import addrkey
 from sizeup.cad.store import CadError
+from sizeup.intel.model import lowest
 
 SCHEMA_VERSION = 1
 KINDS = ("airport", "intel")
@@ -61,6 +63,12 @@ CAP = {"trigger": 12, "before": 30, "after": 30, "site_calls": 10, "comments": 5
        "preplan": 12, "cameras": 3, "now_calls": 10, "feedback": 20, "related_channels": 6}
 SITE_YEARS = 5                  # site history goes back this far at most
 NOW_NEAR_M = 1500.0             # "now": open calls this close to the point
+# an intel place good enough to be a site (address key, notes, pre-plan points, earlier calls): these precisions (a
+# block or a street is a stretch, never a building), confirmed by the words; or unconfirmed but the gazetteer sure
+# (where at least UNCONFIRMED_WHERE) with no other reading: police rarely say the town ("respond to 120 Example Ave"),
+# and those are the addresses notes matter at. Then the bundle says "unconfirmed place". ATC's point: never a site
+SITE_PRECISIONS = ("address", "intersection", "landmark")
+UNCONFIRMED_WHERE = 0.75
 TEXT_MAX = 600                  # a remark or a comment, clipped
 
 
@@ -135,11 +143,8 @@ def _by_ids(cad, ids: list[str]) -> dict[str, dict]:
 
 
 def _fetch_asc(cad, where: list, args: list, limit: int) -> list[dict]:
-    """comms._fetch, oldest first: the same gate (another system's rows only for a reader who may see them)."""
-    if not cad.comms._sees_context():
-        where = list(where) + [f"+t.system IN {sourcekeys.OURS_SQL}"]
-    rows = cad.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t WHERE " + " AND ".join(f"({w})" for w in where)
-                       + " ORDER BY t.start ASC LIMIT ?", (*args, limit))
+    """_rows, oldest first (comms._fetch's own gate)."""
+    rows = cad.comms._fetch(where, args, limit, order="ASC")
     cad.comms._decorate(rows)
     return rows
 
@@ -418,7 +423,10 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         if admin or rid in fired:
             return True
         r = by_rule.get(rid)
-        return r is not None and not rid.startswith("local.") and r.enabled and r.mode in ("map", "push")
+        if r is None or rid.startswith("local.") or not r.enabled:
+            return False
+        # the rung the engine gives it: the lowest of the pack's, its category's and its own mode
+        return lowest(pack.mode, pack.category(r.category).get("mode", "push"), r.mode) in ("map", "push")
     trigger = []
     for tid in ids:
         r = found.get(tid)
@@ -435,8 +443,11 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         why = "no transmissions"
     lat, lon = e["lat"], e["lon"]
     placed = lat is not None and lon is not None and e["precision"] != "none"
-    # a site: a place the words pin down (and agree on); else no address key, notes, pre-plan points or earlier calls
-    exact = placed and e["precision"] in ("address", "intersection", "block", "landmark") and bool(e["confirmed"])
+    # a site (SITE_PRECISIONS): else no address key, notes, pre-plan points or earlier calls
+    confirmed = bool(e["confirmed"])
+    exact = placed and e["precision"] in SITE_PRECISIONS and (
+        confirmed or (float(e["where"] or 0) >= UNCONFIRMED_WHERE and not (e["alts"] or [])))
+    unsure = exact and not confirmed
     key = _site(cad, e["place"], lat, lon) if exact else {}
     # the earlier ones at the same place, strictly before this one (intel_events has no index on first_at or the place:
     # a scan of its 90 days, bounded by the LIMIT after the filter)
@@ -475,12 +486,12 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         "place": {"point": ({"lat": lat, "lon": lon, "radius_m": e["radius_m"], "approx": not e["confirmed"],
                              "precision": e["precision"]} if placed else None),
                   "label": e["place"], "town": e["town"], "basis": e["basis"], "phrases": [], "alts": e["alts"] or [],
-                  "key": key, "nearby": _nearby(cad, key, lat, lon, may) if exact else {},
+                  "key": key, "nearby": _nearby(cad, key, lat, lon, may) if exact else {}, "site_unconfirmed": unsure,
                   "empty": "" if placed else "location not heard"},
         "site_history": {
-            "site": e["place"] if exact else "", "key": key,
+            "site": e["place"] if exact else "", "key": key, "unconfirmed": unsure,
             "calls": (_site_calls(cad, key, lat, lon, False, e["place"] if e["precision"] == "landmark" else "", e["first_at"])
-                      if exact else _empty([], f"place too coarse or unconfirmed ({e['precision']}) for a site")),
+                      if exact else _empty([], f"place too coarse or unsure ({e['precision']}) for a site")),
             "prealerts": _empty([dict(p) for p in prior[:CAP["site_prealerts"]]],
                                 "no earlier radio pre-alerts there (kept 90 days)" if exact else "no site"),
             "notes": _notes(cad, key, lat, lon, may) if exact else _empty([], "no site"),
