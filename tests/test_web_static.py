@@ -141,7 +141,11 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
                                 "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
                                 "/api/cad/metrics"}          # the station's signal metrics (#605; graphs: #606)
-    assert "/api/cad/metrics" not in scripts                                # (no script reads it until #606)
+    # #606: the Signal tab, the Squelch card's suggestions and Health's sparks read it, nothing else
+    assert '"/api/cad/metrics"' in js("signal-panel.js") and '"/api/cad/metrics?view=squelch"' in js("squelch-panel.js")
+    assert '"/api/cad/metrics?view=spark"' in js("health.js")
+    assert "/api/cad/metrics" not in "".join(js(n) for n in JS_FILES if n not in ("signal-panel.js", "squelch-panel.js",
+                                                                                  "health.js"))
     assert '"/api/cad/stations"' in js("stations.js")
     assert "/api/cad/stations" not in scripts.replace(js("stations.js"), "")       # only its card reads it
     assert '"/api/cad/adapter-password"' in js("adapterpass.js")

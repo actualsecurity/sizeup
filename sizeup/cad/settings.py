@@ -62,6 +62,9 @@ Reset to default = drop the override (one item, or a whole section).
     alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
                                    silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
                                    Health, not pushed (#340; Settings > System > Push notifications, admins)
+    signal_metrics                 key "margin_db" | "miss_pct" | "shift_db" | "opens_x" | "rate_x" | "cc_drop_pct" -> a
+                                   number: the suggested squelch's margin and the shift warnings' thresholds (#606,
+                                   sizeup/cloud/metricsinsight.py; Settings > Radios > Signal, admins)
     radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}], names?: {source
                                    key: name}}: the Radio page rail's folders, set for the department, and the channels'
                                    display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
@@ -109,7 +112,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
-from sizeup.cloud import cwlogs
+from sizeup.cloud import cwlogs, metricsinsight
 from sizeup.cloud import health as health_mod
 from sizeup.geo.localaddr import parse_number, split_address
 from sizeup.geo.places import norm_tokens
@@ -186,6 +189,10 @@ PAGE_SECTION[FOLDERS_SECTION] = "radios"
 # -> a service; not set: automatic.
 SVC_SECTION = "radio_services"
 PAGE_SECTION[SVC_SECTION] = "radios"
+# The station metrics read back (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
+# warnings' thresholds, Settings > Radios > Signal, admins, audited as Radios. key -> a number (LIMITS); not set: DEFAULTS.
+SIGNAL_SECTION = metricsinsight.SECTION
+PAGE_SECTION[SIGNAL_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
 LOGS_SECTION = cwlogs.SECTION
@@ -685,6 +692,7 @@ class Editor:
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
         out["radio_emergencies"] = self.em_page(ov)
+        out["signal_metrics"] = self.signal_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
         out["station_logs"] = self.logs_page(ov)
@@ -934,6 +942,41 @@ class Editor:
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
+
+    def signal_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Signal (#606): the suggestion's margin and the shift thresholds, each with its default."""
+        e = ((self.overrides() if ov is None else ov).get(SIGNAL_SECTION) or {})
+        cur = metricsinsight.settings(e)
+        return {k: {"label": metricsinsight.LABELS[k], "value": cur[k], "default": d, "edited": k in e,
+                    "min": metricsinsight.LIMITS[k][0], "max": metricsinsight.LIMITS[k][1]}
+                for k, d in metricsinsight.DEFAULTS.items()}
+
+    @staticmethod
+    def _signal_value(key, v) -> float:
+        lo, hi = metricsinsight.LIMITS[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise CadError(f"{key}: {lo:g} to {hi:g}")
+        return round(float(v), 2)
+
+    def _signal_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins (sizeup/cad/api.py), audited as Radios."""
+        key = body.get("key")
+        if key not in metricsinsight.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(metricsinsight.DEFAULTS)}")
+        d = metricsinsight.DEFAULTS[key]
+        cur = metricsinsight.settings(self.section(SIGNAL_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            v = self._signal_value(key, body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        stored = self.section(SIGNAL_SECTION)
+        if (v == d and key not in stored) or (key in stored and stored[key] == v):
+            return {"ok": True, "signal_metrics": self.signal_page()}     # nothing changes: nothing to audit
+        out = self._commit([(SIGNAL_SECTION, key, REMOVE if v == d else v)], op,
+                           [("radios", f"{SIGNAL_SECTION}/{key}", f"{cur:g}", f"{v:g}")])
+        return {**out, "signal_metrics": self.signal_page()}
 
     def mapd_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Map display (#376): each zoom, its default and whether it is edited."""
@@ -1247,7 +1290,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -2224,7 +2267,9 @@ class Editor:
         return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
 
     def _squelch_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
+        refused unless that is what runs now: a suggestion applied from Settings > Radios > Squelch, #606) | reset {key}.
+        Audited."""
         ctx = self.cad.radio_ctx
         locked = ctx.channels_locked() if ctx is not None else ""
         if locked:
@@ -2234,6 +2279,15 @@ class Editor:
         dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
         if action == "set":
             self._squelch_editable(key)
+            exp = body.get("expect")
+            if exp is not None:                       # #606: applied from a suggestion worked out for what ran then
+                rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+                run = (rows.get(key) or {}).get("running") or {}
+                if not isinstance(exp, dict) or any(not isinstance(exp.get(f), (int, float)) or isinstance(exp.get(f), bool)
+                                                    or run.get(f) is None or abs(float(run[f]) - float(exp[f])) > 0.01
+                                                    for f in ("open_db", "close_db")):
+                    raise CadError(f"{key} now runs Open {run.get('open_db')} / Close {run.get('close_db')}: "
+                                   "not what the suggestion was for, look again")
             try:
                 vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
             except ValueError as e:
@@ -2251,12 +2305,18 @@ class Editor:
             before = {**dflt, **(ov.get(key) or {})}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
                                [("radios", f"squelch/{key}", before, eff)])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         elif action == "reset":
             key = _text(key, "key", 40)
             if key not in ov:
                 return {"ok": True}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
                                [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         else:
             raise CadError("action: set or reset")
         if ctx is not None:
@@ -3260,6 +3320,13 @@ class Editor:
                 e["prominent"] = em_value(e["prominent"])
             except CadError as x:
                 raise CadError(f"overrides.{EM_SECTION}.{x}") from None
+        for k, v in (ov.get(SIGNAL_SECTION) or {}).items():   # sizeup/cloud/metricsinsight.py (#606)
+            if k not in metricsinsight.DEFAULTS:
+                raise CadError(f"overrides.{SIGNAL_SECTION}: {', '.join(metricsinsight.DEFAULTS)} only")
+            try:
+                self._signal_value(k, v)
+            except CadError as x:
+                raise CadError(f"overrides.{SIGNAL_SECTION}.{x}") from None
         f = ov.get(FOLDERS_SECTION) or {}                     # the Radio page's folders (#607)
         if set(f) - {radiofolders.KEY}:
             raise CadError(f"overrides.{FOLDERS_SECTION}: {radiofolders.KEY} only")

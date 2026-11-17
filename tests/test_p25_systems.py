@@ -1143,7 +1143,7 @@ def test_the_hub_never_gives_another_systems_radio_a_rig_or_a_dispatcher(tmp_pat
     assert set(hub.channel_desired()["prefs"]) == {"tg:307"}
     hub.hub.status = {"p25_systems": []}
     assert "p25:mrrs:9211" in hub.channel_desired()["prefs"]
-    assert json.loads(hub.hub._state(json.dumps({"at": now}).encode())[1])["caps"] == ["p25_systems"]
+    assert json.loads(hub.hub._state(json.dumps({"at": now}).encode())[1])["caps"][:1] == ["p25_systems"]
 
 
 def test_the_station_keeps_context_out_of_an_older_hub_and_out_of_the_fire_audio_budget(tmp_path):
