@@ -248,6 +248,16 @@ def test_the_token_buckets_are_the_designs_reads_10_a_second_burst_30_writes_2_b
     assert lim.admit("d2", False) == 0 and lim.admit("d2", True) == 0    # another device: its own
 
 
+def test_a_head_is_limited_as_a_read_like_a_get():
+    v1 = V1(table([]), switches=Box(reads=True, writes=True).switches(), resolver=lambda h: DEVICE,
+            limits=Limits(clock=Clock()))
+    assert all(v1.respond("GET", "/api/v1/things", "", {})[0] == 200 for _ in range(30))     # the read burst, used up
+    assert v1.respond("GET", "/api/v1/things", "", {})[0] == 429
+    status, _, _, headers = v1.respond("HEAD", "/api/v1/things", "", {})
+    assert status == 429 and headers["Retry-After"] == "1"                 # a HEAD is a read: the same empty bucket
+    assert v1.respond("POST", "/api/v1/things", "", {})[0] == 200          # ... and not the writes' fresh one
+
+
 def test_the_limit_is_a_429_with_retry_after_and_the_envelopes_retry_after_s():
     clock = Clock()
     v1 = V1(table([]), switches=Box(reads=True, writes=True).switches(), resolver=lambda h: DEVICE,
@@ -399,7 +409,6 @@ def test_v1_does_not_ask_for_access_and_the_console_still_does():
 
 
 
-
 @pytest.mark.parametrize("path", ["/api/cad/whoami", "/api/cad/state", "/api/cad/nope"])
 def test_a_device_bearer_is_refused_on_the_console(path, tmp_path):
     from sizeup.cloud.access import Identity
@@ -431,16 +440,25 @@ def test_a_bearer_is_refused_by_the_console_on_a_real_hub_and_the_stations_still
     assert status == 401 and json.loads(body)["error"]["code"] == "unauthorized"        # a station bearer on v1: no
 
 
-def test_the_hub_reads_the_switch_from_the_config_on_every_request(tmp_path):
-    h = HubRun(hub_cfg(tmp_path))
+def test_the_hub_takes_its_switch_from_the_config_it_started_with_and_a_change_needs_a_restart(tmp_path):
+    """[mobile] enabled is read from the config once, at start (docs/cloud.md): a hub started with it off answers 404
+    for every v1 path but meta (a POST to meta included), and the same config started with it on is a different hub
+    (the POST to meta is then a 405: the route exists). Nothing else turns the switch on."""
+    off = HubRun(hub_cfg(tmp_path / "off"))
     try:
-        assert http(h.url, "/api/v1/nope")[0] == 404 and h.app.cfg.mobile_enabled is False
-        assert json.loads(http(h.url, "/api/v1/meta")[2])["features"] == {f: False for f in FEATURES}
-        object.__setattr__(h.app.cfg, "mobile_enabled", True)
-        status, _, body = http(h.url, "/api/v1/nope")
-        assert status == 404 and json.loads(body)["error"]["code"] == "not_found"
+        assert off.app.cfg.mobile_enabled is False
+        assert http(off.url, "/api/v1/nope")[0] == 404
+        assert http(off.url, "/api/v1/meta", "POST", data=b"{}")[0] == 404
+        assert json.loads(http(off.url, "/api/v1/meta")[2])["features"] == {f: False for f in FEATURES}
     finally:
-        h.close()
+        off.close()
+    on = HubRun(hub_cfg(tmp_path / "on", mobile_enabled=True))               # the restart, with the config changed
+    try:
+        status, headers, _ = http(on.url, "/api/v1/meta", "POST", data=b"{}")
+        assert status == 405 and headers["Allow"] == "GET"
+        assert http(on.url, "/api/v1/meta")[0] == 200
+    finally:
+        on.close()
 
 
 # -- config -----------------------------------------------------------------------------------------------------
@@ -458,9 +476,14 @@ def test_mobile_is_off_without_a_section_and_the_shipped_configs_say_off():
     assert "[mobile]" not in (ROOT / "deploy" / "station" / "config.station.toml").read_text()
 
 
-def test_mobile_section_enables_and_bounds(tmp_path):
-    c = conf(tmp_path, '[cloud]\nrole = "hub"\n[mobile]\nenabled = true\nmax_requests = 4\nmax_streams = 0\n')
-    assert (c.mobile_enabled, c.mobile_max_requests, c.mobile_max_streams) == (True, 4, 0)
+@pytest.mark.parametrize("requests, streams", [(4, 0), (1, 64), (64, 64), (8, 16)])
+def test_mobile_section_enables_and_accepts_the_bounds(tmp_path, requests, streams):
+    c = conf(tmp_path, f'[cloud]\nrole = "hub"\n[mobile]\nenabled = true\nmax_requests = {requests}\n'
+                       f'max_streams = {streams}\n')
+    assert (c.mobile_enabled, c.mobile_max_requests, c.mobile_max_streams) == (True, requests, streams)
+
+
+def test_mobile_defaults_and_no_section(tmp_path):
     assert conf(tmp_path, "[mobile]\n").mobile_enabled is False
     assert conf(tmp_path, "").mobile_enabled is False
 

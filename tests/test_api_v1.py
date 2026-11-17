@@ -97,6 +97,16 @@ def test_meta_answers_and_validates_against_the_spec(hub):
     assert "no-store" in headers["Cache-Control"]
 
 
+def test_head_is_a_get_without_its_body(hub):
+    g_status, g_headers, g_body = call(hub, "/api/v1/meta")
+    h_status, h_headers, h_body = call(hub, "/api/v1/meta", "HEAD")
+    assert (g_status, h_status) == (200, 200) and g_body and h_body == b""
+    volatile = {"Date", "Server-Timing", "Content-Length"}               # the clock moves; the body is not sent
+    assert {k: v for k, v in h_headers.items() if k not in volatile} == \
+        {k: v for k, v in g_headers.items() if k not in volatile}
+    assert h_headers["Content-Type"].startswith("application/json") and "no-store" in h_headers["Cache-Control"]
+
+
 def test_every_error_is_the_one_envelope(hub):
     for method, path, who, want in [("GET", "/api/v1/nope", "person@example.org", 404),
                                     ("POST", "/api/v1/meta", "person@example.org", 405),
