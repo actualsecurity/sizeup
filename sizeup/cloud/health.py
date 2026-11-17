@@ -17,6 +17,11 @@ notice when it clears:
     dup:<serial>  two or more dongles on the station share one serial (#242): nothing of  critical
                   ours opens that serial until one is renamed (sizeup-station sdr-serial)
     job:<job>     a dongle's job (a channel) not running for JOB_GRACE_S                   critical
+    group:<name>  an antenna group short of dongles for JOB_GRACE_S (sizeup/radio/groups.py): warning
+                  the jobs of its mapping left without one (its stand-ins run the higher ones); or
+                  listing a job no dongle has as its own; or a dongle running a job against it
+                  (kept at startup: a fire job is never turned off by a lock)
+    group         the station's antenna groups file unreadable: dropped, every dongle unlocked     warning
     whisper       speech-to-text (whisper-server) down for down_min (2)                    warning
     recorder      trunk-recorder down for down_min while its dongle job is on              critical
     stuck:<chan>  a channel's squelch open without a break (#116's flag)                   warning
@@ -170,7 +175,7 @@ def hub_own(key: str) -> bool:
 MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
 # The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
-              "job": "Channel not running", "sdr": "SDR gone", "dup": "Duplicate dongle serial",
+              "job": "Channel not running", "sdr": "SDR gone", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
               "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
@@ -641,10 +646,24 @@ class StationHealth:
                             "present": bool(d.get("present")), "job": job, "set_by": d.get("set_by"),
                             "held_by": d.get("held_by"), "ambiguous": str(d.get("ambiguous") or "")[:300],
                             "context": bool(js.get("context")),      # another P25 system's job (#409): never an alert
+                            # its antenna group; a stand-in's own job; the stand-in its own job runs on
+                            "group": str(d.get("group") or "")[:40], "own": str(d.get("own") or "")[:40],
+                            "on": str(d.get("on") or "")[:64],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
                             "detail": str(js.get("detail") or "")[:200]})
         out["dongles"] = dongles
+        names = {d["serial"]: d["name"] for d in dongles}
+        out["groups"] = [{"name": str(g.get("name") or "")[:40],
+                          "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
+                          "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
+                          "short": [str(j)[:40] for j in g.get("short") or []][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []][:24],
+                          "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
+                                        for s, j in list((g.get("conflicts") or {}).items())[:16]}
+                          if isinstance(g.get("conflicts"), dict) else {}}
+                         for g in (sdr or {}).get("groups") or [] if isinstance(g, dict)][:8]
+        out["groups_problem"] = str((sdr or {}).get("groups_problem") or "")[:200]
         rx = hl.get("reception") if isinstance(hl.get("reception"), dict) else None      # (#410)
         out["reception"] = ({"job": str(rx.get("job") or "")[:60], "sdr": str(rx.get("sdr") or "")[:60],
                              "text": str(rx.get("text") or "")[:300], "push": bool(rx.get("push")),
@@ -902,14 +921,27 @@ class StationHealth:
             if d.get("context"):
                 continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
+                on = next((x["name"] for x in m["dongles"] if x["serial"] == d.get("on")), "") if d.get("on") else ""
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
                                                "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"
-                                                       + (f" · {d['job']} not running" if d["job"] != "Off" else "")})
+                                                       + (f" · {d['job']} on SDR {on} ({d['group']})" if on else
+                                                          f" · {d['job']} not running" if d["job"] != "Off" else "")})
             elif d["job"] != "Off" and not d["running"] and (d["job"] != P25_JOB or m["processes"]["recorder"] is None):
                 held(f"job:{d['job']}", JOB_GRACE_S, {"severity": "critical", "title": f"{d['job']} not running",
                                                      "text": f"{d['job']} on SDR {d['name']}: {d['state'] or '?'}"
                                                              + (f" ({d['detail']})" if d["detail"] else "")
                                                              + (f", {d['restarts']} restarts" if d["restarts"] else "")})
+        for g in m.get("groups") or []:
+            bits = ([f"{g['usable']} of {len(g['sdrs'])} SDRs · not running: {', '.join(g['short'])}"] if g["short"]
+                    else []) + [f"SDR {s} runs {j} against the group (kept)" for s, j in g["conflicts"].items()] + (
+                [f"no dongle has {', '.join(g['unowned'])}"] if g["unowned"] else [])
+            if bits:
+                held(f"group:{g['name']}", JOB_GRACE_S, {
+                    "severity": "warning", "title": f"Antenna group {g['name']} " + ("short" if g["short"] else "check"),
+                    "text": " · ".join(bits)})
+        if m.get("groups_problem"):
+            out["group"] = {"severity": "warning", "title": "Antenna groups dropped",
+                                 "text": f"{m['groups_problem']} · every dongle unlocked until saved again", "since": now}
         if not m["shared"]:                              # one dongle per channel: each channel is a job
             hl_jobs = ((self.hub.status or {}).get("health") or {}).get("jobs") or {}
             for c in m["channels"]:
@@ -1169,6 +1201,11 @@ class StationHealth:
             d = next((d for d in m["dongles"] if d["job"] == arg), None)
             if d:
                 w["dongle"] = f"SDR {d['name']}"
+        elif kind == "group":
+            g = next((g for g in m.get("groups") or [] if g["name"] == arg), None)
+            w["dongle"] = f"antenna group {arg}" if arg else "antenna groups"
+            if g and (g["short"] or g["unowned"]):
+                w["channel"] = ", ".join(g["short"] or g["unowned"])
         elif kind == "stuck":
             w["channel"] = next((c["name"] for c in m["channels"] if c["label"] == arg), arg)
         elif kind == "dup":

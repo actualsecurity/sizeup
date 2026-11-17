@@ -314,11 +314,17 @@ const StationHealth = (() => {
       dupe.title = "deploy/station/README.md \"Two dongles, one serial\"";
       kids.push(dupe);
     }
-    kids.push(table(["SDR", "Serial", "Plugged in", "Job", "Running", "Restarts", "Detail"],
-      (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.job,
+    kids.push(table(["SDR", "Serial", "Plugged in", "Group", "Job", "Running", "Restarts", "Detail"],
+      (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
+        x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
         [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
         x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));
+    if ((h.groups || []).length) {       // antenna groups (sizeup/radio/groups.py): short of dongles, what doesn't run
+      kids.push(table(["Antenna group", "SDRs", "Jobs (priority)", "Not running"], h.groups.map((g) => [g.name,
+        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""], g.jobs.join(" › "),
+        [g.short.join(", ") || "—", g.short.length ? "hl-bad" : "dim"]]), ""));
+    }
     if ((h.usb || []).length) {
       const dup = new Set((h.duplicates || []).map((x) => x.serial));
       kids.push(table(["Index", "Serial", "Product"], h.usb.map((u) => [`#${u.index}`, [u.serial || "(none)", dup.has(u.serial) ? "hl-bad" : ""],

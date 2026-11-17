@@ -123,6 +123,10 @@ class Env:
         clips = Path(str(self.conf().get("storage", {}).get("clips_dir", "captures/clips")))
         return (clips if clips.is_absolute() else Path(self.state) / clips).parent / "sdr_modes.json"
 
+    def groups_file(self) -> Path:
+        """antenna_groups.json (sizeup/radio/groups.py): next to sdr_modes.json."""
+        return self.modes_file().with_name("antenna_groups.json")
+
     def products_file(self) -> Path:
         return self.modes_file().with_name("sdr_products.json")
 
@@ -198,7 +202,7 @@ class Ref:
     where: str          # where it is ("sdr_modes.json", "config.toml [radio] sdr_names", ...)
     what: str           # what it says
     fix: str            # what to set for the new serial
-    state: str = ""     # "modes" | "adsb": one of sizeup's own state files, updated by this tool when certain
+    state: str = ""     # "modes" | "adsb" | "groups": one of sizeup's own state files, updated by this tool when certain
 
 
 def references(env: Env, old: str, new: str) -> list[Ref]:
@@ -206,6 +210,11 @@ def references(env: Env, old: str, new: str) -> list[Ref]:
     modes = _read_json(env.modes_file())
     if old in modes and isinstance(modes.get(old), str):
         out.append(Ref(str(env.modes_file()), f"{old} runs {modes[old]}", f"the job {modes[old]} under {new}", "modes"))
+    gs = _read_json(env.groups_file()).get("groups")
+    for g in gs if isinstance(gs, list) else []:
+        if isinstance(g, dict) and isinstance(g.get("sdrs"), list) and old in g["sdrs"]:
+            out.append(Ref(str(env.groups_file()), f"{old} is in antenna group {g.get('name')}",
+                           f"{new} in antenna group {g.get('name')}", "groups"))
     ad = _read_json(env.adsb_file())
     if ad.get("sdr") == old:
         out.append(Ref(str(env.adsb_file()), f"the ADS-B receiver is {old}", f"the ADS-B receiver {new}", "adsb"))
@@ -267,6 +276,15 @@ def move_state(env: Env, refs: list[Ref], old: str, new: str) -> list[str]:
                 by[new] = by.pop(old)
             _write_json(p, d)
             done.append(f"{p}: the job {d[new]} moved from {old} to {new}")
+    if any(r.state == "groups" for r in refs):
+        # (else the next start would find the job moved above on a dongle outside its group: App._lock_saved)
+        p = env.groups_file()
+        d = _read_json(p)
+        for g in d.get("groups") if isinstance(d.get("groups"), list) else []:
+            if isinstance(g, dict) and isinstance(g.get("sdrs"), list) and old in g["sdrs"]:
+                g["sdrs"] = [new if s == old else s for s in g["sdrs"]]
+                done.append(f"{p}: {new} is in antenna group {g.get('name')} instead of {old}")
+        _write_json(p, d)
     if any(r.state == "adsb" for r in refs):
         p = env.adsb_file()
         d = _read_json(p)
