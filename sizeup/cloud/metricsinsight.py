@@ -186,7 +186,7 @@ def _when(t: float, now: float) -> str:
     """"14:05" today, "Nov 15 14:05" on another day (the console's time zone)."""
     if tz.clock(t, "%Y-%m-%d") == tz.clock(now, "%Y-%m-%d"):
         return tz.hhmm(t)
-    return tz.clock(t, "%b %d %H:%M").replace(" 0", " ", 1)
+    return f"{tz.clock(t, '%b')} {int(tz.clock(t, '%d', '0'))} {tz.hhmm(t)}"
 
 
 def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: float = SUGGEST_DAYS * 86400.0,

@@ -539,7 +539,8 @@ def test_since_says_the_day_for_an_event_before_today():
     from sizeup import tz
     assert mi._when(NOW - 60, NOW) == tz.hhmm(NOW - 60)
     old = NOW - 2 * DAY
-    assert mi._when(old, NOW) == tz.clock(old, "%b %d %H:%M").replace(" 0", " ", 1) and len(mi._when(old, NOW)) > 5
+    assert mi._when(old, NOW) == f"{tz.clock(old, '%b')} {int(tz.clock(old, '%d'))} {tz.hhmm(old)}"
+    assert mi._when(1798967100.0, NOW) == "Jan 3 04:05"                # the day without its 0, the hour with it
 
 
 def test_apply_is_refused_unless_the_squelch_it_was_for_still_runs_and_a_reset_forgets_it(tmp_path):
