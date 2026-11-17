@@ -35,6 +35,9 @@ GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           street | place | milemarker | exit), label, sub (town), lat, lon, source,
                                           category?, detail?, route?, dir?, value?, at?, score}]}, our towns first, then
                                           nearest to near (else the event iid's point); read only: viewers too
+GET  /api/cad/places/map                  the maps' Common places layer: the department's located place names as
+                                          GeoJSON, one point per spot (a site at its primary, all its addresses);
+                                          ETag (304), the state's places_rev moves with them; read only: viewers too
 GET  /api/cad/runcards                    run cards
 GET  /api/cad/airport                     the Airport map layer (#87): data/khpn_airport.geojson, with "airport" (where the
                                           field is) and "sources"; {} when the file isn't there
@@ -431,7 +434,7 @@ WRITES = (
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
-    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver)"), "admin"),   # the station's radios (server.py)
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver|antenna-groups)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
 MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
@@ -695,6 +698,10 @@ DOES = (
         else "Reception test stopped" if b.get("action") == "stop" else "Reception test: antenna note", "")),
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
+    (re.compile(r"/api/antenna-groups"), lambda m, b, o, c: ("Antenna groups: " + (_clip("; ".join(
+        f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))})"
+        for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
+        + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )
@@ -1181,6 +1188,9 @@ class CadApi:
                 return _json(200, self.cad.tts_voices())
             if path == "/api/cad/places":
                 return _json(200, self.cad.search_places(parse_qs(query)))
+            if path == "/api/cad/places/map":
+                body, etag = self.cad.places_map()
+                return 200, body, JSON, {"ETag": etag, "Cache-Control": "private, no-cache"}
             if path == "/api/cad/geocode":
                 return _json(200, self.cad.geocode((parse_qs(query).get("q") or [""])[0]))
             if path == "/api/cad/geocode/here":

@@ -276,6 +276,10 @@
   .rw-notice a { color: var(--text); }
   .rw-group .ml-fold { margin-block-start: var(--s-1); }
   .rw-info { font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  /* common-places.js: a spot's names, each with its addresses */
+  .cp-group { display: flex; flex-direction: column; }
+  .cp-info .cp-name { margin-block-start: var(--s-1); }
+  .cp-info .cp-name:first-child { margin-block-start: 0; }
   .rw-link a { color: var(--info); }
 
   .ml-cam-dialog { inline-size: min(48rem, 100%); }
