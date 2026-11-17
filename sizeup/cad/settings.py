@@ -3313,4 +3313,6 @@ class Editor:
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
+        if getattr(self.cad, "intel", None) is not None and any(c["store"] in INTEL_SECTIONS for c in changes):
+            self.cad.intel.reload()          # the intel switches (push, push_pii, the caps) live now, as after their own op
         return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

@@ -3,8 +3,9 @@ layer's, PR 5), the console card's state, Dismiss and feedback.
 
 Settings sections (audited as "system", exported like any setting):
 
-    intel         {enabled, push (the kill switch), per_hour, per_day, per_category_hour, repush_min, max_repush,
-                   quiet_from, quiet_to, digest_min}  (sizeup/intel/policy.py DEFAULTS)
+    intel         {enabled, push (the kill switch), push_pii (no PII scrub on intel pushes), per_hour, per_day,
+                   per_category_hour, repush_min, max_repush, quiet_from, quiet_to, digest_min}
+                   (sizeup/intel/policy.py DEFAULTS)
     intel_packs   pack -> {mode, threshold, window_s, categories: {category: {mode, priority, ttl_min}}}
     intel_rules   rule id -> {mode, w, enabled}; "local.<name>": an admin's own rule {pack, category, any, not?, w, mode}
 

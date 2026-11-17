@@ -359,10 +359,15 @@ def test_the_scrub_fails_closed(label, forbidden, why):
     assert push_mod.scrub(push_mod.compose(ev, "PD", {"label": "Weapon / shots"}), forbidden) == why
 
 
-def test_a_scrubbed_push_is_withheld_and_said_so():
+@pytest.mark.parametrize("pii", [True, False])
+def test_a_scrubbed_push_is_withheld_and_said_so(pii):
+    """push_pii off: the scrub as it always was (pinned). On (the default): the same push goes, the name in it. The
+    locator's own check (a label naming the talker is no place) is the same either way."""
+    off = {"intel": {"push_pii": pii}}
+
     def bad_locate(text, scope):
         return Place("landmark", 41, -73, 75, "Officer Sample Park, Rye", "Rye", True, 0.9)
-    e, sink = engine(locate=bad_locate)
+    e, sink = engine(off, locate=bad_locate)
     [ev] = e.feed(row("t1", "shots fired by the park", 1000, talker="Officer Sample"))
     assert ev.precision == "none"                                    # a label naming the talker is no place (L7)
     [(_e, d)] = sink.pushes
@@ -370,10 +375,73 @@ def test_a_scrubbed_push_is_withheld_and_said_so():
 
     def bad_town(text, scope):
         return Place("landmark", 41, -73, 75, "Example Park", "Officer Sample", True, 0.9)
-    e, sink = engine(locate=bad_town)
+    e, sink = engine(off, locate=bad_town)
     [ev] = e.feed(row("t1", "shots fired by the park", 1000, talker="Officer Sample"))
     [(_e, d)] = sink.pushes
-    assert not d.would_push and d.suppressed == "scrub" and ev.suppressed == "scrub" and ev.pushed_at is None
+    if pii:
+        assert d.would_push and d.suppressed == "" and ev.suppressed == "" and ev.pushed_at == 1050.0
+        assert d.message["title"] == "PD · Weapon / shots · Officer Sample"
+        assert d.message["body"].startswith("Example Park · ")
+    else:
+        assert not d.would_push and d.suppressed == "scrub" and ev.suppressed == "scrub" and ev.pushed_at is None
+        assert d.message is None
+
+
+def test_push_pii_is_on_by_default():
+    from sizeup.intel import policy as policy_mod
+    assert policy_mod.DEFAULTS["push_pii"] is True and "push_pii" in policy_mod.BOOLS
+    e, _sink = engine()
+    assert e.policy.cfg["push_pii"] is True
+    assert engine({"intel": {"push_pii": False}})[0].policy.cfg["push_pii"] is False
+    assert engine({"intel": {"push_pii": "no"}})[0].policy.cfg["push_pii"] is True       # not a bool: the default
+
+
+@pytest.mark.parametrize("label, why", [
+    ("ABC1234 Example Ave", "plate"),
+    ("ABC 1234 Example Ave", "plate"),
+    ("1234567 Example Ave", "radio_id"),
+    ("DOB 01/02/1990 Example Ave", "date"),
+])
+def test_push_pii_on_lets_pii_through_and_off_withholds_it(label, why):
+    """A push whose text holds a plate, a radio ID or a date: on, it is sent as composed (the token in it); off, it is
+    withheld by the scrub exactly as before (suppressed "scrub", logged without the text)."""
+    sent = {}
+    for pii in (True, False):
+        logs = []
+        e = IntelEngine(settings={"intel": {"push_pii": pii}}, events=MemoryEvents(), sink=RecordingSink(), locate=None,
+                        thread=False, clock=Clock(), log=logs.append)
+        ev = e.events.save(Event(domain="police", pack="police", category="weapons", precision="landmark",
+                                 label_full=label, town="Rye", confirmed=True, first_at=1000.0, last_at=1000.0,
+                                 level="high", priority=5, mode="push", status="open"))
+        e._after(e.pack("police"), ev, "raised", 1050.0, None)
+        [(_e, d)] = e.sink.pushes
+        sent[pii] = (d, ev, logs)
+    d, ev, _logs = sent[True]
+    assert d.would_push and ev.pushed_at == 1050.0 and ev.suppressed == ""
+    assert d.message == push_mod.compose(ev, "PD", e.pack("police").category("weapons"))
+    assert d.message["title"] == "PD · Weapon / shots · Rye" and d.message["body"].startswith(f"{label} · ")
+    d, ev, logs = sent[False]
+    assert not d.would_push and d.suppressed == "scrub" and d.message is None
+    assert ev.suppressed == "scrub" and ev.pushed_at is None and ev.push_count == 0
+    assert logs == [f"intel: push of event {ev.id} withheld by the scrub ({why})"]          # never the text
+    assert label not in " ".join(logs)
+
+
+def test_a_clean_push_is_the_same_whatever_push_pii_says():
+    """The allow-list is the same either way: no transcript words, talker or radio ID are added with push_pii on."""
+    out = []
+    for pii in (False, True):
+        e, sink = engine({"intel": {"push_pii": pii}})
+        e.public_url = "https://sizeup.example.org"
+        e.feed(row("t1", "respond to 100 Example Ave, caller Jane Example reports smoke coming from the house", 1000,
+                   talker="Officer Example", radio_id="7654321"))
+        [d] = [d for _x, d in sink.pushes if d.would_push]
+        out.append(d.message)
+    assert out[0] == out[1]
+    m = out[0]
+    assert m["title"] == "PD · Smoke / fire reported · Port Chester" and m["body"].startswith("100 Example Ave · ")
+    for word in ("jane", "caller", "officer", "7654321"):
+        assert word not in json.dumps(m).lower()
 
 
 # -- the locator: police tokens never read as house numbers; 266 stays police ---------------------------------------
@@ -623,6 +691,72 @@ def test_settings_change_modes_caps_and_rules_audited_and_checked(rig):
             "intel_rules/local.knife"} <= keys
     ex = cad.settings_export()
     assert "intel_rules" in ex["overrides"]
+
+
+def test_push_pii_is_an_admins_setting_audited_and_exported(rig):
+    cad, api = rig
+    post = lambda b, who=CASEY: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
+    code, out = get(api, "/api/cad/intel")
+    assert code == 200 and out["settings"]["push_pii"] is True and out["defaults"]["push_pii"] is True
+    assert post({"action": "set", "key": "push_pii", "value": False}, JORDAN)[0] == 403      # admins only
+    assert post({"action": "set", "key": "push_pii", "value": "off"})[0] == 400
+    assert cad.intel.policy.cfg["push_pii"] is True
+    code, out = post({"action": "set", "key": "push_pii", "value": False, "operator": "Casey"})
+    assert code == 200 and out["intel"]["settings"]["push_pii"] is False and cad.intel.policy.cfg["push_pii"] is False
+    [a] = [a for a in cad.settings_audit_log({"section": ["system"]})["audit"] if a["key"] == "intel/push_pii"]
+    assert json.loads(a["old"]) is True and json.loads(a["new"]) is False
+    ex = cad.settings_export()
+    assert ex["overrides"]["intel"]["push_pii"] is False
+    assert post({"action": "set", "key": "push_pii", "value": True})[0] == 200         # back to the default: no override
+    assert "push_pii" not in cad.settings_export()["overrides"].get("intel", {})
+    assert cad.intel.policy.cfg["push_pii"] is True
+    assert post({"action": "set", "key": "push_pii", "value": False})[0] == 200
+    assert post({"action": "reset", "what": "set", "key": "push_pii"})[0] == 200
+    assert cad.intel.policy.cfg["push_pii"] is True
+    keys = [a["key"] for a in cad.settings_audit_log({"section": ["system"]})["audit"]]
+    assert keys.count("intel/push_pii") == 4
+    # the export round-trips, and an import is live at once (the engine reloads)
+    assert post({"action": "set", "key": "push_pii", "value": False})[0] == 200
+    ex = cad.settings_export()
+    assert post({"action": "set", "key": "push_pii", "value": True})[0] == 200 and cad.intel.policy.cfg["push_pii"] is True
+    code, out = call(api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, CASEY)
+    assert code == 200, out
+    assert any(c["store"] == "intel" and c["key"] == "push_pii" for c in out["changes"])
+    assert cad.intel.policy.cfg["push_pii"] is False
+
+
+def test_airport_alert_pushes_are_byte_identical_whatever_push_pii_says(tmp_path):
+    """push_pii is the INTEL kind's only: the airport pre-alerts (ALERTS) were never scrubbed and send the same bytes
+    with it on or off. Invented transmission, plate and name."""
+    from sizeup.cad.airport_alerts import AirportAlert
+
+    class Alerts:
+        enabled = True
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, *a, **kw):
+            self.sent.append(json.dumps([a, kw], sort_keys=True).encode())
+            return True
+
+    out = {}
+    for pii in (True, False, True):
+        cad = make_cad(tmp_path / f"c{len(out)}")
+        people(cad)
+        cad.airport_alerts.public_url = "https://sizeup.example.org"
+        n = cad.airport_alerts.notifier = Alerts()
+        code, _ = call(CadApi(cad), "/api/cad/settings/intel", {"action": "set", "key": "push_pii", "value": pii}, CASEY)
+        assert code == 200 and cad.intel.policy.cfg["push_pii"] is pii
+        cad.airport_alerts.raise_alert(AirportAlert(
+            "atc", "fire_off", "fire:example", "HPN ATC: possible brush fire off runway 16", confidence=0.85,
+            channel="HPN Tower", snippets=[{"id": "a1", "at": cad.clock(), "channel": "HPN Tower",
+                                            "text": "N123AB smoke off the end, pilot John Example, tag ABC1234",
+                                            "hits": [], "context": False}]))
+        [b] = n.sent
+        out[len(out)] = b
+    assert out[0] == out[1] == out[2]
+    assert b"ABC1234" in out[0] and b"John Example" in out[0]         # unscrubbed, as always
 
 
 def test_the_section_is_in_settings_system_and_the_card_is_on_the_console():
