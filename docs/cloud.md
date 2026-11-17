@@ -103,6 +103,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [Source keys (#415)](#source-keys-415)
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
+  - [The rail's folders (#607)](#the-rails-folders-607)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -2619,6 +2620,33 @@ An emergency button on someone else's talkgroup is recorded, kept, alarmed and p
 | Never quiet | ours (our fire channels, our rigs, scene safety); a full alarm's window; a window one of our rigs keyed; a row or source whose service isn't known |
 
 Presentation only. Tests: `tests/test_radio_emergency.py`.
+
+### The rail's folders (#607)
+
+> "the radio rail grouping, id like those to be editable by the user, so we can group them in specific ways? or edit
+> the names of folders/etc? we can leave the initial, but the rest should be customizable. and order etc. and also the
+> folders should be able to tab to show all or minimize"
+
+`sizeup/cad/radiofolders.py`, `static/radio-nav.js`.
+
+The rail's channel tree is headings and folders. **Default (the automatic grouping):** a heading per system (County,
+another P25 system such as Metro, Analog, Airband), a folder per group under it (a talkgroup's `Tag` in its
+trunk-recorder `talkgroups.csv`; `Analog` and `Airband` for the FM and airband channels), the channels in the hub's
+order (ours first, then by name). A heading with one folder of its own name (Analog, Airband) is shown once.
+
+| | |
+|---|---|
+| **Edit** (on the rail, admins) | rename, add (**+ Folder**), delete an empty folder, the **heading** over a folder (folders in a row with the same heading share it; blank: none), drag a folder or a channel by its ⠿ (desktop), or ▲ ▼ and **Move to** (touch, keyboard). **Reset**: the automatic grouping. Nothing changes until **Save**; **Cancel** drops the draft |
+| Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written |
+| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept |
+| Stored | `{folders: [{id, name, section, items: [source keys]}], names?: {source key: name}}`. `id`: `d:<system>:<group>` (a default folder, renamed or moved) or `u:<random>` (made by an admin) |
+| A channel in no folder | a talkgroup heard for the first time, one never placed: its default folder (`d:<system>:<group>`) if listed, else that folder made again after the last folder under its heading. **Nothing ever drops off the rail** |
+| A key with no source now | kept, not shown (a talkgroup not heard lately comes back where it was); one that isn't a source key, or a channel listed twice: dropped (the first folder wins), not an error |
+| Who sees it | everyone with the rail on. The folders come with the tree (`GET /api/cad/comms/sources`: `folders`, null for the default); a reader who may not see another system's traffic ([Who sees it](#who-sees-it)) gets none of its keys, and no folder that held only those. The state push carries their rev (`radio_folders`): every open rail asks for the tree again when an admin saves |
+| **Fold** (every viewer) | a folder's head shows all / minimizes it; ⊟ / ⊞ minimizes / shows them all. Folded: its name, how many channels, the new calls, an emergency (as its channels show one) and a live dot (not for a muted channel). The channel on screen stays under its folded folder. Remembered per browser (`localStorage` `sizeup.cad.radio.nav`, `folds`), never on the hub |
+
+Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
+folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 

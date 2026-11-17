@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
+from sizeup.cad import airport, dispatcher, eta, export, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
@@ -224,6 +224,7 @@ class Cad:
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
+        self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -302,6 +303,7 @@ class Cad:
         # hub: the station's), and each P25 system's label ({name: label}). Without them: what the log itself says.
         self.source_rows: Callable[[], list[dict]] = lambda: []
         self.source_systems: Callable[[], dict[str, str]] = lambda: {}
+        self.source_freqs: Callable[[], dict[str, str]] = lambda: {}      # an FM / airband channel's MHz, by its label
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at, heading?, speed?, source?}}
         # from a future AVL feed (IamResponding, Red Alert, an iPad app; #358). The single input: no provider sets
         # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
@@ -459,6 +461,9 @@ class Cad:
                         "channels": sorted(self.atc_talkers.channels)},
                 # Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page
                 "radio_emergencies": {"prominent": list(self.em_prominent)},
+                # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
+                # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
+                "radio_folders": radiofolders.rev(self.radio_folders),
             })
         st = self._state[1]
         now = self.clock()
@@ -1852,8 +1857,9 @@ class Cad:
     def comms_sources(self, q: dict | None = None) -> dict:
         """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
         [{key, system, system_label, group, name, service, tier, ours, mutable, encrypted, department, talkgroup, last,
-        counts, emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
-        the same (the page asks every few seconds).
+        counts, emergency, stuck, mhz}], folders: {rev, folders, names?} | null}. mhz: an FM / airband channel's
+        frequency (its hover, #607), null for a talkgroup. ?rev= a tree's rev: {unchanged: true, rev, live}
+        while nothing was logged and the minute is the same (the page asks every few seconds).
 
         A source: every one in the log or the activity table, and every known talkgroup that is ours, was heard, or is
         another system's with a tier that isn't off. last: when it was last heard (unix). live: the sources transmitting
@@ -1861,11 +1867,13 @@ class Cad:
         counts and the time bar come from these: no per-viewer state here). emergency: "ours" | "other": an emergency
         on it not yet cleared (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
         was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
-        sources."""
+        sources. folders: the admins' folders for the tree (#607, sizeup/cad/radiofolders.py; null: the automatic
+        grouping), without another system's keys for such a reader."""
         context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
-        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}"
+        folders = self.radio_folders
+        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{radiofolders.rev(folders)}"
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -1882,6 +1890,10 @@ class Cad:
             county = sourcekeys.COUNTY
             labels = {"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}}
             info = {str(r.get("source")): r for r in self.source_rows() if r.get("source")}
+            try:
+                freqs = self.source_freqs()
+            except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the tree
+                freqs = {}
             seen = {r["source"]: r for r in self.comms.sources_seen()}
             counts = self.comms.minute_counts(now)
             ems = self.comms.emergencies(now)
@@ -1912,7 +1924,8 @@ class Cad:
                             "mutable": not (ours or (svc == "fire" and system in sourcekeys.OURS_SYSTEMS)),
                             "department": str(i.get("department") or ""), "talkgroup": got[1] if got else None,
                             "last": last, "counts": counts.get(key) or [], "emergency": em.get("emergency", ""),
-                            "stuck": em.get("stuck", "")})
+                            "stuck": em.get("stuck", ""),
+                            "mhz": None if got else freqs.get(key.split(":", 1)[-1])})
             order = {"analog": 1, "airband": 3}
             out.sort(key=lambda r: (0 if r["system"] == county else order.get(r["system"], 2), r["system"],
                                     not r["ours"], r["group"], r["name"]))
@@ -1921,7 +1934,16 @@ class Cad:
         live_keys = sorted(live & shown)
         if q and (q.get("rev") or [""])[0] == rev:
             return {"unchanged": True, "rev": rev, "live": live_keys}
-        return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1]}
+        return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1],
+                "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
+                                                   hidden_labels=self.context_labels())}
+
+    def context_labels(self) -> list[str]:
+        """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""
+        try:
+            return [str(v) for k, v in self.source_systems().items() if k not in sourcekeys.OURS_SYSTEMS]
+        except Exception:  # noqa: BLE001 - a heading's name, never in the way of the tree
+            return []
 
     def feed_query(self, q: dict) -> dict:
         """GET /api/cad/feed?limit=&tg=307,333: the 60 Control feed (default: the data file's talkgroups)."""

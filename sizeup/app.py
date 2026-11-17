@@ -597,6 +597,8 @@ class App:
         # system's label (the county's is its name: it has none of its own)
         self.cad.source_rows = self.talkgroups_state
         self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
+        # ... and each FM / airband channel's frequency, for its hover there (#607)
+        self.cad.source_freqs = lambda: {c.label: f"{c.mhz:g}" for c in self.cfg.channels}
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
