@@ -105,11 +105,15 @@ INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
-# a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place")
+# a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
+# house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
+# other content word ("suspicious", "vehicle", "also ... when you clear") makes the row another job's.
 READBACK_WORDS = frozenset({"copy", "copied", "that's", "thats", "that", "that'll", "is", "it's", "its", "it", "going",
                             "gonna", "to", "be", "correction", "correct", "repeat", "again", "the", "address", "at", "uh",
                             "um", "ok", "okay", "yeah", "yes", "roger", "10", "4", "sorry", "make", "number", "of",
-                            "on", "in", "dispatch", "advised"})
+                            "on", "in", "dispatch", "advised",
+                            "house", "home", "apartment", "apt", "residence", "building", "caller", "caller's",
+                            "callers"})
 STOP_JOIN_S = 1.0                      # stop(): how long the thread may take to finish the row in hand
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
                           "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
@@ -868,7 +872,11 @@ class IntelEngine:
     def _address_only(entry) -> bool:
         """The row is the address and nothing else: its place's words (number, street, town), street words, the units
         it names and READBACK_WORDS. Anything more ("they have a suspicious vehicle", "also ... when you clear") is
-        another job's, never the held call's read-back."""
+        another job's, never the held call's read-back.
+        A known gap: the dispatcher's next job said as a bare address ("21 Sample Street, Port Chester.") by the same
+        talker within RELEASE_S reads exactly like a read-back and places the held call there. The words can't tell
+        them apart; the one cheap guard is _unplaced's: an address outside the source's towns stays held
+        ("out_of_area"), never pushed."""
         if entry.place is None or not entry.place.label:
             return False
         ok = set(rules_mod.words(entry.place.label)) | STREET_WORDS | READBACK_WORDS

@@ -16,6 +16,7 @@ import pytest
 from sizeup import notify
 from sizeup.geo.gazetteer import SCHEMA, Gazetteer
 from sizeup.intel import place as place_mod
+from sizeup.intel import rules as rules_mod
 from sizeup.intel.engine import IntelEngine, RecordingSink
 from sizeup.intel.events import MemoryEvents
 from sizeup.intel.model import Place
@@ -437,3 +438,91 @@ def test_a_fire_call_elsewhere_is_not_deferred_to_a_placed_fire_report(gaz):
     clock.t += 200
     e.feed(row("c1-t2", CALL, clock(), **TALK))           # another address: another call
     assert sorted(p.category for p, d in sink.pushes if d.would_push) == ["fire_call", "fire_report"]
+
+
+# -- follow-up to #640's final review: the building's nouns in a read-back; a short gap for appliance / panel phrases --
+
+@pytest.mark.parametrize("text, at", [
+    ("The house is 40 Example Place.", 150),                     # past the 120 s window
+    ("Uh, 40 Example Place, the caller's house.", 60),
+    ("Copy, that's the apartment building at 40 Example Place.", 45),
+])
+def test_a_read_back_naming_the_building_places_and_pushes_it(gaz, text, at):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += at
+    e.feed(row("c1-t2", text, clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.mode == "push" and ev.suppressed == ""
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
+@pytest.mark.parametrize("text, at", [
+    ("21 Sample Street, the caller's house, they have a suspicious vehicle.", 90),
+    ("Also 21 Sample Street, the caller's apartment, when you clear.", 60),
+    ("The house at 21 Sample Street, a vehicle parked on the lawn.", 45),
+])
+def test_the_building_nouns_never_make_another_job_a_read_back(gaz, text, at):
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += at
+    e.feed(row("c1-t2", text, clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
+
+
+def test_known_gap_a_bare_next_address_in_the_window_reads_as_a_read_back(gaz):
+    """Documented, not wanted: the dispatcher's next job said as a bare address by the same talker within RELEASE_S is
+    word for word a read-back (engine._address_only). An address outside the source's towns would stay held."""
+    clock = Clock()
+    e, sink = held(gaz, clock)
+    clock.t += 90
+    e.feed(row("c1-t2", "21 Sample Street, Port Chester.", clock(), **TALK))
+    [ev] = e.events.open_events()
+    assert ev.label_full.startswith("21 Sample St") and ev.suppressed == ""
+
+
+def complaint(e):
+    [r] = [r for r in e.pack("police").rules if r.id == "pd.fire_complaint"]
+    return lambda text: r.hit(text, rules_mod.words(text))
+
+
+@pytest.mark.parametrize("text", [
+    "the dryer is smoking",
+    "the electrical panel is sparking",
+    "a wire is down and sparking",
+    "outlet smoking",
+    "the wiring is smoking",
+    "a toaster on fire",
+    "the dryer, it's smoking",
+    "the stove was on fire",
+])
+def test_appliance_and_panel_phrases_still_hit(gaz, text):
+    e, _sink = engine(gaz)
+    assert complaint(e)(text)
+
+
+@pytest.mark.parametrize("text", [
+    "panel van parked, the driver is smoking in it",
+    "panel van, driver smoking",                                  # the gap is short: the person exclusion
+    "a panel van parked by the hydrant, smoking",                  # the gap is too long
+    "the dryer vent was cleaned last week, nobody is smoking",
+    "the outlet is not sparking",
+    "the man is smoking out front, a smell of smoke",
+    "a female smoking on the porch, smells like smoke",
+    "the subject was smoking in the car, odor of smoke",
+])
+def test_appliance_and_panel_phrases_need_the_object_close_to_the_smoke(gaz, text):
+    e, _sink = engine(gaz)
+    assert not complaint(e)(text)
+
+
+@pytest.mark.parametrize("text, fires", [
+    ("Respond to 40 Example Place, the dryer is smoking, notifying the FD.", True),
+    ("Respond to 40 Example Place, the electrical panel is sparking, FD notified.", True),
+    ("Respond to 40 Example Place, a panel van parked, the driver is smoking in it, notifying the FD.", False),
+])
+def test_a_panel_van_with_a_smoking_driver_is_no_fire_call(gaz, text, fires):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert [p.category for p, d in sink.pushes if d.would_push] == (["fire_call"] if fires else [])
