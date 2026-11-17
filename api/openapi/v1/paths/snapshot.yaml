@@ -1,0 +1,53 @@
+get:
+  operationId: getSnapshot
+  summary: The screens' first load
+  description: >
+    The open incidents, the units and the alarms, in one answer, with the hub's clock and the change log's epoch (null
+    until there is one). Needs a signed-in device, the `reads` feature and the least role (`read`); another role
+    gets nothing more here than the console shows it. The snapshot is the same for every role: its cached lists carry no
+    premise notes, pre-plan points or radio rows (those are in an incident's detail, per role). `ETag` is the snapshot's rev.
+  parameters:
+    - $ref: ../parameters/IfNoneMatch.yaml
+  responses:
+    "200":
+      description: The snapshot.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Snapshot.yaml
+          example:
+            incidents:
+              - $ref: ../examples/Incident.yaml
+            units:
+              - $ref: ../examples/Unit.yaml
+            alarms:
+              - $ref: ../examples/Alarm.yaml
+            server_time: 1767225800.0
+            epoch: null
+            rev: 5d4c3b2a19080706
+    "304":
+      description: Not modified (the `If-None-Match` rev is current). No body.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+    "401":
+      description: Not signed in.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "503":
+      description: The CAD could not answer (`unavailable`), with Retry-After.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

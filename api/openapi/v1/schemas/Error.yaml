@@ -12,9 +12,11 @@ properties:
           unauthorized (401), not_found (404), method_not_allowed (405, with Allow), uri_too_long (414),
           station (409: this host is a station, not the hub), updating (503 during a deploy handover, with
           Retry-After), internal (500: the handler failed), busy (503: v1's share of concurrent requests is used
-          up, with Retry-After), rate_limited (429, with Retry-After). Change log (#561): bad_cursor, bad_limit (400), epoch_changed (409, with `epoch`),
-          cursor_too_old (410, with `oldest`), too_many_streams (429), unavailable (503). Planned with sign-in (#558): token_expired,
-          device_revoked, user_inactive, invalid_grant, upgrade_required.
+          up, with Retry-After), rate_limited (429, with Retry-After), bad_cursor and bad_request (400: a
+          bad `after`, `limit` or query), unavailable (503: the CAD could not answer, or the change log is not ready, with
+          Retry-After). Change log (#561): bad_limit (400), epoch_changed (409, with `epoch`), cursor_too_old (410, with
+          `oldest`), too_many_streams (429). Planned with sign-in (#558): token_expired, device_revoked, user_inactive,
+          invalid_grant, upgrade_required.
       message:
         type: string
         description: Human text.

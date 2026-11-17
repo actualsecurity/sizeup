@@ -22,6 +22,7 @@ from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
+from . import reads
 from .errors import JSON, error
 from .limits import Limits
 from .principal import Resolver, none_yet, person
@@ -43,12 +44,15 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, changes=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, cad=None,
+                 changes=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
+        self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
         self.changes = changes            # the change log's Feed (#561): /changes and /stream; None: not on this host
 
     def handles(self, path: str) -> bool:
@@ -113,15 +117,22 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.changes)
-            status, obj = route.handler(ctx)
-            if isinstance(obj, StreamPlan):                # SSE (#561): its own slot, and the server runs the body
-                return self._stream(obj, principal)
-            headers = {"Cache-Control": "no-store"}
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), reads=self.reads,
+                      changes=self.changes)
+            # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
+            # finished (status, body, content type, headers), which is what errors.error() makes
+            res = route.handler(ctx)
+            if len(res) == 2 and isinstance(res[1], StreamPlan):   # SSE (#561): its own slot; checked before len(res)
+                return self._stream(res[1], principal)
+            if len(res) == 4:
+                return res
+            status, obj, extra = (*res, {})[:3]
+            body = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
+            out = {"Cache-Control": "no-store", **extra}
             wait = obj.get("error", {}).get("retry_after_s") if isinstance(obj, dict) and status >= 400 else None
             if wait is not None:                       # a handler's error: the header says what the body says
-                headers["Retry-After"] = str(wait)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, headers
+                out["Retry-After"] = str(wait)
+            return status, body, JSON, out
         finally:
             self.limits.leave()
 

@@ -442,7 +442,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
-    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log)
+    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log, cad=getattr(cad, "cad", None))
     if cad is not None and role != "station" and getattr(cad.cad.store, "path", ":memory:") != ":memory:":
         # the change log (#561): hub.sqlite beside the CAD's database, made on first use while the `stream` flag is on;
         # one line into the CAD (its commits poke the recorder, which does nothing with the flag off)

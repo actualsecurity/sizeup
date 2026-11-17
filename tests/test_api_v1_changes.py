@@ -174,12 +174,18 @@ def test_a_closed_call_is_logged_once_more_and_then_left_alone(rig):
     rig.cad.close(inc["id"], {"disposition": "FALSE", "operator": "Lt. Ruiz"})
     out = rig.settle()
     assert ("incident", str(inc["id"])) in {(c.kind, c.id) for c in out}
-    assert ("incident", str(inc["id"])) not in rig.log.heads()              # settled: not looked at again
-    assert rig.settle() == []
+    key = ("incident", str(inc["id"]))
+    # closed, still in the reads' list: kept as a head, no further entry
+    assert key in rig.log.heads() and rig.settle() == []
+    rig.clock.t += 2 * 86400                                                  # it leaves the list (closed long ago)
+    with rig.store.tx():
+        pass
+    head = rig.log.head()
+    assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head   # dropped: not a deletion
 
 
 def test_a_deleted_object_is_a_row_with_no_rev(rig):
-    rig.log.append([("unit", "999", "aaaaaaaaaaaaaaaa", False)])
+    rig.log.append([("unit", "999", "aaaaaaaaaaaaaaaa")])
     with rig.store.tx():                                                     # (a commit, so the recorder looks)
         pass
     out = rig.settle()                                                       # the scan does not find unit 999
@@ -483,7 +489,8 @@ def hub(tmp_path):
     """A real WebServer over a real CAD, mobile on with the stream flag, a test resolver (the person is the
     X-Test-Device header). Its change feed is fast."""
     box = Box()
-    c = cad(tmp_path, Clock())
+    clock = Clock()
+    c = cad(tmp_path, clock)
     c.auto.set_mode("pcfd", "Lt. Ruiz")
     srv = WebServer("127.0.0.1", 0, {}, lambda: {}, lambda x: None, lambda i: False, cad=CadApi(c), role="hub",
                     mobile=box.switches(max_streams=3),
@@ -496,7 +503,7 @@ def hub(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     h = type("Hub", (), {})()
     h.srv, h.box, h.cad, h.v1, h.feed, h.port = srv, box, c, v1, v1.changes, srv.httpd.server_address[1]
-    h.path = tmp_path
+    h.path, h.clock = tmp_path, clock
     h.head = lambda: h.feed.log.head()
     yield h
     srv.shutdown()
@@ -806,14 +813,14 @@ def test_the_log_costs_a_few_wal_frames_per_batch_and_startup_writes_nothing(tmp
     assert first <= 12
     log.baseline([("unit", str(i), "0" * 16) for i in range(250)])                  # a board's heads, once
     n = 100
-    entries = [("unit", str(i), f"{i:016x}", False) for i in range(n)]
+    entries = [("unit", str(i), f"{i:016x}") for i in range(n)]
     batch = wal_frames_written([hub], lambda: log.append(entries))["hub"]
     rev = [0]
 
     def one_by_one():
         for i in range(n):
             rev[0] += 1
-            log.append([("unit", str(i), f"{rev[0] + 1000:016x}", False)])
+            log.append([("unit", str(i), f"{rev[0] + 1000:016x}")])
     single = wal_frames_written([hub], one_by_one)["hub"]
     print(f"WAL frames on a seeded hub.sqlite: first use {first}; {n} changes in one batch {batch} "
           f"({batch / n:.2f} per change); {n} changes one transaction each {single} ({single / n:.2f} per change)")
@@ -1066,7 +1073,7 @@ def test_a_prune_pass_deletes_at_most_its_batch_and_goes_on_at_the_next(tmp_path
     import sizeup.api.v1.changelog as cl
     monkeypatch.setattr(cl, "PRUNE_ROWS", 3)
     log = ChangeLog(tmp_path / "hub.sqlite", max_rows=2)
-    log.append([("unit", str(i), f"{i:016x}", False) for i in range(10)])
+    log.append([("unit", str(i), f"{i:016x}") for i in range(10)])
     got = [log.prune(force=True) for _ in range(4)]
     assert got == [3, 3, 2, 0] and log.floor() == 8 and len(log.since(0, 100)) == 2
     log.close()
@@ -1170,3 +1177,108 @@ def test_a_stream_whose_feed_is_closed_under_it_says_stopping(rig):
     why = body.run(write)
     body.close()
     assert why == "stopping" and b'"reason":"stopping"' in written[-1]
+
+
+# -- the log's rev is the rev the reads serve (phase B) --------------------------------------------------------------
+
+def read(hub, path):
+    c = http.client.HTTPConnection("127.0.0.1", hub.port, timeout=10)
+    c.request("GET", path, headers=dev())
+    r = c.getresponse()
+    return r.status, json.loads(r.read())
+
+
+def quiet(hub):
+    """The CAD has stopped committing and the recorder has caught up with it."""
+    wait_for(lambda: hub.feed.recorder._seen_version == hub.cad.store.rev)
+    time.sleep(0.1)
+    return hub.feed.recorder._seen_version == hub.cad.store.rev
+
+
+def test_the_logs_rev_is_the_rev_the_reads_serve_for_units_and_incidents(hub):
+    hub.box.flags["reads"] = True
+    e63 = uid(hub.cad, "E63")
+    inc = hub.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
+    hub.cad.store.assign(inc["id"], [e63], "Lt. Ruiz")                      # (no dispatch: no async voice render)
+    hub.cad.store.set_unit_status(uid(hub.cad, "L31"), "RS", "Lt. Ruiz")
+    assert quiet(hub)
+    hub.clock.t += 2.0                                                       # past reads' 1 s list-cache floor
+    status, units = read(hub, "/api/v1/units?limit=500")
+    assert status == 200 and len(units["items"]) > 100
+    heads = hub.feed.log.heads()
+    for u in units["items"]:
+        assert heads[("unit", u["id"])] == u["rev"], u["name"]              # every unit, the ones that changed included
+    status, incs = read(hub, "/api/v1/incidents")
+    assert status == 200 and incs["items"]
+    for i in incs["items"]:
+        assert heads[("incident", i["id"])] == i["rev"]
+    changed = {(c.kind, c.id): c.rev for c in hub.feed.log.since(0, 100)}
+    assert changed[("incident", str(inc["id"]))] == next(i["rev"] for i in incs["items"] if i["id"] == str(inc["id"]))
+    assert changed[("unit", str(e63))] == next(u["rev"] for u in units["items"] if u["id"] == str(e63))
+    # the snapshot's items carry the same revs
+    status, snap = read(hub, "/api/v1/snapshot")
+    assert {i["rev"] for i in snap["incidents"]} <= {i["rev"] for i in incs["items"]}
+
+
+def test_a_field_the_api_does_not_show_is_not_a_change_and_the_log_never_hashes_a_raw_row(hub):
+    hub.box.flags["reads"] = True
+    e63 = uid(hub.cad, "E63")
+    inc = hub.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
+    assert quiet(hub)
+    head, entries = hub.head(), len(hub.feed.log.since(0, 1000))
+    with hub.cad.store.tx() as db:                                           # raw columns reads' output leaves out
+        db.execute("UPDATE units SET notes = 'bring the key' WHERE id = ?", (e63,))
+        db.execute("UPDATE incidents SET caller_name = 'A. Caller', phone = '555-0100' WHERE id = ?", (inc["id"],))
+    assert quiet(hub)
+    assert hub.head() == head and len(hub.feed.log.since(0, 1000)) == entries     # no entry: the output is the same
+    hub.clock.t += 2.0
+    _, units = read(hub, "/api/v1/units?limit=500")
+    assert hub.feed.log.heads()[("unit", str(e63))] == next(u["rev"] for u in units["items"] if u["id"] == str(e63))
+    with hub.cad.store.tx() as db:                                           # a field it does show is
+        db.execute("UPDATE units SET title = 'Duty Officer' WHERE id = ?", (e63,))
+    assert quiet(hub)
+    assert hub.head() == head + 1
+
+
+def test_a_log_written_under_the_old_rev_definition_is_reset_at_its_first_run(tmp_path):
+    """Phase A hashed raw rows and recorded no definition: a hub that ran it gets a new epoch (old cursors: 409)."""
+    r = Rig(tmp_path)
+    r.settle()
+    r.incident()
+    r.settle()
+    epoch, head = r.log.epoch, r.log.head()
+    assert head > 0
+    r.feed.close()
+    r.log.close()
+    db = sqlite3.connect(tmp_path / "hub.sqlite")                            # make it a phase A log: no rev_def
+    db.execute("DELETE FROM mobile_changelog_meta WHERE key = 'rev_def'")
+    db.commit()
+    db.close()
+    try:
+        next_task(r)
+        assert r.log.epoch != epoch and r.log.since(0, 10) == []        # (seq goes on: it is never reused)
+        # the CAD was told the new epoch, so no second reset follows
+        assert r.store.meta_get("mobile_log_epoch") == r.log.epoch
+        status, body, _ = r.get(f"after={head}&epoch={epoch}")
+        assert status == 409 and body["error"]["code"] == "epoch_changed"
+        epoch2 = r.log.epoch
+        r.feed.close()
+        r.log.close()
+        next_task(r)                                                         # the next start: stable
+        assert r.log.epoch == epoch2
+    finally:
+        r.close()
+
+
+def test_a_new_log_records_the_rev_definition_without_a_reset(tmp_path):
+    r = Rig(tmp_path)
+    r.settle()
+    epoch = r.log.epoch
+    assert r.log._meta("rev_def") == "reads-serializers-v1"
+    r.feed.close()
+    r.log.close()
+    try:
+        next_task(r)
+        assert r.log.epoch == epoch
+    finally:
+        r.close()

@@ -393,8 +393,14 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
   **DEVIATION from the design:** the SSE `id` and `Last-Event-ID` carry `<epoch>-<seq>` (not a bare cursor), so
   EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works.
   `rev` is a hash of the whole row: a confirmation oracle only for a row someone could already guess, no practical attack.
-  The log's `rev` must equal the reads' GET `rev` (pending: `cad_follow` will hash the reads serializer's output once PR 4
-  lands; until then the log `rev` is a changed-marker only, not comparable with a GET's).
+  The log's `rev` equals the reads' `rev`: `cad_follow` hashes the output of the reads' serializers
+  (`incident_summary`, `unit` through `rev_of`), never a raw row, so a log entry's `(kind, id, rev)` is the `rev` of that
+  object in `GET /api/v1/incidents` (list items and the snapshot) and `GET /api/v1/units`. A column the API does not show
+  (a unit's notes, a caller's name) is not a change. The single-incident GET serves a bigger object (chronology, building
+  notes, the person's role view), so its `rev` is its own; a note alone does not change the summary and is not a log
+  entry. The reads' lists are rebuilt at most once a second, so the log can announce a change up to about a second before a
+  list GET shows it: a client that gets a change event refetches the single object (`GET /units`, `/incidents/{id}`
+  are served from the same cache floor, so a list refetch may be one rebuild late; the detail GET is not cached).
   **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view (the log takes kinds per
   consumer for it), `meta.epoch` (still null), and per-person filtering: `Feed.visible` fails closed, so `changes` and
   `stream` answer 503 `unavailable` until PR 2's resolver supplies a predicate from the person's role and sourcekeys (and
@@ -646,6 +652,58 @@ native client (private repo). **Both** = needs work or inputs from each side.
 | — | In parallel: #446 item 1 (no-op rev bumps) before a mobile beta; then measure, then DVR out (E) or 1 vCPU (F) (D9) | Platform | headroom | #446 |
 
 The app consumes each platform PR as it lands: regenerate the client from the merged spec, then build the screen.
+
+### 10.1 Read resources as built (#560)
+
+`GET /api/v1/{snapshot, incidents, incidents/{id}, units, alarms}` (`sizeup/api/v1/reads.py`, `serialize.py`,
+`paging.py`, `rev.py`; the spec is `api/openapi/v1/`). Each needs a device, the `reads` flag and the `read` role; none
+writes. `/me` is PR 2's.
+
+- **rev and ETag, no schema change.** `rev = sha256(json(obj without rev, sorted keys, compact, ensure_ascii=False))[:16]`
+  (`rev_of`), per object; the ETag is that rev (a list's: a hash of its item revs and `next`; the snapshot's: of the
+  three lists' revs). `If-None-Match` (weak, quoted, a list or `*`) answers 304 with no body. A role's detail has its own
+  rev, because what a role may not see is not in what is hashed.
+- **Cursor.** `?after=<next>&limit=`, response `{items, next}`. The cursor is opaque (a version, the list's name and the
+  last row's sort key: `(created_at, id)` newest first for incidents, `(sort, id)` for units), a keyset and not an
+  offset, so rows added or changed between pages move nothing already sent. A cursor of another list, or a malformed
+  one, is 400 `bad_cursor`; a bad `limit` is 400 `bad_request`. Caps: incidents 50 by default and at most 200, units 100
+  and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
+- **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
+  category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
+  (a device is a signed-in person). **Never sent:** the caller's name, address and phone as fields, nor in the
+  chronology (the "Caller info: ..." line is dropped; an "Edited ..." line that names a caller field is dropped whole,
+  and the match is deliberately broad: any edit line containing "caller" or "phone" becomes "Edited caller details",
+  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (any `<...>` part is dropped, anywhere in a free text, so a "<5 min>" in a note loses
+  it: deliberate, fail-safe; any other whitespace-delimited token holding an "@", in any email form, becomes "an
+  operator"; a standalone " @ " in a named place's address stays); a talker's radio ID: the mask ("radio 41228", "rid
+  41228", "ID 41228" ...) applies to the alarm fields, the `alarm`-kind chronology lines and the identity fields (an
+  alarm's `who`, a radio row's `unit`, which also lose any standalone number of 4+ digits) ONLY: a "radio 41228" in
+  `status`/`tones` events, radio-row transcripts, notes, addresses and remarks is not masked (sent as written, below).
+  `scrub` reads at most 20000 characters of a text (`SCRUB_MAX_CHARS`; the rest is cut and the output ends with an
+  ellipsis), first normalises compatibility forms of "@" and "<" (NFKC; zero-width and direction marks dropped), and is
+  one linear pass per step (no backtracking regex), so a long note cannot stall a cache rebuild. Residual, not
+  addresses a client would link: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org"), and a
+  radio ID written with letters or split into digit groups the mask does not read.
+  **Chronology text is an allow-list:** only the kinds in
+  `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
+  kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,
+  `place` and address; the dispatches' text; operators' notes; `status` events (a unit's radio transcript, "E60 on
+  scene: <said>"); `tones` events (paging-feed lines up to 2000 characters from outside the CAD); an alarm's `text`,
+  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`; a pre-plan point's `note`. ANY of these
+  can contain a name, address or phone number that a human or a transcript put there, and the server does not filter
+  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Unit names, the pre-plan `label`, `geo_label` and `town` are not scrubbed. Site
+  documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
+  premise, pre-plan and radio are only in an incident's detail.
+- **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
+  the `rev` key itself excluded; `with_rev` adds it). The stream's `(kind, id, rev)` (PR 5) and the write answers and
+  `If-Match` (PR 6) must reuse `rev_of` and `with_rev` on these same shapes. `epoch` stays null until PR 5.
+- **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
+  read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
+  incident read is uncached.
+- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
+  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
+  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+  only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---
 

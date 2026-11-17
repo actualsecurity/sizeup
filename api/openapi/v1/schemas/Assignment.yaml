@@ -1,0 +1,11 @@
+type: object
+description: A unit on a call.
+required: [unit_id, name, status]
+properties:
+  unit_id: {type: string}
+  name: {type: string, description: "The board code, E60."}
+  status: {type: string, description: "The unit's status code now."}
+  dispatched_at: {type: [number, "null"]}
+  enroute_at: {type: [number, "null"]}
+  onscene_at: {type: [number, "null"]}
+  cleared_at: {type: [number, "null"]}

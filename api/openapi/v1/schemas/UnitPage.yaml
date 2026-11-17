@@ -1,0 +1,12 @@
+type: object
+description: A page of units in board order.
+required: [items, next, server_time, rev]
+properties:
+  items:
+    type: array
+    items:
+      $ref: ./Unit.yaml
+  next: {type: [string, "null"]}
+  server_time: {type: number}
+  rev:
+    $ref: ./Rev.yaml

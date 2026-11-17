@@ -1061,6 +1061,14 @@ One append-only log of references `(seq, epoch, kind, id, rev, at)` (no payload,
   no operator command for it.) **Not detectable:** a CAD restore that keeps the same max ids, and a `hub.sqlite` restored to a
   point after the last clean drain (it looks like a crash): only the runbook covers them. A missing clean marker (a fenced or
   failed write, or the flag off at the drain) also looks like a crash to the next start.
+- **The rev's definition is versioned** (`REV_DEFINITION` in `changelog.py`): a log written under another definition (the
+  first build hashed raw rows and recorded none) is reset at its first run, a new epoch, so every app resnapshots and
+  gets a 409 for an old cursor; the CAD is told the new epoch at once. A hub that already ran the first build sees one
+  such reset at its first start with this one; later starts are stable. Change `REV_DEFINITION` whenever the reads'
+  serializers change what a `rev` covers.
+- **Cost of the scan:** a flush reads what the reads list reads (`store.incidents()`: open calls and the last day's closed
+  ones, with their assignments, and the units), serializes and hashes it outside the CAD's lock; it is skipped when the CAD
+  has not committed since the last flush.
 - **Retention:** 7 days and at most 100,000 rows, pruned hourly in passes of 5,000 rows; an older cursor is a 410 (`oldest`),
   another epoch (or a cursor ahead of the log) a 409.
 - **Streams:** 2 per device and `[mobile] max_streams` overall (429 `too_many_streams`), 15 s heartbeats, a bounded queue
