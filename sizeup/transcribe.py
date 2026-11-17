@@ -719,6 +719,8 @@ class AwsTranscriber:
         # for none. vocab_version(name): what a transcript records of the vocabulary its stream used (vocab_v)
         self.term_vocabulary: Callable[[str], str] = lambda channel: ""
         self.vocab_version: Callable[[str], str] = lambda name: ""
+        # a term vocabulary's own respelling ({said: written}: its list's numbers back to digits), after the channel's
+        self.vocab_respell: Callable[[str], dict] = lambda name: {}
         self.pace = max(0.5, float(s.pace))
         self._workers: dict[str, ChannelWorker] = {}
         self._lock = threading.RLock()
@@ -1042,6 +1044,9 @@ class AwsTranscriber:
     def _done(self, job: Job, text: str, conf: float | None) -> None:
         try:
             text = self._respell_for(job.channel)(text)
+            extra = self.vocab_respell(job.vocab) if job.vocab else {}
+            if extra:
+                text = respell(text, extra)
         except Exception as e:
             self.log(f"aws transcribe: respell: {type(e).__name__}: {e}")
         try:                                         # its own step: a respelling that failed still loses its hyphens

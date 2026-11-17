@@ -1916,6 +1916,7 @@ class HubApp(App):
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
         if isinstance(self.stt_terms, stt_terms.TermStore):
             self.stt_terms.start()                # the private term lists (sizeup/stt_terms.py): now, then every 5 min
+        self._terms_cleanup()                     # ([stt] terms_aws off: the term vocabularies made before deleted)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:

@@ -1086,13 +1086,16 @@ class App:
     def _base_prompt(self, item, short: bool = False) -> str:
         """The source's own prompt: the configured text, plus (stt.talker_prompt) the talkers on this call as they're
         said on the air; airband and another system's police have their own. short: a term list goes with it, so a
-        police profile's prompt leaves out its streets (the list's places have them, and the profile's alone fills
-        most of whisper's budget)."""
+        police profile's prompt keeps only its towns' busiest streets (stt_terms.PROFILE_STREETS: the addresses that
+        matter; its 30 alone filled most of whisper's budget), the list the rest."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
         prof = self._stt_profile(item)
         if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
-            return self._profile_prompt(dict(prof, prompt_streets=0, name=f"{prof.get('name')}:short") if short else prof)
+            if not short:
+                return self._profile_prompt(prof)
+            n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
+            return self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
@@ -2870,7 +2873,7 @@ class App:
             out += self.police_vocabulary()
         if getattr(self, "term_vocabs", None) is not None:      # the private term lists' (sizeup/stt_terms.py)
             for ts in self.stt_terms.sets().values():
-                out += ts.terms
+                out += stt_terms.aws_phrases(ts.terms)
         return out
 
     def police_vocabulary(self) -> list[str]:
@@ -2890,15 +2893,23 @@ class App:
 
     def _terms_setup(self) -> None:
         """A station keeps what the hub sends it (set_stt_terms). The hub reads the lists from its backups bucket, all-in-one
-        from [stt] terms_dir; with neither (or both switches off) nothing changes. [stt] terms_aws: one Amazon Transcribe
-        vocabulary per list, made by the leader, used on that list's channels once READY."""
+        from [stt] terms_dir; with neither (or both switches off) nothing changes. [stt] terms_aws: per (list, the
+        channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
+        those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
         self.stt_terms = None
         self.term_vocabs = None
+        self.term_cleanup = None
         if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
             self.aws.vocab_version = self._vocab_version
         if self.cfg.cloud_role == "station":
             self.stt_terms = stt_terms.Pushed()
             return
+        if self.aws is not None:
+            store = self.cad.store
+            tv = stt_terms.TermVocabularies(self.aws.region, store.meta_get, store.meta_put, self._own_vocab_phrases,
+                                            self.cfg.stt_aws_api_endpoint, log=log, leader=self._atc_leader)
+            if not self.cfg.stt_terms_aws:
+                self.term_cleanup = tv if tv.pairs() else None
         if not (self.cfg.stt_terms_whisper or self.cfg.stt_terms_aws):
             return
         files = stt_terms.files_from(os.environ, self.cfg.stt_terms_dir)
@@ -2906,10 +2917,26 @@ class App:
             return
         self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
         if self.cfg.stt_terms_aws and self.aws is not None:
-            store = self.cad.store
-            self.term_vocabs = stt_terms.TermVocabularies(self.aws.region, store.meta_get, store.meta_put,
-                                                          self.cfg.stt_aws_api_endpoint, log=log, leader=self._atc_leader)
+            self.term_vocabs = tv
             self.aws.term_vocabulary = self._term_vocab_for
+            self.aws.vocab_respell = lambda name: self.term_vocabs.respell(name)
+
+    def _terms_cleanup(self) -> None:
+        """[stt] terms_aws off: the term vocabularies made before deleted, once this task leads (a thread; at most an
+        hour of looking)."""
+        tv = self.term_cleanup
+        if tv is None:
+            return
+
+        def run():
+            for _ in range(60):
+                if self._stopping.is_set():
+                    return
+                if self._atc_leader():
+                    tv.cleanup()
+                    return
+                self._stopping.wait(60.0)
+        threading.Thread(target=run, name="stt-terms-cleanup", daemon=True).start()
 
     def _terms_read(self, store, changed: bool) -> None:
         """After each read of the lists: the AWS vocabularies made for their versions (an API error tried again), and the
@@ -2922,10 +2949,11 @@ class App:
     def stt_terms_check(self) -> None:
         """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
 
-    def stt_terms_payload(self) -> dict:
-        """What a station is sent (set_stt_terms): nothing while terms_whisper is off."""
+    def stt_terms_payload(self) -> dict | None:
+        """What a station is sent (set_stt_terms): nothing while terms_whisper is off; None (send nothing) until the
+        lists' first read is over."""
         if self.cfg.stt_terms_whisper and isinstance(self.stt_terms, stt_terms.TermStore):
-            return self.stt_terms.payload()
+            return self.stt_terms.payload() if self.stt_terms.loaded else None
         return {"v": "", "sets": {}}
 
     def set_stt_terms(self, payload) -> dict:
@@ -2980,15 +3008,48 @@ class App:
             service = sources.service(kind=kind)
         return stt_terms.own_for(key, service, kind)
 
+    def _own_vocab(self, channel: str) -> str:
+        """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
+        another system's other talkgroups none, ours sizeup-pcfd."""
+        from sizeup.transcribe import PD_VOCABULARY, is_context
+        if self._kind.get(channel) == "airband" and getattr(self, "atc_vocab", None) is not None:
+            return self.atc_vocab.name
+        if channel in getattr(self, "pd_sources", ()) and getattr(self, "pd_vocab", None) is not None:
+            return PD_VOCABULARY
+        return "" if is_context(channel) else self.cfg.stt_aws_vocabulary
+
+    def _own_vocab_phrases(self, base: str) -> list[str]:
+        """An own vocabulary's phrases as they are now: Settings > Radios > Vocabulary's list (edits included), the ATC
+        list with the operators seen (#257), the police one."""
+        if not base:
+            return []
+        if getattr(self, "atc_vocab", None) is not None and base == self.atc_vocab.name:
+            r = getattr(self, "atc_refresh", None)
+            if r is not None:
+                return list(r.phrases())
+            from sizeup import atc
+            return list(atc.vocabulary()["phrases"])
+        if getattr(self, "pd_vocab", None) is not None and base == self.pd_vocab.name:
+            return self.police_vocabulary()
+        if base == self.cfg.stt_aws_vocabulary:
+            return list(self.cad.settings.vocabulary())
+        return []
+
     def _term_vocab_for(self, channel: str) -> str:
-        """The AWS vocabulary of a channel's term list once READY ("" for none: the channel keeps its own)."""
+        """The AWS vocabulary of a channel's term list and own vocabulary once READY ("" for none: it keeps its own);
+        the first time a pair is asked for, the leader makes it."""
         own = self._own_for_key(channel)
         if self.term_vocabs is None or self.stt_terms is None or self.stt_terms.get(own) is None:
             return ""
-        return self.term_vocabs.ready(own)
+        base = self._own_vocab(channel)
+        name = self.term_vocabs.ready(own, base)
+        if not name:
+            self.term_vocabs.want(own, base)
+        return name
 
     def _vocab_version(self, name: str) -> str:
-        """vocab_v of a vocabulary a stream used: a term list's "<own>@<version>", another one's "<name>@<its sig>"."""
+        """vocab_v of a vocabulary a stream used: a term vocabulary's "<list>+<own vocabulary>@<version>", another one's
+        "<name>@<its sig>"."""
         v = stt_terms.vocab_v_of(name)
         if v:
             return v
@@ -4634,6 +4695,7 @@ class App:
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         if isinstance(self.stt_terms, stt_terms.TermStore):
             self.stt_terms.start()                # the private term lists, read now and every few minutes
+        self._terms_cleanup()
         if not self.forwarding():
             self.cad.intel.start()                # radio pre-alerts (sizeup/intel): the "intel" thread
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)

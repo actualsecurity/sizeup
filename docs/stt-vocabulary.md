@@ -100,18 +100,23 @@ aws s3 cp <checkout>/vocab/terms/ s3://<backups bucket>/sizeup-hub/vocab/ --recu
     --exclude '*' --include '*.txt'
 ```
 
-The hub looks at them at start and every 5 minutes (a conditional GET: an unchanged file costs a 304). A new file is
-in use within 5 minutes. A file deleted takes its list away. A file that can't be read (S3 error, not UTF-8) keeps
-what was read before, and the hub's log says why. No terms are ever logged, only counts and versions.
+The hub looks at them at start and every 5 minutes (a conditional GET: an unchanged file costs a 304).
+
+- A change is used once a read a minute later finds the same files, so an upload of all five is used together.
+- A file deleted takes its list away (and its AWS vocabularies).
+- A file that can't be read (S3 error, not UTF-8) keeps what was read before, and the hub's log says why.
+- No terms are ever logged, and no AWS error text (it can quote a phrase): only counts, versions and error codes.
 
 All-in-one (dev) reads them from a folder instead: `[stt] terms_dir`, holding `<name>.txt` or `terms/<name>.txt`.
-A station never reads them. The hub sends it the top of each list (`set_stt_terms`), kept in memory only.
+A station never reads them. The hub sends it the top of each list (`set_stt_terms`) once its first read is over,
+kept in memory only.
 
 ### Format
 
 UTF-8, one term per line, priority order (a smaller budget takes the top). Lines starting with `#` are comments;
 blank lines are skipped. Terms are compared ignoring case, hyphens and punctuation, and repeats are dropped. Numbers
-are written as said (`transcribe.spoken()`): the engines are only biased, and nothing turns them back into digits.
+are spelled as said (`transcribe.spoken()`); both engines get them back in digits (`stt_terms.written()`: "Engine one
+forty two" is "Engine 142", "ten thirty two" is "10-32").
 
 ### Versions
 
@@ -123,19 +128,24 @@ Every transcript records what biased it, in the radio log's `vocab_v` column:
 
 | `vocab_v` | Means |
 |---|---|
-| `county_fire@0123456789ab` | that list at that version (whisper's prompt, or its AWS vocabulary) |
-| `sizeup-pcfd@0123456789ab` | an AWS vocabulary without a term list, at its phrases' signature |
+| `county_fire@0123456789ab` | whisper's prompt had that list at that version |
+| `county_fire+pcfd@0123456789ab` | AWS: the term vocabulary of that list on `sizeup-pcfd`, at that version |
+| `sizeup-pcfd@0123456789ab` | AWS: a vocabulary without a term list, at its phrases' signature |
 | empty | no list (switched off, none for the source, no room in the prompt) or not known |
+
+With the worker pool (#651), `stt_runs.prompt_v` hashes the whole prompt (which now includes the terms); `vocab_v`
+says which list and version. Whichever lands second adds `vocab_v` to `stt_runs` (`getattr(item or job, "vocab_v")`).
 
 ### Switches
 
 `[stt]` in the config. Off unless set; the hub's (`deploy/hub/config.hub.toml`) sets both, and with no lists uploaded
-nothing changes. To turn one off, set it to `false` there (a deploy).
+nothing changes. To turn one off, set it to `false` there (a deploy). `terms_aws` off deletes the term vocabularies
+made before, once the task leads.
 
 | Key | Does |
 |---|---|
 | `terms_whisper` | whisper's prompt gets the top of the source's list (the hub sends it to the station) |
-| `terms_aws` | one Amazon Transcribe vocabulary per list, used on that list's channels |
+| `terms_aws` | an Amazon Transcribe vocabulary per list and own vocabulary, used on those channels |
 | `terms_dir` | all-in-one: the folder to read them from (the hub uses its bucket) |
 
 ### whisper
@@ -146,32 +156,78 @@ prompt, its end. `stt_terms.est_tokens()` overcounts: measured against whisper's
 every list, the real count was at most 0.97 of the estimate. The budget is 210 by that estimate. The terms go most
 important last (nearest the audio), and the source's own prompt after them.
 
-- A police profile with a list leaves out its streets: `places` has them, and the profile alone filled most of the
-  budget.
+- **No term with a number** (`MAX_NUMERIC_PROMPT_TERMS`). Spelled out, whisper wrote every number as words, and the
+  dispatch parser found no unit or house number. Even in digits, a prompt of callsigns pulled heard numbers toward
+  them. The talkers on the call still go in.
+- A police profile with a list keeps its towns' 12 busiest streets (`PROFILE_STREETS`): the addresses that matter.
+  Its 30 alone filled most of the budget.
 - The ATC prompt is unchanged. With aircraft near HPN it fills the budget, so the airband list mostly goes to AWS.
 
-whisper can read a prompt back on dead air. `stt.prompt_echo()` catches it: a text that is mostly a run of three or
-more of the prompt's items, in the prompt's order, is no speech when the clip is short, has no voice energy, or has
-more words than anyone says in that time (4.5 a second). The older rules (`NOISE_LABEL`, `HALLUCINATIONS`, `SHORT_S`)
-still apply.
+whisper can read its prompt back on dead air. `stt.prompt_noise()` checks for it, only when a list went in the prompt
+(the item's `vocab_v`). The text is no speech when it is:
+
+- mostly a run of three or more of the prompt's items in the prompt's order, on a clip under 1.5 s or faster than
+  4.5 words a second; or six or more of them, at any pace;
+- nothing but two or more of the prompt's items on a clip under 1.5 s;
+- only a number of the prompt or a piece of it (the talker's ID) on a clip with no voice energy;
+- one of `PROMPT_HALLUCINATIONS` ("we'll be right back") on a short or quiet clip.
+
+Voice energy alone never drops anything: P25 has none live, and a re-run's is unreliable. The older rules
+(`NOISE_LABEL`, `HALLUCINATIONS`, `SHORT_S`) still apply.
+
+#### Measured (2026-11)
+
+The county_fire list, 146 real county clips (60 Control, Fire/EMS 10-19, FG1; 112 with speech, 34 without), each with
+its talker in the prompt as the station has it. Run on local whisper-servers: large-v3-turbo (the worker pool's) and
+medium.en (nearest the station's small.en). "Digits" counts the transcripts with a digit, of the 81 whose reference
+has one. "From prompt" counts numbers in the text that the prompt had and the reference doesn't. "No-speech text" is
+how many of the 34 got text after every rule. "Speech dropped" is clips with speech that the new guard emptied.
+
+| Prompt | Model | WER | Digits | From prompt | No-speech text | Speech dropped |
+|---|---|---|---|---|---|---|
+| talker only (before) | turbo | 30.6% | 71 | 2 | 17 | - |
+| list spelled out (first version) | turbo | 29.7% | 56 | 3 | 20 | 0 |
+| list in digits, every numeric term | turbo | 30.4% | 73 | 8 | 15 | 0 |
+| list in digits, 8 numeric terms | turbo | 31.0% | 72 | 5 | 17 | 0 |
+| **list in digits, no numeric term** | turbo | 29.4% | 74 | 3 | 17 (24 without the guard) | 0 |
+| talker only (before) | medium.en | 33.2% | 67 | 2 | 11 | - |
+| list spelled out (first version) | medium.en | 30.3% | 47 | 3 | 13 | 0 |
+| list in digits, every numeric term | medium.en | 30.1% | 77 | 8 | 11 | 0 |
+| list in digits, 8 numeric terms | medium.en | 32.9% | 73 | 3 | 11 | 0 |
+| **list in digits, no numeric term** | medium.en | 35.3% | 68 | 2 | 12 | 0 |
+
+The interval on WER is about ±5 points, so the list's effect on WER is within the noise either way. What is clear:
+
+- A spelled-out list costs digits (71 to 56 on turbo, 67 to 47 on medium.en). Digits fix it.
+- Numeric terms make whisper use numbers that weren't said.
+- The guard brings turbo's no-speech text back to where it was with no list, and drops no speech.
 
 ### Amazon Transcribe
 
-With `terms_aws`, the hub's leader makes one custom vocabulary per list, named by the list and its version:
-`sizeup-terms-county_fire-0123456789ab`. It holds the set's top terms within AWS's limits (1,500 phrases, 50 KB,
-256 characters a phrase, letters only: `build_vocabulary()`; accents dropped). It is made only when the version
-changes (`CreateVocabulary`, then `GetVocabulary` until READY).
+A stream takes one vocabulary, so a term vocabulary keeps the channel's own phrases. With `terms_aws`, the hub's
+leader makes one per list and own vocabulary, the first time a channel of that pair streams:
 
-- Once READY, new streams on that list's channels use it ahead of the channel's own (`sizeup-pcfd`, `sizeup-pd`,
-  `sizeup-atc`).
-- While the next version is PENDING, the one before stays in use. If none is READY (or AWS refused it), the channel
-  keeps its own vocabulary.
-- The last three per list are kept; older ones are deleted.
-- The respelling is the channel's own, as before. AWS's hyphens are taken off the list's phrases like any other's
-  ([Hyphens](#hyphens)).
+| Channels | Own phrases first | Then |
+|---|---|---|
+| South 2, FG1, FG2, `tg:307`, our talkgroups | `sizeup-pcfd` as Settings > Radios > Vocabulary has it (edits included) | `county_fire` |
+| HPN Tower / Approach / Ground | `sizeup-atc` with the operators seen near HPN (#257) | `airband` |
+| `p25:mrrs:9211` | `sizeup-pd` (`police_phrases()`) | `pd_dispatch` |
+| another system's source with no vocabulary (`p25:mrrs:9570`) | none | its list |
+
+- The name says the list, the own vocabulary and the version: `sizeup-terms-county_fire-pcfd-0123456789ab`.
+- It holds phrases up to AWS's limits (1,500 phrases, 50 KB, 256 characters a phrase, letters only:
+  `build_vocabulary()`). The list's terms are written in digits, so `build_vocabulary` spells them for AWS and keeps
+  the respelling back to digits, as for the own phrases.
+- It is made again when anything in it changes: the list, an admin's edit, a new operator.
+- Until it is READY, the channel keeps its own vocabulary. While the next version is PENDING, the one before stays in
+  use. If AWS refuses it, the channel keeps its own; a FAILED one is tried again after 1 h, 6 h, then every 24 h.
+- A READY one is checked once an hour and made again if it was deleted.
+- The last three per pair are kept; older ones are deleted.
+- Respelling: the channel's own as before, then the term vocabulary's (its list's numbers back to digits). AWS's
+  hyphens come off the list's phrases like any other's ([Hyphens](#hyphens)).
 
 The task role's `transcribe` policy (sizeup-aws step 12) covers `vocabulary/sizeup-*`: Create, Update, Get and
-Delete. Settings > Radios > Vocabulary's state (`GET /api/cad/stt`) has each list's under `terms`.
+Delete. Settings > Radios > Vocabulary's state (`GET /api/cad/stt`) has each pair's under `terms`.
 
 ## How a phrase is built
 
