@@ -4,7 +4,9 @@
 //   IntelCard.column(list, state, deps)   the console's 60 Control column: one row per open event at map or push
 //                                         (the state's "intel": {open}; only for a signed-in viewer). Category · town,
 //                                         the place (hollow "?" when unconfirmed), WHAT / WHERE, play its clips,
-//                                         Useful / Noise, Dismiss (dispatchers). deps: {api, operator, time, readonly}
+//                                         Useful / Noise, Dismiss (dispatchers), More info (its page,
+//                                         /cad#prealert/intel/<id>: prealert-info.js). deps: {api, operator, time,
+//                                         readonly, more}
 //   IntelSettings.mount(card)             Settings > System > Intel: the kill switch, caps, each pack's mode and
 //                                         threshold, each category's mode, each rule's mode and weight with its
 //                                         7-day hits. Terse; the why is in the hovers. Admins edit (sPost, settings.js)
@@ -60,8 +62,19 @@ window.IntelCard = (() => {
       src.append(" ", b);
     }
     li.append(src);
-    if (deps.readonly) return li;
+    const more = () => {
+      const m = el("a", "nav mini aa-more", "More info");
+      m.href = window.PrealertInfo ? PrealertInfo.href("intel", e.id) : `#prealert/intel/${e.id}`;
+      m.title = "Its page: the full transcripts and their audio, the place, site history, the outcome";
+      m.addEventListener("click", (ev) => ev.stopPropagation());
+      return m;
+    };
+    if (deps.readonly) {
+      if (deps.more) { const r = el("div", "aa-btns"); r.append(more()); li.append(r); }
+      return li;
+    }
     const row = el("div", "aa-btns");
+    if (deps.more) row.append(more());
     const busy = st.busy.has(e.id);
     const act = (path, body, ok) => async (ev) => {
       ev.stopPropagation();

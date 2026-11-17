@@ -313,6 +313,11 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
                                           signed in (sourcekeys.may_see_context), 403 otherwise
 POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
+GET  /api/cad/prealerts/<kind>/<id>       a pre-alert's More info (kind airport | intel; /cad#prealert/<kind>/<id>): its
+                                          context bundle (sizeup/context_bundle.py: why, the transmissions and their
+                                          audio, before / after, the place, site history, now, the outcome). Anyone
+                                          signed in (403 otherwise, as the radio pre-alerts); 404 when there is none
+                                          (or it is a shadow / log one and the reader no admin)
 POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
                                           anyone signed in
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
@@ -355,6 +360,7 @@ PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
+PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
@@ -960,6 +966,19 @@ class CadApi:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
 
+    def _prealert_info(self, kind: str, pid: int, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/prealerts/<kind>/<id>: the context bundle (sizeup/context_bundle.py). Fails closed: a verified
+        sign-in (or a CAD that broadcasts context on purpose), as the radio pre-alerts and their transcripts."""
+        from sizeup import context_bundle
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+            return _json(403, {"error": "pre-alert details need a sign-in (Cloudflare Access)"})
+        try:
+            out = context_bundle.build(self.cad, kind, pid, admin=self._admin(who),
+                                       may=self._may(who))
+        except context_bundle.NotFound as e:
+            return _json(404, {"error": str(e)})
+        return 200, json.dumps(out, separators=(",", ":"), default=str).encode(), JSON, {"Cache-Control": "no-store"}
+
     def _admin(self, who) -> bool:
         """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
         if who is None or not who.email:
@@ -1117,6 +1136,8 @@ class CadApi:
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
+            if m := PREALERT_INFO.fullmatch(path):
+                return self._prealert_info(m.group(1), int(m.group(2)), who)
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
