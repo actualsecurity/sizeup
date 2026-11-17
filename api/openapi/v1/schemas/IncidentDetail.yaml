@@ -3,12 +3,14 @@ description: >
   One incident with its chronology, dispatches and, for the person's role, the notes and points on its building and
   the call's radio rows. `premise` and `preplan` hold only what the console shows that person (a category or kind
   kept to dispatchers or admins is not here for a viewer); `radio` leaves out another P25 system's rows unless the
-  person may see them (the console's rule) and names a talker only as the row's alias, never a radio ID. At most 300
+  person may see them (the console's rule) and names a talker only as the row's alias, never a radio ID. The chronology
+  sends free text only for the kinds the CAD words itself or an operator wrote (never the caller's name, address or
+  phone; any other kind has an empty `text`). At most 300
   events, 50 dispatches, 100 radio rows. The rev is per role (what a role may not see is not in its hash).
 allOf:
   - $ref: ./Incident.yaml
   - type: object
-    required: [events, dispatches, premise, preplan, radio, server_time]
+    required: [type_note, place_address, geo_label, town, aircraft, events, dispatches, premise, preplan, radio, server_time]
     properties:
       server_time: {type: number}
       type_note: {type: string}
@@ -18,6 +20,7 @@ allOf:
       aircraft:
         type: [object, "null"]
         description: An Airport event's details; null on any other.
+        required: [type, nature, eta_min, runway, souls, level, fuel, cargo]
         properties:
           type: {type: string}
           nature: {type: string}
@@ -31,19 +34,19 @@ allOf:
         type: array
         items:
           type: object
-          required: [id, at, kind, text]
+          required: [id, at, kind, text, operator, unit_id]
           properties:
             id: {type: string}
             at: {type: number}
             kind: {type: string}
-            text: {type: string}
+            text: {type: string, description: "Empty for a kind whose text is not sent (the caller's details are never sent)."}
             operator: {type: string, description: "A name, never a sign-in email."}
             unit_id: {type: [string, "null"]}
       dispatches:
         type: array
         items:
           type: object
-          required: [id, at, kind, text]
+          required: [id, at, kind, text, operator, unit_ids]
           properties:
             id: {type: string}
             at: {type: number}
@@ -55,7 +58,7 @@ allOf:
         type: array
         items:
           type: object
-          required: [id, category, text]
+          required: [id, category, priority, text, label, review_due, expires_at, updated_at, nearby]
           properties:
             id: {type: string}
             category: {type: string}
@@ -70,7 +73,7 @@ allOf:
         type: array
         items:
           type: object
-          required: [id, kind, label]
+          required: [id, kind, label, note, lat, lon, level, priority, review_due, nearby]
           properties:
             id: {type: string}
             kind: {type: string}
@@ -86,7 +89,7 @@ allOf:
         type: array
         items:
           type: object
-          required: [id, at, channel, text]
+          required: [id, at, channel, text, unit, emergency, has_audio]
           properties:
             id: {type: string}
             at: {type: number}

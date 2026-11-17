@@ -650,11 +650,17 @@ writes. `/me` is PR 2's.
   and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
 - **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
   category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
-  (a device is a signed-in person), the caller's name/address/phone, operators' sign-in emails and every radio ID are
-  never sent (the chronology's "Edited ..." lines lose the caller's segments). Site documents and the radio log are not
-  served by these routes.
+  (a device is a signed-in person). **Never sent:** the caller's name, address and phone (not as fields, and not in the
+  chronology: the "Caller info: ..." line and any "Edited ..." line that names a caller field are dropped whole),
+  operators' sign-in emails (a name only), every radio ID, rig and talker beyond a row's alias. **Chronology text is an
+  allow-list:** only the kinds the CAD words itself or an operator wrote (`serialize.EVENT_TEXT_KINDS`) carry text; every
+  other kind (system, feed, radio, prealert, any kind added later) is sent as kind, time and operator with an empty
+  text. **Sent as written:** an incident's `remarks`, `type_note`, `place`, address, the dispatches' text and the
+  operators' notes. Site documents and the radio log are not served by these routes. The snapshot and the lists are the
+  same for every role; premise, pre-plan and radio are only in an incident's detail.
 - **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
-  by one request at a time; role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
+  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
   only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---

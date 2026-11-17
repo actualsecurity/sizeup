@@ -9,8 +9,8 @@ priority: null
 address: 100 Example Ave
 cross_street: Sample St
 place: ""
-lat: 41.0118
-lon: -73.6652
+lat: 41.5000
+lon: -73.5000
 remarks: Smoke from the second floor, occupants out
 disposition: ""
 source: manual
@@ -23,7 +23,7 @@ units:
 type_note: ""
 place_address: ""
 geo_label: ""
-town: Port Chester
+town: Exampleton
 aircraft: null
 events:
   - {id: "9001", at: 1767225600.5, kind: created, text: "Event created (pending): Structure fire at 100 Example Ave", operator: "", unit_id: null}
@@ -31,7 +31,7 @@ dispatches: []
 premise:
   - {id: "3", category: access, priority: 2, text: Knox box at the side door, label: 100 Example Ave, review_due: false, expires_at: null, updated_at: 1760000000.0, nearby: false}
 preplan:
-  - {id: "11", kind: fdc, label: Side A, note: "", lat: 41.0117, lon: -73.6653, level: null, priority: null, review_due: false, nearby: false}
+  - {id: "11", kind: fdc, label: Side A, note: "", lat: 41.5001, lon: -73.5001, level: null, priority: null, review_due: false, nearby: false}
 radio:
   - {id: "FG1-1767225650-1", at: 1767225650.0, channel: FG1, text: Engine 60 on scene, smoke showing, unit: E60, emergency: false, has_audio: true}
 server_time: 1767225800.0

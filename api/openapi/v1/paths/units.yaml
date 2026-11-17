@@ -41,6 +41,12 @@ get:
         application/json:
           schema:
             $ref: ../schemas/Error.yaml
+    "503":
+      description: "The CAD could not answer (`unavailable`, as on a station, which has no CAD), with Retry-After."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
     default:
       description: An error.
       content:

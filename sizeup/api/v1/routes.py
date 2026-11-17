@@ -45,7 +45,8 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
-    reads: object = None       # reads.Reads: the read-only facade over the CAD (never the Cad or a CadApi), None if none (#560)
+    # the read-only facade over the CAD (never the Cad or a CadApi); None where there is no CAD (#560)
+    reads: "reads.Reads | None" = None
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:

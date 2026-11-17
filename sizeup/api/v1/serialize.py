@@ -2,8 +2,17 @@
 sections mirror panels and change with the UI, docs/mobile-api.md section 1.2). Additive within v1: a field may be
 added, none removed or renamed. Pure functions over the dicts the CAD already builds; nothing here reads a database.
 
-Left out on purpose, however the console shows them: the caller's name, address and phone, the operators' sign-in
-emails (a name only), every radio ID, rig and talker beyond what a row's own alias says, and the console's draw hints.
+What is NOT sent, however the console shows it:
+  - the caller's name, address and phone: not the fields, and not the chronology lines that carry them. The
+    chronology is fail-safe: an event's free text is sent only for the kinds in EVENT_TEXT_KINDS (an explicit
+    allow-list); every other kind (system, feed, radio, prealert, one not known yet) goes as kind + time + operator
+    name with an empty text. An "Edited ..." line that touches a caller field is dropped whole, as is any other line
+    that names one;
+  - the operators' sign-in emails (a name only), every radio ID, rig and talker beyond a row's own alias, and the
+    console's draw hints.
+What IS sent as written, because the people on the call read it: an incident's `remarks`, `type_note`, `place` and
+address, the dispatches' text and the operators' notes and dispatch remarks in the chronology. These are what the
+dispatcher typed or the page said about the call; the CAD does not put the caller's details in them.
 Ids are strings (docs/mobile-api.md section 3.2), times unix seconds."""
 from __future__ import annotations
 
@@ -51,15 +60,21 @@ def incident_summary(i: dict) -> dict:
             "units": [_assignment(a) for a in i.get("assignments") or []]}
 
 
-_CALLER = ("caller:", "caller address:", "phone:")          # the segments of an "Edited ..." line that name the caller
+# Event kinds (store._event) whose text is the CAD's own wording or an operator's note: sent. Not listed, so never sent
+# as text: "system" (its "Caller info: name · address · phone" line), "radio" (a row's words, possibly another P25
+# system's), "feed" (a page or a feed's text, up to 2000 characters), "prealert", and any kind added later.
+EVENT_TEXT_KINDS = frozenset({"created", "accepted", "dismissed", "note", "upgrade", "dispatch", "remarks", "tones",
+                              "attach", "status", "closed", "reopened", "alarm", "auto"})
+_CALLER = re.compile(r"caller|phone", re.I)       # "caller: ", "caller address: ", "phone: " (store.update's labels)
 
 
 def event_text(kind: str, text: str) -> str:
-    """The chronology line; an edit line loses the caller's name, address and phone (store.update writes them in)."""
-    if kind != "edit" or not text.startswith("Edited "):
-        return text
-    parts = [p for p in text[len("Edited "):].split("; ") if not p.startswith(_CALLER)]
-    return "Edited " + "; ".join(parts) if parts else "Edited caller details"
+    """The chronology line as the app may read it (see the module docstring)."""
+    if kind == "edit":
+        # store.update joins "label: value" with "; ", and a value may hold "; " itself: so a line that touches a caller
+        # field is dropped whole, never split
+        return "Edited caller details" if _CALLER.search(text) else text
+    return text if kind in EVENT_TEXT_KINDS and not text.startswith("Caller info:") else ""
 
 
 def _event(e: dict) -> dict:

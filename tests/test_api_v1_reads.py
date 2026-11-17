@@ -1,11 +1,12 @@
-"""The read resources of /api/v1 (#560): snapshot, incidents, one incident, units, alarms. A real Cad seeded with invented
-calls (Example Ave, the units of data/cad_lists.json), a test resolver for the device principal, the `reads` flag
-turned on through injected Switches. Everything is invented; no real address, caller or radio ID."""
+"""The read resources of /api/v1 (#560): snapshot, incidents, one incident, units, alarms. A real Cad seeded with
+invented calls (Example Ave, the units of data/cad_lists.json), a test resolver for the device principal, the
+`reads` flag turned on through injected Switches. Everything is invented; no real address, caller or radio ID."""
 from __future__ import annotations
 
 import hashlib
 import itertools
 import json
+import math
 import time
 
 import pytest
@@ -70,6 +71,11 @@ def seed(tmp_path, calls=3, clock=None):
                         "lon": LON, "remarks": f"Smoke showing {n}", "operator": "Casey <casey@example.org>"})
         ids.append(inc["id"])
         c.clock.t += 5 if hasattr(c.clock, "t") else 0
+    # a dispatch starts two workers that commit later (the voice's audio, service._send; the radio log's units
+    # backfill, radiolog.units_soon), which moves the CAD's change counter at a time of its own. Here the voice job is
+    # taken and never run and the backfill runs inline, so a test's counts are its own (B3: that was the flake)
+    c.voice.put = lambda job: True
+    c.radiolog.inline = True
     c.dispatch(ids[0], {"unit_ids": [uid(c, "E60"), uid(c, "L31")], "operator": "Casey <casey@example.org>"})
     return c, ids
 
@@ -126,10 +132,9 @@ def test_no_cad_here_is_a_503_not_an_empty_answer():
 # -- rev and ETag ----------------------------------------------------------------------------------------------
 
 def test_rev_of_is_exactly_the_agreed_function():
-    obj = {"b": [1, 2.5, None], "a": "é  \"q\"", "c": {"z": True, "y": False}}
-    want = hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-                          ).hexdigest()[:16]
-    assert rev_of(obj) == want and len(want) == 16
+    """A literal: another pull request defines the identical function, and both must give this."""
+    obj = {"b": [1, 2.5, None], "a": "\u00e9 x", "c": {"z": True}}
+    assert rev_of(obj) == "49b40a1026b17706"
     assert rev_of({"a": 1, "b": 2}) == rev_of({"b": 2, "a": 1}) and rev_of({"a": 1}) != rev_of({"a": 2})
 
 
@@ -145,7 +150,8 @@ def test_each_object_carries_the_hash_of_the_rest_of_it(cad):
     assert inc["rev"] != unit["rev"]
 
 
-@pytest.mark.parametrize("path, query", [("/api/v1/snapshot", ""), ("/api/v1/incidents", ""), ("/api/v1/incidents/1", ""),
+@pytest.mark.parametrize("path, query", [("/api/v1/snapshot", ""), ("/api/v1/incidents", ""),
+                                         ("/api/v1/incidents/1", ""),
                                          ("/api/v1/units", ""), ("/api/v1/alarms", "")])
 def test_if_none_match_is_a_304_with_no_body_until_it_changes(cad, path, query):
     v1 = v1_for(cad)
@@ -202,7 +208,7 @@ def test_incidents_page_newest_first_with_no_repeat_and_a_last_page_without_next
     seen, pages = walk(v1, "/api/v1/incidents")
     assert pages == 3 and seen == [str(i) for i in reversed(ids)]                     # 3 + 3 + 1, newest first
     exact, pages = walk(v1, "/api/v1/incidents", limit=7)
-    assert pages == 1 and exact == seen                                               # a full page: no next, no empty page
+    assert pages == 1 and exact == seen  # a full page: no next, no empty page
     one, pages = walk(v1, "/api/v1/incidents", limit=1)
     assert pages == 7 and one == seen
 
@@ -213,7 +219,7 @@ def test_a_cursor_resumes_correctly_when_rows_are_added_or_change_state(tmp_path
     _, first, _ = get(v1, "/api/v1/incidents", "limit=2")
     c.clock.t += 60
     c.create({"type": "ALARM", "address": "25 Sample St", "operator": "Casey"})         # newer than the cursor
-    c.close(ids[3], {"operator": "Casey", "disposition": "NO ACTION"})                # a row after the cursor changes state
+    c.close(ids[3], {"operator": "Casey", "disposition": "NO ACTION"})  # a row after the cursor changes state
     _, second, _ = get(v1, "/api/v1/incidents", "limit=2&after=" + first["next"])
     assert [i["id"] for i in second["items"]] == [str(ids[3]), str(ids[2])]            # nothing skipped, none repeated
     assert second["items"][0]["status"] == "closed"
@@ -239,18 +245,36 @@ def test_an_empty_cad_is_an_empty_page_not_an_error(tmp_path):
     assert get(v1, "/api/v1/alarms")[1]["items"] == []
 
 
-@pytest.mark.parametrize("after", ["!!!", "x" * 300, "", "e30", "bm90IGpzb24",                       # junk, long, {}, not JSON
-                                   paging.encode("units", [0, 1]),                                  # another list's cursor
+def test_no_cursor_and_an_empty_one_are_the_first_page(cad):
+    v1 = v1_for(cad)
+    first = get(v1, "/api/v1/incidents")[1]["items"]
+    assert get(v1, "/api/v1/incidents", "after=")[1]["items"] == first and len(first) == 3
+
+
+@pytest.mark.parametrize("after", ["!!!", "x" * 300, "e30", "bm90IGpzb24",  # junk, long, {}, not JSON
+                                   paging.encode("units", [0, 1]),  # another list's cursor
                                    paging.encode("incidents", ["a", 1]), paging.encode("incidents", [1.0]),
                                    paging.encode("incidents", [True, 1]),
-                                   paging.encode("incidents", [float("inf"), 1])])
+                                   paging.encode("incidents", [float("inf"), 1]),
+                                   paging.encode("incidents", [float("-inf"), 1]),
+                                   paging.encode("incidents", [float("nan"), 1])])
 def test_a_bad_cursor_is_a_400(cad, after):
-    v1 = v1_for(cad)
-    status, body, _ = get(v1, "/api/v1/incidents", "after=" + after)
-    if after == "":
-        assert status == 200                                       # no cursor: the first page
-        return
+    status, body, _ = get(v1_for(cad), "/api/v1/incidents", "after=" + after)
     assert status == 400 and body["error"]["code"] == "bad_cursor"
+
+
+def test_a_cursor_whose_row_was_deleted_still_resumes(tmp_path):
+    c, ids = seed(tmp_path, calls=6)
+    v1 = v1_for(c)
+    first = get(v1, "/api/v1/incidents", "limit=2")[1]
+    last = first["items"][-1]["id"]
+    c.store.db.execute("DELETE FROM events WHERE incident_id = ?", (int(last),))
+    c.store.db.execute("DELETE FROM assignments WHERE incident_id = ?", (int(last),))
+    c.store.db.execute("DELETE FROM incidents WHERE id = ?", (int(last),))
+    c.store.rev += 1
+    c.clock.t += 2
+    second = get(v1, "/api/v1/incidents", "limit=2&after=" + first["next"])[1]
+    assert [i["id"] for i in second["items"]] == [str(i) for i in (ids[3], ids[2])]    # the position, not the row
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "x", "1.5", "99999999"])
@@ -294,7 +318,8 @@ def test_the_cursor_is_opaque_and_a_page_rev_covers_its_next(cad):
 def link_radio(c, iid, tid, system, text, rid="6401", unit="E60 P1"):
     c.record_traffic({"id": tid, "start": c.clock() + 1, "end": c.clock() + 4, "channel": "FG1", "talkgroup": None,
                       "system": system, "source": "FG1", "unit": unit, "rig": "E60", "radio_id": rid, "text": text})
-    c.store.db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why) VALUES (?, ?, 'manual')", (tid, iid))
+    c.store.db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why) VALUES (?, ?, 'manual')",
+                       (tid, iid))
 
 
 def detail(v1, c, who):
@@ -308,7 +333,8 @@ def test_a_category_kept_to_admins_is_not_in_a_viewers_or_dispatchers_incident(c
         cad.premise.create({"incident_id": cad.ids[0], "text": text, "category": cat, "operator": "Casey"})
     cad.preplan.create({"incident_id": cad.ids[0], "kind": "knox_box", "lat": LAT + 100 * 0.00009, "lon": LON,
                         "label": "Side door"})
-    cad.preplan.create({"incident_id": cad.ids[0], "kind": "fdc", "lat": LAT + 100 * 0.00009, "lon": LON, "label": "Side A"})
+    cad.preplan.create({"incident_id": cad.ids[0], "kind": "fdc", "lat": LAT + 100 * 0.00009, "lon": LON,
+                        "label": "Side A"})
     post(cad, "premise_visibility", action="set", key="medical", value="admin")
     post(cad, "premise_visibility", action="set", key="knox_box", value="dispatcher")
     v1 = v1_for(cad)
@@ -316,8 +342,10 @@ def test_a_category_kept_to_admins_is_not_in_a_viewers_or_dispatchers_incident(c
     kinds = lambda b: sorted(p["kind"] for p in b["preplan"])              # noqa: E731
     assert (cats(detail(v1, cad, "val")), kinds(detail(v1, cad, "val"))) == (["access"], ["fdc"])
     assert (cats(detail(v1, cad, "jordan")), kinds(detail(v1, cad, "jordan"))) == (["access"], ["fdc", "knox_box"])
-    assert (cats(detail(v1, cad, "casey")), kinds(detail(v1, cad, "casey"))) == (["access", "medical"], ["fdc", "knox_box"])
-    assert "Oxygen" not in json.dumps(detail(v1, cad, "val")) and "Oxygen" not in json.dumps(get(v1, "/api/v1/snapshot")[1])
+    assert (cats(detail(v1, cad, "casey")), kinds(detail(v1, cad, "casey"))) == (["access", "medical"],
+                                                                                 ["fdc", "knox_box"])
+    assert "Oxygen" not in json.dumps(detail(v1, cad, "val"))
+    assert "Oxygen" not in json.dumps(get(v1, "/api/v1/snapshot")[1])
 
 
 def test_a_viewer_gets_nothing_the_console_hides_from_a_viewer(cad):
@@ -344,23 +372,92 @@ def test_another_p25_systems_rows_are_the_consoles_gate_and_never_carry_a_radio_
     link_radio(cad, cad.ids[0], "9211-p1", "mrrs", "suspect fled northbound", rid="77777", unit="PD 4")
     v1 = v1_for(cad)
     body = detail(v1, cad, "val")
-    assert {r["id"] for r in body["radio"]} == {"FG1-ours", "9211-p1"}                # a signed-in person: as the console
+    assert {r["id"] for r in body["radio"]} == {"FG1-ours", "9211-p1"}  # a signed-in person: as the console
     text = json.dumps([get(v1, p, who="val")[1] for p in ("/api/v1/snapshot", "/api/v1/incidents/%d" % cad.ids[0])])
     assert "6401" not in text and "77777" not in text and "radio_id" not in text and '"rig"' not in text
-    # the gate itself: a reader who may not see context gets none of its rows (all-in-one, a hub with no Access)
-    rows = [{"id": "a", "start": 1.0, "system": ""}, {"id": "b", "start": 2.0, "system": "mrrs", "text": "x"}]
-    assert [r["id"] for r in radio_rows(rows, False)] == ["a"] and [r["id"] for r in radio_rows(rows, True)] == ["a", "b"]
+    # the gate itself, against the console's own answers: a signed-in person's rows are the same ids as v1's, and the
+    # rows of a reader with no context access (the console with nobody verified) are what radio_rows(..., False) keeps
+    api = CadApi(cad)
+    signed = json.loads(api.get(f"/api/cad/incident/{cad.ids[0]}", "", Identity(email=VAL))[1])["radio"]
+    nobody = json.loads(api.get(f"/api/cad/incident/{cad.ids[0]}", "")[1])["radio"]
+    assert {r["id"] for r in body["radio"]} == {r["id"] for r in signed} == {"FG1-ours", "9211-p1"}
+    assert {r["id"] for r in nobody} == {"FG1-ours"}
+    assert [r["id"] for r in radio_rows(signed, False)] == [r["id"] for r in nobody]
+    assert {r["id"] for r in radio_rows(signed, True)} == {r["id"] for r in signed}
 
 
-def test_names_never_carry_an_email_and_the_caller_is_not_sent(cad):
-    cad.update(cad.ids[0], {"caller_name": "Pat Example", "phone": "555-0100", "caller_address": "1 Sample St",
-                            "operator": "Casey"})
+CALLER = {"caller_name": "Zed Quill; Ray", "caller_address": "9 Quillmere Ct; Apt 4", "phone": "555-0147"}
+CALLER_BITS = ("Zed Quill", "Quill", "Ray", "9 Quillmere", "Quillmere", "Apt 4", "555-0147", "0147")
+
+
+def whole_api(v1, c, who):
+    """Every v1 answer a device could ask for, as one text."""
+    paths = ["/api/v1/snapshot", "/api/v1/incidents", "/api/v1/units", "/api/v1/alarms"]
+    paths += [f"/api/v1/incidents/{i}" for i in c.ids]
+    return "\n".join(json.dumps(get(v1, p, who=who)[1], ensure_ascii=False) for p in paths)
+
+
+def test_the_callers_details_are_nowhere_in_any_answer_for_any_role(tmp_path):
+    """The callers name, address and phone (a name with a "; " in it too) are written into the chronology when a call
+    is created ("Caller info: ...") and when it is edited ("Edited caller: ..."): neither reaches a device."""
+    c, ids = seed(tmp_path, calls=2)
+    c.ids = ids
+    inc = c.create({"type": "STRU", "address": "100 Example Ave", "lat": LAT + 100 * 0.00009, "lon": LON,
+                    "remarks": "Smoke showing", "operator": "Casey", **CALLER})
+    c.ids.append(inc["id"])
+    c.update(ids[0], {**CALLER, "operator": "Casey"})                                  # an edit line, too
+    c.update(ids[0], {"caller_name": "Zed Quill; Ray; Sam", "remarks": "Smoke, now showing", "operator": "Casey"})
+    link_radio(c, ids[0], "FG1-ours", "", "Engine 60 on scene")
+    chronology = " ".join(e["text"] for i in c.ids for e in c.store.full(i)["events"])
+    assert "Caller info:" in chronology and "Quill" in chronology                       # (the CAD does write them)
+    v1 = v1_for(c)
+    for who in ("val", "jordan", "casey"):
+        text = whole_api(v1, c, who)
+        for bit in CALLER_BITS:
+            assert bit not in text, (who, bit)
+        assert "Smoke, now showing" in text                                             # the rest of the call is there
+
+
+def test_the_chronology_sends_text_only_for_kinds_it_knows_and_is_the_callers_never():
+    from sizeup.api.v1.serialize import EVENT_TEXT_KINDS, event_text
+    assert event_text("system", "Caller info: Zed Quill · 9 Quillmere Ct · 555-0147") == ""
+    assert event_text("system", "Dispatch #4 transmitted") == ""                       # a kind not listed: no text
+    for kind in ("feed", "radio", "prealert", "a-kind-added-later"):
+        assert event_text(kind, "anything at all") == ""
+    for kind in ("note", "status", "created", "dispatch", "alarm"):
+        assert kind in EVENT_TEXT_KINDS and event_text(kind, "Engine 60 on scene") == "Engine 60 on scene"
+    assert event_text("note", "Caller info: leaked by hand") == ""
+    for line in ("Edited caller: Zed Quill; Ray", "Edited remarks updated; phone: 555-0147",
+                 "Edited location: 9 Sample St; caller address: 9 Quillmere Ct; Apt 4"):
+        assert event_text("edit", line) == "Edited caller details"
+    fine = "Edited type: Structure fire; remarks updated"
+    assert event_text("edit", fine) == fine
+
+
+def test_a_cache_warmed_by_one_role_never_serves_another_what_it_may_not_see(cad):
+    cad.premise.create({"incident_id": cad.ids[0], "text": "Oxygen in use, rear bedroom", "category": "medical",
+                        "operator": "Casey"})
+    post(cad, "premise_visibility", action="set", key="medical", value="admin")
+    v1 = v1_for(cad)
+    path = f"/api/v1/incidents/{cad.ids[0]}"
+    admin = get(v1, path, who="casey")[1]                                               # warms every cache
+    assert [n["category"] for n in admin["premise"]] == ["medical"]
+    viewer = get(v1, path, who="val")[1]
+    assert viewer["premise"] == [] and "Oxygen" not in json.dumps(viewer) and viewer["rev"] != admin["rev"]
+    same = ("/api/v1/snapshot", "/api/v1/incidents", "/api/v1/units", "/api/v1/alarms")
+    for p in same:  # role-independent, byte for byte
+        a, b = get(v1, p, who="casey")[1], get(v1, p, who="val")[1]
+        assert {**a, "server_time": 0} == {**b, "server_time": 0}, p
+
+
+def test_names_never_carry_an_email(cad):
     cad.note(cad.ids[0], {"text": "Hydrant out on the corner", "operator": "Casey <casey@example.org>"})
     v1 = v1_for(cad)
     text = json.dumps(detail(v1, cad, "val"))
-    assert "casey@example.org" not in text and "Pat Example" not in text and "555-0100" not in text
+    assert "casey@example.org" not in text
     assert {e["operator"] for e in detail(v1, cad, "val")["events"]} <= {"", "Casey"}
-    assert name_of("Casey <casey@example.org>") == "Casey" and name_of("casey@example.org") == "" and name_of("Lt. Ruiz") == "Lt. Ruiz"
+    assert name_of("Casey <casey@example.org>") == "Casey" and name_of("casey@example.org") == ""
+    assert name_of("Lt. Ruiz") == "Lt. Ruiz"
 
 
 def test_a_deactivated_person_reads_as_the_console_lets_a_viewer(cad):
@@ -395,8 +492,9 @@ def test_no_such_incident_is_a_404(cad, raw):
 # -- alarms ----------------------------------------------------------------------------------------------------
 
 def test_alarms_open_then_recent_and_a_cad_fault_is_a_503(cad):
-    cad.record_traffic(tx("FG1-9", "Engine 64 mayday mayday", rig="E64", unit="E64 P1", radio_id="6499", at=cad.clock() - 1))
-    a = cad.alarms.on_traffic(tx("FG1-9", "Engine 64 mayday mayday", rig="E64", unit="E64 P1", radio_id="6499", at=cad.clock() - 1))
+    t = tx("FG1-9", "Engine 64 mayday mayday", rig="E64", unit="E64 P1", radio_id="6499", at=cad.clock() - 1)
+    cad.record_traffic(t)
+    a = cad.alarms.on_traffic(t)
     v1 = v1_for(cad)
     cad.clock.t += 2
     s, body, _ = get(v1, "/api/v1/alarms")
@@ -417,26 +515,64 @@ def test_alarms_open_then_recent_and_a_cad_fault_is_a_503(cad):
 
 # -- cost (#446) and read-only ----------------------------------------------------------------------------------
 
-def test_a_burst_of_reads_costs_one_rebuild_and_writes_nothing(tmp_path):
-    c, ids = seed(tmp_path, calls=5)
-    v1 = v1_for(c)
+def counted_builds(c):
     built = {"incidents": 0, "units": 0}
-    for name, kind in (("incidents", "incidents"), ("units", "units")):
+    for name in built:
         real = getattr(c.store, name)
 
-        def counted(*a, _real=real, _k=kind, **kw):
+        def counted(*a, _real=real, _k=name, **kw):
             built[_k] += 1
             return _real(*a, **kw)
         setattr(c.store, name, counted)
+    return built
+
+
+def test_a_burst_of_reads_costs_one_rebuild_and_writes_nothing(tmp_path):
+    c, ids = seed(tmp_path, calls=5)
+    v1 = v1_for(c)
+    built = counted_builds(c)
     rev, writes = c.store.rev, c.store.db.total_changes
-    for _ in range(40):
+    for n in range(40):
         for p in ("/api/v1/snapshot", "/api/v1/incidents", "/api/v1/units"):
-            assert get(v1, p, who=("val", "jordan", "casey")[_ % 3])[0] == 200
+            assert get(v1, p, who=("val", "jordan", "casey")[n % 3])[0] == 200
     assert built == {"incidents": 1, "units": 1}
     assert (c.store.rev, c.store.db.total_changes) == (rev, writes)                  # read only: no commit, no row
-    c.note(ids[0], {"text": "Update", "operator": "Casey"})                          # a change: the next read rebuilds
+    c.note(ids[0], {"text": "Update", "operator": "Casey"})                          # a change, inside the floor:
+    get(v1, "/api/v1/snapshot")
+    assert built["incidents"] == 1                                                   # the list is served as it was
+    c.clock.t += 1.5                                                                 # past the rebuild floor
     get(v1, "/api/v1/snapshot")
     assert built["incidents"] == 2
+
+
+def test_a_burst_of_writes_costs_one_rebuild_a_second_not_one_per_poll(tmp_path):
+    c, ids = seed(tmp_path, calls=3)
+    v1 = v1_for(c)
+    built = counted_builds(c)
+    get(v1, "/api/v1/incidents")
+    for n in range(20):
+        c.note(ids[0], {"text": f"Update {n}", "operator": "Casey"})                 # a write between every poll
+        c.clock.t += 0.01
+        assert get(v1, "/api/v1/incidents")[0] == 200
+    assert built["incidents"] == 1
+    c.clock.t += 1.0
+    get(v1, "/api/v1/incidents")
+    assert built["incidents"] == 2
+
+
+def test_a_failing_build_is_run_once_a_second_not_once_per_waiting_request(cad):
+    v1 = v1_for(cad)
+    runs = []
+
+    def broken(now=None):
+        runs.append(1)
+        return None                                                                  # the CAD's own swallowed fault
+    cad.alarms_state = broken
+    for _ in range(10):
+        assert get(v1, "/api/v1/alarms")[0] == 503
+    assert len(runs) == 1
+    cad.clock.t += 1.5
+    assert get(v1, "/api/v1/alarms")[0] == 503 and len(runs) == 2
 
 
 def test_the_cache_ages_out_the_closed_window_even_with_no_write(tmp_path):
@@ -448,21 +584,6 @@ def test_the_cache_ages_out_the_closed_window_even_with_no_write(tmp_path):
     assert [i["id"] for i in get(v1, "/api/v1/incidents")[1]["items"]] == [str(ids[0])]
 
 
-def test_what_a_snapshot_costs_on_a_seeded_board(tmp_path):
-    c, ids = seed(tmp_path, calls=40)
-    v1 = v1_for(c)
-    t = time.perf_counter()
-    status, body, ctype, headers = v1.respond("GET", "/api/v1/snapshot", "", hdr())
-    cold = time.perf_counter() - t
-    t = time.perf_counter()
-    for _ in range(50):
-        v1.respond("GET", "/api/v1/snapshot", "", hdr())
-    warm = (time.perf_counter() - t) / 50
-    print(f"snapshot: {len(json.loads(body)['incidents'])} incidents, {len(body)} bytes, cold {cold * 1000:.1f} ms, "
-          f"warm {warm * 1000:.2f} ms")
-    assert status == 200 and warm < 0.05 and cold < 2
-
-
 # -- the spec, over real HTTP ----------------------------------------------------------------------------------------
 
 def test_every_read_answers_in_the_specs_shape_over_http_and_a_304_has_no_body(cad):
@@ -470,11 +591,13 @@ def test_every_read_answers_in_the_specs_shape_over_http_and_a_304_has_no_body(c
     import urllib.request
     srv, url = serve(role="hub", cad=CadApi(cad), mobile=reads_on(), mobile_resolver=resolver)
     cad.record_traffic(tx("FG1-9", "Engine 64 mayday", rig="E64", unit="E64 P1", radio_id="6499", at=time.time() - 1))
-    cad.alarms.on_traffic(tx("FG1-9", "Engine 64 mayday", rig="E64", unit="E64 P1", radio_id="6499", at=time.time() - 1))
+    cad.alarms.on_traffic(tx("FG1-9", "Engine 64 mayday", rig="E64", unit="E64 P1", radio_id="6499",
+                             at=time.time() - 1))
     link_radio(cad, cad.ids[0], "FG1-ours", "", "Engine 60 on scene")
     cad.premise.create({"incident_id": cad.ids[0], "text": "Knox box at the side door", "category": "access",
                         "operator": "Casey"})
-    cad.preplan.create({"incident_id": cad.ids[0], "kind": "fdc", "lat": LAT + 100 * 0.00009, "lon": LON, "label": "Side A"})
+    cad.preplan.create({"incident_id": cad.ids[0], "kind": "fdc", "lat": LAT + 100 * 0.00009, "lon": LON,
+                        "label": "Side A"})
 
     def fetch(path, h=None):
         req = urllib.request.Request(url + path, headers={**hdr(), **(h or {})})
@@ -484,7 +607,8 @@ def test_every_read_answers_in_the_specs_shape_over_http_and_a_304_has_no_body(c
         except urllib.error.HTTPError as e:
             return e.code, dict(e.headers), e.read()
     try:
-        for path, spec_path in (("/api/v1/snapshot", "/api/v1/snapshot"), ("/api/v1/incidents?limit=2", "/api/v1/incidents"),
+        for path, spec_path in (("/api/v1/snapshot", "/api/v1/snapshot"),
+                                ("/api/v1/incidents?limit=2", "/api/v1/incidents"),
                                 (f"/api/v1/incidents/{cad.ids[0]}", "/api/v1/incidents/{id}"),
                                 ("/api/v1/units?limit=3", "/api/v1/units"), ("/api/v1/alarms", "/api/v1/alarms")):
             status, headers, body = fetch(path)
@@ -499,3 +623,62 @@ def test_every_read_answers_in_the_specs_shape_over_http_and_a_304_has_no_body(c
         assert fetch("/api/v1/snapshot", {"Authorization": "Bearer nope"})[0] == 401
     finally:
         srv.shutdown()
+
+
+# -- the spec and the served shapes agree both ways -----------------------------------------------------------
+
+EXAMPLES = {"Incident": "Incident", "Unit": "Unit", "Alarm": "Alarm", "IncidentDetail": "IncidentDetail"}
+
+
+def test_every_example_file_validates_against_its_schema():
+    import yaml
+    for name in EXAMPLES:
+        example = yaml.safe_load((oas.SPEC_DIR / "examples" / f"{name}.yaml").read_text())
+        schema = oas.bundle(yaml.safe_load((oas.SPEC_DIR / "schemas" / f"{name}.yaml").read_text()),
+                            oas.SPEC_DIR / "schemas" / f"{name}.yaml")
+        errs = list(Draft202012Validator(schema).iter_errors(example))
+        assert not errs, (name, [e.message for e in errs][:3])
+        assert "Port Chester" not in json.dumps(example)  # fictional
+
+
+def test_every_field_served_is_in_the_schema_and_every_one_always_served_is_required(cad):
+    """Two ways: the served object has no field the spec does not name (so a field cannot be added unlisted), and the
+    spec requires every field the server always sends."""
+    cad.premise.create({"incident_id": cad.ids[0], "text": "Knox box", "category": "access", "operator": "Casey"})
+    cad.preplan.create({"incident_id": cad.ids[0], "kind": "fdc", "lat": LAT + 100 * 0.00009, "lon": LON, "label": "A"})
+    cad.alarms.on_traffic(tx("FG1-7", "Engine 60 mayday", rig="E60", unit="E60 P1", radio_id="6401",
+                             at=cad.clock() - 1))
+    link_radio(cad, cad.ids[0], "FG1-ours", "", "Engine 60 on scene")
+    cad.clock.t += 2
+    v1 = v1_for(cad)
+    snap = get(v1, "/api/v1/snapshot")[1]
+    det = get(v1, f"/api/v1/incidents/{cad.ids[0]}")[1]
+    inc_schema = oas.response_schema(DOC, "GET", "/api/v1/incidents", 200)["properties"]["items"]["items"]
+    unit_schema = oas.response_schema(DOC, "GET", "/api/v1/units", 200)["properties"]["items"]["items"]
+    alarm_schema = oas.response_schema(DOC, "GET", "/api/v1/alarms", 200)["properties"]["items"]["items"]
+    det_schema = oas.response_schema(DOC, "GET", "/api/v1/incidents/{id}", 200)
+    for obj, schema in ((snap["incidents"][0], inc_schema), (snap["units"][0], unit_schema),
+                        (snap["alarms"][0], alarm_schema)):
+        assert set(obj) == set(schema["properties"]) == set(schema["required"])
+    props = {**det_schema["allOf"][0]["properties"], **det_schema["allOf"][1]["properties"]}
+    required = set(det_schema["allOf"][0]["required"]) | set(det_schema["allOf"][1]["required"])
+    assert set(det) - {"rev"} <= set(props) and set(det) == required
+    for key, row in (("events", det["events"][0]), ("dispatches", det["dispatches"][0]), ("premise", det["premise"][0]),
+                     ("preplan", det["preplan"][0]), ("radio", det["radio"][0])):
+        item = props[key]["items"]
+        assert set(row) == set(item["properties"]) == set(item["required"]), key
+
+
+def test_the_404_and_503_bodies_are_the_specs_error(cad):
+    v1 = v1_for(cad)
+    s, body, _ = get(v1, "/api/v1/incidents/99999")
+    assert s == 404
+    conforms(body, "GET", "/api/v1/incidents/{id}", 404)
+    off = V1(switches=reads_on(), resolver=resolver)                                    # no CAD: a station
+    for path, spec in (("/api/v1/snapshot", "/api/v1/snapshot"), ("/api/v1/units", "/api/v1/units"),
+                       ("/api/v1/incidents", "/api/v1/incidents"), ("/api/v1/incidents/1", "/api/v1/incidents/{id}"),
+                       ("/api/v1/alarms", "/api/v1/alarms")):
+        s, body, h = get(off, path)
+        assert s == 503 and h["Retry-After"] == "5"
+        conforms(body, "GET", spec, 503)
+        assert "503" in DOC["paths"][spec]["get"]["responses"]

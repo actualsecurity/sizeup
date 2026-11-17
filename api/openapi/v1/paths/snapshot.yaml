@@ -4,7 +4,8 @@ get:
   description: >
     The open incidents, the units and the alarms, in one answer, with the hub's clock and the change log's epoch (null
     until there is one). Needs a signed-in device, the `reads` feature and the least role (`read`); another role
-    gets nothing more here than the console shows it. `ETag` is the snapshot's rev.
+    gets nothing more here than the console shows it. The snapshot is the same for every role: its cached lists carry no
+    premise notes, pre-plan points or radio rows (those are in an incident's detail, per role). `ETag` is the snapshot's rev.
   parameters:
     - $ref: ../parameters/IfNoneMatch.yaml
   responses:

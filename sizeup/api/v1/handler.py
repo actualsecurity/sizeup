@@ -22,9 +22,9 @@ from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
+from . import reads
 from .errors import JSON, error
 from .limits import Limits
-from . import reads
 from .principal import Resolver, none_yet, person
 from .routes import ROUTES, Ctx, Route
 from .switches import Switches
@@ -50,7 +50,7 @@ class V1:
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
         # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
-        self.reads = reads.Reads(cad) if cad is not None else None
+        self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -115,9 +115,13 @@ class V1:
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
             ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads)
-            # a handler answers (status, object) or (status, object, headers); object None is no body (a 304, #560)
-            status, obj, *extra = route.handler(ctx)
+            # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
+            # finished (status, body, content type, headers), which is what errors.error() makes
+            res = route.handler(ctx)
+            if len(res) == 4:
+                return res
+            status, obj, extra = (*res, {})[:3]
             body = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
-            return status, body, JSON, {"Cache-Control": "no-store", **(extra[0] if extra else {})}
+            return status, body, JSON, {"Cache-Control": "no-store", **extra}
         finally:
             self.limits.leave()

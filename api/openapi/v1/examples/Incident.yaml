@@ -9,8 +9,8 @@ priority: null
 address: 100 Example Ave
 cross_street: Sample St
 place: ""
-lat: 41.0118
-lon: -73.6652
+lat: 41.5000
+lon: -73.5000
 remarks: Smoke from the second floor, occupants out
 disposition: ""
 source: manual

@@ -2,7 +2,8 @@ type: object
 description: >
   An emergency alarm or notice (an emergency button, a mayday heard, an aircraft emergency). `who` is the talker as the
   console labels it; no separate radio ID is sent.
-required: [id, state, level, what, who, rev]
+required: [id, state, level, at, created_at, what, who, channel, text, emergency, drill, source, subject, incident_id,
+  incident_number, has_clip, quiet, ack_by, ack_at, clear_by, clear_at, rev]
 properties:
   id: {type: string}
   state: {type: string, description: "open (not acknowledged) | notice | recent (just acknowledged)."}

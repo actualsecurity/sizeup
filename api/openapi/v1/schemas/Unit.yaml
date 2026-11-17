@@ -1,10 +1,11 @@
 type: object
 description: A unit on the board.
-required: [id, name, kind, status, incident_ids, rev]
+required: [id, name, kind, title, station, department, board, response, status, status_at, out_of_service, spare,
+  mutual_aid, incident_ids, incident_number, rev]
 properties:
   id: {type: string}
   name: {type: string, description: "The board code, E60."}
-  kind: {type: string, description: "engine | ladder | rescue | chief ... (an unknown value is \"other\")."}
+  kind: {type: string, description: "engine | ladder | rescue | chief ...; clients must tolerate a value they do not know."}
   title: {type: string}
   station: {type: string}
   department: {type: string}

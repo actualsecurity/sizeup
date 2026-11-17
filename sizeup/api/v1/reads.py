@@ -25,16 +25,23 @@ import threading
 
 from sizeup import sourcekeys
 
+from sizeup.cad.store import CadError         # the CAD's own exception for no such row or a refusal, nothing else
+
 from . import paging
+from .errors import error
 from .paging import BadRequest
 from .rev import rev_of
 from .serialize import RADIO_MAX, alarm, incident_detail, incident_summary, radio_rows, unit, with_rev
 
 OPEN = ("queued", "pending", "active")
-SNAPSHOT_MAX = 200                    # open incidents in the snapshot (open calls are few; this is a guard)
-UNITS_DEFAULT, UNITS_MAX = 100, 500
-INCIDENT_AGE_S = 30.0                 # the cache's maximum age: the "closed in the last day" window moves with time
-ALARM_AGE_S = 1.0                     # alarms age out by the clock (notices, the just acknowledged), like the console's 1 s
+SNAPSHOT_MAX = 200                    # open incidents (rows) in the snapshot: open calls are few, this is a guard
+UNITS_DEFAULT, UNITS_MAX = 100, 500  # units (rows) a page by default and at most; a board larger than UNITS_MAX has its
+#                                       first UNITS_MAX units in the snapshot and the rest from /units (cursor pages)
+LIST_AGE_S = 30.0                     # incidents and units: the longest a list is served without a rebuild (the "closed
+#                                       in the last day" window moves with time, a unit's board with a settings edit)
+ALARM_AGE_S = 1.0                     # alarms age out by the clock (notices, the just acknowledged): the console's 1 s
+REBUILD_FLOOR_S = 1.0                 # the shortest time between two rebuilds of a list, so a burst of writes (a voice
+#                                       render, radio rows) costs one rebuild a second, not one per poll (#446)
 
 
 class Unavailable(Exception):
@@ -42,18 +49,29 @@ class Unavailable(Exception):
 
 
 class _Cached:
-    """One list, rebuilt when the CAD's change counter moves or it is older than max_age; one rebuild at a time."""
+    """One list, rebuilt when the CAD's change counter moves or it is older than max_age, but never more often than
+    every REBUILD_FLOOR_S (the last list is served meanwhile); one rebuild at a time. A failed build is remembered for
+    the same floor, so requests waiting on a failing build do not each run it again."""
 
     def __init__(self, build, max_age: float, clock):
         self.build, self.max_age, self.clock = build, max_age, clock
         self._lock = threading.Lock()
-        self._at, self._rev, self._value = 0.0, None, None
+        self._at, self._rev, self._value, self._failed = 0.0, None, None, None
 
     def get(self, rev):
         with self._lock:
             now = self.clock()
+            if self._failed is not None and now - self._failed[0] < REBUILD_FLOOR_S:
+                raise self._failed[1]
+            if self._value is not None and now - self._at < REBUILD_FLOOR_S:
+                return self._value
             if self._value is None or rev != self._rev or now - self._at >= self.max_age:
-                self._value = self.build()
+                try:
+                    self._value = self.build()
+                except Exception as e:  # noqa: BLE001 - kept for the floor, then raised as it was
+                    self._failed = (now, e)
+                    raise
+                self._failed = None
                 self._rev, self._at = rev, now
             return self._value
 
@@ -61,11 +79,12 @@ class _Cached:
 class Reads:
     """One per Cad: the caches and the reads."""
 
-    def __init__(self, cad, clock=None):
-        # the CAD's own clock: the console's `time`, and what its tests move
-        self._cad, self.clock = cad, clock or cad.clock
-        self._incidents = _Cached(self._build_incidents, INCIDENT_AGE_S, self.clock)
-        self._units = _Cached(self._build_units, INCIDENT_AGE_S, self.clock)
+    def __init__(self, cad, clock=None, log=None):
+        # the CAD's own clock: the console's `time`, and what its tests move; log: v1's sink (handler.py), the
+        # class of a failure only, never a note's text
+        self._cad, self.clock, self.log = cad, clock or cad.clock, log or (lambda msg: None)
+        self._incidents = _Cached(self._build_incidents, LIST_AGE_S, self.clock)
+        self._units = _Cached(self._build_units, LIST_AGE_S, self.clock)
         self._alarms = _Cached(self._build_alarms, ALARM_AGE_S, self.clock)
 
     # -- the cached, role-independent lists ---------------------------------------------------------------------
@@ -105,8 +124,7 @@ class Reads:
         """The person's standing as the console reads it (CadApi._may): viewer | dispatcher | admin."""
         try:
             return self._cad.settings.standing(principal.email)["may"]
-        except Exception as e:  # noqa: BLE001 - CadError and the like: the least, as the console does
-            self._cad.log(f"api v1: standing: {type(e).__name__}")
+        except CadError:                    # as CadApi._may: the least (not reused: it takes the console's Identity)
             return "viewer"
 
     # -- the reads ------------------------------------------------------------------------------------------------
@@ -117,6 +135,7 @@ class Reads:
         alarms = self.alarms_all()
         rev = rev_of({"incidents": [i["rev"] for i in incs], "units": [u["rev"] for u in units],
                       "alarms": [a["rev"] for a in alarms]})
+        # epoch: the change log's (#561, PR 5): null until there is one
         body = {"incidents": incs, "units": units, "alarms": alarms, "server_time": self.clock(), "epoch": None,
                 "rev": rev}
         return paging.answer(headers, body, rev)
@@ -140,19 +159,17 @@ class Reads:
 
     def incident(self, raw_id: str, principal, headers) -> tuple:
         if not re.fullmatch(r"[0-9]{1,12}", raw_id):
-            return _err(404, "not_found", "no such incident")
+            return error(404, "not_found", "no such incident")
         iid = int(raw_id)
         try:
             full = self._cad.store.full(iid)
-        except Exception as e:  # noqa: BLE001
-            if type(e).__name__ == "CadError":                          # "no event N"
-                return _err(404, "not_found", "no such incident")
-            raise
+        except CadError:                                                # "no event N"
+            return error(404, "not_found", "no such incident")
         may = self.may(principal)
         with sourcekeys.request_context(principal):                     # a signed-in person: the console's gate
             sees = sourcekeys.may_see_context()
             rows = self._cad.comms.for_incidents([iid], RADIO_MAX)[iid]
-            for r in rows:
+            for r in rows:                                              # (a clip check each: at most RADIO_MAX files)
                 r["has_audio"] = bool(self._cad.has_clip(r["id"]))
         premise = self._safe(lambda: self._cad.premise.for_incident(full, may))
         preplan = self._safe(lambda: self._cad.preplan.for_incident(full, may))
@@ -182,28 +199,22 @@ class Reads:
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
-            self._cad.log(f"api v1: building notes: {type(e).__name__}")
+            self.log(f"api v1: building notes: {type(e).__name__}")
             return []
 
 
 # -- the route handlers (routes.py) ---------------------------------------------------------------------------------
 
-def _err(status: int, code: str, message: str, retry_after_s: int | None = None) -> tuple:
-    """An error from a handler: the same envelope as errors.error (the handler's tuple form: status, object, headers)."""
-    e = {"code": code, "message": message, **({} if retry_after_s is None else {"retry_after_s": retry_after_s})}
-    return status, {"error": e}, ({} if retry_after_s is None else {"Retry-After": str(retry_after_s)})
-
-
 def _serve(ctx, fn):
     """Run one read: no CAD here (a station's page has none): 503; the query wrong: 400; the CAD's own fault: 503."""
     if ctx.reads is None:
-        return _err(503, "unavailable", "the CAD is not available here", 5)
+        return error(503, "unavailable", "the CAD is not available here", 5)
     try:
         return fn(ctx.reads)
     except BadRequest as e:
-        return _err(400, e.code, e.message)
+        return error(400, e.code, e.message)
     except Unavailable:
-        return _err(503, "unavailable", "the CAD could not answer: try again", 2)
+        return error(503, "unavailable", "the CAD could not answer: try again", 2)
 
 
 def snapshot(ctx):
