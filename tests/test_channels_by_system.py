@@ -129,20 +129,61 @@ def test_a_county_choice_saved_under_another_systems_number_is_dropped_on_loadin
     assert json.loads((tmp_path / "talkgroups.json").read_text()) == {           # the county's kept, under their numbers
         "307": {"record": False}, str(other): {"record": False}, "5021": {"main": True}, "4242": {"record": False}}
     kept = json.loads((tmp_path / "talkgroups_migrated.json").read_text())       # what went, kept to put back by hand
-    assert [(k["tg"], k["system"], k["prefs"]) for k in kept] == [(PD, "mrrs", {"main": True})]
+    assert kept["version"] == 1 and [(k["tg"], k["system"], k["prefs"]) for k in kept["dropped"]] == [(PD, "mrrs", {"main": True})]
+    assert not list(tmp_path.glob("*.tmp"))
     assert [r["source"] for r in p.state() if r["tg"] == PD] == [f"p25:mrrs:{PD}"]
     assert not p.record(307) and not p.record(other) and p.main(5021) and not p.record(4242)
     again = prefs(tmp_path)
     again.seed(other, 1000.0)
-    assert again.drop_orphans() == [] and not again.record(other)                # once; the heard one stays the county's
-    assert len(json.loads((tmp_path / "talkgroups_migrated.json").read_text())) == 1
+    assert again.drop_orphans() == [] and not again.record(other)                # the heard one stays the county's
+    assert json.loads((tmp_path / "talkgroups_migrated.json").read_text()) == kept
 
 
-def test_with_no_county_list_nothing_is_dropped(tmp_path):
-    (tmp_path / "talkgroups.json").write_text(json.dumps({str(PD): {"record": False}}))
-    p = TalkgroupPrefs({}, set(), tmp_path / "talkgroups.json", others={"mrrs": MRRS.talkgroups})
-    assert p.drop_orphans() == [] and not p.record(PD)
+def test_it_runs_once_per_station_never_again(tmp_path):
+    p = prefs(tmp_path)
+    assert p.drop_orphans() == []                       # nothing to drop: still marked done
+    assert json.loads((tmp_path / "talkgroups_migrated.json").read_text())["dropped"] == []
+    # later: a county talkgroup the file doesn't list, with a number MRRS lists, quiet past the history: kept
+    p.set(9212, record=False)
+    again = prefs(tmp_path)
+    assert again.drop_orphans() == [] and not again.record(9212)
+    assert json.loads((tmp_path / "talkgroups.json").read_text()) == {"9212": {"record": False}}
+
+
+def test_a_sidecar_that_cant_be_written_drops_nothing(tmp_path, monkeypatch):
+    import sizeup.talkgroups as tgmod
+    (tmp_path / "talkgroups.json").write_text(json.dumps({str(PD): {"main": True}}))
+    p = prefs(tmp_path)
+
+    def refuse(*a):
+        raise OSError("read-only")
+    monkeypatch.setattr(tgmod.os, "replace", refuse)
+    assert p.drop_orphans() == [] and p.migrated == []
+    assert json.loads((tmp_path / "talkgroups.json").read_text()) == {str(PD): {"main": True}}
     assert not (tmp_path / "talkgroups_migrated.json").exists()
+    monkeypatch.undo()                                  # the next start: it can, so it does
+    assert prefs(tmp_path).drop_orphans() == [(PD, "mrrs", {"main": True})]
+
+
+def test_a_corrupt_sidecar_is_moved_aside_and_nothing_dropped(tmp_path):
+    (tmp_path / "talkgroups.json").write_text(json.dumps({str(PD): {"main": True}}))
+    (tmp_path / "talkgroups_migrated.json").write_text("{not json")
+    p = prefs(tmp_path)
+    assert p.drop_orphans() == [] and p.main(PD)                                  # it ran before: done
+    aside = list(tmp_path.glob("talkgroups_migrated.json.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+    assert not (tmp_path / "talkgroups_migrated.json").exists()
+
+
+def test_with_no_county_talkgroups_file_nothing_is_dropped(tmp_path):
+    # the config always has the [p25] talkgroups (307 ...): what counts is whether the county's file gave rows
+    from sizeup.config import load
+    from tests.test_p25_systems import ROOT
+    assert load(ROOT / "config.example.toml").p25_tg_file_rows > 0
+    (tmp_path / "talkgroups.json").write_text(json.dumps({str(PD): {"record": False}}))
+    p = prefs(tmp_path)
+    assert p.drop_orphans(county_listed=False) == [] and not p.record(PD)
+    assert not (tmp_path / "talkgroups_migrated.json").exists()                  # not marked: tried again with a file
 
 
 def test_the_app_says_what_it_dropped(two, tmp_path):
@@ -150,7 +191,8 @@ def test_the_app_says_what_it_dropped(two, tmp_path):
     assert not any("dropped" in m for m in logs)
     (app.clips_dir.parent / "talkgroups.json").write_text(json.dumps({str(PD): {"main": True}}))
     import sizeup.app as appmod
-    again = appmod.App(app.cfg)
+    from dataclasses import replace
+    again = appmod.App(replace(app.cfg, p25_tg_file_rows=2))
     try:
         assert any(f"county choice for {PD} dropped (main=True; kept in talkgroups_migrated.json): {PD} is mrrs's" in m
                    for m in logs)

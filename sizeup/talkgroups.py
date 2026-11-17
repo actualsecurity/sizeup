@@ -19,8 +19,9 @@ A bare number is always the county's. Settings > Radios once sent Main / Record 
 number alone (before the page sent the source), which saved a county choice under that number: an "Unknown — TG 9211"
 card under the county, and nothing on the other system's talkgroup (its tier). drop_orphans() (the app, once the
 history has been seeded) drops such a choice: a number the county neither lists nor has heard (no county call in the
-history) that another system lists, and only when the county has a list at all. What it drops is kept in
-talkgroups_migrated.json first (and logged), so a real county choice could be put back by hand. Numbers are not
+history) that another system lists, and only when the county's talkgroups file gave rows. It runs once per station
+(talkgroups_migrated.json marks it done, with what it dropped, written before anything is dropped, and logged), so
+a real county choice could be put back by hand and none is ever dropped later. Numbers are not
 guaranteed unique: config.load refuses another system only for a number the county LISTS, so an unlisted county
 talkgroup that is heard can share a number with another system; it stays the county's. elsewhere() is what
 App.set_talkgroup refuses a bare number by (the same test, live).
@@ -29,6 +30,7 @@ App.set_talkgroup refuses a bare number by (the same test, live).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -82,30 +84,44 @@ class TalkgroupPrefs:
         """The key a talkgroup is held under: its number for the county's, (system, number) for another system's."""
         return int(tg) if not system or system == self.county else (system, int(tg))
 
-    def drop_orphans(self) -> list[tuple[int, str, dict]]:
-        """County choices saved under another system's number by the old page (see above): dropped, kept in
-        talkgroups_migrated.json first, the file written without them. Call once the history is seeded (heard() needs
-        it). -> what was dropped (also `migrated`)."""
-        if not any(not isinstance(k, tuple) for k in self.info):
-            return []                         # no county list: a county talkgroup can't be told from another's
+    def drop_orphans(self, county_listed: bool = True) -> list[tuple[int, str, dict]]:
+        """County choices saved under another system's number by the old page (see above): dropped ONCE per station,
+        never again (talkgroups_migrated.json marks it done: after this release nothing makes such an entry, so a later
+        one could only be a real county choice). Call once the history is seeded (the county's heard talkgroups).
+        county_listed: the county's talkgroups file gave rows; without one a county talkgroup can't be told from
+        another system's: nothing is dropped and nothing marked (the next start tries again). The sidecar is written
+        first (a temp file, then replaced); it can't be: nothing is dropped. A sidecar that can't be read is moved
+        aside (.corrupt-<time>), and counts as done. -> what was dropped (also `migrated`)."""
+        if not self.migrated_path or not county_listed:
+            return []
+        done = self.migrated_path.is_file()
+        if done:
+            try:
+                json.loads(self.migrated_path.read_text())
+            except (OSError, ValueError):
+                try:                                  # kept for a person to look at, never overwritten
+                    self.migrated_path.rename(self.migrated_path.with_name(
+                        f"{self.migrated_path.name}.corrupt-{int(time.time())}"))
+                except OSError:
+                    pass
+            return []
         with self._lock:
             gone = []
             for k in [k for k in self._prefs if not isinstance(k, tuple) and k not in self.info and k not in self._seen]:
                 if owners := self._owners(k):
-                    gone.append((k, owners[0], self._prefs.pop(k)))
+                    gone.append((k, owners[0], dict(self._prefs[k])))
+        mark = {"version": 1, "at": time.time(), "dropped": [{"tg": k, "system": o, "prefs": w} for k, o, w in gone]}
+        tmp = self.migrated_path.with_name(self.migrated_path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(mark))
+            os.replace(tmp, self.migrated_path)
+        except OSError:
+            return []                             # not kept, so not dropped (the next start tries again)
         if not gone:
             return []
-        if self.migrated_path:
-            try:
-                kept = json.loads(self.migrated_path.read_text()) if self.migrated_path.is_file() else []
-                kept = kept if isinstance(kept, list) else []
-            except (OSError, ValueError):
-                kept = []
-            kept += [{"tg": k, "system": owner, "prefs": was, "at": time.time()} for k, owner, was in gone]
-            try:
-                self.migrated_path.write_text(json.dumps(kept[-200:]))
-            except OSError:
-                pass
+        with self._lock:
+            for k, _o, _w in gone:
+                self._prefs.pop(k, None)
         self.save()
         self.migrated = gone
         return gone

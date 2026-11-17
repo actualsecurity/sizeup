@@ -461,7 +461,7 @@ class App:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
         # (after the seed: a county talkgroup heard in the history is the county's, whatever another system lists)
-        for tg, owner, was in self.tg.drop_orphans():   # the old page saved these under the county by number alone
+        for tg, owner, was in self.tg.drop_orphans(cfg.p25_tg_file_rows > 0):   # the old page's, by number alone (once)
             log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}; "
                 f"kept in talkgroups_migrated.json): {tg} is {owner}'s talkgroup, never heard on the county")
         self._last_tones_only: Page | None = None
