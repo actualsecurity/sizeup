@@ -3,6 +3,7 @@ See config.example.toml for every option with comments."""
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -33,6 +34,15 @@ KINDS = ("paging", "traffic", "airband")
 AIRBAND_SQUELCH_DB = 3.5
 AIRBAND_GAIN_DB = 36.4
 AIRBAND_MHZ = (118.0, 137.0)   # VHF airband voice (AM)
+
+HEARTBEAT_EVERY_MIN = 360.0     # [prealert]: Tapout's status-topic heartbeat, every 6 h (it was hourly)
+STALE_MIN_FACTOR = 1.05         # an explicit heartbeat_stale_min must be at least this x the period (no flapping)
+
+
+def heartbeat_stale_min(every_min: float) -> float:
+    """No heartbeat this long (minutes) -> Tapout's health warns: the period, 10 % for its clock and a slow boot, and
+    15 min for ntfy and the network. 6 h -> 411 min (6 h 51 min): one missed heartbeat warns ~7 h after the last."""
+    return round(every_min * 1.1 + 15)
 
 
 @dataclass(frozen=True)
@@ -207,7 +217,12 @@ class Config:
     prealert_ring_source: str = ""        # "env" | "config" | "" (unset)
     prealert_status_source: str = ""
     prealert_expire_min: float = 5.0
-    prealert_heartbeat_stale_min: float = 90.0
+    # Tapout's heartbeat period (its firmware: every 6 h) and how long without one before "no heartbeat for ..."
+    # (heartbeat_stale_min(): 411 for the default period). Only load() derives the stale value from a period read
+    # from the config; a Config built or replace()d by hand with another period must set both.
+    prealert_heartbeat_every_min: float = HEARTBEAT_EVERY_MIN
+    prealert_heartbeat_stale_min: float = heartbeat_stale_min(HEARTBEAT_EVERY_MIN)
+    prealert_config_note: str = ""        # a [prealert] value not used as given (logged by the app at start)
     # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topics for pushes that
     # page a person, two kinds (notify.route()): ntfy_topic for the incident alarms (sizeup/cad/alarms.py, #128:
     # emergency buttons, mayday, aircraft squawks; env SIZEUP_ALERT_TOPIC, the hub: SSM /sizeup-hub/alert-topic),
@@ -533,7 +548,7 @@ def _prealert(data: dict) -> dict:
     if "prealert" not in data:
         return {}
     pa = _take(data["prealert"], "prealert", {"enabled", "server", "ring_topic", "status_topic", "expire_min",
-                                              "heartbeat_stale_min"})
+                                              "heartbeat_every_min", "heartbeat_stale_min"})
     server = _env("SIZEUP_PREALERT_SERVER", str(pa.get("server", "https://ntfy.sh"))).rstrip("/")
     m = re.fullmatch(r"(https?)://([^/:?#]+)(:\d+)?", server)
     if not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1")):
@@ -547,18 +562,33 @@ def _prealert(data: dict) -> dict:
         raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _), "
                           "or empty (set them in Settings > System > Push notifications)")
     try:
-        expire, stale = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_stale_min", 90))
+        expire, every = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_every_min", HEARTBEAT_EVERY_MIN))
+        stale = float(pa["heartbeat_stale_min"]) if "heartbeat_stale_min" in pa else heartbeat_stale_min(every)
     except (TypeError, ValueError):
-        raise ConfigError("prealert.expire_min / heartbeat_stale_min: minutes") from None
-    if not 0.5 <= expire <= 60 or not 5 <= stale <= 24 * 60:
-        raise ConfigError("prealert.expire_min: 0.5 to 60; prealert.heartbeat_stale_min: 5 to 1440")
+        raise ConfigError("prealert.expire_min / heartbeat_every_min / heartbeat_stale_min: minutes, "
+                          "a finite number") from None
+    if not all(math.isfinite(x) for x in (expire, every, stale)):          # nan would turn the no-heartbeat warning off
+        raise ConfigError("prealert.expire_min / heartbeat_every_min / heartbeat_stale_min: minutes, a finite number")
+    if not 0.5 <= expire <= 60:
+        raise ConfigError("prealert.expire_min: 0.5 to 60")
+    if not 5 <= every <= 24 * 60:
+        raise ConfigError("prealert.heartbeat_every_min: 5 to 1440 (Tapout's heartbeat period)")
+    note = ""
+    if stale > 2 * 24 * 60:
+        raise ConfigError("prealert.heartbeat_stale_min: at most 2880; leave it out to derive it from heartbeat_every_min")
+    if stale < every * STALE_MIN_FACTOR:
+        # an old config (the example's 90 from when Tapout beat hourly) must not stop the app, nor flap on a late beat
+        derived = heartbeat_stale_min(every)
+        note = (f"[prealert] heartbeat_stale_min = {stale:g} is not above the {every:g} min heartbeat period "
+                f"(needs at least {every * STALE_MIN_FACTOR:g}): using {derived:g}; remove it or raise it")
+        stale = derived
     enabled = pa.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("prealert.enabled: true or false")
     return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
                 prealert_status_topic=topics["status_topic"], prealert_ring_source=tsrc["ring_topic"],
                 prealert_status_source=tsrc["status_topic"], prealert_expire_min=expire,
-                prealert_heartbeat_stale_min=stale)
+                prealert_heartbeat_every_min=every, prealert_heartbeat_stale_min=stale, prealert_config_note=note)
 
 
 def _alerts(data: dict, prealert: dict) -> dict:

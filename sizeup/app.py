@@ -774,8 +774,11 @@ class App:
                 p = getattr(self, "pushes", None)          # built just below: no topic until then
                 t = p.prealert_topics() if p is not None else {"ring": {"topic": ""}, "status": {"topic": ""}}
                 return t["ring"]["topic"], t["status"]["topic"]
+            if cfg.prealert_config_note:
+                log(f"prealert: config: {cfg.prealert_config_note}")
             self.prealert = PreAlerts(self.cad, cfg.prealert_server, "", "", cfg.prealert_expire_min,
-                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics)
+                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics,
+                                      heartbeat_every_min=cfg.prealert_heartbeat_every_min)
             self.prealert_sync()
         # Pushes (sizeup/notify.py Pushes, [alerts]): our own ntfy topics by kind: the emergency alarms
         # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon
