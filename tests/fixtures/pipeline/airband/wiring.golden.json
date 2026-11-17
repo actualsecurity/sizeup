@@ -1,0 +1,465 @@
+{
+ "atc": {
+  "channels": [
+   "HPN Ground",
+   "HPN Tower",
+   "NY App 124.65",
+   "NY App 126.4/120.8"
+  ],
+  "max_age_s": 900.0,
+  "context": 4,
+  "context_s": 120.0,
+  "threshold": 0.5,
+  "context_factor": 0.5,
+  "routine_factor": 0.6,
+  "adsb_normal": 0.3,
+  "adsb_worse": 0.4,
+  "adsb_match": 0.7,
+  "rules": [
+   {
+    "id": "brush-fire",
+    "category": "fire",
+    "weight": 0.85,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": "BRUSH"
+   },
+   {
+    "id": "fire-on-field",
+    "category": "fire",
+    "weight": 0.85,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "smoke-aircraft",
+    "category": "fire",
+    "weight": 0.85,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "engine-fire",
+    "category": "fire",
+    "weight": 0.85,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "fire",
+    "category": "fire",
+    "weight": 0.55,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "smoke",
+    "category": "fire",
+    "weight": 0.5,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "mayday",
+    "category": "emergency",
+    "weight": 0.95,
+    "always": true,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "pan-pan",
+    "category": "emergency",
+    "weight": 0.9,
+    "always": true,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "declaring",
+    "category": "emergency",
+    "weight": 0.95,
+    "always": true,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "emergency-aircraft",
+    "category": "emergency",
+    "weight": 0.7,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "return",
+    "category": "emergency",
+    "weight": 0.5,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "souls",
+    "category": "emergency",
+    "weight": 0.75,
+    "always": true,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "fuel-remaining",
+    "category": "emergency",
+    "weight": 0.55,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "emergency",
+    "category": "emergency",
+    "weight": 0.4,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "hydraulics",
+    "category": "emergency",
+    "weight": 0.6,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "ditching",
+    "category": "emergency",
+    "weight": 0.85,
+    "always": true,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "roll-trucks",
+    "category": "arff",
+    "weight": 0.85,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "arff",
+    "category": "arff",
+    "weight": 0.8,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "crash",
+    "category": "accident",
+    "weight": 0.75,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "lost-radar",
+    "category": "accident",
+    "weight": 0.6,
+    "always": false,
+    "routine": true,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "lost-contact",
+    "category": "accident",
+    "weight": 0.45,
+    "always": false,
+    "routine": true,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "disabled",
+    "category": "runway",
+    "weight": 0.7,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "excursion",
+    "category": "runway",
+    "weight": 0.75,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "go-around-disabled",
+    "category": "runway",
+    "weight": 0.6,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "runway-closed",
+    "category": "runway",
+    "weight": 0.4,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "gear",
+    "category": "gear",
+    "weight": 0.75,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "engine",
+    "category": "engine",
+    "weight": 0.75,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "bird",
+    "category": "bird",
+    "weight": 0.6,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "fuel",
+    "category": "fuel",
+    "weight": 0.7,
+    "always": false,
+    "routine": false,
+    "not": false,
+    "event_type": ""
+   },
+   {
+    "id": "medical",
+    "category": "medical",
+    "weight": 0.65,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   },
+   {
+    "id": "laser",
+    "category": "laser",
+    "weight": 0.55,
+    "always": false,
+    "routine": false,
+    "not": true,
+    "event_type": ""
+   }
+  ],
+  "categories": {
+   "fire": {
+    "label": "fire or smoke",
+    "event_type": "INVEST",
+    "event_subtype": ""
+   },
+   "fire_off": {
+    "label": "fire or smoke off the airport",
+    "event_type": "INVEST",
+    "event_subtype": ""
+   },
+   "fire_acft": {
+    "label": "fire or smoke on an aircraft",
+    "event_type": "AIRPORT",
+    "event_subtype": "ACFT-FIRE"
+   },
+   "fire_field": {
+    "label": "fire on the field",
+    "event_type": "AIRPORT",
+    "event_subtype": "OTHER"
+   },
+   "emergency": {
+    "label": "aircraft emergency",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "arff": {
+    "label": "ARFF called",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "accident": {
+    "label": "possible aircraft accident",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "runway": {
+    "label": "disabled aircraft / runway",
+    "event_type": "AIRPORT",
+    "event_subtype": "DISABLED"
+   },
+   "gear": {
+    "label": "landing gear problem",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "engine": {
+    "label": "engine problem",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "bird": {
+    "label": "bird strike",
+    "event_type": "AIRPORT",
+    "event_subtype": ""
+   },
+   "fuel": {
+    "label": "fuel problem",
+    "event_type": "AIRPORT",
+    "event_subtype": "FUEL"
+   },
+   "medical": {
+    "label": "medical emergency on board",
+    "event_type": "AIRPORT",
+    "event_subtype": "OTHER"
+   },
+   "laser": {
+    "label": "laser strike",
+    "event_type": "INVEST",
+    "event_subtype": ""
+   }
+  }
+ },
+ "airport_alerts": {
+  "dedupe_s": 300.0,
+  "group_s": 90.0,
+  "max_per_hour": 8,
+  "expire_s": 1800.0,
+  "keep_s": 7776000,
+  "list_s": 86400,
+  "max_snippets": 12,
+  "max_aircraft": 4,
+  "max_phrases": 12,
+  "levels": [
+   [
+    0.8,
+    "high"
+   ],
+   [
+    0.6,
+    "medium"
+   ],
+   [
+    0.0,
+    "low"
+   ]
+  ],
+  "sources": {
+   "atc": "HPN ATC",
+   "adsb": "ADS-B",
+   "radio": "60 Control"
+  },
+  "adsb_reopen_s": 1800.0,
+  "public_url": "https://cad.example.test",
+  "notifier": {
+   "kind": "alerts",
+   "to": "alerts"
+  },
+  "notifier_is_the_alerts_kind": true
+ },
+ "airport_watch": {
+  "enabled": true,
+  "airband": [
+   "HPN Ground",
+   "HPN Tower",
+   "NY App 124.65",
+   "NY App 126.4/120.8"
+  ],
+  "incident_levels": [
+   2,
+   3
+  ],
+  "fire_talkgroups": [
+   301,
+   307,
+   333
+  ],
+  "airport_names": [
+   "westchester",
+   "west chester",
+   "hpn",
+   "white plains"
+  ],
+  "WINDOW_S": 600.0,
+  "EXCHANGE_S": 45.0,
+  "EXCHANGE_ABN_S": 120.0,
+  "ORPHAN_S": 90.0,
+  "STALE_S": 600.0,
+  "KEEP_S": 1800.0,
+  "ADSB_ARRIVING_S": 300.0,
+  "LOST_S": 600.0,
+  "LEAVE_NEAR_NM": 10.0,
+  "LEAVE_NM": 40.0,
+  "LANDED_NM": 2.0,
+  "LEVEL_KEEP_S": 7200.0,
+  "ATTACH_S": 3600.0,
+  "RETURN_S": 60.0,
+  "REPUSH_S": 300.0
+ },
+ "talkers": {
+  "channels": [
+   "HPN Ground",
+   "HPN Tower",
+   "NY App 124.65",
+   "NY App 126.4/120.8"
+  ],
+  "identify": true
+ },
+ "intel_notifier": {
+  "kind": "intel",
+  "to": "intel"
+ },
+ "alarms_notifier": {
+  "kind": "alerts",
+  "to": "alerts"
+ }
+}

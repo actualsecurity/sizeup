@@ -1,0 +1,5 @@
+{"do": "scenario", "t0": "day", "why": "One exchange on one channel, one pre-alert: another subject within GROUP_S (90 s) of the open one's last addition is added to it (and names it when it ranks higher or is more confident); 91 s after, a new one."}
+{"do": "air", "t": 0, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "we just got lasered on a two mile final, green laser from the ground"}
+{"do": "air", "t": 89, "id": "twr-2", "ch": "HPN Tower", "dur": 4, "text": "tower, November four five six charlie delta, unable to taxi, we are stuck on the runway"}
+{"do": "air", "t": 180, "id": "twr-3", "ch": "HPN Tower", "dur": 4, "text": "mayday mayday mayday, November seven eight niner echo foxtrot, engine failure"}
+{"do": "air", "t": 185, "id": "gnd-1", "ch": "HPN Ground", "dur": 4, "text": "Westchester ground, we just got lasered taxiing out, green laser from the parking lot"}

@@ -1,0 +1,567 @@
+{
+ "why": "What the console's answers do: accept makes a PENDING event (an Airport one at the terminal when the words give no point), never a dispatch; dismiss keeps it with the reason; an answered one can't be answered again.",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "a0b1c2",
+      "flight": "N123AB",
+      "type": "C68A",
+      "lat": 41.04,
+      "lon": -73.69,
+      "alt": 1400,
+      "gs": 130,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 3.1,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 5,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, November one two three alfa bravo, we have a passenger unresponsive, need paramedics at the gate"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, N123AB, we have a passenger unresponsive, need paramedics at the gate",
+     "hits": [
+      [
+       "medical",
+       "passenger unresponsive"
+      ]
+     ],
+     "score": 0.65,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "medical",
+      "subject": "acft:N123AB",
+      "group": "HPN Tower",
+      "title": "HPN ATC: medical emergency on board (medical emergency): N123AB",
+      "confidence": 0.65,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N123AB",
+        "a0b1c2",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": null
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "medical",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 5.0,
+     "updated_at": 5.0,
+     "title": "HPN ATC: medical emergency on board (medical emergency): N123AB",
+     "detail": "medical emergency on board · heard: passenger unresponsive · HPN Tower",
+     "confidence": 0.65,
+     "level": "medium",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 5.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we have a passenger unresponsive, need paramedics at the gate",
+        "hits": [
+         "passenger unresponsive"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "medical"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "OTHER"
+      },
+      "rank": 1,
+      "pushed": 0.65
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 5.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: medical emergency on board (medical emergency): N123AB (alert medium 65%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: medical emergency on board (medical emergency): N123AB",
+     "body": "“Westchester Tower, N123AB, we have a passenger unresponsive, need paramedics at the gate” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert medium 65% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: medical emergency on board (medical emergency): N123AB (0.65)"
+   ]
+  },
+  {
+   "step": {
+    "do": "accept",
+    "t": 60,
+    "alert": "A1",
+    "operator": "Disp One"
+   },
+   "decisions": [
+    {
+     "console": "accept",
+     "alert": "A1",
+     "status": "accepted",
+     "acknowledged": false,
+     "incident": "I1"
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "medical",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 5.0,
+     "updated_at": 5.0,
+     "title": "HPN ATC: medical emergency on board (medical emergency): N123AB",
+     "detail": "medical emergency on board · heard: passenger unresponsive · HPN Tower",
+     "confidence": 0.65,
+     "level": "medium",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "accepted",
+     "outcome_at": 60.0,
+     "incident": "I1",
+     "operator": "Disp One",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 5.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we have a passenger unresponsive, need paramedics at the gate",
+        "hits": [
+         "passenger unresponsive"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "medical"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "OTHER"
+      },
+      "rank": 1,
+      "pushed": 0.65
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": "27-000001",
+     "type": "AIRPORT",
+     "subtype": "OTHER",
+     "status": "pending",
+     "source": "manual",
+     "source_ref": null,
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (HPN ATC, 12:00:05): HPN ATC: medical emergency on board (medical emergency): N123AB (alert medium 65%)\n12:00:05 HPN Tower: “Westchester Tower, N123AB, we have a passenger unresponsive, need paramedics at the gate”\nAircraft: N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100%\nNot dispatched.",
+     "acft_type": "",
+     "acft_nature": "",
+     "acft_runway": "",
+     "created_at": 60.0,
+     "accepted_at": 60.0
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 60.0,
+     "kind": "created",
+     "text": "Event created (pending): Airport / Other at 240 Airport Rd; received via Radio",
+     "operator": "Disp One"
+    },
+    {
+     "incident": "I1",
+     "at": 60.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:05 accepted: HPN ATC: medical emergency on board (medical emergency): N123AB · event pending, not dispatched",
+     "operator": "Disp One"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 300,
+    "id": "twr-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "we just got lasered on a two mile final, green laser from the ground"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-2",
+     "ch": "HPN Tower",
+     "fed": "We just got lasered on a two mile final, green laser from the ground",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.55,
+     "adsb": null,
+     "context": [],
+     "row": "A2"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "laser",
+      "subject": "laser",
+      "group": "HPN Tower",
+      "title": "HPN ATC: laser strike (laser strike)",
+      "confidence": 0.55,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-2",
+     "record": null
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-2",
+     "row": null
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 300.0,
+     "updated_at": 300.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "level": "low",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-2",
+        "at": 300.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered on a two mile final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 300.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: laser strike (laser strike) (alert low 55%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: laser strike (laser strike)",
+     "body": "“We just got lasered on a two mile final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: laser strike (laser strike) (0.55)"
+   ]
+  },
+  {
+   "step": {
+    "do": "dismiss",
+    "t": 320,
+    "alert": "A2",
+    "operator": "Disp Two",
+    "reason": "pilot reports no effect"
+   },
+   "decisions": [
+    {
+     "console": "dismiss",
+     "alert": "A2",
+     "status": "dismissed",
+     "acknowledged": false,
+     "incident": null
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 300.0,
+     "updated_at": 300.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "level": "low",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "dismissed",
+     "outcome_at": 320.0,
+     "incident": null,
+     "operator": "Disp Two",
+     "note": "pilot reports no effect",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-2",
+        "at": 300.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered on a two mile final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 320.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:05:00 dismissed: HPN ATC: laser strike (laser strike) (pilot reports no effect)",
+     "operator": "Disp Two"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "accept",
+    "t": 330,
+    "alert": "A2",
+    "operator": "Disp Two"
+   },
+   "decisions": [
+    {
+     "console": "accept",
+     "alert": "A2",
+     "error": "CadError: airport pre-alert 2 is already dismissed"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "dismiss",
+    "t": 340,
+    "alert": "A1",
+    "operator": "Disp Two"
+   },
+   "decisions": [
+    {
+     "console": "dismiss",
+     "alert": "A1",
+     "error": "CadError: airport pre-alert 1 is already accepted"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 350
+   },
+   "decisions": [
+    {
+     "console": "read",
+     "open": []
+    }
+   ]
+  }
+ ]
+}

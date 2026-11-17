@@ -1,0 +1,436 @@
+{
+ "why": "MAX_AGE_S (900 s) from the transmission's END: a transcript of one that ended 901 s ago raises nothing, 900 s ago still does; a re-text of the old one is gated the same way (its end, not the re-text's time). The airport watch's own gate is STALE_S (600 s) from the START.",
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 1000,
+    "id": "old-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "ago": 901,
+    "text": "mayday mayday mayday, November one two three alfa bravo, engine failure"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-1",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N123AB, engine failure",
+     "hits": null,
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "old-1",
+     "record": {
+      "role": "unknown",
+      "talker": {
+       "callsign": "",
+       "status": ""
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1010,
+    "id": "old-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "ago": 900,
+    "text": "we just got lasered on a two mile final, green laser from the ground"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-2",
+     "ch": "HPN Tower",
+     "fed": "We just got lasered on a two mile final, green laser from the ground",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.55,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "laser",
+      "subject": "laser",
+      "group": "HPN Tower",
+      "title": "HPN ATC: laser strike (laser strike)",
+      "confidence": 0.55,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "old-2",
+     "record": null
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-2",
+     "row": null
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "laser",
+     "group": "HPN Tower",
+     "at": 110.0,
+     "updated_at": 1010.0,
+     "title": "HPN ATC: laser strike (laser strike)",
+     "detail": "laser strike · heard: lasered · HPN Tower",
+     "confidence": 0.55,
+     "level": "low",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "old-2",
+        "at": 110.0,
+        "channel": "HPN Tower",
+        "text": "We just got lasered on a two mile final, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 110.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: laser strike (laser strike) (alert low 55%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: laser strike (laser strike)",
+     "body": "“We just got lasered on a two mile final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: laser strike (laser strike) (0.55)"
+   ]
+  },
+  {
+   "step": {
+    "do": "retext",
+    "t": 1020,
+    "id": "old-1",
+    "text": "mayday mayday mayday, November one two three alfa bravo, engine fire"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "old-1",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N123AB, engine fire",
+     "hits": null,
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "old-1",
+     "record": {
+      "role": "unknown",
+      "talker": {
+       "callsign": "",
+       "status": ""
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "old-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1200,
+    "id": "late-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "ago": 595,
+    "text": "November four five six charlie delta is going around, we have a flap failure, we have to run a checklist"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "late-1",
+     "ch": "HPN Tower",
+     "fed": "N456CD is going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "late-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N456CD",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N456CD",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N456CD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "late-1",
+     "row": "A2"
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N456CD",
+     "group": "",
+     "at": 605.0,
+     "updated_at": 1200.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N456CD",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "level": "medium",
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "late-1",
+        "at": 605.0,
+        "channel": "HPN Tower",
+        "text": "N456CD is going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N456CD",
+        "hex": null,
+        "spoken": "N456CD",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N456CD"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 605.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps, checklist · N456CD (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps, checklist · N456CD",
+     "body": "“N456CD is going around, we have a flap failure, we have to run a checklist” · N456CD · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: go-around · flaps, checklist · N456CD (0.75)",
+    "airport_watch: airport watch: N456CD: goaround -> pre-alert #A2 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 1500,
+    "id": "late-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "ago": 597,
+    "text": "November seven eight niner echo foxtrot is going around, we have a flap failure, we have to run a checklist"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "late-2",
+     "ch": "HPN Tower",
+     "fed": "N789EF is going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "late-2",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N789EF",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N789EF",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N789EF",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "late-2",
+     "row": null
+    }
+   ]
+  }
+ ]
+}

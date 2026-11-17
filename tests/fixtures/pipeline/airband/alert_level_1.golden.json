@@ -1,0 +1,512 @@
+{
+ "why": "Alert 1 alone is a standby: its own pre-alert (source radio), pushed at priority 5, the feed polled, never an incident; Accept acknowledges it (no event) and it stays open; another airport's alert and a drill's level 2 never make an incident; the cancel ends it.",
+ "steps": [
+  {
+   "step": {
+    "do": "radio",
+    "t": 0,
+    "id": "fire-1",
+    "tg": 307,
+    "text": "60 Control, car 9901, urgent"
+   },
+   "decisions": [
+    {
+     "watch": "60 Control",
+     "id": "fire-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 20,
+    "id": "fire-2",
+    "tg": 307,
+    "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+      "confidence": 1.0,
+      "rank": 5,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-2",
+     "row": "A1"
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": 16.0,
+     "updated_at": 20.0,
+     "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+     "detail": "60 Control: alert level 1",
+     "confidence": 1.0,
+     "level": "high",
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-2",
+        "at": 16.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 5,
+      "lines": [
+       [
+        "Alert",
+        "declared 12:00 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "flaps",
+       "runway": "16",
+       "final_nm": 5,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 1,
+       "pushed_at": 20.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 16.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (60 Control): HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 (alert high 100%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+     "body": "“60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 1"
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 (1.00)",
+    "airport_watch: airport watch: HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 (pre-alert #A1)"
+   ]
+  },
+  {
+   "step": {
+    "do": "accept",
+    "t": 40,
+    "alert": "A1",
+    "operator": "Disp One"
+   },
+   "decisions": [
+    {
+     "console": "accept",
+     "alert": "A1",
+     "status": "open",
+     "acknowledged": true,
+     "incident": null
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": 16.0,
+     "updated_at": 20.0,
+     "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+     "detail": "60 Control: alert level 1",
+     "confidence": 1.0,
+     "level": "high",
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "Disp One",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-2",
+        "at": 16.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 5,
+      "lines": [
+       [
+        "Alert",
+        "declared 12:00 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "flaps",
+       "runway": "16",
+       "final_nm": 5,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 1,
+       "pushed_at": 20.0
+      },
+      "acknowledged": {
+       "by": "Disp One",
+       "at": 40.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 40.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:16 acknowledged: HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 · standby, no event",
+     "operator": "Disp One"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 60,
+    "id": "fire-3",
+    "tg": 307,
+    "text": "60 Control, be advised Danbury airport has an alert 1 for a Cessna, no response needed"
+   },
+   "decisions": [
+    {
+     "watch": "60 Control",
+     "id": "fire-3",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 600,
+    "id": "fire-4",
+    "tg": 307,
+    "text": "60 Control, car 9901, alert level one is canceled, aircraft landed without incident"
+   },
+   "decisions": [
+    {
+     "add_to": "A1",
+     "alert": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "",
+      "confidence": 1.0,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-4",
+     "row": "A1"
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": 16.0,
+     "updated_at": 600.0,
+     "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+     "detail": "60 Control: alert level 1",
+     "confidence": 1.0,
+     "level": "high",
+     "channel": "Fire/EMS 15",
+     "count": 2,
+     "status": "ended",
+     "outcome_at": 600.0,
+     "incident": null,
+     "operator": "Disp One",
+     "note": "60 Control: 60 Control, car 9901, alert level one is canceled, aircraft landed without incident",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-2",
+        "at": 16.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-4",
+        "at": 596.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, alert level one is canceled, aircraft landed without incident",
+        "hits": [
+         "canceled"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 5,
+      "lines": [
+       [
+        "Alert",
+        "declared 12:00 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "flaps",
+       "runway": "16",
+       "final_nm": 5,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 1,
+       "pushed_at": 20.0
+      },
+      "acknowledged": {
+       "by": "Disp One",
+       "at": 40.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 600.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:16 ended: 60 Control: 60 Control, car 9901, alert level one is canceled, aircraft landed without incident",
+     "operator": ""
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1 ended: 60 Control: 60 Control, car 9901, alert level one is canceled, aircraft landed without incident"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 700,
+    "id": "fire-5",
+    "tg": 307,
+    "text": "60 Control, car 9901, this is a drill, alert level 2 drill at the airport, runway 16"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 2 · RWY 16",
+      "confidence": 1.0,
+      "rank": 6,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-5",
+     "row": "A2"
+    }
+   ],
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": 696.0,
+     "updated_at": 700.0,
+     "title": "HPN Alert 2 · RWY 16",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "level": "high",
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-5",
+        "at": 696.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, this is a drill, alert level 2 drill at the airport, runway 16",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Alert",
+        "declared 12:11 · Fire/EMS 15 · DRILL"
+       ]
+      ],
+      "drill": true,
+      "alert_level": {
+       "level": 2,
+       "type": "",
+       "problem": "",
+       "runway": "16",
+       "final_nm": null,
+       "drill": true,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 700.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 696.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (60 Control): HPN Alert 2 · RWY 16 (alert high 100%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 2 · RWY 16",
+     "body": "“60 Control, car 9901, this is a drill, alert level 2 drill at the airport, runway 16” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad",
+     "who": null,
+     "actions": []
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 2"
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN Alert 2 · RWY 16 (1.00)",
+    "airport_watch: airport watch: HPN Alert 2 · RWY 16 (pre-alert #A2)"
+   ]
+  }
+ ]
+}
