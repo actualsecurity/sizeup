@@ -222,6 +222,11 @@ def test_said_towns(monkeypatch):
     assert said("port chester and rye brook fire departments, 9 model street") == (set(), set())
     assert said("sample fitness in rye brook avenue and specimen street") == (set(), set())     # a street of that name
     assert said("9 model street, rye brook, smoke showing") == (set(), {"rye brook"})           # named elsewhere
+    assert said("to rye 412 sample post road") == ({"rye"}, set())                             # a number after it
+    assert said("to the city of rye mutual aid") == ({"rye"}, set())
+    for landmark in ("respond to the rye example plaza", "respond to the rye brook side of the building",
+                     "go to the rye side", "in rye hospital lot", "by the rye border"):
+        assert said(landmark)[0] == set(), landmark                                             # a noun after it
 
 
 def test_over_5_min_after_the_dispatch_is_offered_and_over_10_never_scored(tmp_path, monkeypatch):
@@ -325,12 +330,13 @@ def test_a_stale_feed_never_joins_on_the_score(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("words", ["Engine 60, mutual aid to the City of Rye", "Engine 60, respond to the Town of Harrison"])
-def test_a_mutual_aid_page_never_joins_our_call_at_that_address(tmp_path, words):
-    """The same number and street as our open county call, but the page sends us elsewhere: another call, noted."""
+def test_a_mutual_aid_page_never_joins_our_call_on_that_street(tmp_path, words):
+    """The street of our open county call, no number of ours and no unit in common, but the page sends us elsewhere:
+    another call, noted (main joined it on the street alone)."""
     rig = AutoRig(tmp_path)
     a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("PCFD",), typ="HAZARD/GAS")
     rig.at(60)
-    p = rig.page("p1", f"Port Chester Fire Department, {words}, odor of gas, 412 Sample Post Road. Time out 1431.")["id"]
+    p = rig.page("p1", f"Port Chester Fire Department, {words}, odor of gas, Sample Post Road. Time out 1431.")["id"]
     assert p != a and paging_on(rig) == p and possibly(rig, p, a)
     assert "merge_offer" not in state_inc(rig, p) and "E60" not in units_on(rig, a)
 
@@ -491,7 +497,7 @@ def test_a_chains_two_stores_on_the_street_are_never_the_place_itself(tmp_path, 
     assert not any(" matched by: " in x for x in feed_lines(rig, a))
     ev = rig.cad.sources.page_feed(rig.clock.t, "Sample Post Road",
                                    {"f": {"type": "STRU"}, "lines": ["structure fire, Sample Post Road, Sample Pharmacy"]})
-    assert ev.place == "" and "also elsewhere" in ev.other_place                  # named without our number: against
+    assert ev.place == "" and ev.elsewhere == "Sample Pharmacy" and ev.elsewhere_near   # named, no number of ours
 
 
 def test_a_chain_store_with_our_number_said_still_joins(tmp_path):
@@ -554,6 +560,48 @@ def test_a_town_named_as_a_landmark_is_no_evidence(tmp_path, monkeypatch):
     rig.at(60)
     assert rig.page("p1", PAGE.replace("Specimen Street.", "Specimen Street, by the Rye border."))["id"] == a
     assert any(" matched by: " in x for x in feed_lines(rig, a))
+
+
+@pytest.mark.parametrize("words", ["respond to the Rye Example plaza", "respond to the Rye Brook side of the building",
+                                   "go to the Rye side", "mutual aid to the City of Rye", "respond to the Village of Port Chester"])
+def test_our_exact_number_joins_whatever_town_the_page_mentions(tmp_path, words):
+    """412 Sample Post Road said: a town as a landmark, or even "mutual aid to ...", never overrides our number (main
+    joins these; the county may keep another town's type)."""
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("PCFD",), typ="HAZARD/GAS")
+    rig.at(60)
+    p = rig.page("p1", f"Port Chester Fire Department, full response, {words}, odor of gas, 412 Sample Post Road. "
+                       "Time out 1431.")["id"]
+    assert p == a and len(open_incidents(rig)) == 1
+
+
+def test_the_city_of_our_town_on_the_street_only_still_joins(tmp_path):
+    rig = AutoRig(tmp_path)
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD", ("PCFD",), typ="HAZARD/GAS")
+    rig.at(60)
+    p = rig.page("p1", "Port Chester Fire Department, full response, respond to the Village of Port Chester, odor of "
+                       "gas, Sample Post Road. Time out 1431.")["id"]
+    assert p == a
+
+
+def test_a_chains_store_on_another_street_in_another_town_leaves_main_s_join(tmp_path, monkeypatch):
+    """SAMPLE PHARMACY at 412 here and on another street in another town; the page "fire alarm, Sample Post Road,
+    Sample Pharmacy" (its number lost): the street-only rule joins it, as on main. Still never the place itself."""
+    lost_number(monkeypatch)
+    rig = Rig(tmp_path)
+    rig.cad.local_places = lambda: [
+        {"key": "cp:1", "name": "SAMPLE PHARMACY", "aliases": [], "address": "412 SAMPLE POST RD", "muni": "port chester"},
+        {"key": "cp:2", "name": "SAMPLE PHARMACY", "aliases": [], "address": "5 MODEL ST", "muni": "rye brook"}]
+    a = feed_event(rig, "A1", "412 SAMPLE POST RD : @SAMPLE PHARMACY", ("PCFD",), typ="ALARM/COMM")
+    rig.at(60)
+    page = "Port Chester Fire Department, full response, fire alarm, Sample Post Road, Sample Pharmacy. Time out 1431."
+    assert rig.page("p1", page)["id"] == a and len(open_incidents(rig)) == 1
+    ev = rig.cad.sources.page_feed(rig.clock.t, "Sample Post Road", {"f": {"type": "ALARM"}, "lines": [page]})
+    assert ev.decision == "weak" and ev.elsewhere == "Sample Pharmacy" and not ev.elsewhere_near
+    near = rig.cad.sources.page_feed(rig.clock.t, "Sample Post Road",
+                                     {"f": {"type": "ALARM"}, "lines": [page.replace("Sample Pharmacy.", "Sample Pharmacy, "
+                                                                                     "Rye Brook.")]})
+    assert near.elsewhere_near                                                   # the page names the other's town
 
 
 def test_the_cross_street_cache_is_bounded(tmp_path, monkeypatch):

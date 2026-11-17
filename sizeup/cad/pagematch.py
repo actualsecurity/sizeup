@@ -129,6 +129,9 @@ class Evidence:
     feed_numbered: bool = False                       # the feed's location has a house number
     place: str = ""                                   # the named place said on the page (for)
     other_place: str = ""                             # another place on that street said on the page (against)
+    elsewhere: str = ""                               # the feed's name said, no number of ours, the list has it at
+                                                      # another address too (against: never the place itself)
+    elsewhere_near: bool = False                      # ... on that street, or in a town the page names
     cross: str = ""                                   # "" | "match" | "differ"
     family: str = ""                                  # "" | "same" | "differ"
     units: str = ""                                   # "" | "common" | "differ" (both name apparatus, none in common)
@@ -176,6 +179,8 @@ class Evidence:
             out.append("another house number")
         if self.other_place:
             out.append(f"names {self.other_place}")
+        if self.elsewhere:
+            out.append(f"names {self.elsewhere} (also elsewhere)")
         if self.cross == "differ":
             out.append("other cross streets")
         if self.family == "differ":

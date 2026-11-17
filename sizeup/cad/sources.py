@@ -2437,20 +2437,20 @@ class Sources:
         return r is not None and r["state"] == "ok" and self.clock() - r["got"] <= REPORT_STALE_S
 
     def _vetoed(self, inc: dict, location: str, rec: dict) -> bool:
-        """A strict rules' match a page's own words say is another call: a mutual-aid page ("mutual aid", "to the City
-        of ...") against an event that isn't (unless the house number is ours exactly, or the county lists a unit the
-        page names); a town the page says it is in ("in Sample Village", "to the Town of ...")
-        that isn't the event's; or, with no house number in common (a street only, a doubled number), another of the
-        department's places on that street named (the common places, #575). Never joined (noted). Cheap: no cross
-        streets."""
+        """A strict rules' match a page's own words say is another call (never joined, noted), unless the house number
+        is ours exactly or the county lists a unit the page names (it may keep the other town's type when it adds
+        ours): a mutual-aid page ("mutual aid", "to the City of ...") against an event that isn't; a town the page says
+        it is in or goes to ("in Sample Village", "to the Town of Sample, ...") that isn't the event's; another of the
+        department's places on that street named (the common places, #575); or the feed's own name, said without our
+        number, when the places list has it on that street too or in a town the page names. Cheap: no cross streets."""
         r = self._best_feed(inc["id"])
         if r is None:
             return False
         e = self._evidence(inc, json.loads(r["data"] or "{}"), location, rec, cross=False)
         # mutual aid: never over our own number, nor when the county lists a unit the page names (it may keep the
         # other town's type when it adds ours)
-        mutual = e.mutual == "differ" and e.number != "exact" and e.units != "common"
-        return mutual or e.town == "differ" or (e.number != "exact" and bool(e.other_place))
+        ours = e.number == "exact" or e.units == "common"
+        return not ours and (e.mutual == "differ" or e.town == "differ" or bool(e.other_place) or e.elsewhere_near)
 
     def _evidence(self, inc: dict, d: dict, location: str, data: dict, cross: bool = True) -> pagematch.Evidence:
         """One feed incident against a page (data: the page's record: f, lines, towns, units). cross False: no cross
@@ -2466,7 +2466,7 @@ class Sources:
                                                                                          inc["type"]):
             e.mutual = "differ"
         ft = _town(raw) or _town(match_address(inc)) or _town(inc["address"] or "")
-        where, _named = self._said_towns(text)               # only where the call is ("in / to <town>"): a town
+        where, named = self._said_towns(text)                # only where the call is ("in / to <town>"): a town
         said = {*where, *([_town(location)] if _town(location) else [])}   # named as a landmark is no evidence
         home = {ft} if ft else {str(t).lower() for t in towns}
         if said and home and said - home:
@@ -2496,12 +2496,13 @@ class Sources:
         e.number = next((x for x in ("exact", "doubled", "misread", "near", "other") if x in fits), "")
         # the named place: the feed's own ("@NAME"), the department's common place at its address (and its aliases)
         words = pagematch.name_words(text)
-        ours, other, ambiguous = self._place_names(inc, raw, d, theirs, kp)
+        ours, other, ambiguous, near = self._place_names(inc, raw, d, theirs, kp, {*where, *named, *said})
         e.place = next((n for n in ours if pagematch.says_name(words, n)), "")
         if not e.place:
             e.other_place = next((n for n in other if pagematch.says_name(words, n)), "")
         if not e.place and not e.other_place and e.number not in ("exact", "doubled"):
-            e.other_place = next((f"{n} (also elsewhere)" for n in ambiguous if pagematch.says_name(words, n)), "")
+            e.elsewhere = next((n for n in ambiguous if pagematch.says_name(words, n)), "")
+            e.elsewhere_near = bool(e.elsewhere) and any(pagematch.says_name(words, n) for n in near)
         mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
         if mine_x:                                           # the feed's only when the page says some
             feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
@@ -2520,37 +2521,43 @@ class Sources:
 
     @staticmethod
     def _said_towns(text: str) -> tuple[set, set]:
-        """(the known towns a page's words say the call is in or goes to: "in Sample Village", "to the City of Sample",
-        "in the village of Sample Village"; every known town it names anywhere else). Never who ("Sample Village Fire
+        """(the known towns a page's words say the call is in or goes to; every known town it names anywhere else).
+        Where: "in / to (the) (city / town / village of) <town>" with the town ending the phrase: then a comma, a
+        stop, the end, a house number, "for" or "mutual aid" ("in Sample Village.", "to the City of Sample, ...", "to
+        Sample for a cover"). A town followed by a noun is a landmark, not where ("to the Sample Ridge plaza", "the
+        Sample Brook side of the building", "by the Sample border"): named only. Never who ("Sample Village Fire
         Department", "Sample and Other Village fire departments": a department word within four words after it), nor
         a street of that name ("Sample Village Road")."""
-        words = re.findall(r"[a-z0-9]+", (text or "").lower())
+        toks = re.findall(r"[a-z0-9]+|[.,;:!?]", (text or "").lower())
         street = {*ABBR, *SUFFIXES, "lane", "terrace", "plaza", "square", "way", "turnpike", "crescent"}
         where, named = set(), set()
         i = 0
-        while i < len(words):
-            t = next((t for t in TOWNS if tuple(words[i:i + len(t)]) == t), None)    # longest first
+        while i < len(toks):
+            t = next((t for t in TOWNS if tuple(toks[i:i + len(t)]) == t), None)    # longest first
             if t is None:
                 i += 1
                 continue
             j = i + len(t)
-            if not (Sources.WHO & set(words[j:j + 4])) and (j >= len(words) or words[j] not in street):
+            nxt = toks[j] if j < len(toks) else ""
+            if not (Sources.WHO & set(toks[j:j + 4])) and nxt not in street:
                 k = i                                        # "(the) city / town / village of" before it
-                if k >= 2 and words[k - 1] == "of" and words[k - 2] in ("village", "town", "city"):
+                if k >= 2 and toks[k - 1] == "of" and toks[k - 2] in ("village", "town", "city"):
                     k -= 2
-                if k >= 1 and words[k - 1] == "the":         # (also a town listed as "city of ...")
+                if k >= 1 and toks[k - 1] == "the":         # (also a town listed as "city of ...")
                     k -= 1
-                (where if k >= 1 and words[k - 1] in ("in", "to") else named).add(TOWN_OF[t])
+                ends = nxt == "" or not nxt.isalnum() or nxt.isdigit() or nxt == "for" or toks[j:j + 2] == ["mutual", "aid"]
+                (where if k >= 1 and toks[k - 1] in ("in", "to") and ends else named).add(TOWN_OF[t])
             i = j
         return where, named
 
-    def _place_names(self, inc: dict, raw: str, d: dict, theirs: list[str],
-                     kp: tuple) -> tuple[list[str], list[str], list[str]]:
+    def _place_names(self, inc: dict, raw: str, d: dict, theirs: list[str], kp: tuple,
+                     towns=()) -> tuple[list[str], list[str], list[str], list[str]]:
         """(the names of the feed's place: its "@NAME", the incident's place, the common places at its address and
         their aliases, each only when it names that place alone; the common places' names elsewhere on the page's
-        street; the feed's names the places list also has at another address, anywhere: ambiguous). A name that is
-        only town names, department or agency words, or the page's street's words ("PORT CHESTER", "SAMPLE POST" on
-        Sample Post Rd, "FIRE DEPARTMENT") is never a place's name here."""
+        street; the feed's names the places list also has at another address, anywhere: ambiguous; those of them
+        with that other address on the page's street or in one of the towns the page names: ambiguous here). A name
+        that is only town names, department or agency words, or the page's street's words ("PORT CHESTER", "SAMPLE
+        POST" on Sample Post Rd, "FIRE DEPARTMENT") is never a place's name here."""
         ours = [x for x in (inc["place"] or "", location_extras(raw)[1] if raw else "") if x]
         cp = self.common_place(raw, d) if raw else None
         if cp:
@@ -2562,27 +2569,32 @@ class Sources:
             rows = []
         numbered = [x for x in theirs if (place_key(x) or ("", ""))[1]]
         street = {*kp[4], *(w for w in (kp[3],) if w)}
+        towns = {str(t).lower() for t in towns or () if t}
         key = lambda n: pagematch.name_key_of(n) if self._names_a_place(n, street) else ""
-        elsewhere: dict[str, int] = {}                       # name -> places with it at another address than the feed's
+        elsewhere: set[str] = set()                          # names at another address than the feed's, anywhere
+        near: set[str] = set()                               # ... on the page's street or in a town it names
         other: list[str] = []
         for r in rows or ():
             addr = str(r.get("address") or "")
             names = [r.get("label") or "", r.get("name") or "", *(r.get("aliases") or [])]
-            here = bool(addr) and any(same_place(addr, x) for x in numbered)
-            if here:
+            if addr and any(same_place(addr, x) for x in numbered):
                 ours.extend(names)
                 continue
+            k = place_key(addr) if addr else None
+            on_street = k is not None and k[0] == "addr" and _same_street(k[2:], kp[2:])
+            in_town = bool(towns & {str(r.get("muni") or "").lower(), _town(addr)} - {""})
             for n in names:
                 if key(n):
-                    elsewhere[key(n)] = elsewhere.get(key(n), 0) + 1
-            k = place_key(addr) if addr else None
-            if k is not None and k[0] == "addr" and _same_street(k[2:], kp[2:]):
+                    elsewhere.add(key(n))
+                    if on_street or in_town:
+                        near.add(key(n))
+            if on_street:
                 other.extend(names)
         ours = [n for n in dict.fromkeys(ours) if key(n)]
         mine = {key(n) for n in ours}
-        ambiguous = [n for n in ours if key(n) in elsewhere]
         return ([n for n in ours if key(n) not in elsewhere],
-                [n for n in dict.fromkeys(other) if key(n) and key(n) not in mine], ambiguous)
+                [n for n in dict.fromkeys(other) if key(n) and key(n) not in mine],
+                [n for n in ours if key(n) in elsewhere], [n for n in ours if key(n) in near])
 
     AGENCY = {"fire", "department", "departments", "dept", "fd", "police", "pd", "ambulance", "ems", "volunteer", "vac",
               "village", "town", "city", "county", "hall", "station", "hq", "headquarters", "engine", "ladder",
