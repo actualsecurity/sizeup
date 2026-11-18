@@ -11,7 +11,10 @@ Reads GET <url>/api/station/status (read only, sizeup/cloud/health.py) with
     SIZEUP_ACCESS_CLIENT_SECRET    (CF-Access-Client-Id / CF-Access-Client-Secret)
 
 Success: the hub answers with this build and the station reports it (or an equivalent one: a docs-only change
-the station recorded as "no runtime change"); the station's update log line is printed. Failure (exit 1): the
+the station recorded as "no runtime change"); the station's update log line is printed. Or the station has built and
+preflighted it and its switch is deferred ("deferred": staged, switching by HH:MM): the station switches once the hub's
+build has held still and nothing is on the air, within its ceiling (sizeup/cloud/autoupdate.py moment()), and its
+own "behind" alert covers a switch that then doesn't come. Failure (exit 1): the
 station's update failed or was rolled back, auto-update is paused there, the token is refused, or the time ran
 out. Exit 2: bad arguments or no token (the workflow skips the step with a warning before that).
 
@@ -84,6 +87,8 @@ def verdict(status: dict | None, build: str, error: str = "", code: int = 0) -> 
     line = last.get("line") if same_build(last.get("to"), build) else ""
     if state == "ok":                       # on this build, or one the station recorded as equivalent (docs only)
         return OK, line or text
+    if state == "deferred":                 # built and preflighted there; the switch waits for its moment (bounded:
+        return OK, f"station: {text}"       # one restart per burst of deploys, never mid-page; autoupdate.py moment())
     if state == "failed":
         return FAIL, f"the station's update failed: {text}" + (f"\n  {line}" if line else "")
     if state == "paused":

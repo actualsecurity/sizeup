@@ -260,6 +260,7 @@
   .ag-job { display: flex; align-items: center; gap: var(--s-1); }
   .ag-job > span { min-inline-size: 8rem; }
   .ag-addjob { align-self: flex-start; }
+  .ag-park[aria-pressed="true"] { color: var(--warn); }   /* a parked job (#637): off on purpose */
   /* the ADS-B receiver (reserved, #235): its dongle and its decoder; "Use for ADS-B" on a dongle's row */
   .adsb-box { margin-block-start: var(--s-2); }
   .adsb-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }

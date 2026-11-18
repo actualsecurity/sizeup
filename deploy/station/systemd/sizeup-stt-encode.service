@@ -1,0 +1,48 @@
+# The station's speech-to-text input encoder (#677, sizeup/cloud/sttencode.py): the FLAC of each clip's exact whisper
+# input, for the hub, in a cgroup of its own at a low CPU weight. In sizeup-station (Nice=-5, CPUWeight=500) it would
+# compete at the station's weight, above whisper's (100), whatever its niceness. sizeup-station sends it each clip over
+# /run/sizeup-stt-encode/encode.sock; while the socket isn't there the station makes them on its own thread.
+# Same user as sizeup, no privilege. Restarted with sizeup-station (PartOf): both run the same release's code.
+[Unit]
+Description=sizeup station: speech-to-text input encoder (FLAC), below whisper
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+PartOf=sizeup-station.service
+After=sizeup-station.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+WorkingDirectory=/opt/sizeup
+RuntimeDirectory=sizeup-stt-encode
+RuntimeDirectoryMode=0700
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/bin/sh -c 'rel=$$(readlink -f /opt/sizeup/current) && cd "$$rel" && PYTHONPATH="$$rel" exec "$$rel/venv/bin/python" -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock'
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+# Below everything that matters: the radios (500), whisper (100), the updater (20).
+Nice=19
+CPUWeight=10
+IOWeight=10
+# Memory: Python + numpy ~45 MB; a 300 s clip (the longest it takes) peaks at ~420 MB while it is made (float64
+# samples, the FFT and its working arrays, measured); up to 4 connections' 40 MB frames. 1 GiB leaves room for a
+# second clip in flight. Over it: this service is killed first (OOMScoreAdjust), never the radios or whisper, and the
+# station makes the FLAC on its own thread until it is back.
+MemoryMax=1G
+OOMScoreAdjust=500
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# Nothing written but its RuntimeDirectory (its socket); no network: a Unix socket only
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-stt-encode
+
+[Install]
+WantedBy=sizeup-station.service
