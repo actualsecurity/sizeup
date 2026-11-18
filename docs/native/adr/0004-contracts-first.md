@@ -1,6 +1,6 @@
 # ADR 0004: Versioned schemas and conformance tests come before any port
 
-Status: proposed · Date: 2026-11-18
+Status: accepted (admin, 2026-11-18): Phase 2 · Date: 2026-11-18
 
 ## Context
 

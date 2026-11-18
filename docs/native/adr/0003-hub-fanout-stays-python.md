@@ -1,6 +1,6 @@
 # ADR 0003: The hub's state push stays in Python
 
-Status: proposed · Date: 2026-11-18
+Status: accepted (admin, 2026-11-18); the 1 vCPU task is deferred until needed · Date: 2026-11-18
 
 ## Context
 

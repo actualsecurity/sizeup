@@ -1,6 +1,6 @@
 # ADR 0002: No native station agent yet; capture becomes its own service
 
-Status: proposed · Date: 2026-11-18
+Status: accepted (admin, 2026-11-18): no agent now; the capture split is to be designed with the radio code's maintainers · Date: 2026-11-18
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0001: The station's FM / AM squelch and segmenter stay in Python
 
-Status: proposed · Date: 2026-11-18
+Status: accepted (admin, 2026-11-18) · Date: 2026-11-18
 
 ## Context
 

@@ -5,16 +5,17 @@ programs it did not write: trunk-recorder, rtl_fm, whisper.cpp and readsb. This 
 which of sizeup's **own** Python components would be worth moving to native code, which would not, and what has to
 exist first. Nothing here is live: each move is decided in an ADR and switched only on the admin's go.
 
-Status (2026-11-18): **Phase 1 (evidence) is done. Its result is that no component should be ported now.** Every
+Status (2026-11-18): **Phase 1 (evidence) is done and its decisions are accepted: no component is ported now.**
+Phase 2 (ADR 0004: schemas and conformance tests) is under way. Every
 overrun and limit that was measured is caused by where the work runs or how often, not by the language, and each has
 a Python fix that returns most of what a port would. The ADRs say what would change that.
 
 | ADR | Decision | Status |
 |---|---|---|
-| [0001](adr/0001-radio-pipeline-stays-python.md) | The station's FM / AM squelch and segmenter stay in Python; take the per-transmission work off the receiver thread | proposed |
-| [0002](adr/0002-no-native-station-agent-yet.md) | No Go station agent yet; split capture into its own service behind a spool contract | proposed |
-| [0003](adr/0003-hub-fanout-stays-python.md) | The hub's state push stays in Python; compress once per push | proposed |
-| [0004](adr/0004-contracts-first.md) | Versioned schemas and conformance tests for every station, hub and worker interface come before any port | proposed |
+| [0001](adr/0001-radio-pipeline-stays-python.md) | The station's FM / AM squelch and segmenter stay in Python; take the per-transmission work off the receiver thread | accepted |
+| [0002](adr/0002-no-native-station-agent-yet.md) | No Go station agent yet; split capture into its own service behind a spool contract | accepted |
+| [0003](adr/0003-hub-fanout-stays-python.md) | The hub's state push stays in Python; compress once per push | accepted |
+| [0004](adr/0004-contracts-first.md) | Versioned schemas and conformance tests for every station, hub and worker interface come before any port | accepted |
 
 ## Method
 
