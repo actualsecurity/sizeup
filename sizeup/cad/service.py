@@ -1582,48 +1582,64 @@ class Cad:
         """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure).
         status (RS, OL...: Assigned > Add unit): a unit heard on the air responding, or showing up,
         that nobody toned out (user, 2026-10-08: "we need to 'add someone responding' even if they
-        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air."""
+        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air.
+        Another agency's unit goes on as its set's first status (Dispatched), or status when that is one of its start
+        statuses (Lists.start_statuses: Dispatched; a third party's Dispatch other too). A third-party unit (keyholder, utility,
+        police: PCFD, 2026-11-17) never goes on Responding or On location: whatever status the rest of the units are
+        added as, it is Dispatched ("we requested them, but we don't necessarily know if they're enroute").
+        -> {ok, moved, status?, as: {unit: the status it went on as}}."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
-        if body.get("status") is not None:
-            return self._add_responding(iid, units, body)
-        op = _text(body, "operator", OPERATOR_MAX)
+        status = _text(body, "status", 40) if body.get("status") is not None else ""
+        if body.get("status") is not None and status not in self.lists.status_ids:   # '' or unknown
+            self._add_check(iid, [], status)                     # "status: RS (Responding) or OL (On location)"
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
+        if status and here:
+            raise CadError(f"Already on this event: {', '.join(here)}")
+        units = [u for u in units if u["name"] not in here]    # a plain attach: one already on it stays as it is
+        start = {u["id"]: self._agency_start(u, status) for u in units if u["response"] == "agency"}
+        if status and any(u["id"] not in start for u in units):
+            self._add_check(iid, [u for u in units if u["id"] not in start], status)   # ours: Responding / On location only
+        op = _text(body, "operator", OPERATOR_MAX, required=bool(status))
         self._by_hand(iid, [u["id"] for u in units], op)
-        ours = [u["id"] for u in units if u["response"] != "agency"]
-        agency = [u["id"] for u in units if u["response"] == "agency"]
-        moved = self.store.assign(iid, ours, op, attach=True, by=PERSON) if ours else []
-        if agency:          # another agency's unit: on the event assigned, not yet responding (#219: never
-            moved += self.store.assign(iid, agency, op, attach=True, by=PERSON)    # straight to On location), then its statuses
-            by = {u["id"]: u for u in units}
-            for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
-                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op, by=PERSON)
+        ours = [u["id"] for u in units if u["id"] not in start]
+        moved, out = [], {}
+        if ours:
+            moved += self.store.assign(iid, ours, op, attach=not status, status=status, by=PERSON)
+            out.update({u["name"]: status for u in units if u["id"] in ours and status})
+        by_status: dict[str, list[int]] = {}
+        for i, st in start.items():                          # "PCPD added: dispatched", "CONED-E added: dispatch other (DO)"
+            by_status.setdefault(st, []).append(i)
+        for st, ids in by_status.items():
+            moved += self.store.assign(iid, ids, op, status=st, by=PERSON)
+            out.update({u["name"]: st for u in units if u["id"] in ids})
         self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved}
+        return {"ok": True, "moved": moved, "as": out, **({"status": status} if status else {})}
 
-    def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
-        """attach with a status: on the event in that status, no dispatch logged, no Disp time. A unit
-        already on this event is refused; one on another call is moved, as a dispatch moves it."""
+    def _agency_start(self, u: dict, status: str) -> str:
+        """What another agency's unit goes on a call as: status when it is one of its start statuses (DP; a
+        third party's DO), else, for a third party, its set's first (Dispatched: never Responding); for EMS and the
+        other agencies the Responding / On location asked for (#220), else its set's first."""
         L = self.lists
-        status = _text(body, "status", 40)
+        start = L.start_statuses(u["name"], u["board"])
+        if status in start or (status in self.store.return_statuses() and not u["third_party"]
+                               and status in L.unit_statuses_for(u["name"], u["board"])):
+            return status
+        if status and not u["third_party"]:
+            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {u['name']}")
+        return start[0]
+
+    def _add_check(self, iid: int, units: list[dict], status: str) -> None:
+        """Our units added with a status (Assigned > Add unit): Responding / On location only, never a placeholder."""
+        L = self.lists
         ok = self.store.return_statuses()
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
-        op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if iid in u["incident_ids"]]
-        if here:
-            raise CadError(f"Already on this event: {', '.join(here)}")
         ph = [u["name"] for u in units if u["placeholder"]]
         if ph:
             raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
-        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
-        if agency:
-            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
-        self._by_hand(iid, [u["id"] for u in units], op)
-        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status, by=PERSON)
-        self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
         """Previews nobody dispatched are dropped after a day; dispatch audio is kept with the log."""

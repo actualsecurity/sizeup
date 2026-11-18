@@ -212,6 +212,7 @@ class IntelAdmin:
                 "confirmed": bool(e["confirmed"]), "lat": e["lat"], "lon": e["lon"], "radius_m": e["radius_m"],
                 "place": e["label_full"], "town": e["town"], "alts": e["alts"], "basis": e["basis"], "mode": e["mode"],
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
+                "delivery": e.get("delivery"),        # the last push at ntfy: {ok, at, status, id | error} or None
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
                 "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
                 "near_incident": e.get("near_incident"),

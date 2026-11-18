@@ -521,9 +521,9 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                     "note": e["note"], "acknowledged": None, "incident": _incident(cad, raw.get("incident_id")),
                     "near_incident": _incident(cad, e.get("near_incident")),
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
-                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"]},
+                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery")},
     }
-    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0]
+    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or ""]
     return out, rev
 
 

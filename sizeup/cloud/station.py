@@ -95,7 +95,8 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "set_antenna_groups",        # ... the antenna groups: dongles locked to jobs (sizeup/radio/groups.py)
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
-         "reception_sample_b64")      # ... and a call it captured, to listen to (never stored on the hub)
+         "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
+         "set_stt_terms")             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -488,6 +489,7 @@ class StationLink:
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
+               "stt_terms": app.stt_terms_applied(),         # the term lists the hub sent ({v, sets}: versions only)
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "version": self.version()}

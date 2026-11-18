@@ -854,7 +854,9 @@ function renderDetail() {
   if (window.PreplanDocs) PreplanDocs.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its site documents (#459)
   renderOnUnits(inc);
   renderAddUnit(inc);
-  show($("#d-attach"), open && inc.status !== "queued");
+  // Attach: a non-emergency event's own units, no dispatch. Other agencies (EMS, PD, utilities, keyholders) are added from
+  // Assigned > Add unit, on any event (PCFD, 2026-11-17): no Other agencies card; the ones on it show in Assigned.
+  show($("#d-attach"), open && inc.status !== "queued" && !inc.emergency);
   renderAttach(inc);
   renderDispatchCard(inc, open);
   renderRadio(inc);
@@ -1895,13 +1897,14 @@ function statusButtons(u, where) {
 function statusChoices(u, where) {
   const all = L().unit_statuses || [];
   const set = agencySet(u);
-  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  const only = ((L().agency_status_sets || {}).third_party_only) || [];     // DO: a third party's only
+  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all.filter((s) => !only.includes(s.code));
   if (u.placeholder) return mine.filter((s) => s.code === u.quarters);   // in quarters only: the county assigns it
   if (where !== "inc") return mine;
   const flow = L().status_flow || {};
   const next = u.next || (!set && (flow[u.status] || flow["*"]));
   if (!next) return mine;                              // a server without the flow: as before
-  return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
+  return next.map((c) => all.find((s) => s.code === c)).filter((s) => s && (set || !only.includes(s.code)));
 }
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
 // hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
@@ -2797,15 +2800,10 @@ async function placeAsLocation(inc, p) {
 // ---- non-emergency: attach units --------------------------------------------------------------
 
 function renderAttach(inc) {
-  if (!inc || !isOpen(inc)) return;
-  // An emergency event: only other agencies (EMS, PD) that show up; they are never dispatched.
-  setText($("#a-title"), inc.emergency ? "Other agencies" : "Attach");
-  $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities, keyholders: attached as Dispatched (a keyholder or the Knox box: Notified), "
-    + "then their statuses like our units, here and in the right column. Never toned out or said on the air."
-    : "Non-emergency: no run card, no dispatch.";
-  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id)
-    && (!inc.emergency || u.response === "agency"));
-  const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
+  if (!inc || !isOpen(inc) || inc.emergency) return;
+  // Our units only: other agencies' go on from Assigned > Add unit (Dispatched; a third party never Responding)
+  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id) && u.response !== "agency");
+  const sig = JSON.stringify([others.map((u) => [u.id, u.status, u.incident_number])]);
   const sel = $("#a-unit");
   if (sel._sig === sig) return;
   sel._sig = sig;
@@ -2877,10 +2875,24 @@ function returnButtons(inc, a) {
 // matched nothing stays in the box, with a note, to fix or clear (the rest are added: nothing is lost, nothing
 // asks); a unit already on the event, or typed twice, is skipped with a note.
 
+// Other agencies' units are added here too (PCFD, 2026-11-17: the Other agencies card is gone). A third-party unit
+// (keyholder, utility, police: its status set's third_party) goes on Dispatched whatever button is pressed, never
+// Responding ("we requested them, but we don't necessarily know if they're enroute"); typed alone, the buttons are its
+// own: Dispatched (Enter) or Dispatch other. EMS and the other agencies typed alone: Dispatched too, as Attach did.
 const addUnit = { items: [], idx: 0, iid: null, moved: false };
-function addStatuses() {                  // Responding, On location: the first of each role
+function addStatuses(taken = []) {        // the buttons for the units typed; the first is Enter's
   const all = L().unit_statuses || [];
-  return ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
+  const fire = ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
+  if (!taken.length || !taken.every((u) => u.response === "agency")) return fire;
+  // the server's start (u.start: what each can go on as, Dispatched first; a third party's Dispatch other too)
+  const start = (taken[0].start || []).filter((c) => taken.every((u) => (u.start || []).includes(c)))
+    .map((c) => all.find((s) => s.code === c)).filter(Boolean);
+  if (taken.every((u) => u.third_party)) return start;          // Dispatched (Enter), Dispatch other
+  const sets = taken.filter((u) => !u.third_party).map(agencySet);      // (a third party typed with them: Dispatched)
+  return [...fire.filter((s) => sets.every((x) => x && x.statuses.includes(s.code))), ...start];   // EMS: Enter Responding
+}
+function addTaken(inc) {                  // the units typed that would be added
+  return inc ? addParse(inc).filter((g) => g.unit && !g.why).map((g) => g.unit) : [];
 }
 function addCandidates(inc) {
   const on = new Set(openAssignments(inc).map((a) => a.name));
@@ -2945,17 +2957,40 @@ function renderAddPreview() {
   const inc = selected(), box = $("#o-preview");
   const got = inc ? addParse(inc) : [];
   show(box, got.length > 0);
+  const taken = got.filter((g) => g.unit && !g.why).map((g) => g.unit);
+  const thirdAlone = taken.length && taken.every((u) => u.third_party);
   box.replaceChildren(...got.map((g) => {
     const u = g.unit, away = u && !g.why && awayOn(u, inc.id);
     const oos = u && !g.why && roleOf(u.status) === "oos" && u.response !== "agency";
+    const asDisp = u && !g.why && u.third_party && !thirdAlone;    // with our units: on Dispatched, not as they are
     const c = el("span", "chip add-chip" + (g.why === "unknown" ? " nomatch" : g.why === "typing" ? " typing"
       : g.why ? " skip" : away || oos ? " moving" : ""), u ? u.name : g.text);
     c.title = g.why === "unknown" ? `No unit ${g.text}` : g.why === "typing" ? "Still typing"
       : g.why === "here" ? `${u.name}: already on this event` : g.why === "twice" ? `${u.name}: typed twice`
       : oos ? `${u.name}: ${unitStatus(u.status).name}` : away ? `${u.name}: on ${u.incident_number || "another call"} (moved here)`
+      : asDisp ? `${u.name}: third party, added ${statusLabel(u, (addStatuses([u])[0] || {}).code || "")}`
       : [u.name, u.title || u.department].filter(Boolean).join(", ");
+    if (asDisp) c.classList.add("third");
     if (u && u.name.toLowerCase() !== g.text.toLowerCase()) c.title += ` (typed "${g.text}")`;
     return c;
+  }));
+  renderAddButtons(inc, taken);
+}
+function renderAddButtons(inc, taken = addTaken(inc)) {
+  const box = $("#o-status"), list = addStatuses(taken);
+  const one = taken.length === 1 ? taken[0] : null;          // a keyholder's own names for its statuses, if any
+  const sig = JSON.stringify(list.map((s) => [s.code, s.name, s.bg, one && statusLabel(one, s.code)]));
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren(...list.map((s) => {
+    const name = one ? statusLabel(one, s.code) : s.name;
+    const b = statusColors(el("button", "", name), s);
+    b.type = "button";
+    b.dataset.status = s.code;
+    b.title = !["enroute", "onscene"].includes(s.role) ? `On this event as ${name} (${s.code}): requested, nothing said on the air`
+      : `On this event as ${name}, not dispatched` + (taken.some((u) => u.third_party) ? "; third party: Dispatched" : "");
+    b.addEventListener("click", () => submitAddUnit(s.code));
+    return b;
   }));
 }
 
@@ -2963,17 +2998,7 @@ function renderAddUnit(inc) {
   const ok = !BOARD && isOpen(inc) && inc.status !== "queued";
   if (!$("#o-form").hidden && (!ok || addUnit.iid !== inc.id)) closeAddUnit();    // another event, or this one closed
   show($("#o-open"), ok && $("#o-form").hidden);
-  const box = $("#o-status"), sig = JSON.stringify(addStatuses().map((s) => [s.code, s.name, s.bg]));
-  if (box._sig === sig) return;
-  box._sig = sig;
-  box.replaceChildren(...addStatuses().map((s) => {
-    const b = statusColors(el("button", "", s.name), s);
-    b.type = "button";
-    b.dataset.status = s.code;
-    b.title = `On this event as ${s.name}, not dispatched`;
-    b.addEventListener("click", () => submitAddUnit(s.code));
-    return b;
-  }));
+  if (ok) renderAddButtons(inc);
 }
 function openAddUnit() {
   const inc = selected();
@@ -3008,27 +3033,62 @@ function suggestAddUnit() {
   const inc = selected(), input = $("#o-unit"), w = addLastWord(input), q = w ? w.text.toLowerCase() : "";
   if (!inc || !q) return hideAddSugg();
   const before = new Set(unitWords(input.value.slice(0, w.start)).map((x) => x.toLowerCase()));
-  const items = addCandidates(inc).filter((u) => u.name.toLowerCase().startsWith(q) && !before.has(u.name.toLowerCase()))
-    .sort((a, b) => (b.name.toLowerCase() === q) - (a.name.toLowerCase() === q)).slice(0, 8);   // what was typed, first
+  const items = addMatches(addCandidates(inc).filter((u) => !before.has(u.name.toLowerCase())), q);
   if (!items.length || (items.length === 1 && items[0].name.toLowerCase() === q)) return hideAddSugg();
   if (addUnit.items.map((u) => u.id).join() !== items.map((u) => u.id).join()) { addUnit.idx = 0; addUnit.moved = false; }
   addUnit.items = items;
-  const box = $("#o-sugg");
-  box.replaceChildren(...items.map((u, i) => {
-    const li = el("li", i === addUnit.idx ? "on" : "");
-    li.id = `o-sugg-${i}`;
-    li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", String(i === addUnit.idx));
-    li.append(el("b", "", u.name));
-    if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
-    else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
-    else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
-    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
-    return li;
-  }));
+  const box = $("#o-sugg"), heads = new Set(items.map(boardTitle)).size > 1, rows = [];
+  items.forEach((u, i) => {
+    if (heads && (i === 0 || boardTitle(items[i - 1]) !== boardTitle(u))) {
+      const h = el("li", "grp dim", boardTitle(u));             // a group: "Agencies: PD"
+      h.setAttribute("role", "presentation");
+      rows.push(h);
+    }
+    rows.push(addSuggRow(inc, u, i));
+  });
+  box.replaceChildren(...rows);
   show(box, true);
   input.setAttribute("aria-expanded", "true");
   input.setAttribute("aria-activedescendant", `o-sugg-${addUnit.idx}`);
+}
+// A unit's group: its board's title (the main board: its kind's); the third parties say so on hover.
+function boardTitle(u) {
+  const b = (L().unit_boards || []).find((x) => x.id === u.board);
+  if (!b || b.group_by === "kind") return "Fire";
+  return b.title || b.id;
+}
+// What the box offers for the word being typed: the units whose code starts with it (what was typed, first), then other
+// agencies' units found by any part of their code or their group's name ("pd", "coned", "keyholder"), grouped by board.
+const ADD_SUGG_MAX = 12;
+function addMatches(cands, q) {
+  if (!q) return [];
+  const words = (u) => boardTitle(u).toLowerCase().split(/[^a-z0-9]+/).filter((x) => x && x !== "agencies");
+  const rank = (u) => {
+    const n = u.name.toLowerCase();
+    if (n === q) return 0;
+    if (n.startsWith(q)) return 1;
+    if (u.response !== "agency" || q.length < 2) return -1;
+    if (unitKey(u.name).includes(unitKey(q)) && unitKey(q)) return 2;
+    return words(u).some((x) => x.startsWith(q)) ? 3 : -1;
+  };
+  const hit = cands.map((u, i) => ({ u, i, r: rank(u) })).filter((x) => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.i - b.i).slice(0, ADD_SUGG_MAX);
+  const order = [];                                   // groups in the order they first come
+  for (const x of hit) if (!order.includes(boardTitle(x.u))) order.push(boardTitle(x.u));
+  return hit.sort((a, b) => order.indexOf(boardTitle(a.u)) - order.indexOf(boardTitle(b.u))).map((x) => x.u);
+}
+function addSuggRow(inc, u, i) {
+  const li = el("li", i === addUnit.idx ? "on" : "");
+  li.id = `o-sugg-${i}`;
+  li.setAttribute("role", "option");
+  li.setAttribute("aria-selected", String(i === addUnit.idx));
+  li.append(el("b", "", u.name));
+  if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
+  else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
+  else if (u.third_party) li.append(el("span", "dim small", "Third party"));
+  else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
+  li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
+  return li;
 }
 function takeAddUnit(name) {             // the suggestion in place of the word being typed
   const input = $("#o-unit"), w = addLastWord(input);
@@ -3051,7 +3111,7 @@ function addUnitKeys(e) {
   } else if (e.key === "Enter") {                 // the units typed (or taken): Responding
     e.preventDefault();
     hideAddSugg();
-    const first = addStatuses()[0];
+    const first = addStatuses(addTaken(selected()))[0];
     if (first) submitAddUnit(first.code);
   } else if (e.key === "Escape") {
     e.preventDefault();

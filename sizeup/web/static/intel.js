@@ -31,6 +31,12 @@ window.IntelCard = (() => {
     st.audio.addEventListener("ended", done);
     st.audio.play().catch((e) => { done(); UI.toast(`Can't play: ${e.message}`, "alert"); });
   }
+  // the last push at ntfy (sizeup/intel/events.py delivery): "sent 16:21:27" / "not sent: 429" / "queued"
+  function delivered(e, time) {
+    const d = e.delivery;
+    if (!d || !(d.at >= e.pushed_at)) return "queued";
+    return d.ok ? `sent ${time(d.at)}` : `not sent: ${d.status || d.error || "?"}`;
+  }
   function where(e) {
     if (!e.place || e.precision === "none") return "Location not heard";
     return e.confirmed ? e.place : `${e.place} ?`;
@@ -41,7 +47,7 @@ window.IntelCard = (() => {
     const head = el("div", "aa-head");
     const conf = el("span", `aa-conf ${e.level}`, `${e.level} ${pct(e.what)}`);
     conf.title = `What ${pct(e.what)} · where ${pct(e.where)} (${e.precision})\nRules: ${(e.rules || []).map((r) => r[0]).join(", ")}`
-      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)}` : "");
+      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)} · ${delivered(e, deps.time)}` : "");
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
@@ -110,12 +116,12 @@ window.IntelCard = (() => {
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, st.busy.has(e.id), st.playing]));
+      e.suppressed, e.pushed_at, e.delivery, st.busy.has(e.id), st.playing]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((e) => card(e, deps)));
   }
-  return { column };
+  return { column, delivered };
 })();
 
 window.IntelSettings = (() => {
@@ -197,8 +203,14 @@ window.IntelSettings = (() => {
     const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
     lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
     const lnum = (key, min, max, label, tip) => num(s[key], min, max, 1, set(key), label, tip);
-    const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
+    // ready / not configured; a pushed link refused by S3 (the self-test, sizeup/intel/listen.py) reads "refused"
+    const lk = ls.links || {};
+    const lbad = ls.configured && lk.state === "failed";
+    const lst = el("span", ls.configured && !lbad ? "chip s-state default" : "chip s-state edited",
+      !ls.configured ? "not configured" : lbad ? "refused" : "ready");
     if (!ls.configured) lst.title = ls.why || "";
+    else if (lbad) lst.title = `A pushed link was refused: HTTP ${lk.status}${lk.code ? " " + lk.code : ""}. Phones can't play it`;
+    else if (lk.state === "ok") lst.title = "A pushed link played";
     top.append(line(llab, [
       field("expiry min", lnum("listen_expiry_min", 1, 720, "Minutes the link plays", "Minutes the link plays, then it expires")),
       field("before s", lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission")),
