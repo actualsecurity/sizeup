@@ -1051,7 +1051,7 @@ def test_once_late_it_switches_to_the_staged_build_rather_than_chase_a_newer_one
     assert u.current()[1] == newer
 
 
-def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip(tmp_path):
+def test_a_page_waiting_at_stop_gets_its_seconds_then_is_saved_for_the_next_start(tmp_path):
     import numpy as np
     from sizeup.app import App
     from sizeup.radio.page import Page
@@ -1064,9 +1064,10 @@ def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip
     t0 = time.monotonic()
     n = app._stt_handoff(wait_s=0.5)
     assert 0.5 <= time.monotonic() - t0 < 5
-    assert n["waiting"] == 1 and app.stt.busy() == 0
-    # (#639 phase 2: saved for the next start, where it is transcribed first; with nowhere to save it, marked)
-    assert n["saved"] == 1 or (n["pages"] == 1 and page.status == "skipped" and f"({SHED}: the station stopped" in page.model)
+    assert n["waiting"] == 1 and app.stt.busy() == 0 and n["saved"] == 1 and n["pages"] == 0
+    # (#639 phase 2: saved for the next start, where it is transcribed first, at its class)
+    (entry,) = json.loads((Path(app.cfg.clips_dir).parent / "stt-queue.json").read_text())
+    assert (entry["kind"], entry["id"], entry["class"]) == ("page", "South2-1", URGENT)
 
 
 def _late(u, sha):

@@ -333,14 +333,15 @@ class Pool:
 
     def word(self, sid: str, now: float | None = None) -> dict:
         """What the pool tells a station (its state answer, #639 phase 2): ready, the workers other than its own whisper
-        that could take a context clip of its now; max_s, the longest clip one of them would take; gpu_idle, a GPU
-        worker idle and quick on pre-alert clips now (a stopping station hands those over only then)."""
+        that could take a context clip of its now; max_s, the longest clip one of them would take; gpu_idle(_n), the GPU
+        workers idle and quick on pre-alert clips now (a stopping station hands over one pre-alert clip each at most)."""
         now = self.clock() if now is None else now
         with self._cv:
             others = [w for w in self.workers.values() if self._ready(w, now) and w.id != f"station:{sid}"]
             max_s = max((float(w.load.get("max_s", 1e9)) if w.kind == "station" else 1e9 for w in others), default=0.0)
-            gpu_idle = any(w.kind == "gpu" and self._fast_ok(w, now) for w in others)
-        return {"ready": len(others), "max_s": round(min(max_s, 3600.0), 1), "gpu_idle": gpu_idle}
+            gpu_idle_n = sum(1 for w in others if w.kind == "gpu" and self._fast_ok(w, now))
+        return {"ready": len(others), "max_s": round(min(max_s, 3600.0), 1), "gpu_idle": gpu_idle_n > 0,
+                "gpu_idle_n": gpu_idle_n}
 
     def _gpu_idle(self, now: float) -> bool:
         return any(w.kind == "gpu" and w.polling > 0 and not w.leases and self._ready(w, now)

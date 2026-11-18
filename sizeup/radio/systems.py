@@ -344,6 +344,8 @@ class Runtime:
             st.update(state="off", detail="no dongle (Settings > Radios)")
         elif rs["state"] != "ok":
             st.update(state=rs["state"], detail=no_ids(rs["detail"]))
+            if rs.get("hold_until"):
+                st["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: Receivers, Health say until
         else:
             part = "" if len(on) == len(self.system.sources) else f"{len(on)} of {len(self.system.sources)} dongles · "
             st["state"] = "ok"
@@ -364,4 +366,5 @@ class Runtime:
                 "frequencies": [round(f / 1e6, 5) for f in s.frequencies],
                 "covered": [round(f / 1e6, 5) for f in s.covered(on)],
                 "state": row["state"], "detail": row["detail"], "last_heard": row.get("last_heard"),
+                "hold_until": row.get("hold_until"),
                 "cc": cc.status() if cc is not None and on else None, **self.activity.state()}

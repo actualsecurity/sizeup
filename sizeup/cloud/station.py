@@ -49,7 +49,8 @@ halving the rate halves the upload and changes nothing you can hear.
     stt-input threads  each transmission's / page's speech-to-text input (the exact audio the station's whisper
                        transcribes, FLAC at 16 kHz, sizeup/cloud/sttinput.py): made by one low-priority thread
                        ("hub-stt-input") off the radio path, kept in the outbox's own lane, and sent by "hub-stt"
-                       to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them
+                       to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them;
+                       the pre-alerts first (pages, alert-tier talkgroups), then fire traffic (#677)
 """
 
 from __future__ import annotations
@@ -196,7 +197,8 @@ class StationLink:
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
         self.metrics_link = MetricsLink(app, cfg, self._client, log)
         # each transmission's / page's speech-to-text input: made off the radio path, into the outbox's own lane
-        self.stt_encoder = sttinput.Encoder(self._stt_made, log)
+        # (held while whisper is behind: the FLAC is made once it caught up, #677)
+        self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
         self._stt_wake = threading.Event()
         # the hub's speech-to-text pool (#639 phase 2): its word (on, may this station's whisper claim, how many others
         # could take a clip now: its state answer's "pool"), and this station's whisper as one of its workers
@@ -279,17 +281,44 @@ class StationLink:
     def pool_gpu_idle(self) -> bool:
         """The hub's last word, heard lately: a GPU worker idle and quick on pre-alert clips now (a stopping station
         hands those over only then; else they are saved here and transcribed first at the next start)."""
-        return self.pool_takes() and bool(self.pool.get("gpu_idle")) and self.connected()
+        return self.pool_gpu_idle_n() > 0
 
-    def stt_input(self, item, audio) -> None:
+    def pool_gpu_idle_n(self) -> int:
+        """How many: a stopping station hands over one pre-alert clip per idle quick GPU worker at most (a second one
+        would wait behind the first, or fall to this station's own whisper, which is stopping)."""
+        if not self.pool_takes() or not self.connected():
+            return 0
+        n = self.pool.get("gpu_idle_n")
+        return int(n) if isinstance(n, int) and not isinstance(n, bool) else int(bool(self.pool.get("gpu_idle")))
+
+    def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
         made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own.
-        Not even queued for a hub that doesn't take them (an older one): no encoding for nothing."""
+        Not even queued for a hub that doesn't take them (an older one): no encoding for nothing. prio: its channel's
+        (#677, App._stt_lane): the pre-alert channels' go first and are dropped last."""
         if sttinput.CAP in self.hub_caps:
-            self.stt_encoder.submit(item, audio)
+            self.stt_encoder.submit(item, audio, prio)
 
-    def _stt_made(self, data: dict, flac: bytes, meta: dict) -> None:
-        self.outbox.add_stt(data, flac, meta)
+    def _whisper_behind(self) -> bool:
+        """The station's whisper is behind on live traffic: a clip of a live class (URGENT, HIGH, LIVE: never a
+        context talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) has waited stt.BEHIND_S. The STT
+        inputs of NORMAL / LOW priority wait meanwhile (sttinput.Encoder: never PRE / FIRE, at most HOLD_MAX_S).
+        Read from the queue's own list, defensively (anything unexpected: not behind). For the STT session: a public
+        Transcriber.behind_live() would be better than reading SttQueue._items here."""
+        try:
+            from sizeup.stt import BEHIND_S, LIVE_CLASSES
+            q = getattr(getattr(self.app, "stt", None), "_q", None)
+            if q is None:
+                return False
+            now = q.clock()
+            with q._cv:
+                ats = [e[5] for e in q._items if e[0] in LIVE_CLASSES]
+            return any(now - float(at) >= BEHIND_S for at in ats)
+        except Exception:  # noqa: BLE001 - a guess at another module's insides: never in the lane's way
+            return False
+
+    def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
+        self.outbox.add_stt(data, flac, meta, prio=prio)
         self._stt_wake.set()
 
     def stt_stats(self) -> dict:
@@ -298,7 +327,13 @@ class StationLink:
         n, b = self.outbox.stt_pending()
         dropped = dict(enc["dropped"], outbox=self.outbox.dropped_stt, refused=self.stt_refused)
         return {"queued": enc["queued"], "waiting": n, "bytes": b, "made": enc["made"], "sent": self.stt_sent,
-                "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps}
+                "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps,
+                # (#677) of the dropped, the pre-alert channels' (only once nothing of a lower priority was left)
+                "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre,
+                "dropped_fire": self.stt_encoder.dropped_fire + self.outbox.dropped_stt_fire,
+                # (#677) where the FLAC is made (scope | process | thread (why)), and held now for whisper
+                "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding,
+                "worker": self.stt_encoder.worker()}       # (its state: a wedged-but-alive service is seen)
 
     def live_changed(self) -> None:
         self._live_wake.set()

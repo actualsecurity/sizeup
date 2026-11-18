@@ -400,6 +400,8 @@ def station_metrics(app, metrics: Metrics) -> dict:
             jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
                          "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
                          "context": True}
+            if job in assigned and isinstance(rs.get("hold_until"), (int, float)):
+                jobs[job]["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: no fault
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
@@ -544,6 +546,8 @@ class StationHealth:
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
         self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
+        # each STT input's arrival after its event, p50 / p95 (#677, sizeup/cloud/sttarrival.py stats; HubApp sets it)
+        self.stt_arrival: Callable[[float], dict | None] | None = None
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -656,6 +660,14 @@ class StationHealth:
         why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
         out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
         out["outbox"]["dropped_stt_why"] = why
+        pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
+        out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        wk = si.get("worker") if isinstance(si.get("worker"), dict) else {}     # (#677) where NORMAL / LOW are made
+        out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
+                                       "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
+                                       "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        fire = si.get("dropped_fire")                               # ... and fire traffic's
+        out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -675,14 +687,20 @@ class StationHealth:
                             "on": str(d.get("on") or "")[:64],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
-                            "detail": str(js.get("detail") or "")[:200]})
+                            "detail": str(js.get("detail") or "")[:200],
+                            # (#637) a P25 system held back after dropouts: until when (the hub's clock)
+                            "hold_until": js["hold_until"] + hub.skew
+                            if job != "Off" and isinstance(js.get("hold_until"), (int, float))
+                            and not isinstance(js.get("hold_until"), bool) else None})
         out["dongles"] = dongles
         names = {d["serial"]: d["name"] for d in dongles}
         out["groups"] = [{"name": str(g.get("name") or "")[:40],
                           "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
                           "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
                           "short": [str(j)[:40] for j in g.get("short") or []][:24],
-                          "unowned": [str(j)[:40] for j in g.get("unowned") or []][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []
+                                      if j not in (g.get("parked") or [])][:24],
+                          "parked": [str(j)[:40] for j in g.get("parked") or []][:24],     # (#637) off on purpose
                           "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
                                         for s, j in list((g.get("conflicts") or {}).items())[:16]}
                           if isinstance(g.get("conflicts"), dict) else {}}
@@ -794,6 +812,10 @@ class StationHealth:
         except Exception:  # noqa: BLE001 - never in the way of the rest
             shifts = []
         out["hints"] += shifts
+        try:                                        # #677: the STT inputs' arrival on the hub after their events
+            out["stt_arrival"] = self.stt_arrival(now) if self.stt_arrival is not None else None
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            out["stt_arrival"] = None
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

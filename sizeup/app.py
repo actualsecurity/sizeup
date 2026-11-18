@@ -55,6 +55,7 @@ import time
 import wave
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -549,6 +550,8 @@ class App:
         # Antenna groups (sizeup/radio/groups.py): dongles locked to jobs, by priority. None saved: as before.
         self._groups_file = self._mode_file.with_name(antenna.FILE) if self._mode_file and self.shared else None
         self.groups, self._groups_problem = antenna.load(self._groups_file)
+        self._kind = {c.label: c.kind for c in cfg.channels}     # (also below; _parkable needs it now)
+        self._unpark_unparkable()
         if self._groups_problem:               # never silently: the dongles run unlocked until the groups are saved
             log(f"sdr: CRITICAL antenna groups dropped: {self._groups_problem}; every dongle runs unlocked until "
                 "they are saved again (Settings > Radios > Receivers)")
@@ -2720,7 +2723,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
-        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
+        self._stt_input(item, audio, key)      # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2772,14 +2775,32 @@ class App:
         """Where a stop saves what still waits for whisper (_stt_handoff) and the next start finds it (_stt_resume)."""
         return self.clips_dir.parent / STT_QUEUE_FILE if self.clips_dir else None
 
-    def _handover_ok(self, prio, item) -> bool:
+    def _handover_ok(self, prio, item, fast_left: list | None = None) -> bool:
         """(station, stopping) Hand this clip to the hub's pool rather than save it for the next start: a pre-alert class
-        (pages, Fire/EMS, airband, police alert) only when the hub said lately a GPU worker is idle and quick on them;
-        any other while a worker elsewhere could take a clip this long now."""
+        (pages, Fire/EMS, airband, police alert) only while the hub said lately a GPU worker is idle and quick on them,
+        one such clip per such worker (fast_left: [how many more], counted down here); any other while a worker
+        elsewhere could take a clip this long now."""
         link = self.link
         if prio in (URGENT, HIGH, CONTEXT, CONTEXT_FALLBACK):
-            return bool(link.pool_gpu_idle()) if hasattr(link, "pool_gpu_idle") else False
+            if fast_left is None:
+                return bool(link.pool_gpu_idle()) if hasattr(link, "pool_gpu_idle") else False
+            if fast_left[0] <= 0:
+                return False
+            fast_left[0] -= 1
+            return True
         return link.pool_has_room(max(0.0, float(getattr(item, "end", 0.0)) - float(getattr(item, "start", 0.0))))
+
+    def _has_text(self, cid: str, item=None) -> bool:
+        """This clip has its transcript already (a page read, a row with text or "no speech"): a saved entry for it is
+        stale (whisper finished it while the station stopped)."""
+        if item is not None and getattr(item, "status", "") in ("done", "no_speech") and (
+                getattr(item, "raw", "") or getattr(item, "status", "") == "no_speech"):
+            return True
+        try:
+            r = self.cad.store.one("SELECT status FROM radio_traffic WHERE id = ?", (cid,))
+        except Exception:  # noqa: BLE001 - no log here: not known
+            return False
+        return bool(r) and r.get("status") in ("done", "no_speech")
 
     def _stt_resume(self) -> int:
         """Starting: the clips a stop saved (_stt_handoff) queued again at their own class, each with its saved
@@ -2814,6 +2835,8 @@ class App:
                 if item is None or got is None:
                     log(f"speech-to-text: saved clip {cid} has no recording here: not queued again")
                     continue
+                if self._has_text(cid, item):
+                    continue                           # (whisper finished it during the stop: never twice, no alarm again)
                 item.fm = got[1]                                   # type: ignore[attr-defined]
                 item.status = "pending"
                 self.stt.submit(item, got[0], e.get("class") if isinstance(e.get("class"), (int, float)) else LIVE,
@@ -2825,17 +2848,33 @@ class App:
             log(f"speech-to-text: {n} clip(s) saved at the last stop queued again")
         return n
 
-    def _stt_input(self, item, audio: np.ndarray | None) -> None:
+    def _stt_input(self, item, audio: np.ndarray | None, key: str = "") -> None:
         """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
         engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
-        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread, the pre-alert channels'
+        first (_stt_lane)."""
         link = self.link
         if link is None or audio is None or not hasattr(link, "stt_input"):
             return
         try:
-            link.stt_input(item, audio)
+            link.stt_input(item, audio, self._stt_lane(item, key))
         except Exception as e:  # never in the radio path's way (the hub falls back to the clip)
             log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
+
+    def _stt_lane(self, item, key: str) -> int:
+        """Its priority in the STT input lane to the hub (#677, sizeup/cloud/sttinput.py), from whisper's own classes
+        (_stt_priority): PRE the pre-alerts (a page; another system's talkgroup of the alert tier: PD dispatch), FIRE our
+        fire traffic (URGENT: Fire/EMS 15, the firegrounds), NORMAL the airband (HIGH) and other live traffic, LOW a
+        talkgroup heard only as context (dropped first when the outbox is pressed). The airband never outranks fire."""
+        from sizeup.cloud import sttinput
+        if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page":
+            return sttinput.PRE
+        p = self._stt_priority(item, key)
+        if p in (CONTEXT, CONTEXT_FALLBACK):                    # an alert-tier talkgroup
+            return sttinput.PRE
+        if p == URGENT:
+            return sttinput.FIRE
+        return sttinput.LOW if p == LOW else sttinput.NORMAL
 
     def _stt_priority(self, item, key: str) -> int:
         """The class (_stt_class), raised to HIGH at least for a source the radio pre-alerts push alerts from: their
@@ -3743,7 +3782,7 @@ class App:
         if g is not None:            # a grouped dongle: its group's first job no dongle of the group has as its own
             mine = {self._own_of(s) for s in g.sdrs if s != sd}
             return next((j for j in g.jobs if j in self.modes and j not in mine and j not in have
-                         and self._group_runnable(j, have | {j})), None)
+                         and j not in g.parked and self._group_runnable(j, have | {j})), None)
         for job in self.cfg.sdr_auto_order:
             if job == OFF_MODE or job not in self.modes or job in have or antenna.of_job(self.groups, job):
                 continue                # (a group's job: only ever on its own dongles)
@@ -3923,7 +3962,7 @@ class App:
         file put back): a fire job runs where it was saved, said loudly and shown (groups_state "conflicts", Health);
         any other starts Off, said once. A fire job is never turned off by a lock."""
         for sd, m in list(self.assign.items()):
-            why = self._locked(m, sd) if m != OFF_MODE else ""
+            why = (self._locked(m, sd) or self._parked(m)) if m != OFF_MODE else ""
             if why and self.fire_job(m):
                 log(f"sdr: CRITICAL {self._sdr_tag(sd)} runs {m} against the antenna groups ({why}): kept running; "
                     "fix the group in Settings > Radios > Receivers")
@@ -3951,8 +3990,8 @@ class App:
             g = antenna.of_sdr(self.groups, sd)
             own = self.assign.get(sd, OFF_MODE)
             owners = [o for o in (g.sdrs if g else ()) if o != sd and self.assign.get(o) == job]
-            if g is None or job not in g.jobs or not owners or (own != OFF_MODE and own not in g.jobs) or \
-                    any(o in self._own for o in owners):
+            if g is None or job not in g.jobs or job in g.parked or not owners or \
+                    (own != OFF_MODE and own not in g.jobs) or any(o in self._own for o in owners):
                 continue
             self._own[sd], self.assign[sd] = own, job
             for o in owners:
@@ -3983,6 +4022,38 @@ class App:
         if gj is not None and sdr not in gj.sdrs:
             return f"{mode} is locked to {gj.name}: SDR {', '.join(self.sdr_name(s) for s in gj.sdrs)}"
         return ""
+
+    def _parkable(self, job: str) -> bool:
+        """(#637) A job a group may park: never the county's trunk-recorder or paging (fire coverage)."""
+        return job != P25_MODE and self._kind.get(job) != "paging"
+
+    def _parked(self, mode: str, gs: list | None = None) -> str:
+        """Why `mode` may run on no dongle: parked in its antenna group (#637: switched off there on purpose), or "".
+        Never the county's or paging (_parkable): a person can always pick those, whatever a file says."""
+        if mode == OFF_MODE or not self._parkable(mode):
+            return ""
+        g = antenna.of_job(self.groups if gs is None else gs, mode)
+        return f"{mode} is parked in {g.name}: unpark it first" if g is not None and mode in g.parked else ""
+
+    def _unpark_unparkable(self) -> None:
+        """At startup: a parked job that may not be parked (the county's, paging) in the groups file (edited by hand,
+        a backup put back, a fireground made a paging channel since) is unparked, said CRITICAL once, and the file
+        written again: its "no dongle has" warning is back, and nothing keeps a person from picking it."""
+        out, dropped = [], []
+        for g in self.groups:
+            bad = [j for j in g.parked if not self._parkable(j)]
+            dropped += [(g.name, j) for j in bad]
+            out.append(dataclasses.replace(g, parked=tuple(j for j in g.parked if j not in bad)) if bad else g)
+        if not dropped:
+            return
+        self.groups = out
+        for name, j in dropped:
+            log(f"sdr: CRITICAL antenna group {name}: {j} can't be parked (fire coverage): unparked")
+        try:
+            if self._groups_file is not None:
+                antenna.save(self._groups_file, out)
+        except OSError as e:
+            log(f"sdr: antenna groups: couldn't write the unparked groups back: {e}")
 
     def _group_runnable(self, job: str, on: set[str]) -> bool:
         """A job a group may give a dongle, beside the jobs `on`: the county's trunk-recorder only when one dongle
@@ -4071,8 +4142,9 @@ class App:
                 for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
-                # a dongle on a job outside its group (kept at startup, _lock_saved): left as it is, never planned
-                for s in [s for s, m in own.items() if m != OFF_MODE and m not in g.jobs]:
+                # a dongle on a job outside its group or parked there (kept at startup, _lock_saved): left as it is,
+                # never planned
+                for s in [s for s, m in own.items() if m != OFF_MODE and (m not in g.jobs or m in g.parked)]:
                     own.pop(s)
                     usable = [x for x in usable if x != s]
                 # (a group is the admin's consent to moves inside it: spares with auto_assign off too)
@@ -4124,7 +4196,10 @@ class App:
                 self._stop_mode(job, f"antenna group: {job} off SDR {self.sdr_name(sd)}", sd)
             if stops:
                 time.sleep(SWITCH_PAUSE_S)         # let the dongles go before the next programs open them
-            for sd, job in moves.items():
+            # (#637) the county's trunk-recorder is asked for first: another system's start in the same step then
+            # finds it on and waits until it is up (trunkrecd.SystemSupervisor._county_first), whatever the order
+            # of the groups
+            for sd, job in sorted(moves.items(), key=lambda m: m[1] != P25_MODE):
                 old = self.assign.get(sd, OFF_MODE)
                 ok = job == OFF_MODE or self._start_mode(job, sd)
                 self.assign[sd] = job if ok else OFF_MODE
@@ -4178,7 +4253,7 @@ class App:
         for g in gs:
             own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
             usable = [s for s in g.sdrs if s in here and self._gusable.get(s, True) and own.get(s, OFF_MODE) in
-                      (OFF_MODE, *g.jobs)]
+                      (OFF_MODE, *g.jobs) and own.get(s, OFF_MODE) not in g.parked]
             spares = [s for s in usable if own.get(s) == OFF_MODE and self.set_by.get(s) != "person"]
             plan, _ = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job, self._group_runnable)
             out |= set(plan.values()) - {OFF_MODE}
@@ -4210,6 +4285,15 @@ class App:
                         return f"SDR {self.sdr_name(s)} is reserved (ADS-B, AIS or sdr_ignore): never in a group"
                     if s not in known:
                         return f"{g.name}: no SDR {s!r} here"
+            # (#637) never parked: the county's trunk-recorder and paging (the alert that no dongle has one stays);
+            # a reception test's job while it runs
+            for g in gs:
+                if bad := next((j for j in g.parked if not self._parkable(j)), None):
+                    return f"{bad} can't be parked (fire coverage): take it out of {g.name}, or give it a dongle"
+            t = getattr(self.reception, "active", None)
+            testing = set(t.get("plan") or []) if isinstance(t, dict) else set()
+            if bad := next((j for g in gs for j in g.parked if j in testing), None):
+                return f"a reception test runs {bad}: stop it before parking {bad}"
             lent = self.reception.lent()
             for sd in sorted(known | set(self.assign)):
                 m = lent[1] if lent and lent[0] == sd else self._own_of(sd)
@@ -4220,8 +4304,14 @@ class App:
                     return f"SDR {self.sdr_name(sd)} runs {m}: add {m} to {g.name}, or switch SDR {self.sdr_name(sd)} first"
                 if gj is not None and sd not in gj.sdrs:
                     return f"{m} runs on SDR {self.sdr_name(sd)}: add it to {gj.name}, or switch it first"
+                if gj is not None and m in gj.parked:       # (#637) parking never stops a job: Off first
+                    return f"SDR {self.sdr_name(sd)} runs {m}: switch it Off before parking {m}"
             asks = [f"{w}: in a fallback the higher one takes the other's dongle"
                     for g in gs if (w := antenna.fire_order(g, self._fire_rank))]
+            was = {j for g in self.groups for j in g.parked}
+            if fire := [j for g in gs for j in g.parked if j not in was and self.fire_job(j)]:
+                # (#637) a fireground parked: no warning that no dongle has it any more, asked once when parked
+                asks.append(f"Parking {', '.join(fire)} keeps a fire channel off with no warning")
             here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s}
             now = {m for sd, m in self.assign.items() if m != OFF_MODE and sd in here and self._program_on(m) == sd}
             stops = sorted(j for j in now - self._running_after(gs) if self.fire_job(j))
@@ -4244,7 +4334,8 @@ class App:
                 self._gseen.pop(s, None)
                 self._gusable.pop(s, None)
             log("sdr: antenna groups: " + ("; ".join(
-                f"{g.name}: SDR {', '.join(self.sdr_name(s) for s in g.sdrs)} · {' > '.join(g.jobs)}" for g in gs)
+                f"{g.name}: SDR {', '.join(self.sdr_name(s) for s in g.sdrs)} · {' > '.join(g.jobs)}"
+                + (f" · parked {', '.join(g.parked)}" if g.parked else "") for g in gs)
                 or "none"))
             self._groups_reconcile()
         if self.groups and self._started:
@@ -4270,17 +4361,19 @@ class App:
 
     def groups_state(self) -> list[dict]:
         """sdr()["groups"]: each group, its dongles that can run now, its wanted jobs without a dongle ("short"), the
-        jobs it lists that are no dongle's own anywhere ("unowned"), and the dongles that run a job against it
-        ("conflicts": {serial: job}, kept at startup: _lock_saved)."""
+        jobs it lists that are no dongle's own anywhere and not parked ("unowned"), its parked jobs ("parked", only
+        when there are), and the dongles that run a job against it ("conflicts": {serial: job}, kept at startup:
+        _lock_saved)."""
         owns = {self._own_of(s) for s in set(self.assign) | set(self._own)}
         out = []
         for g in self.groups:
             conf = {s: m for s in set(self.assign) | set(self._own)
-                    if (m := self._own_of(s)) != OFF_MODE and self._locked(m, s)
+                    if (m := self._own_of(s)) != OFF_MODE and (self._locked(m, s) or self._parked(m))
                     and (s in g.sdrs or m in g.jobs)}
             out.append({**g.row(), "usable": [s for s in g.sdrs if self._gusable.get(s)],
                         "short": list(self._gshort.get(g.name, [])),
-                        "unowned": [j for j in g.jobs if j not in owns], "conflicts": conf})
+                        # (#637) a parked job is switched off on purpose: never "no dongle has it"
+                        "unowned": [j for j in g.jobs if j not in owns and j not in g.parked], "conflicts": conf})
         return out
 
     def _start_watch(self) -> None:
@@ -4452,8 +4545,8 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
-        if why := self._locked(mode, sdr):         # antenna groups: never a job off its own antenna
-            return why
+        if why := self._locked(mode, sdr) or self._parked(mode):   # antenna groups: never off its own antenna,
+            return why                             # never a job parked there (#637)
         # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
         # (said in the answer); one still owed its job: that job picked is "restore now"
         lent = self.reception.person_switch(mode, sdr)
@@ -4599,6 +4692,7 @@ class App:
                           **self._group_row(sd)}
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
+                "no_park": [m for m in self.modes if m != OFF_MODE and not self._parkable(m)],   # (#637) the editor
                 "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
     def radio_status(self) -> list[dict]:
@@ -5059,6 +5153,7 @@ class App:
         fwd = self.forwarding() and link is not None and hasattr(link, "pool_has_room")
         f = self._stt_queue_file()
         keep, mark = [], []
+        fast_left = [int(link.pool_gpu_idle_n()) if fwd and hasattr(link, "pool_gpu_idle_n") else 0]
         end = time.monotonic() + mark_s
         for i, (prio, item, _audio, ch, queued) in enumerate(items):
             if time.monotonic() > end:
@@ -5071,10 +5166,10 @@ class App:
                 elif isinstance(item, Rerun):
                     self._stt_dropped(item, "the station stopped before it ran")
                     n["reruns"] += 1
-                elif fwd and isinstance(item, Traffic) and self._handover_ok(prio, item) and \
+                elif fwd and isinstance(item, Traffic) and self._handover_ok(prio, item, fast_left) and \
                         self._stt_offload(item, ch or traffic_key(item), prio, "the station is stopping"):
                     n["pool"] += 1
-                elif fwd and isinstance(item, Page) and self._handover_ok(URGENT, item):
+                elif fwd and isinstance(item, Page) and self._handover_ok(URGENT, item, fast_left):
                     item.stt, item.status, item.raw = "pool", "pending", ""      # type: ignore[attr-defined]
                     self._emit("page_text", self._page_doc(item))
                     n["pool"] += 1

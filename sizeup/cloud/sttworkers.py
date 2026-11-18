@@ -68,6 +68,8 @@ POLL_S = 25.0
 AUDIO_WAIT_MAX_S = 2.0          # a job's audio: the station's STT input waited for this long at most (it usually comes a
                                 # moment after its event; one that doesn't come costs the worker this much of its lease)
 STATION_PREFIX = "station:"     # a station's whisper as a pool worker: "station:<station id>" (never a token's id)
+STATION_ROUTES = (API + "hello", API + "state", API + "claim")            # what a station's identity may reach here
+STATION_LEASE_ROUTES = ("audio", "extend", "complete", "release")
 REFUSAL_LOG_S = 3600.0
 _DUMMY = hashlib.sha256(b"sizeup: no such worker").hexdigest()
 
@@ -441,6 +443,11 @@ class WorkerApi:
                 return _json(403, {"error": "this station's whisper isn't in the pool (Settings > Station > Stations)",
                                    "reason": "stations_off"})
             wid, kind = f"{STATION_PREFIX}{sid}", "station"
+            # a station's whisper: only the transcription routes (a route added under /api/station/stt/ is a GPU
+            # worker's alone until it is listed here: never, say, a language model's jobs with their prompts)
+            lm = LEASE_PATH.fullmatch(path)
+            if path not in STATION_ROUTES and not (lm and lm.group(2) in STATION_LEASE_ROUTES):
+                return _json(403, {"error": "not a station's route", "reason": "gpu_only"})
         if not self.may_write():
             from sizeup import fence as fence_mod
             fence_mod.refuse(f"{method} {path}")    # a standby: 503 + Retry-After (sizeup/web/server.py)

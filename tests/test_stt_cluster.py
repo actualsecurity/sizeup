@@ -7,6 +7,7 @@ talkgroups, texts and synthetic audio only; local fakes, never AWS."""
 import base64
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -273,12 +274,15 @@ def test_a_restarting_station_hands_everything_waiting_to_the_pool_and_nothing_i
             time.sleep(0.01)
         assert wait(lambda: st.stt.busy() == 3 and hold.calls == 1, 10)   # one on whisper, two waiting
         n = st._stt_handoff(wait_s=0.2)                     # the update stops it: the one on whisper doesn't finish
-        assert n["pool"] == 3 and n["saved"] == 0 and n["in_flight"] == 1
-        st.stt._stopping = False                            # (the station back: its whisper may be asked again)
+        # one idle quick GPU worker: one Fire/EMS clip to it, the other two saved for the next start (never to the
+        # stopping station's own whisper)
+        assert n["pool"] == 1 and n["saved"] == 2 and n["in_flight"] == 1
+        saved = {e["id"] for e in __import__("json").loads(
+            (Path(st.cfg.clips_dir).parent / "stt-queue.json").read_text())}
+        (handed,) = set(ids) - saved
         hold.go.set()
-        assert wait(lambda: all(any(t["id"] == tid and t["text"] for t in all_traffic(hub.get("/api/state")))
-                                for tid in ids), 40)
-        assert gpu.jobs                                     # the pool took them (what it couldn't: the next way)
+        assert wait(lambda: any(t["id"] == handed and t["text"] for t in all_traffic(hub.get("/api/state"))), 40)
+        assert gpu.jobs                                     # the pool took it
     finally:
         gpu.close()
         if st is not None:
@@ -309,15 +313,16 @@ def test_a_station_restarting_with_a_full_queue_and_no_pool_saves_it_and_queues_
     app2 = App(cfg)                                             # the next start
     heard = []
     app2._alarm = lambda t, text=None: heard.append(t.id)       # (what acts on live words: never a quiet catch-up)
-    assert app2._stt_resume() == 5 and not (tmp_path / "stt-queue.json").exists()
+    # (the one on whisper when it stopped finished meanwhile: it has its text, so it isn't queued again)
+    assert app2._stt_resume() == 4 and not (tmp_path / "stt-queue.json").exists()
     order = [(e[0], e[2].id) for e in sorted(app2.stt._q._items, key=lambda e: app2.stt._q._key(e, time.time()))]
-    assert [cid for _p, cid in order[:2]] == [fire, fire2] and {p for p, _c in order[:2]} == {URGENT}
-    assert {p for p, cid in order[2:]} == {LOW} and {cid for _p, cid in order[2:]} == set(ctx)
+    assert [cid for _p, cid in order[:1]] == [fire2] and {p for p, _c in order[:1]} == {URGENT}
+    assert {p for p, cid in order[1:]} == {LOW} and {cid for _p, cid in order[1:]} == set(ctx)
     app2.stt.client = SimpleNamespace(transcribe=lambda audio, prompt="", **k: ("Engine 99 responding", 0.9))
     app2.stt.start()
     done = lambda: {t.id for t in app2.store.loose if t.text}     # noqa: E731
-    assert wait(lambda: done() >= {fire, fire2, *ctx}, 20)
-    assert set(heard) >= {fire, fire2}                           # alerts as ever
+    assert wait(lambda: done() >= {fire2, *ctx}, 20)
+    assert set(heard) >= {fire2} and heard.count(fire) == 0     # alerts as ever, never twice
 
 
 def test_the_catch_up_takes_the_rows_a_stopped_station_left_first(tmp_path):
@@ -752,5 +757,68 @@ def test_a_handed_over_clip_carries_its_own_station_and_never_goes_back_to_it(tm
             assert next(t for t in app.store.loose if t.id == "9570-1794-call_71").origin_station == "st-a"
         finally:
             w.close()
+    finally:
+        hub.close()
+
+
+# -- the final check of 601cb35 ---------------------------------------------------------------------------------------------
+
+
+def test_a_stopping_station_hands_one_pre_alert_clip_per_idle_gpu_worker_and_saves_the_rest(tmp_path):
+    from sizeup.app import App
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    sent = []
+    idle_n = {"n": 1}
+    app.link = SimpleNamespace(pool_takes=lambda: True, pool_gpu_idle=lambda: idle_n["n"] > 0,
+                               pool_gpu_idle_n=lambda: idle_n["n"], pool_has_room=lambda seconds=None: True)
+    app.forwarding = lambda: True
+    app._emit = lambda kind, d, clip=None: sent.append((kind, d))
+    fires = [Traffic(f"FG1-{i}", "FG1", 1.0 + i, 4.0 + i, "", status="pending") for i in range(3)]
+    for t in fires:
+        app.stt.submit(t, np.zeros(1600, np.float32), URGENT, "FG1")
+    n = app._stt_handoff(wait_s=0.0)
+    assert (n["pool"], n["saved"]) == (1, 2)                     # one idle quick GPU worker: one clip to it
+    handed = [d["id"] for k, d in sent if k == "traffic" and d.get("transcript_pending") == "pool"]
+    saved = __import__("json").loads((tmp_path / "stt-queue.json").read_text())
+    assert len(handed) == 1 and sorted([handed[0]] + [e["id"] for e in saved]) == ["FG1-0", "FG1-1", "FG1-2"]
+
+
+def test_a_saved_clip_whisper_finished_during_the_stop_is_never_transcribed_twice(tmp_path):
+    from sizeup.app import App
+    from tests.test_cloud import base
+    cfg = base(clips_dir=str(tmp_path / "clips"))
+    app = App(cfg)
+    hold = Hold()
+    app.stt.client = hold
+    app.stt.start()
+    first = fm_segment(app)                                      # on whisper when the station stops
+    time.sleep(0.01)
+    second = fm_segment(app)
+    assert wait(lambda: app.stt.busy() == 2 and hold.calls == 1, 10)
+    assert app._stt_handoff(wait_s=0.0)["saved"] == 2            # (both saved: the first was still on whisper)
+    hold.go.set()                                                # ... and whisper finishes it before the exit
+    assert wait(lambda: (app.cad.store.one("SELECT status FROM radio_traffic WHERE id = ?", (first,)) or {}).get(
+        "status") == "done", 10)
+    app2 = App(cfg)
+    assert app2._stt_resume() == 1                               # the second only: the first has its text
+    assert [e[2].id for e in app2.stt._q._items] == [second]
+
+
+def test_a_pooled_stations_identity_reaches_only_the_transcription_routes(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a"))
+    try:
+        tok = hub.app.hub.stations.add("st-b")
+        hub.app.hub.workers.act({"action": "pool", "stations": {"st-b": True}})
+        assert call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=tok)[0] == 200
+        assert call(hub.url + "/api/station/stt/claim", "POST", {"wait": 0}, token=tok) == (200, {"job": None})
+        assert call(hub.url + "/api/station/stt/jobs/0123456789abcdef/complete", "POST", {"text": "x"},
+                    token=tok)[0] == 409                         # (a lease route: listed, the lease just isn't its)
+        for path in ("/api/station/stt/infer/claim", "/api/station/stt/anything-new"):
+            code, out = call(hub.url + path, "POST", {}, token=tok)
+            assert code == 403 and out["reason"] == "gpu_only", path   # not listed: a GPU worker's only
+        gpu = hub.app.hub.workers.add("gpu-1")
+        assert call(hub.url + "/api/station/stt/anything-new", "POST", {}, token=gpu)[0] == 404   # (a GPU worker: no such)
     finally:
         hub.close()
