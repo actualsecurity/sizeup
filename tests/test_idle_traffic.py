@@ -2,7 +2,7 @@
 
 - The state push sends the whole state once, then only the sections that changed (idle: the clock), with an
   id a reconnect (Last-Event-ID), the stream's start (?since=) and the polling fallback (?since=) resume from;
-  gzipped, one stream flushed per event.
+  gzipped, one stream flushed per event, each event compressed once for every page at the same place.
 - Static files: named by version from the pages (kept a year), else revalidated (ETag -> 304); gzip.
 - The layers' data: ETag + max-age (the layer's refresh, else 300 s), must-revalidate; 304 when unchanged.
 - The Radio view and the board ask /api/cad/comms only on screen and when the push's comms_rev moves;
@@ -24,6 +24,7 @@ import pytest
 from sizeup.cad import dispatcher
 from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad, Settings
+from sizeup.web import server as server_mod
 from sizeup.web.server import Broadcaster, WebServer
 from tests import test_gis, test_roads
 from tests.test_settings import post
@@ -81,6 +82,78 @@ def test_a_broken_state_is_an_error_push_and_the_next_good_one_puts_it_all_back(
     s2 = b.snapshot()[0]
     b.publish()
     assert snap_json(b, s2) == {"_delta": 1, "time": 3, "units": [1], "_gone": ["error"]}
+
+
+def test_an_event_is_made_once_per_push_and_place_and_any_run_of_them_decodes(monkeypatch):
+    """One compression per push for every page at the same place (FINDINGS §3.5); what each page decodes is exactly
+    what it had before: the bodies in order, whatever it joined at and whatever else was sent."""
+    made = []
+    real = server_mod.deflate_segment
+    monkeypatch.setattr(server_mod, "deflate_segment", lambda raw, *a: made.append(raw) or real(raw, *a))
+    b = Broadcaster(lambda: {})
+    big = {"rows": [{"n": i, "text": f"row {i} on Example Ave"} for i in range(2000)]}
+    s1 = b.publish({"time": 1, "incidents": big, "units": [1, 2]})
+    first = b.snapshot()
+    assert b.event(first, None, True) is b.event(first, None, True) and len(made) == 1
+    assert b.event(first, None) == b"id: " + b.ident(s1).encode() + b"\ndata: " + b.body(first) + b"\n\n"
+    s2 = b.publish({"time": 2, "incidents": {"rows": big["rows"] + [{"n": -1}]}, "units": [1, 2]})
+    second = b.snapshot()
+    one_behind = b.event(second, s1, True)
+    assert b.event(second, s1, True) is one_behind and len(made) == 2           # shared by every page one push behind
+    joined = b.event(second, None, True)                                       # a page that joins now: the whole state
+    assert len(made) == 3 and joined != one_behind
+    s3 = b.publish({"time": 3, "incidents": {"rows": []}, "units": [1, 2]})
+    third = b.snapshot()
+    # page A was there from the first push; page B joined at the second
+    for parts, bodies in (([b.event(first, None, True), one_behind, b.event(third, s2, True)],
+                           [b.body(first), b.body(second, s1), b.body(third, s2)]),
+                          ([joined, b.event(third, s2, True)], [b.body(second), b.body(third, s2)])):
+        hello = b"retry: 2000\n:" + b"ab" * 1024 + b"\n\n"
+        wire = server_mod.GZIP_HEAD + server_mod.deflate_segment(hello) + b"".join(parts)
+        got = zlib.decompressobj(31).decompress(wire).split(b"\n\n")[1:-1]
+        assert [json.loads(e.split(b"\ndata: ", 1)[1]) for e in got] == [json.loads(x) for x in bodies]
+        assert got[-1].startswith(b"id: " + b.ident(s3).encode() + b"\n")
+    assert json.loads(b.body(third, s2)) == {"_delta": 1, "time": 3, "incidents": {"rows": []}}
+
+
+def test_an_event_is_never_one_of_another_push_and_only_the_last_two_pushes_are_kept():
+    b = Broadcaster(lambda: {})
+    seen = {}
+    for t in range(1, 40):
+        seq = b.publish({"time": t, "units": [t % 3]})
+        snap = b.snapshot()
+        for since in (None, seq - 1, max(1, seq - 5)):
+            ev = b.event(snap, since, t % 2 == 0)
+            raw = b.event(snap, since)
+            assert raw == b"id: " + b.ident(seq).encode() + b"\ndata: " + b.body(snap, since) + b"\n\n"
+            assert seen.get(ev, seq) == seq                  # never the bytes of another push
+            seen[ev] = seq
+        assert {k[0] for k in b._events} <= {seq - 1, seq}
+
+
+def test_pages_at_the_same_place_share_one_compression_even_when_they_ask_at_once(monkeypatch):
+    calls = []
+    real = server_mod.deflate_segment
+
+    def slow(raw, *a):
+        calls.append(raw)
+        time.sleep(0.05)                     # long enough for every page to be waiting on it
+        return real(raw, *a)
+    monkeypatch.setattr(server_mod, "deflate_segment", slow)
+    b = Broadcaster(lambda: {})
+    s1 = b.publish({"time": 1, "incidents": ["x" * 5000]})
+    b.publish({"time": 2, "incidents": ["y" * 5000]})
+    snap, out, go = b.snapshot(), [], threading.Barrier(20)
+
+    def page():
+        go.wait()
+        out.append(b.event(snap, s1, True))
+    ts = [threading.Thread(target=page) for _ in range(20)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(calls) == 1 and len(out) == 20 and all(o is out[0] for o in out)
 
 
 # ---- through the server ------------------------------------------------------------------------------------------
@@ -166,6 +239,60 @@ def test_the_stream_is_gzipped_for_a_browser_that_takes_it_and_each_event_arrive
     assert "units" in events[0][1] and events[1][1]["_delta"] == 1 and events[2][1]["_delta"] == 1
     events, h = read_events(hub.port, "/api/stream", 2, {"Accept-Encoding": "gzip"}, decode_gzip=True)    # the monitor's too
     assert "radios" in events[0][1] and events[1][1] == {"_delta": 1, "time": events[1][1]["time"]}
+
+
+def test_a_change_reaches_every_page_in_the_same_push_whatever_it_takes_and_wherever_it_joined(hub):
+    """Pages share one made event per push: a change still reaches each of them (gzipped or not, joined whole, by
+    Last-Event-ID or by ?since=) in the same push, and each page's merged state is the same as the others'."""
+    b = hub.ws.cad_broadcaster
+    code, gh, _ = hub.get("/api/cad/state")
+    at = gh["x-state-id"]
+    kinds = [({}, False, ""), ({"Accept-Encoding": "gzip"}, True, ""), ({"Accept-Encoding": "gzip"}, True, ""),
+             ({"Accept-Encoding": "gzip", "Last-Event-ID": at}, True, ""), ({"Accept-Encoding": "gzip"}, True, f"?since={at}"),
+             ({"Last-Event-ID": at}, False, "")]
+    seen = [[] for _ in kinds]
+    merged = [{} for _ in kinds]
+    done = [None] * len(kinds)
+
+    def page(i, headers, gz, query):
+        c = http.client.HTTPConnection("127.0.0.1", hub.port, timeout=15)
+        c.request("GET", "/api/cad/stream" + query, headers=headers)
+        r = c.getresponse()
+        assert (r.getheader("Content-Encoding") == "gzip") == gz
+        z, buf = zlib.decompressobj(31) if gz else None, b""
+        while done[i] is None:
+            chunk = r.read1(65536)
+            assert chunk, "the stream ended"
+            buf += z.decompress(chunk) if z else chunk
+            while b"\n\n" in buf and done[i] is None:
+                ev, buf = buf.split(b"\n\n", 1)
+                f = dict(line.split(b": ", 1) for line in ev.split(b"\n") if b": " in line and not line.startswith(b":"))
+                if b"data" not in f:
+                    continue
+                ident, data = f[b"id"].decode(), json.loads(f[b"data"])
+                if not data.pop("_delta", None):
+                    merged[i].clear()
+                for k in data.pop("_gone", []):
+                    merged[i].pop(k, None)
+                merged[i].update(data)
+                seen[i].append(ident)
+                if any(x.get("address") == "2 Example Ave" for x in merged[i].get("incidents") or []):
+                    done[i] = (ident, json.dumps(merged[i]["incidents"], sort_keys=True))
+        c.close()
+    ts = [threading.Thread(target=page, args=(i, *k), daemon=True) for i, k in enumerate(kinds)]
+    for t in ts:
+        t.start()
+    deadline = time.time() + 10
+    while not all(len(s) >= 2 for s in seen) and time.time() < deadline:
+        time.sleep(0.02)
+    assert all(len(s) >= 2 for s in seen), seen
+    hub.cad.create({"type": "ALARM", "address": "2 Example Ave", "operator": "JD"})
+    for t in ts:
+        t.join(10)
+    assert all(d is not None for d in done), done
+    assert len({d[0] for d in done}) == 1 and len({d[1] for d in done}) == 1         # the same push, the same state
+    assert done[0][0] == b.ident(int(done[0][0].split(".")[1]))
+    assert {k[0] for k in b._events} <= {b.snapshot()[0] - 1, b.snapshot()[0]} | {int(done[0][0].split(".")[1])}
 
 
 def test_polling_gets_only_what_changed_since_its_last_answer(hub):
