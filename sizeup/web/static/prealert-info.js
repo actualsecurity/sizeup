@@ -253,6 +253,10 @@ window.PrealertInfo = (() => {
         : "The FD was already there: no pre-alert (an FYI only when the words added something)"],
       ["Push", o.pushed_at ? tm(o.pushed_at) : o.suppressed ? `held: ${o.suppressed}` : o.pushed ? "pushed" : "",
         o.suppressed ? "Not pushed, and why" : ""],
+      // the last push at ntfy: "sent 16:21:27" / "not sent: 429" (sizeup/intel/events.py delivery)
+      ["Delivery", o.pushed_at && window.IntelCard ? IntelCard.delivered(o, tm) : "",
+        o.delivery ? (o.delivery.ok ? `ntfy took it (HTTP ${o.delivery.status}${o.delivery.id ? `, message ${o.delivery.id}` : ""})`
+          : `ntfy didn't take it: ${o.delivery.error || o.delivery.status}`) : "Queued: no answer from ntfy yet"],
       ["Votes", fb.join("; ")],
     ]));
     return kids;

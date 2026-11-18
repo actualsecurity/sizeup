@@ -6,11 +6,13 @@ immediately. Other-agency units should go through statuses like our rigs (dispat
 available), set by the dispatcher. In the right column, the groups EMS, ConEd, Keyholders, Knox box, PDs, BATs and
 Other show no status control when an incident is selected, unlike our units."
 
-    attach       an agency's unit goes on the event as its set's first status, Dispatched (a keyholder: Notified),
-                 its Disp time stamped, "Attached RBPD" then "RBPD dispatched" on the timeline; never On location
+    attach       an agency's unit goes on the event as its set's first status, Dispatched, its Disp time stamped,
+                 "BAT10 added: dispatched" on the timeline; never On location
     the sets     cad_lists.json agency_status_sets, by board: full (Port Chester EMS: Out of service too),
-                 responder (PD, ConEd, BATs, Other: our rigs' run but Out of service), contact (Keyholders, Knox box:
-                 Notified / En route / On location / Done, the labels shown and logged, the codes stored)
+                 responder (BATs, the fire and EMS codes on Other: our rigs' run but Out of service), third_party
+                 (PD, ConEd, the rest of Other: Dispatched, Dispatch other, On location, Available, Cancelled) and
+                 keyholder (Keyholders, Knox box: the same and Notified not responding, Failure to respond); the
+                 third-party ones in tests/test_third_party_units.py
     controls     on the event the status_flow's next steps in the set; on the board (the right column) the whole
                  set, a working status asking which call with the incident being worked first
 
@@ -56,33 +58,33 @@ def texts(c, iid):
 
 # -- #219: the status flow of an outside agency's unit ------------------------------------------------------------
 
-def test_attaching_rbpd_puts_it_on_dispatched_then_it_goes_through_its_statuses(ev):
+def test_attaching_an_agency_unit_puts_it_on_dispatched_then_it_goes_through_its_statuses(ev):
     c, iid = ev, ev.iid
-    rb = uid(c, "RBPD")
+    rb = uid(c, "BAT10")
     t0 = c.store.clock()
-    assert c.attach(iid, {"unit_ids": [rb], "operator": "JD"}) == {"ok": True, "moved": []}
-    a = row(c, iid, "RBPD")
+    assert c.attach(iid, {"unit_ids": [rb], "operator": "JD"}) == {"ok": True, "moved": [], "as": {"BAT10": "DP"}}
+    a = row(c, iid, "BAT10")
     assert a["status"] == "DP" and a["status_set"] == "responder"          # assigned, not yet responding
     assert a["dispatched_at"] >= t0 and a["enroute_at"] is None and a["onscene_at"] is None
     assert a["next"] == ["RS", "OL", "ST", "AV", "CN"]                       # our rigs' steps, no Out of service
-    assert texts(c, iid)[-2:] == ["Attached RBPD", "RBPD dispatched"]
-    assert "RBPD on location" not in texts(c, iid)
+    assert texts(c, iid)[-1] == "BAT10 added: dispatched"
+    assert "BAT10 on location" not in texts(c, iid)
     assert len(c.full(iid)["dispatches"]) == 1                              # never in the dispatch log, never said
-    for st, said, nxt in (("RS", "RBPD responding", ["OL", "ST", "AV", "CE"]), ("ST", "RBPD staging", ["OL", "AV"]),
-                          ("OL", "RBPD on location", ["AV"])):
+    for st, said, nxt in (("RS", "BAT10 responding", ["OL", "ST", "AV", "CE"]), ("ST", "BAT10 staging", ["OL", "AV"]),
+                          ("OL", "BAT10 on location", ["AV"])):
         c.unit_status(rb, {"status": st, "operator": "JD"})
         assert texts(c, iid)[-1] == said
-        assert row(c, iid, "RBPD")["next"] == nxt
-    a = row(c, iid, "RBPD")
+        assert row(c, iid, "BAT10")["next"] == nxt
+    a = row(c, iid, "BAT10")
     assert a["enroute_at"] and a["onscene_at"]
     c.unit_status(rb, {"status": "AV", "operator": "JD"})
-    assert texts(c, iid)[-1] == "RBPD cleared"
+    assert texts(c, iid)[-1] == "BAT10 cleared"
     hist = c.store.q("SELECT old_status, new_status, incident_id, operator FROM unit_history WHERE unit_id = ? ORDER BY id", (rb,))
     assert [(h["old_status"], h["new_status"]) for h in hist][-5:] == [
         ("AV", "DP"), ("DP", "RS"), ("RS", "ST"), ("ST", "OL"), ("OL", "AV")]
     assert {h["incident_id"] for h in hist[-5:]} == {iid} and {h["operator"] for h in hist[-5:]} == {"JD"}
     # cleared, the call still open: it can go back to it, in its own set
-    back = next(a for a in c.full(iid)["assignments"] if a["name"] == "RBPD")
+    back = next(a for a in c.full(iid)["assignments"] if a["name"] == "BAT10")
     assert back["return"] == ["RS", "OL"]
 
 
@@ -99,25 +101,26 @@ def test_an_agency_unit_refuses_a_status_outside_its_set(ev):
     assert texts(c, iid)[-1] == "77A4 out of service (stretcher)"
 
 
-def test_keyholders_and_the_knox_box_are_notified_en_route_on_location_done(ev):
+def test_keyholders_and_the_knox_box_go_dispatched_dispatch_other_on_location_available(ev):
     c, iid = ev, ev.iid
     kh, kb = uid(c, "KEYHOLDER"), uid(c, "KNOX_BOX")
     c.attach(iid, {"unit_ids": [kh, kb], "operator": "JD"})
-    assert texts(c, iid)[-3:] == ["Attached KEYHOLDER, KNOX_BOX", "KEYHOLDER notified", "KNOX_BOX notified"]
+    assert texts(c, iid)[-2:] == ["KEYHOLDER added: dispatched", "KNOX_BOX added: dispatched"]
     a = row(c, iid, "KEYHOLDER")
-    assert (a["status"], a["status_set"], a["next"]) == ("DP", "contact", ["RS", "OL", "AV"])
-    c.unit_status(kh, {"status": "RS", "operator": "JD"})
-    assert texts(c, iid)[-1] == "KEYHOLDER en route"
-    assert row(c, iid, "KEYHOLDER")["next"] == ["OL", "AV"]
-    with pytest.raises(CadError, match="Notified, En route, On location or Done"):
-        c.unit_status(kh, {"status": "ST", "operator": "JD"})
+    assert (a["status"], a["status_set"], a["next"]) == ("DP", "keyholder", ["DO", "OL", "NR", "FR", "AV", "CN"])
+    c.unit_status(kh, {"status": "DO", "operator": "JD"})
+    assert texts(c, iid)[-1] == "KEYHOLDER dispatch other (DO)"
+    assert row(c, iid, "KEYHOLDER")["next"] == ["OL", "NR", "FR", "AV", "CN"]
+    with pytest.raises(CadError, match="Dispatched, Dispatch other, Notified not responding, Failure to respond, "
+                                       "On location, Available or Cancelled"):
+        c.unit_status(kh, {"status": "RS", "operator": "JD"})
     c.unit_status(kh, {"status": "OL", "operator": "JD"})
     assert row(c, iid, "KEYHOLDER")["next"] == ["AV"]
     c.unit_status(kh, {"status": "AV", "operator": "JD"})
     assert texts(c, iid)[-1] == "KEYHOLDER cleared"
-    # the codes are stored and exported as ever: the labels are the set's names for them
+    # the codes are stored and exported as ever
     assert [h["new_status"] for h in c.store.q("SELECT new_status FROM unit_history WHERE unit_id = ? ORDER BY id", (kh,))][-4:] == [
-        "DP", "RS", "OL", "AV"]
+        "DP", "DO", "OL", "AV"]
     # closing the call clears whoever is still on it, an agency's too
     c.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
     assert next(u for u in c.store.units() if u["id"] == kb)["status"] == "AV"
@@ -126,24 +129,31 @@ def test_keyholders_and_the_knox_box_are_notified_en_route_on_location_done(ev):
 def test_the_right_column_puts_an_agency_unit_on_a_call_and_moves_it_through(ev):
     """The board: a working status asks which call (the incident worked first); the unit goes on it, then the status."""
     c, iid = ev, ev.iid
-    pd = uid(c, "PCPD1")
+    pd = uid(c, "BAT12")
     c.unit_status(pd, {"status": "RS", "incident_id": iid, "operator": "JD"})
-    a = row(c, iid, "PCPD1")
+    a = row(c, iid, "BAT12")
     assert a["status"] == "RS" and a["dispatched_at"] and a["enroute_at"]
-    assert texts(c, iid)[-2:] == ["PCPD1 dispatched", "PCPD1 responding"]
+    assert texts(c, iid)[-2:] == ["BAT12 dispatched", "BAT12 responding"]
     c.unit_status(pd, {"status": "OL", "incident_id": iid, "operator": "JD"})
-    assert texts(c, iid)[-1] == "PCPD1 on location"
+    assert texts(c, iid)[-1] == "BAT12 on location"
     with pytest.raises(CadError, match="another agency's unit"):
         c.unit_status(pd, {"status": "OS", "incident_id": 0, "operator": "JD"})
+    # a third party from the right column: on the call Dispatched, then Dispatch other; never Responding
+    p1 = uid(c, "PCPD1")
+    c.unit_status(p1, {"status": "DO", "incident_id": iid, "operator": "JD"})
+    assert texts(c, iid)[-2:] == ["PCPD1 dispatched", "PCPD1 dispatch other (DO)"]
+    assert row(c, iid, "PCPD1")["dispatched_at"]
+    with pytest.raises(CadError, match="another agency's unit"):
+        c.unit_status(p1, {"status": "RS", "incident_id": iid, "operator": "JD"})
 
 
-def test_add_unit_puts_an_agency_unit_on_responding_and_a_keyholder_en_route(ev):
+def test_add_unit_puts_an_agency_unit_on_responding_and_a_third_party_dispatched(ev):
     c, iid = ev, ev.iid
-    c.attach(iid, {"unit_ids": [uid(c, "RBPD"), uid(c, "E62")], "status": "RS", "operator": "JD"})
-    c.attach(iid, {"unit_ids": [uid(c, "KEYHOLDER2")], "status": "RS", "operator": "JD"})
-    assert texts(c, iid)[-3:] == ["RBPD added responding (not dispatched)", "E62 added responding (not dispatched)",
-                                  "KEYHOLDER2 added en route (not dispatched)"]
-    assert row(c, iid, "RBPD")["dispatched_at"] is None
+    c.attach(iid, {"unit_ids": [uid(c, "BAT10"), uid(c, "E62")], "status": "RS", "operator": "JD"})
+    c.attach(iid, {"unit_ids": [uid(c, "KEYHOLDER2"), uid(c, "RBPD")], "status": "RS", "operator": "JD"})
+    assert texts(c, iid)[-4:] == ["E62 added responding (not dispatched)", "BAT10 added responding (not dispatched)",
+                                  "KEYHOLDER2 added: dispatched", "RBPD added: dispatched"]
+    assert row(c, iid, "BAT10")["dispatched_at"] is None and row(c, iid, "RBPD")["dispatched_at"]
     with pytest.raises(CadError, match="Another agency's unit, not Incident command: 77A1"):
         c.attach(iid, {"unit_ids": [uid(c, "77A1")], "status": "IC", "operator": "JD"})
 
@@ -152,20 +162,23 @@ def test_the_groups_and_their_sets():
     L = make_cad().lists
     got = {b["id"]: {L.agency_set(u) for u in b["units"] if u} for b in L.unit_boards}
     assert got["ems"] == {"full"}
-    assert got["res-keyholder"] == got["res-knox"] == {"contact"}
-    assert got["res-coned"] == got["res-pd"] == got["res-bat"] == got["agencies"] == {"responder"}
+    assert got["res-keyholder"] == got["res-knox"] == {"keyholder"}
+    assert got["res-coned"] == got["res-pd"] == {"third_party"} and got["res-bat"] == {"responder"}
+    assert got["agencies"] == {"third_party", "responder"}                    # its fire and EMS codes: responder
+    assert {u for u in L.unit_boards[-1]["units"] if L.agency_set(u) == "responder"} >= {"GREENWICH-F", "EMS10", "FC1", "FM42"}
     assert got["main"] == got["ma-rye"] == got["ma-requests"] == {""}        # ours and mutual aid: every status
-    assert L.unit_statuses_for("E60") == L.status_ids
-    assert L.label("DP", "KNOX_BOX") == "Notified" and L.label("AV", "KEYHOLDER3") == "Done"
-    assert L.label("DP", "RBPD") == "Dispatched" and L.label("DP", "E60") == "Dispatched"
+    assert L.unit_statuses_for("E60") == tuple(c for c in L.status_ids if c != "DO")   # but a third party's
+    assert L.label("DP", "KNOX_BOX") == L.label("DP", "RBPD") == L.label("DP", "E60") == "Dispatched"
     pub = L.public()["agency_status_sets"]
-    assert pub["sets"]["contact"] == {"statuses": ["DP", "RS", "OL", "AV"],
-                                      "labels": {"DP": "Notified", "RS": "En route", "AV": "Done"}}
-    assert pub["boards"] == {"ems": "full", "res-keyholder": "contact", "res-knox": "contact"}
+    assert pub["sets"]["keyholder"] == {"statuses": ["DP", "DO", "NR", "FR", "OL", "AV", "CN"], "labels": {},
+                                        "title": "Third party: keyholder", "third_party": True}
+    assert pub["sets"]["full"]["third_party"] is False and pub["third_party_only"] == ["DO"]
+    assert pub["boards"] == {"ems": "full", "res-keyholder": "keyholder", "res-knox": "keyholder", "res-coned": "third_party",
+                             "res-pd": "third_party", "agencies": "third_party"}
     # the units the page gets say their set
     by = {u["name"]: u["status_set"] for u in make_cad().store.units()}
-    assert (by["RBPD"], by["KNOX_BOX"], by["77M1"], by["CONED-G2"], by["E60"], by["L25"]) == (
-        "responder", "contact", "full", "responder", "", "")
+    assert (by["RBPD"], by["KNOX_BOX"], by["77M1"], by["CONED-G2"], by["BAT10"], by["E60"], by["L25"]) == (
+        "third_party", "keyholder", "full", "third_party", "responder", "", "")
 
 
 def test_the_sets_are_checked_and_a_file_without_them_still_works():
@@ -205,7 +218,7 @@ def test_permissions_are_unchanged(api):  # noqa: F811
     assert needs("/api/cad/incident/7/attach") == needs("/api/cad/unit/7/status") == "dispatch"
     c = api.cad
     iid = c.create({"type": "STRU", "address": "1 Main St"})["id"]
-    rb = uid(c, "RBPD")
+    rb = uid(c, "BAT10")
     code, _ = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [rb], "operator": "Val"}, VAL)
     assert code == 403
     assert next(u for u in c.store.units() if u["id"] == rb)["incident_id"] is None
@@ -272,7 +285,7 @@ for (const n of ["RBPD", "KEYHOLDER"]) {
   out["inc " + n] = kids(statusButtons({ id: r.unit_id, status: r.status, next: r.next, status_set: r.status_set }, "inc"));
 }
 // a working status from the right column asks which call: the incident being worked first; no "No call" for an agency
-cad.pick = { uid: byName("PCPD1").id, status: "RS" };
+cad.pick = { uid: byName("PCPD1").id, status: "DO" };
 out.pick = kids(statusButtons(byName("PCPD1"), "board"));
 cad.pick = { uid: byName("E61").id, status: "RS" };
 out.pickOurs = kids(statusButtons(byName("E61"), "board"));
@@ -292,19 +305,23 @@ def test_status_controls_for_every_agency_group(ev, tmp_path):
              "unitById", "statusChoices", "statusButtons", "callPicker"]
     out = run_node(tmp_path, grab_harness(names, BUTTONS), page_data(c, iid))
     full_ = ["Dispatched", "Responding", "On location", "Staging", "Available", "Cancelled", "Cancelled enroute"]
-    assert out["RBPD"] == out["CONED-G"] == out["BAT10"] == out["DPW"] == full_        # like our rigs, no OOS
+    third = ["Dispatched", "Dispatch other", "On location", "Available", "Cancelled"]
+    assert out["BAT10"] == full_                                                        # like our rigs, no OOS
+    assert out["RBPD"] == out["CONED-G"] == out["DPW"] == third                         # third party: never Responding
     assert out["77A4"] == full_ + ["Out of service"]
-    assert out["KEYHOLDER"] == out["KNOX_BOX"] == ["Notified", "En route", "On location", "Done"]
-    assert len(out["E60"]) == len(c.lists.status_ids)                                   # ours: as before
-    assert out["inc RBPD"] == ["Responding", "On location", "Staging", "Available", "Cancelled"]
-    assert out["inc KEYHOLDER"] == ["En route", "On location", "Done"]
+    assert out["KEYHOLDER"] == out["KNOX_BOX"] == ["Dispatched", "Dispatch other", "Notified not responding",
+                                                   "Failure to respond", "On location", "Available", "Cancelled"]
+    assert len(out["E60"]) == len(c.lists.status_ids) - 1 and "Dispatch other" not in out["E60"]   # ours: never DO
+    assert out["inc RBPD"] == ["Dispatch other", "On location", "Available", "Cancelled"]
+    assert out["inc KEYHOLDER"] == ["Dispatch other", "On location", "Notified not responding", "Failure to respond",
+                                    "Available", "Cancelled"]
     inc = c.store.incident(iid)["number"]
     pick = out["pick"][0]
-    assert pick.startswith("[PCPD1 Responding on|<") and "No call" not in pick
+    assert pick.startswith("[PCPD1 Dispatch other on|<") and "No call" not in pick
     assert pick.index(f"{inc} ") < pick.index(c.store.incident(other)["number"])       # the incident worked first
     assert "(this incident)" in pick
     assert "No call" in out["pickOurs"][0]
-    assert out["chip"] == "Notified"
+    assert out["chip"] == "Dispatched"
 
 
 PARSE = r"""

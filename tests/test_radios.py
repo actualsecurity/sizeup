@@ -496,7 +496,7 @@ def test_units_on_an_incident_are_offered_only_the_next_steps():
     assert nxt() == ["IC", "AV", "OS"]
     c.unit_status(uid(c, "E63"), {"status": "IC"})
     assert nxt() == ["OL", "AV", "OS"]
-    c.unit_status(uid(c, "E63"), {"status": "DO"})        # the API still takes any status (the board)
+    c.unit_status(uid(c, "E63"), {"status": "OA"})        # the API still takes any status (the board) but a third party's
     assert nxt() == ["AV", "OS"]
     for a in c.state()["incidents"][0]["assignments"]:
         assert not {"DP", "DO", "AK", "UNMANNED"} & set(a["next"])

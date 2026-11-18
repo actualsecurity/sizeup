@@ -939,8 +939,11 @@ class HubApp(App):
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
         # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py); first, a warning
-        # row when intel pushes go nowhere (no intel topic of its own, or one refused: notify.Pushes.intel_health)
-        self.health.intel = lambda: [r for r in (self.pushes.intel_health(),) if r] + self.cad.intel.counts()["packs"]
+        # row when intel pushes go nowhere (no intel topic of its own, or one refused: notify.Pushes.intel_health); then
+        # the Listen links' self-test and cleanup (sizeup/intel/listen.py health())
+        lk = lambda: getattr(self.cad.intel, "listen", None)      # noqa: E731
+        self.health.intel = lambda: [r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] \
+            + self.cad.intel.counts()["packs"]
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
         # and each aircraft source with the FAA registry (#542: last good read, failures and back-off on hover)
         self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else []) \

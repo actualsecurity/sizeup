@@ -481,6 +481,9 @@
   .add-chip.skip { --c: var(--dim); text-decoration: line-through; }
   .add-chip.nomatch { --c: var(--err); border-style: dashed; }
   .add-chip.typing { --c: var(--dim); border-style: dashed; }
+  .add-chip.third { --c: var(--info); }                 /* a third party typed with our units: on Dispatched */
+  .note-sugg > li.grp { min-block-size: auto; padding-block: var(--s-1) 0; cursor: default; pointer-events: none;
+    background: none; font-size: var(--fs-2xs); font-weight: 600; }
   /* a note's "@place" (#67): a chip in the text that shows the spot on the map */
   .place-tag { --c: var(--info); font-weight: 600; white-space: normal; text-align: start; }
   .place-tag .ico { inline-size: var(--ico-sm); block-size: var(--ico-sm); }
