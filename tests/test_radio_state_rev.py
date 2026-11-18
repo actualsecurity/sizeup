@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import random
-import time
 
 from sizeup.cad.comms import Comms
 from tests.test_radios import Clock, _event_with, cad, tx, uid
@@ -25,6 +24,7 @@ def make(tmp_path):
     c = cad(tmp_path, clock)
     c.radiolog.inline = True                  # (the units backfill on the test's thread: no write lands mid-test)
     c.comms.context_broadcast = True          # the hub behind Access: the state's comms_rev is the full one
+    c.voice.put = lambda job: c._voice_job(job) or True     # a dispatch's voice written at once: no write lands mid-test
     c.clockref = clock
     return c
 
@@ -154,48 +154,110 @@ def test_a_quiet_mark_never_outlives_its_transaction(tmp_path):
     assert c.store.state_rev == srev + 2
 
 
+def turn(call: int, k: int) -> str:
+    """A P25 call's k-th turn, as the station names it."""
+    return f"333-{1791400000 + call}.000_460000000.0-call_{call}-t{k}"
+
+
+def test_a_turn_that_links_another_turn_of_its_call_rebuilds_though_it_is_on_no_incident(tmp_path):
+    """The dispatcher's turns of a call go on the incident its unit's turn is on (_dispatcher_links): a turn heard
+    late can put another turn on it while it stays on none itself."""
+    c = make(tmp_path)
+    inc = _event_with(c, ["E63"], c.clockref)
+    t = c.clockref.t + 10
+    assert c.record_traffic(tx(turn(5, 1), t, "Airport", rig="E63", unit="E63", tg=333, radio_id="6301")) == [inc["id"]]
+    c.record_traffic(tx(turn(5, 3), t + 4, "Airport", unit="60 Ctrl", tg=333, text="control copies"))
+    c.state()
+    srev = c.store.state_rev
+    assert c.record_traffic(tx(turn(5, 2), t + 2, "Airport", tg=333, text="")) == []
+    assert c.store.state_rev > srev
+    served = c.state()
+    assert same(served, fresh(c))
+    assert turn(5, 3) in [r["id"] for r in next(i for i in served["incidents"] if i["id"] == inc["id"])["radio"]]
+
+
+def test_new_text_rebuilds_only_for_a_row_the_state_shows(tmp_path):
+    c = make(tmp_path)
+    inc = _event_with(c, ["E63"], c.clockref)
+    t = c.clockref.t + 10
+    c.record_traffic(other("pd-1", t, text=""))
+    c.record_traffic(tx("fg-63", t + 1, rig="E63", radio_id="6301", text=""))
+    st = c.state()
+    srev = c.store.state_rev
+    for call in (lambda: c.comms.retext("pd-1", "made-up words", "done", "aws"),
+                 lambda: c.comms.set_alt("pd-1", {"text": "made up words", "model": "whisper"}),
+                 lambda: c.comms.rerun_done("pd-1", "changed"),
+                 lambda: c.comms.activity("p25:metro:9003", int(t // 60), 2)):
+        call()
+        assert c.store.state_rev == srev and c.state()["incidents"] is st["incidents"]
+    rev = c.store.rev
+    assert c.comms.retext("fg-63", "engine 63 on location", "done", "aws") and c.store.rev > rev
+    assert c.store.state_rev > srev
+    assert next(i for i in c.state()["incidents"] if i["id"] == inc["id"])["radio"][0]["text"] == "engine 63 on location"
+
+
+def test_quiet_is_only_for_an_open_transaction(tmp_path):
+    c = make(tmp_path)
+    try:
+        c.store.quiet_for_state()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("quiet_for_state outside a transaction")
+
+
 def test_after_every_write_of_a_mixed_run_the_state_is_what_a_fresh_build_makes(tmp_path):
-    """The safety net: whatever is recorded (ours, other systems', the feed, pages, rows on and off incidents, rows
-    recorded again, units moving, incidents opened and closed), the state served is never stale."""
+    """The safety net: whatever is recorded (ours, other systems', the feed, pages, P25 calls' turns on an incident
+    talkgroup, rows on and off incidents, rows recorded or transcribed again, units moving, incidents opened and closed),
+    the state served is never stale."""
     c = make(tmp_path)
     rng = random.Random(415)
     clock = c.clockref
     tg = c.feed.cfg.talkgroups[0]
     incs = [_event_with(c, ["E63"], clock)["id"]]
     quiet = rebuilt = 0
-    for i in range(160):
+    tids: list[str] = []
+    for i in range(240):
         clock.t += rng.choice((1, 2, 5))
         roll = rng.random()
-        tid = f"r{i}" if rng.random() > 0.2 or i == 0 else f"r{rng.randrange(i)}"   # sometimes a row recorded again
+        tid = f"r{i}" if rng.random() > 0.2 or not tids else rng.choice(tids)      # sometimes a row recorded again
         srev = c.store.state_rev
-        if roll < 0.3:
+        if roll < 0.2:
             c.record_traffic(other(tid, clock.t, tg=rng.choice((9001, 9002)), text=f"made-up words {i}"))
-        elif roll < 0.45:
+        elif roll < 0.3:
             c.record_traffic(tx(tid, clock.t, "FG1", rig=rng.choice(("E63", "E60", "")), radio_id=rng.choice(("6301", "")),
                                 text=f"engine words {i}"))
-        elif roll < 0.55:
+        elif roll < 0.37:
             c.record_traffic(tx(tid, clock.t, "Fire Dispatch", tg=tg, unit=rng.choice(("60 Ctrl", "E63")), text=f"dispatch {i}"))
-        elif roll < 0.65:
+        elif roll < 0.5:                     # a call's turns on an incident talkgroup, in any order
+            tid = turn(rng.randrange(6), rng.randrange(4))
+            who = rng.choice(("E63", "60 Ctrl", ""))
+            c.record_traffic(tx(tid, clock.t, "Airport", tg=333, unit=who, rig=who if who == "E63" else "",
+                                radio_id="6301" if who == "E63" else "", text=rng.choice(("", f"turn words {i}"))))
+        elif roll < 0.56:
             c.record_traffic(tx(tid, clock.t, "Ops 2", tg=8123, unit="Car 3", text=f"other words {i}"))
-        elif roll < 0.72:
-            c.record_traffic(tx(tid, clock.t, "Tower", text=f"tower words {i}"))
-        elif roll < 0.8:
+        elif roll < 0.61:
+            c.record_traffic(dict(tx(tid, clock.t, "Tower", text=f"tower words {i}"), mhz=118.575, service="air"))
+        elif roll < 0.66:
             c.record_traffic(dict(tx(tid, clock.t, c.feed.paging[0], text=f"page {i}"),
                                   tones=[{"a_hz": 1000.0, "b_hz": 2000.0, "names": [], "ours": False}]))
-        elif roll < 0.86:
+        elif roll < 0.76 and tids:           # its text again (the hub's own speech-to-text), or the other engine's
+            if rng.random() < 0.7:
+                c.comms.retext(rng.choice(tids), f"new words {i}", "done", "aws")
+            else:
+                c.comms.set_alt(rng.choice(tids), {"text": f"alt words {i}", "model": "whisper"})
+        elif roll < 0.82:
             incs.append(_event_with(c, [rng.choice(("E60", "E64", "L31"))], clock)["id"])
-        elif roll < 0.9 and len(incs) > 1:
+        elif roll < 0.86 and len(incs) > 1:
             c.close(incs.pop(0), {"disposition": "COMPLETE", "operator": "op"})
-        elif roll < 0.95:
+        elif roll < 0.93:
             c.state()                        # a push between writes
             continue
+        else:
+            continue
+        tids = list(dict.fromkeys(tids + [r["id"] for r in c.store.q("SELECT id FROM radio_traffic")]))
         quiet += c.store.state_rev == srev
         rebuilt += c.store.state_rev != srev
-        for _ in range(100):                 # (a dispatch's voice is written by its own thread: then look again)
-            at = c.store.state_rev
-            served, built = c.state(), fresh(c)
-            if c.store.state_rev == at:
-                break
-            time.sleep(0.01)
-        assert same(served, built), f"stale after step {i}"
-    assert quiet > 20 and rebuilt > 20, (quiet, rebuilt)       # both kinds were exercised
+        served = c.state()
+        assert same(served, fresh(c)), f"stale after step {i}"
+    assert quiet > 30 and rebuilt > 30, (quiet, rebuilt)       # both kinds were exercised

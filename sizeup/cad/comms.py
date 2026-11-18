@@ -361,6 +361,17 @@ class Comms:
         self._heard(tid)
         return out
 
+    def _quiet_unless_shown(self, db, tid: str) -> None:
+        """In a transaction that changed only this row of radio_traffic (its text, status, other transcript, re-run): the
+        console's state rebuilds nothing for it when the row is on no incident and no row of the 60 Control feed
+        (store.quiet_for_state; as record() does)."""
+        if self.in_state is None:
+            return
+        r = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+                       "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
+        if r is not None and not r["linked"] and not self.in_state(dict(r)):
+            self.store.quiet_for_state()
+
     def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
                     tg, disp: bool) -> None:
         """record()'s automatic links for one of our rows: a unit on the event, the airport talkgroup, dispatch."""
@@ -448,6 +459,8 @@ class Comms:
             return
         with self.store.tx() as db:
             self._count(db, source, minute * 60.0, seconds, int(calls), radios)
+            if self.in_state is not None:
+                self.store.quiet_for_state()             # radio_activity: never in the console's state
             if sources.is_context({"system": (sources.parse(source) or ("", 0))[0]}):
                 self.quiet()                             # another system's key-ups: no reader's rev but theirs moves
 
@@ -704,6 +717,7 @@ class Comms:
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         if n and notify:
             if row is not None and sources.other_p25(row):
                 self._heard_context(tid)
@@ -723,6 +737,7 @@ class Comms:
                            (status, model, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
@@ -789,6 +804,7 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def rerun_done(self, tid: str, result: str) -> bool:
@@ -800,6 +816,7 @@ class Comms:
                            (self.clock(), result, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def _section(self, name: str) -> dict:

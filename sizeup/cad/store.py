@@ -845,6 +845,8 @@ class Store:
         """In an open tx(), by its own thread: what this transaction writes is no part of the console's state (Cad.state
         never reads it), so its commit moves rev (the Radio page, comms_rev, every per-rev cache) and not state_rev.
         The caller vouches for every row the transaction wrote."""
+        if not self.db.in_transaction:
+            raise RuntimeError("quiet_for_state: only inside an open tx()")
         self._state_quiet = True
 
     def tx(self):

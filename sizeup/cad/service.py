@@ -835,7 +835,7 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        key = (self.store.rev, int(now // STATE_CLOCK_S))      # (and the minute: a clear ages out with no write)
+        key = (self.store.state_rev, int(now // STATE_CLOCK_S))   # (and the minute: a clear ages out with no write)
         if self._clears is None or self._clears[0] != key:
             self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
