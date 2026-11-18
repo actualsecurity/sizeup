@@ -51,7 +51,9 @@ overruns are fixed where they are caused:
 5. The station sets a shorter switch interval, as the hub already does (1 ms there; 0.5 ms was the value measured
    here).
 
-Items 1 and 2 were not built or measured. What supports them: with a close handler running in another thread of the
+Items 1 and 2 were not built or measured for this ADR. They are implemented in #767 (in review when this was
+written), whose own local benchmarks report the reader's stall at close falling from 155 / 389 / 978 ms to 9 / 14 /
+16 ms for 30 s / 60 s / 2 min, and the worst frame from 6 to 9 ms to 1.4 to 4 ms. What supported them beforehand: with a close handler running in another thread of the
 same interpreter, idle channels' frames were 0.17 ms late at the median, the same as the control (0.18 ms); p99 was 1.9 ms against
 0.58 ms.
 
