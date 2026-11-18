@@ -252,10 +252,14 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   `sizeup-stt-encode` service (`python -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock`: same
   user, no privilege, its own cgroup at `CPUWeight=10`, `Nice=19`: `deploy/station/systemd/sizeup-stt-encode.service`,
   installed and started by `install-linux.sh`, `PartOf=sizeup-station.service` so both always run the same release,
-  #709). Where that socket isn't there (a station not updated yet, the service restarting, macOS, the tests) the
-  station's own thread makes them, as before, and
-  looks for it again every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or
-  `thread (<why>)`). The bytes are the same either way.
+  #709; `MemoryMax=1G`: a 300 s clip peaks at ~420 MB while it is made, plus 4 connections' 40 MB frames;
+  `OOMScoreAdjust=500`, `ProtectSystem=strict`, `PrivateDevices=yes`, `RestrictAddressFamilies=AF_UNIX`). Where that
+  socket isn't there (a station not updated yet, the service restarting, macOS, the tests) the station's own thread
+  makes them, as before, and looks for it again every 10 s for 5 min after the station starts or the worker dies, then
+  every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or `thread (<why>)`), and
+  the worker's state (`stt_input.worker`: `ok`, `slow`, `unhealthy`, `dead` or `thread`, with what was said of it):
+  Health's "STT encoder" row (Outbox and system: terse, the detail on hover), so a wedged but alive service is seen.
+  The bytes are the same either way.
   - The socket is 0600 in a 0700 directory, and each side checks the other's uid (`SO_PEERCRED`; elsewhere the
     socket file's owner). No pickle: fixed frames, a JSON header (`proto`, `op`, `rate`, `samples`, `dtype`) and the
     raw float64 (or float32) samples one way, the FLAC the other, a frame at most 40 MB, refused from its 8-byte
@@ -321,7 +325,7 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   "STT inputs dropped".
 - **Arrival delay** (#677, `sizeup/cloud/sttarrival.py`). The hub measures each STT input against its event, on its own
   clock: stored minus applied, in seconds. It is negative when the STT input came first. Each clip counts once; one
-  whose other half never comes within an hour gives no sample. The samples go into the station metrics as kind `stt`
+  whose other half never comes within an hour gives no sample. The samples go into the station metrics as kind `stt_in`
   (the subject is the channel, with `delay` and `kind`), rolled up hourly as `stt_delay`, with p95. They are written
   on the metrics-backup thread every 30 s, never in a station's request; a standby drops them. Health has "STT input
   arrival (hub)": p50 / p95 over 1 h and 24 h per kind and per channel. The Signal tab graphs it under each channel.
@@ -1206,6 +1210,27 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
   python -m sizeup --config deploy/hub/config.hub.toml        # http://localhost:8090/cad, /healthz
 ```
 
+### The app's API switches (`[mobile]`, #619)
+
+The mobile API (`/api/v1`, [mobile-api.md](mobile-api.md)) is built on this hub, so it is inert until switched on:
+
+```toml
+[mobile]
+enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelope beside GET /api/v1/meta
+# max_requests = 8   # v1's share of concurrent requests (1 to 64): over it, 503 busy + Retry-After
+# max_streams = 16   # v1's share of open streams (0 to 64; 2 a device; no stream is built yet)
+```
+
+- A hub (or all-in-one) key, never a station's: a station's config refuses the section, and an older release refuses
+  a key it doesn't know. Unknown keys are refused. The config is read once at start: a change is one line and a restart.
+- Off: nothing reads a token key, creates a table or sends a push, and `meta.features` reports every flag false.
+- Per-feature flags (auth, reads, stream, writes, push, media, responders) are in `meta.features`, each off until its
+  pull request is proven (code-driven until a feature wires a source, e.g. `[mobile] features` or a settings
+  policy); a route whose flag is off answers as if it did not exist.
+- Rate limits are in memory per device (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`), and per
+  address for requests with no device token.
+- The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.
+
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
 
 > "lets try it [AWS Transcribe], but lets make it configurable, which channel in the settings gets
@@ -1348,6 +1373,74 @@ Radios > Channels says otherwise. The hub ships `[383, 3127]` (WCPD Ch 1, LLT Su
 folds it into the channel map of the `set_channel_prefs` job (`channels.for_station()`, as
 `{"transcribe": false}` per channel unless a Settings choice says otherwise), so any station,
 including one on an older build, applies it as a plain choice and reports the same signature.
+
+### GPU speech-to-text workers (#639)
+
+GPU workers connect **out** to the hub, never the other way: a long poll for jobs, then the clip's audio, then the
+text. The admin's gaming PC is the first worker, a dedicated box later. Each worker comes and goes as it likes, so a
+clip waits for one only as long as its class allows. After that the clip goes the way it went before.
+
+| file | what it does |
+|---|---|
+| `sizeup/sttpool.py` | the queue, with the whisper queue's strict classes; leases; the per-class budgets; the numbers |
+| `sizeup/cloud/sttworkers.py` | the workers' tokens (`sw1.<id>.<secret>`, hash only, made on first use); the pool's switches; the API under `/api/station/stt/` |
+| `sizeup/cloud/hub.py` | the routing (`_pool_first`, `_pool_done`, `_pool_fallback`, the catch-up's `pool` route) |
+| `sizeup/sttruns.py` | every transcript as written, plus the latency per channel |
+
+- **Which clips:**
+  - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
+  - Shed clips go to a ready worker first, before the station's whisper idles. Fire work doesn't pause them; they stay quiet (old words alert nothing). A clip the pool hands back is routed again next tick, with no try burnt.
+- **When the pool is off:** with no worker added, or the pool switched off, nothing changes. A clip also skips the pool when its estimated wait (work ahead × the median service time) is over the class's budget.
+- **Pre-alert clips** (pages, Fire/EMS 15, firegrounds, airband, police alert talkgroups) go to the pool only when all of these hold:
+  - a worker is idle now: in a claim, with no job;
+  - no other pre-alert clip waits;
+  - the workers' recent time from claim to text on these classes is under 3 s.
+
+  Otherwise they go to AWS, as before.
+- **Catch-up:** fire work pauses it, on the pool too, so a worker busy on old clips never stands between a pre-alert and the pool.
+- **Budgets per class:** `sttpool.BUDGETS` sets three limits for each class: how long a clip waits for a claim, the first lease, and the lease cap.
+  - The pre-alert classes wait 2.5 s and get a 4 s first lease, renewable to an absolute 8 s from the claim. The deadline doesn't grow with the clip's length, and the job is decoded in one greedy pass (`fast`).
+  - The pre-alert target is p50 ≤ 5 s and p95 ≤ 15 s, from the end of the transmission to its text.
+- **Leases:**
+  - Any of these sends the job to the next engine at once:
+    - a lease that runs out;
+    - a worker unheard for 12 s;
+    - a job handed back (`release`);
+    - a worker that starts gaming or pauses (its pre-alert jobs);
+    - a revoked worker.
+  - A worker holds at most 2 jobs at once, and a pre-alert job only when it holds none.
+  - The heartbeat contract: a worker sends a request (state, extend or claim) at least every 6 s, during a decode too.
+  - A pre-alert lease that is lost or handed back counts in the "quick" gate as its whole cap.
+  - Repeated cooldowns double, up to 30 min, until a job is done.
+  - A late `complete` gets 409 and is counted. It is never applied.
+  - The queue lives in memory on the leader. After a restart, an AWS-channel clip is still `pending` on its row, and `_aws_recover` routes it.
+- **States:**
+  - `online`: takes jobs.
+  - `gaming` and `paused`: no new jobs. A clip waiting with no other worker ready falls back at once.
+  - `offline`: no word for 30 s.
+  - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
+- **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
+- **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
+- **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
+  - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
+  - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme, every hour. They are not made at the hub's stop, because a deploy's drain has no seconds to spare.
+  - A new task restores the same way the metrics store does (a shared helper): the newest copy, or the next readable one, merged column by column. Until that works it uploads nothing; Health shows "Transcript copies" and warns after 6 h.
+  - A deploy can lose at most the last hour of run records. The transcripts themselves are in cad.sqlite.
+  - Runbook, when Health keeps saying "not restored" because every copy is unreadable: delete the bad copies with an admin's credentials (`aws s3 rm s3://<backups>/<path>/stt/copy-<n>.sqlite.gz`; for the metrics, `.../metrics/copy-<n>.sqlite.gz`). With no copy left, the next turn settles empty and copies start again.
+  - A run goes with its radio log row (that channel's transcript retention), and is kept 90 days at most.
+
+  Each row holds:
+  - the engine, model, worker and prompt hash;
+  - the role (`text`, `alt`, `late`, `rerun` or `catchup`);
+  - the raw text, the confidence and the words;
+  - the class;
+  - the clip's end, when it was queued, when the engine started and when it finished;
+  - the wait and the run time;
+  - the P25 `call_id` and `turn`, and the radio's `keyup` split.
+
+  The station's whisper measures its own wait and run (`Transcriber._timing`) and sends them with the transmission. `radio_traffic.text_at` is when a row's first text landed (`updated_at` moves with every edit).
+- **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
+- **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
 
 ## Phone pre-alert (Tapout)
 
@@ -3380,7 +3473,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 12 categories, 19 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 12 categories, 21 rules, Port Chester / Rye / Rye Brook PD only; the log-only `county_police.json`, `ems.json`, `fire.json` and `neighbor_police.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
@@ -3391,7 +3484,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
 | Settings, API, card | `admin.py`, `static/intel.js` | Settings > System > Intel; the 60 Control column's card |
 
-**The log-only packs.** Three more packs read what the hub already transcribes. The pack, every category and every
+**The log-only packs.** Four more packs read what the hub already transcribes (`neighbor_police` differs: its row). The pack, every category and every
 rule of each is written at `log`: an event in `intel_events`, its hits in `intel_hits` and a line in the log, and
 never the map's events, the console's card or a push. The engine takes the lowest of the three modes, so no single
 switch turns one on: an admin raises the pack, the category and the rule in Settings > System > Intel. Settings
@@ -3403,6 +3496,7 @@ saved before they existed name only `police` and its rules, and change nothing h
 | `county_police` | the county system's police talkgroups | smoke or fire, the fire department asked for, a fire alarm, gas / wires / CO, a critical patient, EMS asked for with what it is for, a crash with EMS or injuries (rollover, pedestrian struck, entrapment, a vehicle into a building, a pursuit ending in a crash), a person or vehicle in water, an elevator / lock-in / someone trapped, shots or a weapon, a barricade |
 | `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
 | `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
+| `neighbor_police` ("Area PD") | every MRRS police talkgroup but the `police` pack's own (Harrison PD, MTA PD, the interop talkgroups: `"exclude"`) | the `police` pack's categories and rules, read from `police.json` at load (`"rules_from": "police"`, rule ids `area.<id>`, labels `Area PD: <label>` in Settings, the plain label beside the pack's in a push and on the card), so the two never drift; only the pack is written at `log`, so raising the pack alone in Settings turns it on |
 
 Each strong phrase family is a rule of its own, at or over the threshold alone. That includes `cpd.ems_request`
 (0.6): on the county police talkgroups "EMS en route" or "ambulance is being sent" is an event by itself, the most
@@ -3432,7 +3526,7 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
-| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
+| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. With no place it stays at log until it expires: the tick never lets it go. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
 [...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
@@ -3595,7 +3689,7 @@ stay exactly as they were (they still go to CloudWatch); this adds numbers besid
 | Station | `sizeup/cloud/metrics.py`. A thread looks at each running channel's squelch once a second (attributes the receivers keep anyway: never a dongle) and at what changed every 5 s; each transmission's numbers are handed over as its squelch closes it (`App._segment`: a dict queued, no I/O) |
 | Records | `floor` a channel a minute: idle quieting p50 / p90 / max, the FM hiss (relative dB) or the AM floor (dBFS), seconds open, noise opens, and its squelch, dongle, gain (sent when they change and every 15 min). `tx` each transmission: kind (voice, page, burst, noise), length, quieting / carrier, at open and close, the hiss or floor, carrier dBFS and voice SNR (airband), why it ended. `cc` each P25 system a minute: decode rate (avg, low, high), retunes, grants on uncovered frequencies. `ev` what explains a shift: start, sdr, squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped |
 | Path | `POST /api/station/metrics` (gzipped, every minute, at most 2,000 records, at most 4 MB unpacked), on its own thread and connection: never the outbox, so pages and transmissions never queue behind it. Never counted as the station being seen (a second station's, or a wedged primary's, metrics don't keep "connected" up). A malformed batch is a 400, which the station drops; a hub that isn't the leader answers 503 and the batch is sent again. While the hub is away records wait in memory, at most 20,000 (about a day and a half): past that the oldest go, counted, and one `dropped` event says so when the hub is back. Taken from any authenticated station, under its own id |
-| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, p95, max per metric; p95 since #677) and events a year. The hub adds its own `stt` records, each STT input's arrival delay (#677). Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
+| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, p95, max per metric; p95 since #677) and events a year. The hub adds its own `stt_in` records, each STT input's arrival delay (#677; `stt` is the whisper queue's, #639). Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
 | Durability | Not in Litestream (nothing added to a drain or a takeover). Copies in the backups bucket (`sizeup/cloud/metricsbackup.py`): `metrics/copy-0..7.sqlite.gz`, round-robin over the oldest, so the last 8 are always there and one bad copy can't take the history with it. A new leader first *settles*: it lists the copies and merges the newest (and the largest) in, or sees, from a listing that succeeded, that there are none; a failed listing or download is retried (30 s doubling to 30 min) and nothing is uploaded until it settles. Then a copy 15 min later and every 3 h (SQLite's backup API: the ingest isn't held up). Once settled its answer to each station carries `resend_from` (when the merged copy was made) and the station sends again what was acked since (kept 6 h; duplicates are ignored). Lost at worst: what the old task took after its last copy, when the station was away for that whole time or settling took longer than 6 h; never what a copy already holds. A copy that can't be read (torn, another release's schema without a key column) is skipped for the next older one; one with a column more or less merges column by column. Settings > Station > Health shows a Metrics warning when it hasn't settled in 6 h or kept no copy in 12 h. Each copy is made in memory (~80 MB at steady state, briefly) |
 | Size | Measured (tests/test_station_metrics.py): a day of 6 channels, 2 P25 systems and 2,000 transmissions is ~13,500 records, ~1.7 MB; ~50 MB at 30 days of raw and ~30 MB for a year of rollups |
 | Reading | `GET /api/cad/metrics?subject=FG1&from=&to=&res=raw\|hour\|auto&station=&kind=&metric=`: raw (a week at most) or hourly, with the events, the station's and the Settings audit's changes to that channel; no subject: the series there are. A signed-in admin only, on the hub only: closed without a verified sign-in |

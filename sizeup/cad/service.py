@@ -187,6 +187,10 @@ def services_rev(m: dict | None) -> str:
     return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:10] if m else ""
 
 
+
+STATE_CLOCK_S = 60.0   # Cad.state / clears: rebuilt at least this often, a write or not (what ages with the clock)
+
+
 class Cad:
     @property
     def may_write(self) -> Callable[[], bool]:
@@ -437,7 +441,10 @@ class Cad:
     def state(self) -> dict:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
-        if self._state is None or self._state[0] != rev:
+        # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one)
+        key = (rev, int(self.clock() // STATE_CLOCK_S))
+        if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
@@ -448,7 +455,7 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
-            self._state = (rev, {
+            self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
@@ -473,6 +480,8 @@ class Cad:
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
+                # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
+                "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -779,9 +788,9 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        rev = self.store.rev
-        if self._clears is None or self._clears[0] != rev:
-            self._clears = (rev, self.store.recent_clears(now - mapview.RECENT_S))
+        key = (self.store.rev, int(now // STATE_CLOCK_S))      # (and the minute: a clear ages out with no write)
+        if self._clears is None or self._clears[0] != key:
+            self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
 
     def locations(self, units: list[dict] | None = None, now: float | None = None) -> dict[str, dict | None]:
@@ -933,7 +942,9 @@ class Cad:
         f = self._fields(body, partial=True)
         if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
             old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
-            if f["until_at"] != old["until_at"] and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            if old["until_at"] is not None and f["until_at"] // 60 == old["until_at"] // 60:
+                del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
+            elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
                 raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))

@@ -289,7 +289,8 @@ class StationLink:
                 "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre,
                 "dropped_fire": self.stt_encoder.dropped_fire + self.outbox.dropped_stt_fire,
                 # (#677) where the FLAC is made (scope | process | thread (why)), and held now for whisper
-                "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding}
+                "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding,
+                "worker": self.stt_encoder.worker()}       # (its state: a wedged-but-alive service is seen)
 
     def live_changed(self) -> None:
         self._live_wake.set()

@@ -27,10 +27,19 @@ TimeoutStopSec=10
 Nice=19
 CPUWeight=10
 IOWeight=10
+# Memory: Python + numpy ~45 MB; a 300 s clip (the longest it takes) peaks at ~420 MB while it is made (float64
+# samples, the FFT and its working arrays, measured); up to 4 connections' 40 MB frames. 1 GiB leaves room for a
+# second clip in flight. Over it: this service is killed first (OOMScoreAdjust), never the radios or whisper, and the
+# station makes the FLAC on its own thread until it is back.
+MemoryMax=1G
+OOMScoreAdjust=500
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=full
+PrivateDevices=yes
+# Nothing written but its RuntimeDirectory (its socket); no network: a Unix socket only
+ProtectSystem=strict
 ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sizeup-stt-encode

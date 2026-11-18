@@ -256,6 +256,9 @@ def test_a_hello_only_worker_never_delays_pre_or_fire_and_never_gets_a_clip_twic
         assert [m[0] for m in made] == ["South2-1", "FG1-1"]                # Ops-*: never made on the station
         assert enc.stats()["queued"] == 1 and enc.dropped == {"queue": 0, "too_big": 0, "failed": 0}
         assert sum("unhealthy" in m for m in logs) == 1 and sum("is slow" in m for m in logs) == 1   # said once each
+        wk = enc.worker()                                                   # (the station's status, Health)
+        assert wk["where"] == "service" and wk["state"] == "unhealthy" and wk["unhealthy"] and wk["in_flight"]
+        assert "unhealthy" in wk["detail"]
         t0 = time.monotonic()
         enc.stop()                                                          # promptly, mid-wait on the worker
         assert time.monotonic() - t0 < 3.0
@@ -301,6 +304,29 @@ def test_a_connection_the_service_would_have_closed_for_silence_is_replaced_befo
         assert not any("is gone" in m for m in logs)
     finally:
         enc.stop()
+
+
+def test_a_service_that_comes_up_after_the_station_is_taken_within_seconds(short_dir, monkeypatch):
+    path = f"{short_dir}/encode.sock"
+    monkeypatch.setenv(sttencode.SOCKET_ENV, path)
+    monkeypatch.setattr(sttinput, "QUICK_LOOK_S", 0.3)
+    made = []
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=lambda m: None, mode="auto")
+    proc = None
+    try:
+        a = voice(0.5, seed=4)
+        assert enc.submit(_tx("Ops-1", a), a, NORMAL) and wait(lambda: made == ["Ops-1"], 20)
+        assert enc.where == "thread (no sizeup-stt-encode service)" and enc.worker()["state"] == "thread"
+        proc = subprocess.Popen([sys.executable, "-m", "sizeup.cloud.sttencode", "--serve", path])   # (restarted)
+        assert wait(lambda: os.path.exists(path), 20)
+        time.sleep(0.4)                                                     # (the next look: 0.3 s, not 5 min)
+        assert enc.submit(_tx("Ops-2", a), a, NORMAL) and wait(lambda: made == ["Ops-1", "Ops-2"], 20)
+        assert enc.where == "service" and enc.worker()["state"] == "ok"
+    finally:
+        enc.stop()
+        if proc is not None:
+            proc.kill()                                                     # (our own child)
+            proc.wait(5)
 
 
 def test_the_code_hash_is_made_at_import_and_has_numpys_version(monkeypatch):
@@ -456,6 +482,8 @@ def test_the_encode_service_unit_runs_below_whisper_with_the_station_and_the_ins
     for want in ("User=sizeup", "Group=sizeup", "CPUWeight=10", "Nice=19", "NoNewPrivileges=yes",
                  "RuntimeDirectory=sizeup-stt-encode", "RuntimeDirectoryMode=0700", "PartOf=sizeup-station.service",
                  "After=sizeup-station.service", "WantedBy=sizeup-station.service", "Restart=always",
+                 "MemoryMax=1G", "OOMScoreAdjust=500", "ProtectSystem=strict", "PrivateDevices=yes",
+                 "RestrictAddressFamilies=AF_UNIX", "ProtectHome=yes", "PrivateTmp=yes",
                  f"-m sizeup.cloud.sttencode --serve {sttencode.SOCKET}"):
         assert want in unit, want
     settings = [ln for ln in unit.splitlines() if ln and not ln.startswith("#")]

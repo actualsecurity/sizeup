@@ -652,6 +652,10 @@ class StationHealth:
         out["outbox"]["dropped_stt_why"] = why
         pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
         out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        wk = si.get("worker") if isinstance(si.get("worker"), dict) else {}     # (#677) where NORMAL / LOW are made
+        out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
+                                       "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
+                                       "held": bool(si.get("held"))} if wk or si.get("encoder") else None
         fire = si.get("dropped_fire")                               # ... and fire traffic's
         out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
@@ -751,6 +755,7 @@ class StationHealth:
                                                    "shed_context", "shed_context_h", "catchup",
                                                    "last_drop", "last_error", "max", "working")} if sq else None
         out["stt_catchup"] = self._catchup()
+        out["stt_pool"] = self._stt_pool()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -783,6 +788,9 @@ class StationHealth:
         out["metrics_backup"] = mb
         if mb and mb.get("warn"):
             out["hints"].append({"channel": "Metrics", "level": "warn", "text": mb["warn"]})
+        sc = (out.get("stt_pool") or {}).get("copies") if isinstance(out.get("stt_pool"), dict) else None
+        if sc and sc.get("warn"):                   # the transcripts-as-written copies (#639): a warning, never an alert
+            out["hints"].append({"channel": "Transcripts", "level": "warn", "text": sc["warn"]})
         try:                                        # #606: a channel's signal shifted after an event (a warning, no push)
             shifts = self.shifts() if self.shifts is not None and "metrics_shift" not in self._mutes(now) else []
         except Exception:  # noqa: BLE001 - never in the way of the rest
@@ -844,6 +852,17 @@ class StationHealth:
             return None
         try:
             return cu.stats()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _stt_pool(self) -> dict | None:
+        """The GPU worker pool (#639, HubApp.pool_health()): its workers, queue, fallbacks, and every channel's latency
+        (transmission end -> text). None when there is nothing to show. A worker offline is never an alert."""
+        fn = getattr(getattr(self.hub, "app", None), "pool_health", None)
+        if fn is None:
+            return None
+        try:
+            return fn()
         except Exception as e:  # never in the way of the rest
             return {"error": f"{type(e).__name__}: {e}"}
 

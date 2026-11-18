@@ -13,9 +13,9 @@ station, dropped, a channel not transcribed), or the other way round, gives none
 
     Arrival.event(cid)                         HubApp.apply: a traffic / page event applied
     Arrival.blob(cid, station, kind, channel)  HubApp.put_stt_input: its STT input stored
-    Arrival.take()                             the samples since, as station-metrics records ({"k": "stt",
+    Arrival.take()                             the samples since, as station-metrics records ({"k": "stt_in",
                                                "s": <channel>, "at", "delay", "kind": "page" | "traffic"}): HubApp
-                                               adds them to the metrics store (sizeup/cloud/metricstore.py, kind "stt",
+                                               adds them to the metrics store (sizeup/cloud/metricstore.py, kind "stt_in",
                                                rolled up hourly as "stt_delay": the Signal tab graphs it)
     stats(store, now)                          p50 / p95 per channel and per kind over the last hour and day, from the
                                                metrics store (Health: the hub's STT input arrival)
@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from typing import Callable
 
-KIND = "stt"                    # the metrics store's record kind
+KIND = "stt_in"                 # the metrics store's record kind ("stt" is the whisper queue's, #639)
 PENDING_S = 3600.0              # an event or an STT input waiting this long for the other: forgotten (no sample)
 PENDING_MAX = 20000             # ... and at most this many of each waiting (the oldest forgotten first)
 DONE_MAX = 20000                # clips sampled already: a resend or a replay never counted twice
@@ -129,7 +129,7 @@ def _at(v) -> float:
 
 def stats(store, now: float | None = None) -> dict | None:
     """p50 / p95 of the arrival delay over the last hour (h1) and day (d1): per kind (page / traffic) and per channel,
-    from the metrics store's "stt" records. None when there are none in the day."""
+    from the metrics store's "stt_in" records. None when there are none in the day."""
     now = time.time() if now is None else now
     t0 = now - WINDOWS[-1][1]
     per: dict[tuple[str, str], list[tuple[float, float]]] = {}

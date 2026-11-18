@@ -60,7 +60,11 @@ How a row becomes an event, per pack whose scope it is in:
      (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
      own words or a read-back of the held call place it (_may_place); placed more than RELEASE_S after the call-out it
      stays at log ("placed_late"). A category with "defer_to" is never raised beside that category (_deferred), and an
-     event of that category takes its open event over: one pre-alert per call.
+     event of that category takes its open event over: one pre-alert per call. The tick never lets a held call go: an
+     unplaced one stays at log until it expires (#640: a burning smell with no address is no pre-alert).
+     A push can only be as early as the transcript: a row is read when its text lands (consider), so speech-to-text's
+     queue (sizeup/stt.py: another system's "text" talkgroups wait in the LOW class) is the delay before a push, never
+     the engine. A row transcribed after newer rows of its source is still read (Window.prune keeps it).
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -149,8 +153,10 @@ class Entry:
 class Window:
     entries: dict = field(default_factory=dict)      # tid -> Entry
 
-    def prune(self, newest: float, span: float) -> None:
-        for tid in [t for t, e in self.entries.items() if e.at < newest - span]:
+    def prune(self, newest: float, span: float, keep: str = "") -> None:
+        """Entries older than span before the newest go; never `keep` (the row being read: a transmission transcribed
+        late, after newer ones of its source, is still judged, with what the window holds, instead of dropped)."""
+        for tid in [t for t, e in self.entries.items() if e.at < newest - span and t != keep]:
             del self.entries[tid]
 
     def ordered(self) -> list[tuple[str, Entry]]:
@@ -555,7 +561,7 @@ class IntelEngine:
                        for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
-        win.prune(max(e.at for e in win.entries.values()), pack.window_s)
+        win.prune(max(e.at for e in win.entries.values()), pack.window_s, keep=tid)
         changed: list[Event] = []
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)

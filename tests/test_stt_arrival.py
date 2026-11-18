@@ -278,7 +278,7 @@ def test_too_long_or_failed_pre_alerts_arent_pressure_drops():
 def test_a_renamed_station_keeps_its_hourly_p95(tmp_path):
     now = 1_800_000_000.0
     store = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: now)
-    store.ingest("st-old", [{"k": "stt", "s": "FG1", "at": now - 7200 + k, "delay": k / 10, "kind": "traffic"}
+    store.ingest("st-old", [{"k": "stt_in", "s": "FG1", "at": now - 7200 + k, "delay": k / 10, "kind": "traffic"}
                             for k in range(1, 21)], tell=False)
     store.maintain(now)
     before = store.hours("st-old", "FG1", "stt_delay", now - 86400, now)
@@ -304,8 +304,8 @@ def test_arrival_after_the_event_before_it_once_each_and_forgotten_in_time():
     arr.event("FG1-2")                                         # never an STT input (a channel not transcribed)
     arr.blob("FG1-3", "st-2", "traffic", "FG1")                # never an event
     got = arr.take()
-    assert got == {"st-hq": [{"k": "stt", "s": "FG1", "at": 1001.25, "delay": 1.25, "kind": "traffic"},
-                             {"k": "stt", "s": "South 2", "at": 1001.75, "delay": -0.5, "kind": "page"}]}
+    assert got == {"st-hq": [{"k": "stt_in", "s": "FG1", "at": 1001.25, "delay": 1.25, "kind": "traffic"},
+                             {"k": "stt_in", "s": "South 2", "at": 1001.75, "delay": -0.5, "kind": "page"}]}
     assert arr.take() == {} and arr.pending() == {"events": 1, "blobs": 1, "untaken": 0}
     clock[0] += sttarrival.PENDING_S + 1
     arr.event("FG1-4")                                         # (the old ones forgotten as new ones come)
@@ -318,11 +318,11 @@ def test_arrival_after_the_event_before_it_once_each_and_forgotten_in_time():
 def test_arrival_stats_p50_p95_per_kind_and_channel_over_the_hour_and_day(tmp_path):
     now = 1_800_000_000.0
     store = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: now)
-    recs = [{"k": "stt", "s": "FG1", "at": now - 7200 + k, "delay": float(k), "kind": "traffic"} for k in range(1, 21)]
-    recs += [{"k": "stt", "s": "FG1", "at": now - 60, "delay": 0.4, "kind": "traffic"}]
-    recs += [{"k": "stt", "s": "South 2", "at": now - 30 - k, "delay": d, "kind": "page"}
+    recs = [{"k": "stt_in", "s": "FG1", "at": now - 7200 + k, "delay": float(k), "kind": "traffic"} for k in range(1, 21)]
+    recs += [{"k": "stt_in", "s": "FG1", "at": now - 60, "delay": 0.4, "kind": "traffic"}]
+    recs += [{"k": "stt_in", "s": "South 2", "at": now - 30 - k, "delay": d, "kind": "page"}
              for k, d in enumerate([-0.2, 0.3, 0.5, 0.6, 2.0])]
-    recs += [{"k": "stt", "s": "FG2", "at": now - 3 * 86400, "delay": 9.0, "kind": "traffic"}]     # older than a day
+    recs += [{"k": "stt_in", "s": "FG2", "at": now - 3 * 86400, "delay": 9.0, "kind": "traffic"}]     # older than a day
     store.ingest("st-hq", recs, tell=False)
     out = sttarrival.stats(store, now)
     assert out["kinds"]["page"]["h1"] == {"n": 5, "p50": 0.5, "p95": 2.0, "early": 1}
@@ -337,16 +337,16 @@ def test_the_stt_delay_series_rolls_up_hourly_with_its_p95(tmp_path):
     now = 1_800_000_000.0
     store = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: now)
     hour = int(now // 3600) - 1
-    store.ingest("st-hq", [{"k": "stt", "s": "FG1", "at": hour * 3600 + k * 30, "delay": k / 10, "kind": "traffic"}
+    store.ingest("st-hq", [{"k": "stt_in", "s": "FG1", "at": hour * 3600 + k * 30, "delay": k / 10, "kind": "traffic"}
                            for k in range(1, 101)], tell=False)
     store.maintain(now)
     [row] = store.hours("st-hq", "FG1", "stt_delay", now - 86400, now)
     assert row["n"] == 100 and row["p50"] == 5.0 and row["p95"] == 9.5 and row["p90"] == 9.0 and row["hi"] == 10.0
     q = store.query({"subject": "FG1", "from": now - 86400, "to": now, "res": "hour", "metric": "stt_delay"})
     assert q["rows"][0]["p95"] == 9.5
-    raw = store.query({"subject": "FG1", "from": now - 86400, "to": now, "res": "raw", "kind": "stt"})
-    assert len(raw["rows"]) == 100 and raw["rows"][0] == {"k": "stt", "at": hour * 3600 + 30, "delay": 0.1, "kind": "traffic"}
-    assert {"station": "st-hq", "subject": "FG1", "kind": "stt"} in [
+    raw = store.query({"subject": "FG1", "from": now - 86400, "to": now, "res": "raw", "kind": "stt_in"})
+    assert len(raw["rows"]) == 100 and raw["rows"][0] == {"k": "stt_in", "at": hour * 3600 + 30, "delay": 0.1, "kind": "traffic"}
+    assert {"station": "st-hq", "subject": "FG1", "kind": "stt_in"} in [
         {k: s[k] for k in ("station", "subject", "kind")} for s in store.index()["series"]]
 
 
@@ -361,7 +361,7 @@ def test_a_metrics_file_from_before_p95_opens_and_rolls_it_up(tmp_path):
     db.close()
     now = 1_800_000_000.0
     store = MetricStore(p, log=lambda m: None, clock=lambda: now)
-    store.ingest("st-hq", [{"k": "stt", "s": "FG1", "at": now - 100, "delay": 1.0, "kind": "traffic"}], tell=False)
+    store.ingest("st-hq", [{"k": "stt_in", "s": "FG1", "at": now - 100, "delay": 1.0, "kind": "traffic"}], tell=False)
     store.maintain(now)
     assert store.hours("st-hq", "FG1", "floor", 499995 * 3600, 499996 * 3600)[0]["p95"] is None     # (an older row)
     assert store.hours("st-hq", "FG1", "stt_delay", now - 3600, now)[0]["p95"] == 1.0
@@ -370,7 +370,7 @@ def test_a_metrics_file_from_before_p95_opens_and_rolls_it_up(tmp_path):
 def test_the_hubs_own_records_never_take_a_stations_resend_answer(tmp_path):
     store = MetricStore(":memory:", log=lambda m: None)
     store._settle(123.0, "test")
-    assert "resend_from" not in store.ingest("st-hq", [{"k": "stt", "s": "FG1", "at": time.time(), "delay": 1.0}], tell=False)
+    assert "resend_from" not in store.ingest("st-hq", [{"k": "stt_in", "s": "FG1", "at": time.time(), "delay": 1.0}], tell=False)
     assert store.ingest("st-hq", [])["resend_from"] == 123.0                     # still the station's to hear
 
 
@@ -404,7 +404,7 @@ def test_the_hub_measures_each_stt_inputs_arrival_and_keeps_it_as_a_series(tmp_p
         call(hub.url + "/api/station/stt", "POST", {"station": "t", "items": [_item(3, "FG1-1790000000001", a)]})
         assert hub.app.stt_arrival_flush() == 2
         docs = {d["kind"]: d for st, s in (("t", "FG1"), ("t", "South 2"))
-                for d in hub.app.metric_store.docs(st, s, "stt", now - 60, now + 60)}
+                for d in hub.app.metric_store.docs(st, s, "stt_in", now - 60, now + 60)}
         assert 0.25 <= docs["traffic"]["delay"] < 5.0
         assert -5.0 < docs["page"]["delay"] <= -0.15
         # on Health: per kind and channel
@@ -413,8 +413,8 @@ def test_the_hub_measures_each_stt_inputs_arrival_and_keeps_it_as_a_series(tmp_p
         assert [(c["channel"], c["kind"]) for c in sa["channels"]] == [("South 2", "page"), ("FG1", "traffic")]
         # and in the metrics API (GET /api/cad/metrics: the store's query), for the Signal tab
         assert hub.app.cad.station_metrics is hub.app.metric_store
-        q = hub.app.metric_store.query({"subject": "South 2", "res": "raw", "kind": "stt"})
-        assert [(r["k"], r["kind"]) for r in q["rows"]] == [("stt", "page")]
+        q = hub.app.metric_store.query({"subject": "South 2", "res": "raw", "kind": "stt_in"})
+        assert [(r["k"], r["kind"]) for r in q["rows"]] == [("stt_in", "page")]
         hub.app.metric_store.maintain()
         q = hub.app.metric_store.query({"subject": "FG1", "res": "hour", "metric": "stt_delay"})
         assert q["rows"][0]["n"] == 1 and q["rows"][0]["p95"] == docs["traffic"]["delay"]
@@ -455,7 +455,9 @@ def test_health_shows_the_arrival_table_and_the_pre_alert_drops(tmp_path):
         "/api/cad/health": {"status": 200, "body": {
             "health": {"reported": True, "health_reported": True, "channels": [], "stt_arrival": sa,
                        "outbox": {"pending": 0, "dropped_stt": 4, "dropped_stt_why": {"outbox": 4}, "dropped_stt_pre": 1,
-                                  "dropped_stt_fire": 2}},
+                                  "dropped_stt_fire": 2,
+                                  "stt_worker": {"where": "service", "state": "unhealthy", "held": False,
+                                                 "detail": "the worker is unhealthy (no answer for 600 s)"}}},
             "alerts": [], "notify": {}, "thresholds": {}, "history": []}},
         "/api/cad/perf": {"status": 403, "body": {}}}}
     out = run(tmp_path, r"""
@@ -473,7 +475,10 @@ const tbl = parent.children[parent.children.indexOf(subs[i]) + 1];
 const rows = all(tbl, (n) => n.tag === "tr").map((r) => r.children.map((c) => c.textContent));
 const dts = all(box, (n) => n.tag === "dt" && n.textContent === "STT inputs dropped");
 const dd = all(box, (n) => n.tag === "div" && n.children.includes(dts[0]))[0].children[1];
-console.log(JSON.stringify({ title: subs[i].title, rows, dropped: dd.textContent, cls: dd.className }));
+const ets = all(box, (n) => n.tag === "dt" && n.textContent === "STT encoder");
+const ed = all(box, (n) => n.tag === "div" && n.children.includes(ets[0]))[0].children[1];
+console.log(JSON.stringify({ title: subs[i].title, rows, dropped: dd.textContent, cls: dd.className,
+                             enc: [ed.textContent, ed.className, ed.title] }));
 """, data)
     assert out["title"].startswith("Event applied → its STT input stored")
     assert out["rows"] == [["Channel", "Kind", "1 h", "24 h", "n 24 h"],
@@ -482,6 +487,53 @@ console.log(JSON.stringify({ title: subs[i].title, rows, dropped: dd.textContent
                            ["South 2", "page", "0.4 / 0.9 s", "0.5 / 1.2 s", "40"],
                            ["FG1", "traffic", "—", "1.1 / 3 s", "9"]]
     assert out["dropped"] == "4 (outbox 4) · 1 pre-alert · 2 fire" and out["cls"] == "hl-warn"
+    # the encoder service's state: terse, the detail on hover (a wedged-but-alive service is seen)
+    assert out["enc"] == ["service · unhealthy", "hl-warn", "service\nthe worker is unhealthy (no answer for 600 s)"]
+
+
+def test_health_carries_the_encoder_workers_state_from_the_station(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        status = {"id": "t", "name": "Test", "radios": [], "outbox": {"pending": 0, "oldest": None, "dropped_audio": 0},
+                  "stt_input": {"dropped": {}, "encoder": "service", "held": True,
+                                "worker": {"where": "service", "state": "slow", "detail": "the worker is slow"}}}
+        assert call(hub.url + "/api/station/state", "POST", {"at": time.time(), "status": status})[0] == 200
+        ob = hub.app.hub.health_.model()["outbox"]
+        assert ob["stt_worker"] == {"where": "service", "state": "slow", "detail": "the worker is slow", "held": True}
+    finally:
+        hub.close()
+
+
+def test_the_whisper_queues_stt_records_and_the_arrivals_stt_in_records_never_mix(tmp_path):
+    """#639's whisper queue is kind "stt" (subject "whisper"); #677's arrival delays are "stt_in": both in one store."""
+    from tests.test_signal_ui import NODE, PANEL, run
+    now = 1_800_000_000.0
+    store = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: now)
+    store.ingest("st-hq", [{"k": "stt", "s": "whisper", "at": now - 600 + 60 * k, "queued": k, "oldest": 2.0 * k,
+                            "done": 3} for k in range(10)])
+    store.ingest("st-hq", [{"k": "stt_in", "s": "FG1", "at": now - 300 + k, "delay": 0.5 + k / 10, "kind": "traffic"}
+                           for k in range(5)], tell=False)
+    store.maintain(now)
+    st = sttarrival.stats(store, now)                                           # arrivals only
+    assert [c["channel"] for c in st["channels"]] == ["FG1"] and st["kinds"]["traffic"]["d1"]["n"] == 5
+    w = store.query({"subject": "whisper", "res": "raw", "kind": "stt", "from": now - 3600, "to": now})
+    assert len(w["rows"]) == 10 and all(r["k"] == "stt" and "delay" not in r for r in w["rows"])   # ?kind=stt: #639's
+    assert store.query({"subject": "FG1", "res": "raw", "kind": "stt", "from": now - 3600, "to": now})["rows"] == []
+    assert len(store.query({"subject": "FG1", "res": "raw", "kind": "stt_in", "from": now - 3600, "to": now})["rows"]) == 5
+    assert store.hours("st-hq", "whisper", "stt_delay", now - 86400, now) == []
+    assert store.hours("st-hq", "FG1", "stt_delay", now - 86400, now)[0]["n"] == 5
+    assert store.hours("st-hq", "whisper", "stt_queued", now - 86400, now)[0]["n"] == 10
+    if NODE is None:
+        return
+    q = {"from": now - 86400, "to": now, "res": "raw"}
+    data = {"now": now, "fetch": {
+        "/api/cad/metrics?view=squelch": {"status": 200, "body": {"channels": []}},
+        "/api/cad/metrics?subject=FG1": {"status": 200, "body": store.query({**q, "subject": "FG1"})},
+        "/api/cad/metrics?subject=whisper": {"status": 200, "body": store.query({**q, "subject": "whisper"})},
+        "/api/cad/metrics": {"status": 200, "body": store.index()}}}
+    out = run(tmp_path, PANEL, data)
+    assert [c["subject"] for c in out["cards"]] == ["FG1"]                     # never a "whisper" arrival card
+    assert [f[0] for f in out["cards"][0]["figs"]] == ["FG1: STT input arrival after its event"]
 
 
 def test_the_signal_tab_graphs_the_arrival_and_a_talkgroup_with_only_that(tmp_path):
@@ -491,8 +543,8 @@ def test_the_signal_tab_graphs_the_arrival_and_a_talkgroup_with_only_that(tmp_pa
         pytest.skip("node not installed")
     s = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: NOW)
     s.ingest("st-hq", [dict(r, s="FG1") for r in floor_minutes(NOW - 3600, 60)])
-    s.ingest("st-hq", [{"k": "stt", "s": "FG1", "at": NOW - 600 + k, "delay": 0.5 + k / 100, "kind": "traffic"}
-                       for k in range(10)] + [{"k": "stt", "s": "PD dispatch", "at": NOW - 300, "delay": -0.2,
+    s.ingest("st-hq", [{"k": "stt_in", "s": "FG1", "at": NOW - 600 + k, "delay": 0.5 + k / 100, "kind": "traffic"}
+                       for k in range(10)] + [{"k": "stt_in", "s": "PD dispatch", "at": NOW - 300, "delay": -0.2,
                                                 "kind": "traffic"}], tell=False)
     q = {"from": NOW - 86400, "to": NOW, "res": "raw"}
     data = {"now": NOW, "fetch": {

@@ -75,7 +75,8 @@ window.SignalPanel = (() => {
   function subjects() {
     const by = new Map();
     for (const s of (st.index && st.index.series) || []) {
-      if (s.subject === "station") continue;
+      // (the station's own row; and a subject of none of these, e.g. the whisper queue's "stt" records, #639)
+      if (s.subject === "station" || !["floor", "tx", "cc", "stt_in"].includes(s.kind)) continue;
       const k = `${s.station}\u0000${s.subject}`;
       if (!by.has(k)) by.set(k, { station: s.station, subject: s.subject, kinds: new Set() });
       by.get(k).kinds.add(s.kind);
@@ -332,13 +333,13 @@ window.SignalPanel = (() => {
 
   // each STT input's arrival on the hub after its event (#677): raw, a dot each (negative: it came first); hourly,
   // the p50-p95 band and the p50. null without any
-  const sttOnly = (x) => !x.kinds.has("floor") && !x.kinds.has("cc");
+  const sttOnly = (x) => x.kinds.has("stt_in") && !x.kinds.has("floor") && !x.kinds.has("cc");
   function sttChart(x, d, t0, t1, box) {
     const rows = d.rows || [], raw = d.res === "raw", ev = events(d);
     const L = [];
     let legend;
     if (raw) {
-      const got = rows.filter((r) => r.k === "stt" && num(r.delay) !== null);
+      const got = rows.filter((r) => r.k === "stt_in" && num(r.delay) !== null);
       if (!got.length) return null;
       for (const [k, name, cls] of [["page", "Page", "sg-page"], ["traffic", "Traffic", "sg-voice"]]) {
         const of = got.filter((r) => (r.kind === "page" ? "page" : "traffic") === k);
@@ -388,7 +389,7 @@ window.SignalPanel = (() => {
     if (d.error) { c.append(el("p", "error small", d.error)); return c; }
     const [t0, t1] = [d.from ?? window_()[0], d.to ?? window_()[1]];
     const charts = only ? [] : cc ? ccCharts(x, d, t0, t1, st.box) : fmCharts(x, d, sug, t0, t1, st.box);
-    const stt = x.kinds.has("stt") ? sttChart(x, d, t0, t1, st.box) : null;
+    const stt = x.kinds.has("stt_in") ? sttChart(x, d, t0, t1, st.box) : null;
     if (stt) charts.push(stt);
     else if (only) charts.push(el("p", "dim small", "No STT inputs in this range"));
     c.append(...charts);

@@ -1691,6 +1691,7 @@ function sttSaid(t) {
   if (t.status === "pending" && m.startsWith("whisper")) return m.startsWith("whisper on the station")
     ? "Transcribing on the station (whisper)" : "Transcribing (whisper)";
   if (t.status === "pending" && m.startsWith("aws-transcribe")) return "Transcribing (AWS)";
+  if (t.status === "pending" && m.startsWith("gpu-worker")) return "Transcribing (GPU)";
   return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            skipped: "Skipped: busy", error: "Transcription failed" }[t.status] || "—";
 }

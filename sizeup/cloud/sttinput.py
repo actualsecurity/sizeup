@@ -123,6 +123,8 @@ def _blob(desc: dict, fm: bool, voice_offset_s: float, audio: np.ndarray) -> tup
 ENCODER_ENV = "SIZEUP_STT_ENCODER"   # auto (default) | thread | process: where the FLAC is made (Encoder below)
 WORKER_FAILS = 3                # the worker dead this often in a row: the thread, until WORKER_RETRY_S later
 WORKER_RETRY_S = 300.0          # ... (and auto without the service's socket, or another release's: looked again then)
+QUICK_LOOK_S = 10.0             # ... but every this often for QUICK_FOR_S after the start or after the worker died
+QUICK_FOR_S = 300.0             #     (a service restarting: back on it within seconds, not 5 min)
 WAIT_CAP_S = 120.0              # a wait on the worker's answer: at most this long (then waited for again) ...
 WORKER_SLOW = 3                 # ... this many waits in a row without one, or ...
 UNHEALTHY_S = 600.0             # ... this long: the worker is unhealthy (NORMAL / LOW wait queued)
@@ -191,6 +193,8 @@ class Encoder:
         self._inflight: tuple | None = None     # (prio, job): the helper's one clip
         self._worker_used = 0.0         # (monotonic) its last answer
         self._state = ""                # the worker's, for the log: said once each time it changes
+        self._state_msg = ""            # ... and what was said
+        self._quick_until = time.monotonic() + QUICK_FOR_S
         self._said = ""
 
     def _queued(self) -> int:
@@ -327,13 +331,26 @@ class Encoder:
 
     def _say(self, state: str, msg: str) -> None:
         if state != self._state:
-            self._state = state
+            self._state, self._state_msg = state, msg
             self.log(f"hub link: speech-to-text input encoder: {msg}")
+
+    def worker(self) -> dict:
+        """The station's status (Health): where NORMAL / LOW are made, and the worker's state: ok | slow | unhealthy
+        | dead | thread ("" before the first), with what was said of it."""
+        if self.where.startswith("thread"):
+            state = "thread"
+        else:
+            state = self._state if self._state in ("ok", "slow", "unhealthy", "dead") else ""
+        return {"where": self.where, "state": state, "detail": self._state_msg[:300], "unhealthy": self.unhealthy,
+                "in_flight": self._inflight is not None}
+
+    def _retry_in(self) -> float:
+        return QUICK_LOOK_S if time.monotonic() < self._quick_until else WORKER_RETRY_S
 
     def _look(self) -> None:
         """Where NORMAL / LOW are made, for this mode (auto: the service when its socket is there)."""
         from sizeup.cloud import sttencode
-        self._look_at = time.monotonic() + WORKER_RETRY_S
+        self._look_at = time.monotonic() + self._retry_in()
         if self.mode == "thread":
             self._target, self.where = None, "thread"
         elif self.mode == "process":
@@ -345,12 +362,15 @@ class Encoder:
             else:
                 self._target, self.where = None, "thread (no sizeup-stt-encode service)"
 
-    def _thread_for_now(self, why: str) -> None:
+    def _thread_for_now(self, why: str, quick: bool = False) -> None:
         self._close_worker()
-        self._target, self._look_at, self._fails = None, time.monotonic() + WORKER_RETRY_S, 0
+        if quick:                                               # (it died: likely restarting, looked for again soon)
+            self._quick_until = time.monotonic() + QUICK_FOR_S
+        retry = self._retry_in()
+        self._target, self._look_at, self._fails = None, time.monotonic() + retry, 0
         self.where = f"thread ({why})"
         self._say("thread", f"{why}: made on the station's helper thread, the worker looked for again in "
-                            f"{WORKER_RETRY_S:.0f} s")
+                            f"{retry:.0f} s")
 
     def _set_unhealthy(self, bad: bool, why: str = "") -> None:
         with self._cond:
@@ -428,7 +448,7 @@ class Encoder:
                     raise _Stopped() from None
                 self._fails += 1
                 if self._fails >= WORKER_FAILS:
-                    self._thread_for_now(f"the worker failed {WORKER_FAILS} times: {e}")
+                    self._thread_for_now(f"the worker failed {WORKER_FAILS} times: {e}", quick=True)
                 else:
                     self._say("dead", f"the worker is gone ({e}): this one on the station's helper thread")
         if self._stop:

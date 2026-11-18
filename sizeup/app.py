@@ -61,6 +61,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
@@ -716,7 +717,7 @@ class App:
         self.roads.gis = self.gis
         self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
-        self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
+        self.roads.wall_settings = lambda: self.cad.settings.section("camera_wall")
         self.cad.camera_area = self.roads.settings_rows
         self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
@@ -914,7 +915,7 @@ class App:
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
         # for the slow ones, the schedule the registry keeps (the admins' choices in the CAD settings).
         from sizeup import datasources
-        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.overrides().get(datasources.SECTION) or {})
+        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.section(datasources.SECTION))
         self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()
@@ -2395,7 +2396,12 @@ class App:
                                   caught=lambda since: comms.caught_up(since, since - oldest),
                                   route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
                                   aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
-                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log,
+                                  to_pool=self._catchup_pool)
+
+    def _catchup_pool(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to the GPU worker pool (the hub's, sizeup/sttpool.py): none here."""
+        return False, ""
 
     def _catchup_may_run(self) -> bool:
         """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call). Under a lease
@@ -4935,7 +4941,9 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
-                       adapter_password=adapter_password(cfg))
+                       adapter_password=adapter_password(cfg),
+                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                                       max_streams=cfg.mobile_max_streams))
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 

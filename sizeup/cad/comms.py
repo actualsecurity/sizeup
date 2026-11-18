@@ -324,6 +324,8 @@ class Comms:
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
+                db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)
             if not other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
@@ -679,8 +681,9 @@ class Comms:
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
-            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ? WHERE id = ?",
-                           (text, status, model, self.clock(), tid)).rowcount
+            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ?, "
+                           "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech') THEN ? ELSE text_at END "
+                           "WHERE id = ?", (text, status, model, self.clock(), status, self.clock(), tid)).rowcount
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
