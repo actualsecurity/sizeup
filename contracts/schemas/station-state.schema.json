@@ -25,7 +25,7 @@
     "wall_steps": {
       "type": "integer",
       "minimum": 0,
-      "description": "How many times the station's wall clock stepped by more than 5 s in this boot (`boot_id`). It never goes down within one `boot_id`: the station keeps it across a restart of sizeup in its state folder, and a step while sizeup was stopped counts too (the offset against the one saved, beyond 5 s plus 10 % of the time stopped); a reboot starts it from 0. Where there is no `boot_id` (null), it is not kept and starts from 0 at every start. A step: (wall clock - CLOCK_BOOTTIME) changed by more than 5 s between two samples at most 5 s apart; samples once a second. The boot clock's drift (2-5 %) and the wall clock's small corrections (about 2 s, #788) are never a step. Skew samples of one `boot_id` with the same count are comparable (#773, #776)."
+      "description": "How many times the station's wall clock stepped by more than 5 s in this boot (`boot_id`). It never goes down within one `boot_id`: the station keeps it across a restart of sizeup in its state folder, and a step while sizeup was stopped counts too (the offset against the one saved, beyond 5 s plus 10 % of the time stopped); a reboot starts it from 0. Where there is no `boot_id` (null), it is not kept and starts from 0 at every start. A step: (wall clock - CLOCK_BOOTTIME) changed by more than 5 s between two samples at most 5 s apart, or by more than 5 s plus 10 % of the gap between two samples further apart (a stall, the link off); samples once a second. The boot clock's drift (2-5 %) and the wall clock's small corrections (about 2 s, #788) are never a step. Skew samples of one `boot_id` with the same count are comparable (#773, #776)."
     },
     "talking": {
       "type": "array",

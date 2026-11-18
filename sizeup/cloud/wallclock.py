@@ -9,9 +9,10 @@ Beside it go two fields, so the hub can tell whether two skew samples are compar
                 boot_id: a restart of sizeup (an auto-update, about 13 a day) carries it on (below).
 
 A step: the offset (wall clock - boot clock) changed by more than STEP_S between two samples at most WITHIN_S apart
-on the boot clock (CLOCK_BOOTTIME: it counts a suspend; time.monotonic() where there is none). Samples further apart
-within one run (a stall, a suspend, the link off) are not compared. Sampled once a second on the station's metrics
-sampler ("station-metrics", sizeup/cloud/metrics.py), never a thread of its own.
+on the boot clock (CLOCK_BOOTTIME: it counts a suspend; time.monotonic() where there is none). Two samples further
+apart (a stall, a suspend, the hub link turned off) are compared too, with the boot clock's drift over the gap
+allowed: more than STEP_S + RESTART_DRIFT x the gap is one step (as across a restart, below). Sampled once a second on
+the station's metrics sampler ("station-metrics", sizeup/cloud/metrics.py), never a thread of its own.
 
 What is never a step (#788): the station's boot clock runs 2-5 % fast, which moves the offset by 0.25 s at most over
 WITHIN_S; and its wall clock is pulled back toward network time in small, frequent steps of about 2 s at most.
@@ -39,7 +40,7 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 STEP_S = 5.0                # the offset changed by more than this: a step ...
 WITHIN_S = 5.0              # ... between two samples at most this far apart (boot clock)
 SAVE_S = 60.0               # the count saved at least this often while it holds still (and at once when it changes)
-RESTART_DRIFT = 0.10        # across a restart: the boot clock's drift allowed per second stopped (#773: +-10 %)
+RESTART_DRIFT = 0.10        # over a gap or a restart: the boot clock's drift allowed per second (#773: +-10 %)
 FILE = "wall_clock.json"
 
 _BOOTTIME = getattr(time, "CLOCK_BOOTTIME", None)
@@ -126,7 +127,9 @@ class WallSteps:
         with self._lock:
             last, self._last = self._last, now
             d = off - last[1] if last is not None else 0.0
-            stepped = last is not None and 0.0 <= b - last[0] <= WITHIN_S and abs(d) > STEP_S
+            gap = b - last[0] if last is not None else -1.0
+            # (a gap over WITHIN_S: the boot clock's drift over it is allowed too, as across a restart)
+            stepped = gap >= 0.0 and abs(d) > STEP_S + (RESTART_DRIFT * gap if gap > WITHIN_S else 0.0)
             if stepped:
                 self.steps += 1
             due = self._saved is None or self._saved[0] != self.steps or b - self._saved[1] >= SAVE_S

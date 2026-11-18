@@ -84,20 +84,33 @@ def test_a_forward_and_a_backward_step_are_counted_and_each_logged_once():
     assert said == ["wall clock stepped +60 s", "wall clock stepped -15 s"]
 
 
-def test_samples_more_than_5_s_apart_never_count():
-    """A gap (a stall, a suspend, the link off) may hold a step: it is not counted, and the next sample is the new start."""
-    clk, said = Clocks(1.0), []
+def test_a_step_inside_a_gap_over_5_s_counts():
+    """A gap (a stall, a suspend, the hub link off) is compared too: a 6 s gap holding a 60 s step is one step."""
+    clk, said = Clocks(1.05), []
     w = counter(clk, said)
     run(clk, w, 10)
-    clk.t += 6.0                           # 6 s on the boot clock since the last sample ...
+    clk.t += 6.0                           # 6 s since the last sample ...
     clk.adj += 60.0                        # ... and the wall clock stepped meanwhile
+    w.sample()
+    run(clk, w, 10)                        # (once: the samples after it compare with the new offset)
+    assert w.steps == 1 and said == ["wall clock stepped +60 s"]
+
+
+@pytest.mark.parametrize("rate", [1.05, 0.95])
+def test_a_2_minute_gap_with_drift_only_is_not_a_step(rate):
+    """5 % of 2 min is 6 s (more than STEP_S), within the 5 s + 10 % x 120 s allowed; a 2 s correction in it too."""
+    clk, said = Clocks(rate), []
+    w = counter(clk, said)
+    run(clk, w, 10)
+    clk.t += 120.0
+    clk.adj -= 2.0
     w.sample()
     run(clk, w, 10)
     assert w.steps == 0 and said == []
-    clk.t += 5.0                           # 5 s apart is still "at most 5 s"
-    clk.adj -= 30.0
+    clk.t += 120.0                         # ... but a 20 s step in a 2 minute gap is beyond it (6 + 20 > 17)
+    clk.adj += 20.0 if rate < 1 else -20.0
     w.sample()
-    assert w.steps == 1 and said == ["wall clock stepped -30 s"]
+    assert w.steps == 1
 
 
 def test_a_step_of_5_s_or_less_is_not_one():
