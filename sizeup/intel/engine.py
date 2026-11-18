@@ -690,6 +690,8 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if not suppressed and pack.resolved and pack.resolves(text, ws):
+            changed += [x for x in self._resolve(pack, key, at, tid) if not any(x is c for c in changed)]
         if not suppressed and pack.calm:
             for x in (self._uncalm(pack, key, at, tid, ws, win.entries[tid], event_of)
                       + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
@@ -1296,13 +1298,19 @@ class IntelEngine:
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
         # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
         # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
-        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and self._safe(pack, ev.category)]:
-            ev.note, ev.updated_at = "possibly cancelled", self.clock()
+        # a call whose category has "cancel_ttl_min" (EDP, a dispute) flagged by an earlier disregard: this one ends it
+        again = [] if named else [ev for ev in open_ if ev.note == "possibly cancelled" and self._soft(pack, ev.category)]
+        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and self._safe(pack, ev.category)
+                                    and ev not in again]:
+            now = self.clock()
+            ev.note, ev.updated_at = "possibly cancelled", now
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            if self._soft(pack, ev.category):            # "cancel_ttl_min": it lives no longer than this after it
+                ev.until = min(ev.until or now, now + float(pack.category(ev.category)["cancel_ttl_min"]) * 60)
             self.events.save(ev)
             self.sink.event(ev, "updated")
             out.append(ev)
-        for ev in named or [ev for ev in open_ if current & set(ev.traffic_ids) and not self._safe(pack, ev.category)]:
+        for ev in (named or [ev for ev in open_ if current & set(ev.traffic_ids) and not self._safe(pack, ev.category)]) + again:
             ev.status, ev.updated_at = "ended", self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
             self.events.save(ev)
@@ -1369,8 +1377,27 @@ class IntelEngine:
         return out
 
     def _safe(self, pack, cat: str) -> bool:
-        """A safety call: never ended by a disregard that names nothing, only "possibly cancelled"."""
-        return cat in SAFETY or pack.is_safety(cat)
+        """A safety call: never ended by a disregard that names nothing, only "possibly cancelled". The engine's own
+        list, and in a police pack every category the pack marks "safety" (EDP, a dispute, an officer); the fire and
+        EMS packs keep the engine's list only."""
+        return cat in SAFETY or (pack.domain == "police" and pack.is_safety(cat))
+
+    def _soft(self, pack, cat: str) -> bool:
+        """A safety call a second disregard or a "resolved" phrase ends ("cancel_ttl_min": EDP, a dispute)."""
+        return self._safe(pack, cat) and pack.category(cat).get("cancel_ttl_min") is not None
+
+    def _resolve(self, pack, key: str, at: float, tid: str) -> list[Event]:
+        """A "resolved" phrase ("unfounded", "the caller called back"): the source's "possibly cancelled" calls with
+        "cancel_ttl_min" end."""
+        out = []
+        for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
+            if ev.note == "possibly cancelled" and self._soft(pack, ev.category):
+                ev.status, ev.updated_at = "ended", self.clock()
+                ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+                self.events.save(ev)
+                self.sink.event(ev, "ended")
+                out.append(ev)
+        return out
 
     def _elsewhere(self, pack, ev: Event, entry) -> bool:
         """The row speaks of another job ("at the other call"), or names units and none of the event's own."""

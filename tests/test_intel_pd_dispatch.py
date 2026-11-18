@@ -143,6 +143,53 @@ def test_a_de_escalation_from_another_job_needs_the_place():
     assert e.events.get(ev.id).note == "de-escalated"
 
 
+@pytest.mark.parametrize("text", ["units be advised, shots fired, one in custody",
+                                  "be advised now he pulled a gun, he had the knife before"])
+def test_shots_or_a_new_weapon_after_a_de_escalation_push_again_whatever_else_is_said(text):
+    e, sink = engine()
+    [ev] = e.feed(row("t1", GUN_CALL, 1000))
+    e.feed(row("t2", SECURED, 1100))
+    e.feed(row("t3", text, 1110))
+    assert e.events.get(ev.id).note == "re-opened" and pushed(sink) == ["weapons", "weapons"]
+
+
+@pytest.mark.parametrize("text", ["respond to 100 Example Ave for an EDP, he is threatening to jump",
+                                  "respond to 100 Example Ave, large fight in progress"])
+def test_a_flagged_edp_or_dispute_lives_ten_minutes_and_a_second_disregard_ends_it(text):
+    e, sink = engine()
+    [ev] = e.feed(row("t1", text, 1000))
+    e.feed(row("t2", "disregard, disregard", 1020))
+    got = e.events.get(ev.id)
+    assert got.status == "open" and got.note == "possibly cancelled" and got.until <= e.clock() + 600 < 1000 + 60 * 60
+    e.feed(row("t3", "disregard that", 1100))
+    assert e.events.get(ev.id).status == "ended"
+
+
+@pytest.mark.parametrize("words", ["the caller called back, everything is fine", "it's unfounded", "no longer needed"])
+def test_a_flagged_edp_or_dispute_ends_when_it_is_resolved(words):
+    e, sink = engine()
+    [ev] = e.feed(row("t1", "respond to 100 Example Ave for an EDP, he is threatening to jump", 1000))
+    e.feed(row("t2", "disregard, disregard", 1020))
+    e.feed(row("t3", words, 1200))
+    assert e.events.get(ev.id).status == "ended"
+
+
+def test_a_flagged_weapons_or_officer_call_is_never_ended_by_a_second_disregard():
+    e, sink = engine()
+    [ev] = e.feed(row("t1", "officer down, officer down, 40 Sample Street", 1000))
+    e.feed(row("t2", "disregard, disregard", 1020))
+    e.feed(row("t3", "disregard that, unfounded", 1100))
+    assert e.events.get(ev.id).status == "open"
+
+
+def test_only_police_packs_take_safety_from_the_pack():
+    e, sink = engine()
+    fire = e.pack("fire")
+    assert fire is not None and fire.category("mayday").get("safety")
+    assert not e._safe(fire, "mayday")                                  # the fire pack keeps the engine's list
+    assert e._safe(e.pack("police"), "edp") and e._safe(e.pack("police"), "officer")
+
+
 def test_officers_are_a_safety_call_and_never_tie_by_the_word_officer():
     e, sink = engine()
     [ev] = e.feed(row("t1", "officer down, officer down, 40 Sample Street", 1000))
@@ -225,6 +272,32 @@ def test_weapons_edp_and_dispute_tie_by_telling_words_only():
     (CUE + "complainant states a coworker punched him", "assault"),
     ("car 12 to headquarters, I've been assaulted, send me another car", "officer"),
     ("officer down, officer down, 40 Sample Street", "officer"),
+    ("officer down at 40 Sample Street", "officer"),
+    ("officer down on Sample Street", "officer"),
+    ("officer down in the rear of the building", "officer"),
+    ("officers down at Sample St and Test Rd", "officer"),
+    ("officer down, officer down at 40 Sample Street", "officer"),
+    ("car 12 I'm hit, I'm not ok, send EMS", "officer"),
+    ("I'm shot, I'm not okay", "officer"),
+    ("car 12 I've been stabbed, he said he'd kill me", "officer"),
+    # weapons whose context words once silenced them
+    ("the male has a bat in his hand, swinging it at cars", "weapons"),
+    ("the male has a gun on the roof", "weapons"),
+    ("a male pointed a gun at a player at the game", "weapons"),
+    ("he pulled out a gun at the game", "weapons"),
+    ("the male has a gun in the field behind the school", "weapons"),
+    ("a male has a knife at the construction site, threatening workers", "weapons"),
+    ("he has a knife, he's working on the door trying to get in", "weapons"),
+    (CUE + "he's armed and hunting for his ex", "weapons"),
+    ("he has a gun, he locked up the house and won't come out", "weapons"),
+    ("he's got a gun, same as last time", "weapons"),
+    (CUE + "she has a bat in her bedroom, she's swinging it at him", "weapons"),        # "unless" sets the exclusion aside
+    ("he's a hunter, he pointed the gun at his wife", "weapons"),
+    # assaults whose context words once silenced them
+    (CUE + "a male was assaulted today in front of the store", "assault"),
+    (CUE + "the victim was assaulted, she is at the station, bleeding from the head", "assault"),
+    (CUE + "he's attacking her, the dog is barking", "dispute"),
+    (CUE + "he is beating her, she sent messages to her sister", "dispute"),
     ("car 12, I'm being attacked", "officer"),                                       # one push: never dispute too
     ("car 12, I'm hit, I'm hit", "officer"),
     ("caller states I've been assaulted, can you respond to 40 Sample Street", "assault"),
@@ -319,9 +392,9 @@ def test_dispatch_shapes_push_their_category(text, cat):
     CUE + "a dog is attacking him",
     # an assault report
     CUE + "assault victim at the hospital, wants to speak with an officer",
-    CUE + "she was assaulted on the bus, she's at the station",
+    CUE + "she was assaulted on the bus, she is at the station to file a report",
     CUE + "she was assaulted, she wants to file a complaint",
-    CUE + "the student was assaulted at school today",
+    CUE + "the student was assaulted at school today, wants to file a report",
     CUE + "he says he was attacked in a dream",
     CUE + "she was assaulted on social media",
     # bats, sport, tools at work, hunters, locked up, last time

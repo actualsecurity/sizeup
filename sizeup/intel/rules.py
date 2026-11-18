@@ -52,7 +52,11 @@ phrases (the grammar above) that mark the category's open event on the same sour
 category: "the gun was secured", "the firearm has been recovered"): a note on the event, never a push and never an end
 (engine.py _deescalate). "escalate" / "escalate_not": what says the category is live again after that note (the weapons
 category: "pulled out a gun", "shots fired"; never with "in custody", "for the report", "when we arrived"): such a row
-re-opens the event and pushes it again; any other row that says the category only takes the note off.
+re-opens the event and pushes it again; any other row that says the category only takes the note off;
+"escalate_always" ("shots fired") does so whatever "escalate_not" says. "cancel_ttl_min": a safety category of a police
+pack that a nameless disregard marks "possibly cancelled" lives at most this long after it, and a second disregard or one
+of the pack's "resolved" phrases ("unfounded", "the caller called back") ends it. A rule's "unless" phrases set its
+"not" phrases aside ("pointed a gun at" beside "a bat in his bedroom").
 
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
@@ -268,12 +272,15 @@ class Rule:
     enabled: bool = True
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None    # the pack's table (None: the words as transcribed only)
+    unless: list = field(default_factory=list)   # phrases that set the "not" phrases aside ("pointed a gun at")
 
     def hit(self, text: str, ws: list[str]) -> bool:
-        """One reading where a phrase is found and no "not" phrase is (see the module's doc)."""
+        """One reading where a phrase is found and no "not" phrase is, unless an "unless" phrase is (see the module's
+        doc)."""
         if not self.enabled:
             return False
-        return any(any(p.found(t, w) for p in self.any) and not any(p.found(t, w) for p in self.nots)
+        return any(any(p.found(t, w) for p in self.any)
+                   and (not any(p.found(t, w) for p in self.nots) or any(p.found(t, w) for p in self.unless))
                    for t, w in readings(text, ws, self.norm))
 
 
@@ -297,7 +304,8 @@ class Pack:
     norm: Normalizer | None = None
     area: tuple = ()                  # the towns its events belong to (empty: anywhere)
     calm: dict = field(default_factory=dict)    # category -> its "deescalate" phrases, compiled
-    rise: dict = field(default_factory=dict)    # category -> (its "escalate" phrases, its "escalate_not"), compiled
+    rise: dict = field(default_factory=dict)    # category -> ("escalate", "escalate_not", "escalate_always"), compiled
+    resolved: list = field(default_factory=list)   # phrases that end a "possibly cancelled" call with "cancel_ttl_min"
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -334,9 +342,15 @@ class Pack:
 
     def escalates(self, cat: str, text: str, ws: list[str]) -> bool:
         """The text says the category is live again ("escalate", and none of "escalate_not")."""
-        yes, no = self.rise.get(cat) or ((), ())
+        yes, no, always = self.rise.get(cat) or ((), (), ())
+        if any(_found(p, text, ws, self.norm) for p in always):
+            return True
         return (any(_found(p, text, ws, self.norm) for p in yes)
                 and not any(_found(p, text, ws, self.norm) for p in no))
+
+    def resolves(self, text: str, ws: list[str]) -> bool:
+        """The text says a call is over ("resolved": "unfounded", "the caller called back")."""
+        return any(_found(p, text, ws, self.norm) for p in self.resolved)
 
     def is_safety(self, cat: str) -> bool:
         return bool(self.category(cat).get("safety"))
@@ -427,6 +441,9 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "deescalate": [p.src for p in _phrases(cd.get("deescalate") or [], f"{name}.{c}.deescalate")],
                    "escalate": [p.src for p in _phrases(cd.get("escalate") or [], f"{name}.{c}.escalate")],
                    "escalate_not": [p.src for p in _phrases(cd.get("escalate_not") or [], f"{name}.{c}.escalate_not")],
+                   "escalate_always": [p.src for p in _phrases(cd.get("escalate_always") or [], f"{name}.{c}.escalate_always")],
+                   "cancel_ttl_min": (_num(cd["cancel_ttl_min"], 1, 24 * 60, f"{name}.{c}.cancel_ttl_min")
+                                      if cd.get("cancel_ttl_min") is not None else None),
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
     for c, cd in cats.items():
         if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
@@ -445,7 +462,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
         rules.append(Rule(rid, int(r.get("v") or 1), cat, _num(o.get("w", r.get("w", 0.5)), -1, 1, f"rule {rid} weight"),
                           _phrases(r.get("any") or [], f"rule {rid}"), _phrases(r.get("not") or [], f"rule {rid} not"),
                           _mode(o.get("mode", r.get("mode", "push")), f"rule {rid} mode"),
-                          bool(o.get("enabled", r.get("enabled", True))), dict(r), norm))
+                          bool(o.get("enabled", r.get("enabled", True))), dict(r), norm,
+                          _phrases(r.get("unless") or [], f"rule {rid} unless")))
     for rid, o in ro.items():                           # an admin's own rule (local.*)
         if rid.startswith("local.") and isinstance(o, dict) and o.get("pack") == name and rid not in seen:
             cat = str(o.get("category") or "")
@@ -471,8 +489,10 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
                 area=area(po.get("area") or d.get("area"), f"{name}.area"),
                 calm={c: [Phrase(x) for x in cd["deescalate"]] for c, cd in cats.items() if cd["deescalate"]},
-                rise={c: ([Phrase(x) for x in cd["escalate"]], [Phrase(x) for x in cd["escalate_not"]])
-                      for c, cd in cats.items() if cd["escalate"]})
+                rise={c: ([Phrase(x) for x in cd["escalate"]], [Phrase(x) for x in cd["escalate_not"]],
+                          [Phrase(x) for x in cd["escalate_always"]])
+                      for c, cd in cats.items() if cd["escalate"] or cd["escalate_always"]},
+                resolved=_phrases(d.get("resolved") or [], f"{name}.resolved"))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -545,8 +565,10 @@ def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
                         p.scope, list(p.area),
-                        [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
+                        [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots],
+                          *([[x.src for x in r.unless]] if r.unless else [])]
                          for r in p.rules], [x.src for x in p.suppress],
+                        *([[x.src for x in p.resolved]] if p.resolved else []),
                         *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],
                       sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
