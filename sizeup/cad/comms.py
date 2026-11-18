@@ -739,8 +739,8 @@ class Comms:
                 "tries": Comms.catchup_tries_of(r["rerun_result"] or ""), "tried_at": r["rerun_at"] or 0.0}
 
     def shed_clips(self, since: float, limit: int = 60, sort=None) -> tuple[list[dict], dict[str, int]]:
-        """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: the alert tier first,
-        then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, seconds, service, tier,
+        """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: those a station stopped
+        with first, then the alert tier, then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, seconds, service, tier,
         tries, tried_at}. sort(row) -> a word for it ("" = eligible): every row is sorted before the limit, so one
         that can't be sent now (given up, not transcribed, too long) never keeps one further back from its turn.
         -> (the first `limit` eligible rows, how many rows got each word: {"": eligible, "gave up": ...})."""
@@ -749,7 +749,9 @@ class Comms:
         with self.store.lock:
             cur = self.store.db.execute(
                 "SELECT id, start, end, channel, talkgroup, talker, system, service, tier, rerun_result, rerun_at "
-                f"FROM radio_traffic WHERE {self.SHED_WHERE} ORDER BY (tier = 'alert') DESC, start DESC",
+                # (a station's rows it stopped with first: they were heard live, often fire traffic; #549, #639 phase 2)
+                f"FROM radio_traffic WHERE {self.SHED_WHERE} ORDER BY (model LIKE '%station stopped%') DESC, "
+                "(tier = 'alert') DESC, start DESC",
                 (float(since), f"%{SHED}%"))
             rows = [self._shed_row(r) for r in cur]
         for row in rows:

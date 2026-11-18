@@ -9,6 +9,9 @@
                                                                closed); "location not heard"
     Tags   the category's tag, police_car (a police pack)      Priority: the category's
     Click  <public url>/radio?view=police&intel=<id>           behind Cloudflare Access
+    FYI    a fire-related event with the FD already there (engine.py _fire): the title starts "FYI · ", the body
+           ends "FD on scene · #26-000123" (fd_text), its priority the pack's fyi / safety priority. The FD
+           cleared (a rekindle): a pre-alert as usual, its body ending "FD here 14:05 · #26-000123"
 
 Not among its fields: transcript words, a talker, a roster alias, a radio ID, a plate, a date of birth, a person's
 name. Only the fields above go in, and (push_pii off) scrub() checks the result anyway: any of the event's
@@ -34,6 +37,7 @@ HOUSE = re.compile(r"^\s*(\d+)[A-Za-z]?\s+(.+)$")
 DATE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:dob|d\.o\.b|born)\b", re.I)
 RADIO_ID = re.compile(r"\b\d{6,}\b")
 PLATE_LIKE = re.compile(r"\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{5,8}\b")
+OUR_NUMBER = re.compile(r"#\d{2}-\d{6}\b")
 DOMAIN_TAG = {"police": "police_car", "fire": "fire_engine"}
 
 
@@ -82,13 +86,30 @@ def category_label(cat: dict, pack_label: str, category: str) -> str:
     return label[len(pre):] if pre and label.startswith(pre) and len(label) > len(pre) else label
 
 
-def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubtful: bool = False) -> dict:
-    """{title, body, tags, priority, click} for the event (never the transcript)."""
+FD_SHOWN = {"on_scene": "FD on scene", "dispatched": "FD dispatched", "there": "FD there"}
+FYI = frozenset(FD_SHOWN)
+
+
+def fd_text(fd: str, number: str = "", at=None, tz=None) -> str:
+    """Event.fd as shown, terse: "FD on scene · #26-000123", "FD dispatched", "FD there", "FD here 14:05 · #26-000123"
+    (cleared: at, when); "" for none."""
+    if fd == "cleared":
+        shown = "FD here" + (f" {datetime.fromtimestamp(float(at), tz).strftime('%H:%M')}" if at else "")
+    else:
+        shown = FD_SHOWN.get(fd or "", "")
+    return f"{shown} · #{number}" if shown and number else shown
+
+
+def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubtful: bool = False,
+            number: str = "", fd_at=None) -> dict:
+    """{title, body, tags, priority, click} for the event (never the transcript). number: the incident it is linked
+    to (an FYI's "FD on scene · #<number>"); fd_at: when the FD cleared it ("FD here HH:MM")."""
     town = ev.town or ""
-    title = " · ".join(x for x in (pack_label, category_label(cat, pack_label, ev.category), town) if x)
+    fd = fd_text(getattr(ev, "fd", ""), number, fd_at, tz)
+    title = " · ".join(x for x in ("FYI" if getattr(ev, "fd", "") in FYI else "", pack_label, category_label(cat, pack_label, ev.category), town) if x)
     where = where_text(ev, doubtful)
     when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
-    body = " · ".join(x for x in (where or "location not heard", when, ev.level) if x)
+    body = " · ".join(x for x in (where or "location not heard", when, ev.level, fd) if x)
     tags = [t for t in (cat.get("tag") or "", DOMAIN_TAG.get(ev.domain, "")) if t]
     click = ""
     if public_url and ev.id is not None:
@@ -105,6 +126,7 @@ def scrub_label(label: str, forbidden=()) -> str:
 def scrub(msg: dict, forbidden=()) -> str:
     """"" when the composed push is clean, else why not (a category only, never the text)."""
     text = f"{msg.get('title', '')}\n{msg.get('body', '')}"
+    text = OUR_NUMBER.sub("", text)        # our own incident's number (an FYI's "#26-000123"): never a radio ID
     low = text.lower()
     for f in forbidden:
         f = str(f or "").strip()

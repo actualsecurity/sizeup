@@ -1456,6 +1456,68 @@ clip waits for one only as long as its class allows. After that the clip goes th
 - **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
 - **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
 
+### Whisper capacity across the cluster (#639 phase 2)
+
+A station's whisper can be a worker in the hub's pool, so a clip from one station can be transcribed on another.
+
+**Off by default, per station.** An admin turns it on per station: Settings > Station > Stations, "Whisper in pool" on that station's row, audited. Until then nothing changes.
+
+The order is:
+1. a GPU worker;
+2. an idle station's whisper;
+3. AWS, as its budget allows;
+4. the catch-up.
+
+#### A station's whisper as a worker
+
+`sizeup/cloud/stationworker.py`, under the station's own identity (#555, "station:<id>"). There is no extra token, and revoking the station ends its worker.
+
+Its own radios always come first, because whisper-server takes one request at a time. It claims only when all of these hold:
+- none of its own clips wait;
+- none of its own has been heard for 90 s;
+- its CPU is under 85 %, measured from `/proc/stat` (on WSL that is the Linux side).
+
+Limits on what it takes:
+- only clips it decodes in 8 s at its own measured pace. It tells the hub `max_s`, and the hub never hands it a longer one;
+- always one greedy pass;
+- never a pre-alert clip, an AWS channel's clip, or its own station's;
+- a GPU worker idle now gets each job first.
+
+It re-checks right after a claim, and hands the job back if its own work came. While it decodes, if one of its own urgent, high or live clips comes, it closes the decode's connection and hands the job back. whisper-server stops a request whose client went away: "client disconnected, aborted processing", checked on whisper.cpp 1.9.4. Its own page then gets its text within a second of its normal time.
+
+#### What a station hands to the hub's pool
+
+`transcript_pending: "pool"`:
+- A context clip, when its own queue is 60 s behind and the hub says a worker elsewhere could take a clip that long now.
+- A clip it would shed, under the same condition. Otherwise it is skipped here as before; there is never a round trip back to the sender.
+- What it stops with (`App._stt_handoff`, #712's stop path). Pre-alert classes go only when the hub said lately that a GPU worker is idle and quick, one clip per such worker. Anything else goes while there is room. The rest is saved to `stt-queue.json` (written with fsync, and an unreadable one is kept as `.bad`). The next start queues it again at its own class, alerts as ever; a saved clip that already has its text is skipped. **A clip saved at stop reaches the hub only after the station restarts.**
+
+  The clip whisper is on gets 3 s. If whisper finishes it before the exit, its text goes up first and the hub keeps that one: a transmission is applied once.
+
+On the hub, a handed-over clip the pool can't take:
+- a live class goes to AWS, else to the station's whisper;
+- a context class goes to the catch-up, which keeps its own AWS cap (`CATCHUP_AWS_PCT`).
+
+The pool's catch-up keeps the catch-up's bounds on any worker:
+- one greedy pass;
+- 20 s at most;
+- clips of 30 s at most;
+- paused by fire work;
+- a station's whisper never gets its own station's clips.
+
+#### Pre-alert sources
+
+The sources the radio pre-alerts push alerts from are HIGH at least, in the station's queue and the pool, whatever their tier. On the hub they come from `sizeup.intel.is_push_source` or `push_sources()`.
+- The hub's leader sends them to the station (`set_stt_alert_keys`) when the revision the station reports differs.
+- The station compares its channel keys normalised the same way (`sizeup.intel.engine.source_key`: "tg:<n>" becomes "p25:westchester:<n>", a label becomes "fm:" or "air:"). A test checks that the station and the hub agree on every kind of key.
+- The set is cached (5 s), never computed per clip under a lock.
+
+#### Public API and Health
+
+- `Transcriber.withdraw()`, `current()`, `stop(timeout)`, `behind_live()`.
+- The catch-up takes the rows a stopped station left before other shed clips.
+- Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
@@ -3532,7 +3594,7 @@ category's, and the rules' rung. The rung is the highest mode M at which the rul
   carry it.
 
 **Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
-`ems` and `fire`; and a `"place": true` category of any pack (the `police` pack's `fire_call`), which is held while it has no address. The `police` pack's events are never linked. An event already pushed is never held (its mode
+`ems` and `fire`; a `"place": true` category of any pack (the `police` pack's `fire_call`), which is held while it has no address; and a `"fire_related"` category of any pack (the `police` pack's `fire_report`, `fire_call`, `hazmat`, `alarm`) when the FD is already there (`fd_*` below). The `police` pack's events are linked only in a fire-related category. An event already pushed is never held (its mode
 never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
 event gets back the mode its rules give.
 
@@ -3540,6 +3602,10 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+| `fd_on_scene` | a `"fire_related"` category (admin, 2026-11-17: a pre-alert is a jump on a call; PD's dispatch of a fire the FD is already working is not one), with one of our fire incidents at its place: the CAD's own or an incident source's (the county feed's too, queued ones included; never a dismissed one or a notification), of a type the pack's `fd_present.types` allows for the category (STRU, ALARM, BRUSH, MVF, HAZARD, INVEST, MA, or none yet; gas: HAZARD, INVEST; alarms: ALARM, STRU, INVEST; never an aided, MVA, service call, rescue, drill or airport event), open and made up to 12 hours before the event (a long fire) or closed within `fd_window_min` (60), at the same address or the same block of the same street (and within the radius when both have a point), or, for a confirmed address or intersection, within `fd_radius_m` (150 m) plus half the reading's radius; never two known towns. With no place, an open one whose street (name and suffix) the words say, in its town (named, or the source's own; never with another town named). A unit on scene (ours on scene and not cleared, or the feed's on location and not in service): held, unless the words are a safety change (the pack's `fd_present.safety`: a weapon on scene, violence, an explosion or collapse, an officer or firefighter down): then an FYI at `safety_priority` (4). Linked either way (`near_incident`, `fd`) |
+| `fd_dispatched` | as above, units assigned or en route and not cleared, or no unit known yet on an open incident made at most 30 minutes before (a page's own card: the FD already toned out): held, unless the words add something (`fd_present.add_info`: people inside or trapped, injuries, spread or exposure, hazmat): then an FYI at `fyi_priority` (2); a safety change: at `safety_priority`. An FYI's title starts "FYI", its body ends "FD on scene · #26-000123"; the console row and the More info page say the same. A pushed FYI keeps its FYI priority on later updates |
+| `fd_there` | as `fd_dispatched`, with no incident of ours on scene or dispatched but the words saying the FD is there (`fd_present.there`: the FD, the fire department, the engine or the fire chief on scene, on location, working, already there; a bare "the chief" on a PD channel is theirs: another department's call, not in our feed). "FD notified", "FD en route", a caller's "fire there" are not: still a pre-alert. An event pushed as a pre-alert before the FD was known is linked only, never lowered |
+| `fd_late` | held for the FD, then let go because its incident is gone (dismissed, no longer at the place) more than 5 minutes after the call: stays at log, as `placed_late`. The FD cleared instead (the incident closed, every unit cleared or in service), before the call or after it while the call was held (a rekindle merged into the held call): no hold, a pre-alert as usual, its body ending "FD here HH:MM · #26-000123" |
 | `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. With no place it stays at log until it expires: the tick never lets it go. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:

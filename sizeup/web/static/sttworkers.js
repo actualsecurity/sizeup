@@ -86,8 +86,9 @@ const SttWorkersCard = (() => {
     cb.checked = !!p.on;
     cb.addEventListener("change", () => act({ action: "pool", on: cb.checked }, cb.checked ? "Pool on" : "Pool off"));
     on.append(cb, " Pool on");
-    on.title = "Off: every clip goes the way it went before (AWS, the station's whisper). No worker added: off whatever this says";
+    on.title = "Off: every clip goes the way it went before (AWS, the station's whisper)";
     wrap.append(on);
+
     for (const [k, v] of Object.entries(p.classes || {})) {
       const l = el("label", "check");
       const c = el("input");

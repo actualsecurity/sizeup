@@ -259,7 +259,10 @@ pushed. It never creates an incident.
    (an event's mode is the rung its own rules reach; a cue's mode never moves it). Only these three packs' events
    are held at log when outside our area or at one of our own accepted emergency incidents (`out_of_area`,
    `near_incident`; never once pushed; a safety category is linked, not held: docs/cloud.md). The police pack's
-   events are never linked, and held only in its `fire_call` category (a burning smell, the FD notified) until it
+   events are linked only in a `"fire_related"` category (fire_report, fire_call, hazmat, alarm), and held only
+   there: when the FD is already there (one of our fire incidents, the CAD's or the county feed's, at the place,
+   or the words saying so): `fd_on_scene`, `fd_dispatched`, `fd_there`, an FYI only when the words add something
+   (the FD cleared: a pre-alert as usual); and in its `fire_call` category (a burning smell, the FD notified) until it
    has an address in the source's towns (`unplaced`); its own safety categories are weapons, barricade, EDP and
    dispute. The police pack reads Port Chester / Rye / Rye Brook PD only;
    `neighbor_police.json` reads the other MRRS police talkgroups with the same rules (`"rules_from"`), at log.

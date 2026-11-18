@@ -14,7 +14,13 @@ works as before; this is next to it, keyed by the same clip id.
                             engine_start, done_at (the hub's clock), wait_s (queued -> the engine took it) and run_s
                             (the engine's own time; the station's whisper measures both itself), keyup (a cut
                             transmission's {parent, prev, split} as the radio sends it, JSON; "" for a whole one), call_id
-                            and turn (a P25 call split per transmission: its call and 0-based turn). Pruned by the hub's
+                            and turn (a P25 call split per transmission: its call and 0-based turn); the dispatcher's
+                            trailing time (#727, sizeup/stt_time.py; "" where it isn't checked): time_check (match |
+                            time_mismatch | no_time), time_said (the time read, "1549"), time_off (said - air time, min),
+                            time_conf, time_fixed_text (the text with that time written the canonical way: a match whose
+                            text it changes only; the raw text is never changed), fix_rule (the rule and its version,
+                            "ttime/1:words") and label_flag (auto_label | review); time_check "prompted": the engine's
+                            prompt carried the clip's time, never counted. Pruned by the hub's
                             janitor: older than KEEP_DAYS, and a run whose radio log row is gone (its channel's transcript
                             retention: never longer than the transcript), batch after batch for up to PRUNE_BUDGET_S
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
@@ -51,6 +57,18 @@ COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "
 ENGINES = ("gpu-worker", "aws", "station-whisper")
 ROLES = ("text", "alt", "late", "rerun", "catchup")
 KEEP_DAYS = 90.0
+# the dispatcher's trailing time (#727): added to a file from before them (Runs._open)
+_TEXT = "TEXT NOT NULL DEFAULT ''"
+CHECK_TYPES = {"time_check": _TEXT, "time_said": _TEXT, "time_off": "INTEGER", "time_conf": "REAL",
+               "time_fixed_text": _TEXT, "fix_rule": _TEXT, "label_flag": _TEXT}
+CHECK_COLUMNS = tuple(CHECK_TYPES)
+TIME_RATES_S = 60.0          # Health's trailing-time table, worked out at most this often
+TIME_DAYS = 7
+TIME_ROLES = ("text", "alt", "late")    # first passes only: a person's re-run and a catch-up are no live engine's word
+TIME_COUNTED = ("match", "time_mismatch", "no_time")    # ("prompted": led to the answer, never counted)
+# Health's query reads this index alone (partial: checked runs only), never the table; vocab_v once runs carry it
+TIME_INDEX = ("stt_runs_time", "done_at, time_check, role, channel, engine, model")
+TIME_INDEX_V = ("stt_runs_time_v", "done_at, time_check, role, channel, engine, model, vocab_v")
 PRUNE_BATCH = 500
 PRUNE_BUDGET_S = 2.0       # a janitor pass prunes for this long at most (batch after batch: what came in goes out)
 ORPHAN_AFTER_S = 3600.0    # a run whose radio log row is gone, looked for once this old
@@ -81,6 +99,19 @@ def _keyup(k) -> str:
     if not isinstance(k, dict):
         return ""
     return json.dumps({f: str(k.get(f) or "")[:128] for f in ("parent", "prev", "split")}, separators=(",", ":"))
+
+
+def _check_row(c) -> tuple:
+    """A trailing-time check's columns (CHECK_COLUMNS), "" / None for none."""
+    if c is None:
+        return ("", "", None, None, "", "", "")
+    off = getattr(c, "off_min", None)
+    return (str(c.result or "")[:20], str(c.said or "")[:8], int(off) if isinstance(off, int) else None, _fin(c.conf),
+            str(c.text or "")[:20000], str(c.rule or "")[:40], str(c.flag or "")[:20])
+
+
+def _rate(match: int, said: int) -> float | None:
+    return round(100.0 * match / said, 1) if said else None
 
 
 def prompt_version(prompt: str) -> str:
@@ -118,6 +149,10 @@ class Runs:
         self._copy_at: float | None = None
         self._uploaded = 0.0
         self._sweep_from = 0                       # the orphan sweep's place (row id)
+        self._vocab = False                        # the file has #659's vocab_v
+        self._rates: tuple | None = None           # (days, at, time_rates()) for TIME_RATES_S
+        self._rdb: sqlite3.Connection | None = None    # Health's reads: their own connection, never the writer's lock
+        self._rlock = threading.Lock()
         self.status = {"state": "settled" if backup is None else "unsettled", "error": "", "uploaded": None}
 
     def _say(self, msg: str) -> None:
@@ -143,6 +178,19 @@ class Runs:
                 db.close()                        # (never a connection left open: the next write tries again)
                 raise
             self._db = db
+            try:
+                have = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
+                for c in CHECK_COLUMNS:
+                    if c not in have:
+                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CHECK_TYPES[c]}")
+                want, other = (TIME_INDEX_V, TIME_INDEX) if "vocab_v" in have else (TIME_INDEX, TIME_INDEX_V)
+                db.execute(f"DROP INDEX IF EXISTS {other[0]}")
+                db.execute(f"CREATE INDEX IF NOT EXISTS {want[0]} ON stt_runs ({want[1]}) WHERE time_check != ''")
+            except Exception:
+                self._db = None                    # (opened again next time)
+                db.close()
+                raise
+            self._vocab = "vocab_v" in have           # (#659's column, once runs carry it: Health's rates split by it)
         return self._db
 
     def _exists(self) -> bool:
@@ -150,6 +198,7 @@ class Runs:
 
     def add(self, clip_id: str, engine: str, *, text: str = "", status: str = "", model: str = "", worker: str = "",
             prompt_v: str = "", role: str = "text", confidence: float | None = None, words: list | None = None,
+            check=None,                            # (its trailing-time check, a sizeup.stt_time.Check: #727)
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
@@ -168,8 +217,9 @@ class Runs:
             return False
         try:
             with self._lock:
-                self._open().execute(f"INSERT INTO stt_runs ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
-                                     row)
+                cols = COLUMNS + CHECK_COLUMNS
+                self._open().execute(f"INSERT INTO stt_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                     row + _check_row(check))
             return True
         except Exception as e:  # noqa: BLE001 - bookkeeping: never in the way of the transcript
             self._say(f"stt runs: not recorded: {type(e).__name__}: {e}")
@@ -181,9 +231,10 @@ class Runs:
             return []
         try:
             with self._lock:
-                cur = self._open().execute(f"SELECT {', '.join(COLUMNS)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
+                cols = COLUMNS + CHECK_COLUMNS
+                cur = self._open().execute(f"SELECT {', '.join(cols)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
                                            (clip_id,))
-                rows = [dict(zip(COLUMNS, r)) for r in cur.fetchall()]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         except Exception:  # noqa: BLE001 - none
             return []
         for d in rows:
@@ -225,6 +276,78 @@ class Runs:
         except Exception as e:  # noqa: BLE001 - again next time
             self._say(f"stt runs: prune: {type(e).__name__}: {e}")
         return n
+
+    # -- the dispatcher's trailing time (#727, sizeup/stt_time.py) -------------------------------------------------------
+
+    def time_rates(self, now: float | None = None, days: int = TIME_DAYS) -> list[dict]:
+        """Settings > Station > Health: the trailing-time match rate per channel, engine, model (and vocab_v once runs
+        carry it), from the checked runs done in the last `days` (TIME_RATES_S old at most): [{channel, engine, model,
+        vocab_v, n_24h, said_24h, match_24h, rate_24h, n, said, match, rate, daily}]. said: a time was read (match +
+        time_mismatch; a no_time is never a failure); rate: match / said in %, None with nothing said; daily: each
+        day's rate, oldest first. The busiest first."""
+        now = self.clock() if now is None else now
+        got = self._rates
+        if got is not None and got[0] == days and 0 <= now - got[1] < TIME_RATES_S:
+            return got[2]
+        out: list[dict] = []
+        if self._exists():
+            try:
+                if self._db is None:
+                    with self._lock:
+                        self._open()               # (made and migrated once: its columns and index there)
+                vocab = "vocab_v" if self._vocab else "''"
+                roles, counted = ", ".join(f"'{r}'" for r in TIME_ROLES), ", ".join(f"'{r}'" for r in TIME_COUNTED)
+                sql = (f"SELECT channel, engine, model, {vocab}, CAST((? - done_at) / 86400 AS INTEGER), time_check, "
+                       f"COUNT(*) FROM stt_runs WHERE time_check != '' AND done_at > ? AND role IN ({roles}) AND "
+                       f"time_check IN ({counted}) GROUP BY 1, 2, 3, 4, 5, 6")
+                args = (now, now - days * 86400.0)
+                rdb = self._reader()
+                if rdb is None:                    # (in memory: the one connection)
+                    with self._lock:
+                        rows = self._open().execute(sql, args).fetchall()
+                else:
+                    with self._rlock:
+                        rows = rdb.execute(sql, args).fetchall()
+            except Exception as e:  # noqa: BLE001 - none this time
+                self._say(f"stt runs: trailing-time rates: {type(e).__name__}: {e}")
+                rows = []
+            by: dict[tuple, dict] = {}
+            for ch, eng, model, voc, age, res, n in rows:
+                age = min(max(int(age), 0), days - 1)
+                d = by.setdefault((ch, eng, model, voc), {"channel": ch, "engine": eng, "model": model, "vocab_v": voc,
+                                                          "days": [[0, 0] for _ in range(days)], "n": 0, "n_24h": 0,
+                                                          "match": 0, "said": 0, "match_24h": 0, "said_24h": 0})
+                said, match = (n if res in ("match", "time_mismatch") else 0), (n if res == "match" else 0)
+                d["n"] += n
+                d["said"] += said
+                d["match"] += match
+                d["days"][days - 1 - age][0] += match
+                d["days"][days - 1 - age][1] += said
+                if age == 0:
+                    d["n_24h"] += n
+                    d["said_24h"] += said
+                    d["match_24h"] += match
+            for d in by.values():
+                d["rate"] = _rate(d["match"], d["said"])
+                d["rate_24h"] = _rate(d["match_24h"], d["said_24h"])
+                d["daily"] = [_rate(m, s_) for m, s_ in d.pop("days")]
+                out.append(d)
+            out.sort(key=lambda d: (-d["n_24h"], -d["n"], d["channel"], d["engine"], d["model"]))
+        self._rates = (days, now, out)
+        return out
+
+    def _reader(self) -> sqlite3.Connection | None:
+        """Health's own read-only connection to the file (WAL: it never waits on a write, nor a write on it); None in
+        memory."""
+        if self.path == ":memory:":
+            return None
+        if self._rdb is None:
+            from urllib.parse import quote
+            rdb = sqlite3.connect(f"file:{quote(str(Path(self.path).resolve()))}?mode=ro", uri=True,
+                                  check_same_thread=False)
+            rdb.execute("PRAGMA busy_timeout = 5000")
+            self._rdb = rdb
+        return self._rdb
 
     # -- the copies (like the station metrics': sizeup/cloud/metricsbackup.py, the same restore) ------------------------
 
