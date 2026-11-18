@@ -102,6 +102,7 @@ MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|contin
 DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
+DEESCALATED = "de-escalated"           # the note a category's "deescalate" phrase leaves on its open event
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
@@ -593,6 +594,9 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if not suppressed and pack.calm:
+            changed += [x for x in self._deescalate(pack, key, at, tid, text, ws, win.entries[tid])
+                        if not any(x is c for c in changed)]
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -1203,6 +1207,26 @@ class IntelEngine:
             self.sink.event(ev, "ended")
             out.append(ev)
         self._consume(pack.name, key)
+        return out
+
+    def _deescalate(self, pack, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
+        """A category's "deescalate" phrase (rules.py; the weapons category: "she got the knife away", "he wasn't
+        using it to threaten anyone"): its open event on this source within merge_min (the span an open event takes a
+        new mention: the follow-up often comes once units are there) is noted DEESCALATED, with this row in its
+        traffic. The one at the place this row reads back, else the latest. Never a push, never an end (the call goes
+        on), never a new event; a later row that says the category again leaves the note as it is."""
+        out = []
+        for cat in pack.deescalated(text, ws):
+            open_ = self._open_for(pack, cat, key, at, self._merge_span(pack))
+            here = [e for e in open_ if entry.place is not None and e.precision != "none" and same_place(entry.place, e.place())]
+            ev = max(here or open_, key=lambda e: (e.last_at, e.id or 0), default=None)
+            if ev is None or ev.note == DEESCALATED:
+                continue
+            ev.note, ev.updated_at = DEESCALATED, self.clock()
+            ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
         return out
 
     def _consume(self, pack_name: str, key: str) -> None:
