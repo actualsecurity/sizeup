@@ -107,20 +107,53 @@ def test_a_safety_escalation_after_a_de_escalation_clears_the_note_and_pushes_ag
     assert e.events.get(ev.id).note == "re-opened" and pushed(sink) == ["weapons", "weapons"]
 
 
-def test_a_weak_mention_after_a_de_escalation_clears_the_note_without_a_push():
+@pytest.mark.parametrize("text", [
+    "for the report, he had a gun in his waistband when we arrived",
+    "he had a gun in his pocket too, he's in custody",
+    "for the report, a gun was involved, no injuries",
+    "be advised a gun was involved, one in custody",
+])
+def test_an_after_action_mention_after_a_de_escalation_clears_the_note_without_a_push(text):
     e, sink = engine()
     [ev] = e.feed(row("t1", GUN_CALL, 1000))
     e.feed(row("t2", SECURED, 1100))
-    e.feed(row("t3", "he is armed", 1110))
+    e.feed(row("t3", text, 1110))
     assert e.events.get(ev.id).note == "" and pushed(sink) == ["weapons"]
 
 
-def test_a_weak_mention_after_the_window_clears_the_note_too():
+def test_after_the_window_an_after_action_mention_clears_the_note_and_an_escalation_pushes_again():
     e, sink = engine()
     [ev] = e.feed(row("t1", GUN_CALL, 1000))
     e.feed(row("t2", SECURED, 1100))
-    e.feed(row("t3", "he is armed again", 1600))                            # the call-out has left the window
+    e.feed(row("t3", "the male had the gun in his waistband when we arrived", 1600))     # the call-out left the window
     assert e.events.get(ev.id).note == "" and pushed(sink) == ["weapons"]
+    e, sink = engine()
+    [ev] = e.feed(row("t1", GUN_CALL, 1000))
+    e.feed(row("t2", SECURED, 1100))
+    e.feed(row("t3", "units be advised, he is armed again", 1600))
+    assert e.events.get(ev.id).note == "re-opened" and pushed(sink) == ["weapons", "weapons"]
+
+
+def test_a_de_escalation_from_another_job_needs_the_place():
+    e, sink = engine()
+    [ev] = e.feed(row("t1", "caller states the male has a machete at 100 Example Ave", 1000))
+    e.feed(row("t2", "car 20 at the other job, the knife was secured in the kitchen", 1060))
+    assert e.events.get(ev.id).note == ""
+    e.feed(row("t3", "car 20, the machete was secured at 100 Example Ave", 1080))
+    assert e.events.get(ev.id).note == "de-escalated"
+
+
+def test_officers_are_a_safety_call_and_never_tie_by_the_word_officer():
+    e, sink = engine()
+    [ev] = e.feed(row("t1", "officer down, officer down, 40 Sample Street", 1000))
+    e.feed(row("t2", "disregard, officer 14 back in service", 1300))
+    assert e.events.get(ev.id).status == "open"
+    e, sink = engine()
+    [ev] = e.feed(row("t1", "officer down, officer down, 40 Sample Street", 1000))
+    e.feed(row("t2", "disregard, disregard", 1020))                      # nameless: only "possibly cancelled"
+    got = e.events.get(ev.id)
+    assert got.status == "open" and got.note == "possibly cancelled"
+    assert "officer" not in police().category("officer")["words"]
 
 
 def test_a_possibly_cancelled_note_is_never_overwritten():
@@ -191,7 +224,11 @@ def test_weapons_edp_and_dispute_tie_by_telling_words_only():
     ("he said he got jumped by three males, can you respond", "assault"),
     (CUE + "complainant states a coworker punched him", "assault"),
     ("car 12 to headquarters, I've been assaulted, send me another car", "officer"),
-    ("officer down at 40 Sample Street", "officer"),
+    ("officer down, officer down, 40 Sample Street", "officer"),
+    ("car 12, I'm being attacked", "officer"),                                       # one push: never dispute too
+    ("car 12, I'm hit, I'm hit", "officer"),
+    ("caller states I've been assaulted, can you respond to 40 Sample Street", "assault"),
+    ("the caller said I'm being attacked by my neighbor, respond to 40 Sample Street", "dispute"),
 ])
 def test_dispatch_shapes_push_their_category(text, cat):
     e, sink = engine()
@@ -261,8 +298,40 @@ def test_dispatch_shapes_push_their_category(text, cat):
     CUE + "the car was jumped already",
     CUE + "he got jumped during the game",
     "she was assaulted",                                                              # no dispatch cue: under
-    # an officer's routine request
+    # an officer's routine request, and words that only look like an officer in trouble
     "send me another car",
+    "officer down the street at the corner store",
+    "officer by the river, officer down by the river checking the boat",
+    "officer at headquarters, officer down at headquarters for lunch",
+    "officer needs help with the tow",
+    "officer needs assistance with traffic at the parade",
+    "officer needs help lifting the patient",
+    "officer needs help carrying the stretcher",
+    "officer shot a video of the damage",
+    "officer shot the photos for the report",
+    "car 12, I'm hit, I'm okay, minor accident",
+    "car 12, I'm hit, rear ended at the light",
+    "caller states I'm being attacked by my dog",
+    "I just got attacked by a dog",
+    # an assault in progress that isn't one
+    CUE + "she is being attacked by bees",
+    CUE + "he's attacking her online, posting about her",
+    CUE + "a dog is attacking him",
+    # an assault report
+    CUE + "assault victim at the hospital, wants to speak with an officer",
+    CUE + "she was assaulted on the bus, she's at the station",
+    CUE + "she was assaulted, she wants to file a complaint",
+    CUE + "the student was assaulted at school today",
+    CUE + "he says he was attacked in a dream",
+    CUE + "she was assaulted on social media",
+    # bats, sport, tools at work, hunters, locked up, last time
+    CUE + "she has a bat in her bedroom",
+    CUE + "a bat flying in the apartment, the male has a bat trapped",
+    CUE + "the boy has a bat at little league practice",
+    CUE + "the contractor has a hammer working on the roof",
+    CUE + "he has a gun at home, he's a hunter",
+    CUE + "he has a gun but it's locked up",
+    CUE + "he had a knife last time",
     "car 12, send me another car for the transport",
     # cues alone
     "be advised car 12 is responding",
