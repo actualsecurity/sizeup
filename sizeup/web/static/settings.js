@@ -302,8 +302,8 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 
 // ---- load / save ----------------------------------------------------------------------------------
 
-// The settings as they are now. The CAD's rev moves with every call, unit and transmission (sHook), the settings
-// seldom: the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
+// The settings as they are now. The CAD's rev moves with every call, unit and transmission, the settings seldom (sHook
+// reads them again at once only when settings_rev moves, else on a slower clock): the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
 // scroll position, the focus and typed text (fresh: the form that was just saved starts clean).
 // "What it shows" is by section (S_PART_OF: a part of the settings drawn in one section only; a part not named is
 // everyone's), and without what moves with the calls and the radio (S_LIVE_KEYS: a list item's "used 12×" and "3 now",
@@ -335,8 +335,10 @@ async function sLoad(opts = {}) {
     return;
   }
   S.loading = true;
+  if (cad.state) S.seenSettingsRev = cad.state.settings_rev;       // (sHook: read again when it moves)
   try {
     const d = await api("GET", "/api/cad/settings");
+    S.loadedAt = Date.now();
     const [sig, live] = sSigs(d, S.section);
     const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
     S.data = d;
@@ -357,6 +359,7 @@ async function sLoad(opts = {}) {
 // alarms and Intel (their own reads: another admin's change, the 24 h counts), the audio kept and the cameras on the
 // wall. Users: who was seen when, at most every 15 s.
 function sRefresh() {
+  if (document.hidden) return;              // (not shown: its cards catch up once it is, sHook)
   if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
   S.refreshDue = false;
   if (S.section === "users") sActivity();
@@ -895,12 +898,30 @@ function sUnnamed(d) {
   el("div", "tscroll").appendChild(t).parentNode);
 }
 
+// When to read the settings again. Their own version (the state's settings_rev: any setting written, removed or
+// audited, a user added or edited) at once. The CAD's rev moves with every call, unit and transmission: what moves with
+// it (S_LIVE_KEYS: "used 3×", a unit's status, the audio kept) is read again at most every S_POLL.live ms in the
+// sections that show it on every row (S_LIVE), every S_POLL.other ms in the rest (each read builds every section on
+// the hub: read on every rev, an open Settings page asked about every 1.5 s, 1-2.5 s each, slowing every other request).
+const S_POLL = { live: 5000, other: 30000 };
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere
   sStationTab();
   if (S.section === "station" && cad.state && !S.stationShown && S.data) sRender(true);   // the first state: its tab
   if (!S.section) return;
   if (S.section === "runcards") sRunTools();
-  if (cad.state && S.data && cad.state.rev !== S.data.rev && !S.loading) sLoad();
+  if (!cad.state || !S.data || S.loading) return;
+  const st = cad.state;
+  if (st.settings_rev !== S.seenSettingsRev) { sLoad(); return; }          // (the state's, as at the last read)
+  if (document.hidden) return;              // a tab not shown reads nothing on the clock (back: the next render does)
+  const every = S_LIVE.has(S.section) ? S_POLL.live : S_POLL.other, now = Date.now();
+  if (st.rev !== S.data.rev && now - (S.loadedAt || 0) >= every) { sLoad(); return; }
+  // what System reads apart from the settings (the counts, the audit log, Emergency alarms, Intel's counters) keeps up
+  // with the calls by itself, each card its own small read: at most every S_POLL.live ms, never the whole settings
+  if ((S.section === "system" || S.section === "users") && st.rev !== S.refreshRev && now - (S.refreshedAt || 0) >= S_POLL.live) {
+    S.refreshRev = st.rev;
+    S.refreshedAt = now;
+    sRefresh();
+  }
 }
 
 // ---- lists ----------------------------------------------------------------------------------------
@@ -1040,7 +1061,7 @@ function sItemRow(sec, x, i, n) {
   ord.append(up, down);
   const edit = (item, what) => sPost(sec, { action: "edit", code: x.code, item }, `${x.code} ${what}`);
   const name = sInput(x.name, 60, "Name", (v) => { if (v && v !== x.name) edit({ name: v }, "renamed"); }, "s-name");
-  name.disabled = deleted;
+  name.disabled = deleted || !!x.system;          // the hub's own (Expired): read-only, never on a pick list
   li.append(ord, el("code", "s-code", x.code), name);
   if (sec === "event_types") {
     li.append(sColor(x.color, (v) => edit({ color: v }, "color changed"), "Color"));
@@ -1068,6 +1089,13 @@ function sItemRow(sec, x, i, n) {
   li.append(el("span", "dim small s-used", usedText + (x.used ? `used ${x.used}×` : "unused")), el("span", "spacer"));
   if (deleted) {
     li.append(sBtn("Restore", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} restored`)));
+    return li;
+  }
+  if (x.system) {
+    const sys = el("span", "dim small", "set by the hub");
+    sys.title = "A non-emergency event closes with this when its Until passes. Not on the pick lists; can't be edited, retired or deleted.";
+    li.append(sys);
+    if (x.state === "edited") li.append(sBtn("Reset", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} reset`)));
     return li;
   }
   li.append(x.retired

@@ -109,6 +109,15 @@ def _outbound_not_armed():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_intel_engine():
+    """An App / HubApp registers its intel engine as the process's (sizeup.intel.push_sources()): never past that test
+    (a dead app's engine left behind would answer the next test's push_sources())."""
+    yield
+    from sizeup.intel import engine
+    engine.set_live(None)
+
+
+@pytest.fixture(autouse=True)
 def _private_claims_dir(tmp_path, monkeypatch):
     """Tests never touch the real ~/.local/state/rtl-claims shared with shortfinal."""
     import sizeup.radio.claims as claims

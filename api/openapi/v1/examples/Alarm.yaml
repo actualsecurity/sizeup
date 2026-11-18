@@ -1,0 +1,22 @@
+id: "5"
+state: open
+level: alarm
+at: 1767225700.0
+created_at: 1767225702.0
+what: emergency button
+who: E60 P1
+channel: FG1
+text: ""
+emergency: true
+drill: false
+source: ""
+subject: ""
+incident_id: "1042"
+incident_number: "26-000123"
+has_clip: true
+quiet: false
+ack_by: ""
+ack_at: null
+clear_by: ""
+clear_at: null
+rev: 9a8b7c6d5e4f3a2b

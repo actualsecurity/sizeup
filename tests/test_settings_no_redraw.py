@@ -236,6 +236,10 @@ def page(site):
         pg.on("request", lambda r: pg.posts.append((r.url.rsplit("/", 1)[1], r.post_data_json))
               if r.method == "POST" and "/api/cad/settings/" in r.url else None)
         pg.goto(site.base + "/cad#settings/system")
+        if not REF:
+            # what moves with the calls read again on every rev, as before the slower clock (sHook S_POLL): these tests
+            # are about how a reread lands; test_settings_reload.py is about when one happens
+            pg.evaluate("() => { S_POLL.live = 0; S_POLL.other = 0; }")
         pg.fill("#operator", "JD")
         pg.wait_for_selector(FIELD)
         pg.wait_for_function("document.querySelector('#s-audit table') && document.querySelector('#s-counts div')"

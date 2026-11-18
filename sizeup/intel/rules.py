@@ -23,6 +23,8 @@ tests/test_intel_packs.py times every pack's expressions on hostile texts, and a
 RE_TEXT_MAX characters.
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
+"exclude" (source keys or globs) takes sources back out: neighbor_police reads every MRRS police talkgroup except the
+police pack's own (Port Chester / Rye / Rye Brook PD), with the police pack's rules ("rules_from": rules_from()).
 
 Speech-to-text tolerance (a pack with "normalize": "<table>", data/intel/tables/<table>.json): the table's fixes
 (Normalizer: sound-alikes such as "order of gas" -> "odor of gas", split and merged words, number words as digits) make
@@ -292,12 +294,14 @@ class Pack:
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
-        empty list: any). Never a bare talkgroup number."""
+        empty list: any), and its source key none of "exclude" (globs). Never a bare talkgroup number."""
         sc = self.scope or {}
         key = str(row.get("source") or row.get("source_key") or "")
         if sc.get("services") and str(row.get("service") or "") not in sc["services"]:
             return False
         if sc.get("sources") and not any(fnmatch.fnmatchcase(key, g) for g in sc["sources"]):
+            return False
+        if any(fnmatch.fnmatchcase(key, g) for g in sc.get("exclude") or ()):
             return False
         if sc.get("tiers") and str(row.get("tier") or "") not in sc["tiers"]:
             return False
@@ -458,14 +462,57 @@ def read_files(paths=None) -> list[dict]:
     return out
 
 
+INHERITED = ("suppress", "normalize", "threshold", "window_s", "context_factor")
+
+
+def rules_from(d: dict, others: dict) -> dict:
+    """A pack with "rules_from": "<pack>" reads that pack's categories, rules and suppress phrases (and its normalize,
+    threshold, window_s and context_factor, unless it says its own) as written in that pack's file: one list of rules,
+    kept in one file, for two scopes (the police pack and neighbor_police: the same rules, another mode). Its rules'
+    ids are "rule_prefix" (default "<its name>.") + theirs ("area.pd.barricade"), so Settings tune each pack's rules on
+    their own (intel_rules is keyed by rule id) and the counts per rule stay apart; its categories' labels are
+    "<its label>: <theirs>" (the Settings card names each category's control by its label; a push and the card show
+    them without the prefix, push.category_label). The other pack's Settings
+    and its admin's local.* rules are not taken. ValueError with the reason."""
+    src = d.get("rules_from")
+    if not src:
+        return d
+    name = str(d.get("name") or "")
+    if not isinstance(src, str):
+        raise ValueError(f"{name}.rules_from: a pack's name")
+    base = others.get(src)
+    if base is None and re.fullmatch(r"[a-z][a-z0-9_]{0,23}", str(src)) and (DATA / f"{src}.json").is_file():
+        base = json.loads((DATA / f"{src}.json").read_text())
+    if base is None or src == name:
+        raise ValueError(f"{name}.rules_from: another pack's name ({src!r} isn't one)")
+    if base.get("rules_from"):
+        raise ValueError(f"{name}.rules_from: {src} takes its rules from another pack itself")
+    if "rules" in d or "categories" in d:
+        raise ValueError(f"{name}: rules_from, or rules and categories of its own, not both")
+    prefix = str(d.get("rule_prefix") or f"{name}.")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,23}\.", prefix):
+        raise ValueError(f"{name}.rule_prefix {prefix!r}: lower-case letters, digits, _, then a dot")
+    out = dict(d)
+    for k in INHERITED:
+        if k not in d and k in base:
+            out[k] = json.loads(json.dumps(base[k]))
+    label = str(d.get("label") or name.upper())
+    out["categories"] = {c: {**(cd or {}), "label": f"{label}: {(cd or {}).get('label') or c.replace('_', ' ').capitalize()}"}
+                         for c, cd in (base.get("categories") or {}).items()}
+    out["rules"] = [{**r, "id": prefix + str(r.get("id") or "")} for r in base.get("rules") or []]
+    return out
+
+
 def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]:
     """Packs from files or dicts (None: data/intel/*.json) with Settings' overrides over them:
-    {"intel_packs": {pack: {...}}, "intel_rules": {rule id: {...}}} (the other sections are ignored). Pure."""
+    {"intel_packs": {pack: {...}}, "intel_rules": {rule id: {...}}} (the other sections are ignored). Pure (a pack
+    whose "rules_from" isn't among those given reads that pack's file)."""
     ov = overrides or {}
     srcs = []
     for x in (read_files() if paths_or_dicts is None else paths_or_dicts):
         srcs.append(x if isinstance(x, dict) else json.loads(Path(x).read_text()))
-    return [compile_pack(d, ov.get("intel_packs") or {}, ov.get("intel_rules") or {}) for d in srcs]
+    by_name = {str(d.get("name") or ""): d for d in srcs}
+    return [compile_pack(rules_from(d, by_name), ov.get("intel_packs") or {}, ov.get("intel_rules") or {}) for d in srcs]
 
 
 def ruleset_hash(packs: list[Pack]) -> str:
