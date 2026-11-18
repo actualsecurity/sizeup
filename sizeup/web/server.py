@@ -247,10 +247,14 @@ class Assets:
 GZIP_HEAD = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"
 
 
-def deflate_segment(raw: bytes, level: int = 6) -> bytes:
-    """raw as deflate blocks that refer to nothing before them, ended by a sync flush (byte-aligned, not final):
-    any number of them, in any order, make one valid deflate stream, so one compression serves every stream."""
-    z = zlib.compressobj(level, zlib.DEFLATED, -15)
+def deflate_segment(raw: bytes, level: int = 6, after: bytes = b"") -> bytes:
+    """raw as deflate blocks ended by a sync flush (byte-aligned, not final), so segments can follow one another on a
+    gzip stream. They refer to nothing before them, so any number of them in any order make a valid deflate stream;
+    or, with after (the bytes the stream decoded last: zlib's preset dictionary, its last 32 KB), back into those
+    bytes too, which is right only on a stream whose last bytes are exactly those (as one zlib stream per page was:
+    a section that changed a little since the last event costs a little)."""
+    z = zlib.compressobj(level, zlib.DEFLATED, -15, zdict=after[-32768:]) if after else \
+        zlib.compressobj(level, zlib.DEFLATED, -15)
     return z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)
 
 
@@ -260,7 +264,7 @@ class _Event:
     def __init__(self):
         self.mu = threading.Lock()
         self.raw: bytes | None = None
-        self.gz: bytes | None = None
+        self.gz: dict[tuple | None, bytes] = {}       # the event this one follows on the page (None: any) -> gzip
 
 
 class Broadcaster:
@@ -273,7 +277,7 @@ class Broadcaster:
     ?since= (X-State-Id on GET). A delta is {"_delta": 1, <changed sections>, "_gone": [removed keys]?};
     a page merges it into what it has (live.js). An id from another boot, or none: the whole state."""
     MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
-    EVENTS_KEPT = 64   # event(): (push, since) pairs kept, of the newest two pushes only
+    EVENTS_KEPT = 64   # event(): (push, since) pairs kept, of the newest two pushes only (then: not kept)
 
     def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
@@ -384,31 +388,44 @@ class Broadcaster:
             parts.append(b'"_gone":' + json.dumps(went).encode())
         return b"{" + b",".join(parts) + b"}"
 
-    def event(self, snap, since: int | None, gz: bool = False) -> bytes:
+    def event(self, snap, since: int | None, gz: bool = False, after: tuple[int, int | None] | None = None) -> bytes:
         """The SSE event for snap as a page that has since gets it ("id: ...\\ndata: <body>\\n\\n"), made once per
         (push, since) and shared by every stream that asks: most pages are one push behind, so one delta and, gz, one
         compression serve them all, not one per page (with 200 pages and a change each second that was ~680 ms of CPU
-        a second; native-notes FINDINGS §3.5). gz: the event as raw deflate blocks from a fresh window, ended by a
-        sync flush, so it decodes the same after whatever came before it on any page's gzip stream (GZIP_HEAD once,
-        then these). Concurrent askers wait for the first to make it rather than making it again."""
+        a second; native-notes FINDINGS §3.5). gz: the event as deflate blocks ended by a sync flush (GZIP_HEAD once,
+        then these: deflate_segment), compressed against the event the page got last (after: its (seq, since), what
+        this returned it) while that one is still kept, else against nothing, so it decodes the same on any page's
+        stream. Concurrent askers wait for the first to make it rather than making it again."""
         seq, key = snap[0], (snap[0], since)
-        with self._ev_mu:
-            e = self._events.get(key)
-            if e is None:
-                if seq > self._ev_top:          # a new push: the ones before the last are nobody's any more
-                    self._ev_top = seq
-                    self._events = {k: v for k, v in self._events.items() if k[0] >= seq - 1}
-                if len(self._events) >= self.EVENTS_KEPT:    # many pages, each at another place: start over
-                    self._events = {}
-                e = self._events[key] = _Event()
-        with e.mu:
-            if e.raw is None:
-                e.raw = b"id: " + self.ident(seq).encode() + b"\ndata: " + self.body(snap, since) + b"\n\n"
-            if not gz:
-                return e.raw
-            if e.gz is None:
-                e.gz = deflate_segment(e.raw)
-            return e.gz
+        e = self._events.get(key)                # (a dict read: safe without the lock; most pages find it here)
+        if e is None:
+            with self._ev_mu:
+                e = self._events.get(key)
+                if e is None:
+                    if seq > self._ev_top:          # a new push: the ones before the last are nobody's any more
+                        self._ev_top = seq
+                        self._events = {k: v for k, v in self._events.items() if k[0] >= seq - 1}
+                    e = _Event()
+                    if len(self._events) < self.EVENTS_KEPT:   # full (pages at many places): made for this page alone
+                        self._events[key] = e
+        raw = e.raw
+        if raw is None:
+            with e.mu:
+                if e.raw is None:
+                    e.raw = b"id: " + self.ident(seq).encode() + b"\ndata: " + self.body(snap, since) + b"\n\n"
+                raw = e.raw
+        if not gz:
+            return raw
+        prev = self._events.get(after) if after is not None else None
+        last = prev.raw if prev is not None else None
+        on = after if last is not None else None
+        out = e.gz.get(on)
+        if out is None:
+            with e.mu:
+                out = e.gz.get(on)
+                if out is None:
+                    out = e.gz[on] = deflate_segment(raw, after=last or b"")
+        return out
 
     def latest(self) -> tuple[int, bytes]:
         """(seq, the whole state)."""
@@ -1352,11 +1369,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 # Gzipped, 2 KB of spaces would shrink to nothing: random hex instead.
                 hello = b"retry: 2000\n:" + (secrets.token_hex(1024).encode() if z else b" " * 2048) + b"\n\n"
                 self.wfile.write(GZIP_HEAD + deflate_segment(hello) if z else hello)
+                last = None                       # the event this page got last: the next one compressed against it
                 while not b.stopped:
                     snap = b.snapshot()
-                    self.wfile.write(b.event(snap, since, z))
+                    self.wfile.write(b.event(snap, since, z, last))
                     self.wfile.flush()
-                    since = snap[0]
+                    last, since = (snap[0], since), snap[0]
                     b.wait(since)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass

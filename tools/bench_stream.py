@@ -4,7 +4,8 @@
 
 Runs the real WebServer (sizeup/web/server.py) in this process with a synthetic state: 254 invented units and 10
 invented incidents with 60 radio rows each (~530 KB of JSON); every --change seconds (0: never) one note is added,
-so that section is pushed again, as a note on a working incident does on the hub. The pages are --procs separate
+so that section is pushed again, as a note on a working incident does on the hub; and each push one of 150 rigs
+moves on a ~12 KB "map" section (a small section that changes a little each time). The pages are --procs separate
 processes (so their own CPU is not counted), each holding its share of the --clients streams as a browser does
 (gzip when --gzip 1). Loopback only; nothing is read from or sent to anywhere else.
 
@@ -165,7 +166,10 @@ def main() -> None:
         if a.change and now - last >= a.change:
             v, last = v + 1, now
             inc = _incidents(v)
-        return {"time": now, "units": units, "incidents": inc, "rev": v}
+        n = int(now)                                # each push: one rig moved (a ~12 KB section, as the map's)
+        rigs = [{"name": f"E{100 + i}", "lat": round(41.0 + i * 7.31e-4 + (n % 97 if i == n % 150 else 0) * 1e-5, 6),
+                 "lon": round(-73.7 - i * 9.17e-4, 6), "heading": (i * 37) % 360} for i in range(150)]
+        return {"time": now, "units": units, "incidents": inc, "rev": v, "map": rigs}
 
     ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, state, lambda cid: None, lambda iid: False)
     threading.Thread(target=ws.serve_forever, daemon=True).start()

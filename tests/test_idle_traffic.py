@@ -84,12 +84,27 @@ def test_a_broken_state_is_an_error_push_and_the_next_good_one_puts_it_all_back(
     assert snap_json(b, s2) == {"_delta": 1, "time": 3, "units": [1], "_gone": ["error"]}
 
 
+def page(b: Broadcaster, steps) -> tuple[bytes, list[bytes]]:
+    """What a gzipped stream sends for these (snapshot, since) steps, as _stream does it: the wire and each event."""
+    hello = b"retry: 2000\n:" + b"ab" * 1024 + b"\n\n"
+    parts, last = [server_mod.GZIP_HEAD + server_mod.deflate_segment(hello)], None
+    for snap, since in steps:
+        parts.append(b.event(snap, since, True, last))
+        last = (snap[0], since)
+    return b"".join(parts), parts[1:]
+
+
+def decoded(b: Broadcaster, wire: bytes) -> list[dict]:
+    got = zlib.decompressobj(31).decompress(wire).split(b"\n\n")[1:-1]
+    return [json.loads(e.split(b"\ndata: ", 1)[1]) for e in got]
+
+
 def test_an_event_is_made_once_per_push_and_place_and_any_run_of_them_decodes(monkeypatch):
     """One compression per push for every page at the same place (FINDINGS §3.5); what each page decodes is exactly
     what it had before: the bodies in order, whatever it joined at and whatever else was sent."""
     made = []
     real = server_mod.deflate_segment
-    monkeypatch.setattr(server_mod, "deflate_segment", lambda raw, *a: made.append(raw) or real(raw, *a))
+    monkeypatch.setattr(server_mod, "deflate_segment", lambda raw, *a, **kw: made.append(raw) or real(raw, *a, **kw))
     b = Broadcaster(lambda: {})
     big = {"rows": [{"n": i, "text": f"row {i} on Example Ave"} for i in range(2000)]}
     s1 = b.publish({"time": 1, "incidents": big, "units": [1, 2]})
@@ -98,22 +113,49 @@ def test_an_event_is_made_once_per_push_and_place_and_any_run_of_them_decodes(mo
     assert b.event(first, None) == b"id: " + b.ident(s1).encode() + b"\ndata: " + b.body(first) + b"\n\n"
     s2 = b.publish({"time": 2, "incidents": {"rows": big["rows"] + [{"n": -1}]}, "units": [1, 2]})
     second = b.snapshot()
-    one_behind = b.event(second, s1, True)
-    assert b.event(second, s1, True) is one_behind and len(made) == 2           # shared by every page one push behind
-    joined = b.event(second, None, True)                                       # a page that joins now: the whole state
+    one_behind = b.event(second, s1, True, (s1, None))
+    assert b.event(second, s1, True, (s1, None)) is one_behind and len(made) == 2    # every page one push behind
+    joined = b.event(second, None, True)                                               # a page that joins now
     assert len(made) == 3 and joined != one_behind
     s3 = b.publish({"time": 3, "incidents": {"rows": []}, "units": [1, 2]})
     third = b.snapshot()
-    # page A was there from the first push; page B joined at the second
-    for parts, bodies in (([b.event(first, None, True), one_behind, b.event(third, s2, True)],
-                           [b.body(first), b.body(second, s1), b.body(third, s2)]),
-                          ([joined, b.event(third, s2, True)], [b.body(second), b.body(third, s2)])):
-        hello = b"retry: 2000\n:" + b"ab" * 1024 + b"\n\n"
-        wire = server_mod.GZIP_HEAD + server_mod.deflate_segment(hello) + b"".join(parts)
-        got = zlib.decompressobj(31).decompress(wire).split(b"\n\n")[1:-1]
-        assert [json.loads(e.split(b"\ndata: ", 1)[1]) for e in got] == [json.loads(x) for x in bodies]
-        assert got[-1].startswith(b"id: " + b.ident(s3).encode() + b"\n")
+    # page A was there from the first push; page B joined at the second; C at the second, then missed the third
+    s4 = b.publish({"time": 4, "incidents": {"rows": [{"n": 4}]}, "units": [1, 2, 3]})
+    fourth = b.snapshot()
+    for steps in ([(first, None), (second, s1), (third, s2), (fourth, s3)], [(second, None), (third, s2), (fourth, s3)],
+                  [(second, None), (fourth, s2)]):
+        wire, _ = page(b, steps)
+        assert decoded(b, wire) == [json.loads(b.body(snap, since)) for snap, since in steps]
+        assert zlib.decompressobj(31).decompress(wire).split(b"\n\n")[-2].startswith(b"id: " + b.ident(s4).encode() + b"\n")
     assert json.loads(b.body(third, s2)) == {"_delta": 1, "time": 3, "incidents": {"rows": []}}
+
+
+def test_a_section_that_changed_a_little_costs_a_little_on_the_page_that_had_it():
+    """Each event is compressed against the one the page got last (as one zlib stream per page was): a units list with
+    one status changed is a few bytes, not the whole list again. A page whose last event isn't kept any more gets one
+    compressed against nothing, which decodes all the same."""
+    b = Broadcaster(lambda: {})
+    units = [{"name": f"E{100 + i}", "status": "AQ", "lat": round(41 + i * 0.000731, 6), "lon": round(-73.7 - i * 0.000917, 6),
+              "since": 1700000000 + i * 7919} for i in range(150)]
+    steps = []
+    for t in range(1, 6):
+        units = [dict(u, status="OS") if i == t else u for i, u in enumerate(units)]
+        steps.append((b.snapshot() if b.publish({"time": t, "units": units}) else None, steps[-1][0][0] if steps else None))
+    wire, parts = page(b, steps)
+    assert decoded(b, wire) == [json.loads(b.body(snap, since)) for snap, since in steps]
+    snap, since = steps[-1]
+    alone = server_mod.deflate_segment(b.event(snap, since))
+    assert len(b.body(snap, since)) > 10000 and len(parts[-1]) < len(alone) / 4, (len(parts[-1]), len(alone))
+    snaps = []
+    b2 = Broadcaster(lambda: {})
+    for t in range(1, 6):
+        b2.publish({"time": t, "units": units[:t * 20]})
+        snaps.append(b2.snapshot())
+    wire, parts = page(b2, [(snaps[0], None), (snaps[1], snaps[0][0])])
+    # the third push after a page's last: that event is gone (only the newest two pushes are kept)
+    late = b2.event(snaps[4], snaps[1][0], True, (snaps[1][0], snaps[0][0]))
+    assert (snaps[1][0], snaps[0][0]) not in b2._events
+    assert decoded(b2, wire + late)[-1] == json.loads(b2.body(snaps[4], snaps[1][0]))
 
 
 def test_an_event_is_never_one_of_another_push_and_only_the_last_two_pushes_are_kept():
@@ -135,20 +177,20 @@ def test_pages_at_the_same_place_share_one_compression_even_when_they_ask_at_onc
     calls = []
     real = server_mod.deflate_segment
 
-    def slow(raw, *a):
+    def slow(raw, *a, **kw):
         calls.append(raw)
         time.sleep(0.05)                     # long enough for every page to be waiting on it
-        return real(raw, *a)
+        return real(raw, *a, **kw)
     monkeypatch.setattr(server_mod, "deflate_segment", slow)
     b = Broadcaster(lambda: {})
     s1 = b.publish({"time": 1, "incidents": ["x" * 5000]})
     b.publish({"time": 2, "incidents": ["y" * 5000]})
     snap, out, go = b.snapshot(), [], threading.Barrier(20)
 
-    def page():
+    def one():
         go.wait()
-        out.append(b.event(snap, s1, True))
-    ts = [threading.Thread(target=page) for _ in range(20)]
+        out.append(b.event(snap, s1, True, (s1, None)))
+    ts = [threading.Thread(target=one) for _ in range(20)]
     for t in ts:
         t.start()
     for t in ts:
@@ -290,9 +332,12 @@ def test_a_change_reaches_every_page_in_the_same_push_whatever_it_takes_and_wher
     for t in ts:
         t.join(10)
     assert all(d is not None for d in done), done
-    assert len({d[0] for d in done}) == 1 and len({d[1] for d in done}) == 1         # the same push, the same state
-    assert done[0][0] == b.ident(int(done[0][0].split(".")[1]))
-    assert {k[0] for k in b._events} <= {b.snapshot()[0] - 1, b.snapshot()[0]} | {int(done[0][0].split(".")[1])}
+    assert len({d[1] for d in done}) == 1                                              # the same state on every page
+    n = lambda ident: int(ident.split(".")[1])                                          # noqa: E731
+    at = min(n(d[0]) for d in done)                                                     # the push that carried it
+    for s, d in zip(seen, done):
+        # in that push, or (a page that was busy when it came: pushes are never queued) the first it got after it
+        assert next(x for x in s if n(x) >= at) == d[0], (s, d[0], at)
 
 
 def test_polling_gets_only_what_changed_since_its_last_answer(hub):
