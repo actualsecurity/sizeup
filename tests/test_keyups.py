@@ -266,11 +266,18 @@ def mdc_ids(a):
 
 
 def both_ids(a):
-    """MDC-1200 and FleetSync, emergency packets too: what the station's tap decodes (App._mdc)."""
+    """MDC-1200 and FleetSync, emergency packets too, each with where its sync begins: what the station's tap decodes
+    (App._mdc_at)."""
     a = np.asarray(a, np.float64)
-    return ([(p.unit_hex, p.kind == "emergency") for p in mdc1200.decode(a, RATE)
+    return ([(p.unit_hex, p.kind == "emergency", p.start_s) for p in mdc1200.decode(a, RATE)
              if p.kind in ("pre-id", "post-id", "emergency")]
-            + [(p.id, p.emergency) for p in fleetsync.decode(a, RATE) if p.kind in ("pre-id", "post-id", "emergency")])
+            + [(p.id, p.emergency, p.start_s - len(fleetsync.SYNC) / p.baud) for p in fleetsync.decode(a, RATE)
+               if p.kind in ("pre-id", "post-id", "emergency")])
+
+
+def both_ids_unplaced(a):
+    """both_ids without where (an mdc() that doesn't say: the tap decodes its buffer and look-back apart)."""
+    return [x[:2] for x in both_ids(a)]
 
 
 def tap_run(audio, mdc=mdc_ids, **kw):
@@ -930,7 +937,7 @@ def test_a_burst_sent_to_the_last_moment_stays_with_its_radio(talk, gap, op):
     # never has A's ID or A's alarm. (#690: B's row took them while A's key-up window was open; the cut burst lost its
     # last frame and didn't decode by itself)
     def seg_ids(seg):           # as App._mdc: each cut burst and the audio decoded on its own
-        return [h for b in [*seg.bursts, seg.audio] for h, _e in both_ids(b)]
+        return [x[0] for b in [*seg.bursts, seg.audio] for x in both_ids(b)]
     a = np.concatenate([quiet(0.15), voice_like(talk) + quiet(talk), quiet(0.1), mdc(A_ID, op)])
     rows, alarms = tap_run(np.concatenate([idle(3.0), a, idle(gap, 1), unit(1.5, pre=B_ID), idle(2.0, 2)]),
                            mdc=both_ids, **TRAFFIC)
