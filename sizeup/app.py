@@ -4842,8 +4842,9 @@ class App:
         every clip waiting is taken out; pages and Fire/EMS clips (URGENT) first get wait_s with whisper (when it is
         up), with the one in flight; then each transmission still waiting is marked "skipped: busy" (stt.SHED) like a
         shed clip: its row and recording go up through the outbox, which outlives the restart, and the CAD of record's
-        catch-up (sizeup/sttcatchup.py) transcribes it later (or Re-transcribe can). A page is marked not transcribed
-        (re-runnable), a person's re-run failed, a catch-up clip forgotten (asked for again). Marking stops after mark_s
+        catch-up (sizeup/sttcatchup.py) transcribes it later (or Re-transcribe can). A page is marked the same way
+        ("skipped", re-runnable: the catch-up takes traffic only, so Re-transcribe or the hub's own engine; the STT
+        session's persisted queue replaces all of this), a person's re-run failed, a catch-up clip forgotten. Marking stops after mark_s
         (the rest counted as lost), and the one in flight is lost unless whisper finishes it before the exit: both said
         in the log.
         -> the counts."""
@@ -4877,13 +4878,13 @@ class App:
                 elif isinstance(item, Traffic):
                     self._stt_dropped(item, why)
                     n["skipped"] += 1
-                else:
-                    self._stt_dropped(item, "the station stopped before speech-to-text got to it")
+                else:                          # a page: "skipped", re-runnable, never "failed" (see the docstring)
+                    self._stt_dropped(item, why)
                     n["pages"] += 1
             except Exception as e:  # noqa: BLE001 - one clip's trouble never keeps the others from going up
                 log(f"speech-to-text: {getattr(item, 'id', '?')} not handed over: {type(e).__name__}: {e}")
         log(f"speech-to-text: stopping with {n['waiting']} clip(s) waiting: {n['skipped']} marked skipped (caught up "
-            f"later), {n['pages']} page(s) and {n['reruns']} re-run(s) not transcribed, {n['catchup']} catch-up "
+            f"later), {n['pages']} page(s) marked skipped, {n['reruns']} re-run(s) failed, {n['catchup']} catch-up "
             f"clip(s) given back" + (f", {n['unmarked']} not marked in time (lost)" if n["unmarked"] else "")
             + (f"; {n['in_flight']} in flight (lost unless whisper finishes it before the exit)" if n["in_flight"] else ""))
         return n

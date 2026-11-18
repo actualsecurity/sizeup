@@ -51,6 +51,29 @@ need_root() {
   fi
 }
 
+# The updater running now (a oneshot is "activating" while it runs, waiting for its moment included)
+updater_running() {
+  case "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" in
+    activating|active|deactivating) return 0 ;;
+  esac
+  return 1
+}
+
+# Its state.json state ("deferred": built, waiting for its moment to switch, up to 45 min)
+updater_state() {
+  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("state", ""))' \
+    /var/lib/sizeup-update/state.json 2>/dev/null || true
+}
+
+# What to say when a command can't run because the updater is running
+updater_busy() {
+  echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+  if [ "$(updater_state)" = deferred ]; then
+    echo "It is waiting for its moment to switch (sudo sizeup-station autoupdate status): sudo sizeup-station" \
+         "autoupdate now switches now, autoupdate off stops it waiting; then try again." >&2
+  fi
+}
+
 # conf_port SECTION DEFAULT: [web] port / [stt] port from the config
 conf_port() {
   python3 -c 'import sys, tomllib; print(int(tomllib.load(open(sys.argv[1], "rb")).get(sys.argv[2], {}).get("port", sys.argv[3])))' \
@@ -288,8 +311,8 @@ case "$cmd" in
     exit 0 ;;
   update)
     need_root update "$@"
-    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
-      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+    if updater_running; then
+      updater_busy
       exit 1
     fi
     exec bash "$INSTALLER" --update "$@" ;;
@@ -299,7 +322,19 @@ case "$cmd" in
       on|off)
         need_root autoupdate "$@"
         python3 -I "$UPDATER" "$sub"
-        [ "$sub" = on ] && systemctl start --no-block sizeup-update.service
+        if [ "$sub" = on ]; then
+          systemctl start --no-block sizeup-update.service
+          exit 0
+        fi
+        # off while an update waits for its moment: it sees that within 15 s and stops waiting (nothing switches);
+        # stopped here if it hasn't by then, and only while it still waits (never mid-build or mid-switch)
+        if updater_running && [ "$(updater_state)" = deferred ]; then
+          for _ in $(seq 1 30); do updater_running || break; sleep 1; done
+          if updater_running && [ "$(updater_state)" = deferred ]; then
+            systemctl stop sizeup-update.service
+          fi
+          echo "the update that was waiting for its moment won't switch"
+        fi
         exit 0 ;;
       now)
         need_root autoupdate "$@"
@@ -314,8 +349,8 @@ case "$cmd" in
     esac ;;
   rollback)
     need_root rollback "$@"
-    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
-      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+    if updater_running; then
+      updater_busy
       exit 1
     fi
     exec python3 -I "$UPDATER" rollback "$@" ;;     # (--force: to a release whose adapter isn't set up now, #301)
@@ -325,8 +360,8 @@ case "$cmd" in
     case "$sub" in
       setup|remove)
         need_root adapter "$@"
-        if [ "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" = activating ]; then
-          echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+        if updater_running; then
+          updater_busy
           exit 1
         fi
         rc=0

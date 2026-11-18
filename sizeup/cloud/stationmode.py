@@ -101,8 +101,10 @@ def station_hold(app) -> dict:
     opened = [str(r.get("label")) for r in rows if r.get("open")]
     if opened:
         hard.append("carrier open on " + ", ".join(opened))
-    live = getattr(app, "live", None)
-    talking = live.state() if live is not None else []
+    try:
+        talking = app.live.state() if getattr(app, "live", None) is not None else []
+    except Exception:  # noqa: BLE001
+        talking = []
     if talking:
         hard.append(f"{len(talking)} talking")
     stt = getattr(app, "stt", None)
@@ -113,7 +115,10 @@ def station_hold(app) -> dict:
     if urgent:
         hard.append(f"{urgent} page / Fire-EMS clip(s) waiting for speech-to-text")
     # (shed clips being caught up, sizeup/sttcatchup.py, never hold an update up: not counted, here or below)
-    n = stt.busy(catchup=False) if stt is not None and hasattr(stt, "busy") else 0
+    try:
+        n = int(stt.busy(catchup=False)) if stt is not None and hasattr(stt, "busy") else 0
+    except Exception:  # noqa: BLE001
+        n = 0
     if n:
         said.append(f"{n} transcription(s) in flight")
     rerun = len(set(getattr(app, "_rerun_ids", ()) or ()) - set(getattr(app, "_catchup_ids", ()) or ()))
@@ -122,7 +127,8 @@ def station_hold(app) -> dict:
     return {"hard": hard, "stt": int(n) + rerun, "said": said}
 
 def dispatched_ago(app) -> float | None:
-    """Seconds since the newest emergency event of ours still open was created, within DISPATCH_S (None: none)."""
+    """Seconds since the newest emergency event still open was created, within DISPATCH_S (None: none). (The station's
+    CAD has the events of its own pages and feeds: there is no "ours" column to narrow it by.)"""
     try:
         now = time.time()
         r = app.cad.store.one("SELECT MAX(created_at) AS t FROM incidents WHERE emergency = 1 AND status IN "

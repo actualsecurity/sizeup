@@ -339,15 +339,19 @@ How it goes, end to end:
      Fire/EMS clip waiting for speech-to-text.
    * **A short queue**: at most 5 transcriptions waiting, 20 after 10 more minutes, 60 after 20.
    * **Ceiling**: 45 min behind the hub (counted from when it first fell behind, whatever the hub deployed since),
-     neither settling nor the queue holds it; "busy" 5 min more at most, then it goes anyway.
+     neither settling nor the queue holds it, and it switches to the build it staged rather than chase a newer one;
+     "busy" 5 min more at most (from the ceiling, or from when this wait began if that was later), then it goes
+     anyway. A build that failed is not counted: the ceiling starts again when the hub moves on.
    * **Urgent**: `sudo sizeup-station autoupdate now`, or a commit since the running build with a line
      `Station-Update: now` in its message: no settling, no queue, "busy" 5 min at most.
    While it waits, the station's Hub row (and the hub's) say "staged, switching by HH:MM" and why; the journal says
    each reason once, and the result line says what it waited for, why it went and what was in flight. Shed clips
-   being caught up ([below](#speech-to-text-and-cpu)) never count: the ones still waiting are taken back while an
-   update waits. Clips still waiting for speech-to-text when sizeup-station stops are not lost: pages and Fire/EMS
-   clips get 8 s more, the rest go up marked "skipped: busy" (row and recording, through the outbox) and the
-   hub's catch-up transcribes them later.
+   being caught up ([below](#speech-to-text-and-cpu)) never count: they go on while it waits and are taken back at
+   the switch. Clips still waiting for speech-to-text when sizeup-station stops are not lost: pages and Fire/EMS
+   clips get 8 s more, then everything still waiting goes up marked "skipped: busy" (row and recording, through the
+   outbox): the hub's catch-up transcribes the transmissions later, and Re-transcribe takes any of them.
+   While it waits, `sizeup-station update` and `rollback` refuse (an update is running): `sudo sizeup-station
+   autoupdate now` switches now, `sudo sizeup-station autoupdate off` stops it waiting (nothing switches).
 8. **The switch**: `install-linux.sh --activate <sha>` swaps the build links and `/opt/sizeup/current`
    (each one rename), installs the release's units and commands, and restarts sizeup-station once.
    whisper-server is its own service now (`sizeup-whisper.service`) and keeps its model loaded; it is

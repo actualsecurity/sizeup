@@ -936,8 +936,13 @@ class StationHealth:
                                                   and b["last"].get("line") else ""),
                              "since": float((b["last"] or {}).get("at") or now) if isinstance(b["last"], dict) else now}
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
-            held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
-                                           "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
+            # a deferred switch past its "by HH:MM" (autoupdate.py describe() says "behind" then): the updater died or
+            # hangs, so at once, not behind_s later
+            overdue = isinstance(b["update"], dict) and b["update"].get("state") == "deferred"
+            held("behind", 0 if overdue else self.behind_s,
+                 {"severity": "warning", "title": "Station behind the hub",
+                  "text": f"{b['text']} (the hub runs {short(b['hub'])})"
+                          + (": its switch is overdue (sizeup-update on the station)" if overdue else "")})
         for x in m.get("duplicates") or []:
             on = f" {x['name']}'s job {x['job']} won't start until fixed." if x["job"] != "Off" else ""
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",

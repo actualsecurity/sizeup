@@ -190,6 +190,18 @@ def test_behind_the_hub_for_fifteen_minutes():
     assert r.keys() == []
 
 
+def test_a_deferred_switch_is_no_alert_until_its_deadline_then_one_at_once():
+    r = Rig()
+    until = T0 + 50 * 60                                                   # "staged, switching by" 50 min on
+    upd = {"state": "deferred", "to": HUB, "since": T0, "hold": {"phase": "stt", "why": "80 waiting", "until": until}}
+    for m in (0, 20, 49):
+        r.at(m * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
+        assert r.keys() == []
+    r.at(53 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))   # past it: the updater died
+    (a,) = r.h.alerts()
+    assert a["key"] == "behind" and "overdue" in a["text"]
+
+
 def test_a_failed_or_rolled_back_update_alerts_at_once_with_the_update_line():
     r = Rig()
     last = {"at": T0 - 10, "from": OLD, "to": HUB, "result": "rolled back", "why": "/healthz didn't answer",

@@ -973,3 +973,97 @@ def test_station_stop_hands_over_the_clips_still_waiting(tmp_path):
     assert sorted(r["id"] for r in rows) == ["P25-0", "P25-1", "P25-2"]
     assert app._stt_handoff() == {"waiting": 0, "skipped": 0, "pages": 0, "reruns": 0, "catchup": 0, "unmarked": 0,
                                   "in_flight": 0}
+
+
+# -- review fixes (#712) -------------------------------------------------------------------------------------
+
+def _snapshots(u):
+    seen = []
+    u.on_sleep = lambda now: seen.append(u.load())
+    return seen
+
+
+def test_a_station_that_gets_here_late_still_never_switches_mid_page_at_once(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    old, new = repo.shas[0], repo.commit("two")
+    t0 = u.t[0]
+    # behind for an hour already (a long build, a stage retried, a build that failed before): late on arrival
+    u.save({}, pending={"sha": new, "seen": t0 - 3600, "behind": t0 - 3600, "skipped": []})
+    u.busy_for = 10 ** 6                                     # a page on the air the whole time
+    seen = _snapshots(u)
+    u.want(new)
+    assert u.run() == 0 and u.calls == [("stage", new), ("activate", new)]
+    assert t0 + au.QUIET_MAX_S <= u.t[0] < t0 + au.QUIET_MAX_S + 10            # 5 min of grace from now, not none
+    assert u.load()["last"]["went"] == "still carrier open on FG1 after 5 min: switching anyway"
+    mid = seen[len(seen) // 2]
+    assert mid["state"] == "deferred" and mid["hold"]["phase"] == "busy"
+    assert t0 + au.QUIET_MAX_S <= mid["hold"]["until"] < t0 + au.QUIET_MAX_S + 5
+    d = describe(old, new, mid, now=mid["since"] + 200)
+    assert d["state"] == "deferred" and "staged, switching by" in d["text"]
+
+
+def test_a_build_that_failed_before_doesnt_carry_its_ceiling_over(station):
+    repo, u = station
+    bad = repo.commit("two")
+    u.bad_preflight.add(bad)
+    u.want(bad)
+    assert u.run() == 1 and "pending" in u.load()
+    assert u.run() == 0 and u.load()["state"] == "failed-before" and "pending" not in u.load()
+    u.p.work.mkdir(parents=True, exist_ok=True)
+    u.p.now_mark.touch()                                     # a "now" left over never makes a later update urgent
+    assert u.run() == 0 and not u.p.now_mark.exists()
+
+
+def test_autoupdate_off_stops_a_deferred_switch(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new = repo.commit("two")
+    t0 = u.t[0]
+
+    def off(now):
+        if now - t0 >= 120:
+            u.p.install_conf.write_text("SIZEUP_REF=main\nSIZEUP_AUTO_UPDATE=off\n")
+    u.on_sleep = off
+    u.want(new)
+    assert u.run() == 0 and u.calls == [("stage", new)]     # built, never switched
+    assert u.t[0] - t0 < 140
+    st = u.load()
+    assert st["state"] == "paused" and "autoupdate on" in st["paused"] and "hold" not in st and "pending" not in st
+    assert "not switching: auto-update is off" in "\n".join(u.lines)
+
+
+def test_once_late_it_switches_to_the_staged_build_rather_than_chase_a_newer_one(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new, newer = repo.commit("two"), repo.commit("three")
+    t0 = u.t[0]
+    u.save({}, pending={"sha": new, "seen": t0 - au.CEILING_S - 10, "behind": t0 - au.CEILING_S - 10, "skipped": []})
+    u.busy_for = 4                                           # a carrier for 20 s
+
+    def deploy(now):
+        if now - t0 >= 5 and not u.p.want.read_text().startswith(newer):
+            u.want(newer)
+    u.on_sleep = deploy
+    u.want(new)
+    assert u.run() == 0
+    assert u.calls[:2] == [("stage", new), ("activate", new)]                 # the staged one, at once
+    assert u.calls[2:] == [("stage", newer), ("activate", newer)]             # then the newer one, settled
+    assert u.current()[1] == newer
+
+
+def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip(tmp_path):
+    import numpy as np
+    from sizeup.app import App
+    from sizeup.radio.page import Page
+    from sizeup.stt import SHED, URGENT
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    app.whisper.state = "ok"                                 # whisper up: the URGENT ones get their seconds
+    page = Page("South2-1", "South 2", 46.0, 100.0, 110.0, "voice", audio=np.zeros(16000, np.float32))
+    app.stt.submit(page, np.zeros(16000, np.float32), URGENT, "South 2")
+    t0 = time.monotonic()
+    n = app._stt_handoff(wait_s=0.5)
+    assert 0.5 <= time.monotonic() - t0 < 5
+    assert n["pages"] == 1 and n["waiting"] == 1 and app.stt.busy() == 0
+    assert page.status == "skipped" and f"({SHED}: the station stopped" in page.model

@@ -223,7 +223,7 @@ const StationHealth = (() => {
     ]));
     kids.push(el("h3", "hl-sub", "Version"), dl([
       ["Station build", short(b.station)], ["Hub build", short(b.hub)],
-      ["State", b.text, stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
+      ["State", b.text, b.state === "deferred" ? "hl-warn" : stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
       ["Behind since", b.behind_since ? when(b.behind_since) : ""],
       ["Last update", last ? `${when(last.at)} ${short(last.from)} → ${short(last.to)}: ${last.result || "?"}${last.why ? ` (${last.why})` : ""}` : ""],
       ["Timings", last && last.seconds !== undefined && last.seconds !== null ? [`${last.seconds} s total`,
