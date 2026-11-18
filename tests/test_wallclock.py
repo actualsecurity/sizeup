@@ -2,6 +2,7 @@
 only: a station's boot clock that runs fast, its wall clock corrected in small steps, and real steps of either sign."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import time
@@ -161,11 +162,58 @@ def test_the_boot_id_is_read_or_none(tmp_path):
     assert read_boot_id() == (real.read_text().strip() if real.is_file() else None)
 
 
-def test_the_boot_clock_is_boottime_where_there_is_one():
+def test_the_boot_clock_is_boottime_else_clock_monotonic_which_counts_sleep():
+    """Linux: CLOCK_BOOTTIME. macOS: CLOCK_MONOTONIC (it counts sleep; time.monotonic() there does not)."""
     if getattr(time, "CLOCK_BOOTTIME", None) is not None:
         assert abs(wallclock.boot_clock() - time.clock_gettime(time.CLOCK_BOOTTIME)) < 1.0
     else:
-        assert abs(wallclock.boot_clock() - time.monotonic()) < 1.0
+        assert wallclock._CLOCKS == (time.CLOCK_MONOTONIC,)
+        assert abs(wallclock.boot_clock() - time.clock_gettime(time.CLOCK_MONOTONIC)) < 1.0
+
+
+def test_interleaved_samplers_never_count_one_step_twice():
+    """Two threads sample (the 1 s tick and the state thread): one whose reading is older can never put it back over
+    a newer one (the clocks are read under the lock), so one +60 s step is one step."""
+    clk, said = Clocks(1.0), []
+    clk.t = 10.0
+    hold, inside = threading.Event(), threading.Event()
+
+    def wall():
+        v = clk.wall()
+        if threading.current_thread().name == "slow-sampler":
+            inside.set()
+            hold.wait(2.0)                 # (its reading, taken before the step, held back)
+        return v
+    w = WallSteps(said.append, wall=wall, boot=clk.boot, boot_id_path="/nonexistent/boot_id")
+    w.sample()
+    clk.t += 1.0
+    a = threading.Thread(target=w.sample, name="slow-sampler")
+    a.start()
+    assert inside.wait(2.0)
+    clk.t += 1.0
+    clk.adj += 60.0                        # the step, while the slow one holds its older reading
+    b = threading.Thread(target=w.sample, name="fast-sampler")
+    b.start()
+    time.sleep(0.1)
+    hold.set()
+    a.join(5.0)
+    b.join(5.0)
+    for _ in range(3):
+        clk.t += 1.0
+        w.sample()
+    assert w.steps == 1 and said == ["wall clock stepped +60 s"]
+
+
+def test_a_sample_from_before_the_last_one_changes_nothing():
+    """A boot-clock reading earlier than the last (never on one clock): not a sample, the last one kept."""
+    clk, said = Clocks(1.0), []
+    w = counter(clk, said)
+    clk.t = 10.0
+    w.sample()
+    kept_last = w._last
+    clk.t = 9.0
+    clk.adj += 60.0
+    assert w.sample() == (clk.wall(), 0) and w._last == kept_last and w.steps == 0
 
 
 # -- across a restart (the count kept beside the outbox) ----------------------------------------------------------------
@@ -232,6 +280,13 @@ def test_a_reboot_starts_from_0(tmp_path):
     assert json.loads((tmp_path / "state" / wallclock.FILE).read_text())["boot_id"] == BOOT_B
 
 
+def test_no_state_folder_sends_a_null_boot_id(tmp_path):
+    """No path (a ":memory:" outbox): the count can't outlive a restart, so the post's boot_id is null (unknown)."""
+    w = WallSteps(boot_id_path=boot_file(tmp_path, BOOT_A))
+    assert w.boot_id == BOOT_A and w.post_boot_id is None
+    assert WallSteps(boot_id_path=boot_file(tmp_path, BOOT_A), path=tmp_path / wallclock.FILE).post_boot_id == BOOT_A
+
+
 def test_no_boot_id_keeps_nothing(tmp_path):
     """macOS: a reboot can't be told, so the count is never carried over (and never written)."""
     clk, said = Clocks(1.0), []
@@ -263,7 +318,7 @@ def test_the_count_is_written_when_it_changes_and_at_most_every_60_s_otherwise(t
     w = kept(clk, said, tmp_path)
     writes = []
     real = w.save
-    monkeypatch.setattr(w, "save", lambda: (writes.append((clk.t, w.steps)), real())[1])
+    monkeypatch.setattr(w, "save", lambda wait=True: (writes.append((clk.t, w.steps)), real(wait=wait))[1])
     run(clk, w, 1)                                   # the first sample: written
     run(clk, w, 150)
     assert [t for t, _ in writes] == [1.0, 61.0, 121.0]
@@ -277,17 +332,64 @@ def test_the_count_is_written_when_it_changes_and_at_most_every_60_s_otherwise(t
     assert len(writes) == 5 and json.loads((tmp_path / "state" / wallclock.FILE).read_text())["wall_steps"] == 1
 
 
-def test_a_write_that_fails_is_said_once_and_never_raises(tmp_path):
-    clk, said = Clocks(1.0), []
+def test_a_write_that_fails_is_said_loudly_once_and_on_health_and_never_raises(tmp_path):
+    """Saves that keep failing: a restart then takes back an older count (the contract's "unless saves fail"); said
+    once in the log (ERROR) and once as a note for Health, again only after a save worked in between."""
+    clk, said, notes = Clocks(1.0), [], []
     (tmp_path / "state").write_text("a file where the folder should be")
-    w = kept(clk, said, tmp_path)
+    w = WallSteps(said.append, wall=clk.wall, boot=clk.boot, boot_id_path=boot_file(tmp_path, BOOT_A),
+                  path=tmp_path / "state" / wallclock.FILE, note=notes.append)
     run(clk, w, 3)
     clk.t += 1.0
     clk.adj += 30.0
     w.sample()
     w.stop()
     assert w.steps == 1
-    assert [s for s in said if "can't keep" in s] == [said[0]] and said[1] == "wall clock stepped +30 s"
+    failed = [s for s in said if "can't save" in s]
+    assert len(failed) == 1 and "ERROR" in failed[0] and "wall clock stepped +30 s" in said
+    assert notes == ["wall clock: can't save the step count (a restart may lose steps)"]
+    (tmp_path / "state").unlink()          # the disk is back: a save works ...
+    run(clk, w, 1)
+    assert json.loads((tmp_path / "state" / wallclock.FILE).read_text())["wall_steps"] == 1
+    (tmp_path / "state" / wallclock.FILE).unlink()
+    (tmp_path / "state").rmdir()
+    (tmp_path / "state").write_text("broken again")
+    clk.t += 1.0
+    clk.adj += 30.0
+    w.sample()                             # ... and a new run of failures is said again
+    assert len([s for s in said if "can't save" in s]) == 2 and len(notes) == 2
+
+
+def test_a_slow_disk_never_holds_a_sample_and_stop_waits_for_it_at_most_2_s(tmp_path, monkeypatch):
+    """The write is outside the lock: while the tick's write hangs, the state thread's look still returns at once
+    with the new count; stop() waits for the write in flight at most 2 s."""
+    import types
+    clk, said = Clocks(1.0), []
+    w = kept(clk, said, tmp_path)
+    run(clk, w, 1)                                   # (the first write)
+    slow, writing = threading.Event(), threading.Event()
+
+    def replace(a, b):
+        writing.set()
+        slow.wait(10.0)
+        os.replace(a, b)
+    import os
+    monkeypatch.setattr(wallclock, "os", types.SimpleNamespace(replace=replace, getpid=os.getpid))
+    clk.t += 1.0
+    clk.adj += 30.0
+    tick = threading.Thread(target=w.sample)         # the tick: a step, so a write, which hangs
+    tick.start()
+    assert writing.wait(2.0)
+    clk.t += 1.0
+    t0 = time.monotonic()
+    assert w.sample(save=False) == (clk.wall(), 1)   # the state thread's look: not held
+    assert time.monotonic() - t0 < 0.5
+    t0 = time.monotonic()
+    w.stop()                                         # the write in flight: waited for 2 s at most
+    assert time.monotonic() - t0 < 3.0
+    slow.set()
+    tick.join(5.0)
+    assert json.loads((tmp_path / "state" / wallclock.FILE).read_text())["wall_steps"] == 1
 
 
 # -- on the state post -------------------------------------------------------------------------------------------------
@@ -336,6 +438,7 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
     link._client = fake.client
     link.wall.log = said.append
     assert link.metrics_link.tick == link.wall.sample and app.wall_clock is link.wall
+    assert link.wall.post_boot_id == BOOT_A                         # (kept beside the outbox)
     link.start()
     try:
         assert wait(lambda: fake.last() is not None, 5)
@@ -346,6 +449,8 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
         real = link.wall._wall
         link.wall._wall = lambda: real() + 60.0                              # the wall clock steps a minute ahead
         assert wait(lambda: (fake.last() or {}).get("wall_steps") == 1, 5)
+        stepped = [p for p in list(fake.posts) if p["at"] > time.time() + 30]
+        assert stepped and all(p["wall_steps"] == 1 for p in stepped)        # never a stepped `at` with the old count
         assert said == ["wall clock stepped +60 s"]
         assert wait(lambda: any(p.get("wall_steps") == 1 and "status" in p for p in list(fake.posts)), 5)
     finally:
@@ -357,3 +462,36 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
     assert json.loads(saved.read_text())["wall_steps"] == 1 and json.loads(saved.read_text())["boot_id"] == BOOT_A
     after = WallSteps(said.append, wall=lambda: real() + 60.0, path=saved)   # ... and the next start carries it on
     assert after.steps == 1 and said == ["wall clock stepped +60 s"]
+
+
+def test_a_stalled_sampler_never_hides_a_step_between_posts(tmp_path, monkeypatch):
+    """The 1 s tick stalled (30 s, say) while posts go on: the state thread's own look counts a 7 s step (over a 30 s
+    gap the allowance would be 8 s), and the post carries it with the stepped `at`."""
+    monkeypatch.setattr("sizeup.cloud.station.STATUS_S", 0.2)
+    monkeypatch.setattr("sizeup.cloud.metrics.TICK_S", 3600.0)       # the sampler never ticks
+    monkeypatch.setattr(wallclock, "read_boot_id", lambda path=None: BOOT_A)
+    app = make_app(station_cfg(tmp_path, f"http://127.0.0.1:{free_port()}"))
+    fake, said = Capture(), []
+    link = app.link
+    link._client = fake.client
+    link.wall.log = said.append
+    link.start()
+    try:
+        assert wait(lambda: len(fake.posts) >= 2, 5)
+        real = link.wall._wall
+        link.wall._wall = lambda: real() + 7.0
+        assert wait(lambda: (fake.last() or {}).get("wall_steps") == 1, 5)
+        assert said == ["wall clock stepped +7 s"]
+        assert all(p["wall_steps"] == 1 for p in list(fake.posts) if p["at"] > time.time() + 5)
+    finally:
+        link.stop()
+
+
+def test_a_station_without_a_state_folder_posts_a_null_boot_id_and_notes_go_to_health(tmp_path, monkeypatch):
+    monkeypatch.setattr(wallclock, "read_boot_id", lambda path=None: BOOT_A)
+    cfg = dataclasses.replace(station_cfg(tmp_path, f"http://127.0.0.1:{free_port()}"), cloud_outbox=":memory:")
+    app = make_app(cfg)
+    assert app.link.wall.path is None and app.link.wall.post_boot_id is None
+    app.link.wall.note("wall clock: can't save the step count (a restart may lose steps)")
+    assert app.link.outbox.notes[-1]["text"] == "wall clock: can't save the step count (a restart may lose steps)"
+    assert app.link.status()["outbox"]["notes"][-1]["text"].startswith("wall clock:")
