@@ -1362,6 +1362,38 @@ clip waits for one only as long as its class allows. After that the clip goes th
 - **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
 - **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
 
+### Whisper capacity across the cluster (#639 phase 2)
+
+Every station's whisper is a worker in the hub's pool, so a clip from one station can be transcribed on another. The
+order is:
+
+1. a GPU worker;
+2. an idle station's whisper;
+3. AWS, as its budget allows;
+4. the catch-up.
+
+- **A station's whisper as a worker** (`sizeup/cloud/stationworker.py`):
+  - It works under the station's own identity (#555, "station:<id>"). There is no extra token, and revoking the station ends its worker.
+  - It claims only while the hub says the pool takes stations, its whisper is up, none of its own clips wait and the CPU is under 85 %.
+  - While it doesn't claim, it says "paused" with its load every 5 s.
+  - It never gets a pre-alert clip or an AWS channel's clip. A job a GPU worker could take now waits `STATION_DEFER_S` (1 s) first.
+  - Settings > Station > STT workers: "Stations' whisper" (on by default).
+- **What a station hands to the pool**, as a transmission with `transcript_pending: "pool"`:
+  - A context clip, when its own queue is `OFFLOAD_WAIT_S` (60 s) behind and the hub says another worker could take it now.
+  - A clip it would shed.
+  - Everything still waiting when it stops.
+- **The audio a worker gets** is the clip's exact STT input (#671's stt-src). The worker waits up to 2 s for it, then takes the listening clip.
+- **When the pool doesn't transcribe a handed-over clip:**
+  - a live clip goes to AWS (budget allowing), else to the station's whisper at live priority;
+  - a context clip is marked shed, and the catch-up runs it.
+- **A restart** (`App._stt_stop_queue`):
+  - The clip on whisper gets 3 s.
+  - Then everything waiting goes to the pool while the hub has room. Otherwise it is saved to `stt-queue.json` and queued again at the next start, at its own class (Fire/EMS first, alerts as ever).
+  - `Transcriber.withdraw()`, `current()`, `stop(timeout)` and `behind_live()` are the public API.
+  - The catch-up takes the rows a stopped station left before other shed clips.
+- **Pre-alert sources:** the sources the radio pre-alerts push alerts from (`sizeup.intel.push_sources()`, keys and a revision) are HIGH at least in the station's queue and in the pool, whatever their tier. The hub sends them to its station (`set_stt_alert_keys`) whenever the revision the station reports differs.
+- **Health:** every worker, GPU or station, with its state, load (its own clips, CPU, pace), jobs/h and losses.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

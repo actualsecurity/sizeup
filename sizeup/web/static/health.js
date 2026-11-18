@@ -328,11 +328,15 @@ const StationHealth = (() => {
         ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
           + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
       ]));
-      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "GPU", "Jobs/h", "Lost", "Last seen"],
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Load", "Jobs/h", "Lost", "Last seen"],
         sp.workers.map((w) => {
-          const g = w.gpu || {};
-          return [w.id, [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim"],
-            w.model, g.util_pct !== undefined ? `${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "",
+          const g = w.gpu || {}, l = w.load || {};
+          // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
+          const load = w.kind === "station"
+            ? [`${l.own ?? 0} own`, l.cpu_pct !== undefined ? `CPU ${Math.round(l.cpu_pct)}%` : "", l.service_s ? `${l.service_s} s/clip` : ""].filter(Boolean).join(" · ")
+            : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
+          const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
+          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, load,
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
         }), ""));
       const lat = sp.latency || [];

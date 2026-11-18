@@ -198,7 +198,17 @@ class WhisperClient:
         """fast: one greedy pass, no temperature fallback (whisper-server decodes a hard clip up to 5 more times at
         higher temperatures): the context talkgroups' clips while the queue is behind (#300)."""
         pad = np.zeros(8000, dtype=np.float32)  # whisper likes a little silence around speech
-        body_wav = wav_bytes(np.concatenate([pad, audio16k.astype(np.float32), pad]))
+        out = self.transcribe_wav(wav_bytes(np.concatenate([pad, audio16k.astype(np.float32), pad])), prompt, fast,
+                                  timeout_s)
+        text = " ".join(str(out.get("text", "")).split())
+        probs = [w.get("probability") for s in out.get("segments", []) for w in s.get("words", [])
+                 if isinstance(w.get("probability"), (int, float))]
+        return text, (round(float(np.mean(probs)), 2) if probs else None)
+
+    def transcribe_wav(self, body_wav: bytes, prompt: str = "", fast: bool = False,
+                       timeout_s: float | None = None) -> dict:
+        """A WAV as whisper-server takes it (16 kHz, padded) -> its verbose_json answer, as it gave it (the station's
+        whisper as a pool worker sends the hub its segments and words, #639 phase 2)."""
         boundary = uuid.uuid4().hex
         parts = []
         fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
@@ -215,10 +225,7 @@ class WhisperClient:
                                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
         with urllib.request.urlopen(req, timeout=timeout_s or self.timeout_s) as r:
             out = json.load(r)
-        text = " ".join(str(out.get("text", "")).split())
-        probs = [w.get("probability") for s in out.get("segments", []) for w in s.get("words", [])
-                 if isinstance(w.get("probability"), (int, float))]
-        return text, (round(float(np.mean(probs)), 2) if probs else None)
+        return out if isinstance(out, dict) else {}
 
 
 class SttQueue:
@@ -285,6 +292,16 @@ class SttQueue:
             for e in out:
                 self._items.remove(e)
         return [e[2] for e in out]
+
+    def withdraw_all(self, priority: float | None = None) -> list[tuple]:
+        """Every waiting item (of that class; None: of every class) taken out, the best first (the station stopping:
+        handed on, #549, #639 phase 2): [(priority, item, audio, channel)]."""
+        with self._cv:
+            now = self.clock()
+            out = sorted((e for e in self._items if priority is None or e[0] == priority), key=lambda e: self._key(e, now))
+            for e in out:
+                self._items.remove(e)
+        return [(e[0], e[2], e[3], e[4]) for e in out]
 
     def put(self, entry: tuple, fallback: bool = False) -> bool:
         """entry (priority, seq-or-None, item, audio[, channel]). fallback: the hub's, for a clip AWS couldn't do.
@@ -392,6 +409,13 @@ class SttQueue:
         with self._cv:
             return any(e[0] not in NOT_LIVE and now - e[5] >= BEHIND_S for e in self._items)
 
+    def behind_live(self) -> bool:
+        """The oldest clip of ours (URGENT, HIGH, LIVE: not a context class, a re-run or the catch-up's) has waited
+        more than BEHIND_S. Thread-safe."""
+        now = self.clock()
+        with self._cv:
+            return any(e[0] in LIVE_CLASSES and now - e[5] > BEHIND_S for e in self._items)
+
     def stats(self) -> dict:
         """Depth by kind, the oldest clip's wait, where they come from: station status and health (the backlog
         alert says how many wait and why, sizeup/cloud/health.py). oldest_s: the oldest clip that matters
@@ -453,6 +477,9 @@ class Transcriber:
         self._prio = LIVE                         # the class of the item being transcribed
         self._took: deque = deque(maxlen=50)      # (finished at, seconds) of the last transcriptions: whisper's pace
         self._queued: dict[int, float] = {}       # id(item) -> when it was queued (its wait, #639)
+        self._current: tuple | None = None        # (priority, item, audio, channel) being transcribed now
+        self._channels: dict[int, str | None] = {}   # id(item) -> its channel key, while queued
+        self._stopping = False                    # stop(): nothing more is taken from the queue
         self.timed: deque = deque(maxlen=2000)    # (done at, class, wait s, run s) of each transcript (station metrics)
 
     def busy(self, catchup: bool = True) -> int:
@@ -470,11 +497,47 @@ class Transcriber:
     def withdraw_catchup(self) -> list:
         return self._q.withdraw(CATCHUP)
 
+    def withdraw(self, priority: float | None = None) -> list[tuple]:
+        """Waiting items taken out (priority None: every class, the best first; else that class only): [(priority,
+        item, audio, channel, queued at)]. Nothing of them is said to on_drop: the caller hands them on (the station
+        stopping: to the hub's pool, or saved for its next start; #549, #639 phase 2)."""
+        got = self._q.withdraw_all(priority)
+        out = []
+        for prio, item, audio, ch in got:
+            out.append((prio, item, audio, ch if ch is not None else self._channels.get(id(item)),
+                        self._queued.pop(id(item), None)))
+            self._channels.pop(id(item), None)
+        return out
+
+    def behind_live(self) -> bool:
+        """True when the oldest clip in a live class (URGENT, HIGH, LIVE; not LOW, CONTEXT / CONTEXT_FALLBACK, a re-run
+        or the catch-up's) has waited more than BEHIND_S: fire traffic is behind (behind() counts the context classes
+        too, which are behind most evenings). Thread-safe: what other threads read (the STT input's encoder pauses its
+        normal and low work meanwhile)."""
+        return self._q.behind_live()
+
+    def current(self) -> tuple | None:
+        """The item being transcribed now: (priority, item, audio, channel), None when whisper is idle."""
+        cur = self._current
+        return cur if cur is not None and self._working else None
+
+    def stop(self, timeout: float = 0.0) -> tuple | None:
+        """Stopping: nothing more is taken from the queue (what waits stays there: withdraw() it); the item being
+        transcribed gets `timeout` seconds to finish. The one still running then, handed back: (priority, item, audio,
+        channel), else None. (Its text, if whisper still gives it before the exit, is the same clip's: whoever has it
+        then takes the first.)"""
+        self._stopping = True
+        end = time.monotonic() + max(0.0, timeout)
+        while self.current() is not None and time.monotonic() < end:
+            time.sleep(0.05)
+        return self.current()
+
     def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None,
                fallback: bool = False) -> bool:
         """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already.
         fallback: the hub asked for it because Amazon Transcribe couldn't (counted: the backlog's cause)."""
         self._queued[id(item)] = time.time()
+        self._channels[id(item)] = channel
         return self._q.put((priority, None, item, audio, channel), fallback=fallback)
 
     def stats(self) -> dict:
@@ -489,6 +552,7 @@ class Transcriber:
     def _dropped(self, item, why: str) -> None:
         """on_drop on its own thread: never in the context of submit(), whose caller may hold its own locks."""
         self._queued.pop(id(item), None)
+        self._channels.pop(id(item), None)
         self._drops.put((item, why))
         if self._drop_thread is None:
             self._drop_thread = threading.Thread(target=self._drop_loop, name="stt-drops", daemon=True)
@@ -521,7 +585,17 @@ class Transcriber:
     def _run(self) -> None:
         while True:
             self._working = False
-            prio, _n, item, audio = self._q.get()
+            if self._stopping:
+                time.sleep(0.2)
+                continue
+            try:
+                prio, _n, item, audio = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self._stopping:                    # (taken just as it stopped: back in, for withdraw())
+                self._q.put((prio, None, item, audio, self._channels.get(id(item))))
+                continue
+            self._current = (prio, item, audio, self._channels.pop(id(item), None))
             self._prio, self._working = prio, True
             began = time.time()
             queued = self._queued.pop(id(item), None)

@@ -47,6 +47,9 @@ MAX_LEASES = 2            # jobs one worker holds at once at most
 FAST_WINDOW_S = 1200.0         # a worker's pre-alert times are looked at over this long (older ones forgotten)
 PROBE_S = 180.0                # a worker found slow on them gets one pre-alert clip again this long after its last
                                # slow one or try (a probe: how it recovers; a quick answer opens the gate again)
+STATION_DEFER_S = 1.0          # a job a GPU worker could take now waits this long before a station's whisper may claim it
+                               # (the order: a GPU worker, an idle station's whisper, then AWS; #639 phase 2)
+KINDS = ("gpu", "station")
 PREALERT_MAX_SERVICE_S = 3.0   # a pre-alert clip goes to the pool only to an idle worker (in a claim now) whose recent
                                # claim -> text on these classes is this quick (AWS answers them in seconds)
 FAIL_N = 3                # leases lost or handed back in a row: the worker cools down ...
@@ -70,9 +73,11 @@ def _extra(job) -> float:
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
 
-def model_label(model: str, worker: str = "") -> str:
-    """The row's model for a worker's text: "large-v3-turbo-q5_0 (GPU gpu-1)"."""
+def model_label(model: str, worker: str = "", kind: str = "gpu") -> str:
+    """The row's model for a worker's text: "large-v3-turbo-q5_0 (GPU gpu-1)", "small.en-q5_1 (station st-north)"."""
     name = (model or "").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].removeprefix("ggml-").removesuffix(".bin") or "whisper"
+    if kind == "station":
+        return f"{name} (station {worker.removeprefix('station:')})"
     return f"{name} (GPU {worker})" if worker else f"{name} (GPU)"
 
 
@@ -101,6 +106,9 @@ class Job:
     expires: float = 0.0
     cap_at: float = 0.0
     fetched_at: float | None = None
+    audio_wait: bool = False                    # audio(wait_s): it may wait that long for the station's STT input
+    gpu_only: bool = False                      # a GPU worker's only (an AWS channel's clip: a station's whisper is
+                                                # slower than AWS, so it never waits on one)
     extra: dict = field(default_factory=dict)   # the caller's own (catch-up, the page object, ...)
 
     def public(self) -> dict:
@@ -114,6 +122,8 @@ class Job:
 @dataclass
 class Worker:
     id: str
+    kind: str = "gpu"                           # gpu | station (a station's own whisper, #639 phase 2)
+    load: dict = field(default_factory=dict)    # a station's: its own queue, its CPU, its pace (what it says)
     state: str = "online"
     model: str = ""
     version: str = ""
@@ -237,7 +247,7 @@ class Pool:
     # -- workers ---------------------------------------------------------------------------------------------------
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
-             version: str | None = None) -> Worker:
+             version: str | None = None, kind: str | None = None, load: dict | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
         whose token no longer stands (revoked meanwhile)."""
@@ -248,6 +258,11 @@ class Pool:
             if w is None:
                 w = self.workers[wid] = Worker(wid)
             w.seen = self.clock()
+            if kind in KINDS:
+                w.kind = kind
+            if isinstance(load, dict):
+                w.load = {k: load[k] for k in ("queue", "own", "cpu_pct", "service_s", "why")
+                          if isinstance(load.get(k), (int, float, str)) and not isinstance(load.get(k), bool)}
             if state in STATES:
                 if state != "online" and w.state == "online":
                     for lease in list(w.leases):
@@ -314,8 +329,23 @@ class Pool:
         last = max(w.probe_at, w.fast[-1][0] if w.fast else 0.0)
         return now - last >= PROBE_S
 
-    def ready(self, cls: float, now: float | None = None) -> tuple[bool, str]:
-        """Can the pool take a clip of this class now: (yes, why not)."""
+    def _gpu_idle(self, now: float) -> bool:
+        return any(w.kind == "gpu" and w.polling > 0 and not w.leases and self._ready(w, now)
+                   for w in self.workers.values())
+
+    def _fits(self, w: Worker, j: Job, now: float) -> bool:
+        """May this worker take this job now. A station's whisper: never a pre-alert clip nor an AWS channel's (slower
+        than AWS), and only once a GPU worker that could take it now has had STATION_DEFER_S to. A GPU worker: a
+        pre-alert clip only when _fast_ok."""
+        if w.kind == "station":
+            if j.cls in FAST_CLASSES or j.gpu_only:
+                return False
+            return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now))
+        return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
+
+    def ready(self, cls: float, now: float | None = None, gpu_only: bool = False) -> tuple[bool, str]:
+        """Can the pool take a clip of this class now: (yes, why not). gpu_only: on a GPU worker (an AWS channel's clip:
+        a station's whisper is slower than AWS); a pre-alert class always is."""
         now = self.clock() if now is None else now
         if cls not in BUDGETS:
             return False, "not a pool class"
@@ -327,7 +357,8 @@ class Pool:
         if self._stop.is_set():
             return False, "stopped"
         with self._cv:
-            ready = [w for w in self.workers.values() if self._ready(w, now)]
+            ready = [w for w in self.workers.values() if self._ready(w, now)
+                     and (w.kind == "gpu" or not (gpu_only or cls in FAST_CLASSES))]
             if not ready:
                 return False, "no worker ready"
             if cls in FAST_CLASSES:
@@ -342,6 +373,9 @@ class Pool:
                     svc = min(self._fast_s(w, now) or 0.0 for w in idle)
                     return False, f"slow on pre-alert clips lately ({svc:.1f} s)"
                 return True, ""
+            if any(w.polling > 0 and len(w.leases) < MAX_LEASES for w in ready) and \
+                    not any(j.cls <= cls for j in self._queue):
+                return True, ""                    # a worker in a claim now and nothing ahead: it takes it at once
             ahead = sum(1 for j in self._queue if j.cls <= cls) + len(self._leases)
             est = ahead * self._service_s() / len(ready)
         if est > BUDGETS[cls][0]:
@@ -357,7 +391,7 @@ class Pool:
     def submit(self, job: Job) -> bool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
-        ok, _why = self.ready(job.cls)
+        ok, _why = self.ready(job.cls, gpu_only=job.gpu_only)
         if not ok or self._stop.is_set():
             return False
         with self._cv:
@@ -371,17 +405,17 @@ class Pool:
         return True
 
     def _best(self, w: Worker | None = None, now: float | None = None) -> Job | None:
-        """The next job for this worker: a pre-alert one only to a worker that may have one (_fast_ok: idle, and quick
-        or due a probe)."""
-        fast_ok = w is None or self._fast_ok(w, self.clock() if now is None else now)
-        return min((j for j in self._queue if fast_ok or j.cls not in FAST_CLASSES),
+        """The next job for this worker, among those it may take (_fits)."""
+        now = self.clock() if now is None else now
+        return min((j for j in self._queue if w is None or self._fits(w, j, now)),
                    key=lambda j: (j.cls, j.queued_at), default=None)
 
-    def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None) -> Job | None:
+    def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
+              kind: str | None = None, load: dict | None = None) -> Job | None:
         """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one."""
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
-        w = self.seen(wid, state, model)
+        w = self.seen(wid, state, model, kind=kind, load=load)
         if w is None:
             return None
         with self._cv:
@@ -411,6 +445,7 @@ class Pool:
         _wait, lease_s, cap_s = BUDGETS[job.cls]
         extra = _extra(job)
         job.lease, job.worker, job.claimed_at = secrets.token_hex(8), w.id, now
+        job.extra["kind"] = w.kind
         job.expires, job.cap_at = now + lease_s + extra, now + cap_s + extra
         self._leases[job.lease] = job
         w.leases.add(job.lease)
@@ -538,11 +573,11 @@ class Pool:
             for job in list(self._queue):
                 if not anyone:
                     self._queue.remove(job)
-                    self._fall(job, "no_worker", "no GPU worker ready")
+                    self._fall(job, "no_worker", "no pool worker ready")
                     n += 1
                 elif now - job.queued_at >= BUDGETS[job.cls][0]:
                     self._queue.remove(job)
-                    self._fall(job, "unclaimed", f"no GPU worker took it in {BUDGETS[job.cls][0]:g} s")
+                    self._fall(job, "unclaimed", f"no pool worker took it in {BUDGETS[job.cls][0]:g} s")
                     n += 1
             if n:
                 self._cv.notify_all()
@@ -559,7 +594,8 @@ class Pool:
             workers = []
             for w in sorted(self.workers.values(), key=lambda x: x.id):
                 mine = [x for x in hour if x[5] == w.id]
-                workers.append({"id": w.id, "state": self.state_of(w, now), "model": w.model, "version": w.version,
+                workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
+                                "state": self.state_of(w, now), "model": w.model, "version": w.version,
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),
                                 "cool_until": w.cool_until if w.cool_until > now else None})

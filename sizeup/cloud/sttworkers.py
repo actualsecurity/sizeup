@@ -65,6 +65,9 @@ TEXT_MAX = 20000
 SEGMENTS_MAX = 1000
 WORDS_MAX = 4000
 POLL_S = 25.0
+AUDIO_WAIT_MAX_S = 2.0          # a job's audio: the station's STT input waited for this long at most (it usually comes a
+                                # moment after its event; one that doesn't come costs the worker this much of its lease)
+STATION_PREFIX = "station:"     # a station's whisper as a pool worker: "station:<station id>" (never a token's id)
 REFUSAL_LOG_S = 3600.0
 _DUMMY = hashlib.sha256(b"sizeup: no such worker").hexdigest()
 
@@ -153,8 +156,9 @@ class WorkerRegistry:
     # -- the pool's switches --------------------------------------------------------------------------------------
 
     def pool_settings(self) -> dict:
-        """{on, classes: {name: bool}}: the defaults (on, every class) with what an admin changed."""
-        out = {"on": True, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
+        """{on, stations, classes: {name: bool}}: the defaults (on, the stations' whisper in the pool, every class) with
+        what an admin changed."""
+        out = {"on": True, "stations": True, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
         try:
             saved = json.loads(self.mdb.get(META_POOL, "") or "{}")
         except ValueError:
@@ -162,25 +166,37 @@ class WorkerRegistry:
         if isinstance(saved, dict):
             if isinstance(saved.get("on"), bool):
                 out["on"] = saved["on"]
+            if isinstance(saved.get("stations"), bool):
+                out["stations"] = saved["stations"]
             for k, v in (saved.get("classes") or {}).items() if isinstance(saved.get("classes"), dict) else ():
                 if k in out["classes"] and isinstance(v, bool):
                     out["classes"][k] = v
         return out
 
     def enabled(self, cls: float) -> bool:
-        """Do this class's clips go to the pool first now: a worker exists, the pool is on, the class is on."""
-        if not self.any():
-            return False
+        """Do this class's clips go to the pool first now: the pool is on, the class is on, and a worker can be there (a
+        GPU worker added, or the stations' whisper in the pool: #639 phase 2)."""
         s = self.pool_settings()
-        return bool(s["on"]) and bool(s["classes"].get(sttpool.class_key(cls), False))
+        if not s["on"] or not s["classes"].get(sttpool.class_key(cls), False):
+            return False
+        return bool(s["stations"]) or self.any()
 
-    def set_pool(self, on=None, classes=None) -> tuple[dict, dict]:
+    def stations_on(self) -> bool:
+        """The stations' whisper are pool workers (Settings > Station > STT workers, on by default)."""
+        s = self.pool_settings()
+        return bool(s["on"]) and bool(s["stations"])
+
+    def set_pool(self, on=None, classes=None, stations=None) -> tuple[dict, dict]:
         old = self.pool_settings()
-        new = {"on": old["on"], "classes": dict(old["classes"])}
+        new = {"on": old["on"], "stations": old["stations"], "classes": dict(old["classes"])}
         if on is not None:
             if not isinstance(on, bool):
                 raise WorkerError("on: true or false")
             new["on"] = on
+        if stations is not None:
+            if not isinstance(stations, bool):
+                raise WorkerError("stations: true or false")
+            new["stations"] = stations
         if classes is not None:
             if not isinstance(classes, dict):
                 raise WorkerError("classes: an object")
@@ -333,9 +349,11 @@ class WorkerRegistry:
             note(f"stt workers/{wid}/name", old, new)
             return {"ok": True, "id": wid}
         if a == "pool":
-            old, new = self.set_pool(body.get("on"), body.get("classes"))
+            old, new = self.set_pool(body.get("on"), body.get("classes"), body.get("stations"))
             if old["on"] != new["on"]:
                 note("stt workers/pool", "on" if old["on"] else "off", "on" if new["on"] else "off")
+            if old["stations"] != new["stations"]:
+                note("stt workers/pool/stations", "on" if old["stations"] else "off", "on" if new["stations"] else "off")
             for k, v in new["classes"].items():
                 if old["classes"].get(k) != v:
                     note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
@@ -385,12 +403,14 @@ class WorkerApi:
     """Hub.handle's /api/station/stt/ routes. may_write(): this task is the leader (a standby hands out nothing)."""
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
-                 log: Callable[[str], None] = print):
-        self.reg, self.pool, self.may_write, self.log = registry, pool, may_write, log
+                 log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None):
+        """station(bearer) -> the station id a station's own token proves (sizeup/cloud/stations.py), None when it
+        isn't one: a station's whisper is a pool worker under its station identity ("station:<id>"), no token more."""
+        self.reg, self.pool, self.may_write, self.log, self.station = registry, pool, may_write, log, station
         self._said: dict[tuple[str, str], float] = {}
 
     def _pool_on(self) -> bool:
-        return self.reg.any() and bool(self.reg.pool_settings()["on"])
+        return bool(self.reg.pool_settings()["on"]) and (self.reg.any() or self.reg.stations_on())
 
     def _refuse(self, e: Refused, hint: str = "") -> tuple[int, bytes, str]:
         now = time.time()
@@ -403,15 +423,23 @@ class WorkerApi:
     def handle(self, method: str, path: str, headers, body: Callable[[int], bytes | None] | None):
         auth = str(headers.get("Authorization") or "")
         bearer = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        kind = "gpu"
         try:
             wid = self.reg.resolve(bearer)
         except Refused as e:
-            m = TOKEN.fullmatch(bearer)
-            return self._refuse(e, m.group(1) if m and self.reg.row(m.group(1)) is not None else "")
+            sid = self.station(bearer) if self.station is not None and not bearer.startswith(PREFIX + ".") else None
+            if not sid:
+                m = TOKEN.fullmatch(bearer)
+                return self._refuse(e, m.group(1) if m and self.reg.row(m.group(1)) is not None else "")
+            if not self.reg.stations_on():
+                return _json(403, {"error": "the stations' whisper isn't in the pool (Settings > Station > STT workers)",
+                                   "reason": "stations_off"})
+            wid, kind = f"{STATION_PREFIX}{sid}", "station"
         if not self.may_write():
             from sizeup import fence as fence_mod
             fence_mod.refuse(f"{method} {path}")    # a standby: 503 + Retry-After (sizeup/web/server.py)
-        self.reg.touch(wid)
+        if kind == "gpu":
+            self.reg.touch(wid)
         try:
             if method == "GET":
                 m = LEASE_PATH.fullmatch(path)
@@ -427,17 +455,20 @@ class WorkerApi:
             state, model = d.get("state"), d.get("model")
             state = state if state in sttpool.STATES else None
             model = str(model)[:80] if isinstance(model, str) else None
+            load = d.get("load") if isinstance(d.get("load"), dict) else None
             if path == API + "hello":
-                self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None)
+                self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
+                               kind=kind, load=load)
                 s = self.reg.pool_settings()
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [k for k, v in s["classes"].items() if v]})
             if path == API + "state":
-                self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None)
+                self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
+                               kind=kind, load=load)
                 return _json(200, {"ok": True, "pool_on": self._pool_on()})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
-                job = self.pool.claim(wid, wait, state, model)
+                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load)
                 return _json(200, {"job": job.public() if job is not None else None})
             m = LEASE_PATH.fullmatch(path)
             if m is None or m.group(2) == "audio":
@@ -466,7 +497,10 @@ class WorkerApi:
         if job is None:
             return _json(409, {"error": "lease lost"})
         try:
-            wav = job.audio()
+            # (waiting for the station's own STT input, #671: half of what is left of the lease at most, so the clip is
+            # still transcribed in time; else the listening clip)
+            wait = max(0.0, min(AUDIO_WAIT_MAX_S, (job.expires - self.pool.clock()) / 2.0))
+            wav = job.audio(wait) if job.audio_wait else job.audio()
         except Exception as e:  # noqa: BLE001 - a store that can't be read now: the next engine takes it
             wav = None
             self.log(f"stt workers: {job.id}: audio not readable: {type(e).__name__}")

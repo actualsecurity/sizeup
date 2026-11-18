@@ -958,6 +958,7 @@ def test_a_police_clip_failing_on_aws_stays_skipped_with_the_try_on_its_row(tmp_
 
 def test_the_hub_has_the_stations_whisper_catch_up_once_it_is_idle(tmp_path, monkeypatch):
     hub = HubRun(hub_cfg(tmp_path))
+    hub.app.hub.workers.act({"action": "pool", "stations": False})     # (the station's own catch-up call, #639)
     st = None
     try:
         st = station(station_cfg(tmp_path, hub.url), {})
@@ -990,6 +991,7 @@ def test_an_older_station_refusing_the_call_burns_no_tries_and_is_left_alone_for
     from sizeup.cloud import station as station_mod
     monkeypatch.setattr(station_mod, "CALLS", tuple(c for c in station_mod.CALLS if c != "catch_up"))   # an older build
     hub = HubRun(hub_cfg(tmp_path))
+    hub.app.hub.workers.act({"action": "pool", "stations": False})     # (the station's own catch-up call, #639)
     st = None
     try:
         st = station(station_cfg(tmp_path, hub.url), {})
