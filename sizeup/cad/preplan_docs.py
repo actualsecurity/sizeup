@@ -415,8 +415,11 @@ class PreplanDocs:
     # -- writing ----------------------------------------------------------------------------------------------------------
 
     def _bump(self) -> None:
+        """After the write's commit: the gen moves, and the rev again (as Preplan._bump)."""
         with self._lock:
             self.gen += 1
+        with self.db.lock:
+            self.db.rev += 1
 
     def _fields(self, body: dict, partial: bool) -> dict:
         f: dict = {}

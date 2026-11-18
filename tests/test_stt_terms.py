@@ -86,7 +86,13 @@ def test_an_admins_service_choice_picks_the_list():
         assert own_for("tg:333", "ems") == "pd_dispatch"                   # (the county's older key the same)
         assert own_for("p25:mrrs:9001", "transit") == "ems"
         assert own_for("p25:westchester:4242", "other") == "county_fire"
-        assert own_for("p25:mrrs:9211", "fire") == "pd_dispatch"          # the plan's own keys first
+        assert own_for("p25:mrrs:9211", "fire") == "pd_dispatch"          # no choice for it: the plan's own key
+        sourcekeys.set_service_overrides({"p25:mrrs:9211": "fire", "p25:mrrs:9570": "transit",
+                                          "fm:South 2": "police", "air:HPN Tower": "police"})
+        assert own_for("p25:mrrs:9211", "police") == "county_fire"         # an admin's choice over the plan's keys
+        assert own_for("p25:mrrs:9570", "ems") is None
+        assert own_for("fm:South 2", "fire", "paging") == "county_fire"     # paging and airband: by their audio
+        assert own_for("air:HPN Tower", "air", "airband") == "airband"
         assert own_for("p25:westchester:5", "police") == "pd_dispatch"     # no choice: as given
     finally:
         sourcekeys.set_service_overrides(before)
@@ -393,9 +399,11 @@ def test_a_channels_term_vocabulary_holds_its_own_vocabulary_first_then_the_list
     tv.sync(s1)                                                          # (not the leader: the leader makes it)
     assert tv.ready("county_fire", "sizeup-pcfd") == name1 and len(api.calls) == n
     leader[0] = True
+    api.pending = 10 ** 9                                                # (held PENDING until let go: no race)
     tv.sync(s1)
     name2 = tv.meta("county_fire", "sizeup-pcfd")["want"]
     assert name2 != name1 and tv.ready("county_fire", "sizeup-pcfd") == name1     # the one before while PENDING
+    api.pending = 0
     assert wait(lambda: tv.ready("county_fire", "sizeup-pcfd") == name2)
     assert "Tower-Ladder-two" in api.vocabs[name2]["phrases"][:5] and tv.respell(name1) == {}
     for i in range(3):                                                   # a few versions on: the oldest deleted
@@ -680,3 +688,61 @@ def test_airband_keeps_the_atc_vocabulary_as_it_was_last_pushed():
     now["phrases"] = list(pushed)                                                   # gone again, not pushed yet
     assert App._own_vocab_phrases(stub, "sizeup-atc") == [*pushed, "Otherair"]
     assert App._own_vocab_phrases(stub, "") == []
+
+
+# -- the GPU workers (#651): the same no-speech rules, and stt_runs keeps vocab_v -------------------------------------
+
+
+def test_a_gpu_workers_text_gets_the_read_back_guard_and_every_run_keeps_its_vocab_v(tmp_path):
+    from sizeup import sttpool
+    from sizeup.stt import URGENT, judge
+    from tests.test_cloud import HubRun, hub_cfg
+    p = "Zephyrton, working fire, second alarm, all hands, Quillbrook, Marrowind Avenue, Example Post Road."
+    vv = "county_fire@0123456789ab"
+    # judge: the guard only with a list in the prompt
+    assert judge(p, 2.0, prompt=p, vocab_v=vv) == ("", "no_speech")
+    assert judge(p, 2.0, prompt=p) == (p, "done")
+    assert judge("Engine 61 on location, working fire.", 2.0, prompt=p, vocab_v=vv)[1] == "done"
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        app = hub.app
+        for tid in ("FG1-71", "FG1-72", "FG1-73"):
+            app.cad.comms.record({"id": tid, "start": 1.0, "end": 3.0, "source": "FG1", "talkgroup": None, "text": "",
+                                  "status": "pending", "model": sttpool.PENDING_MODEL})
+
+        def job(tid, vocab_v):
+            return sttpool.Job(tid, URGENT, "FG1", "traffic", 2.0, audio=lambda: None, on_done=lambda *a: None,
+                               on_fallback=lambda *a: None, prompt=p, extra={"vocab_v": vocab_v})
+
+        app._pool_done(job("FG1-71", vv), {"text": p, "model": "large-v3-turbo-q5_0", "words": []})   # read back
+        app._pool_done(job("FG1-72", vv), {"text": "Engine 61 on location, working fire.", "model": "m"})
+        app._pool_done(job("FG1-73", ""), {"text": p, "model": "m"})                                   # no list: off
+        q = lambda tid: app.cad.store.one("SELECT text, status, vocab_v FROM radio_traffic WHERE id = ?", (tid,))
+        assert q("FG1-71")["status"] == "no_speech" and q("FG1-71")["text"] == ""
+        assert q("FG1-72")["status"] == "done" and q("FG1-72")["vocab_v"] == vv
+        assert q("FG1-73")["status"] == "done"
+        assert wait(lambda: all(app.stt_runs.of(t) for t in ("FG1-71", "FG1-72", "FG1-73")), 5)
+        (r1,), (r2,), (r3,) = (app.stt_runs.of(t) for t in ("FG1-71", "FG1-72", "FG1-73"))
+        assert r1["text"] == p and r1["status"] == "no_speech" and r1["vocab_v"] == vv   # the raw words kept, judged
+        assert r2["vocab_v"] == vv and r3["vocab_v"] == "" and r1["prompt_v"]
+        # AWS's runs keep the vocabulary its stream used; the station's whisper's, what its event said
+        from sizeup.app import AwsJob
+        app._aws_done(AwsJob("traffic", "FG1-72", "FG1", rerun=True, vocab_v="county_fire+pcfd@0123456789ab"),
+                      "words", 0.9)
+        assert app.stt_runs.of("FG1-72")[-1]["vocab_v"] == "county_fire+pcfd@0123456789ab"
+    finally:
+        hub.close()
+
+
+def test_a_runs_file_from_before_vocab_v_gets_the_column(tmp_path):
+    import sqlite3
+    from sizeup import sttruns
+    path = tmp_path / "runs.sqlite"
+    old = sttruns.SCHEMA.replace(", vocab_v TEXT NOT NULL DEFAULT ''", "")
+    assert old != sttruns.SCHEMA
+    db = sqlite3.connect(path)
+    db.executescript(old)
+    db.close()
+    runs = sttruns.Runs(str(path), log=lambda m: None)
+    assert runs.add("FG1-9", "aws", text="x", vocab_v="ems+none@0123456789ab")
+    assert runs.of("FG1-9")[0]["vocab_v"] == "ems+none@0123456789ab"

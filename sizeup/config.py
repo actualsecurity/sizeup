@@ -10,6 +10,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.cloud.access import team_host
 from sizeup.polly import DEFAULT_VOICE as POLLY_DEFAULT
 from sizeup.polly import VOICES as POLLY_VOICES
@@ -231,6 +232,11 @@ class Config:
     # hub: the station id the shared token (SIZEUP_STATION_TOKEN) is (sizeup/cloud/stations.py); "" = the first id it
     # posts as, kept in hub.sqlite. It is refused for any other id, so a new station can't use it
     cloud_legacy_station_id: str = ""
+    # [mobile] (sizeup/api/v1, docs/mobile-api.md "Sharing the production hub", #619): the hub's own, never a station's.
+    # Off unless the section says `enabled = true`: /api/v1 then answers 404 beside its meta.
+    mobile_enabled: bool = False
+    mobile_max_requests: int = DEFAULT_MAX_REQUESTS      # v1's share of concurrent requests
+    mobile_max_streams: int = DEFAULT_MAX_STREAMS      # ... and of open streams (none yet)
     # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
@@ -570,6 +576,32 @@ def _cloud(data: dict) -> dict:
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
                 cloud_access_team=team, cloud_access_aud=aud, cloud_status_token=status_token,
                 cloud_legacy_station_id=legacy_id, **_keychain(cl))
+
+
+MOBILE_REQUESTS_RANGE = (1, 64)       # [mobile] max_requests
+MOBILE_STREAMS_RANGE = (0, 64)        # [mobile] max_streams
+
+
+def _mobile(data: dict, role: str) -> dict:
+    """[mobile] -> Config fields. No section = off. A hub (or all-in-one) key: a station's config never has one, and a
+    release that doesn't know the section refuses the file (CLAUDE.md, the station rule)."""
+    if "mobile" not in data:
+        return {}
+    if role == "station":
+        raise ConfigError("[mobile]: the hub's section, not a station's")
+    mo = _take(data["mobile"], "mobile", {"enabled", "max_requests", "max_streams"})
+    enabled = mo.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("mobile.enabled: true or false")
+
+    def whole(key: str, default: int, bounds: tuple[int, int]) -> int:
+        v = mo.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, int) or not bounds[0] <= v <= bounds[1]:
+            raise ConfigError(f"mobile.{key}: a whole number, {bounds[0]} to {bounds[1]}")
+        return v
+    return dict(mobile_enabled=enabled,
+                mobile_max_requests=whole("max_requests", DEFAULT_MAX_REQUESTS, MOBILE_REQUESTS_RANGE),
+                mobile_max_streams=whole("max_streams", DEFAULT_MAX_STREAMS, MOBILE_STREAMS_RANGE))
 
 
 def _prealert(data: dict) -> dict:
@@ -1420,7 +1452,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc", "adapter", "routing", "vessels", "streetview"})
+                           "mobile", "aircraft", "geo", "atc", "adapter", "routing", "vessels", "streetview"})
     adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
@@ -1441,6 +1473,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError("SIZEUP_PORT: a port number") from None
     cloud = _cloud(data)
     pa = _prealert(data)
+    mobile = _mobile(data, cloud.get("cloud_role", ""))
     state_dir = Path(os.environ["SIZEUP_STATE_DIR"]).expanduser() if os.environ.get("SIZEUP_STATE_DIR", "").strip() else base
     radio = _take(data.get("radio", {}), "radio", {"rtl_fm", "channels", "tones_file", "shared_device", "start_mode", "sdrs", "sdr_names", "sdr_ignore",
                                                  "auto_assign", "auto_assign_order", "airband_multichannel"})
@@ -1703,5 +1736,6 @@ def load(path: str | Path) -> Config:
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
         **_atc(data, base),
+        **mobile,
         **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels, **_streetview(data),
     )

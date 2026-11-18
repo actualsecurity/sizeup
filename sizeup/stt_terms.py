@@ -93,18 +93,21 @@ BY_SERVICE = {"fire": "county_fire", "police": "pd_dispatch", "ems": "ems", "air
 
 def own_for(key: str = "", service: str = "", kind: str = "") -> str | None:
     """The list a source takes ("county_fire" ...; places goes with it), None for none (transit, other). key: its source
-    key (p25:mrrs:9211, fm:South 2, air:HPN Tower) or the older form (tg:307); kind: the channel's kind. "Else by its
-    service": an admin's service choice for the key (Settings > Radios, sourcekeys.overridden) over the one given."""
+    key (p25:mrrs:9211, fm:South 2, air:HPN Tower) or the older form (tg:307); kind: the channel's kind. Airband and
+    paging by their audio, whatever else is said; then an admin's service choice for the key (Settings > Radios,
+    sourcekeys.overridden: it wins over BY_KEY too); then BY_KEY; then the service given."""
     from sizeup import sourcekeys
     key, kind = str(key or ""), str(kind or "")
-    service = sourcekeys.overridden(key, str(service or "").lower()) if key else str(service or "").lower()
     if kind == "airband" or key.startswith("air:"):
         return "airband"
-    if key in BY_KEY:
-        return BY_KEY[key]
     if kind == "paging":
         return "county_fire"
-    return BY_SERVICE.get(service)
+    chosen = sourcekeys.overridden(key, "") if key else ""
+    if chosen:
+        return BY_SERVICE.get(chosen)
+    if key in BY_KEY:
+        return BY_KEY[key]
+    return BY_SERVICE.get(str(service or "").lower())
 
 
 # -- the lists ---------------------------------------------------------------------------------------------------------
@@ -643,6 +646,7 @@ class TermVocabularies:
         self._vocabs: dict[tuple[str, str], object] = {}
         self._sets: dict[str, TermSet] = {}
         self._syncing = False
+        self._again = False
 
     # -- what is kept ------------------------------------------------------------------------------------------------
 
@@ -720,18 +724,26 @@ class TermVocabularies:
         if not self.leader():
             return
         with self._lock:
-            if self._syncing:
+            if self._syncing:                        # one at a time: the running one goes round again for this
+                self._again = True
                 return
-            self._syncing = True
+            self._syncing, self._again = True, False
         try:
-            for own, base in self.pairs():
-                try:
-                    self._sync_one(own, base)
-                except Exception as e:  # noqa: BLE001 - the next pair, and this one at the next read
-                    self.log(f"aws transcribe: term vocabulary {own}/{base_short(base)}: {type(e).__name__}")
-        finally:
+            while True:
+                for own, base in self.pairs():
+                    try:
+                        self._sync_one(own, base)
+                    except Exception as e:  # noqa: BLE001 - the next pair, and this one at the next read
+                        self.log(f"aws transcribe: term vocabulary {own}/{base_short(base)}: {type(e).__name__}")
+                with self._lock:
+                    if not self._again:
+                        self._syncing = False
+                        return
+                    self._again = False
+        except BaseException:
             with self._lock:
                 self._syncing = False
+            raise
 
     def _sync_one(self, own: str, base: str) -> None:
         ts = self._sets.get(own)

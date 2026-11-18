@@ -76,8 +76,14 @@ and made-up lists in its tests.
 | `airband` | HPN Tower, Approach and Ground |
 | `places` | loaded with every one of them |
 
-Which list a source takes: `stt_terms.own_for()`, by its key first (`BY_KEY`: 9211, 9212, 9570), then airband or
-paging, then its service (fire, police, ems, air). A transit or "other" talkgroup takes none.
+Which list a source takes: `stt_terms.own_for()`, always by its system-qualified key.
+
+1. Airband and paging channels by their audio.
+2. An admin's service choice for the source (Settings > Radios), which wins over everything below.
+3. Its key (`BY_KEY`: 9211, 9212, 9570).
+4. Its service (fire, police, ems, air).
+
+A transit or "other" talkgroup takes none.
 
 ### Where they live
 
@@ -133,8 +139,10 @@ Every transcript records what biased it, in the radio log's `vocab_v` column:
 | `sizeup-pcfd@0123456789ab` | AWS: a vocabulary without a term list, at its phrases' signature |
 | empty | no list (switched off, none for the source, no room in the prompt) or not known |
 
-With the worker pool (#651), `stt_runs.prompt_v` hashes the whole prompt (which now includes the terms); `vocab_v`
-says which list and version. Whichever lands second adds `vocab_v` to `stt_runs` (`getattr(item or job, "vocab_v")`).
+`stt_runs` (#651) keeps it too, for every engine (the GPU workers, AWS, the station's whisper), next to `prompt_v`,
+the hash of the whole prompt (terms included). The GPU workers' text goes through the same no-speech rules as the
+station's whisper (`stt.judge(raw, seconds, low_energy, prompt, vocab_v)`), the read-back guard included when a list
+went in the prompt.
 
 ### Switches
 
