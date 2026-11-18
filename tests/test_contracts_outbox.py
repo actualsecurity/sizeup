@@ -1234,8 +1234,8 @@ def test_known_deviation_a_row_the_station_cannot_read_blocks_the_forwarder(tmp_
             assert "hub-forward" not in link.restarts and forward.is_alive() and not died
             assert link.outbox.pending()[0] == 2 and hub.seq == 1 and link.outbox.summary()["n"] == 0
         else:
-            assert wait(lambda: hub.seq == 3, 30) and forward.is_alive() and not died
-            assert link.outbox.pending()[0] == 0
+            assert wait(lambda: hub.seq == 3 and link.outbox.pending()[0] == 0, 30)       # (acked on the station too)
+            assert forward.is_alive() and not died
     finally:
         lv.close()
 
