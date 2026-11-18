@@ -34,6 +34,10 @@ decode too. One unheard for 12 s (sttpool.LOST_S) loses every lease it holds, ca
 to the next engine. A pre-alert job (fast) is leased 4 s, renewable by extend to 8 s from the claim; a worker that goes
 gaming or paused has its pre-alert jobs taken back at once (their complete / extend then answer 409). A worker holds two
 leases at most, and a pre-alert job only when it holds none.
+
+The LLM lane (sizeup/cloud/infer.py): a worker serving a local LLM says so in every request's models {stt, llm,
+llm_version} and claims JSON classification jobs at /api/station/stt/infer/* with the same token; never while it holds
+a pre-alert lease, and never counted in the STT leases above.
 """
 
 from __future__ import annotations
@@ -384,6 +388,8 @@ def clean_result(raw: dict) -> dict:
 class WorkerApi:
     """Hub.handle's /api/station/stt/ routes. may_write(): this task is the leader (a standby hands out nothing)."""
 
+    infer = None    # the LLM lane (sizeup/cloud/infer.py Lane), set by the hub: /api/station/stt/infer/* and models
+
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print):
         self.reg, self.pool, self.may_write, self.log = registry, pool, may_write, log
@@ -424,6 +430,10 @@ class WorkerApi:
             d = json.loads(raw or b"{}")
             if not isinstance(d, dict):
                 return _json(400, {"error": "a JSON object"})
+            if self.infer is not None:                     # the LLM lane (sizeup/cloud/infer.py): its models, its routes
+                self.infer.seen(wid, d.get("state"), d.get("models"))
+                if path.startswith(API + "infer/"):
+                    return _json(*self.infer.handle(wid, path, d))
             state, model = d.get("state"), d.get("model")
             state = state if state in sttpool.STATES else None
             model = str(model)[:80] if isinstance(model, str) else None

@@ -279,6 +279,13 @@ class Pool:
     def _ready(self, w: Worker, now: float) -> bool:
         return (w.state == "online" and (w.polling > 0 or now - w.seen < READY_S) and now >= w.cool_until)
 
+    def holds_prealert(self, wid: str) -> bool:
+        """This worker holds a pre-alert lease now: the LLM lane (sizeup/cloud/infer.py) gives it nothing meanwhile."""
+        with self._cv:
+            w = self.workers.get(wid)
+            return w is not None and any(j is not None and j.cls in FAST_CLASSES
+                                         for j in (self._leases.get(lease) for lease in w.leases))
+
     def ready_workers(self, now: float | None = None) -> list[str]:
         now = self.clock() if now is None else now
         with self._cv:
