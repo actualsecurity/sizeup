@@ -290,15 +290,16 @@ def what(a: dict) -> str:
 
 
 def late_note(a: dict) -> str:
-    """"from while sizeup was down, 4 min ago" for an alarm raised late (#747: a P25 call written while sizeup was down,
-    ingested at its next start), "" otherwise. The minutes are how long after the transmission ended it was raised."""
+    """"raised 4 min late" for an alarm raised late (#747: a P25 call written while sizeup was down, ingested at its next
+    start), "" otherwise: how long after the transmission ended it was raised, true whenever it is read (the
+    transmission's own time is shown next to it)."""
     late = a.get("late") or 0
-    return f"from while sizeup was down, {max(1, round(float(late) / 60))} min ago" if late else ""
+    return f"raised {max(1, round(float(late) / 60))} min late" if late else ""
 
 
 def line(a: dict) -> str:
-    """The chronology's line: "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10" (raised late, #747: "... at 14:32:10 (from
-    while sizeup was down, 4 min ago)": the transmission's own time, never when it was raised)."""
+    """The chronology's line: "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10" (raised late, #747: "... at 14:32:10
+    (raised 4 min late)": the transmission's own time, never when it was raised)."""
     note = late_note(a)
     return (("DRILL — " if a.get("drill") else "") + f"EMERGENCY: {who(a)} {what(a)} on {a.get('channel') or '?'} "
             f"at {_hms(a.get('at'))}" + (f" ({note})" if note else ""))
@@ -1029,7 +1030,7 @@ class Alarms:
         for r in rows:
             a = self._row(r)
             a["what"], a["who"] = what(a), who(a)
-            if late_note(a):                      # (#747) the screens say it is late: "... (from while sizeup was down, ...)"
+            if late_note(a):                      # (#747) the screens say it is late: "... (raised 4 min late)"
                 a["what"] += f" ({late_note(a)})"
             a["talker"] = self.who_of(a)
             try:

@@ -88,7 +88,7 @@ def test_calls_older_than_replay_s_are_skipped(cap):
     ing.stop()
     got, logs = [], []
     ing = run(base, mark, got, logs)                          # and never later either (behind the mark now)
-    assert settle(ing) == [] and logs == ["p25 P25: 0 calls from while it was down ingested late (0 older skipped)"]
+    assert settle(ing) == [] and logs == []                   # (nothing from while it was down: no line)
 
 
 def test_no_call_is_ingested_twice_across_three_restarts(cap):
@@ -118,7 +118,7 @@ def test_the_mark_moves_only_past_a_call_that_was_taken(cap):
     logs = []
     ing = run(base, mark, [], logs, on_call=fails)
     assert settle(ing) == []
-    assert logs[-1] == "p25 P25: 0 calls from while it was down ingested late (0 older skipped)"
+    assert logs == ["p25 call handler error: RuntimeError: the app's handler broke"]      # (none taken: no line)
     ing.stop()
     got = []
     ing = run(base, mark, got, [])               # the next start tries it again
@@ -205,6 +205,49 @@ def test_the_mark_is_written_at_most_every_few_seconds(cap, monkeypatch):
     assert not list(mark.parent.glob("*.tmp"))
 
 
+class Clock:
+    """p25's clock, `off` seconds from the real one (a station's clock running fast, then stepped back)."""
+
+    def __init__(self, off=0.0):
+        self.off = off
+
+    def time(self):
+        return time.time() + self.off
+
+    def monotonic(self):
+        return time.monotonic()
+
+
+def test_a_mark_taken_while_the_clock_ran_fast_loses_no_call(cap, monkeypatch):
+    """WSL2 steps the station's clock: a mark written while it ran 2 min fast is ahead of every call after the step.
+    Not trusted: every call of the last REPLAY_S comes in late (any taken before is dropped by its id in the app)."""
+    base, d, mark = cap
+    clock = Clock(120.0)
+    monkeypatch.setattr(p25, "time", clock)
+    ing = run(base, mark, [], [])
+    put(d, "307-1-call_1", age=-120)                         # written while the clock ran fast
+    assert [c.id for c in settle(ing)] == ["307-1-call_1"]
+    ing.stop()
+    for ext in (".json", ".wav"):                            # (the app removes the files of a call it took)
+        (d / f"307-1-call_1{ext}").unlink()
+    assert json.loads(mark.read_text())["saved_at"] > time.time() + 100
+    clock.off = 0.0                                          # the clock stepped back 120 s; sizeup down meanwhile
+    put(d, "307-2-call_2", age=30)                           # older than the mark's newest: would count as seen
+    put(d, "307-3-call_3", age=p25.REPLAY_S + 60)
+    got, logs = [], []
+    ing = run(base, mark, got, logs)
+    assert [(c.id, c.late) for c in settle(ing)] == [("307-2-call_2", True)]
+    assert logs == ["p25 P25: ingest mark is ahead of the clock (it stepped back): every call of the last 10 min "
+                    "ingested late, any taken before dropped by its id",
+                    "p25 P25: 1 calls from while it was down ingested late (1 older skipped)"]
+    ing.stop()
+    m = json.loads(mark.read_text())
+    assert m["name"].endswith("307-2-call_2.json") and m["saved_at"] <= time.time()
+    logs = []
+    ing = run(base, mark, got, logs)                         # and the start after that is an ordinary one
+    assert settle(ing) == [] and logs == [] and len(got) == 1
+
+
 # -- what a late call reaches in the app -----------------------------------------------------------------------------
 
 
@@ -246,7 +289,11 @@ class Push:
         return True
 
 
-LATE = "from while sizeup was down, "
+LATE = "min late)"
+
+
+def late(n):
+    return f"(raised {n} min late)"
 
 
 def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert(tmp_path, monkeypatch):
@@ -279,8 +326,8 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         assert a["keywords"] and 190 <= a["late"] <= 260
         said = float(json.loads((tmp_path / "emergency" / "307-1-call_1.json").read_text())["start_time"])
         assert said <= a["at"] <= said + 1 and time.time() - a["at"] >= 150     # when it was said, not when it came in
-        assert a["what"].endswith(f"({LATE}3 min ago)") and line(a).endswith(f"at {_hms(a['at'])} ({LATE}3 min ago)")
-        assert len(push.sent) == 1 and f"({LATE}3 min ago)" in push.sent[0][0]
+        assert a["what"].endswith(late(3)) and line(a).endswith(f"at {_hms(a['at'])} {late(3)}")
+        assert len(push.sent) == 1 and late(3) in push.sent[0][0]
         assert push.sent[0][1].startswith(_hms(a["at"]))                             # its own time, not now
         # no pre-alert of any kind; the per-incident radio log still takes it
         assert got["radiolog"] == ["307-1-call_1"]
@@ -303,6 +350,33 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         live = app.cad.store.one("SELECT * FROM alarms WHERE traffic_id = '307-2-call_2'")
         assert live["late"] == 0 and LATE not in app.cad.alarms.get(live["id"])["what"]
         assert "307-2-call_2" in got["intel"] and "307-2-call_2" in got["hints"]
+    finally:
+        app.stop()
+
+
+def test_live_fire_traffic_goes_ahead_of_late_calls_in_whisper(tmp_path):
+    """After a restart up to REPLAY_S of late calls arrive at once: each goes in at whisper's RERUN class, after every
+    live clip (a live Fire/EMS 15 key-up is never held behind them, and they never make whisper "behind"). A late
+    emergency keeps its own class."""
+    from sizeup.app import App
+    from sizeup.stt import RERUN, URGENT
+    from tests.test_app import voice
+    from tests.test_cloud import base as cloud_base
+    app = App(cloud_base(clips_dir=str(tmp_path / "clips"), cad_db=str(tmp_path / "cad.sqlite"),
+                         p25_talkgroups={307: "Fire/EMS 15"}))
+    try:
+        now = time.time()
+
+        def c(cid, at, late=False, emergency=False, radio=RADIO):
+            return Call(cid, 307, "Fire/EMS 15", at, at + 2, [str(radio)], voice(2.0, 1), "",
+                        [Turn(0.0, str(radio), str(radio), at=at)], emergency=emergency, late=late)
+        for k in range(3):
+            app._call(c(f"307-{k}-call_{k}", now - 300 + 10 * k, late=True))
+        app._call(c("307-8-call_8", now - 200, late=True, emergency=True, radio=OTHER))
+        app._call(c("307-9-call_9", now - 2))                                       # live
+        order = [(prio, item.id) for prio, item, _a, _ch in app.stt._q.withdraw_all()]
+        assert order == [(URGENT, "307-8-call_8"), (URGENT, "307-9-call_9"),
+                         (RERUN, "307-0-call_0"), (RERUN, "307-1-call_1"), (RERUN, "307-2-call_2")]
     finally:
         app.stop()
 
@@ -382,8 +456,8 @@ def test_the_hub_alarms_a_late_emergency_from_its_station_once_and_nothing_else(
         assert row("307-8-call_8")["emergency"] == 1
         assert wait(lambda: len(alarms()) == 1, 10)
         a = app.cad.alarms.get(alarms()[0]["id"])
-        assert a["traffic_id"] == "307-8-call_8" and a["at"] == now - 240 and a["what"].endswith(f"({LATE}4 min ago)")
-        assert len(push.sent) == 1 and f"({LATE}4 min ago)" in push.sent[0][0]
+        assert a["traffic_id"] == "307-8-call_8" and a["at"] == now - 240 and a["what"].endswith(late(4))
+        assert len(push.sent) == 1 and late(4) in push.sent[0][0]
         assert heard == {"text": [], "late": ["307-8-call_8"]}                    # no pre-alert hook
         # its words again from the station (whisper standing in, a re-run): the same alarm, no second push
         assert post(ev(2, "307-8-call_8", "retext", text="mayday mayday, invented unit trapped", late=True)) == 200

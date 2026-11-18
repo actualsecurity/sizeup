@@ -1682,7 +1682,7 @@ class App:
                     self._alarm_now(mark)
             else:
                 log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})"
-                    + (f" (from while sizeup was down, {max(1, round((time.time() - call.end) / 60))} min ago)"
+                    + (f" (from while sizeup was down: raised {max(1, round((time.time() - call.end) / 60))} min late)"
                        if late else ""))
                 # The emergency window (alarms.Windows): this talkgroup, and the radio that pressed it anywhere, kept
                 # for [p25] emergency_window_min after this call (someone else's: at most WINDOW_MAX_KEPT calls).
@@ -1729,7 +1729,9 @@ class App:
                     if evidence:
                         t.evidence = evidence  # trunk-recorder's call record, for audit  # type: ignore[attr-defined]
                     self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
-                if pc.stt:
+                if pc.stt and late and not flagged:   # (#747) after the live traffic in whisper's queue
+                    self._stt(t, pc.audio, eng, key, late=True)
+                elif pc.stt:
                     self._stt(t, pc.audio, eng, key)
                 else:                   # under 0.25 s, or under 0.3 s with no voice (p25.MIN_STT_S): kept, not transcribed
                     t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
@@ -1780,7 +1782,9 @@ class App:
                     t.late = True  # from while sizeup was down (#747): no intel pre-alert or push  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
-                if pc.stt:
+                if pc.stt and getattr(call, "late", False):     # (#747) after the live traffic in whisper's queue
+                    self._stt(t, pc.audio, eng, key, late=True)
+                elif pc.stt:
                     self._stt(t, pc.audio, eng, key)
                 else:
                     t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
@@ -2833,10 +2837,12 @@ class App:
         """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS)."""
         return channels.effective(self.channel_pref(key), self.aws_ok(key)[0])
 
-    def _stt(self, item, audio: np.ndarray, eng: str, key: str) -> None:
-        """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input)."""
+    def _stt(self, item, audio: np.ndarray, eng: str, key: str, late: bool = False) -> None:
+        """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input). late: a
+        P25 key-up from while sizeup was down with no emergency (#747): whisper's RERUN class at the highest (_late_prio),
+        so the live fire traffic after a restart never waits behind up to REPLAY_S of it."""
         item.stt = eng if eng in ("aws", "both") else ""
-        if self._stt_priority(item, key) in (URGENT, HIGH, LIVE):
+        if self._late_prio(self._stt_priority(item, key), late) in (URGENT, HIGH, LIVE):
             self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
         if eng == "off":                       # kept, not transcribed
             item.raw, item.confidence, item.status = "", None, "off"
@@ -2856,11 +2862,17 @@ class App:
             if eng == "aws":
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
-        prio = self._stt_priority(item, key)
+        prio = self._late_prio(self._stt_priority(item, key), late)
         if eng == "local" and self._offload_now(prio, len(audio) / RATE) and \
                 self._stt_offload(item, key, prio, "whisper behind here"):
             return                             # (#639 phase 2: another worker of the pool takes it now)
         self.stt.submit(item, audio, prio, key)    # (dropped: _stt_dropped says so on it)
+
+    @staticmethod
+    def _late_prio(prio, late: bool):
+        """A late clip's whisper class (#747): RERUN, or its own when that is lower still (a context talkgroup). Not live:
+        never "behind", never stale, after every live clip; a late emergency is not demoted (its caller says late=False)."""
+        return max(prio, RERUN) if late else prio
 
     def _offload_now(self, prio, seconds: float | None = None) -> bool:
         """(station) Hand this clip to the hub's pool now rather than queue it: a context class, this station's whisper

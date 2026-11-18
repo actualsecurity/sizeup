@@ -130,6 +130,7 @@ MARK_SAVE_S = 5.0          # the high-water mark is written at most this often (
 MARK_WAITING_MAX = 200     # sidecars at or before the mark still waiting for their WAV, kept in the mark
 STOP_JOIN_S = 3.0          # stop(): the poll thread finishes the call in hand, then the mark is written
 LATE_REPORT_S = SETTLE_GIVE_UP_S + 5.0     # the start's "ingested late" line, at the latest this long after start
+CLOCK_SLACK_S = 1.0        # a mark (or its write) further ahead of the clock than this: the clock stepped back since
 
 
 def _levels(d: dict) -> tuple[float | None, float | None]:
@@ -504,8 +505,8 @@ class CallIngest:
         self._behind: list[tuple[float, str]] | None = None    # None: not scanned yet (the loaded mark's are kept)
         self._waiting: list[str] = []                           # the loaded mark's
         self._mark_lock = threading.Lock()
-        self._saved: tuple | None = None                        # what was written last, and when
-        self._saved_at = 0.0
+        self._saved: tuple | None = None                        # what was written last, and when (monotonic)
+        self._saved_at = -MARK_SAVE_S
         self._mark_err = False
         self._keys: dict[str, tuple[float, str]] = {}           # wav path of a call scan() returned -> its sidecar key
         # Calls written while sizeup was down, ingested late at this start, and the start's line about them
@@ -521,7 +522,10 @@ class CallIngest:
     def resume(self) -> CallIngest:
         """At start, with a mark kept (#747): sidecars newer than the mark (or waiting for their WAV at it), written in
         the last REPLAY_S, are ingested late; every other one on disk is primed as seen. No mark, or one that can't be
-        read: everything is primed (as prime()), and the mark starts at the newest sidecar on disk."""
+        read: everything is primed (as prime()), and the mark starts at the newest sidecar on disk. A mark ahead of the
+        clock (its newest sidecar's mtime, or when it was written: the clock stepped back since, as WSL2 does): it can't
+        say what was taken, so every sidecar of the last REPLAY_S is ingested late (one taken before is dropped by its id,
+        App._late_dup, and an alarm by its transmission id) and the mark starts again from the older ones."""
         loaded, why = self._load_mark()
         listing = self._listing()
         if loaded is None:
@@ -531,8 +535,13 @@ class CallIngest:
             self._save_mark(force=True)
             self.on_event(f"p25 {self.name}: {why}: the {len(listing)} call(s) on disk not replayed")
             return self
-        mark, waiting = loaded
+        mark, waiting, saved_at = loaded
         now = time.time()
+        ahead = mark[0] > now + CLOCK_SLACK_S or saved_at > now + CLOCK_SLACK_S
+        if ahead:
+            self.on_event(f"p25 {self.name}: ingest mark is ahead of the clock (it stepped back): every call of the last "
+                          f"{REPLAY_S / 60:.0f} min ingested late, any taken before dropped by its id")
+            mark, waiting = (-1.0, ""), set()
         seen, late, skipped = set(), set(), 0
         for key, p in listing:
             if key <= mark and key[1] not in waiting:
@@ -543,9 +552,13 @@ class CallIngest:
             else:
                 late.add(str(p))
         self._seen, self._late, self._late_n, self._late_skipped = seen, late, 0, skipped
+        if ahead:                                    # (from the newest primed one: the late ones move it as they're taken)
+            mark = max((k for k, p in listing if str(p) in seen), default=(0.0, ""))
         with self._mark_lock:
             self._mark, self._behind, self._waiting = mark, None, sorted(waiting)
         self._late_say_by = now + LATE_REPORT_S
+        if ahead:
+            self._save_mark(force=True)
         self._say_late()
         return self
 
@@ -677,11 +690,14 @@ class CallIngest:
             return
         self._late_say_by = None
         left = len(self._late)
+        if not (self._late_n or self._late_skipped or left):
+            return                                   # (nothing from while it was down: nothing said)
         self.on_event(f"p25 {self.name}: {self._late_n} calls from while it was down ingested late "
                       f"({self._late_skipped} older skipped)" + (f"; {left} not ready yet" if left else ""))
 
-    def _load_mark(self) -> tuple[tuple[tuple[float, str], set[str]] | None, str]:
-        """((mtime, name), waiting names) from mark_path, or (None, why not)."""
+    def _load_mark(self) -> tuple[tuple[tuple[float, str], set[str], float] | None, str]:
+        """((mtime, name), waiting names, when it was written (wall clock; 0 unknown)) from mark_path, or (None, why
+        not)."""
         try:
             d = json.loads(self.mark_path.read_text())
         except FileNotFoundError:
@@ -699,9 +715,11 @@ class CallIngest:
             if not isinstance(name, str) or not isinstance(waiting, list) or \
                     not all(isinstance(w, str) for w in waiting):
                 raise ValueError("name")
+            at = d.get("saved_at", 0.0)
+            at = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) and 0 <= at < float("inf") else 0.0
         except (KeyError, ValueError):
             return None, "ingest mark unreadable"
-        return ((float(mt), name), set(waiting)), ""
+        return ((float(mt), name), set(waiting), at), ""
 
     def _save_mark(self, force: bool = False) -> None:
         """The mark to mark_path (tmp + rename, no fsync) when it changed: at most every MARK_SAVE_S, or now (force)."""
@@ -711,21 +729,21 @@ class CallIngest:
             mark = self._mark
             if mark is None:
                 return
-            now = time.time()
+            now, mono = time.time(), time.monotonic()        # (the throttle on the monotonic clock: a step can't stall it)
             if self._behind is None:
                 waiting = list(self._waiting)
             else:                                            # (older than REPLAY_S: never replayed anyway)
                 waiting = [n for mt, n in self._behind if (mt, n) <= mark and now - mt <= REPLAY_S]
             waiting = waiting[-MARK_WAITING_MAX:]
             state = (mark, tuple(waiting))
-            if state == self._saved or (not force and now - self._saved_at < MARK_SAVE_S):
+            if state == self._saved or (not force and mono - self._saved_at < MARK_SAVE_S):
                 return
-            self._saved_at = now
+            self._saved_at = mono
             tmp = self.mark_path.with_name(self.mark_path.name + ".tmp")
             try:
                 self.mark_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp.write_text(json.dumps({"v": 1, "dir": str(self.dir), "mtime": mark[0], "name": mark[1],
-                                           "waiting": waiting}))
+                                           "waiting": waiting, "saved_at": now}))
                 os.replace(tmp, self.mark_path)
             except OSError as e:
                 if not self._mark_err:                       # (said once: it is tried again every MARK_SAVE_S)
