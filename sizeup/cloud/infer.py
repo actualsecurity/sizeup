@@ -227,6 +227,8 @@ class Lane:
         self._switch: dict = {}              # the switches as last read ("": the pool's; a worker id: its LLM jobs)
         self._switch_at = -1e9               # (read outside the lock, at most once a second: the lock never waits on
                                              # hub.sqlite)
+        self._switch_gen = 0                 # bumped by switched(): a read begun before it is never written back
+        self._switcher: threading.Thread | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # what available() and submit() read without any lock: set under the lock (never any I/O there) whenever a
@@ -242,6 +244,8 @@ class Lane:
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="infer-lane", daemon=True)
             self._thread.start()
+            self._switcher = threading.Thread(target=self._switch_loop, name="infer-switches", daemon=True)
+            self._switcher.start()
         with self._cv:
             self._recompute(self.clock())
         return self
@@ -295,20 +299,36 @@ class Lane:
         for line in said:
             self.log(line)
 
+    def _switch_loop(self) -> None:
+        """The switches and the leader, read again every second on a thread of their own: hub.sqlite being slow never
+        holds the lane's thread (its deadlines) nor a request."""
+        while not self._stop.wait(1.0):
+            try:
+                self._refresh()
+                self._leader = self._may_write()
+                with self._cv:
+                    self._recompute(self.clock())
+            except Exception as e:  # noqa: BLE001 - never ends
+                self.log(f"infer: switches: {type(e).__name__}")
+
     def _refresh(self, wids=None) -> None:
         """The switches read again (the pool's, and each worker's or just `wids`'): never with the lane's lock held, so
-        hub.sqlite being slow never holds a submit() or a claim. A switch that can't be read: off."""
+        hub.sqlite being slow never holds a submit() or a claim. A switch that can't be read: off. A read that began
+        before an admin's change (switched()) is dropped, never written over it."""
         def read(fn, *a):
             try:
                 return bool(fn(*a))
             except Exception:  # noqa: BLE001 - can't be read: off
                 return False
         full = wids is None
-        if full:
-            with self._cv:
+        with self._cv:
+            gen = self._switch_gen
+            if full:
                 wids = list(self.workers)
         vals = {"": read(self.enabled), **{w: read(self.llm_on, w) for w in wids}}
         with self._cv:
+            if gen != self._switch_gen:
+                return                                 # (an admin's change came meanwhile: its own read is newer)
             self._switch.update(vals)
             if full:
                 self._switch_at = time.monotonic()
@@ -325,7 +345,10 @@ class Lane:
         return bool(self._switch.get(wid, False))
 
     def switched(self) -> None:
-        """An admin changed a switch (WorkerRegistry's listeners): read them again now, so it holds at once."""
+        """An admin changed a switch (WorkerRegistry's listeners): read them again now, so it holds at once (and any
+        read begun before is dropped)."""
+        with self._cv:
+            self._switch_gen += 1
         self._refresh()
 
     # -- workers ---------------------------------------------------------------------------------------------------
@@ -580,9 +603,9 @@ class Lane:
     def tick(self, now: float | None = None) -> int:
         """Deadlines, lost leases, a worker switched off. Nobody ready at all: what waits is None at once (no_worker /
         gaming). How many were resolved."""
-        if time.monotonic() - self._switch_at >= 1.0:
-            self._refresh()                            # (outside the lock: at most once a second)
-        self._leader = self._may_write()               # (outside the lock too)
+        if self._switcher is None and time.monotonic() - self._switch_at >= 1.0:
+            self._refresh()                            # (no switch thread: a lane not started, tests)
+            self._leader = self._may_write()
         now = self.clock() if now is None else now
         out = []
         with self._cv:

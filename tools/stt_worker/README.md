@@ -320,7 +320,10 @@ the worker starts, checks and stops. Nothing goes to a cloud model.
 - **Qwen3 without thinking:** `--reasoning off` (and the worker's `enable_thinking: false`). With thinking on, Qwen3
   spends its tokens thinking and returns an empty answer.
 - **Pinned:** the worker hashes the GGUF before llama-server's first start and refuses one that isn't
-  `llm_model_sha256` (the hash is remembered in `llm-model.json` until the file changes).
+  `llm_model_sha256` (the hash is remembered in `llm-model.json` until the file changes; before each restart the
+  worker looks at the file's size and time again, and hashes it again when they changed).
+- **No orphans:** on Windows the servers the worker starts join a job object that ends them when the worker ends,
+  however it ends. Their pids are also kept in `children.json`: the next start ends one still running.
 
 ### VRAM budget (12 GB, RTX 3080 Ti)
 
@@ -344,7 +347,8 @@ A game needs the GPU more than either: the worker gives it all back (below).
 ### Gaming and the LLM
 
 When gaming starts, the worker aborts a generation at once and hands the job back, as it does a clip. After
-`llm_stop_gaming_s` (60 s) of gaming it stops its llama-server, which gives about 6 GB of VRAM back to the game
+`llm_stop_gaming_s` of gaming (60 s for Qwen3-8B, 20 s for the bigger Gemma) it stops its llama-server, which gives
+about 6 GB (Gemma: 8 GB) of VRAM back to the game
 (whisper-server keeps its own rule: 10 minutes). When gaming ends, it starts llama-server again; the model takes a few
 seconds to load, and the hub gets LLM jobs from the worker again once its health check passes. llama-server's own GPU
 memory never counts as "another process" in the gaming check.
@@ -394,6 +398,8 @@ These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
 | `whisper-server.log` | whisper-server's output, when the worker starts it (1 MB, 2 old copies) |
 | `llama-server.log` | llama-server's output, when the worker starts it (1 MB, 2 old copies; token counts, never prompts) |
 | `llm-model.json` | the GGUF's checked SHA-256, by path, size and time (so a restart doesn't hash 5 GB again) |
+| `llm-key` | the API key llama-server was last started with (only you can read it; `check` uses it) |
+| `children.json` | the pids of the servers the worker started: the next start ends one a worker that died left running |
 
 ## Config
 
@@ -419,11 +425,11 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `unauthorized_retry_s` | 300 | retry interval after the hub or Cloudflare refuses |
 | `state_dir`, `log_file` | see Files | `log_file = "-"`: stderr only |
 | `llm_url` | | llama-server, loopback only (e.g. `http://127.0.0.1:8180`); unset: no LLM |
-| `llm_server` | | llama-server's command line; when set, the worker runs it. `--host` 127.0.0.1 only, `--port` = `llm_url`'s, `-m` a local GGUF; `-v`, `--slots`, `--api-key`, `--log-file`, `-hf` refused |
+| `llm_server` | | llama-server's command line; when set, the worker runs it. Only these options: `-m` (exactly one local GGUF), `--host` (127.0.0.1 only), `--port` (`llm_url`'s), `-c`, `-ngl`, `-np`, `--jinja`, `--no-webui`, `--no-slots`, `--reasoning`, `-t`, `-fa`, `-b`, `-ub`, `--no-mmap`, `-ctk`, `-ctv` (and their long names); anything else is refused (verbose logs, a prompts directory, the slots endpoint, an API key, CORS, tools, other models). The worker always adds `--no-slots` and `--no-webui` |
 | `llm_model` | | the label the hub shows (Health), e.g. `qwen3-8b-q4_k_m` |
-| `llm_model_sha256` | | the GGUF's SHA-256: checked before llama-server's first start; a mismatch means no LLM |
+| `llm_model_sha256` | | the GGUF's SHA-256, required with `llm_server`: checked before llama-server's first start, and again before a restart when the file's size or time changed; a mismatch means no LLM |
 | `llm_process` | `llama-server` | how the GPU check recognises our llama-server |
-| `llm_stop_gaming_s` | 60 | seconds of gaming before the worker stops its llama-server (its VRAM back to the game); 0 at once |
+| `llm_stop_gaming_s` | auto | seconds of gaming before the worker stops its llama-server (its VRAM back to the game); 0 at once; unset: 60 for a model up to 6 GB (Qwen3-8B), 20 for a bigger one (Gemma-3-12B) |
 | `llm_timeout_s`, `llm_check_s`, `llm_fail_max` | 30, 10, 3 | per answer; health checks; failures in a row before no LLM until healthy |
 | `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
 
@@ -440,6 +446,8 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `llm: ..., model hash mismatch` | The GGUF isn't the pinned one: download it again (step 4b) and check its hash. |
 | `llm: ..., loading` for minutes | Read `llama-server.log`. `CUDA error: out of memory`: something else holds VRAM; lower `-c` or use the fallback model. |
 | `llm: ..., not answering` | llama-server exited or never started: `llama-server.log`; `check` tries a constrained answer. |
+| `llm: ..., a llama-server that isn't this worker's holds the port (401)` | A leftover from a worker that ended (its key is gone). The worker stops it by name and starts its own. On Windows the worker's servers end with it (a kill-on-close job), so this is rare. |
+| `check` says `llama-server said 401` | `check` uses the running worker's key (`state\llm-key`); a llama-server you started by hand for step 4b has none: run `check` against that one before the worker starts its own. |
 | `the hub has no LLM lane (an older hub)` | The hub predates the infer lane. Clips work as before; the worker asks again every 10 min. |
 | `infer ... not valid under its schema` often, with Qwen3 | Check `--reasoning off` is in `llm_server` (thinking eats the answer). |
 | `infer ... not valid under its schema` | The model's answer didn't match the job's schema; the hub drops it (None). Many: tell the admin. |

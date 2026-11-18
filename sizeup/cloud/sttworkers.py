@@ -65,6 +65,7 @@ META_POOL = "stt_pool"
 META_LLM = "stt_llm"            # per GPU worker: its "LLM jobs" switch (JSON {id: bool}; absent: on)
 API = "/api/station/stt/"
 LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
+INFER_MAX_BODY = 32 * 1024     # an LLM job's answer (its 16 KB at most, sizeup/cloud/infer.py) and its counts
 MAX_BODY = 1024 * 1024                  # a result: the text and its words (a 2-minute clip's are ~100 KB)
 TEXT_MAX = 20000
 SEGMENTS_MAX = 1000
@@ -468,7 +469,7 @@ class WorkerApi:
                 if m and m.group(2) == "audio":
                     return self._audio(wid, m.group(1))
                 return _json(404, {"error": "not found"})
-            raw = body(MAX_BODY) if body is not None else b""
+            raw = body(INFER_MAX_BODY if path.startswith(API + "infer/") else MAX_BODY) if body is not None else b""
             if raw is None:
                 return _json(413, {"error": "too large"})
             d = json.loads(raw or b"{}")

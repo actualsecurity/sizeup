@@ -658,3 +658,66 @@ def test_available_and_submit_never_wait_on_the_pools_lock_or_hub_sqlite():
     finally:
         gate.set()
         ln.stop()
+
+
+# -- #755 review -----------------------------------------------------------------------------------------------------
+
+def test_a_slow_read_begun_before_an_admins_change_never_writes_over_it():
+    on = {"gpu-1": True}
+    gate = threading.Event()
+
+    def llm_on(wid):
+        if threading.current_thread().name == "slow-read":
+            gate.wait(5)
+            return True                                      # what it read before the change
+        return on[wid]
+
+    ln = Lane(log=lambda s: None, llm_on=llm_on)
+    ln._thread = threading.current_thread()
+    gate.set()
+    llm_online(ln)
+    gate.clear()
+    slow = threading.Thread(target=ln._refresh, name="slow-read", daemon=True)
+    slow.start()
+    time.sleep(0.1)
+    on["gpu-1"] = False                                      # the admin switches it off meanwhile
+    ln.switched()
+    assert not ln.available()
+    gate.set()
+    slow.join(5)
+    assert not ln.available() and ln._switch["gpu-1"] is False
+
+
+def test_an_infer_body_over_32_kb_is_refused_before_it_is_parsed(tmp_path):
+    ln = lane()
+    reg, wa = api(tmp_path, ln)
+    token = reg.add("gpu-1")
+    raw = json.dumps({"output": {"reason": "r" * 40000}}).encode()
+    asked = []
+
+    def body(n):
+        asked.append(n)
+        return None if len(raw) > n else raw
+
+    code, data, _ = wa.handle("POST", "/api/station/stt/infer/0123456789abcdef/complete",
+                              {"Authorization": f"Bearer {token}"}, body)
+    assert code == 413 and asked == [32 * 1024]
+
+
+def test_deadlines_hold_while_hub_sqlite_is_stuck():
+    """The switches are read on their own thread: a stuck hub.sqlite never holds the lane's (its deadlines)."""
+    gate = threading.Event()
+    gate.set()
+    ln = Lane(log=lambda s: None, enabled=lambda: gate.wait(10) or True).start()
+    try:
+        ln.seen("gpu-1", "online", MODELS)
+        gate.clear()                                         # hub.sqlite stuck from here
+        time.sleep(1.2)                                      # (the switch thread is waiting on it now)
+        f = ln.submit("t", MSGS, PD, deadline_s=1.5, meta=True)
+        t0 = time.monotonic()
+        assert ln.claim("gpu-1", 0) is not None
+        res, meta = f.result(5)
+        assert meta["why"] == "deadline" and time.monotonic() - t0 < 1.65
+    finally:
+        gate.set()
+        ln.stop()

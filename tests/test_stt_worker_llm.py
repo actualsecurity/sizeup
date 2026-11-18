@@ -105,6 +105,7 @@ class FakeLlama:
 
     def __init__(self):
         self.loading = False
+        self.key: str | None = None              # set: it wants this API key (a leftover started with another one)
         self.delay = 0.0
         self.fail: int | None = None
         self.answer: object = GOOD
@@ -131,6 +132,10 @@ class FakeLlama:
                 if self.path == "/health":
                     return self._send(503 if llama.loading else 200,
                                       {"status": "loading model" if llama.loading else "ok"})
+                if self.path == "/v1/models":
+                    if llama.key is not None and self.headers.get("Authorization") != f"Bearer {llama.key}":
+                        return self._send(401, {"error": {"message": "Invalid API Key"}})
+                    return self._send(503 if llama.loading else 200, {"data": [{"id": "m"}]})
                 self._send(404, {})
 
             def do_POST(self):
@@ -202,7 +207,7 @@ def no_prompts_in_logs(caplog):
 
 def base(**kw):
     return W.Config(hub_url="https://hub.example.org", token=TOKEN,
-                    **{"llm_url": "http://127.0.0.1:8180", "llm_model": MODEL, **kw})
+                    **{"llm_url": "http://127.0.0.1:8180", "llm_model": MODEL, "llm_model_sha256": "a" * 64, **kw})
 
 
 @pytest.mark.parametrize("kw, msg", [
@@ -217,9 +222,24 @@ def base(**kw):
     ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--slots"]}, "--slots not allowed"),
     ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--api-key", "k"]}, "--api-key not allowed"),
     ({"llm_server": ["llama-server", "-hf", "org/model", "--port", "8180"]}, "-hf not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--log-prompts-dir", "p"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "-lv", "5"]}, "-lv not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--verbosity=5"]}, "--verbosity=5 not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--slot-save-path", "d"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--cors-origins", "*"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--props"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--mmproj", "p.gguf"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "-md", "d.gguf"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--lora", "l.gguf"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--tools", "all"]}, "not allowed"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "stray"]}, "stray not allowed"),
+    ({"llm_server": ["llama-server", "-m", "a.gguf", "-m", "b.gguf", "--port", "8180"]}, "exactly one -m"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180", "--jinja=1"]}, "takes no value"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port"]}, "needs a value"),
+    ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8180"], "llm_model_sha256": ""}, "required with"),
     ({"llm_server": ["llama-server", "-m", "m.gguf", "--port", "8080"]}, "isn't llm_url's port"),
     ({"llm_server": ["llama-server", "-m", "m.gguf"]}, r"8080 \(its default\)"),
-    ({"llm_server": ["llama-server", "--port", "8180"]}, "-m <the GGUF file>"),
+    ({"llm_server": ["llama-server", "--port", "8180"]}, "exactly one -m"),
 ])
 def test_llama_server_stays_on_loopback_with_a_local_pinned_model_and_quiet_logs(kw, msg):
     with pytest.raises(W.ConfigError, match=msg):
@@ -482,3 +502,158 @@ def test_the_readme_pins_both_model_choices_and_the_example_config_uses_the_defa
     (example,) = re.findall(r"```toml\n(.*?)```", readme, re.S)
     assert 'llm_model_sha256 = "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"' in example
     assert "models\\Qwen3-8B-Q4_K_M.gguf" in example and "'--reasoning', 'off'" in example
+
+
+# --- review fixes (#755) --------------------------------------------------------------------------------------------
+
+def test_llm_command_always_adds_no_slots_no_webui_and_a_loopback_host():
+    assert W.llm_command(["llama-server", "-m", "m.gguf", "--port", "8180"]) == [
+        "llama-server", "-m", "m.gguf", "--port", "8180", "--host", "127.0.0.1", "--no-slots", "--no-webui"]
+    argv = ["llama-server", "-m", "m.gguf", "--host=127.0.0.1", "--no-slots", "--no-webui"]
+    assert W.llm_command(argv) == argv
+
+
+def test_a_pre_alert_clip_being_decoded_stops_a_generation_before_it_starts(tmp_path, ihub, whisper, llama):
+    """do_job and do_infer meet under one lock: a clip held now hands the LLM job back at once; one that comes later
+    sets the flag the generation watches, and no clear() can lose it."""
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    w.whisper_ok, w.llm_ok = True, True
+    lease = secrets.token_hex(8)
+    ihub.infer_leases[lease] = {"job": {}, "closed": False}
+    w.job = {"lease": "x", "fast": True}                      # a pre-alert clip in progress
+    w.do_infer({"lease": lease, "id": "j1", "task": "pd_classify", "messages": MSGS, "schema": PD, "deadline_s": 10})
+    assert ihub.infer_done("release") == [{"why": "preempted"}] and llama.requests == []
+    w.job = {"lease": "y", "fast": False}                     # a slow clip doesn't
+    lease2 = secrets.token_hex(8)
+    ihub.infer_leases[lease2] = {"job": {}, "closed": False}
+    w.do_infer({"lease": lease2, "id": "j2", "task": "pd_classify", "messages": MSGS, "schema": PD, "deadline_s": 10})
+    assert ihub.infer_done("complete")[0]["output"] == GOOD
+
+
+def test_a_generation_that_raises_hands_the_job_back_without_its_text(tmp_path, ihub, whisper, llama, monkeypatch,
+                                                                      caplog):
+    def boom(self):
+        raise RuntimeError(PROMPT_SECRET)                     # (an exception carrying content: never logged)
+    monkeypatch.setattr(W.LlmCall, "run", boom)
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    w.whisper_ok, w.llm_ok = True, True
+    lease = secrets.token_hex(8)
+    ihub.infer_leases[lease] = {"job": {}, "closed": False}
+    w.do_infer({"lease": lease, "id": "j1", "task": "pd_classify", "messages": MSGS, "schema": PD, "deadline_s": 10})
+    assert ihub.infer_done("release") == [{"why": "error"}] and w.llm_counts["failed"] == 1
+    assert "unexpected RuntimeError" in caplog.text
+
+
+def test_the_claim_says_the_workers_real_state(tmp_path, ihub, whisper, llama):
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    w.connected, w.whisper_ok, w.llm_ok = True, True, True
+    w.llm_step()
+    W.Control(w.cfg.control_path).set(paused=True)
+    w.llm_step()
+    assert [r[3]["state"] for r in ihub.calls("/infer/claim")] == ["online", "paused"]
+
+
+def test_a_leftover_llama_server_with_another_key_is_not_used_and_is_stopped(tmp_path, ihub, whisper, llama,
+                                                                           monkeypatch):
+    """A worker that died left its llama-server running (its key gone with it): every job would be 401. The worker
+    says so, never claims, and stops the leftover by name (its own isn't running)."""
+    llama.key = "a key nobody knows any more"
+    killed = []
+    monkeypatch.setattr(W, "kill_pid", lambda pid, run=None: killed.append(pid))
+    monkeypatch.setattr(W, "find_pids", lambda name, run=None: {4242} if name == "llama-server" else set())
+    procs = []
+    cfg = llm_cfg(tmp_path, ihub, whisper, llama, llm_server=["llama-server", "-m", "m.gguf", "--port", str(llama.port)])
+    w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
+    with running(w):
+        wait_for(lambda: killed, what="the leftover stopped")
+        assert not w.llm_ok and "isn't this worker's" in w.llm_err and not ihub.calls("/infer/claim")
+    assert killed[0] == 4242
+
+
+def test_the_children_a_dead_worker_left_are_ended_at_the_next_start(tmp_path):
+    import subprocess
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        ch = W.Children(tmp_path / "children.json")
+        ch.set("llama-server", sleeper.pid)
+        ch.set("whisper-server", 999999)                      # gone already: nothing to do
+        assert W.process_name(sleeper.pid) == "sleep"
+        assert ch.reap_leftovers({"llama-server": "llama-server", "whisper-server": "whisper-server"}) == []
+        ch.set("llama-server", sleeper.pid)                   # (a pid that is now another program: never killed)
+        assert sleeper.poll() is None
+        assert ch.reap_leftovers({"llama-server": "sleep"}) == [sleeper.pid]
+        assert sleeper.wait(5) is not None and W.read_json(tmp_path / "children.json") == {}
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+
+
+def test_a_started_server_joins_the_kill_on_close_job_and_its_pid_is_kept(tmp_path):
+    joined = []
+
+    class Job:
+        def add(self, proc):
+            joined.append(proc.pid)
+            return True
+
+    ch = W.Children(tmp_path / "children.json")
+    procs = []
+    wp = W.WhisperProcess(["llama-server", "-m", "m.gguf"], tmp_path / "l.log", clock=lambda: 1e6, name="llama-server",
+                          popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1], job=Job(),
+                          children=ch, command=W.llm_command)
+    wp.ensure(port_alive=False)
+    assert joined == [procs[0].pid] and W.read_json(ch.path) == {"llama-server": procs[0].pid}
+    assert "--no-slots" in procs[0].argv and "--no-webui" in procs[0].argv
+    wp.stop()
+    assert W.read_json(ch.path) == {}
+
+
+def test_the_job_objects_limits_have_windows_layout():
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION is 144 bytes on 64-bit Windows (SetInformationJobObject checks it)."""
+    import ctypes
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        assert ctypes.sizeof(W._ExtendedLimits) == 144 and ctypes.sizeof(W._BasicLimits) == 64
+    assert W.KillOnClose().add(object()) is False             # (elsewhere than Windows: nothing, never an error)
+
+
+def test_check_uses_the_running_workers_key(tmp_path, ihub, whisper, llama, capsys):
+    llama.answer = {"ok": True}
+    llama.key = "the-key-the-worker-started-it-with"
+    cfg = llm_cfg(tmp_path, ihub, whisper, llama)
+    W.write_secret(Path(cfg.state_dir) / "llm-key", llama.key)
+    assert W._check(cfg) == 0 and "llama-server: ok" in capsys.readouterr().out
+    assert llama.requests[-1]["auth"] == f"Bearer {llama.key}"
+    import os
+    assert os.stat(Path(cfg.state_dir) / "llm-key").st_mode & 0o077 == 0
+
+
+def test_a_model_file_that_changed_is_checked_again_before_a_restart(tmp_path, ihub, whisper):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF" + b"\0" * 4096)
+    good = hashlib.sha256(gguf.read_bytes()).hexdigest()
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    port = dead.getsockname()[1]
+    dead.close()
+    procs = []
+    cfg = make_cfg(tmp_path, ihub, whisper, llm_url=f"http://127.0.0.1:{port}", llm_model=MODEL, llm_model_sha256=good,
+                   llm_server=["llama-server", "-m", str(gguf), "--port", str(port)])
+    w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
+    with running(w):
+        wait_for(lambda: procs, what="started once checked")
+        gguf.write_bytes(b"GGUF" + b"\1" * 5000)             # swapped under it
+        procs[0].code = 1                                     # it exits
+        w.llm_proc.started = w._llm_started_at = -1e9
+        wait_for(lambda: w.llm_verified is False, what="checked again: not the pinned file")
+        time.sleep(0.2)
+        assert len(procs) == 1 and w.llm_err == "model hash mismatch"
+
+
+def test_llama_server_is_stopped_sooner_while_gaming_for_a_big_model(tmp_path, ihub, whisper, llama):
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    w._llm_sig = (5_027_783_488, 0)                           # Qwen3-8B Q4_K_M
+    assert w.llm_stop_after_s() == 60.0
+    w._llm_sig = (7_300_575_264, 0)                           # Gemma-3-12B Q4_K_M
+    assert w.llm_stop_after_s() == 20.0
+    w.cfg.llm_stop_gaming_s = 45.0
+    assert w.llm_stop_after_s() == 45.0
