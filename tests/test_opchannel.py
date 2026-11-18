@@ -314,3 +314,18 @@ def test_promotion_ends_when_the_call_is_no_longer_heard_there(rig):
     assert rig.cad.opchan.promoted(added + QUIET_S + 1) == set()          # open for hours, nothing heard: not ours
     on31(rig, "4031-1-call_1-t0", added + QUIET_S + 5, "", talker="60 Ctrl OP 3")
     assert rig.cad.opchan.promoted(added + QUIET_S + 10) == {TG31}        # heard on it again
+
+
+def test_the_moves_time_sent_to_the_station_is_the_new_calls_never_an_old_closed_ones(rig):
+    old = call(rig)
+    rig.cad.incident_channel(old, {"talkgroup": TG31, "operator": "Lt. Test"})
+    old_since = rig.cad.store.one("SELECT since FROM incident_channels WHERE incident_id = ?", (old,))["since"]
+    rig.at(600)
+    rig.cad.close(old, {"disposition": "OTHER", "operator": "Lt. Test"})
+    rig.at(7 * 86400)                                                     # a week later: another call moves there
+    new = call(rig, "B1", "40 Other Rd", units=("E63",), at=T0 + 7 * 86400)
+    rig.radio("307-9-call_9-t0", T0 + 7 * 86400 + 10, "Engine 63, operate on Fire/EMS 31")
+    assert chans(rig, new) == [(TG31, "dispatch")]
+    want = T0 + 7 * 86400 + 10 - LEAD_S
+    assert rig.cad.opchan.promoted_since() == {"tg:4031": want} and want > old_since
+    assert set(rig.cad.opchan.promoted_from()) == rig.cad.opchan.promoted() == {TG31}

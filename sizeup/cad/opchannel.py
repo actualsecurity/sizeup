@@ -288,25 +288,29 @@ class OpChannels:
         return sorted({w["incident_id"] for w in wins if w["tg"] == tg and w["since"] <= at
                        and (w["until"] is None or w["until"] >= at)})
 
-    def promoted(self, now: float | None = None) -> set[int]:
-        """The talkgroups transcribed like ours now: an open incident's channel, or one closed in the last TAIL_S; and
-        only while the call is heard there (put on in the last QUIET_S, or a transmission on it on the incident in the
-        last QUIET_S): a call left open for hours never keeps a busy shared talkgroup ours."""
+    def promoted_from(self, now: float | None = None) -> dict[int, float]:
+        """The talkgroups transcribed like ours now, each with when the move to it was ({tg: since}, the earliest of the
+        incidents that promote it now), from ONE query: an open incident's channel, or one closed in the last TAIL_S;
+        and only while the call is heard there (put on in the last QUIET_S, or a transmission on it on the incident in
+        the last QUIET_S): a call left open for hours never keeps a busy shared talkgroup ours, and an old call on the
+        same talkgroup never moves `since` back (the station raises only what was heard after it)."""
         now = self.cad.clock() if now is None else now
-        rows = self.store.q("SELECT DISTINCT c.talkgroup FROM incident_channels c JOIN incidents i ON i.id = c.incident_id "
-                            f"WHERE c.removed_at IS NULL AND (i.status IN ({','.join('?' * len(OPEN))}) OR "
-                            "(i.status = 'closed' AND i.closed_at >= ?)) AND (c.since >= ? OR c.at >= ? OR EXISTS ("
+        rows = self.store.q("SELECT c.talkgroup, MIN(c.since) AS since FROM incident_channels c JOIN incidents i "
+                            f"ON i.id = c.incident_id WHERE c.removed_at IS NULL AND (i.status IN ({','.join('?' * len(OPEN))}) "
+                            "OR (i.status = 'closed' AND i.closed_at >= ?)) AND (c.since >= ? OR c.at >= ? OR EXISTS ("
                             "SELECT 1 FROM radio_links l JOIN radio_traffic t ON t.id = l.traffic_id WHERE "
-                            "l.incident_id = c.incident_id AND t.talkgroup = c.talkgroup AND t.start >= ?))",
+                            "l.incident_id = c.incident_id AND t.talkgroup = c.talkgroup AND t.start >= ?)) GROUP BY c.talkgroup",
                             (*OPEN, now - TAIL_S, now - QUIET_S, now - QUIET_S, now - QUIET_S))
-        return {r["talkgroup"] for r in rows} - self.ours()
+        ours = self.ours()
+        return {r["talkgroup"]: float(r["since"]) for r in rows if r["talkgroup"] not in ours}
 
-    def promoted_since(self) -> dict[str, float]:
-        """{"tg:N": since} for the channels on now (not removed, not dismissed): when the move to each was (its earliest),
-        for the station to raise only what was heard after it."""
-        rows = self.store.q("SELECT c.talkgroup, MIN(c.since) AS since FROM incident_channels c JOIN incidents i ON "
-                            "i.id = c.incident_id WHERE c.removed_at IS NULL AND i.status != 'dismissed' GROUP BY c.talkgroup")
-        return {f"tg:{r['talkgroup']}": float(r["since"]) for r in rows}
+    def promoted(self, now: float | None = None) -> set[int]:
+        """The talkgroups transcribed like ours now (promoted_from)."""
+        return set(self.promoted_from(now))
+
+    def promoted_since(self, now: float | None = None) -> dict[str, float]:
+        """{"tg:N": since}: promoted_from keyed as the station's queue keys them."""
+        return {f"tg:{tg}": since for tg, since in self.promoted_from(now).items()}
 
     # -- writing ----------------------------------------------------------------------------------------------------------
 
