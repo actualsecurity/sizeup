@@ -72,6 +72,8 @@ POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every threa
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
 GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
+POST /api/cad/health/dismiss {kind}  the hub only, admins: Health's Dismiss on a station event the hub refused (stuck,
+                               or an alarm delivered late): the station drops those (Hub.dismiss_rejected), audited
 GET  /api/cad/health           the hub only: Settings > Station > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
@@ -143,6 +145,7 @@ from sizeup.web import bundle as bundle_mod
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+HEALTH_DISMISS = "/api/cad/health/dismiss"   # Health's Dismiss (Hub.dismiss_rejected)
 # Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
 COMMON_PLACES_PATH = "/api/cad/settings/common_places"
 MAX_COMMON_PLACES_BODY = 4608 * 1024
@@ -1022,6 +1025,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == HEALTH_DISMISS and station is not None and cad is not None and hasattr(station, "dismiss_rejected"):
+                return self._health_dismiss(path)
             if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
                 return self._adapter_password(path)
             if path == "/api/cad/preplan/docs" and cad is not None:
@@ -1269,6 +1274,30 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if out is None:
                 return self._send(202, json.dumps({"running": True, **p}).encode(), "application/json")
             self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json", {"Cache-Control": "no-store"})
+
+        def _health_dismiss(self, path: str) -> None:
+            """POST /api/cad/health/dismiss {kind} (admins: cad.permit, not in WRITES; JSON with X-Sizeup-Action: dismiss
+            only): Health's Dismiss on "Station event rejected by hub: <kind>" (or a late alarm). The station drops its
+            stuck and late events of that kind (a quarantine_dismiss call); audited on the hub (Hub.dismiss_rejected)."""
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json" or self.headers.get("X-Sizeup-Action") != "dismiss":
+                self.close_connection = True
+                return self._send(400, b'{"error":"JSON with X-Sizeup-Action: dismiss only"}', "application/json")
+            if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
+            raw = self._body(1024)
+            try:
+                body = json.loads(raw or b"{}") if raw is not None else None
+                if not isinstance(body, dict):
+                    raise ValueError("a JSON object, at most 1 KB")
+                out = station.dismiss_rejected(str(body.get("kind") or ""), getattr(self.who, "email", "") or "")
+            except ValueError as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except RuntimeError as e:            # (StationOffline too): the station couldn't
+                return self._send(503, json.dumps({"error": str(e)[:300]}).encode(), "application/json")
+            self._did(path, body)
+            self._send(200, json.dumps(out).encode(), "application/json")
 
         def _adapter_password(self, path: str) -> None:
             """POST /api/cad/adapter-password: an admin's new station adapter password, written to SSM (write-only).

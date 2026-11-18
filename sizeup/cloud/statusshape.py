@@ -60,7 +60,8 @@ CHANNELS = {"prefs": DICT, "aws": DICT, "squelch": DICT, "sig": STR}
 RECEPTION = {"history": LIST}
 STT_TERMS = {"v": OSTR, "sets": DICT}
 OUTBOX = {"pending": (_opt(lambda v: _int(v) and v >= 0), "a count or null"), "oldest": ONUM,
-          "dropped_audio": (_opt(lambda v: _int(v) and v >= 0), "a count or null")}
+          "dropped_audio": (_opt(lambda v: _int(v) and v >= 0), "a count or null"),
+          "quarantine": ODICT}     # (the events the hub refused: health.py _quarantine checks each field it reads)
 STT_INPUT = {"dropped": DICT, "worker": DICT}
 VERSION = {"build": OSTR, "hub": OSTR, "update": DICT, "adapter": ODICT, "state": OSTR, "text": OSTR}
 # the updater's state as the hub reads it (autoupdate.describe: on the deploy check's path)

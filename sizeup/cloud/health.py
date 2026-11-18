@@ -38,6 +38,13 @@ notice when it clears:
     outbox        events waiting on the station for outbox_min (5): it couldn't reach the  warning
                   hub (invisible here until it comes back: worked out from the age of the
                   oldest event it reports)
+    rejected:<type> "Station event rejected by hub: <type>": a page, its text, an alarm or an  critical
+                  incident source's event the hub refuses for good, held in the station's
+                  quarantine (sizeup/cloud/outbox.py): sent again slowly, then stuck until a
+                  person drops it; "Station alarm delivered late, not raised" for one the hub
+                  took too late (sizeup/cad/alarms.py MAX_AGE_S)
+    rejected_minor:<type> another type refused, for REJECTED_RECENT_S after its last refusal   warning
+                  (its own mute kind: muting it never hides a critical one)
     disk          the station's disk over disk_pct (90) full                               warning (critical
                                                                                            from DISK_CRITICAL)
     stt_backlog   the station's whisper queue (sizeup/stt.py SttQueue, #195, #300): its oldest   warning
@@ -191,18 +198,82 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
-              "outbox": "Station's events backing up", "disk": "Station disk full",
+              "outbox": "Station's events backing up", "rejected": "Station event rejected (critical)",
+              "rejected_minor": "Station event rejected (other)",
+              "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped",
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
-MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected")   # critical ones: muted for a time only, never
+                                                                          # until unmuted
+REJECTED_RECENT_S = 24 * 3600.0     # a non-critical event the hub refused: a warning this long after its last refusal
 
 
 def alert_kind(key: str) -> str:
     """An alert's key -> its kind for muting: "job:FG1" -> "job", "aws_budget80" -> "aws_budget"."""
     k = str(key).partition(":")[0]
     return "aws_budget" if k == "aws_budget80" else k
+
+
+def _quarantine(q, skew: float = 0.0) -> dict:
+    """The station's quarantine as it reported it (sizeup/cloud/outbox.py summary(): the events the hub refused), checked;
+    its times on the hub's clock. A station from before this reports none: nothing."""
+    q = q if isinstance(q, dict) else {}
+    num = (lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None)
+    rows = []
+    for r in (q.get("rows") if isinstance(q.get("rows"), list) else [])[:20]:
+        if not isinstance(r, dict) or not isinstance(r.get("kind"), str) or num(r.get("first_at")) is None:
+            continue
+        rows.append({"kind": r["kind"][:40], "reason": str(r.get("reason") or "")[:40],
+                     "error": str(r.get("error") or "")[:200], "first_at": num(r["first_at"]) + skew,
+                     "last_at": (num(r.get("last_at")) or num(r["first_at"])) + skew,
+                     "tries": int(num(r.get("tries")) or 1), "critical": bool(r.get("critical")),
+                     "state": str(r.get("state") or "held")[:10],
+                     "next_at": num(r.get("next_at")) + skew if num(r.get("next_at")) is not None else None})
+    kinds = {}
+    for k, v in list((q.get("kinds") if isinstance(q.get("kinds"), dict) else {}).items())[:40]:
+        if isinstance(k, str) and isinstance(v, dict):
+            kinds[k[:40]] = dict({f: int(num(v.get(f)) or 0) for f in ("n", "critical", "stuck", "late")},
+                                 **{f: num(v.get(f)) + skew if num(v.get(f)) is not None else None
+                                    for f in ("critical_first", "minor_first", "minor_last")})
+    return {"n": int(num(q.get("n")) or 0), "critical": int(num(q.get("critical")) or 0), "rows": rows, "kinds": kinds}
+
+
+def _rejected_alerts(q: dict, now: float) -> dict[str, dict]:
+    """The events the hub refused, per type, from the station's totals per type (its rows are a sample: the reason and
+    the next try). "rejected:<type>" (critical) while a critical one (a page, its text, an alarm, an incident source's
+    event) is held on the station: sent again slowly, stuck (no more tries), or an alarm the hub took too late to raise
+    (LATE_KEEP_S on the station). Stuck and late ones carry "dismiss": an admin's Dismiss on Health
+    (POST /api/cad/health/dismiss) or `sizeup-station quarantine drop`. "rejected_minor:<type>" (a warning, its own mute
+    kind: muting it never hides a critical one) for another type refused in the last REJECTED_RECENT_S."""
+    out: dict[str, dict] = {}
+    rows = q.get("rows") or []
+    for kind, c in (q.get("kinds") or {}).items():
+        crit = [r for r in rows if r["kind"] == kind and r["critical"]]
+        if c["critical"]:
+            late = c["late"] == c["critical"]
+            last = max(crit, key=lambda r: r["last_at"]) if crit else None
+            nxt = min((r["next_at"] for r in crit if r["next_at"] is not None), default=None)
+            state = (f"{c['stuck']} stuck (no more tries)" if c["stuck"]
+                     else "" if late else f"next try {_hhmm(nxt)}" if nxt else "")
+            text = (f"{c['critical']} held on the station" + (f" · {last['reason']}" if last else "")
+                    + (f": {last['error']}" if last and last["error"] else "") + (f" · {state}" if state else ""))
+            out[f"rejected:{kind}"] = {
+                "severity": "critical",
+                "title": f"Station {kind} delivered late, not raised" if late else f"Station event rejected by hub: {kind}",
+                "text": text, "since": c["critical_first"] or min((r["first_at"] for r in crit), default=now),
+                **({"dismiss": kind} if c["stuck"] or c["late"] else {})}
+        minor = c["n"] - c["critical"]
+        if minor > 0 and c["minor_last"] is not None and now - c["minor_last"] <= REJECTED_RECENT_S:
+            last = max((r for r in rows if r["kind"] == kind and not r["critical"]), key=lambda r: r["last_at"],
+                       default=None)
+            out[f"rejected_minor:{kind}"] = {
+                "severity": "warning", "title": f"Station event rejected by hub: {kind}",
+                "text": f"{minor} kept on the station, not sent again" + (f" · {last['reason']}" if last else "")
+                        + (f": {last['error']}" if last and last["error"] else ""),
+                "since": c["minor_first"] or c["minor_last"]}
+    return out
 
 
 def active_mutes(section: dict | None, now: float) -> dict[str, float | None]:
@@ -690,6 +761,7 @@ class StationHealth:
         out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
                                        "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
                                        "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        out["outbox"]["quarantine"] = _quarantine(ob.get("quarantine"), hub.skew)   # the events the hub refused
         fire = si.get("dropped_fire")                               # ... and fire traffic's
         out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
@@ -1141,6 +1213,7 @@ class StationHealth:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
                              "text": f"{ob['pending']} event(s) waiting, oldest {_hhmm(ob['oldest'])} · not reaching the hub",
                              "since": ob["oldest"]}
+        out.update(_rejected_alerts(ob.get("quarantine") or {}, now))
         disk = m["system"].get("disk_pct")
         if isinstance(disk, (int, float)) and disk >= self.disk_pct:
             out["disk"] = {"severity": "critical" if disk >= DISK_CRITICAL else "warning", "title": "Station disk full",
@@ -1445,6 +1518,10 @@ class StationHealth:
                     a["notify_after"] = float(c["notify_after"])   # pushed only once this old (#547)
                 else:
                     a.pop("notify_after", None)
+                if c.get("dismiss"):
+                    a["dismiss"] = str(c["dismiss"])     # an admin may dismiss it (the station's stuck / late events)
+                else:
+                    a.pop("dismiss", None)
             for key in list(self.active):
                 if key in conds:
                     continue
@@ -1595,6 +1672,7 @@ class StationHealth:
         mutes = self._mutes(now)
         with self._lock:
             out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {},
+                        **({"dismiss": a["dismiss"]} if a.get("dismiss") else {}),
                         flaps=self._flaps(a, now),                                  # back this often in 1 h (#340)
                         **({"muted": True, "muted_until": mutes[alert_kind(a["key"])]}
                            if alert_kind(a["key"]) in mutes else {}))
