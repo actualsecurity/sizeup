@@ -116,6 +116,7 @@ class WorkerRegistry:
         self._written: dict[str, float] = {}
         self._any: tuple[float, bool] = (0.0, False)     # (read at, any active worker): read at most once a second
         self._lock = threading.Lock()
+        self.listeners: list[Callable[[], None]] = []    # called after an admin changes a switch (the LLM lane)
 
     def _q(self, sql: str, params=()) -> list[tuple]:
         try:
@@ -194,6 +195,7 @@ class WorkerRegistry:
                     raise WorkerError(f"classes: {', '.join(new['classes'])}, each true or false")
                 new["classes"][k] = v
         self.mdb.put(META_POOL, json.dumps(new, sort_keys=True))
+        self._switched()
         return old, new
 
     # -- each worker's "LLM jobs" switch (the infer lane, sizeup/cloud/infer.py) -------------------------------------
@@ -220,7 +222,15 @@ class WorkerRegistry:
         old = saved.get(wid, True)
         saved[wid] = on
         self.mdb.put(META_LLM, json.dumps(saved, sort_keys=True))
+        self._switched()
         return old, on
+
+    def _switched(self) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - a listener's trouble never undoes the admin's change
+                self.log(f"stt workers: a switch listener failed: {type(e).__name__}")
 
     # -- who a request is ------------------------------------------------------------------------------------------
 
@@ -471,7 +481,7 @@ class WorkerApi:
                     return _json(403, {"error": "GPU workers only", "reason": "not_a_gpu_worker"})
                 if self.infer is None:
                     return _json(404, {"error": "not found"})
-                return _json(*self.infer.handle(wid, path, d))
+                return _json(*self.infer.handle(wid, path, d, len(raw)))
             if self.infer is not None and gpu:
                 self.infer.seen(wid, d.get("state"), d.get("models"))
             state, model = d.get("state"), d.get("model")
