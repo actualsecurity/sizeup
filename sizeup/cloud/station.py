@@ -59,6 +59,7 @@ halving the rate halves the upload and changes nothing you can hear.
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 import json
 import tempfile
@@ -82,7 +83,7 @@ from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.metrics import MetricsLink
 from sizeup.cloud import sttinput
-from sizeup.cloud.outbox import Outbox
+from sizeup.cloud.outbox import Outbox, open_outbox
 from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
 
@@ -103,6 +104,35 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "set_stt_alert_keys",        # the sources the hub's pre-alerts push from: HIGH at least in whisper (#639 ph. 2)
          "set_stt_terms",             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
          "quarantine_dismiss")        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
+# A call's arguments that must be given, never left to the function's default: a default that means "everything"
+# (retranscribe's ids=None: every recording on the disk). Given as null, it is asked for; left out, it is refused. The
+# parameters without a default are required anyway.
+CALL_MUST_NAME = {"retranscribe": ("ids",)}
+
+
+def call_args(fn: str, f, args) -> dict | str | None:
+    """A call's arguments, by name, for f: an object by name (a name f does not take is ignored), or a list by position
+    (a hub's form so far; one past f's last parameter is ignored: a newer hub's). Why not, as a string: not a list or an
+    object, or an argument f must have (CALL_MUST_NAME, or one without a default) left out. None: f's parameters can't
+    be told apart (no signature, *args): the args as given."""
+    if not isinstance(args, (list, dict)):
+        return "args: a list or an object"
+    try:
+        params = list(inspect.signature(f).parameters.values())
+    except (TypeError, ValueError):
+        return None                         # (no signature to read: as given, _call)
+    if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD, p.POSITIONAL_ONLY) for p in params):
+        return None                         # (a stand-in that takes anything: as given, _call)
+    names = [p.name for p in params]
+    if isinstance(args, list):
+        given = dict(zip(names, args))
+    else:
+        given = {k: v for k, v in args.items() if k in names}
+    must = [p.name for p in params if p.default is p.empty] + [n for n in CALL_MUST_NAME.get(fn, ()) if n in names]
+    missing = [n for n in must if n not in given]
+    if missing:
+        return f"TypeError: {fn}() missing argument {', '.join(map(repr, missing))} (a call never runs on its defaults)"
+    return given
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -187,7 +217,8 @@ class StationLink:
         self.app, self.cfg, self.log = app, cfg, log
         self.station_id = cfg.station_id        # the id the hub assigns this station, once it says (adopt)
         self.updates = updates or Watch(log=log)
-        self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
+        self.outbox = outbox or open_outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024),
+                                            log=log)
         # what the hub last said it knows (#409), kept beside the outbox: a station starting while the hub is away
         # still queues another system's rows for it
         self._caps_file = (Path(cfg.cloud_outbox).with_name("hub_caps.json")
@@ -696,7 +727,10 @@ class StationLink:
         body = {"epoch": self.outbox.epoch, "station": self.station_id,
                 "events": [{"seq": r["seq"], "at": r["at"], "type": r["type"], "data": r["data"],
                             "audio": base64.b64encode(r["audio"]).decode() if r["audio"] else None,
-                            "audio_dropped": r["audio_dropped"]} for r in rows]}
+                            "audio_dropped": r["audio_dropped"],
+                            # a quarantined event sent again: its quarantine row (the hub applies such a feed snapshot
+                            # only over an older one; an older hub ignores the key)
+                            **({"qid": r["qid"]} if isinstance(r.get("qid"), int) else {})} for r in rows]}
         return client.request("POST", "/api/station/events", body, timeout=60.0)
 
     def _forward_once(self, client: HubClient, backoff: Backoff, now: float | None = None) -> float | None:
@@ -874,7 +908,8 @@ class StationLink:
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "stt_terms": app.stt_terms_applied(),         # the term lists the hub sent ({v, sets}: versions only)
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio,
-                          "quarantine": self.outbox.summary()},     # (the events the hub refused: health.py "rejected")
+                          "quarantine": self.outbox.summary(),      # (the events the hub refused: health.py "rejected")
+                          **({"notes": list(notes)} if (notes := getattr(self.outbox, "notes", None)) else {})},
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "pool_worker": dict(self.pool_worker.stats),  # (its whisper as a pool worker, #639 phase 2)
                "stt_alert_rev": app.stt_alert_rev,           # (the alert sources' revision it has: the hub resends on a change)
@@ -969,9 +1004,13 @@ class StationLink:
             elif kind == "call":
                 res = self._call(job.get("args") or {})
             elif kind == "sources_reset":               # an admin on the hub: an incident source's reset() (#301)
-                a = job.get("args") if isinstance(job.get("args"), dict) else {}
-                res = request_reset(getattr(self.app, "sources_runner", None), str(a.get("source") or ""),
-                                    f"{a.get('by') or 'an admin'} on the hub", self.log, origin="hub")
+                a = job.get("args")
+                if not isinstance(a, dict) or not isinstance(a.get("source"), str):
+                    # ("" is every source, asked for by name: a reset is never taken from args that say nothing)
+                    res = {"ok": False, "error": "sources_reset: args: {source, by} (source \"\" for every source)"}
+                else:
+                    res = request_reset(getattr(self.app, "sources_runner", None), a["source"],
+                                        f"{a.get('by') or 'an admin'} on the hub", self.log, origin="hub")
             else:
                 res = {"ok": False, "error": f"this station doesn't know job {kind!r}"}
         except Exception as e:  # a bad job must never take the station down
@@ -1010,13 +1049,22 @@ class StationLink:
         return {"ok": True, "label": label, "audio": base64.b64encode(wav).decode()}
 
     def _call(self, a: dict) -> dict:
+        """One of CALLS. Its arguments by name or by position (call_args); a call without them (absent or null) is
+        refused, never run on the function's defaults."""
         fn = a.get("fn")
         if fn not in CALLS:
             return {"ok": False, "error": f"not allowed from the hub: {fn!r}"}
-        args = a.get("args") or []
-        if not isinstance(args, list):
-            return {"ok": False, "error": "args: a list"}
-        result = getattr(self.app, fn)(*args)
+        args = a.get("args")
+        if args is None:
+            return {"ok": False, "error": f"{fn}: no args (a call never runs on its defaults)"}
+        f = getattr(self.app, fn)
+        given = call_args(fn, f, args)
+        if isinstance(given, str):
+            return {"ok": False, "error": given}
+        if given is None:
+            result = f(*args) if isinstance(args, list) else f(**args)
+        else:
+            result = f(**given)
         self._status_now = True             # the switch shows on the hub right away
         self._live_wake.set()
         return {"ok": True, "result": result}

@@ -644,6 +644,20 @@
               "description": "When the oldest waiting event was queued, Unix seconds; null when none waits."
             },
             "dropped_audio": {"type": "integer", "minimum": 0, "description": "Clips whose audio was dropped to keep the outbox under its size limit (the events stayed)."},
+            "notes": {
+              "type": "array",
+              "maxItems": 10,
+              "description": "From #791 on, and only when there are any: the outbox's own trouble this run (a new epoch after a stop that was not in order, a file SQLite could not open moved aside, a row it could not read set aside), newest last. Health shows each for a day as a hint. Not sent by the code before #791.",
+              "items": {
+                "type": "object",
+                "required": ["at", "text"],
+                "additionalProperties": true,
+                "properties": {
+                  "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When, Unix seconds."},
+                  "text": {"type": "string", "maxLength": 120, "description": "What, terse, for people."}
+                }
+              }
+            },
             "quarantine": {
               "title": "Quarantine",
               "x-complete": true,

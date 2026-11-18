@@ -341,6 +341,7 @@ class Hub:
         self._failed: tuple[str, int, int] = ("", 0, 0)   # (epoch, seq, tries) of a source_event that failed to apply
         # the events it couldn't apply lately, {(epoch, seq): {seq, type, reason, error}}: listed again on a retry
         self._rejections: OrderedDict[tuple[str, int], dict] = OrderedDict()
+        self._wrong_results: set[tuple[str, str]] = set()     # (job, key) said once (_wrong_result)
 
     # -- health --------------------------------------------------------------------------------------
 
@@ -479,13 +480,23 @@ class Hub:
             raise AudioUnavailable(f"Voice unavailable — {e}: text only") from None
         except RuntimeError as e:
             raise AudioUnavailable(f"Voice unavailable — station: {e}: text only") from None
+        audio, label = res.get("audio"), res.get("label")
+        if not isinstance(audio, (str, type(None))) or not isinstance(label, (str, type(None))):
+            self._wrong_result("tts", "audio" if not isinstance(audio, (str, type(None))) else "label")
         try:
-            wav = base64.b64decode(res.get("audio") or "", validate=True)
+            wav = base64.b64decode(audio if isinstance(audio, str) else "", validate=True)
         except (binascii.Error, ValueError):
             wav = b""
         if wav[:4] != b"RIFF":
             raise AudioUnavailable("Voice unavailable — the station sent no audio: text only")
-        return wav, str(res.get("label") or "Voice: rendered by the station")
+        return wav, (label if isinstance(label, str) and label else "Voice: rendered by the station")
+
+    def _wrong_result(self, job: str, key: str) -> None:
+        """A job's result with a wrong type where its caller reads it: taken as a station that sent nothing there. Said
+        once per job and key."""
+        if (job, key) not in self._wrong_results:
+            self._wrong_results.add((job, key))
+            self.log(f"hub: the station's {job} result has a wrong type in {key!r}: taken as nothing sent")
 
     def dismiss_rejected(self, kind: str, by: str = "") -> dict:
         """POST /api/cad/health/dismiss (an admin, Settings > Station > Health): the station drops its stuck and late
@@ -947,6 +958,10 @@ class Hub:
                     if p is not None and p.id and isinstance(data, dict) and kind in ("traffic", "page_text"):
                         # whose clip it is, on the clip (a pool job never goes back to the station it came from)
                         data = {**data, "origin_station": p.id}
+                    if kind == "source_event":
+                        # a copy the station's quarantine sends again (its qid): applied only over an older snapshot
+                        # (on_event); said by the hub alone, never taken from the station's data
+                        data = {**data, "resent": isinstance(ev.get("qid"), int) and not isinstance(ev["qid"], bool)}
                     self.app.apply(kind, data, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
@@ -1268,7 +1283,8 @@ class HubApp(App):
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
                          quiet=bool(d.get("catchup")),      # (a shed clip caught up: old words, nothing alerts)
-                         vocab_v=str(d.get("vocab_v") or "")[:80])
+                         vocab_v=str(d.get("vocab_v") or "")[:80],
+                         late=bool(d.get("late")))          # (#747: a call from while the station was down: the same)
             if str(d.get("status") or "done") in ("done", "no_speech"):     # the station's whisper's text (#639)
                 self._stt_ran(pid, "station-whisper", str(d.get("model") or ""), str(d.get("text") or ""),
                               str(d.get("status") or "done"), d.get("confidence"), role=role,
@@ -2533,6 +2549,9 @@ class HubApp(App):
             return None
         if not isinstance(got, dict):
             return None
+        if not isinstance(got.get("queued"), (list, type(None))):
+            self.hub._wrong_result("catch_up", "queued")
+            return None                     # (as a call that failed: nothing counted as tried)
         refused = got.get("refused") if isinstance(got.get("refused"), dict) else {}
         return {"queued": [str(x) for x in got.get("queued") or [] if isinstance(x, str)],
                 "refused": {str(k): str(v)[:160] for k, v in refused.items()}, "hold": str(got.get("hold") or "")[:160]}
