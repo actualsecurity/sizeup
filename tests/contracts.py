@@ -62,6 +62,12 @@ NOT_JSON = type("NotJson", (), {"__repr__": lambda self: "NOT_JSON"})()     # a 
 PATCH = ".patch.json"            # a vector written as a base vector and the changes to it (RFC 6902 JSON Patch)
 
 
+class Unfit(str):
+    """What vector() gives for a patched vector whose patch no longer fits its base: the file and the operation, as
+    text. A value rather than an exception, so the stale vector is one named test failure and not a collection error
+    for its whole file."""
+
+
 def _pointer(doc, path: str):
     """(the container, the key or index in it) an RFC 6901 JSON Pointer names in doc."""
     assert path == "" or path.startswith("/"), f"not a JSON Pointer: {path!r}"
@@ -80,8 +86,11 @@ def patched(doc, ops: list[dict]):
     out = copy.deepcopy(doc)
     for op in ops:
         assert set(op) <= {"op", "path", "value"} and op.get("op") in ("add", "remove", "replace"), op
-        box, key = _pointer(out, op["path"])
-        there = key < len(box) if isinstance(box, list) else key in box
+        try:
+            box, key = _pointer(out, op["path"])
+            there = key < len(box) if isinstance(box, list) else key in box
+        except (LookupError, TypeError, ValueError):       # a step of the pointer that the base no longer has
+            raise AssertionError(f"{op['op']} {op['path']}: not in the base") from None
         if op["op"] == "add":
             if isinstance(box, list):
                 box.insert(key, copy.deepcopy(op["value"]))
@@ -99,7 +108,8 @@ def patched(doc, ops: list[dict]):
 def vector(path: Path):
     """One vector file as the body it stands for. A plain .json file is the body (NOT_JSON when a strict reader refuses
     it: an invalid vector may be that, `NaN`). A .patch.json file is {"base": a vector's path under contracts/vectors/,
-    "patch": [RFC 6902 operations]}: the base with the patch applied."""
+    "patch": [RFC 6902 operations]}: the base with the patch applied, or an Unfit naming the file and the operation
+    when the patch no longer fits."""
     text = path.read_text(encoding="utf-8")
     if not path.name.endswith(PATCH):
         try:
@@ -110,7 +120,11 @@ def vector(path: Path):
     assert set(doc) == {"base", "patch"} and isinstance(doc["patch"], list) and doc["patch"], f"{path.name}: base, patch"
     base = VECTORS / doc["base"]
     assert base.is_file() and not base.name.endswith(PATCH), f"{path.name}: its base is a plain vector, {doc['base']}"
-    return patched(vector(base), doc["patch"])
+    try:
+        return patched(vector(base), doc["patch"])
+    except AssertionError as e:
+        where = path.relative_to(VECTORS) if path.is_relative_to(VECTORS) else path.name
+        return Unfit(f"{where}: the patch no longer fits {doc['base']}: {e}")
 
 
 def vectors(name: str, kind: str) -> list[tuple[str, object]]:
