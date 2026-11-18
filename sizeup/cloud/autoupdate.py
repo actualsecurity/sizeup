@@ -351,7 +351,7 @@ def short(build) -> str:
 
 
 def failed_entry(failed: dict | None, sha: str) -> dict | None:
-    for k, v in (failed or {}).items():
+    for k, v in (failed.items() if isinstance(failed, dict) else ()):
         if same_build(k, sha):
             return v if isinstance(v, dict) else {"why": str(v)}
     return None
@@ -484,7 +484,7 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
         return {"state": "deferred", "text": f"updating {short(build)} -> {short(hub)}: staged, switching by "
                                              f"{_clock(until)}" + (f" ({why})" if why else "") + win}
     if (upd.get("state") in ("waiting", "updating") and same_build(upd.get("to"), hub)
-            and now - float(upd.get("since") or 0) < STALE_ATTEMPT_S):
+            and now - (float(upd["since"]) if isinstance(upd.get("since"), (int, float)) else 0.0) < STALE_ATTEMPT_S):
         wait = " (waiting for a quiet moment)" if upd.get("state") == "waiting" else ""
         return {"state": "updating", "text": f"updating {short(build)} -> {short(hub)}{wait}{win}"}
     f = failed_for(upd.get("failed"), upd, hub)
@@ -579,6 +579,14 @@ class Watch:
         st = self._read[1]
         out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry",
                                   "hold") if k in st}
+        for k in ("last", "equivalent", "retry", "hold"):     # (one shape, whatever an older run wrote: as report())
+            if k in out and not isinstance(out[k], dict):
+                out[k] = {}
+        for k in ("state", "to", "from"):
+            if k in out and not isinstance(out[k], str):
+                del out[k]
+        if "since" in out and not (isinstance(out["since"], (int, float)) and not isinstance(out["since"], bool)):
+            del out["since"]
         out["failed"] = _newest_failed(st.get("failed") if isinstance(st.get("failed"), dict) else {}, 5)
         return out
 
