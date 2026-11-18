@@ -1,0 +1,28 @@
+{
+  "tables": {
+    "meta": [
+      {"name": "key", "type": "TEXT", "notnull": false, "default": null, "pk": true},
+      {"name": "value", "type": "TEXT", "notnull": true, "default": null, "pk": false}
+    ],
+    "outbox": [
+      {"name": "seq", "type": "INTEGER", "notnull": false, "default": null, "pk": true},
+      {"name": "at", "type": "REAL", "notnull": true, "default": null, "pk": false},
+      {"name": "kind", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "data", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "audio", "type": "BLOB", "notnull": false, "default": null, "pk": false},
+      {"name": "audio_dropped", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
+      {"name": "context", "type": "INTEGER", "notnull": true, "default": "0", "pk": false}
+    ],
+    "stt_inputs": [
+      {"name": "n", "type": "INTEGER", "notnull": false, "default": null, "pk": true},
+      {"name": "at", "type": "REAL", "notnull": true, "default": null, "pk": false},
+      {"name": "data", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "flac", "type": "BLOB", "notnull": true, "default": null, "pk": false},
+      {"name": "meta", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "prio", "type": "INTEGER", "notnull": true, "default": "1", "pk": false}
+    ]
+  },
+  "autoincrement": ["outbox", "stt_inputs"],
+  "indexes": [{"name": "stt_inputs_order", "table": "stt_inputs", "unique": false, "columns": ["prio", "n", "at"]}],
+  "file": {"journal_mode": "wal", "encoding": "UTF-8", "auto_vacuum": 0, "application_id": 0, "user_version": 0}
+}

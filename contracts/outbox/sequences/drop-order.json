@@ -1,0 +1,534 @@
+{
+  "description": "What goes when the file is over its limit (max_audio_bytes 1000: the speech-to-text inputs' own budget is 300, the context audio's 200), in the code's order. First the speech-to-text inputs, the lowest priority first and the oldest first within it, whole rows: over their own budget, or while the whole is over the limit. Then context audio, the oldest first: over its own budget, or while the whole is over. Only then the oldest audio of any event. An event's row and its data are never dropped: its audio becomes NULL and audio_dropped 1. prio: 3 pre-alert, 2 fire traffic, 1 other, 0 a context talkgroup.",
+  "steps": [
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "outbox": [], "stt_inputs": [], "sqlite_sequence": {}
+      }
+    },
+    {
+      "op": "add_stt", "data": {"id": "east-7001-1794990000", "kind": "traffic", "source": "East Dispatch"},
+      "flac": {"bytes": 100, "fill": "c0"}, "meta": {"v": 1, "format": "flac", "samples": 16000}, "at": 1794990000.0,
+      "prio": 0, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 1, "stt_bytes": 100,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "stt_inputs": [
+          [
+            1, 1794990000.0, "{\"id\":\"east-7001-1794990000\",\"kind\":\"traffic\",\"source\":\"East Dispatch\"}",
+            {"bytes": 100, "fill": "c0"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 0
+          ]
+        ],
+        "sqlite_sequence": {"stt_inputs": 1}
+      }
+    },
+    {
+      "op": "add_stt", "data": {"id": "a1b2c3d4e5", "kind": "page", "label": "Paging 1"},
+      "flac": {"bytes": 100, "fill": "c3"}, "meta": {"v": 1, "format": "flac", "samples": 16000}, "at": 1794990001.0,
+      "prio": 3, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 2, "stt_bytes": 200,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "stt_inputs": [
+          [
+            1, 1794990000.0, "{\"id\":\"east-7001-1794990000\",\"kind\":\"traffic\",\"source\":\"East Dispatch\"}",
+            {"bytes": 100, "fill": "c0"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 0
+          ],
+          [
+            2, 1794990001.0, "{\"id\":\"a1b2c3d4e5\",\"kind\":\"page\",\"label\":\"Paging 1\"}",
+            {"bytes": 100, "fill": "c3"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 3
+          ]
+        ],
+        "sqlite_sequence": {"stt_inputs": 2}
+      }
+    },
+    {
+      "op": "add_stt", "data": {"id": "Tower-1794990002000", "kind": "traffic", "source": "Tower"},
+      "flac": {"bytes": 100, "fill": "c1"}, "meta": {"v": 1, "format": "flac", "samples": 16000}, "at": 1794990002.0,
+      "prio": 1, "returns": 3,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 3, "stt_bytes": 300,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "stt_inputs": [
+          [
+            1, 1794990000.0, "{\"id\":\"east-7001-1794990000\",\"kind\":\"traffic\",\"source\":\"East Dispatch\"}",
+            {"bytes": 100, "fill": "c0"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 0
+          ],
+          [
+            2, 1794990001.0, "{\"id\":\"a1b2c3d4e5\",\"kind\":\"page\",\"label\":\"Paging 1\"}",
+            {"bytes": 100, "fill": "c3"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 3
+          ],
+          [
+            3, 1794990002.0, "{\"id\":\"Tower-1794990002000\",\"kind\":\"traffic\",\"source\":\"Tower\"}",
+            {"bytes": 100, "fill": "c1"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 1
+          ]
+        ],
+        "sqlite_sequence": {"stt_inputs": 3}
+      }
+    },
+    {
+      "op": "add_stt", "data": {"id": "Fireground1-1794990003000", "kind": "traffic", "source": "Fireground 1"},
+      "flac": {"bytes": 100, "fill": "c2"}, "meta": {"v": 1, "format": "flac", "samples": 16000}, "at": 1794990003.0,
+      "prio": 2, "returns": 4,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 3, "stt_bytes": 300,
+          "dropped_audio": 0, "dropped_stt": 1, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "stt_inputs": [
+          [
+            2, 1794990001.0, "{\"id\":\"a1b2c3d4e5\",\"kind\":\"page\",\"label\":\"Paging 1\"}",
+            {"bytes": 100, "fill": "c3"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 3
+          ],
+          [
+            3, 1794990002.0, "{\"id\":\"Tower-1794990002000\",\"kind\":\"traffic\",\"source\":\"Tower\"}",
+            {"bytes": 100, "fill": "c1"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 1
+          ],
+          [
+            4, 1794990003.0, "{\"id\":\"Fireground1-1794990003000\",\"kind\":\"traffic\",\"source\":\"Fireground 1\"}",
+            {"bytes": 100, "fill": "c2"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 2
+          ]
+        ],
+        "sqlite_sequence": {"stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990004000", "source": "Fireground 1", "text": "Engine 1 responding"},
+      "audio": {"bytes": 400, "fill": "a1"}, "at": 1794990004.0, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990004.0, "audio_bytes": 400, "context_bytes": 0, "stt_pending": 3,
+          "stt_bytes": 300, "dropped_audio": 0, "dropped_stt": 1, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 1, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "east-7001-1794990005", "source": "East Dispatch", "system": "east", "text": ""},
+      "audio": {"bytes": 150, "fill": "b2"}, "at": 1794990005.0, "context": true, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990004.0, "audio_bytes": 550, "context_bytes": 150, "stt_pending": 3,
+          "stt_bytes": 300, "dropped_audio": 0, "dropped_stt": 1, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}",
+            {"bytes": 150, "fill": "b2"}, 0, 1
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 2, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "east-7001-1794990006", "source": "East Dispatch", "system": "east", "text": ""},
+      "audio": {"bytes": 100, "fill": "b3"}, "at": 1794990006.0, "context": true, "returns": 3,
+      "after": {
+        "totals": {
+          "pending": 3, "oldest": 1794990004.0, "audio_bytes": 500, "context_bytes": 100, "stt_pending": 3,
+          "stt_bytes": 300, "dropped_audio": 1, "dropped_stt": 1, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}",
+            {"bytes": 100, "fill": "b3"}, 0, 1
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 3, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990007000", "source": "Fireground 1", "text": "Engine 1 on scene"},
+      "audio": {"bytes": 300, "fill": "a4"}, "at": 1794990007.0, "returns": 4,
+      "after": {
+        "totals": {
+          "pending": 4, "oldest": 1794990004.0, "audio_bytes": 800, "context_bytes": 100, "stt_pending": 2,
+          "stt_bytes": 200, "dropped_audio": 1, "dropped_stt": 2, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}",
+            {"bytes": 100, "fill": "b3"}, 0, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
+            {"bytes": 300, "fill": "a4"}, 0, 0
+          ]
+        ],
+        "stt_inputs": [
+          [
+            2, 1794990001.0, "{\"id\":\"a1b2c3d4e5\",\"kind\":\"page\",\"label\":\"Paging 1\"}",
+            {"bytes": 100, "fill": "c3"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 3
+          ],
+          [
+            4, 1794990003.0, "{\"id\":\"Fireground1-1794990003000\",\"kind\":\"traffic\",\"source\":\"Fireground 1\"}",
+            {"bytes": 100, "fill": "c2"}, "{\"v\":1,\"format\":\"flac\",\"samples\":16000}", 2
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 4, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990008000", "source": "Fireground 1", "text": "Ladder 1 on scene"},
+      "audio": {"bytes": 150, "fill": "a5"}, "at": 1794990008.0, "returns": 5,
+      "after": {
+        "totals": {
+          "pending": 5, "oldest": 1794990004.0, "audio_bytes": 950, "context_bytes": 100, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 1, "dropped_stt": 4, "dropped_stt_pre": 1, "dropped_stt_fire": 1
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}",
+            {"bytes": 100, "fill": "b3"}, 0, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
+            {"bytes": 300, "fill": "a4"}, 0, 0
+          ],
+          [
+            5, 1794990008.0, "traffic",
+            "{\"id\":\"Fireground1-1794990008000\",\"source\":\"Fireground 1\",\"text\":\"Ladder 1 on scene\"}",
+            {"bytes": 150, "fill": "a5"}, 0, 0
+          ]
+        ],
+        "stt_inputs": [], "sqlite_sequence": {"outbox": 5, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990009000", "source": "Fireground 1", "text": "Command to Engine 1"},
+      "audio": {"bytes": 100, "fill": "a6"}, "at": 1794990009.0, "returns": 6,
+      "after": {
+        "totals": {
+          "pending": 6, "oldest": 1794990004.0, "audio_bytes": 950, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 2, "dropped_stt": 4, "dropped_stt_pre": 1, "dropped_stt_fire": 1
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            {"bytes": 400, "fill": "a1"}, 0, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
+            {"bytes": 300, "fill": "a4"}, 0, 0
+          ],
+          [
+            5, 1794990008.0, "traffic",
+            "{\"id\":\"Fireground1-1794990008000\",\"source\":\"Fireground 1\",\"text\":\"Ladder 1 on scene\"}",
+            {"bytes": 150, "fill": "a5"}, 0, 0
+          ],
+          [
+            6, 1794990009.0, "traffic",
+            "{\"id\":\"Fireground1-1794990009000\",\"source\":\"Fireground 1\",\"text\":\"Command to Engine 1\"}",
+            {"bytes": 100, "fill": "a6"}, 0, 0
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 6, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990010000", "source": "Fireground 1", "text": "Engine 1 to Command"},
+      "audio": {"bytes": 200, "fill": "a7"}, "at": 1794990010.0, "returns": 7,
+      "after": {
+        "totals": {
+          "pending": 7, "oldest": 1794990004.0, "audio_bytes": 750, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 3, "dropped_stt": 4, "dropped_stt_pre": 1, "dropped_stt_fire": 1
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            null, 1, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
+            {"bytes": 300, "fill": "a4"}, 0, 0
+          ],
+          [
+            5, 1794990008.0, "traffic",
+            "{\"id\":\"Fireground1-1794990008000\",\"source\":\"Fireground 1\",\"text\":\"Ladder 1 on scene\"}",
+            {"bytes": 150, "fill": "a5"}, 0, 0
+          ],
+          [
+            6, 1794990009.0, "traffic",
+            "{\"id\":\"Fireground1-1794990009000\",\"source\":\"Fireground 1\",\"text\":\"Command to Engine 1\"}",
+            {"bytes": 100, "fill": "a6"}, 0, 0
+          ],
+          [
+            7, 1794990010.0, "traffic",
+            "{\"id\":\"Fireground1-1794990010000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 to Command\"}",
+            {"bytes": 200, "fill": "a7"}, 0, 0
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 7, "stt_inputs": 4}
+      }
+    },
+    {
+      "op": "add_stt", "data": {"id": "Fireground1-1794990011000", "kind": "traffic", "source": "Fireground 1"},
+      "flac": {"bytes": 300, "fill": "c4"}, "meta": {"v": 1, "format": "flac", "samples": 16000}, "at": 1794990011.0,
+      "prio": 2, "returns": 5,
+      "after": {
+        "totals": {
+          "pending": 7, "oldest": 1794990004.0, "audio_bytes": 750, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 3, "dropped_stt": 5, "dropped_stt_pre": 1, "dropped_stt_fire": 2
+        },
+        "sqlite_sequence": {"outbox": 7, "stt_inputs": 5}
+      }
+    },
+    {
+      "op": "add", "kind": "page",
+      "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"},
+      "audio": {"bytes": 900, "fill": "a8"}, "at": 1794990012.0, "returns": 8,
+      "after": {
+        "totals": {
+          "pending": 8, "oldest": 1794990004.0, "audio_bytes": 900, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 7, "dropped_stt": 5, "dropped_stt_pre": 1, "dropped_stt_fire": 2
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            null, 1, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}", null,
+            1, 0
+          ],
+          [
+            5, 1794990008.0, "traffic",
+            "{\"id\":\"Fireground1-1794990008000\",\"source\":\"Fireground 1\",\"text\":\"Ladder 1 on scene\"}", null,
+            1, 0
+          ],
+          [
+            6, 1794990009.0, "traffic",
+            "{\"id\":\"Fireground1-1794990009000\",\"source\":\"Fireground 1\",\"text\":\"Command to Engine 1\"}",
+            null, 1, 0
+          ],
+          [
+            7, 1794990010.0, "traffic",
+            "{\"id\":\"Fireground1-1794990010000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 to Command\"}",
+            null, 1, 0
+          ],
+          [
+            8, 1794990012.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 900, "fill": "a8"}, 0, 0
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 8, "stt_inputs": 5}
+      }
+    },
+    {
+      "op": "add", "kind": "page",
+      "data": {"id": "f6a7b8c9d0", "label": "Paging 1", "kind": "page", "status": "pending"},
+      "audio": {"bytes": 1001, "fill": "a9"}, "at": 1794990013.0, "returns": 9,
+      "after": {
+        "totals": {
+          "pending": 9, "oldest": 1794990004.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 9, "dropped_stt": 5, "dropped_stt_pre": 1, "dropped_stt_fire": 2
+        },
+        "outbox": [
+          [
+            1, 1794990004.0, "traffic",
+            "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
+            null, 1, 0
+          ],
+          [
+            2, 1794990005.0, "traffic",
+            "{\"id\":\"east-7001-1794990005\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            3, 1794990006.0, "traffic",
+            "{\"id\":\"east-7001-1794990006\",\"source\":\"East Dispatch\",\"system\":\"east\",\"text\":\"\"}", null,
+            1, 1
+          ],
+          [
+            4, 1794990007.0, "traffic",
+            "{\"id\":\"Fireground1-1794990007000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}", null,
+            1, 0
+          ],
+          [
+            5, 1794990008.0, "traffic",
+            "{\"id\":\"Fireground1-1794990008000\",\"source\":\"Fireground 1\",\"text\":\"Ladder 1 on scene\"}", null,
+            1, 0
+          ],
+          [
+            6, 1794990009.0, "traffic",
+            "{\"id\":\"Fireground1-1794990009000\",\"source\":\"Fireground 1\",\"text\":\"Command to Engine 1\"}",
+            null, 1, 0
+          ],
+          [
+            7, 1794990010.0, "traffic",
+            "{\"id\":\"Fireground1-1794990010000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 to Command\"}",
+            null, 1, 0
+          ],
+          [
+            8, 1794990012.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}", null, 1, 0
+          ],
+          [
+            9, 1794990013.0, "page",
+            "{\"id\":\"f6a7b8c9d0\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}", null, 1, 0
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 9, "stt_inputs": 5}
+      }
+    },
+    {
+      "op": "batch",
+      "returns": [
+        {
+          "seq": 1, "at": 1794990004.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990004000", "source": "Fireground 1", "text": "Engine 1 responding"},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 2, "at": 1794990005.0, "type": "traffic",
+          "data": {"id": "east-7001-1794990005", "source": "East Dispatch", "system": "east", "text": ""},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 3, "at": 1794990006.0, "type": "traffic",
+          "data": {"id": "east-7001-1794990006", "source": "East Dispatch", "system": "east", "text": ""},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 4, "at": 1794990007.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990007000", "source": "Fireground 1", "text": "Engine 1 on scene"},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 5, "at": 1794990008.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990008000", "source": "Fireground 1", "text": "Ladder 1 on scene"},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 6, "at": 1794990009.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990009000", "source": "Fireground 1", "text": "Command to Engine 1"},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 7, "at": 1794990010.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990010000", "source": "Fireground 1", "text": "Engine 1 to Command"},
+          "audio": null, "audio_dropped": true
+        },
+        {
+          "seq": 8, "at": 1794990012.0, "type": "page",
+          "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"}, "audio": null,
+          "audio_dropped": true
+        },
+        {
+          "seq": 9, "at": 1794990013.0, "type": "page",
+          "data": {"id": "f6a7b8c9d0", "label": "Paging 1", "kind": "page", "status": "pending"}, "audio": null,
+          "audio_dropped": true
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 9, "oldest": 1794990004.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 9, "dropped_stt": 5, "dropped_stt_pre": 1, "dropped_stt_fire": 2
+        }
+      }
+    }
+  ]
+}
