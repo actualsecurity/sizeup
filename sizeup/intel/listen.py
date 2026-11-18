@@ -24,11 +24,17 @@ on listen/*, and a lifecycle rule removes listen/ objects after a day (sizeup-aw
 
 The cleanup: a link is a bearer URL until it expires, and its file is no use after. The hub deletes each listen/ object
 DELETE_MARGIN_S after the LAST presign of its key has expired (a refreshed key is signed again: only its final expiry
-counts), on the listen thread. Nothing of this is stored, so after a restart (or a standby taking over) the first sweep,
-once a link signed before this process led could no longer play (its start + listen_expiry_min + the margin), lists
-listen/ (ListObjectsV2) and deletes what was written before then and isn't this process's own. That needs DeleteObject
-on listen/* and ListBucket (prefix listen/); until the grant is there an AccessDenied is logged once, shown on the Health
-row, and the cleanup rests CLEANUP_REST_S: the one-day lifecycle rule is the backstop.
+counts), on the listen thread, in DeleteObjects batches (at most DELETE_BATCH keys a request, one batch a pass, so a
+long backlog never holds up the next upload). A key S3 keeps failing (not a 403) goes to the back of the queue and is
+dropped after DELETE_TRIES (the lifecycle rule takes it). Only while this process leads (leader(): the engine's lease):
+one that never leads never deletes. Nothing of this is stored, so after a restart (or a standby taking over) one sweep,
+once any link signed before this process led could no longer play, lists listen/ (ListObjectsV2) and queues for delete
+what was written before then and isn't this process's own. "Could no longer play" is judged by the LONGEST expiry the
+setting allows (SWEEP_EXPIRY_S, its range's max): the earlier leader may have signed with a longer one than is set now.
+That needs DeleteObject on listen/* and ListBucket (prefix listen/); until the grant is there an AccessDenied is logged
+once, shown on the Health row, and the cleanup rests CLEANUP_REST_S: the one-day lifecycle rule is the backstop.
+Never point a process with outbound on (an all-in-one with SIZEUP_ALLOW_OUTBOUND=1) at production's audio bucket: it
+would lead its own engine and sweep production's listen/ files.
 Until then the first upload is refused (403): the status says "not configured" and it is tried again only after RETRY_S;
 any other failure (a timeout, the network) is tried again after RETRY_SOON_S.
 
@@ -75,6 +81,9 @@ CRED_MARGIN_S = 300.0          # presign with credentials that outlive the link 
 CHECK_TIMEOUT_S = 5.0          # the self-test's GET of a pushed link
 CHECK_RETRY_S = 900.0          # a link not ok (refused, unreachable): fetched again after a later upload, at most this often
 DELETE_MARGIN_S = 120.0        # a file is deleted this long after its last link expired
+SWEEP_EXPIRY_S = 720 * 60      # the longest listen_expiry_min allows (sizeup/intel/policy.py LIMITS): the restart sweep
+DELETE_BATCH = 1000            # keys a DeleteObjects request (S3's own limit); one batch a pass of the listen thread
+DELETE_TRIES = 5               # a key that fails this often (not a 403) is left to the lifecycle rule
 CLEANUP_REST_S = 3600.0        # the cleanup refused (AccessDenied): the lifecycle rule does it; tried again after this
 MAX_PENDING = 2000             # deletes waiting at most (past it the oldest are left to the lifecycle rule)
 LATE_S = 180.0                 # transcripts and clips arrive after the transmission: keep refreshing this much longer
@@ -205,14 +214,34 @@ class S3ListenStore:
         status, _h, data = self.s3.send("GET", url, {"Range": "bytes=0-0"}, None, timeout)
         return int(status), data or b""
 
-    def delete(self, key: str) -> None:
-        """DeleteObject (a missing key is gone too). AwsError with the status (403: not permitted) otherwise."""
+    def delete(self, keys: list[str]) -> dict[str, str]:
+        """DeleteObjects (Quiet), at most DELETE_BATCH keys: {key: S3's error code} for the ones that failed (a missing
+        key is gone too). AwsError with the status (403: not permitted) when the request itself fails."""
+        import base64
+        import hashlib
+        from xml.sax.saxutils import escape
+
+        from sizeup.audiostore import _unxml
+        keys = list(keys)[:DELETE_BATCH]
+        if not keys:
+            return {}
+        body = ("<Delete><Quiet>true</Quiet>" + "".join(f"<Object><Key>{escape(k)}</Key></Object>" for k in keys)
+                + "</Delete>").encode()
         try:
-            status, _h, data = self.s3._call("DELETE", key, {})
+            status, _h, data = self.s3._call("POST", "", {
+                "Content-Type": "application/xml", "Content-Length": str(len(body)),
+                "Content-MD5": base64.b64encode(hashlib.md5(body).digest()).decode()}, body, query="delete=")
         except OSError as e:
             raise self.aws.AwsError(f"S3 DELETE: {type(e).__name__}", "Network") from None
-        if status not in (200, 204, 404):
-            raise self.aws.AwsError(f"S3 DELETE: {status} {s3_code(data)}", s3_code(data), status)
+        text = (data or b"").decode(errors="replace")
+        if status != 200 or not re.search(r"<DeleteResult[\s>/]", text):
+            raise self.aws.AwsError(f"S3 DELETE: {status} {s3_code(data)}", s3_code(data) or "NoDeleteResult", status)
+        out = {}
+        for block in re.findall(r"<Error>(.*?)</Error>", text, re.S):
+            k, c = re.search(r"<Key>(.*?)</Key>", block, re.S), re.search(r"<Code>(.*?)</Code>", block, re.S)
+            if k:
+                out[_unxml(k.group(1))] = c.group(1)[:64] if c else "Error"
+        return out
 
     def list(self, prefix: str = PREFIX) -> list[tuple[str, float]]:
         """ListObjectsV2 under prefix: [(key, last modified)]. AwsError with the status (403: not permitted)."""
@@ -260,7 +289,7 @@ class Listen:
                  settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
                  log: Callable[[str], None] = print, ffmpeg: str | None = None, token=lambda: secrets.token_urlsafe(24),
                  tiers: Callable[[list], dict] | None = None, worker: bool = True,
-                 spawn: Callable[[Callable[[], None]], None] | None = None):
+                 spawn: Callable[[Callable[[], None]], None] | None = None, leader: Callable[[], bool] | None = None):
         self.store, self.rows, self.clip, self.tiers = store, rows, clip, tiers
         self.settings = settings or (lambda: {})
         self.clock, self.log, self.ffmpeg, self.token = clock, log, ffmpeg, token
@@ -280,8 +309,10 @@ class Listen:
         self._checking = False
         self._logged: tuple | None = None
         # the cleanup (module doc): files whose last link has expired, deleted on the listen thread
+        self.leader = leader or (lambda: True)          # the engine's lease (the app); deletes only while it holds
         self._deletes: dict[str, float] = {}           # key -> when it may be deleted
-        self._led_since = 0.0                          # the first link() / refresh() here: this process leads
+        self._tries: dict[str, int] = {}               # key -> failed deletes (not a 403)
+        self._led_since = 0.0                          # the first link() / refresh() here while leading
         self._swept = False
         self._cleanup_at = 0.0                          # not before (after a refusal or a failure)
         self.cleanup: dict = {"state": "", "at": 0.0, "code": ""}     # "" (nothing yet) | ok | denied | failed
@@ -437,7 +468,7 @@ class Listen:
             return None
         expires_s = int(float(c["listen_expiry_min"]) * 60)
         with self._lock:
-            self._led_since = self._led_since or self.clock()
+            self._lead(self.clock())
             it = self.items.get(ref)
             if it is None:
                 ff = self._ffmpeg()
@@ -467,7 +498,7 @@ class Listen:
         c = self.cfg()
         n = 0
         with self._lock:
-            self._led_since = self._led_since or now
+            self._lead(now)
             for ref, it in list(self.items.items()):
                 end = it.last_at + float(c["listen_after_s"]) + LATE_S
                 if now > max(end, it.signed_until):
@@ -525,51 +556,84 @@ class Listen:
 
     # -- the cleanup (the listen thread) --------------------------------------------------------------------------
 
+    def _lead(self, now: float) -> None:
+        """link() / refresh() (under the lock): from the first one while leading, this process may clean up."""
+        if not self._led_since and self._leading():
+            self._led_since = now
+
+    def _leading(self) -> bool:
+        try:
+            return bool(self.leader())
+        except Exception:  # noqa: BLE001 - can't tell: not leading (never deletes)
+            return False
+
     def clean(self, now: float | None = None) -> int:
-        """Delete the files whose last link has expired, and once (after a link signed before this process led could
-        no longer play) sweep listen/ for older ones nobody here knows. Never raises; objects deleted."""
+        """One pass: a batch of the files whose last link has expired, deleted; once (when no link signed before this
+        process led can still play) the older files nobody here knows, listed and queued. Only while leading; never
+        raises. Objects deleted."""
         now = self.clock() if now is None else now
         delete = getattr(self.store, "delete", None)
-        if delete is None or not self._led_since or now < self._cleanup_at:
+        if delete is None or not self._led_since or now < self._cleanup_at or not self._leading():
             return 0
-        expiry_s = float(self.cfg()["listen_expiry_min"]) * 60
+        sweep = not self._swept and hasattr(self.store, "list") and now >= self._led_since + SWEEP_EXPIRY_S + DELETE_MARGIN_S
         with self._lock:
-            due = [k for k, at in self._deletes.items() if at <= now]
-        sweep = (not self._swept and hasattr(self.store, "list")
-                 and now >= self._led_since + expiry_s + DELETE_MARGIN_S)
+            due = sorted((at, k) for k, at in self._deletes.items() if at <= now)
         if not due and not sweep:
             return 0
         gone = 0
         try:
-            for k in due:
-                delete(k)
-                with self._lock:
-                    self._deletes.pop(k, None)
-                gone += 1
             if sweep:
                 with self._lock:
                     mine = {it.key for it in self.items.values()} | set(self._deletes)
                 old = [k for k, at in self.store.list(PREFIX)
                        if k.startswith(PREFIX) and k not in mine and at < self._led_since]
-                for k in old:
-                    delete(k)
-                    gone += 1
                 self._swept = True
+                with self._lock:
+                    for k in old:
+                        self._deletes.setdefault(k, now)
+                    due = sorted((at, k) for k, at in self._deletes.items() if at <= now)
+            batch = [k for _at, k in due[:DELETE_BATCH]]
+            failed = delete(batch) if batch else {}
         except Exception as e:  # noqa: BLE001 - the one-day lifecycle rule is the backstop
-            code = str(getattr(e, "code", "") or type(e).__name__)
-            was = self.cleanup["state"]
-            if refused(e):
-                self._cleanup_at = now + CLEANUP_REST_S
-                self.cleanup = {"state": "denied", "at": now, "code": code}
-                if was != "denied":
-                    self.log("intel: listen cleanup not permitted, relying on the 1-day lifecycle")
-            else:
-                self._cleanup_at = now + RETRY_SOON_S
-                self.cleanup = {"state": "failed", "at": now, "code": code}
-                if was != "failed":
-                    self.log(f"intel: listen cleanup failed ({code}): trying again in a minute")
-            return gone
+            return self._clean_failed(e, now)
+        denied = {k: c for k, c in failed.items() if c == "AccessDenied"}
+        with self._lock:
+            for k in batch:
+                if k not in failed:
+                    self._deletes.pop(k, None)
+                    self._tries.pop(k, None)
+                    gone += 1
+                elif k not in denied:                    # to the back; after DELETE_TRIES, the lifecycle rule's
+                    self._tries[k] = self._tries.get(k, 0) + 1
+                    if self._tries[k] >= DELETE_TRIES:
+                        self._deletes.pop(k, None)
+                        self._tries.pop(k, None)
+                    else:
+                        self._deletes[k] = now + RETRY_SOON_S
+        if denied:
+            return gone + self._clean_failed(self._denied_error(), now)
         if self.cleanup["state"] in ("denied", "failed"):
             self.log("intel: listen cleanup ok")
         self.cleanup = {"state": "ok", "at": now, "code": ""}
         return gone
+
+    @staticmethod
+    def _denied_error() -> Exception:
+        e = RuntimeError("AccessDenied")
+        e.status, e.code = 403, "AccessDenied"           # type: ignore[attr-defined]
+        return e
+
+    def _clean_failed(self, e: Exception, now: float) -> int:
+        code = str(getattr(e, "code", "") or type(e).__name__)
+        was = self.cleanup["state"]
+        if refused(e):
+            self._cleanup_at = now + CLEANUP_REST_S
+            self.cleanup = {"state": "denied", "at": now, "code": code}
+            if was != "denied":
+                self.log("intel: listen cleanup not permitted, relying on the 1-day lifecycle")
+        else:
+            self._cleanup_at = now + RETRY_SOON_S
+            self.cleanup = {"state": "failed", "at": now, "code": code}
+            if was != "failed":
+                self.log(f"intel: listen cleanup failed ({code}): trying again in a minute")
+        return 0

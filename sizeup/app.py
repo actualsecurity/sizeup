@@ -2857,7 +2857,9 @@ class App:
                 return {}
             return {r["id"]: r["tier"] for r in cad.store.q(
                 f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(ids))})", ids)}
-        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers)
+        # leader: the engine's lease, so only the hub that leads deletes listen/ files (listen.py, the cleanup)
+        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers,
+                      leader=lambda: intel.leader())
 
     def _atc_leader(self) -> bool:
         """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""

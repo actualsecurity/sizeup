@@ -134,3 +134,52 @@ def test_no_url_or_topic_in_what_is_stored(tmp_path, monkeypatch):
     cad, ev = pushed_event(tmp_path, monkeypatch, [{"id": "Msg42"}])
     raw = cad.store.one("SELECT delivery FROM intel_events WHERE id = ?", (ev.id,))["delivery"]
     assert TOPIC not in raw and "ntfy.example" not in raw
+
+
+def test_a_full_queue_gives_no_callback_and_the_event_is_held(tmp_path, monkeypatch):
+    import queue
+    urlopen, calls = fake_urlopen([])
+    monkeypatch.setattr(notify, "urlopen", urlopen)
+    n = notify.Notifier(SERVER, TOPIC, log=lambda m: None)
+    n._q = queue.Queue(maxsize=1)
+    n._q.put_nowait(("waiting",))                          # full, and no notify thread to take it
+    got = []
+    assert n.send("t", "b", done=got.append) is False and got == []
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True
+    cad.intel.notifier, cad.intel.locate = n, example_locate
+    cad.comms.record(ctx_row("c1-t0", "shots fired at Sample St and Test Rd", cad.clock()))
+    cad.intel.consider("c1-t0")
+    cad.intel.drain()
+    [ev] = cad.intel.events.open_events()
+    assert ev.suppressed == "unsent" and not ev.pushed_at and calls == []
+    assert cad.intel.events.rows("id = ?", (ev.id,), 1)[0]["delivery"] is None
+
+
+def test_queued_but_not_yet_answered_reads_queued(tmp_path):
+    """Taken by the notifier, no answer from ntfy yet: pushed_at set, no delivery (the card and More info: "queued")."""
+    class Waiting:
+        enabled = True
+
+        def __init__(self):
+            self.done = []
+
+        def send(self, title, body, priority=3, tags=(), click="", who=None, actions=(), done=None):
+            self.done.append(done)
+            return True
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True
+    w = Waiting()
+    cad.intel.notifier, cad.intel.locate = w, example_locate
+    cad.comms.record(ctx_row("c1-t0", "shots fired at Sample St and Test Rd", cad.clock()))
+    cad.intel.consider("c1-t0")
+    cad.intel.drain()
+    [ev] = cad.intel.events.open_events()
+    [row] = cad.intel.events.rows("id = ?", (ev.id,), 1)
+    shown = cad.intel_admin.shown(row)
+    assert shown["pushed_at"] and shown["delivery"] is None   # intel.js delivered(): no delivery -> "queued"
+    assert context_bundle.build(cad, "intel", ev.id, admin=True)["outcome"]["delivery"] is None
+    [done] = w.done
+    done({"ok": False, "at": ev.pushed_at + 1, "status": 429, "error": "ntfy refused it: HTTP 429"})
+    d = cad.intel.events.rows("id = ?", (ev.id,), 1)[0]["delivery"]
+    assert d == {"ok": False, "at": ev.pushed_at + 1, "status": 429, "error": "ntfy refused it: HTTP 429"}
