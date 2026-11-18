@@ -2655,6 +2655,16 @@ def adapter_cli(u: Updater, a) -> int:
     return 2
 
 
+def _env_s(name: str, default: float) -> float:
+    """Seconds from the updater's environment (a systemd drop-in: CI's station test runs without settling), else
+    default; anything but a number from 0 to a day: default."""
+    try:
+        v = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return v if 0.0 <= v <= 86400.0 else default
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="autoupdate.py", description="the station follows the hub's build")
     ap.add_argument("cmd", choices=["run", "now", "status", "doctor", "on", "off", "prune", "rollback", "adapter"])
@@ -2669,7 +2679,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="adapter remove: don't ask")
     ap.add_argument("--force", action="store_true", help="rollback: to a release whose adapter isn't set up now")
     a = ap.parse_args(argv)
-    u = Updater(quiet_max_s=a.quiet_max, health_s=a.health_timeout)
+    u = Updater(quiet_max_s=a.quiet_max, health_s=a.health_timeout, settle_s=_env_s("SIZEUP_UPDATE_SETTLE_S", SETTLE_S),
+                ceiling_s=_env_s("SIZEUP_UPDATE_CEILING_S", CEILING_S))
     if a.cmd == "adapter":
         return adapter_cli(u, a)
     if a.sub:

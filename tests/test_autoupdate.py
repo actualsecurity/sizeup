@@ -1155,3 +1155,16 @@ def test_a_fetch_that_hangs_while_late_still_switches_to_the_staged_build(statio
     assert tried[0] == 60
     st = u.load()
     assert st["state"] == "behind" and st["last"]["result"] == "no fetch" and "timed out after 600 s" in st["last"]["why"]
+
+
+def test_settle_and_ceiling_can_come_from_the_updaters_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(au.Updater, "run", lambda self: seen.update(settle=self.settle_s, ceiling=self.ceiling_s) or 0)
+    monkeypatch.setenv("SIZEUP_UPDATE_SETTLE_S", "0")
+    monkeypatch.setenv("SIZEUP_UPDATE_CEILING_S", "nonsense")
+    assert au.main(["run"]) == 0 and seen == {"settle": 0.0, "ceiling": au.CEILING_S}
+    monkeypatch.setenv("SIZEUP_UPDATE_SETTLE_S", "-5")
+    au.main(["run"])
+    assert seen["settle"] == au.SETTLE_S
+    text = (Path(__file__).parent.parent / ".github" / "scripts" / "station-update.sh").read_text()
+    assert "Environment=SIZEUP_UPDATE_SETTLE_S=0" in text                  # CI's real station: no 10 min per step
