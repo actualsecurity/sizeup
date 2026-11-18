@@ -1,0 +1,259 @@
+{
+ "why": "A re-text (Amazon Transcribe's words after the local ones, a re-run) replaces its own entry in the exchange and is read again; the next transmission sees it once.",
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 0,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November one two three alfa bravo, say again"
+   }
+  },
+  {
+   "step": {
+    "do": "retext",
+    "t": 30,
+    "id": "twr-1",
+    "text": "Westchester tower, November one two three alfa bravo, we have smoke in the cockpit"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "fire_acft",
+     "subject": "fire",
+     "group": "HPN Tower",
+     "at": 0.0,
+     "updated_at": 30.0,
+     "title": "HPN ATC: smoke on board reported by N123AB",
+     "detail": "fire or smoke on an aircraft · heard: smoke in the cockpit · HPN Tower",
+     "confidence": 0.85,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 0.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we have smoke in the cockpit",
+        "hits": [
+         "smoke in the cockpit"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ACFT-FIRE"
+      },
+      "rank": 2,
+      "pushed": 0.85
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 0.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: smoke on board reported by N123AB (alert high 85%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: smoke on board reported by N123AB",
+     "message": "“Westchester Tower, N123AB, we have smoke in the cockpit” · N123AB · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 60,
+    "id": "twr-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November one two three alfa bravo, roll the trucks, runway three four"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "fire_acft",
+     "subject": "fire",
+     "group": "HPN Tower",
+     "at": 0.0,
+     "updated_at": 60.0,
+     "title": "HPN ATC: smoke on board reported by N123AB, runway 34",
+     "detail": "fire or smoke on an aircraft · heard: roll the trucks, smoke in the cockpit · HPN Tower",
+     "confidence": 0.91,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 0.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we have smoke in the cockpit",
+        "hits": [
+         "smoke in the cockpit"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "N123AB, roll the trucks, runway 34",
+        "hits": [
+         "roll the trucks"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ACFT-FIRE"
+      },
+      "rank": 2,
+      "pushed": 0.85
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "retext",
+    "t": 70,
+    "id": "twr-2",
+    "text": "November one two three alfa bravo, roger, the trucks are rolling, runway three four"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "fire_acft",
+     "subject": "fire",
+     "group": "HPN Tower",
+     "at": 0.0,
+     "updated_at": 70.0,
+     "title": "HPN ATC: smoke on board reported by N123AB, runway 34",
+     "detail": "fire or smoke on an aircraft · heard: roll the trucks, smoke in the cockpit · HPN Tower",
+     "confidence": 0.91,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 0.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we have smoke in the cockpit",
+        "hits": [
+         "smoke in the cockpit"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "N123AB, roll the trucks, runway 34",
+        "hits": [
+         "roll the trucks"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ACFT-FIRE"
+      },
+      "rank": 2,
+      "pushed": 0.85
+     }
+    }
+   ]
+  }
+ ]
+}

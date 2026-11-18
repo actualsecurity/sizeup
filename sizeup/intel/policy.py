@@ -6,6 +6,9 @@ test pre-alert topic from day one, caps generous for testing):
 
     enabled            True     the whole pipeline (off: nothing is detected)
     push               True     the kill switch: off, detection and the map go on, nothing is pushed
+    push_pii           True     intel pushes go without the PII scrub (push.scrub(): talkers, radio IDs, plates,
+                                dates; admin decision, 2026-11-17: access to the output is limited instead); off: the
+                                scrub withholds such a push, as before. Intel pushes only: never the ALERTS kind
     per_hour           30       pushes an hour, every pack together
     per_day            200      ... a day
     per_category_hour  10       ... an hour of one category
@@ -40,8 +43,9 @@ DEFAULTS = {"enabled": True, "push": True, "per_hour": 30, "per_day": 200, "per_
             "max_repush": 2, "quiet_from": "", "quiet_to": "", "digest_min": 15, "max_age_min": 15,
             "merge_min": 20, "mute_min": 15, "place_repush_min": 5, "move_min": 5,
             # the push's "Listen" link (sizeup/intel/listen.py): on, minutes it plays, seconds around the alert, bitrate
-            "listen": True, "listen_expiry_min": 20, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24}
-BOOLS = ("enabled", "push", "listen")
+            "listen": True, "listen_expiry_min": 20, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24,
+            "push_pii": True}
+BOOLS = ("enabled", "push", "listen", "push_pii")
 LIMITS = {"per_hour": (1, 1000), "per_day": (1, 10000), "per_category_hour": (1, 1000), "repush_min": (0, 1440),
           "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440),
           "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60), "move_min": (1, 120), "listen_expiry_min": (1, 720),

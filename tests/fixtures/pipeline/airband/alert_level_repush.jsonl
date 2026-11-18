@@ -1,0 +1,6 @@
+{"do": "scenario", "t0": "day", "why": "REPUSH_S (300 s): an alert level pushed again (and the county feed polled) only above any level pushed, or 300 s or more after the last push: 2 -> 1 -> 2 at 299 s is quiet, 2 -> 1 -> 2 at 300 s pushes and polls again."}
+{"do": "radio", "t": 0, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34"}
+{"do": "radio", "t": 100, "id": "fire-2", "tg": 307, "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1"}
+{"do": "radio", "t": 299, "id": "fire-3", "tg": 307, "text": "60 Control, car 9901, upgrade to an alert level 2"}
+{"do": "radio", "t": 299.5, "id": "fire-4", "tg": 307, "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1"}
+{"do": "radio", "t": 300, "id": "fire-5", "tg": 307, "text": "60 Control, car 9901, upgrade to an alert level 2"}

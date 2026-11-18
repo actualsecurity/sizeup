@@ -861,8 +861,10 @@ def set_local_source(gaz: Gazetteer, source) -> None:
 
 def locate_page(gaz: Gazetteer, text: str, departments=()) -> PageGeo:
     """A page's location, held to the towns of its tones (``departments``: the tone names of ours; one that names no
-    town, "PCFD", holds it to the DISTRICT). No departments: no town to hold it to."""
-    return locator(gaz).locate(text, home_towns(departments) or (DISTRICT if departments else ()))
+    town, "PCFD", holds it to the DISTRICT). No departments: no town to hold it to. A house number said twice and
+    heard run together ("412412 Sample Road") is read once (sizeup/dispatch.py undouble)."""
+    from sizeup.dispatch import undouble
+    return locator(gaz).locate(undouble(text), home_towns(departments) or (DISTRICT if departments else ()))
 
 
 # ------------------------------------------------------------------ a typed location's block (#204)

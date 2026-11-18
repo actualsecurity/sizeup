@@ -279,8 +279,7 @@ def fenced_hub(tmp_path, keys, monkeypatch):
     h.app.fence.exit_fn, h.app.fence.kill, h.app.fence.log = h.exits.append, (lambda pid, sig: None), (lambda m: None)
     h.server = make_server(h.app, h.app.fence)
     h.server.access.certs_url, h.server.access.log = jw.url, (lambda m: None)
-    threading.Thread(target=h.server.serve_forever, daemon=True).start()
-    h.url = f"http://127.0.0.1:{h.server.httpd.server_address[1]}"
+    h.serve()
 
     def fence() -> None:
         put(-1)

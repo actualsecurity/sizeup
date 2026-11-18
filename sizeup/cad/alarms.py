@@ -531,12 +531,12 @@ class Alarms:
         return {"keywords": list(KEYWORDS), "channels": self.default_channels(), "other": "notice", "drill": False}
 
     def config(self) -> dict:
-        ov = self.cad.settings.overrides().get(SECTION) or {}
+        ov = self.cad.settings.section(SECTION)          # every state push: never every override (#446)
         d = self.defaults()
         return {k: ov.get(k, v) for k, v in d.items()}
 
     def settings_page(self) -> dict:
-        ov = self.cad.settings.overrides().get(SECTION) or {}
+        ov = self.cad.settings.section(SECTION)
         return {**self.config(), "defaults": self.defaults(), "edited": sorted(ov),
                 "push": bool(self.notifier is not None and self.notifier.enabled), "gap_words": GAP_WORDS}
 

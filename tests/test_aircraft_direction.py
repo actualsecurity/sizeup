@@ -469,3 +469,100 @@ def test_a_departure_descending_straight_out_is_not_arriving():
     reports = takeoff("34", 0.2, baro=150.0, climb_s=50, extra=[(30, {"vr": -800.0}), (60, {})])
     k = kinds(phases_of(reports)[0])
     assert ARRIVING not in k and k[-1] == DEPARTING, k
+
+
+# ---- on the ground by inference: never while descending or climbing (a C172 on short final read "On ground") -------
+
+def final_29(from_nm=1.0, gs=58.0, vr=-576.0, down_to_ft=0.0, baro=0.0, legs_after=(), category="A1"):
+    """A light aircraft on the 29 final from from_nm at gs and vr (a steep path: down at the threshold), to
+    down_to_ft, then legs_after."""
+    agl0 = -vr * from_nm / gs * 60
+    s = (agl0 - down_to_ft) / -vr * 60
+    return fly_legs(move(*END["29"], HDG["29"] + 180, from_nm), HDG["29"], ELEV + agl0, gs,
+                    [(s - s % STEP_S, {"vr": vr}), *legs_after], baro=baro, category=category)
+
+
+@pytest.mark.parametrize("baro", [0.0, -364.0, 150.0])
+def test_a_c172_on_short_final_at_75_ft_descending_is_arriving_not_on_the_ground(baro):
+    """The admin's screenshot: 75 ft, -576 ft/min, 58 kt, lined up on 29, 0.5 nm from the field (and the same with the
+    day's altimeter making the pressure altitude read 364 ft low, "75 ft" being the raw reading, or 150 ft high)."""
+    at = move(*END["29"], HDG["29"] + 180, 0.13)
+    assert A.nm(*A.ARP, *at) == pytest.approx(0.5, abs=0.03)
+    shot = Plane(hex=HEX, lat=at[0], lon=at[1], track=HDG["29"], gs=58.0, category="A1",
+                 alt_baro=round(ELEV + 75 + baro), baro_rate=-576.0)
+    p = classify(shot, PROC)
+    assert p.kind == ARRIVING and p.runway == "29", p
+    reports = final_29(baro=baro, down_to_ft=75.0)
+    phases, _ = phases_of(reports + [shot])
+    assert GROUND not in kinds(phases) and kinds(phases)[-1] == ARRIVING and phases[-1].runway == "29", kinds(phases)
+
+
+@pytest.mark.parametrize("baro", [0.0, 150.0])
+def test_a_c172_rolling_out_after_touchdown_with_no_ground_flag_reads_ground(baro):
+    """Final -> touchdown (level, 60 kt) -> rollout slowing through 40 kt to a taxi: arriving down the final, on the
+    ground soon after touchdown (the smoothed rate settling) and from then on, never departing or near."""
+    reports = final_29(baro=baro, legs_after=[(15, {"gs": 60.0}), (15, {"gs": 40.0}), (30, {"gs": 15.0})])
+    n = len(final_29())
+    phases, _ = phases_of(reports)
+    k = kinds(phases)
+    assert set(k[:n]) == {ARRIVING}, k
+    down = n + LAG
+    assert set(k[down:]) == {GROUND} and DEPARTING not in k and NEAR not in k, k
+    # one snapshot of the rollout, no memory: level, on the runway, 65 kt
+    roll = Plane(hex=HEX, lat=END["29"][0], lon=END["29"][1], track=HDG["29"], gs=65.0, category="A1",
+                 alt_baro=round(ELEV), baro_rate=0.0)
+    assert classify(roll, PROC).kind == GROUND
+    # ... but a descended arrival is down by inference only below LANDED_KT (a float at 65 kt may yet climb away)
+    phases, _ = phases_of(final_29() + [roll, Plane(**{**roll.__dict__, "gs": 45.0})])
+    assert kinds(phases)[-2] != GROUND and kinds(phases)[-1] == GROUND, kinds(phases)
+
+
+def test_geometric_height_is_preferred_for_the_ground_test():
+    """On a low-pressure day the pressure altitude reads 300 ft high: GNSS height (above WGS84; the geoid is ~107 ft
+    below it here) says it is on the runway."""
+    roll = Plane(hex=HEX, lat=END["29"][0], lon=END["29"][1], track=HDG["29"], gs=65.0, category="A1",
+                 alt_baro=round(ELEV + 300), baro_rate=0.0)
+    assert classify(roll, PROC).kind != GROUND
+    assert classify(Plane(**{**roll.__dict__, "alt_geom": ELEV + A.GEOID_FT}), PROC).kind == GROUND
+    # and GNSS height 200 ft up overrides a pressure altitude that reads on the field
+    low = Plane(**{**roll.__dict__, "alt_baro": round(ELEV), "alt_geom": ELEV + A.GEOID_FT + 200})
+    assert classify(low, PROC).kind != GROUND
+
+
+@pytest.mark.parametrize("vr", [0.0, None])
+def test_a_taxiing_aircraft_with_no_ground_flag_reads_ground(vr):
+    taxi = Plane(hex=HEX, lat=A.ARP[0], lon=A.ARP[1], track=200.0, gs=15.0, category="A1", alt_baro=round(ELEV), baro_rate=vr)
+    assert classify(taxi, PROC).kind == GROUND
+    assert PhaseMemory(PROC).phase(taxi, T0).kind == GROUND
+    # a 200 ft altimeter offset: too slow to fly, so still on the ground
+    assert classify(Plane(**{**taxi.__dict__, "alt_baro": round(ELEV + 200)}), PROC).kind == GROUND
+
+
+@pytest.mark.parametrize("category,gs,vr", [("A3", 140.0, 1800.0), ("A1", 55.0, 700.0)])
+def test_an_aircraft_climbing_off_the_runway_at_140_ft_is_never_on_the_ground(category, gs, vr):
+    """A jet (and a C172 just off, slower than the old 60 kt gate) at 140 ft climbing out over the 34 departure end."""
+    at = move(*END["16"], HDG["34"], 0.1)
+    up = Plane(hex=HEX, lat=at[0], lon=at[1], track=HDG["34"], gs=gs, category=category, alt_baro=round(ELEV + 140),
+               baro_rate=vr)
+    assert classify(up, PROC).kind != GROUND
+    assert classify(Plane(**{**up.__dict__, "alt_baro": round(ELEV + 140 - 300)}), PROC).kind != GROUND   # high pressure
+    reports = takeoff("34", 0.2)
+    k = kinds(phases_of(reports)[0])
+    assert GROUND not in k[airborne_from(reports) + 1:], k
+
+
+@pytest.mark.parametrize("category", ["A7", "B4"])
+def test_a_hovering_helicopter_is_on_the_ground_only_by_its_flag_or_all_but_still_on_it(category):
+    """Rotorcraft fly slow and low: hovering at 40 ft by the field (by GNSS height) is flying; only under HOVER_KT and
+    HOVER_AGL_FT, or with the flag, on the ground. By the pressure altitude alone (off by a few hundred feet) a hover
+    can't be told from parked on the ramp: under HOVER_KT within LOW_SLOW_AGL_FT is on the ground (HPN Ground's)."""
+    hover = Plane(hex=HEX, lat=A.ARP[0], lon=A.ARP[1], track=0.0, gs=3.0, category=category, alt_baro=round(ELEV + 40),
+                  alt_geom=ELEV + A.GEOID_FT + 40, baro_rate=0.0)
+    assert classify(hover, PROC).kind != GROUND
+    assert classify(Plane(**{**hover.__dict__, "gs": 20.0}), PROC).kind != GROUND
+    assert classify(Plane(**{**hover.__dict__, "alt_geom": ELEV + A.GEOID_FT + 10, "gs": 2.0}), PROC).kind == GROUND
+    assert classify(Plane(**{**hover.__dict__, "alt_baro": "ground"}), PROC).kind == GROUND
+    by_baro = Plane(**{**hover.__dict__, "alt_geom": None})
+    assert classify(by_baro, PROC).kind == GROUND
+    assert classify(Plane(**{**by_baro.__dict__, "alt_baro": round(ELEV + 200)}), PROC).kind != GROUND
+    assert classify(Plane(**{**by_baro.__dict__, "gs": 20.0}), PROC).kind != GROUND

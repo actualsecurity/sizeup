@@ -51,7 +51,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
     html = (STATIC / "cad.html").read_text()
     assert 'id="settings-radios"' in html and 'id="settings-radio-controls"' in html
     assert 'RadiosPanel.mount($("#settings-radios")' in js("settings.js")
-    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab })" in js("settings.js")
+    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES })" in js("settings.js")
     # one header: the console's tabs and the board's links on the same bar
     for tab in ("dispatch-open", "overview-open", "radio-open", "settings-open"):
         assert f'id="{tab}" class="tab' in html
@@ -140,10 +140,17 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                 "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
                                 "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
+                                "/api/cad/stt-workers",      # GPU workers and their tokens (sizeup/cloud/sttworkers.py)
                                 "/api/cad/metrics"}          # the station's signal metrics (#605; graphs: #606)
-    assert "/api/cad/metrics" not in scripts                                # (no script reads it until #606)
+    # #606: the Signal tab, the Squelch card's suggestions and Health's sparks read it, nothing else
+    assert '"/api/cad/metrics"' in js("signal-panel.js") and '"/api/cad/metrics?view=squelch"' in js("squelch-panel.js")
+    assert '"/api/cad/metrics?view=spark"' in js("health.js")
+    assert "/api/cad/metrics" not in "".join(js(n) for n in JS_FILES if n not in ("signal-panel.js", "squelch-panel.js",
+                                                                                  "health.js"))
     assert '"/api/cad/stations"' in js("stations.js")
     assert "/api/cad/stations" not in scripts.replace(js("stations.js"), "")       # only its card reads it
+    assert '"/api/cad/stt-workers"' in js("sttworkers.js")
+    assert "/api/cad/stt-workers" not in scripts.replace(js("sttworkers.js"), "")   # only its card reads it (#639)
     assert '"/api/cad/adapter-password"' in js("adapterpass.js")
     assert "/api/cad/adapter-password" not in scripts.replace(js("adapterpass.js"), "")   # only its card reads it
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")

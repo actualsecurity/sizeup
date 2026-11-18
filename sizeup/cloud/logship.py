@@ -510,6 +510,22 @@ class LogShipper:
                 pass
         self.log(f"station logs: the hub refused batch {p.name} ({why[:120]}): set aside, not sent again")
 
+    def _stamped(self, data: bytes) -> bytes:
+        """A spooled batch as sent: stamped with this station's id NOW. The hub may have renamed the station since it was
+        spooled (StationLink.adopt sets self.station), and a batch stamped with a former id must never block the spool
+        once the hub no longer takes that id. Unreadable: as it is (the hub refuses it, 400: set aside)."""
+        try:
+            body = json.loads(gzip.decompress(data))
+        except (OSError, ValueError, EOFError):
+            return data
+        was = body.get("station") if isinstance(body, dict) else None
+        if not isinstance(was, str) or was == self.station:
+            return data
+        body["station"] = self.station
+        if isinstance(body.get("batch"), str) and body["batch"].startswith(f"{was}-"):
+            body["batch"] = self.station + body["batch"][len(was):]
+        return gzip.compress(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(), 6)
+
     def send(self, now: float | None = None) -> str:
         """The oldest spooled batch to the hub: "sent" | "empty" | "waiting" | "failed" | "rejected" | "not configured"."""
         now = self.clock() if now is None else now
@@ -523,6 +539,7 @@ class LogShipper:
             data = p.read_bytes()
         except OSError:
             return "empty"
+        data = self._stamped(data)
         try:
             if self.c is None:
                 self.c = self._client(20.0)

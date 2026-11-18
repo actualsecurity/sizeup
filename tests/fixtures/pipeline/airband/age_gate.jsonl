@@ -1,0 +1,6 @@
+{"do": "scenario", "t0": "day", "why": "MAX_AGE_S (900 s) from the transmission's END: a transcript of one that ended 901 s ago raises nothing, 900 s ago still does; a re-text of the old one is gated the same way (its end, not the re-text's time). The airport watch's own gate is STALE_S (600 s) from the START."}
+{"do": "air", "t": 1000, "id": "old-1", "ch": "HPN Tower", "dur": 4, "ago": 901, "text": "mayday mayday mayday, November one two three alfa bravo, engine failure"}
+{"do": "air", "t": 1010, "id": "old-2", "ch": "HPN Tower", "dur": 4, "ago": 900, "text": "we just got lasered on a two mile final, green laser from the ground"}
+{"do": "retext", "t": 1020, "id": "old-1", "text": "mayday mayday mayday, November one two three alfa bravo, engine fire"}
+{"do": "air", "t": 1200, "id": "late-1", "ch": "HPN Tower", "dur": 4, "ago": 595, "text": "November four five six charlie delta is going around, we have a flap failure, we have to run a checklist"}
+{"do": "air", "t": 1500, "id": "late-2", "ch": "HPN Tower", "dur": 4, "ago": 597, "text": "November seven eight niner echo foxtrot is going around, we have a flap failure, we have to run a checklist"}

@@ -138,23 +138,26 @@ OUR_INTEL = "pcfd-xmpl-intel-thread"
 
 def test_each_kind_goes_to_its_own_topic_and_one_topic_takes_both():
     A, S, I = notify.ALERTS, notify.STATUS, notify.INTEL
-    assert notify.route(OUR_ALERTS, OUR_STATUS) == {A: OUR_ALERTS, S: OUR_STATUS, I: OUR_ALERTS}
-    assert notify.route(OUR_ALERTS, "") == {A: OUR_ALERTS, S: OUR_ALERTS, I: OUR_ALERTS}   # as before
-    assert notify.route("", OUR_STATUS) == {A: OUR_STATUS, S: OUR_STATUS, I: OUR_STATUS}
+    assert notify.route(OUR_ALERTS, OUR_STATUS) == {A: OUR_ALERTS, S: OUR_STATUS, I: ""}     # intel: its own only
+    assert notify.route(OUR_ALERTS, "") == {A: OUR_ALERTS, S: OUR_ALERTS, I: ""}           # as before, intel aside
+    assert notify.route("", OUR_STATUS) == {A: OUR_STATUS, S: OUR_STATUS, I: ""}
     assert notify.route("", " ") == {A: "", S: "", I: ""}                                    # no pushes
-    assert notify.route(OUR_ALERTS, OUR_STATUS, OUR_INTEL)[I] == OUR_INTEL
+    assert notify.route(OUR_ALERTS, OUR_STATUS, OUR_INTEL) == {A: OUR_ALERTS, S: OUR_STATUS, I: OUR_INTEL}
+    assert notify.route("", "", OUR_INTEL) == {A: "", S: "", I: OUR_INTEL}                 # never the other way
+    for same in (OUR_ALERTS, " " + OUR_STATUS.upper() + " "):                                # trimmed, case aside
+        assert notify.route(OUR_ALERTS, OUR_STATUS, same)[I] == ""
 
 
 def test_the_startup_line_says_where_each_kind_goes_never_the_names():
     def line(a, st, src="ssm"):
         return notify.Pushes("https://ntfy.sh", a, st, sources={notify.ALERTS: src, notify.STATUS: src}).line()
     both = line(OUR_ALERTS, OUR_STATUS)
-    intel = ", intel \u2192 the alerts topic (no intel topic set)"
+    intel = ", intel \u2192 off (no intel topic set)"
     assert both == "notify: alerts \u2192 topic set (SSM), status \u2192 topic set (SSM)" + intel
     assert line(OUR_ALERTS, "", "config") == \
         "notify: alerts \u2192 topic set (config file), status \u2192 the alerts topic (no status topic set)" + intel
     assert line("", OUR_STATUS) == ("notify: alerts \u2192 the status topic (no alerts topic set), "
-                                    "status \u2192 topic set (SSM), intel \u2192 the status topic (no intel topic set)")
+                                    "status \u2192 topic set (SSM)" + intel)
     assert line("", "").startswith("notify: no pushes")
     for out in (both, line(OUR_ALERTS, ""), line("", OUR_STATUS)):
         assert OUR_ALERTS not in out and OUR_STATUS not in out
@@ -189,37 +192,82 @@ def test_protected_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
 
 # -- the third kind: radio-intelligence pre-alerts (INTEL) ----------------------------------------------------------
 
-def test_intel_falls_back_to_the_alerts_topic_and_never_the_other_way():
+def test_intel_never_falls_back_and_alerts_and_status_still_share():
+    """Admin, 2026-11-17: intel pushes go to a channel of their own, never sizeup's alerts (or status) topic."""
     assert notify.KINDS == (notify.ALERTS, notify.STATUS, notify.INTEL)
-    assert notify.FALLBACK == {notify.STATUS: notify.ALERTS, notify.ALERTS: notify.STATUS, notify.INTEL: notify.ALERTS}
-    assert notify.other(notify.INTEL) == notify.ALERTS and notify.other(notify.ALERTS) == notify.STATUS
+    assert notify.FALLBACK == {notify.STATUS: notify.ALERTS, notify.ALERTS: notify.STATUS}      # only INTEL's removed
+    assert notify.other(notify.INTEL) == "" and notify.other(notify.ALERTS) == notify.STATUS
     p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
-    assert p.effective(notify.INTEL) == {"topic": OUR_ALERTS, "source": "fallback"}
-    # only a status topic: the alerts share it, and intel follows the alerts there
-    p = notify.Pushes("https://ntfy.sh", "", OUR_STATUS, log=lambda m: None)
-    assert p.effective(notify.INTEL) == {"topic": OUR_STATUS, "source": "fallback"}
-    # an intel topic of its own: the alerts never fall back to it
+    assert p.effective(notify.INTEL) == {"topic": "", "source": "none"}
+    assert p.effective(notify.ALERTS) == {"topic": OUR_ALERTS, "source": "config"}
+    for a, s in ((OUR_ALERTS, ""), ("", OUR_STATUS)):            # one set: alerts and status share it, intel doesn't
+        p = notify.Pushes("https://ntfy.sh", a, s, log=lambda m: None)
+        assert p.effective(notify.ALERTS)["topic"] == p.effective(notify.STATUS)["topic"] == (a or s)
+        assert p.effective(notify.INTEL) == {"topic": "", "source": "none"}
+        assert {p.effective(notify.ALERTS)["source"], p.effective(notify.STATUS)["source"]} == {"config", "fallback"}
+    # an intel topic of its own: there only, and the alerts never fall back to it
     p = notify.Pushes("https://ntfy.sh", "", "", intel_topic=OUR_INTEL, sources={notify.INTEL: "env"}, log=lambda m: None)
     assert p.effective(notify.INTEL) == {"topic": OUR_INTEL, "source": "env"}
     assert p.effective(notify.ALERTS)["topic"] == "" and p.effective(notify.STATUS)["topic"] == ""
     assert notify.Pushes("https://ntfy.sh", "", "", log=lambda m: None).effective(notify.INTEL)["topic"] == ""
 
 
-def test_intel_follows_the_alerts_off_and_its_own_topic_splits_it_off(ntfy):
+def test_no_intel_topic_sends_no_intel_push_and_the_alarms_go_on(ntfy):
     ov = {}
     p = notify.Pushes(ntfy.url, OUR_ALERTS, OUR_STATUS, settings=lambda: ov, log=lambda m: None)
-    n = p.notifier(notify.INTEL)
-    n.send("PD \u00b7 Smoke reported \u00b7 Example Town", "Example Ave \u00b7 14:32")
-    assert n.flush(5) and [m["body"]["topic"] for m in ntfy.got] == [OUR_ALERTS]
+    n, a = p.notifier(notify.INTEL), p.notifier(notify.ALERTS)
+    assert not n.enabled and n.topic == ""
+    assert n.send("PD \u00b7 Smoke reported \u00b7 Example Town", "Example Ave \u00b7 14:32") is False   # not sent
+    assert a.send("MAYDAY", "Emergency button", priority=5) and a.flush(5)
+    assert [m["body"]["topic"] for m in ntfy.got] == [OUR_ALERTS] and ntfy.got[0]["body"]["title"] == "MAYDAY"
+    row = p.intel_health()
+    assert row["label"] == "Intel pushes" and row["text"] == "no intel topic set" and row["level"] == "warn"
+    assert OUR_ALERTS not in str(row) and OUR_STATUS not in str(row)
     ov[notify.INTEL] = {"topic": OUR_INTEL}                     # Settings: the "intel thread", no restart
     n.send("PD \u00b7 MVA \u00b7 Example Town", "Sample St")
-    assert n.flush(5) and ntfy.got[-1]["body"]["topic"] == OUR_INTEL
+    assert n.flush(5) and ntfy.got[-1]["body"]["topic"] == OUR_INTEL and len(ntfy.got) == 2       # there only
+    assert p.intel_health() is None and p.effective(notify.ALERTS)["topic"] == OUR_ALERTS
     ov[notify.INTEL] = {"off": True}
-    assert not n.enabled and not n.send("x", "y")
+    assert not n.enabled and not n.send("x", "y") and p.intel_health()["level"] == "off"
     del ov[notify.INTEL]
-    ov[notify.ALERTS] = {"off": True}                           # the alerts off: intel with no topic of its own too
+    ov[notify.ALERTS] = {"off": True}
     assert p.effective(notify.INTEL) == {"topic": "", "source": "none"} and not n.enabled
     assert p.effective(notify.STATUS)["topic"] == OUR_STATUS
+
+
+@pytest.mark.parametrize("same", [OUR_ALERTS, OUR_STATUS, OUR_ALERTS.upper(), f" {OUR_STATUS} "])
+def test_an_intel_topic_that_is_the_alerts_or_status_one_is_refused_at_every_send(same, ntfy):
+    p = notify.Pushes(ntfy.url, OUR_ALERTS, OUR_STATUS, intel_topic=same, log=lambda m: None)
+    assert p.effective(notify.INTEL) == {"topic": "", "source": "same"}
+    assert not p.notifier(notify.INTEL).send("PD \u00b7 x", "y") and ntfy.got == []
+    assert p.line().endswith("intel \u2192 off (intel topic refused: " + notify.INTEL_SAME_WHY + ")")
+    assert p.intel_health()["level"] == "warn" and "refused" in p.intel_health()["text"]
+    with pytest.raises(notify.NotifyError):
+        p.test(notify.INTEL)
+    # Settings' alerts topic made the same as the env's intel topic (or turned off: still the alerts' channel)
+    ov = {}
+    q = notify.Pushes(ntfy.url, OUR_ALERTS, OUR_STATUS, intel_topic=OUR_INTEL, settings=lambda: ov, log=lambda m: None)
+    assert q.effective(notify.INTEL)["topic"] == OUR_INTEL
+    ov[notify.ALERTS] = {"topic": OUR_INTEL.upper()}
+    assert q.effective(notify.INTEL) == {"topic": "", "source": "same"}
+
+
+def test_an_intel_topic_equal_to_the_alerts_or_status_one_is_dropped_at_startup(tmp_path, monkeypatch):
+    from sizeup.config import load
+    cfg = tmp_path / "config.toml"
+    for same in (OUR_ALERTS, OUR_STATUS.upper()):
+        cfg.write_text(f'[alerts]\nntfy_topic = "{OUR_ALERTS}"\nstatus_topic = "{OUR_STATUS}"\nintel_topic = "{same}"\n')
+        c = load(cfg)
+        assert (c.alerts_intel_topic, c.alerts_intel_topic_source) == ("", "")
+        assert notify.INTEL_SAME_WHY in c.alerts_config_note and same not in c.alerts_config_note
+        assert (c.alerts_ntfy_topic, c.alerts_status_topic) == (OUR_ALERTS, OUR_STATUS)       # the others untouched
+    cfg.write_text(f'[alerts]\nntfy_topic = "{OUR_ALERTS}"\n')
+    monkeypatch.setenv("SIZEUP_INTEL_TOPIC", f" {OUR_ALERTS} ")                               # SSM / env the same
+    c = load(cfg)
+    assert c.alerts_intel_topic == "" and "refused" in c.alerts_config_note
+    monkeypatch.setenv("SIZEUP_INTEL_TOPIC", OUR_INTEL)
+    c = load(cfg)
+    assert (c.alerts_intel_topic, c.alerts_config_note) == (OUR_INTEL, "")
 
 
 def test_intel_topic_from_the_config_and_env_refuses_the_subscribed_topics(tmp_path, monkeypatch):
@@ -249,9 +297,9 @@ def test_a_mayday_never_waits_behind_pre_alerts_on_the_shared_topic(monkeypatch)
         sent.append(title)
         return {}
     monkeypatch.setattr(notify, "publish", slow)
-    p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, "", log=lambda m: None)
+    p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, "", intel_topic=OUR_INTEL, log=lambda m: None)
     i, a = p.notifier(notify.INTEL), p.notifier(notify.ALERTS)
-    assert i.topic == a.topic == OUR_ALERTS and i.current() is not a.current()      # one topic, two queues
+    assert i.topic == OUR_INTEL and a.topic == OUR_ALERTS and i.current() is not a.current()     # two queues
     for k in range(3):
         assert i.send(f"PD \u00b7 pre-alert {k}", "x")
     assert a.send("MAYDAY", "Emergency button", priority=5)
@@ -262,12 +310,17 @@ def test_a_mayday_never_waits_behind_pre_alerts_on_the_shared_topic(monkeypatch)
     assert s.notifier(notify.ALERTS).current() is not s.notifier(notify.INTEL).current()
 
 
-def test_the_line_names_the_topic_intel_really_shares():
+def test_the_line_and_the_page_say_intel_is_off_without_a_topic_of_its_own():
     only_status = notify.Pushes("https://ntfy.sh", "", OUR_STATUS, log=lambda m: None)
-    assert only_status.line().endswith("intel \u2192 the status topic (no intel topic set)")
-    assert only_status.page()["kinds"][2]["source_text"] == "shared (the status topic)"
+    assert only_status.line().endswith("intel \u2192 off (no intel topic set)")
+    by = {k["kind"]: k for k in only_status.page()["kinds"]}
+    assert by["intel"]["topic"] == "" and by["intel"]["source_text"] == "not set"
+    assert by["alerts"]["source_text"] == "shared (the status topic)"
     both = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
-    assert both.line().endswith("intel \u2192 the alerts topic (no intel topic set)")
+    assert both.line().endswith("intel \u2192 off (no intel topic set)")
+    own = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, intel_topic=OUR_INTEL, sources={notify.INTEL: "ssm"},
+                        log=lambda m: None)
+    assert own.line().endswith("intel \u2192 topic set (SSM)") and OUR_INTEL not in own.line()
 
 
 # -- the static backstop (notify.PROTECTED_SHA256): refused whatever was derived ------------------------------------
