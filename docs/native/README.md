@@ -65,8 +65,8 @@ per frame at pace, which frees about 0.7 % of one station core per channel [E].
 | Idle memory of the station's Python process, no radios | 117 MB, 29 threads, 172 modules [L] |
 | Memory peak of the station service in production | median 496 MB, p95 1,126 MB, max 1,536 MB (its control group: includes the rtl_fm children and page cache; the make-up is not known) [P] |
 | Transient memory while closing one 2-minute transmission | 237 MB [L] |
-| Restarts of the station process | 57 in 4.45 days (12.8 a day), all automatic updates, no rollbacks [P] |
-| Capture is deaf per restart | about 8 s median (p95 11 s, max 52 s): about 7.6 minutes over the 4.45 days [P] |
+| Restarts of the station process | 57 in 4.45 days (12.8 a day), all automatic updates, no rollbacks; measured before updates were coalesced into one switch per burst of deploys [P] |
+| Radios reported back after a restart | 8 s median (p95 11 s, max 52 s), by the updater's own poll of each radio's state [P]. The gap in the audio itself was not measured: a radio reads "ok" once its receiver process is started, before audio flows, and a new squelch cannot open for 2 s |
 | Updates that switched while the station was still busy | 40 of 57 [P] |
 | Of the 55 updates whose commits could be compared: touched the 16 DSP modules / anything under `sizeup/radio/` / that folder, `app.py`, `stt.py` or the trunk-recorder deploy files | 7 / 11 / 30 |
 | From-scratch install | 398 apt packages, 1.1 GB, nearly all for trunk-recorder; the Python side is numpy (CI logs) |
@@ -76,7 +76,9 @@ The measured load is trunk-recorder; whisper's CPU was not measured in this wind
 hurts is **capture restarting with every update**, and that is a process boundary, not a language. A capture
 service restarted only when its own files change would have restarted between about 7 times (only today's 16 DSP
 modules) and 30 times (everything under `sizeup/radio/`, `app.py` and `stt.py`, where the segment handlers and clip
-writing live today) instead of 55. Where it lands depends on how the handlers are split out.
+writing live today) instead of 55. Where it lands depends on how the handlers are split out: for the boundary
+proposed in [`capture-split.md`](capture-split.md) (capture also owns the dongles; row building, the voice filter
+and speech-to-text stay in the app) a count over the commit history gives about 12.
 
 ### The hub's real-time path (ADR 0003)
 
@@ -127,6 +129,7 @@ What they support instead, in order:
 
 - Whisper's CPU on the station, and how late frames run while whisper is busy on the same four cores.
 - Any frame timing on the station itself: station figures are local figures scaled.
+- How long capture is actually deaf across a restart, at the audio level.
 - What `rtl_fm` does when its pipe is full.
 - Real radio audio: every signal was synthetic. The voice filter's cost varies about three times with how many
   spectral lines a clip has.

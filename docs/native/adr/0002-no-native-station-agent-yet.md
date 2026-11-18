@@ -18,8 +18,8 @@ Production, 4.45 days of systemd and updater lines (aggregates only), and local 
 | Memory an agent would save | about none while the Python DSP stays; about 150 MB once no Python is left (estimate) |
 | Memory of the station service | 117 MB idle locally with no radios; in production its peak is median 496 MB, max 1,536 MB (the control group, with `rtl_fm` and page cache: the make-up is not known); closing one 2-minute transmission takes 237 MB for a moment |
 | Install weight | 398 apt packages and 1.1 GB (CI logs), nearly all for trunk-recorder and GNU Radio; the Python side is numpy |
-| Restarts of the station process | 57 in 4.45 days (12.8 a day), all updates, 0 rollbacks |
-| An update | 318 s median: 10 s of build, 300 s waiting for a quiet moment, then about 8 s until the radios are back (p95 11 s, max 52 s): about 7.6 minutes deaf over the window |
+| Restarts of the station process | 57 in 4.45 days (12.8 a day), all updates, 0 rollbacks. The window ended just before updates were coalesced into one switch per burst of deploys, so today's rate is lower |
+| An update | 318 s median: 10 s of build, 300 s waiting for a quiet moment, then 8 s until the updater's poll shows the radios back (p95 11 s, max 52 s). That poll reads a radio as back once its receiver process is started, and a new squelch cannot open for 2 s, so the gap in the audio was not measured |
 | Updates that gave up waiting and switched while busy | 40 of 57 |
 | Updates that touched something the station process imports | 53 of the 55 whose commits could be compared (it imports 172 modules: it runs as all-in-one and also feeds the hub) |
 | Of those 55: touched the 16 DSP modules / anything under `sizeup/radio/` / that folder, `app.py`, `stt.py` or the trunk-recorder deploy files | 7 / 11 / 30 |
@@ -33,8 +33,9 @@ while the app restarts is never ingested (an estimated 1 to 7 calls a day).
    toolchain, an artifact path the updater does not have, a second log scrubber that must fail closed exactly like
    the first, and a rollback matrix across two implementations (about 11,700 lines in scope, pinned by at least
    7,300 lines of tests).
-2. **Capture becomes its own service**, in Python first: `rtl_fm` readers, squelch, decoders and clip writing,
-   restarted only when its own files or unit change (the pattern trunk-recorder's supervisor already uses). It hands
+2. **Capture becomes its own service**, in Python first: `rtl_fm` readers, squelch, decoders and the writing of each
+   finished segment (where exactly the line falls, including who owns the dongles and the alarm lane, is the
+   subject of [`capture-split.md`](../capture-split.md)), restarted only when its own files or unit change (the pattern trunk-recorder's supervisor already uses). It hands
    finished segments to the app through one contract for every radio: a spool directory of finished segments (audio
    plus a JSON sidecar, written to a temporary name and renamed, with a durable reader cursor), a status file, a
    wish file, and a local stream for "talking now" and tone events.
@@ -51,9 +52,10 @@ This ADR proposes the capture split and offers its contract (ADR 0004); the work
 ## Consequences
 
 - Capture restarts fall from 55 to between about 7 and 30 over the measured window. The low end counts only today's
-  16 DSP modules; the high end counts `app.py` and `stt.py` too, where the segment handlers, clip writing and voice
-  filter live today. Where it lands depends on how those are split out, and on the coalescing of updates already
-  under way. A deploy can reach the rest of the station without waiting for radio silence.
+  16 DSP modules (a list that leaves out two modules the live tap needs and includes one that capture would not);
+  the high end counts `app.py` and `stt.py` too, where the segment handlers, clip writing and voice filter live
+  today. For the boundary the design proposes, a count over the commit history gives about 12. Coalescing of
+  updates, now in place, lowers both sides of the comparison. A deploy can reach the rest of the station without waiting for radio silence.
 - The spool contract is the seam for a native radio daemon: a Rust daemon would implement the same directory and
   files, and could be run in shadow against the Python service by comparing spools.
 - A native agent is reconsidered when all three hold: a native radio daemon exists, a station class with 1 to 2 GB
