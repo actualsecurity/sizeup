@@ -1,0 +1,15 @@
+{
+  "_about": "The other MRRS police talkgroups (Harrison PD, MTA PD, the interop talkgroups) with the police pack's rules (\"rules_from\": sizeup/intel/rules.py rules_from(): its categories, rules and suppress phrases as data/intel/police.json writes them; rule ids \"area.<id>\", labels \"Area PD: <label>\"). LOG ONLY: events in the store and the log, never the map, the card or a push, until an admin raises the pack in Settings > System > Intel (its categories and rules are the police pack's, at push). Scope: every MRRS police talkgroup except the police pack's own (\"exclude\" = police.json's sources; tests/test_intel_scope.py holds the two together). No towns (they aren't ours), no model (\"infer\": false).",
+  "name": "neighbor_police",
+  "version": 1,
+  "order": 4,
+  "domain": "police",
+  "label": "Area PD",
+  "rules_from": "police",
+  "rule_prefix": "area.",
+  "scope": {"services": ["police"], "sources": ["p25:mrrs:*"], "exclude": ["p25:mrrs:9211", "p25:mrrs:9212", "p25:mrrs:9213"], "tiers": [], "systems": ["mrrs"]},
+  "accept": false,
+  "mode": "log",
+  "infer": false,
+  "towns": {}
+}

@@ -74,10 +74,18 @@ def doubtful_number(label: str, texts) -> bool:
     return any(re.sub(r"\D", "", tok) == n for t in texts or () for tok in cued_numbers(t))
 
 
+def category_label(cat: dict, pack_label: str, category: str) -> str:
+    """A category's label as shown beside its pack's: without the pack's own label in front ("Area PD: Weapon / shots"
+    is unique in Settings; beside "Area PD" it is "Weapon / shots", rules.rules_from)."""
+    label = str(cat.get("label") or category)
+    pre = f"{pack_label}: " if pack_label else ""
+    return label[len(pre):] if pre and label.startswith(pre) and len(label) > len(pre) else label
+
+
 def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubtful: bool = False) -> dict:
     """{title, body, tags, priority, click} for the event (never the transcript)."""
     town = ev.town or ""
-    title = " · ".join(x for x in (pack_label, cat.get("label") or ev.category, town) if x)
+    title = " · ".join(x for x in (pack_label, category_label(cat, pack_label, ev.category), town) if x)
     where = where_text(ev, doubtful)
     when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
     body = " · ".join(x for x in (where or "location not heard", when, ev.level) if x)
