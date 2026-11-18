@@ -262,7 +262,7 @@ class Comms:
 
     def record(self, t: dict, replace: bool = True) -> list[int]:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
-        text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
+        text, status, model, emergency?, evidence?, vocab_v? (the term list that biased its text: sizeup/stt_terms.py)}. Returns the event ids it is linked to. replace=False: skip
         one already logged (the startup backfill). An emergency once logged stays (a later write without the
         flag never clears it), and so does its evidence. Must not be called with store.lock held: the hooks
         (on_text, on_context_text) run on the caller's thread after commit."""
@@ -324,6 +324,9 @@ class Comms:
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            vocab_v = str(t.get("vocab_v") or "")[:80]
+            if vocab_v or have:                 # (its text written again: the version goes with it)
+                db.execute("UPDATE radio_traffic SET vocab_v = ? WHERE id = ?", (vocab_v, tid))
             if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
                 db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)
@@ -668,22 +671,23 @@ class Comms:
         return {"unlinked": True, "why": old["why"], "excluded": auto}
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
-               notify: bool = True) -> bool:
+               notify: bool = True, vocab_v: str = "") -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
         run on the caller's thread after commit. notify=False: a shed clip caught up hours later
         (sizeup/sttcatchup.py): stored and in the change log like any text, but neither hook is told, so nothing
         that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's step, the
-        context pre-alerts) acts on old words."""
+        context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown)."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
-            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ?, "
+            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
                            "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech') THEN ? ELSE text_at END "
-                           "WHERE id = ?", (text, status, model, self.clock(), status, self.clock(), tid)).rowcount
+                           "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(), status,
+                                            self.clock(), tid)).rowcount
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1

@@ -593,6 +593,8 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if tcols and "mhz" not in tcols:                  # the frequency an airband row was heard on (#260: NY Approach
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN mhz REAL")   # changes by the time of day), 2026-11-06
+        if tcols and "vocab_v" not in tcols:              # the term list / vocabulary that biased its text (sizeup/stt_terms.py:
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")   # vocab_v), 2026-11-16
         if tcols and "text_at" not in tcols:              # when its first transcript landed (#639: updated_at moves with
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN text_at REAL")   # every later edit), 2026-11-17
         # Every row's source, qualified by its system (#409, #415: talkgroup numbers repeat between P25 systems), 2026-11-10.

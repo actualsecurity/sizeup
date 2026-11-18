@@ -98,7 +98,7 @@ from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
-from sizeup import channels
+from sizeup import channels, stt_terms
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -432,6 +432,7 @@ class AwsJob:
     rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
     catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
+    vocab_v: str = ""         # the vocabulary its stream used (AwsTranscriber sets it): the transcript's vocab_v
 
 
 @dataclass
@@ -694,6 +695,7 @@ class App:
         if cfg.stt_aws:
             self._aws_setup()
             _mark("speech-to-text")
+        self._terms_setup()
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
         # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
         # subscribes: one alert): prealert_sync() follows Settings > Station > Hub link.
@@ -1061,7 +1063,7 @@ class App:
                  history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
                  rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
-                 read_twice=page.read_twice)
+                 read_twice=page.read_twice, vocab_v=getattr(page, "vocab_v", "") or "")
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
@@ -1120,13 +1122,39 @@ class App:
                 pass
 
     def _prompt(self, item) -> str:
-        """whisper's prompt for one recording: the configured text, plus (stt.talker_prompt) the
-        talkers on this call as they're said on the air."""
+        """whisper's prompt for one recording: the source's own (_base_prompt), with the top of its private term list
+        ahead of it in what that leaves of the budget (sizeup/stt_terms.py; [stt] terms_whisper, the station's from
+        the hub). item.vocab_v: which list went in ("" none)."""
+        try:
+            ts = self._terms_for_item(item)
+        except Exception as e:  # noqa: BLE001 - the source's own prompt then
+            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            ts = None
+        base = self._base_prompt(item, short=ts is not None)
+        try:
+            text, vocab_v = stt_terms.with_terms(base, ts)
+        except Exception as e:  # noqa: BLE001 - the source's own prompt then
+            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            text, vocab_v = base, ""
+        try:
+            item.vocab_v = vocab_v
+        except AttributeError:
+            pass
+        return text
+
+    def _base_prompt(self, item, short: bool = False) -> str:
+        """The source's own prompt: the configured text, plus (stt.talker_prompt) the talkers on this call as they're
+        said on the air; airband and another system's police have their own. short: a term list goes with it, so a
+        police profile's prompt keeps only its towns' busiest streets (stt_terms.PROFILE_STREETS: the addresses that
+        matter; its 30 alone filled most of whisper's budget), the list the rest."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
         prof = self._stt_profile(item)
         if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
-            return self._profile_prompt(prof)
+            if not short:
+                return self._profile_prompt(prof)
+            n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
+            return self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
@@ -1566,6 +1594,7 @@ class App:
                                                | ({} if any(t is m for m in own) else {"other_page": True})
                                                for t in page.tones],
                                      "tone_seq": list(getattr(page, "tone_seq", None) or []),
+                                     "vocab_v": getattr(page, "vocab_v", "") or "",
                                      "voice_at": round(page.voice_offset_s, 2) if page.tones else None},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
@@ -2131,6 +2160,7 @@ class App:
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
                                      "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", ""),
+                                     "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
                                     replace=replace)
@@ -2593,7 +2623,8 @@ class App:
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
             # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
-            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup)
+            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup,
+                                   vocab_v=getattr(job, "vocab_v", ""))
             # (a restarted station no longer has the transmission to compare: a skipped clip with words now has changed)
             changed = changed or (job.catchup and bool(text))
         with self._lock:
@@ -2653,13 +2684,14 @@ class App:
         self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
-                alt: dict | None = None, why: str = "re-run", quiet: bool = False) -> bool:
+                alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
         (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
         but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
-        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event)."""
+        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event). vocab_v: the term
+        list or vocabulary that biased the new text (sizeup/stt_terms.py), on the row and the event."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
@@ -2670,7 +2702,7 @@ class App:
                 page.history = hist[-5:]  # type: ignore[attr-defined]
                 changed = True
             page.raw, page.confidence = text, confidence
-            page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
+            page.rerun_at, page.model, page.vocab_v = time.time(), model, vocab_v  # type: ignore[attr-defined]
             if alt is not None:
                 page.alt_text, page.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
             page.status = "done" if text else "no_speech"
@@ -2682,7 +2714,7 @@ class App:
         changed = changed or (old is not None and old != text)
         self.store.retext(cid, text, status, confidence, model, alt=alt)
         try:
-            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
@@ -2694,7 +2726,8 @@ class App:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
-                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {})})
+                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
+                              **({"vocab_v": vocab_v} if vocab_v else {})})
         return changed
 
 
@@ -2964,6 +2997,9 @@ class App:
         out = [*self.cad.settings.vocabulary(), *self.vocabulary_suggestions()]
         if getattr(self, "pd_sources", None):
             out += self.police_vocabulary()
+        if getattr(self, "term_vocabs", None) is not None:      # the private term lists' (sizeup/stt_terms.py)
+            for ts in self.stt_terms.sets().values():
+                out += stt_terms.aws_phrases(ts.terms)
         return out
 
     def police_vocabulary(self) -> list[str]:
@@ -2978,6 +3014,199 @@ class App:
         if self.aws is not None and self.aws.vocabulary != name:
             self.aws.vocabulary = name
             log(f"aws transcribe: custom vocabulary {name} in use from the next stream")
+
+    # -- private term lists per kind of source (sizeup/stt_terms.py, the STT plan's step 3a) -----------------------
+
+    def _terms_setup(self) -> None:
+        """A station keeps what the hub sends it (set_stt_terms). The hub reads the lists from its backups bucket, all-in-one
+        from [stt] terms_dir; with neither (or both switches off) nothing changes. [stt] terms_aws: per (list, the
+        channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
+        those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
+        self.stt_terms = None
+        self.term_vocabs = None
+        self.term_cleanup = None
+        if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
+            self.aws.vocab_version = self._vocab_version
+        if self.cfg.cloud_role == "station":
+            self.stt_terms = stt_terms.Pushed()
+            return
+        if self.aws is not None:
+            store = self.cad.store
+            tv = stt_terms.TermVocabularies(self.aws.region, store.meta_get, store.meta_put, self._own_vocab_phrases,
+                                            self.cfg.stt_aws_api_endpoint, log=log, leader=self._atc_leader)
+            if not self.cfg.stt_terms_aws:
+                self.term_cleanup = tv if tv.pairs() else None
+        if not (self.cfg.stt_terms_whisper or self.cfg.stt_terms_aws):
+            return
+        files = stt_terms.files_from(os.environ, self.cfg.stt_terms_dir)
+        if files is None:
+            return
+        self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        if self.cfg.stt_terms_aws and self.aws is not None:
+            self.term_vocabs = tv
+            self.aws.term_vocabulary = self._term_vocab_for
+            self.aws.vocab_respell = lambda name: self.term_vocabs.respell(name)
+
+    def _terms_cleanup(self) -> None:
+        """[stt] terms_aws off: the term vocabularies made before deleted, once this task leads (a thread; at most an
+        hour of looking)."""
+        tv = self.term_cleanup
+        if tv is None:
+            return
+
+        def run():
+            for _ in range(60):
+                if self._stopping.is_set():
+                    return
+                if self._atc_leader():
+                    tv.cleanup()
+                    return
+                self._stopping.wait(60.0)
+        threading.Thread(target=run, name="stt-terms-cleanup", daemon=True).start()
+
+    def _terms_read(self, store, changed: bool) -> None:
+        """After each read of the lists: the AWS vocabularies made for their versions (an API error tried again), and the
+        station sent the new prompts' terms."""
+        if self.term_vocabs is not None:
+            self.term_vocabs.sync(store.sets())
+        if changed:
+            self.stt_terms_check()
+
+    def stt_terms_check(self) -> None:
+        """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
+
+    def stt_terms_payload(self) -> dict | None:
+        """What a station is sent (set_stt_terms): nothing while terms_whisper is off; None (send nothing) until the
+        lists' first read is over."""
+        if self.cfg.stt_terms_whisper and isinstance(self.stt_terms, stt_terms.TermStore):
+            return self.stt_terms.payload() if self.stt_terms.loaded else None
+        return {"v": "", "sets": {}}
+
+    def set_stt_terms(self, payload) -> dict:
+        """The hub's lists for whisper's prompt (a call from the hub): kept in memory. {v, sets}: what is applied."""
+        if not isinstance(self.stt_terms, stt_terms.Pushed):
+            raise RuntimeError("not a station: the term lists are read here")
+        st = self.stt_terms.apply(payload)
+        log("speech-to-text terms from the hub: " + (", ".join(f"{k} ({v})" for k, v in st["sets"].items()) or "none"))
+        return st
+
+    def stt_terms_applied(self) -> dict:
+        """What the station reports in its status ({v}): the hub sends the lists again when it differs."""
+        return self.stt_terms.state() if isinstance(self.stt_terms, stt_terms.Pushed) else {"v": ""}
+
+    def _terms_for_item(self, item):
+        """The term set for whisper's prompt on this recording, None for none (off, no list, transit ...)."""
+        terms = getattr(self, "stt_terms", None)
+        if terms is None or (isinstance(terms, stt_terms.TermStore) and not self.cfg.stt_terms_whisper):
+            return None
+        return terms.get(self._own_for_item(item))
+
+    def _own_for_item(self, item) -> str | None:
+        """Which list a recording takes (stt_terms.own_for): a page the paging one, a transmission by its source."""
+        if isinstance(item, Page) or getattr(item, "kind", "") == "page":
+            return "county_fire"
+        if isinstance(item, Traffic):
+            src = self._row_source(item)
+            kind = self._kind.get(item.source, "") if item.talkgroup is None else ""
+            return stt_terms.own_for(src["source_key"], src["service"], kind) or self._own_for_key(traffic_key(item))
+        key = str(getattr(item, "source_key", "") or "")
+        service = str(getattr(item, "service", "") or "")
+        return stt_terms.own_for(key, service, self._kind.get(key, "")) if service else self._own_for_key(key)
+
+    def _own_for_key(self, key: str) -> str | None:
+        """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
+        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        key = str(key or "")
+        kind = self._kind.get(key, "")
+        service = ""
+        got = sources.parse(key) if channels.is_tg(key) else None
+        if got is not None:
+            system, tg = got
+            if system == sources.COUNTY:
+                group = (self.tg.info.get(tg) or {}).get("group") or ""
+                service = sources.service(group) if group else ("fire" if tg in self.cfg.p25_incident_talkgroups else "")
+            else:
+                rt = getattr(self, "systems", {}).get(system)
+                info = (rt.system.talkgroups.get(tg) or {}) if rt is not None else {}
+                service = str(info.get("service") or "")
+            key = sources.p25(system, tg)
+        elif kind:
+            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
+            service = sources.service(kind=kind)
+        return stt_terms.own_for(key, service, kind)
+
+    def _own_vocab(self, channel: str) -> str:
+        """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
+        another system's other talkgroups none, ours sizeup-pcfd."""
+        from sizeup.transcribe import PD_VOCABULARY, is_context
+        if self._kind.get(channel) == "airband" and getattr(self, "atc_vocab", None) is not None:
+            return self.atc_vocab.name
+        if channel in getattr(self, "pd_sources", ()) and getattr(self, "pd_vocab", None) is not None:
+            return PD_VOCABULARY
+        return "" if is_context(channel) else self.cfg.stt_aws_vocabulary
+
+    def _own_vocab_phrases(self, base: str) -> list[str]:
+        """An own vocabulary's phrases: Settings > Radios > Vocabulary's list as it is (edits included), the ATC list as
+        sizeup-atc last got it (_atc_pushed_phrases), the police one."""
+        if not base:
+            return []
+        if getattr(self, "atc_vocab", None) is not None and base == self.atc_vocab.name:
+            return self._atc_pushed_phrases()
+        if getattr(self, "pd_vocab", None) is not None and base == self.pd_vocab.name:
+            return self.police_vocabulary()
+        if base == self.cfg.stt_aws_vocabulary:
+            return list(self.cad.settings.vocabulary())
+        return []
+
+    ATC_PUSHED = "stt_terms_atc_base"
+
+    def _atc_pushed_phrases(self) -> list[str]:
+        """sizeup-atc's phrases as AWS last got them (#257's refresher pushes the operators seen when they change), so the
+        airband term vocabulary changes only when sizeup-atc does, never with every operator seen or gone. The refresher
+        keeps no copy: the list now is kept (in the CAD's meta, by the leader) when its signature is sizeup-atc's; until
+        one is, the copy kept before, else the fixed list."""
+        import hashlib
+        from sizeup import atc
+        from sizeup.transcribe import build_vocabulary
+        store = self.cad.store
+        try:
+            kept = json.loads(store.meta_get(self.ATC_PUSHED) or "{}")
+        except ValueError:
+            kept = {}
+        sig = self.atc_vocab.state().get("sig") or ""
+        if sig and kept.get("sig") == sig:
+            return [str(p) for p in kept.get("phrases") or ()]
+        r = getattr(self, "atc_refresh", None)
+        now = list(r.phrases()) if r is not None else list(atc.vocabulary()["phrases"])
+        if sig and hashlib.sha1(json.dumps(build_vocabulary(now)["phrases"]).encode()).hexdigest()[:12] == sig:
+            if self._atc_leader():
+                store.meta_put(self.ATC_PUSHED, json.dumps({"sig": sig, "phrases": now}))
+            return now
+        return [str(p) for p in kept.get("phrases") or ()] or list(atc.vocabulary()["phrases"])
+
+    def _term_vocab_for(self, channel: str) -> str:
+        """The AWS vocabulary of a channel's term list and own vocabulary once READY ("" for none: it keeps its own);
+        the first time a pair is asked for, the leader makes it."""
+        own = self._own_for_key(channel)
+        if self.term_vocabs is None or self.stt_terms is None or self.stt_terms.get(own) is None:
+            return ""
+        base = self._own_vocab(channel)
+        name = self.term_vocabs.ready(own, base)
+        if not name:
+            self.term_vocabs.want(own, base)
+        return name
+
+    def _vocab_version(self, name: str) -> str:
+        """vocab_v of a vocabulary a stream used: a term vocabulary's "<list>+<own vocabulary>@<version>", another one's
+        "<name>@<its sig>"."""
+        v = stt_terms.vocab_v_of(name)
+        if v:
+            return v
+        for vb in (self.vocab, getattr(self, "atc_vocab", None), getattr(self, "pd_vocab", None)):
+            if vb is not None and vb.name == name:
+                sig = vb.state().get("sig") or ""
+                return f"{name}@{sig}" if sig else name
+        return name
 
     def _aws_start(self, item, pcm: np.ndarray, key: str) -> None:
         """Amazon Transcribe for a transmission (shown at once as "Transcribing", the text follows) or a
@@ -3010,14 +3239,16 @@ class App:
         status = "done" if text else "no_speech"
         if job.rerun:
             changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
-                                   quiet=job.catchup)
+                                   quiet=job.catchup, vocab_v=job.vocab_v)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
             page.raw, page.confidence, page.status, page.model = text, conf, status, channels_model()
+            page.vocab_v = job.vocab_v  # type: ignore[attr-defined]
             self._transcribed(page)
         else:
-            self._retext(job.id, text, status, conf, channels_model(), alt=job.alt, why="AWS Transcribe")
+            self._retext(job.id, text, status, conf, channels_model(), alt=job.alt, why="AWS Transcribe",
+                         vocab_v=job.vocab_v)
 
     def _aws_failed(self, job: AwsJob, why: str) -> None:
         """Never dropped: the local model takes it ("both": the local text simply stays)."""
@@ -3184,6 +3415,8 @@ class App:
             a = self.pd_vocab.state()
             a.pop("respell", None)
             st["pd"] = a
+        if getattr(self, "term_vocabs", None) is not None:      # one per private term list (no terms, only states)
+            st["terms"] = self.term_vocabs.state()
         return st
 
     def aws_status(self) -> dict:
@@ -4949,6 +5182,9 @@ class App:
         self.stt.start()
         self.catchup.start()                      # its first look minutes from now: nothing written at start
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        if isinstance(self.stt_terms, stt_terms.TermStore):
+            self.stt_terms.start()                # the private term lists, read now and every few minutes
+        self._terms_cleanup()
         if not self.forwarding():
             self.cad.intel.start()                # radio pre-alerts (sizeup/intel): the "intel" thread
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
@@ -5185,6 +5421,8 @@ class App:
     def stop(self) -> None:
         self._stopping.set()
         self.catchup.stop()
+        if isinstance(getattr(self, "stt_terms", None), stt_terms.TermStore):
+            self.stt_terms.stop()
         self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
         self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
