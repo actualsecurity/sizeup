@@ -123,7 +123,9 @@ def _blob(desc: dict, fm: bool, voice_offset_s: float, audio: np.ndarray) -> tup
 ENCODER_ENV = "SIZEUP_STT_ENCODER"   # auto (default) | thread | process: where the FLAC is made (Encoder below)
 WORKER_FAILS = 3                # the worker dead this often in a row: the thread, until WORKER_RETRY_S later
 WORKER_RETRY_S = 300.0          # ... (and auto without the service's socket, or another release's: looked again then)
-SLOW_BACKOFF_S = 30.0           # the worker too slow to answer: the clip stays queued, tried again this much later
+WAIT_CAP_S = 120.0              # a wait on the worker's answer: at most this long (then waited for again) ...
+WORKER_SLOW = 3                 # ... this many waits in a row without one, or ...
+UNHEALTHY_S = 600.0             # ... this long: the worker is unhealthy (NORMAL / LOW wait queued)
 HELD_LOOK_S = 1.0               # held (whisper behind): looked at again this often
 HOLD_MAX_S = 300.0              # one hold at most this long (then NORMAL / LOW go on until whisper has caught up)
 
@@ -136,23 +138,28 @@ def _lower_priority() -> None:
 
 
 class Encoder:
-    """The station's STT inputs, made off the radio path: submit() only queues a reference to the audio; one thread
-    ("hub-stt-input") takes them in turn and hands each FLAC to sink(data, flac, meta, prio) (the outbox's lane). The
-    highest priority is made first; when the queue is full a new one takes the place of lower-priority ones (the oldest
-    of the lowest first), else it is dropped.
+    """The station's STT inputs, made off the radio path: submit() only queues a reference to the audio and the FLAC is
+    handed to sink(data, flac, meta, prio) (the outbox's lane). The highest priority is made first; when the queue is
+    full a new one takes the place of lower-priority ones (the oldest of the lowest first), else it is dropped.
 
-    Where the FLAC is made (about 40 ms of CPU an audio-second on the station's i5), so that it never takes whisper's
-    CPU (sizeup/cloud/sttencode.py): mode (ENCODER_ENV) "auto" sends it to the sizeup-stt-encode service (its own
-    cgroup, #709) when its socket is there, else makes it on the thread itself (niceness NICE: below the radio threads,
-    though not below whisper); "process" a child process (the tests: the same bytes either way); "thread" always the
-    thread. A dead worker (not there, refused, reset): the thread makes that clip; WORKER_FAILS in a row, or another
-    release's worker, and the thread makes them for WORKER_RETRY_S. A slow one (no answer in the clip's time): the
-    clip stays queued (subject to the eviction above) and is tried again SLOW_BACKOFF_S later, never made on the
-    station's thread for being slow. Each change of state is logged once.
+    Two threads, so that a pre-alert never waits on anything:
+      "hub-stt-input"     PRE and FIRE (pages, alert-tier talkgroups, fire traffic): always made here, on the station,
+                          at once (small, cheap). It also hands NORMAL / LOW to the helper, one at a time.
+      "hub-stt-input-bg"  NORMAL / LOW, one in flight: in the worker (sizeup/cloud/sttencode.py) when there is one,
+                          else here (mode "thread", no service, another release's, or a dead one).
 
-    held(): whisper is behind on live traffic (sizeup/cloud/station.py _whisper_behind). The pre-alerts and fire
-    traffic (PRE, FIRE) are never held; NORMAL and LOW wait (bounded as above, the priorities kept) and drain, highest
-    first, once whisper caught up, or after HOLD_MAX_S of one hold.
+    The worker (about 40 ms of CPU an audio-second on the i5, so never at the station's own cgroup weight): mode
+    (ENCODER_ENV) "auto" the sizeup-stt-encode service (its own cgroup, #709) when its socket is there; "process" a
+    child (the tests: the same bytes either way); "thread" never. One connection, one clip in flight, never sent twice:
+    no answer within its time (WAIT_CAP_S at most) and the helper goes on waiting on the same connection; WORKER_SLOW
+    such waits in a row, or UNHEALTHY_S without an answer, and the worker is unhealthy: NORMAL / LOW wait queued
+    (subject to the eviction above), never made on the station for it, until it answers. A dead worker (refused, reset,
+    gone): the helper makes that clip; WORKER_FAILS in a row, or another release's, and the helper makes them for
+    WORKER_RETRY_S. Each change of state is logged once.
+
+    held(): whisper is behind on live traffic (sizeup/cloud/station.py _whisper_behind). PRE and FIRE are never held;
+    NORMAL and LOW wait (bounded as above, the priorities kept) and drain, highest first, once whisper caught up, or
+    after HOLD_MAX_S of one hold.
     """
 
     def __init__(self, sink: Callable[..., None], log: Callable[[str], None] = print,
@@ -165,6 +172,7 @@ class Encoder:
         self._q: dict[int, deque] = {PRE: deque(), FIRE: deque(), NORMAL: deque(), LOW: deque()}
         self._queued_s = 0.0
         self._thread: threading.Thread | None = None
+        self._bg: threading.Thread | None = None
         self._stop = False
         self.made = 0
         self.dropped = {"queue": 0, "too_big": 0, "failed": 0}
@@ -173,11 +181,15 @@ class Encoder:
         self.holding = False            # NORMAL / LOW held now (whisper behind)
         self.held_s = 0.0               # ... for this long in all
         self._hold_since: float | None = None
-        self.where = ""                 # "service" | "process" | "thread (why)": where they are made
-        self._worker = None             # sttencode.Client
-        self._target: tuple | None = None   # ("sock", path) | ("argv", [...]) | None: the thread
+        self.where = ""                 # "service" | "process" | "thread (why)": where NORMAL / LOW are made
+        self._worker = None             # sttencode.Client (the helper's)
+        self._target: tuple | None = None   # ("sock", path) | ("argv", [...]) | None: the helper itself
         self._look_at = 0.0             # (monotonic) the target looked at again then
-        self._fails = 0
+        self._fails = 0                 # dead, in a row
+        self._slow = 0                  # waits without an answer, in a row
+        self.unhealthy = False          # the worker answers nothing: NORMAL / LOW wait
+        self._inflight: tuple | None = None     # (prio, job): the helper's one clip
+        self._worker_used = 0.0         # (monotonic) its last answer
         self._state = ""                # the worker's, for the log: said once each time it changes
         self._said = ""
 
@@ -231,8 +243,10 @@ class Encoder:
             self._queued_s += secs
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="hub-stt-input", daemon=True)
+                self._bg = threading.Thread(target=self._run_bg, name="hub-stt-input-bg", daemon=True)
                 self._thread.start()
-            self._cond.notify()
+                self._bg.start()
+            self._cond.notify_all()                             # (a wait of either thread: wakes now)
         return True
 
     def _held(self) -> bool:
@@ -249,62 +263,67 @@ class Encoder:
             self._hold_since = now
         return now - self._hold_since < HOLD_MAX_S         # (capped: on until whisper has caught up, then anew)
 
+    def _deliver(self, prio: int, desc: dict, got) -> None:
+        if got is None:
+            with self._cond:
+                self._drop("too_big", prio)
+            return
+        try:
+            self.sink(desc, *got, prio=prio)
+            self.made += 1
+        except Exception as e:  # noqa: BLE001 - one bad clip never stops the next
+            with self._cond:
+                self._drop("failed", prio)
+            self._failed_once(e, "kept")
+
+    def _failed_once(self, e: Exception, what: str = "made") -> None:
+        if self._said != type(e).__name__:
+            self._said = type(e).__name__
+            self.log(f"hub link: speech-to-text input not {what}: {type(e).__name__}: {e}")
+
     def _run(self) -> None:
+        """PRE / FIRE: made here at once. NORMAL / LOW: handed to the helper, one at a time, when not held."""
         _lower_priority()
         while True:
             with self._cond:
                 self._cond.wait_for(lambda: self._stop or bool(self._queued()))
                 if self._stop:
                     return
-                top = max(p for p, q in self._q.items() if q)
-            if top < FIRE and self._held():                 # whisper behind: NORMAL / LOW wait (never PRE / FIRE)
-                t0 = time.monotonic()
-                self.holding = True
-                with self._cond:                            # (a PRE / FIRE one coming in wakes it)
-                    self._cond.wait_for(lambda: self._stop or bool(self._q[PRE] or self._q[FIRE]),
-                                        timeout=HELD_LOOK_S)
-                self.held_s += time.monotonic() - t0
-                continue
-            self.holding = False
+                low = bool(self._q[NORMAL] or self._q[LOW]) and self._inflight is None and not self.unhealthy
+            held = low and self._held()
+            t0 = time.monotonic()
             with self._cond:
-                if self._stop or not self._queued():
+                if self._stop:
+                    return
+                top = next((p for p in (PRE, FIRE) if self._q[p]), None)
+                if top is not None:
+                    job = self._q[top].popleft()
+                    self._queued_s -= job[2]
+                elif low and not held and self._inflight is None and not self.unhealthy:
+                    p = NORMAL if self._q[NORMAL] else LOW
+                    job = self._q[p].popleft()
+                    self._queued_s -= job[2]
+                    self._inflight = (p, job)                   # (the helper's)
+                    self.holding = False
+                    self._cond.notify_all()
                     continue
-                prio = max(p for p, q in self._q.items() if q)
-                job = self._q[prio].popleft()
-                (desc, fm, offset), audio, secs = job
-                self._queued_s -= secs
+                else:                                           # nothing it may take now: a submit, the helper
+                    self.holding = held                         # done, or the hold's next look wakes it
+                    self._cond.wait(HELD_LOOK_S)
+                    if held:
+                        self.held_s += time.monotonic() - t0
+                    continue
+            (desc, fm, offset), audio, _secs = job
             try:
-                got = self._make(desc, fm, offset, audio)
-            except _Requeue:                                # the worker is slow: kept, tried again later
-                with self._cond:
-                    if self._stop:
-                        return
-                    self._q[prio].appendleft(job)
-                    self._queued_s += secs
-                    self._cond.wait_for(lambda: self._stop, timeout=SLOW_BACKOFF_S)
-                continue
+                got = _blob(desc, fm, offset, audio)            # (PRE / FIRE: always here, never the worker)
             except Exception as e:  # noqa: BLE001 - one bad clip never stops the next (the hub uses its clip)
                 with self._cond:
-                    self._drop("failed", prio)
-                if self._said != type(e).__name__:
-                    self._said = type(e).__name__
-                    self.log(f"hub link: speech-to-text input not made: {type(e).__name__}: {e}")
+                    self._drop("failed", top)
+                self._failed_once(e)
                 continue
-            if got is None:
-                with self._cond:
-                    self._drop("too_big", prio)
-                continue
-            try:
-                self.sink(desc, *got, prio=prio)
-                self.made += 1
-            except Exception as e:  # noqa: BLE001 - one bad clip never stops the next
-                with self._cond:
-                    self._drop("failed", prio)
-                if self._said != type(e).__name__:
-                    self._said = type(e).__name__
-                    self.log(f"hub link: speech-to-text input not kept: {type(e).__name__}: {e}")
+            self._deliver(top, desc, got)
 
-    # -- where the FLAC is made -----------------------------------------------------------------------------------
+    # -- the helper: NORMAL / LOW, one in flight ----------------------------------------------------------------------
 
     def _say(self, state: str, msg: str) -> None:
         if state != self._state:
@@ -312,7 +331,7 @@ class Encoder:
             self.log(f"hub link: speech-to-text input encoder: {msg}")
 
     def _look(self) -> None:
-        """Where the next ones are made, for this mode (auto: the service when its socket is there)."""
+        """Where NORMAL / LOW are made, for this mode (auto: the service when its socket is there)."""
         from sizeup.cloud import sttencode
         self._look_at = time.monotonic() + WORKER_RETRY_S
         if self.mode == "thread":
@@ -330,39 +349,91 @@ class Encoder:
         self._close_worker()
         self._target, self._look_at, self._fails = None, time.monotonic() + WORKER_RETRY_S, 0
         self.where = f"thread ({why})"
-        self._say("thread", f"{why}: made on the station's thread, the worker looked for again in "
+        self._say("thread", f"{why}: made on the station's helper thread, the worker looked for again in "
                             f"{WORKER_RETRY_S:.0f} s")
 
-    def _make(self, desc: dict, fm: bool, offset: float, audio) -> tuple[bytes, dict] | None:
-        """_blob, in the worker when there is one (the same bytes: the same code on the same samples). _Requeue: the
-        worker is slow (the clip stays queued)."""
+    def _set_unhealthy(self, bad: bool, why: str = "") -> None:
+        with self._cond:
+            if bad == self.unhealthy:
+                return
+            self.unhealthy = bad
+            self._cond.notify_all()
+        self._say("unhealthy" if bad else "ok", f"the worker is unhealthy ({why}): NORMAL / LOW wait queued" if bad
+                  else f"the worker ({self.where}) answers again")
+
+    def _run_bg(self) -> None:
+        _lower_priority()
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._stop or self._inflight is not None)
+                if self._stop:
+                    return
+                prio, job = self._inflight
+            (desc, fm, offset), audio, _secs = job
+            try:
+                got = self._make(desc, fm, offset, audio)
+            except _Stopped:
+                return
+            except Exception as e:  # noqa: BLE001 - one bad clip never stops the next (the hub uses its clip)
+                with self._cond:
+                    self._drop("failed", prio)
+                self._failed_once(e)
+                got = _NOTHING
+            if got is not _NOTHING:
+                self._deliver(prio, desc, got)
+            with self._cond:
+                self._inflight = None
+                self._cond.notify_all()
+
+    def _make(self, desc: dict, fm: bool, offset: float, audio):
+        """(the helper) _blob, in the worker when there is one (the same bytes: the same code on the same samples):
+        sent once, then waited for on the same connection, however long (never sent again, never made here for
+        being slow: the worker is marked unhealthy meanwhile)."""
         from sizeup.cloud import sttencode
         if not self.where or (self._target is None and self.mode != "thread" and time.monotonic() >= self._look_at):
             self._look()
         if self._target is not None:
             try:
+                if self._worker is not None and time.monotonic() - self._worker_used > sttencode.SERVER_IDLE_S * 0.8:
+                    self._close_worker()                        # (the service closes a silent one: a new one first)
                 if self._worker is None:
                     self._worker = sttencode.Client(*self._target)
-                got = self._worker.encode(desc, fm, offset, audio)
-                self._fails = 0
+                self._worker.send(desc, fm, offset, audio)
+                sent = time.monotonic()
+                window = min(WAIT_CAP_S, sttencode.BASE_TIMEOUT_S + sttencode.PER_AUDIO_S * len(audio) / RATE)
+                while True:
+                    try:
+                        got = self._worker.wait(window)
+                        break
+                    except sttencode.Slow:
+                        if self._stop:
+                            raise _Stopped() from None
+                        self._slow += 1
+                        if self._slow >= WORKER_SLOW or time.monotonic() - sent >= UNHEALTHY_S:
+                            self._set_unhealthy(True, f"no answer for {time.monotonic() - sent:.0f} s")
+                        else:
+                            self._say("slow", f"the worker is slow (no answer in {window:.0f} s): still waiting "
+                                              "for it, never sent again")
+                self._worker_used = time.monotonic()
+                self._fails = self._slow = 0
+                self._set_unhealthy(False)
                 self._say("ok", f"the worker ({self.where}) makes them")
                 return got
-            except sttencode.Slow as e:
-                self._close_worker()                        # (its answer may still come: a new connection next)
-                self._say("slow", f"the worker is slow ({e}): kept queued, tried again in {SLOW_BACKOFF_S:.0f} s")
-                raise _Requeue() from None
             except sttencode.Mismatch as e:
                 self._thread_for_now(str(e))
             except sttencode.Dead as e:
                 self._close_worker()
+                self._set_unhealthy(False)
                 if self._stop:                                  # (stop() cut it short: nothing more is made)
-                    raise _Requeue() from None
+                    raise _Stopped() from None
                 self._fails += 1
                 if self._fails >= WORKER_FAILS:
                     self._thread_for_now(f"the worker failed {WORKER_FAILS} times: {e}")
                 else:
-                    self._say("dead", f"the worker is gone ({e}): this one on the station's thread")
-        return _blob(desc, fm, offset, audio)                   # (and this one, the worker gone)
+                    self._say("dead", f"the worker is gone ({e}): this one on the station's helper thread")
+        if self._stop:
+            raise _Stopped()
+        return _blob(desc, fm, offset, audio)                   # (no worker, or a dead one: here)
 
     def _close_worker(self) -> None:
         w, self._worker = self._worker, None
@@ -371,7 +442,7 @@ class Encoder:
 
     def idle(self) -> bool:
         with self._cond:
-            return not self._queued()
+            return not self._queued() and self._inflight is None
 
     def stop(self) -> None:
         with self._cond:
@@ -383,9 +454,9 @@ class Encoder:
         w = self._worker
         if w is not None:
             w.shutdown()                                        # (a wait on the worker returns now)
-        t = self._thread
-        if t is not None and t is not threading.current_thread():
-            t.join(2.0)
+        for t in (self._thread, self._bg):
+            if t is not None and t is not threading.current_thread():
+                t.join(2.0)
         self._close_worker()
 
     def stats(self) -> dict:
@@ -393,8 +464,11 @@ class Encoder:
             return {"queued": self._queued(), "made": self.made, "dropped": dict(self.dropped)}
 
 
-class _Requeue(Exception):
-    """The worker is slow: the clip goes back to the front of its queue."""
+class _Stopped(Exception):
+    """stop() during a wait on the worker: nothing more is made."""
+
+
+_NOTHING = object()
 
 
 # -- the wire ---------------------------------------------------------------------------------------------------------

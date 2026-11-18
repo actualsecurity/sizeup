@@ -55,7 +55,8 @@ def _made_by(mode, items, **kw):
 
 
 def _items():
-    return [(f"FG1-{k}", voice(1.0 + k / 2, seed=40 + k), k % 2 == 0, FIRE) for k in range(4)]
+    # (NORMAL: the worker's; PRE / FIRE are always made on the station's own thread)
+    return [(f"Ops-{k}", voice(1.0 + k / 2, seed=40 + k), k % 2 == 0, NORMAL) for k in range(4)]
 
 
 @pytest.fixture
@@ -96,7 +97,7 @@ def test_the_worker_process_and_the_service_make_the_very_same_flac_as_the_threa
     assert np.array_equal(flac.decode(by_service[0][1])[0], sttinput.stt_pcm(items[0][1], True))
     # float32 samples go as float32 (radio_voice reads them as float64 either way: the same bytes)
     a32 = items[0][1].astype(np.float32)
-    assert _made_by("auto", [("FG1-f32", a32, True, FIRE)])[0] == _made_by("thread", [("FG1-f32", a32, True, FIRE)])[0]
+    assert _made_by("auto", [("Ops-f32", a32, True, NORMAL)])[0] == _made_by("thread", [("Ops-f32", a32, True, NORMAL)])[0]
 
 
 def test_the_service_socket_is_ours_alone(encode_service):
@@ -156,7 +157,7 @@ def test_the_service_answers_a_bad_frame_and_closes_and_refuses_another_release(
     assert sttencode.read_frame(fin, 0)[0]["refused"] == "version"
     s.close()
     s, fin, fout = conn()
-    sttencode.write_frame(fout, {"proto": sttencode.PROTO, "op": "hello", "code": sttencode.code_version()})
+    sttencode.write_frame(fout, {"proto": sttencode.PROTO, "op": "hello", "code": sttencode.CODE})
     assert sttencode.read_frame(fin, 0)[0]["ok"] is True
     fout.write(struct.pack(">II", 10, 1 << 31))                             # a 2 GB payload claimed
     fout.flush()
@@ -167,11 +168,11 @@ def test_the_service_answers_a_bad_frame_and_closes_and_refuses_another_release(
 
 
 def test_another_releases_worker_leaves_it_to_the_thread_said_once(encode_service, monkeypatch):
-    monkeypatch.setattr(sttencode, "_CODE", "0123456789abcdef")             # (this station: another release)
+    monkeypatch.setattr(sttencode, "CODE", "0123456789abcdef")              # (this station: another release)
     logs = []
     items = _items()
     out, where, _ = _made_by("auto", items, log=logs.append)
-    monkeypatch.setattr(sttencode, "_CODE", None)
+    monkeypatch.undo()
     assert where.startswith("thread (another release's worker") and out == _made_by("thread", items)[0]
     assert sum("another release" in m for m in logs) == 1
 
@@ -180,10 +181,11 @@ def test_another_releases_worker_leaves_it_to_the_thread_said_once(encode_servic
 
 
 class FakeWorker:
-    """A service that says hello, then never answers (slow) or hangs up mid-request (dead)."""
+    """A service that says hello, then never answers ("slow": hello-only), hangs up mid-request ("dead"), or answers
+    late with the real thing ("late": after `delay`)."""
 
-    def __init__(self, path: str, how: str):
-        self.how, self.requests = how, 0
+    def __init__(self, path: str, how: str, delay: float = 0.0):
+        self.how, self.delay, self.requests = how, delay, 0
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old = os.umask(0o177)
         self.srv.bind(path)
@@ -205,13 +207,19 @@ class FakeWorker:
         fin, fout = c.makefile("rb"), c.makefile("wb")
         try:
             sttencode.read_frame(fin, 0)
-            sttencode.write_frame(fout, {"ok": True, "code": sttencode.code_version()})
-            sttencode.read_frame(fin, sttencode.MAX_FRAME)
-            self.requests += 1
-            if self.how == "dead":
-                c.shutdown(socket.SHUT_RDWR)
-                return
-            time.sleep(60)                                                  # slow: no answer
+            sttencode.write_frame(fout, {"ok": True, "code": sttencode.CODE})
+            while True:
+                head, payload = sttencode.read_frame(fin, sttencode.MAX_FRAME)
+                self.requests += 1
+                if self.how == "dead":
+                    c.shutdown(socket.SHUT_RDWR)
+                    return
+                if self.how == "slow":
+                    time.sleep(120)                                         # never an answer
+                    return
+                time.sleep(self.delay)
+                got = sttinput._blob(head["desc"], head["fm"], head["offset"], np.frombuffer(payload, head["dtype"]))
+                sttencode.write_frame(fout, {"ok": True, "meta": got[1]}, got[0])
         except (OSError, EOFError, struct.error):
             pass
 
@@ -225,28 +233,81 @@ class FakeWorker:
             c.close()
 
 
-def test_a_slow_worker_keeps_the_clip_queued_and_never_makes_it_on_the_station_thread(short_dir, monkeypatch):
+def test_a_hello_only_worker_never_delays_pre_or_fire_and_never_gets_a_clip_twice(short_dir, monkeypatch):
     path = f"{short_dir}/encode.sock"
     fake = FakeWorker(path, "slow")
     monkeypatch.setenv(sttencode.SOCKET_ENV, path)
-    monkeypatch.setattr(sttencode, "BASE_TIMEOUT_S", 0.3)
-    monkeypatch.setattr(sttencode, "PER_AUDIO_S", 0.1)
-    monkeypatch.setattr(sttinput, "SLOW_BACKOFF_S", 0.3)
+    monkeypatch.setattr(sttinput, "WAIT_CAP_S", 0.3)
     made, logs = [], []
-    enc = sttinput.Encoder(lambda *a, **k: made.append(a), log=logs.append, mode="auto")
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], time.monotonic())), log=logs.append,
+                           mode="auto")
     try:
         a = voice(1.0, seed=1)
-        assert enc.submit(_tx("FG1-1", a), a, FIRE)
-        assert wait(lambda: fake.requests >= 3, 15)                         # asked again and again, never given up
-        assert wait(lambda: enc.stats()["queued"] == 1, 5)                  # (back in its queue between tries)
-        assert made == [] and enc.dropped == {"queue": 0, "too_big": 0, "failed": 0}
-        assert sum("slow" in m for m in logs) == 1                          # said once, not at every try
+        assert enc.submit(_tx("Ops-1", a), a, NORMAL) and enc.submit(_tx("Ops-2", a), a, NORMAL)
+        assert wait(lambda: fake.requests == 1, 10)                         # Ops-1 in flight: no answer, ever
+        for tid, prio in (("South2-1", PRE), ("FG1-1", FIRE)):
+            t0 = time.monotonic()
+            assert enc.submit(_tx(tid, a), a, prio)
+            assert wait(lambda: any(m[0] == tid for m in made), 5)
+            assert next(m[1] for m in made if m[0] == tid) - t0 < 1.0       # at once, on the station's own thread
+        assert wait(lambda: enc.unhealthy, 5)                               # three waits without an answer: unhealthy
+        time.sleep(1.0)
+        assert fake.requests == 1                                           # never sent again, never a second clip
+        assert [m[0] for m in made] == ["South2-1", "FG1-1"]                # Ops-*: never made on the station
+        assert enc.stats()["queued"] == 1 and enc.dropped == {"queue": 0, "too_big": 0, "failed": 0}
+        assert sum("unhealthy" in m for m in logs) == 1 and sum("is slow" in m for m in logs) == 1   # said once each
         t0 = time.monotonic()
         enc.stop()                                                          # promptly, mid-wait on the worker
         assert time.monotonic() - t0 < 3.0
     finally:
         enc.stop()
         fake.close()
+
+
+def test_the_worker_is_unhealthy_after_long_enough_without_an_answer_and_well_again_when_it_answers(
+        short_dir, monkeypatch):
+    path = f"{short_dir}/encode.sock"
+    fake = FakeWorker(path, "late", delay=2.0)
+    monkeypatch.setenv(sttencode.SOCKET_ENV, path)
+    monkeypatch.setattr(sttinput, "WAIT_CAP_S", 0.2)
+    monkeypatch.setattr(sttinput, "WORKER_SLOW", 100)                       # (the clock trips it, not the count)
+    monkeypatch.setattr(sttinput, "UNHEALTHY_S", 1.0)
+    made, logs = [], []
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], data)), log=logs.append, mode="auto")
+    try:
+        a = voice(1.0, seed=2)
+        assert enc.submit(_tx("Ops-1", a), a, NORMAL)
+        assert wait(lambda: enc.unhealthy, 5)
+        assert wait(lambda: made and not enc.unhealthy, 10)                 # the late answer: taken, well again
+        assert made == [("Ops-1", _made_by("thread", [("Ops-1", a, True, NORMAL)])[0][0][1])] and fake.requests == 1
+        assert any("unhealthy" in m for m in logs) and any("answers again" in m for m in logs)
+    finally:
+        enc.stop()
+        fake.close()
+
+
+def test_a_connection_the_service_would_have_closed_for_silence_is_replaced_before_the_next_clip(
+        encode_service, monkeypatch):
+    monkeypatch.setattr(sttencode, "SERVER_IDLE_S", 0.5)                    # (the station's side of it)
+    made, logs = [], []
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=logs.append, mode="auto")
+    try:
+        a = voice(0.5, seed=3)
+        assert enc.submit(_tx("Ops-1", a), a, NORMAL) and wait(lambda: made == ["Ops-1"], 20)
+        first = enc._worker
+        time.sleep(0.6)
+        assert enc.submit(_tx("Ops-2", a), a, NORMAL) and wait(lambda: made == ["Ops-1", "Ops-2"], 20)
+        assert enc._worker is not first and enc.where == "service" and enc._fails == 0
+        assert not any("is gone" in m for m in logs)
+    finally:
+        enc.stop()
+
+
+def test_the_code_hash_is_made_at_import_and_has_numpys_version(monkeypatch):
+    assert sttencode.code_version() == sttencode.CODE == sttencode._code_version()
+    monkeypatch.setattr(sttencode.np, "__version__", "0.0.0-another")
+    assert sttencode._code_version() != sttencode.CODE                      # another numpy: another worker's bytes
+    assert sttencode.code_version() == sttencode.CODE                       # (this process's: as imported)
 
 
 def test_a_dead_worker_hands_the_clip_to_the_thread_and_three_in_a_row_the_rest(short_dir, monkeypatch):
@@ -280,7 +341,7 @@ def test_a_worker_that_cannot_start_or_is_killed_is_replaced_and_nothing_is_lost
             if k == 1:
                 enc._worker.proc.kill()                                     # (our own child)
                 enc._worker.proc.wait(5)
-            enc.submit(_tx(items[k][0], items[k][1], items[k][2]), items[k][1], FIRE)
+            enc.submit(_tx(items[k][0], items[k][1], items[k][2]), items[k][1], NORMAL)
             assert wait(lambda: len(out) == k + 1, 30)
             if k == 1:
                 assert enc._worker is None and enc._fails == 1

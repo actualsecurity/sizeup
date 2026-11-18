@@ -258,13 +258,19 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
     socket file's owner). No pickle: fixed frames, a JSON header (`proto`, `op`, `rate`, `samples`, `dtype`) and the
     raw float64 (or float32) samples one way, the FLAC the other, a frame at most 40 MB, refused from its 8-byte
     lengths and its header before the samples are read.
-  - A hello carries a hash of the code that makes the bytes (`sttencode`, `sttinput`, `flac`, `stt`): a worker of
-    another release refuses, and the station's thread makes them until the service restarts with it (it is
-    `PartOf=sizeup-station.service`), said once.
-  - A **dead** worker (not there, refused, reset): the station's thread makes that clip; 3 in a row, the thread for
-    5 min. A **slow** one (no answer in 30 s + 4 s per audio-second): the clip stays queued, subject to the priority
-    eviction, and is tried again 30 s later; it is never made on the station's thread for being slow. Each change of
-    state is logged once. `stop()` shuts the socket, so it returns at once.
+  - A hello carries a hash, made at import, of the code that makes the bytes (`sttencode`, `sttinput`, `flac`,
+    `stt`), numpy's version and Python's: a worker of another release refuses, and the station's helper thread makes
+    them until the service restarts with it (it is `PartOf=sizeup-station.service`), said once. The service takes at
+    most 4 connections, each closed after 5 min of silence.
+  - **PRE and FIRE never go to the worker**: the encoder thread makes them at once, on the station (small and cheap).
+    NORMAL and LOW go to a helper thread, one in flight on one connection, so nothing the worker does can delay a
+    page or fire traffic.
+  - **Slow** (no answer in 30 s + 4 s an audio-second, at most 120 s): the helper goes on waiting on the same
+    connection; the clip is never sent again, so never encoded twice. After 3 such waits in a row, or 10 min without
+    an answer, the worker is **unhealthy**: NORMAL and LOW wait queued, subject to the priority eviction, never made
+    on the station for it, until it answers again. A **dead** worker (not there, refused, reset): the helper makes that
+    clip; 3 in a row, the helper makes them for 5 min. Each change of state is logged once. `stop()` shuts the socket,
+    so it returns at once.
 - **Held while whisper is behind on live traffic**: a clip of a live class (`URGENT`, `HIGH`, `LIVE`; never a context
   talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) waiting `stt.BEHIND_S` (120 s). `PRE` and `FIRE`
   are never held. `NORMAL` and `LOW` wait, bounded and with their priorities, and drain highest first once whisper has

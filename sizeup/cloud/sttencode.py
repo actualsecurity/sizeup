@@ -29,11 +29,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import socket
 import struct
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +50,8 @@ DTYPES = {"<f8": 8, "<f4": 4}
 CONNECT_TIMEOUT_S = 5.0
 BASE_TIMEOUT_S = 30.0                   # a clip's answer: this, plus ...
 PER_AUDIO_S = 4.0                       # ... this per second of its audio (the worker runs on what is left)
-SERVER_IDLE_S = 3600.0                  # the service: a connection silent this long is closed
+SERVER_IDLE_S = 300.0                   # the service: a connection silent this long is closed ...
+SERVER_CONNS = 4                        # ... and at most this many at once (the station holds one)
 
 
 class WorkerError(RuntimeError):
@@ -72,20 +75,22 @@ class FrameError(ValueError):
     pass
 
 
-_CODE: str | None = None
+def _code_version() -> str:
+    """A hash of what makes the bytes: this module's, sttinput's, flac's and stt's source (radio_voice), numpy's
+    version and Python's."""
+    from sizeup import stt
+    from sizeup.cloud import flac, sttinput
+    h = hashlib.sha256(f"numpy {np.__version__}; python {sys.version_info[0]}.{sys.version_info[1]}\n".encode())
+    for f in (__file__, sttinput.__file__, flac.__file__, stt.__file__):
+        h.update(Path(f).read_bytes())
+    return h.hexdigest()[:16]
+
+
+CODE = _code_version()                  # at import: what this process makes, whatever changes on disk later
 
 
 def code_version() -> str:
-    """A hash of what makes the bytes: this module's, sttinput's, flac's and stt's source (radio_voice)."""
-    global _CODE
-    if _CODE is None:
-        from sizeup import stt
-        from sizeup.cloud import flac, sttinput
-        h = hashlib.sha256()
-        for m in (sys.modules[__name__], sttinput, flac, stt):
-            h.update(Path(m.__file__).read_bytes())
-        _CODE = h.hexdigest()[:16]
-    return _CODE
+    return CODE
 
 
 # -- frames -----------------------------------------------------------------------------------------------------------
@@ -139,12 +144,15 @@ def peer_uid(sock: socket.socket) -> int | None:
 # -- the station's side -----------------------------------------------------------------------------------------------
 
 class Client:
-    """One connection to a worker: the service ("sock", path) or a child process ("argv", [...])."""
+    """One connection to a worker: the service ("sock", path) or a child process ("argv", [...]). send() one clip,
+    then wait(timeout) for its answer, as often as it takes: a wait that times out keeps the connection and what was
+    read of the answer (the clip is never sent twice)."""
 
     def __init__(self, how: str, where):
         self.proc: subprocess.Popen | None = None
         self.sock: socket.socket | None = None
-        self.fin = self.fout = None
+        self.fout = None
+        self._buf = bytearray()
         try:
             if how == "sock":
                 st = os.stat(where)
@@ -156,42 +164,101 @@ class Client:
                 uid = peer_uid(self.sock)
                 if uid is not None and uid != os.getuid():
                     raise Dead(f"the worker runs as uid {uid}, not ours")
-                self.fin, self.fout = self.sock.makefile("rb"), self.sock.makefile("wb")
+                self.sock.settimeout(None)
+                self._rfd = self.sock.fileno()
             else:
                 self.proc = subprocess.Popen(where, stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True)
-                self.fin, self.fout = self.proc.stdout, self.proc.stdin
-            write_frame(self.fout, {"proto": PROTO, "op": "hello", "code": code_version()})
-            head, _ = read_frame(self.fin, 0)
+                self.fout = self.proc.stdin
+                self._rfd = self.proc.stdout.fileno()
+            self._write({"proto": PROTO, "op": "hello", "code": CODE})
+            head, _ = self.wait(CONNECT_TIMEOUT_S, raw=True)
+        except Slow:
+            self.close()
+            raise Dead("no hello") from None
         except WorkerError:
             self.close()
             raise
-        except (OSError, EOFError, FrameError, struct.error) as e:
+        except (OSError, struct.error) as e:
             self.close()
             raise Dead(f"not reached: {type(e).__name__}: {e}") from None
         if head.get("refused") == "version":
             self.close()
-            raise Mismatch(f"another release's worker ({str(head.get('code'))[:16]}, ours {code_version()})")
+            raise Mismatch(f"another release's worker ({str(head.get('code'))[:16]}, ours {CODE})")
         if head.get("ok") is not True:
             self.close()
             raise Dead("a bad hello")
 
-    def encode(self, desc: dict, fm: bool, offset: float, audio) -> tuple[bytes, dict] | None:
-        from sizeup.cloud.sttinput import MAX_BLOB, RATE
+    def _write(self, head: dict, payload: bytes = b"") -> None:
+        h = json.dumps(head, separators=(",", ":")).encode()
+        data = struct.pack(">II", len(h), len(payload)) + h
+        if self.sock is not None:
+            self.sock.sendall(data)
+            if payload:
+                self.sock.sendall(payload)
+        else:
+            self.fout.write(data + payload)
+            self.fout.flush()
+
+    def send(self, desc: dict, fm: bool, offset: float, audio) -> None:
+        """One clip to make (its answer: wait())."""
+        from sizeup.cloud.sttinput import RATE
         a = np.asarray(audio)
         if a.dtype.str not in DTYPES:
             a = a.astype("<f8")                         # (int or big-endian samples: exactly as float64)
         a = np.ascontiguousarray(a)
-        if self.sock is not None:
-            self.sock.settimeout(BASE_TIMEOUT_S + PER_AUDIO_S * len(a) / RATE)
         try:
-            write_frame(self.fout, {"proto": PROTO, "op": "encode", "desc": desc, "fm": bool(fm),
-                                    "offset": float(offset), "rate": RATE, "samples": int(len(a)),
-                                    "dtype": a.dtype.str}, a.tobytes())
-            head, payload = read_frame(self.fin, MAX_BLOB)
-        except (socket.timeout, TimeoutError):
-            raise Slow("no answer in time") from None
-        except (OSError, EOFError, FrameError, struct.error) as e:
-            raise Dead(f"{type(e).__name__}: {e}" if str(e) else type(e).__name__) from None
+            self._write({"proto": PROTO, "op": "encode", "desc": desc, "fm": bool(fm), "offset": float(offset),
+                         "rate": RATE, "samples": int(len(a)), "dtype": a.dtype.str}, a.tobytes())
+        except OSError as e:
+            raise Dead(f"{type(e).__name__}: {e}") from None
+
+    def _frame(self, max_payload: int):
+        """A whole frame from what was read, or None (checked as read_frame does, from its lengths on)."""
+        if len(self._buf) < 8:
+            return None
+        hl, pl = struct.unpack(">II", self._buf[:8])
+        if hl > MAX_HEADER or pl > max_payload:
+            raise Dead(f"a frame too big ({hl} + {pl} bytes)")
+        if len(self._buf) < 8 + hl + pl:
+            return None
+        try:
+            head = json.loads(bytes(self._buf[8:8 + hl]))
+        except ValueError:
+            raise Dead("a header that isn't JSON") from None
+        payload = bytes(self._buf[8 + hl:8 + hl + pl])
+        del self._buf[:8 + hl + pl]
+        if not isinstance(head, dict):
+            raise Dead("a header that isn't an object")
+        return head, payload
+
+    def wait(self, timeout: float, raw: bool = False):
+        """The answer to the clip sent: (flac, meta) | None (too long / big). Slow: none within timeout (wait again:
+        nothing is lost). Dead: the connection is gone. raw: the frame itself (the hello)."""
+        from sizeup.cloud.sttinput import MAX_BLOB
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            got = self._frame(0 if raw else MAX_BLOB)
+            if got is not None:
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise Slow("no answer in time")
+            try:
+                ready, _, _ = select.select([self._rfd], [], [], left)
+            except (OSError, ValueError) as e:
+                raise Dead(f"{type(e).__name__}: {e}") from None
+            if not ready:
+                continue
+            try:
+                data = os.read(self._rfd, 1 << 16)
+            except OSError as e:
+                raise Dead(f"{type(e).__name__}: {e}") from None
+            if not data:
+                raise Dead("the worker hung up")
+            self._buf += data
+        if raw:
+            return got
+        head, payload = got
         if head.get("ok") is True and isinstance(head.get("meta"), dict) and payload:
             return payload, head["meta"]
         if head.get("none") is True:
@@ -199,6 +266,11 @@ class Client:
         if isinstance(head.get("error"), str):
             raise RuntimeError(head["error"][:300])     # (this clip: counted "failed", the worker goes on)
         raise Dead("a bad answer")
+
+    def encode(self, desc: dict, fm: bool, offset: float, audio, timeout: float = 600.0):
+        """send() and wait(), once (the tests)."""
+        self.send(desc, fm, offset, audio)
+        return self.wait(timeout)
 
     def shutdown(self) -> None:
         """From another thread: whatever waits on this worker returns now (stop())."""
@@ -211,7 +283,7 @@ class Client:
             pass
 
     def close(self) -> None:
-        for f in (self.fout, self.fin, self.sock):
+        for f in (self.fout, self.sock, self.proc.stdout if self.proc is not None else None):
             try:
                 if f is not None:
                     f.close()
@@ -253,10 +325,10 @@ def serve_one(fin, fout) -> None:
     from sizeup.cloud.sttinput import _blob
     try:
         hello, _ = read_frame(fin, 0)
-        if hello.get("proto") != PROTO or hello.get("op") != "hello" or hello.get("code") != code_version():
-            write_frame(fout, {"refused": "version", "code": code_version()})
+        if hello.get("proto") != PROTO or hello.get("op") != "hello" or hello.get("code") != CODE:
+            write_frame(fout, {"refused": "version", "code": CODE})
             return
-        write_frame(fout, {"ok": True, "code": code_version()})
+        write_frame(fout, {"ok": True, "code": CODE})
         while True:
             try:
                 head, payload = read_frame(fin, MAX_FRAME, _check_encode)
@@ -313,10 +385,20 @@ def main(argv: list[str]) -> int:
         finally:
             os.umask(old)
         srv.listen(4)
-        print(f"sizeup-stt-encode: serving on {path} (code {code_version()})", file=sys.stderr, flush=True)
+        print(f"sizeup-stt-encode: serving on {path} (code {CODE})", file=sys.stderr, flush=True)
+        slots = threading.BoundedSemaphore(SERVER_CONNS)
         while True:
             conn, _ = srv.accept()
-            threading.Thread(target=_serve_conn, args=(conn,), name="stt-encode", daemon=True).start()
+            if not slots.acquire(blocking=False):
+                conn.close()                            # (more than SERVER_CONNS at once: never one thread each)
+                continue
+
+            def one(c=conn):
+                try:
+                    _serve_conn(c)
+                finally:
+                    slots.release()
+            threading.Thread(target=one, name="stt-encode", daemon=True).start()
     if argv == ["--stdio"]:
         fin, fout = sys.stdin.buffer, sys.stdout.buffer
         sys.stdout = sys.stderr                         # (nothing else ever writes to the answers' pipe)

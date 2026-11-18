@@ -78,7 +78,7 @@ def test_the_encoder_makes_the_pre_alert_ones_first_and_a_full_queue_drops_the_l
     a = voice(0.5)
     tx = lambda tid: Traffic(tid, "FG1", 0.0, 0.5, "")       # noqa: E731
     assert enc.submit(tx("busy"), a)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # the worker holds it in the sink
+    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # the helper holds it in the sink
     assert enc.submit(tx("ctx-1"), a, LOW) and enc.submit(tx("FG1-1"), a, NORMAL) and enc.submit(tx("ctx-2"), a, LOW)
     assert enc.submit(tx("PD-1"), a, PRE)                       # full: the oldest of the lowest gives its place
     assert enc.dropped["queue"] == 1 and enc.dropped_pre == 0
@@ -99,7 +99,9 @@ def test_a_full_queue_never_drops_lower_ones_for_nothing():
     enc = sttinput.Encoder(lambda *a, **k: gate.wait(10), log=lambda m: None, max_items=10, max_s=3.0)
     a = voice(1.0)
     assert enc.submit(Traffic("busy", "FG1", 0, 1, ""), a)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)
+    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # the helper held in the sink ...
+    assert enc.submit(Traffic("busy-pre", "FG1", 0, 1, ""), a, PRE)
+    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # ... and the encoder thread
     assert enc.submit(Traffic("ctx", "FG1", 0, 1, ""), a, LOW) and enc.submit(Traffic("PD", "FG1", 0, 1, ""), a, PRE)
     assert not enc.submit(Traffic("PD-long", "FG1", 0, 2, ""), voice(2.5), PRE)    # 2.5 s > 3 s - 1 s (PD stays)
     assert enc.stats()["queued"] == 2 and enc.dropped["queue"] == 1
