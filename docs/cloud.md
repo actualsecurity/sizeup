@@ -258,13 +258,16 @@ The station treats 400 / 413 / 422 as "refused for good":
 - A page, its text, an alarm or a `source_event` (not one the hub calls malformed) is critical: it is sent again as a
   new event after 10 min, 30 min, then hourly, for 8 tries or 24 h, then "stuck" until a person drops it.
 - A `source_event` is a snapshot. A quarantined one is dropped once the feed has sent a newer report of the same event,
-  and the hub ignores a report older than the one it applied (`source_reports.seen_at`).
-- An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late".
+  and the hub ignores a report more than 2 min older than the one it applied (`source_reports.seen_at`; within 2 min
+  it is applied, so the station's clock stepping back never drops a newer one).
+- An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late" for 24 h, then clears.
 - A page event whose `page_text` came first still brings its clip.
 
 Health shows **Station event rejected by hub: *type*** (`rejected:<type>`, critical) for those, **Station alarm
 delivered late, not raised** for a late alarm, and a warning for other types for 24 h (`rejected_minor:<type>`: muting
-it never hides a critical one). `sudo sizeup-station quarantine` lists them; `... drop ID` (or `drop all`) drops one.
+it never hides a critical one). A stuck or late one has **Dismiss** on Health (admins; `POST /api/cad/health/dismiss`,
+audited): the station drops those. `sudo sizeup-station quarantine` lists them; `... drop ID` (or `drop all`) drops
+one, with any copy queued to go again.
 5xx, network errors and refused tokens are retried as before, with backoff. Older releases on either side keep
 working: an older hub's bare 400 is split the same way, and an older station ignores `rejected`.
 

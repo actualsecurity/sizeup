@@ -397,13 +397,13 @@ def test_the_hub_ignores_a_snapshot_older_than_the_one_it_applied(tmp_path):
     rig.poll()
     [inc] = rig.incidents()
     snap1 = [d for k, d in rig.sent if k == "source_event"][-1]
-    rig.at(60)
+    rig.at(600)                                                   # (a quarantine's replay is 10 min stale at least)
     rig.feed.change("A1", type="STRU", location="14 Example Ave", units=("E60", "L31"))
     rig.poll()
     after = rig.cad.store.incident(inc["id"])
     assert (after["type"], after["address"]) == ("STRU", "14 Example Ave")
     lines = rig.feed_lines(inc["id"])
-    rig.at(700)
+    rig.at(1300)
     rig.cad.sources.apply("source_event", snap1)                  # the station's quarantine sends the old one again
     again = rig.cad.store.incident(inc["id"])
     assert (again["type"], again["address"]) == ("STRU", "14 Example Ave")
@@ -427,7 +427,8 @@ def test_a_critical_one_is_stuck_after_its_tries_and_a_person_drops_it(tmp_path,
         q = ob.quarantine(copy, "http_400", "bad request", now=t)
     assert q["state"] == "stuck" and q["next_at"] is None and ob.requeue_due(now=t + 10 ** 6) == []
     s = ob.summary()
-    assert s["kinds"]["page"] == {"n": 1, "critical": 1, "stuck": 1, "late": 0}
+    assert {k: s["kinds"]["page"][k] for k in ("n", "critical", "stuck", "late")} == {"n": 1, "critical": 1, "stuck": 1,
+                                                                                    "late": 0}
     r = Rig()
     r.at(0, status=station_status(outbox={"pending": 0, "oldest": None, "dropped_audio": 0, "quarantine": s}))
     a = {x["key"]: x for x in r.h.alerts()}
@@ -489,3 +490,96 @@ def test_muting_the_other_types_never_hides_a_critical_one(link):
     a = {x["key"]: x for x in r.h.alerts()}
     assert a["rejected_minor:traffic"]["muted"] and not a["rejected:page"].get("muted")
     assert (alert_kind("rejected:page"), alert_kind("rejected_minor:traffic")) == ("rejected", "rejected_minor")
+
+
+def test_a_newer_report_is_applied_when_the_stations_clock_stepped_back_a_little(tmp_path):
+    from tests.test_incident_sources import Rig as SourceRig
+    rig = SourceRig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": rig.clock.t})
+    rig.poll()
+    [inc] = rig.incidents()
+    snap = [d for k, d in rig.sent if k == "source_event"][-1]
+    newer = json.loads(json.dumps(snap))
+    newer["seen_at"] = snap["seen_at"] - 5                      # NTP stepped the station's clock back 5 s
+    newer["event"].update(type="STRU", location="14 Example Ave")
+    rig.cad.sources.apply("source_event", newer)
+    after = rig.cad.store.incident(inc["id"])
+    assert (after["type"], after["address"]) == ("STRU", "14 Example Ave")
+
+
+def test_dropping_a_row_also_drops_its_queued_copy_and_an_in_flight_copy_never_brings_it_back(tmp_path):
+    path = tmp_path / "outbox.sqlite"
+    ob = Outbox(path)
+    ob.add("page", page(1), None)
+    q = ob.quarantine(ob.batch(meta=True)[0], "http_400", "bad request", now=T)
+    ob.requeue_due(now=T + 601)
+    copy = ob.batch(meta=True)[0]
+    assert copy["qid"] == q["id"]
+    assert ob.drop(q["id"]) == 1 and ob.pending()[0] == 0 and ob.summary()["n"] == 0
+    # a copy that was on its way when it was dropped, refused again: gone, not a new row
+    assert ob.quarantine(copy, "http_400", "bad request", now=T + 700)["state"] == "dropped"
+    assert ob.summary()["n"] == 0 and ob.requeue_due(now=T + 99999) == []
+    plan = " ".join(str(r) for r in ob.db.execute("EXPLAIN QUERY PLAN SELECT qid FROM outbox WHERE qid IS NOT NULL"))
+    assert "outbox_qid" in plan                                   # requeue_due's NOT IN reads the index
+    ob.close()
+
+
+def test_a_late_alarm_clears_itself_after_a_day_a_stuck_one_waits_for_a_person(tmp_path):
+    ob = Outbox(tmp_path / "o.sqlite")
+    ob.add("alarm", {"id": "FG1-1", "end": T - 3600}, None)
+    ob.add("page", page(2), None)
+    rows = ob.batch(meta=True)
+    a = ob.quarantine(rows[0], "http_400", "bad request", now=T)
+    ob.late(a["id"], "alarm delivered late, not raised", now=T)
+    p = ob.quarantine(rows[1], "http_400", "bad request", now=T)
+    ob.db.execute("UPDATE quarantine SET state = 'stuck', next_at = NULL WHERE id = ?", (p["id"],))
+    ob.requeue_due(now=T + outbox_mod.LATE_KEEP_S + 1)
+    assert [r["kind"] for r in ob.summary()["rows"]] == ["page"]          # the late alarm gone, the stuck page kept
+    assert ob.dismiss("page") == 1 and ob.summary()["n"] == 0
+    ob.close()
+
+
+def test_the_minor_warning_counts_every_held_row_not_the_sample(link):
+    ids = [traffic(k)["id"] for k in range(15)]
+    for k in range(15):
+        link.outbox.add("traffic", traffic(k), None)
+    hub = FakeHub(poison=set(ids))
+    for k in range(15):                                           # (each refused alone: quarantined one by one)
+        drain(link, hub)
+        hub.poison = set(ids[k + 1:])
+    s = link.outbox.summary()
+    assert s["n"] == 15 and len(s["rows"]) == 10 and s["kinds"]["traffic"]["n"] == 15
+    a = alerts(link)
+    assert a["rejected_minor:traffic"]["text"].startswith("15 kept on the station")
+
+
+def test_an_admin_dismisses_a_stuck_page_from_health_and_it_is_audited(tmp_path):
+    from sizeup.cloud.health import StationHealth  # noqa: F401  (the panel's alerts carry "dismiss")
+    hub = HubRun(hub_cfg(tmp_path))
+    st = None
+    try:
+        st = station(station_cfg(tmp_path, hub.url), {})
+        ob = st.link.outbox
+        ob.add("page", page(1), None)
+        q = ob.quarantine(ob.batch(meta=True)[0], "http_400", "bad request")
+        ob.db.execute("UPDATE quarantine SET state = 'stuck', next_at = NULL WHERE id = ?", (q["id"],))
+        st.link._status_now = True
+        st.link._live_wake.set()
+        h = hub.app.hub.health_
+        assert wait(lambda: h.tick() is not None and any(a["key"] == "rejected:page" and a.get("dismiss") == "page"
+                                                         for a in h.alerts()), 15)
+        code, r = call(hub.url + "/api/cad/health/dismiss", "POST", {"kind": "page"}, token=None)
+        assert code == 400                                        # the action header is required
+        req = __import__("urllib.request").request.Request(
+            hub.url + "/api/cad/health/dismiss", method="POST", data=json.dumps({"kind": "page"}).encode(),
+            headers={"Content-Type": "application/json", "X-Sizeup-Action": "dismiss"})
+        with __import__("urllib.request").request.urlopen(req, timeout=20) as resp:
+            assert json.loads(resp.read()) == {"ok": True, "dismissed": 1}
+        assert ob.summary()["n"] == 0
+        rows = hub.app.cad.store.q("SELECT * FROM settings_audit WHERE key = 'health_dismiss:page'")
+        assert rows and rows[0]["section"] == "system" and rows[0]["new"] == "dismissed (1)"
+        assert wait(lambda: h.tick() is not None and not any(a["key"] == "rejected:page" for a in h.alerts()), 15)
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()

@@ -101,7 +101,8 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
          "set_stt_alert_keys",        # the sources the hub's pre-alerts push from: HIGH at least in whisper (#639 ph. 2)
-         "set_stt_terms")             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
+         "set_stt_terms",             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
+         "quarantine_dismiss")        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -616,7 +617,9 @@ class StationLink:
         q = self.outbox.quarantine(row, reason, error, now)
         self._isolate = None                        # (found: whole batches again; another bad one is split out the same way)
         said = "" if row["type"] in ("source_event", "source_health", "source_seen") else f": {error[:160]}"
-        if q["critical"] and q["state"] == "stuck":
+        if q["state"] == "dropped":
+            self.log(f"hub link: the hub refused a {row['type']} a person had dropped meanwhile: gone")
+        elif q["critical"] and q["state"] == "stuck":
             self.log(f"hub link: CRITICAL: the hub refused a {row['type']} again ({reason}{said}); refused {q['tries']} "
                      "time(s): kept on the station, not sent again (sizeup-station quarantine)")
         elif q["critical"]:

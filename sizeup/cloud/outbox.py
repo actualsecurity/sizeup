@@ -78,6 +78,7 @@ QUARANTINE_CLIP = 8 * 1024 * 1024   # a clip over this is not kept in the quaran
                                     # store still has the clip)
 CRITICAL_TRIES = 8                  # a critical one is sent again this many times at most (about 7 h) ...
 CRITICAL_FOR_S = 24 * 3600.0        # ... or for this long: then "stuck", kept for a person (the alert stays)
+LATE_KEEP_S = 24 * 3600.0           # an alarm the hub took too late to raise: on Health this long, then gone
 PERMANENT_REASONS = ("malformed",)  # the hub's reasons that never change with a retry: never critical
 SOURCE_LATEST_S = 7 * 24 * 3600.0   # a feed event's latest snapshot seq is kept this long (source_latest)
 
@@ -150,6 +151,7 @@ class Outbox:
             self.db.execute("ALTER TABLE outbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0")
         if "qid" not in cols:               # a quarantined event sent again: its quarantine row (an older release
             self.db.execute("ALTER TABLE outbox ADD COLUMN qid INTEGER")     # ignores the column and just sends it)
+        self.db.execute("CREATE INDEX IF NOT EXISTS outbox_qid ON outbox (qid) WHERE qid IS NOT NULL")
         if "prio" not in {r[1] for r in self.db.execute("PRAGMA table_info(stt_inputs)")}:    # (a lane before #677)
             self.db.execute(f"ALTER TABLE stt_inputs ADD COLUMN prio INTEGER NOT NULL DEFAULT {STT_NORMAL}")
         self.db.execute("CREATE INDEX IF NOT EXISTS stt_inputs_order ON stt_inputs (prio, n, at)")
@@ -347,6 +349,12 @@ class Outbox:
                 q = row.get("qid")
                 cur = (self.db.execute("SELECT tries, first_at, critical FROM quarantine WHERE id = ?", (q,)).fetchone()
                        if q else None)
+                if q and cur is None:
+                    # a copy of a row a person dropped meanwhile (in flight then): it goes too, never back
+                    self.db.execute("DELETE FROM outbox WHERE seq = ?", (int(row["seq"]),))
+                    self.db.execute("COMMIT")
+                    self._recount()
+                    return {"id": int(q), "kind": kind, "tries": 0, "critical": False, "state": "dropped", "next_at": None}
                 tries = (cur[0] + 1) if cur else 1
                 first = cur[1] if cur else now
                 critical = critical and (not cur or bool(cur[2]))
@@ -410,6 +418,8 @@ class Outbox:
         now = time.time() if now is None else now
         out = []
         with self._lock:
+            # (a "late" alarm: never raised, said on Health for LATE_KEEP_S; nothing to do about it after that)
+            self.db.execute("DELETE FROM quarantine WHERE state = 'late' AND last_at < ?", (now - LATE_KEEP_S,))
             due = self.db.execute("SELECT id, seq, kind, data, audio, audio_dropped, context, tries FROM quarantine "
                                   "WHERE critical = 1 AND next_at IS NOT NULL AND next_at <= ? AND id NOT IN "
                                   "(SELECT qid FROM outbox WHERE qid IS NOT NULL) ORDER BY id LIMIT 20", (now,)).fetchall()
@@ -449,11 +459,32 @@ class Outbox:
                             "WHERE id = ?", (str(why)[:QUARANTINE_ERROR], now, int(qid)))
 
     def drop(self, qid: int | None = None) -> int:
-        """A person drops a quarantined event (`sizeup-station quarantine drop ID|all`). None: all of them."""
+        """A person drops a quarantined event (`sizeup-station quarantine drop ID|all`). None: all of them. A copy of it
+        queued to go again goes too (never sent once dropped)."""
+        where, args = ("", ()) if qid is None else (" WHERE id = ?", (int(qid),))
+        return self._drop_where(where, args)
+
+    def dismiss(self, kind: str) -> int:
+        """An admin's Dismiss on Health (the hub's quarantine_dismiss call): this type's stuck and late rows go (one still
+        being sent again stays: it may yet get through)."""
+        return self._drop_where(" WHERE kind = ? AND state IN ('stuck', 'late')", (str(kind),))
+
+    def _drop_where(self, where: str, args: tuple) -> int:
         with self._lock:
-            if qid is None:
-                return self.db.execute("DELETE FROM quarantine").rowcount
-            return self.db.execute("DELETE FROM quarantine WHERE id = ?", (int(qid),)).rowcount
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                ids = [i for (i,) in self.db.execute(f"SELECT id FROM quarantine{where}", args)]
+                for k in range(0, len(ids), 500):
+                    part = ids[k:k + 500]
+                    marks = ",".join("?" * len(part))
+                    self.db.execute(f"DELETE FROM outbox WHERE qid IN ({marks})", part)
+                    self.db.execute(f"DELETE FROM quarantine WHERE id IN ({marks})", part)
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self._recount()
+            return len(ids)
 
     def strip_audio(self, seq: int) -> bool:
         """An event the hub refuses as too large with its clip: sent without it from now on (audio_dropped). Counted in
@@ -467,15 +498,20 @@ class Outbox:
             return bool(k)
 
     def summary(self, limit: int = 10) -> dict:
-        """The quarantine for the status: how many (critical), per kind ({kind: {n, critical, stuck, late}}), and the
+        """The quarantine for the status: how many (critical), per kind ({kind: {n, critical, stuck, late, critical_first,
+        minor_first, minor_last}}), and the
         newest rows, the critical first. Kinds, states, reasons and the hub's error only, never an event's data; an
         incident source's error never leaves the station (it may quote the county's data, #297)."""
         with self._lock:
             n, crit = self.db.execute("SELECT COUNT(*), COALESCE(SUM(critical), 0) FROM quarantine").fetchone()
-            kinds = {k: {"n": int(c), "critical": int(cr or 0), "stuck": int(st or 0), "late": int(la or 0)}
-                     for k, c, cr, st, la in self.db.execute(
-                         "SELECT kind, COUNT(*), SUM(critical), SUM(state = 'stuck'), SUM(state = 'late') FROM quarantine "
-                         "GROUP BY kind ORDER BY kind LIMIT 40")}
+            # per type, over every row (the rows below are a sample): the counts, and when the critical / the other
+            # ones were first and last refused (Health's alerts are decided from these)
+            kinds = {k: {"n": int(c), "critical": int(cr or 0), "stuck": int(st or 0), "late": int(la or 0),
+                         "critical_first": cf, "minor_first": mf, "minor_last": ml}
+                     for k, c, cr, st, la, cf, mf, ml in self.db.execute(
+                         "SELECT kind, COUNT(*), SUM(critical), SUM(state = 'stuck'), SUM(state = 'late'), "
+                         "MIN(CASE WHEN critical = 1 THEN first_at END), MIN(CASE WHEN critical = 0 THEN first_at END), "
+                         "MAX(CASE WHEN critical = 0 THEN last_at END) FROM quarantine GROUP BY kind ORDER BY kind LIMIT 40")}
             rows = self.db.execute("SELECT id, kind, reason, error, first_at, last_at, tries, critical, next_at, state "
                                    "FROM quarantine ORDER BY critical DESC, id DESC LIMIT ?", (int(limit),)).fetchall()
         return {"n": int(n), "critical": int(crit or 0), "evicted": self.quarantine_evicted,

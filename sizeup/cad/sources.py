@@ -155,6 +155,7 @@ FEED_SOURCE = "CAD feed"               # incidents.source of one an external fee
 PAGE_SOURCE = "60 Control page"
 ALERT_SOURCE = "60 Control radio"     # incidents.source of an airport alert level declared on the fire radio (#369)
 MATCH_WINDOW_S = 20 * 60.0
+SNAPSHOT_SKEW_S = 120.0    # on_event: a feed report older than the applied one by more than this is ignored (a replay)
 ALERT_WINDOW_S = MATCH_WINDOW_S        # an airport alert (#369) and a report that is an alert already: this far apart
 SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
 PAGE_LAG_S = 8 * 60.0                  # a "misheard" page this long after the feed's dispatch: still the same call
@@ -1790,9 +1791,12 @@ class Sources:
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
                 into = self._report(ev.source, rep["merged_into"])
                 return into["incident_id"] if into else None
-            if rep and snap is not None and rep.get("seen_at") is not None and snap < rep["seen_at"]:
-                # an older snapshot than the one applied (the station's quarantine sending one again, a late retry):
-                # applying it would put back what the feed has changed since (type, location, units)
+            if rep and snap is not None and rep.get("seen_at") is not None and snap < rep["seen_at"] - SNAPSHOT_SKEW_S:
+                # an older snapshot than the one applied (the station's quarantine sending one again: 10 min stale at
+                # least): applying it would put back what the feed has changed since (type, location, units). Within
+                # SNAPSHOT_SKEW_S it is applied: the station's clock stepping back (NTP, a reboot) never drops a newer
+                # one (the runner doesn't send an unchanged event again); the station drops its own replays anyway
+                # (outbox.py source_latest)
                 self.log(f"incident sources: {label}: an older report of an event ignored (a newer one is applied)")
                 return rep["incident_id"]
             prev = json.loads(rep["data"]) if rep else None

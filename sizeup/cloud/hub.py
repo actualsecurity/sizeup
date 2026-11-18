@@ -465,6 +465,23 @@ class Hub:
             raise AudioUnavailable("Voice unavailable — the station sent no audio: text only")
         return wav, str(res.get("label") or "Voice: rendered by the station")
 
+    def dismiss_rejected(self, kind: str, by: str = "") -> dict:
+        """POST /api/cad/health/dismiss (an admin, Settings > Station > Health): the station drops its stuck and late
+        quarantined events of this type (sizeup/cloud/outbox.py dismiss, by a quarantine_dismiss call), so their alert
+        clears. Logged and audited (settings_audit, System) with who asked. ValueError for a bad type, StationOffline /
+        RuntimeError from the station."""
+        kind = str(kind or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", kind):
+            raise ValueError("kind: an event type")
+        n = int(self.remote("quarantine_dismiss", kind) or 0)
+        who = by or "someone (no sign-in)"
+        self.log(f"hub: the station's refused {kind} event(s) dismissed by {who}: {n}")
+        from sizeup.cad.radios import audit
+        store = self.app.cad.store
+        with store.tx() as db:
+            audit(db, time.time(), by, "system", f"health_dismiss:{kind}", "stuck / late on the station", f"dismissed ({n})")
+        return {"ok": True, "dismissed": n}
+
     def remote(self, fn: str, *args, timeout: float = CALL_WAIT_S):
         """One of the station's switches (StationOffline / RuntimeError with the reason)."""
         return self.call("call", {"fn": fn, "args": list(args)}, timeout).get("result")

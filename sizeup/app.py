@@ -5057,6 +5057,12 @@ class App:
         """A job of ours a dongle shouldn't lose by one click: the county's trunk-recorder, paging, a fireground."""
         return mode == P25_MODE or any(c.label == mode and c.kind in ("paging", "traffic") for c in self.cfg.channels)
 
+    def quarantine_dismiss(self, kind: str) -> int:
+        """The hub's Dismiss on Health (a quarantine_dismiss call, sizeup/cloud/hub.py dismiss_rejected): this station's
+        stuck and late events of this type the hub refused (sizeup/cloud/outbox.py dismiss). How many went."""
+        link = getattr(self, "link", None)
+        return int(link.outbox.dismiss(str(kind))) if link is not None else 0
+
     def set_mode(self, mode: str, sdr: str | None = None, by: str = "person", confirm: bool = False) -> str | None:
         """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
         A mode already running on another dongle moves here (that dongle goes Off, which auto-assign

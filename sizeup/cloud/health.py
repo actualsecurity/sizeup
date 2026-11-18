@@ -230,48 +230,47 @@ def _quarantine(q, skew: float = 0.0) -> dict:
                      "state": str(r.get("state") or "held")[:10],
                      "next_at": num(r.get("next_at")) + skew if num(r.get("next_at")) is not None else None})
     kinds = {}
-    for k, v in (q.get("kinds") if isinstance(q.get("kinds"), dict) else {}).items():
+    for k, v in list((q.get("kinds") if isinstance(q.get("kinds"), dict) else {}).items())[:40]:
         if isinstance(k, str) and isinstance(v, dict):
-            kinds[k[:40]] = {f: int(num(v.get(f)) or 0) for f in ("n", "critical", "stuck", "late")}
-    for r in rows if not kinds else []:              # (no counts sent: counted from the rows)
-        c = kinds.setdefault(r["kind"], {"n": 0, "critical": 0, "stuck": 0, "late": 0})
-        c["n"] += 1
-        c["critical"] += int(r["critical"])
-        c["stuck"] += int(r["state"] == "stuck")
-        c["late"] += int(r["state"] == "late")
+            kinds[k[:40]] = dict({f: int(num(v.get(f)) or 0) for f in ("n", "critical", "stuck", "late")},
+                                 **{f: num(v.get(f)) + skew if num(v.get(f)) is not None else None
+                                    for f in ("critical_first", "minor_first", "minor_last")})
     return {"n": int(num(q.get("n")) or 0), "critical": int(num(q.get("critical")) or 0), "rows": rows, "kinds": kinds}
 
 
 def _rejected_alerts(q: dict, now: float) -> dict[str, dict]:
-    """The events the hub refused, per type. "rejected:<type>" (critical) while a critical one (a page, its text, an alarm,
-    an incident source's event) is held on the station: sent again slowly, stuck (no more tries: a person drops it,
-    `sizeup-station quarantine`), or an alarm the hub took too late to raise. "rejected_minor:<type>" (a warning, its
-    own mute kind: muting it never hides a critical one) for another type refused in the last REJECTED_RECENT_S."""
+    """The events the hub refused, per type, from the station's totals per type (its rows are a sample: the reason and
+    the next try). "rejected:<type>" (critical) while a critical one (a page, its text, an alarm, an incident source's
+    event) is held on the station: sent again slowly, stuck (no more tries), or an alarm the hub took too late to raise
+    (LATE_KEEP_S on the station). Stuck and late ones carry "dismiss": an admin's Dismiss on Health
+    (POST /api/cad/health/dismiss) or `sizeup-station quarantine drop`. "rejected_minor:<type>" (a warning, its own mute
+    kind: muting it never hides a critical one) for another type refused in the last REJECTED_RECENT_S."""
     out: dict[str, dict] = {}
     rows = q.get("rows") or []
     for kind, c in (q.get("kinds") or {}).items():
-        mine = [r for r in rows if r["kind"] == kind]
-        crit = [r for r in mine if r["critical"]]
+        crit = [r for r in rows if r["kind"] == kind and r["critical"]]
         if c["critical"]:
             late = c["late"] == c["critical"]
             last = max(crit, key=lambda r: r["last_at"]) if crit else None
             nxt = min((r["next_at"] for r in crit if r["next_at"] is not None), default=None)
-            state = (f"{c['stuck']} stuck (no more tries): sizeup-station quarantine" if c["stuck"]
+            state = (f"{c['stuck']} stuck (no more tries)" if c["stuck"]
                      else "" if late else f"next try {_hhmm(nxt)}" if nxt else "")
             text = (f"{c['critical']} held on the station" + (f" · {last['reason']}" if last else "")
                     + (f": {last['error']}" if last and last["error"] else "") + (f" · {state}" if state else ""))
             out[f"rejected:{kind}"] = {
                 "severity": "critical",
                 "title": f"Station {kind} delivered late, not raised" if late else f"Station event rejected by hub: {kind}",
-                "text": text, "since": min((r["first_at"] for r in crit), default=now)}
-        minor = [r for r in mine if not r["critical"]]
-        if c["n"] - c["critical"] > 0 and minor and now - max(r["last_at"] for r in minor) <= REJECTED_RECENT_S:
-            last = max(minor, key=lambda r: r["last_at"])
+                "text": text, "since": c["critical_first"] or min((r["first_at"] for r in crit), default=now),
+                **({"dismiss": kind} if c["stuck"] or c["late"] else {})}
+        minor = c["n"] - c["critical"]
+        if minor > 0 and c["minor_last"] is not None and now - c["minor_last"] <= REJECTED_RECENT_S:
+            last = max((r for r in rows if r["kind"] == kind and not r["critical"]), key=lambda r: r["last_at"],
+                       default=None)
             out[f"rejected_minor:{kind}"] = {
                 "severity": "warning", "title": f"Station event rejected by hub: {kind}",
-                "text": f"{c['n'] - c['critical']} kept on the station, not sent again · {last['reason']}"
-                        + (f": {last['error']}" if last["error"] else ""),
-                "since": min(r["first_at"] for r in minor)}
+                "text": f"{minor} kept on the station, not sent again" + (f" · {last['reason']}" if last else "")
+                        + (f": {last['error']}" if last and last["error"] else ""),
+                "since": c["minor_first"] or c["minor_last"]}
     return out
 
 
@@ -1471,6 +1470,10 @@ class StationHealth:
                     a["notify_after"] = float(c["notify_after"])   # pushed only once this old (#547)
                 else:
                     a.pop("notify_after", None)
+                if c.get("dismiss"):
+                    a["dismiss"] = str(c["dismiss"])     # an admin may dismiss it (the station's stuck / late events)
+                else:
+                    a.pop("dismiss", None)
             for key in list(self.active):
                 if key in conds:
                     continue
@@ -1621,6 +1624,7 @@ class StationHealth:
         mutes = self._mutes(now)
         with self._lock:
             out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {},
+                        **({"dismiss": a["dismiss"]} if a.get("dismiss") else {}),
                         flaps=self._flaps(a, now),                                  # back this often in 1 h (#340)
                         **({"muted": True, "muted_until": mutes[alert_kind(a["key"])]}
                            if alert_kind(a["key"]) in mutes else {}))
