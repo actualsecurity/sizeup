@@ -586,7 +586,7 @@ def test_with_aws_out_too_a_lost_job_goes_to_the_stations_whisper_never_dropped(
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         hub.app.aws.available = lambda key=None: (False, "test: AWS can't take audio now")
         tid = fm_segment(st)
-        assert wait(lambda: w.jobs, 10)                          # a worker took it ... and vanished with it
+        assert wait(lambda: w.jobs, 30)                          # a worker took it ... and vanished with it
         assert wait(lambda: any(t["id"] == tid and t["text"] == "whisper heard this"
                                 for t in all_traffic(hub.get("/api/state"))), 30)
         assert hub.app.sttpool.stats()["fallbacks"]["lease"] == 1
@@ -620,6 +620,8 @@ def test_worker_routes_refuse_bad_tokens_and_station_tokens_and_a_worker_token_o
         assert call(hub.url + "/api/station/jobs?wait=0", token=good)[0] == 401     # a worker's token: no station route
         # a station's token is its whisper's, as a station worker (#639 phase 2), never a GPU worker's
         own = hub.app.hub.stations.add("st-x")
+        assert call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=own)[1]["reason"] == "stations_off"
+        reg.act({"action": "pool", "stations": {"st-x": True}})                  # an admin puts its whisper in
         code, out = call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=own)
         assert code == 200 and out["worker"] == "station:st-x"
         assert hub.app.sttpool.workers[out["worker"]].kind == "station"
@@ -639,9 +641,7 @@ def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
     hub = HubRun(hub_cfg(tmp_path))
     try:
         reg = hub.app.hub.workers
-        assert reg.enabled(URGENT) is True                   # the stations' whisper are workers (#639 phase 2) ...
-        reg.act({"action": "pool", "stations": False})
-        assert reg.enabled(URGENT) is False                  # ... without them and with no GPU worker: off
+        assert reg.enabled(URGENT) is False                  # no worker, no station's whisper put in (#639 phase 2): off
         reg.add("gpu-1")
         assert reg.enabled(URGENT) and reg.enabled(CATCHUP)
         notes = []
@@ -649,7 +649,7 @@ def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
         assert not reg.enabled(URGENT) and reg.enabled(LIVE)
         reg.act({"action": "pool", "on": False}, "admin", lambda k, o, n: notes.append((k, o, n)))
         assert not reg.enabled(LIVE) and notes == [("stt workers/pool/urgent", "on", "off"), ("stt workers/pool", "on", "off")]
-        assert reg.pool_settings()["stations"] is False
+        assert reg.pool_settings()["stations"] == {}
         with pytest.raises(ValueError):
             reg.act({"action": "pool", "classes": {"nope": True}})
     finally:

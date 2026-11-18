@@ -163,6 +163,7 @@ OFFLOAD_CLASSES = (LOW, CONTEXT, CONTEXT_FALLBACK)
 OFFLOAD_WAIT_S = 60.0      # a context clip goes to the pool at once when its own queue is this far behind and a worker
                            # elsewhere could take it now (the hub's word)
 STOP_FINISH_S = 3.0        # stopping: the clip whisper is on gets this long to finish (App._stt_stop_queue)
+PUSH_CACHE_S = 5.0         # the pre-alerts' push sources read from the intel engine at most this often
 STT_QUEUE_FILE = "stt-queue.json"   # ... and what still waits, saved here for the next start (beside clips/)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
@@ -2723,17 +2724,18 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         prio = self._stt_priority(item, key)
-        if eng == "local" and self._offload_now(prio) and self._stt_offload(item, key, prio, "whisper behind here"):
+        if eng == "local" and self._offload_now(prio, len(audio) / RATE) and \
+                self._stt_offload(item, key, prio, "whisper behind here"):
             return                             # (#639 phase 2: another worker of the pool takes it now)
         self.stt.submit(item, audio, prio, key)    # (dropped: _stt_dropped says so on it)
 
-    def _offload_now(self, prio) -> bool:
+    def _offload_now(self, prio, seconds: float | None = None) -> bool:
         """(station) Hand this clip to the hub's pool now rather than queue it: a context class, this station's whisper
         OFFLOAD_WAIT_S behind, and the hub says a worker elsewhere could take it now (#639 phase 2)."""
         link = self.link
         if prio not in OFFLOAD_CLASSES or link is None or not self.forwarding() or not hasattr(link, "pool_has_room"):
             return False
-        if not link.pool_has_room():
+        if not link.pool_has_room(seconds):
             return False
         st = self.stt.stats()
         return int(st.get("queued") or 0) * float(st.get("service_s") or 16.0) > OFFLOAD_WAIT_S
@@ -2766,9 +2768,11 @@ class App:
         cur = self.stt.stop(finish_s) if hasattr(self.stt, "stop") else None
         items = self.stt.withdraw() if hasattr(self.stt, "withdraw") else []
         if cur is not None:
+            # (the clip whisper is still on: saved or handed over too; should whisper finish it before the exit, its text
+            # goes up first and the hub keeps that one, a transmission being applied once by its id: no second text)
             items.insert(0, (*cur, None))
         link = self.link
-        pool = (self.forwarding() and link is not None and hasattr(link, "pool_has_room") and link.pool_has_room())
+        fwd = self.forwarding() and link is not None and hasattr(link, "pool_has_room")
         n = {"pool": 0, "saved": 0, "reruns": 0}
         keep = []
         for prio, item, _audio, ch, queued in items:
@@ -2780,10 +2784,10 @@ class App:
                     if not item.catchup and not item.as_alt:
                         self._rerun_finish(item.id, "failed: the station restarted (Re-transcribe it again)")
                     n["reruns"] += 1
-                elif pool and isinstance(item, Traffic) and self._stt_offload(item, ch or traffic_key(item), prio,
-                                                                              "the station is stopping"):
+                elif fwd and isinstance(item, Traffic) and self._handover_ok(prio, item) and \
+                        self._stt_offload(item, ch or traffic_key(item), prio, "the station is stopping"):
                     n["pool"] += 1
-                elif pool and isinstance(item, Page):
+                elif fwd and isinstance(item, Page) and self._handover_ok(URGENT, item):
                     item.stt, item.status, item.raw = "pool", "pending", ""      # type: ignore[attr-defined]
                     self._emit("page_text", self._page_doc(item))
                     n["pool"] += 1
@@ -2798,7 +2802,10 @@ class App:
         if keep and f is not None:
             try:
                 tmp = f.with_suffix(".tmp")
-                tmp.write_text(json.dumps(keep, default=str))
+                with open(tmp, "w") as out:
+                    out.write(json.dumps(keep, default=str))
+                    out.flush()
+                    os.fsync(out.fileno())             # (on disk before it takes the name: a power cut keeps one or the other)
                 tmp.replace(f)
                 n["saved"] = len(keep)
             except OSError as e:
@@ -2808,6 +2815,15 @@ class App:
                 f"{n['saved']} saved for the next start" + (f", {n['reruns']} re-run(s) cut short" if n["reruns"] else ""))
         return n
 
+    def _handover_ok(self, prio, item) -> bool:
+        """(station, stopping) Hand this clip to the hub's pool rather than save it for the next start: a pre-alert class
+        (pages, Fire/EMS, airband, police alert) only when the hub said lately a GPU worker is idle and quick on them;
+        any other while a worker elsewhere could take a clip this long now."""
+        link = self.link
+        if prio in (URGENT, HIGH, CONTEXT, CONTEXT_FALLBACK):
+            return bool(link.pool_gpu_idle()) if hasattr(link, "pool_gpu_idle") else False
+        return link.pool_has_room(max(0.0, float(getattr(item, "end", 0.0)) - float(getattr(item, "start", 0.0))))
+
     def _stt_resume(self) -> int:
         """Starting: the clips a stop saved (_stt_stop_queue) queued again at their own class, each with its saved
         audio (its STT input, else its listening clip), transcribed and acted on as if just heard. How many."""
@@ -2816,8 +2832,14 @@ class App:
             return 0
         try:
             saved = json.loads(f.read_text())
-        except (OSError, ValueError):
-            saved = []
+        except (OSError, ValueError) as e:
+            bad = f.with_suffix(".bad")
+            log(f"speech-to-text: the saved queue can't be read ({type(e).__name__}): kept as {bad.name}")
+            try:
+                f.replace(bad)
+            except OSError:
+                pass
+            return 0
         f.unlink(missing_ok=True)
         n = 0
         for e in saved if isinstance(saved, list) else []:
@@ -2859,42 +2881,60 @@ class App:
             log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_priority(self, item, key: str) -> int:
-        """The class (_stt_class), raised to HIGH at least for a source the radio pre-alerts push alerts from
-        (stt_alert_keys(): system-qualified source keys, "p25:mrrs:9212"): their clips are never left in LOW and shed
-        as context, whatever their display tier. The station's queue and the hub's pool alike."""
+        """The class (_stt_class), raised to HIGH at least for a source the radio pre-alerts push alerts from: their
+        clips are never left in LOW and shed as context, whatever their display tier (police dispatch at HIGH, with the
+        airband: under our pages and fire traffic). The station's queue and the hub's pool alike."""
         prio = App._stt_class(self, item, key)
         if prio <= HIGH:
             return prio
         try:
-            alert = self.stt_alert_keys() if hasattr(self, "stt_alert_keys") else frozenset()
+            push = self.is_push_source(key, self._kind.get(key, "") if hasattr(self, "_kind") else "")
         except Exception:  # noqa: BLE001 - a source that fails raises nothing
-            alert = frozenset()
-        if alert and (key in alert or str(getattr(item, "source_key", "") or "") in alert):
-            return HIGH
-        return prio
+            push = False
+        return HIGH if push else prio
+
+    def is_push_source(self, key: str, kind: str = "") -> bool:
+        """Do the radio pre-alerts push alerts from this source? key: the queue's channel key ("tg:307" the county's,
+        "p25:mrrs:9212", a bare "FG1" / airband label), normalised to the intel engine's row-style keys (push_key). On
+        the CAD of record: the intel engine's sizeup.intel.is_push_source when there is one; on a station: the hub's
+        set (set_stt_alert_keys). Never computed under a queue's lock: the set is cached (_push_set)."""
+        if not self.forwarding():
+            try:
+                from sizeup import intel
+                fn = getattr(intel, "is_push_source", None)
+                if fn is not None:
+                    return bool(fn(key, kind))
+            except Exception:  # noqa: BLE001 - no engine: the set below
+                pass
+        keys = self._push_set()
+        return bool(keys) and push_key(key, kind) in keys
 
     stt_alert_rev = 0                       # the revision of the alert sources this station has (set_stt_alert_keys)
     _stt_alert_from_hub: frozenset = frozenset()
+    _push_cache: tuple = (0.0, frozenset(), 0)
 
-    def stt_alert_keys(self) -> frozenset:
-        """The sources the radio pre-alerts push alerts from: on the CAD of record, the intel engine's
-        (sizeup.intel.push_sources(): system-qualified source keys and a revision; empty while no engine runs); on a
-        station, what the hub last sent (set_stt_alert_keys, whenever its revision differs from the one reported)."""
+    def _push_set(self) -> frozenset:
+        """The push sources (row-style keys): a station's from the hub; the CAD of record's from the intel engine,
+        read at most every PUSH_CACHE_S (its recompute takes locks: never per clip)."""
         if self.forwarding():
             return self._stt_alert_from_hub
-        return frozenset(self._stt_alert_source()[0])
+        return self._stt_alert_source()[0]
 
     def _stt_alert_source(self) -> tuple[frozenset, int]:
-        """(keys, revision) from the intel engine's accessor; (frozenset(), 0) without one (an older build, no engine)."""
+        """(keys, revision) from the intel engine's accessor (sizeup.intel.push_sources(): row-style keys, a stable
+        revision, 0 = no engine), cached PUSH_CACHE_S; (frozenset(), 0) without one."""
+        at, keys, rev = self._push_cache
+        if time.monotonic() - at < PUSH_CACHE_S and at:
+            return keys, rev
         try:
             from sizeup import intel
             fn = getattr(intel, "push_sources", None)
-            if fn is None:
-                return frozenset(), 0
-            keys, rev = fn()
-            return frozenset(str(k) for k in keys), int(rev or 0)
+            keys, rev = fn() if fn is not None else (frozenset(), 0)
+            keys, rev = frozenset(str(k) for k in keys), int(rev or 0)
         except Exception:  # noqa: BLE001 - no hook, no raised class
-            return frozenset(), 0
+            keys, rev = frozenset(), 0
+        self._push_cache = (time.monotonic(), keys, rev)
+        return keys, rev
 
     def set_stt_alert_keys(self, keys, rev) -> dict:
         """(station) The hub's alert sources (a call job): kept in memory (a restart reports revision 0, and the hub
@@ -2945,8 +2985,11 @@ class App:
                 self._rerun_finish(item.id, f"failed: {why}"[:200])
             return
         shed = why.startswith(SHED)             # whisper was busy (#300): a quiet "skipped", still re-runnable
-        if shed and self._stt_offload(item, traffic_key(item) if isinstance(item, Traffic) else "", None, "shed here"):
-            return                              # (#639 phase 2: the pool takes it rather than skip it)
+        link = self.link
+        if shed and isinstance(item, Traffic) and link is not None and hasattr(link, "pool_has_room") and \
+                link.pool_has_room(max(0.0, float(item.end) - float(item.start))) and \
+                self._stt_offload(item, traffic_key(item), None, "shed here"):
+            return                              # (#639 phase 2: a worker elsewhere takes it now rather than skip it)
         item.raw, item.confidence, item.status = "", None, "skipped" if shed else "error"
         item.model = f"{Path(self.cfg.stt_model).name} ({why if shed else 'not transcribed: ' + why})"[:200]
         self._transcribed(item)
@@ -5044,6 +5087,18 @@ def channels_reserve(app) -> tuple:
 # the log, never "(AWS)"; whisper's own model name replaces it with the text (cad.js sttSaid).
 WHISPER_FALLBACK = "whisper"
 WHISPER_FALLBACK_STATION = "whisper on the station"
+
+
+def push_key(channel_key: str, kind: str = "") -> str:
+    """A queue's channel key as the intel engine's row-style source key: "tg:307" -> "p25:westchester:307",
+    "p25:mrrs:9212" as it is, an FM label -> "fm:<label>", an airband one (kind "airband") -> "air:<label>". (The same
+    normalisation as sizeup.intel.is_push_source: tests/test_stt_cluster.py checks they agree when it is there.)"""
+    got = sources.parse(channel_key)
+    if got is not None:
+        return sources.p25(*got)
+    if str(channel_key).startswith(("fm:", "air:")):
+        return str(channel_key)
+    return sources.fm(str(channel_key), kind)
 
 
 def channels_model() -> str:

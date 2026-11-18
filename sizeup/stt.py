@@ -480,7 +480,8 @@ class Transcriber:
         self._current: tuple | None = None        # (priority, item, audio, channel) being transcribed now
         self._channels: dict[int, str | None] = {}   # id(item) -> its channel key, while queued
         self._stopping = False                    # stop(): nothing more is taken from the queue
-        self.timed: deque = deque(maxlen=2000)    # (done at, class, wait s, run s) of each transcript (station metrics)
+        self.timed: deque = deque(maxlen=2000)    # (done at, class, wait s, run s, audio s) of each transcript (station
+                                                  # metrics; the station's pace as a pool worker)
 
     def busy(self, catchup: bool = True) -> int:
         """Transcriptions queued or running (the station's auto-update waits for none before a restart;
@@ -558,13 +559,13 @@ class Transcriber:
             self._drop_thread = threading.Thread(target=self._drop_loop, name="stt-drops", daemon=True)
             self._drop_thread.start()
 
-    def _timing(self, item, prio, queued: float | None, began: float) -> None:
+    def _timing(self, item, prio, queued: float | None, began: float, seconds: float = 0.0) -> None:
         """Its wait in the queue and its run (#639: what the hub keeps with each transcript, and the station metrics'
         minute): on the item (stt_wait_s, stt_run_s, stt_class: sent with a transmission) and in `timed`."""
         done = time.time()
         wait = round(began - queued, 2) if queued is not None else None
         run = round(done - began, 2)
-        self.timed.append((done, prio, wait, run))
+        self.timed.append((done, prio, wait, run, round(seconds, 2)))
         try:
             item.stt_wait_s, item.stt_run_s, item.stt_class = wait, run, CLASS_NAMES.get(prio, str(prio))
         except AttributeError:      # (an item that takes no attributes: the numbers are in `timed` all the same)
@@ -623,7 +624,7 @@ class Transcriber:
                 self.on_done(item)
                 continue
             raw, status = judge(raw, len(audio) / 16000, getattr(item, "low_energy", False))
-            self._timing(item, prio, queued, began)
+            self._timing(item, prio, queued, began, len(audio) / 16000)
             item.raw, item.confidence = raw, conf
             item.status = status                # last: a reader that sees "done" sees its text (and read_twice)
             self.on_done(item)

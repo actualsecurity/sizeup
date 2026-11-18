@@ -88,15 +88,7 @@ const SttWorkersCard = (() => {
     on.append(cb, " Pool on");
     on.title = "Off: every clip goes the way it went before (AWS, the station's whisper)";
     wrap.append(on);
-    const stl = el("label", "check");                 // the stations' whisper as pool workers (#639 phase 2)
-    const sc = el("input");
-    sc.type = "checkbox";
-    sc.checked = p.stations !== false;
-    sc.disabled = !p.on;
-    sc.addEventListener("change", () => act({ action: "pool", stations: sc.checked }, ""));
-    stl.append(sc, " Stations' whisper");
-    stl.title = "Each station's whisper takes other stations' clips while it has none of its own";
-    wrap.append(stl);
+
     for (const [k, v] of Object.entries(p.classes || {})) {
       const l = el("label", "check");
       const c = el("input");

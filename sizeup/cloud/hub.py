@@ -806,6 +806,8 @@ class Hub:
             raise ValueError("{epoch, events: [...]}")
         if p is not None:
             self._claim(p, d.get("station"))     # (one outbox cursor still: a cursor per station is design step A3)
+            if p.id:
+                self.app.clip_origin = p.id       # whose clips these are (a pool job never goes back to its sender)
         epoch = str(d.get("epoch") or "")[:40]
         with self._ingest:
             if epoch != self.epoch:
@@ -892,6 +894,8 @@ class HubApp(App):
     """App with no radios: the station's events go through the same code (apply), the station's
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
+    clip_origin = ""                     # the station the clips come from (the events' sender; one until multi-station)
+
     def __init__(self, cfg, log: Callable[[str], None] = print, fence=None):
         self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
@@ -931,7 +935,7 @@ class HubApp(App):
         # workers). Every transcript is kept as written (sizeup/sttruns.py), its latency per channel on Health.
         reg = self.hub.workers
         self.sttpool = sttpool.Pool(enabled=reg.enabled, log=log, allowed=lambda wid: (
-            reg.stations_on() if wid.startswith(STATION_PREFIX) else reg.active(wid)))
+            reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)))
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
         self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
@@ -1576,12 +1580,11 @@ class HubApp(App):
         some), worker (its whisper may claim), and ready: how many workers other than its own whisper could take a
         context clip now (a station hands one over at once only when one could)."""
         reg = self.hub.workers
-        mine = f"{STATION_PREFIX}{sid}"
         try:
-            ready = [w for w in self.sttpool.ready_workers() if w != mine]
+            word = self.sttpool.word(sid)
         except Exception:  # noqa: BLE001 - none
-            ready = []
-        return {"on": reg.enabled(sttpool.LOW), "worker": reg.stations_on(), "ready": len(ready)}
+            word = {"ready": 0, "max_s": 0.0, "gpu_idle": False}
+        return {"on": reg.enabled(sttpool.LOW), "worker": reg.stations_on(sid), **word}
 
     def _pool_clip(self, item, key: str, wav: bytes | None, cls_name=None, fresh: bool = True) -> None:
         """A clip a station handed to the pool (#639 phase 2: its whisper too busy to keep it, or the station stopping):
@@ -1608,7 +1611,7 @@ class HubApp(App):
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          extra={"pcm": pcm, "page": page, "handed": True})
+                          extra={"pcm": pcm, "page": page, "handed": True, "origin": self.clip_origin})
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "no pool worker could take it now")
         self.sync()
@@ -1617,13 +1620,14 @@ class HubApp(App):
         """A handed-over clip no pool worker transcribed: a live one to AWS (its budget allowing), else to the station's
         whisper at live priority (it waits for a station restarting to come back); a context or catch-up one marked
         shed, so the catch-up runs it once there is room. Nothing is dropped."""
-        from sizeup.stt import CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, SHED, URGENT
+        from sizeup.stt import HIGH, LIVE, SHED, URGENT
         page = job.extra.get("page")
         item = page if job.kind == "page" else self._find(job.id)[0]
         if item is None or getattr(item, "raw", "") or getattr(item, "text", "") or \
                 getattr(item, "status", "") not in ("pending", "remote"):
             return
-        if job.cls in (URGENT, HIGH, LIVE, CONTEXT_FALLBACK, CONTEXT):
+        if job.cls in (URGENT, HIGH, LIVE):         # (a context class never at live priority, never past the
+                                                   # catch-up's own AWS cap: the catch-up takes it, CATCHUP_AWS_PCT)
             item.stt = "aws"                       # (the AWS path's sweep and a hub restart know it from here)
             if job.extra.get("pcm") is not None and self.aws is not None and self.aws.available(job.channel)[0]:
                 self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: Amazon Transcribe")
@@ -1731,7 +1735,9 @@ class HubApp(App):
         """The GPU pool first for a shed clip while a worker is ready (#639), else as before (AWS on a context channel
         with budget, else the station's whisper)."""
         how = super()._catchup_route(key)
-        if how and getattr(self, "sttpool", None) is not None and self.sttpool.ready(CATCHUP)[0]:
+        # (a worker other than the clip's own station: its own whisper takes its own clips the catch-up's way, with its
+        # quiet spell and its idleness rules)
+        if how and getattr(self, "sttpool", None) is not None and self.sttpool.ready(CATCHUP, origin=self.clip_origin)[0]:
             return "pool"
         return how
 
@@ -1752,7 +1758,8 @@ class HubApp(App):
         job = sttpool.Job(cid, CATCHUP, key, "traffic", len(pcm) / 8000.0, audio_wait=True, audio=self._pool_audio_of(cid, None, pcm),
                           on_done=self._pool_done, on_fallback=self._pool_fallback, prompt=prompt,
                           clip_end=self._hub_time(float(end) + float(row.get("seconds") or 0.0))
-                          if isinstance(end, (int, float)) else None, extra={"pcm": pcm, "catchup": True})
+                          if isinstance(end, (int, float)) else None,
+                          extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin})
         self._rerun_note[cid] = CATCHUP_NOTE
         if not self.sttpool.submit(job):
             self._rerun_note.pop(cid, None)
@@ -1887,6 +1894,8 @@ class HubApp(App):
         """The station has another revision of the pre-alerts' sources than the intel engine's (its status says which):
         sent (set_stt_alert_keys, a call job; one at a time). A station from before this reports none and is never sent
         them (it refuses the call)."""
+        if not self._may_write_audio():                # a standby sends nothing (only the leader's word counts)
+            return
         keys, rev = self._stt_alert_source()
         st = self.hub.status or {}
         if "stt_alert_rev" not in st or st.get("stt_alert_rev") == rev or not self.hub.connected():

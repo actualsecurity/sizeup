@@ -1136,7 +1136,13 @@ class CadApi:
             return _json(404, {"error": "stations are the hub's"})
         if (why := self._signed_admin(who)) is not None:
             return _json(403, {"error": why})
-        return _json(200, reg.panel())
+        out = reg.panel()
+        sw = getattr(self.cad, "stt_workers", None)          # each station's whisper in the STT pool (#639 phase 2)
+        if sw is not None:
+            on = sw.pool_settings().get("stations") or {}
+            for s in out.get("stations", []):
+                s["pool_whisper"] = bool(on.get(s["id"], False))
+        return _json(200, out)
 
     def _stt_workers(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/stt-workers: Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639). The hub's only,
@@ -1346,6 +1352,17 @@ class CadApi:
         c = self.cad
         if m := SETTINGS.fullmatch(path):
             return c.settings_post(m.group(1), body, guard=guard)
+        if path == "/api/cad/stations" and body.get("action") == "pool_whisper" and getattr(c, "stt_workers", None):
+            from sizeup.cloud.sttworkers import WorkerError
+            op = str(body.get("operator") or "")
+            sid, on = str(body.get("id") or ""), body.get("on")
+            if not sid or not isinstance(on, bool) or c.stations.row(sid) is None:
+                raise CadError("pool_whisper: {id: a station, on: true or false}")
+            try:     # this station's whisper in the STT pool (#639 phase 2): audited like the pool's switches
+                return c.stt_workers.act({"action": "pool", "stations": {sid: on}}, op,
+                                         lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except WorkerError as e:
+                raise CadError(str(e)) from None
         if path == "/api/cad/stations" and getattr(c, "stations", None) is not None:
             from sizeup.cloud.stations import ConfirmNeeded, StationError
             op = str(body.get("operator") or "")

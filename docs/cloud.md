@@ -1364,35 +1364,65 @@ clip waits for one only as long as its class allows. After that the clip goes th
 
 ### Whisper capacity across the cluster (#639 phase 2)
 
-Every station's whisper is a worker in the hub's pool, so a clip from one station can be transcribed on another. The
-order is:
+A station's whisper can be a worker in the hub's pool, so a clip from one station can be transcribed on another.
 
+**Off by default, per station.** An admin turns it on per station: Settings > Station > Stations, "Whisper in pool" on that station's row, audited. Until then nothing changes.
+
+The order is:
 1. a GPU worker;
 2. an idle station's whisper;
 3. AWS, as its budget allows;
 4. the catch-up.
 
-- **A station's whisper as a worker** (`sizeup/cloud/stationworker.py`):
-  - It works under the station's own identity (#555, "station:<id>"). There is no extra token, and revoking the station ends its worker.
-  - It claims only while the hub says the pool takes stations, its whisper is up, none of its own clips wait and the CPU is under 85 %.
-  - While it doesn't claim, it says "paused" with its load every 5 s.
-  - It never gets a pre-alert clip or an AWS channel's clip. A job a GPU worker could take now waits `STATION_DEFER_S` (1 s) first.
-  - Settings > Station > STT workers: "Stations' whisper" (on by default).
-- **What a station hands to the pool**, as a transmission with `transcript_pending: "pool"`:
-  - A context clip, when its own queue is `OFFLOAD_WAIT_S` (60 s) behind and the hub says another worker could take it now.
-  - A clip it would shed.
-  - Everything still waiting when it stops.
-- **The audio a worker gets** is the clip's exact STT input (#671's stt-src). The worker waits up to 2 s for it, then takes the listening clip.
-- **When the pool doesn't transcribe a handed-over clip:**
-  - a live clip goes to AWS (budget allowing), else to the station's whisper at live priority;
-  - a context clip is marked shed, and the catch-up runs it.
-- **A restart** (`App._stt_stop_queue`):
-  - The clip on whisper gets 3 s.
-  - Then everything waiting goes to the pool while the hub has room. Otherwise it is saved to `stt-queue.json` and queued again at the next start, at its own class (Fire/EMS first, alerts as ever).
-  - `Transcriber.withdraw()`, `current()`, `stop(timeout)` and `behind_live()` are the public API.
-  - The catch-up takes the rows a stopped station left before other shed clips.
-- **Pre-alert sources:** the sources the radio pre-alerts push alerts from (`sizeup.intel.push_sources()`, keys and a revision) are HIGH at least in the station's queue and in the pool, whatever their tier. The hub sends them to its station (`set_stt_alert_keys`) whenever the revision the station reports differs.
-- **Health:** every worker, GPU or station, with its state, load (its own clips, CPU, pace), jobs/h and losses.
+#### A station's whisper as a worker
+
+`sizeup/cloud/stationworker.py`, under the station's own identity (#555, "station:<id>"). There is no extra token, and revoking the station ends its worker.
+
+Its own radios always come first, because whisper-server takes one request at a time. It claims only when all of these hold:
+- none of its own clips wait;
+- none of its own has been heard for 90 s;
+- its CPU is under 85 %, measured from `/proc/stat` (on WSL that is the Linux side).
+
+Limits on what it takes:
+- only clips it decodes in 8 s at its own measured pace. It tells the hub `max_s`, and the hub never hands it a longer one;
+- always one greedy pass;
+- never a pre-alert clip, an AWS channel's clip, or its own station's;
+- a GPU worker idle now gets each job first.
+
+It re-checks right after a claim, and hands the job back if its own work came. While it decodes, if one of its own urgent, high or live clips comes, it closes the decode's connection and hands the job back. whisper-server stops a request whose client went away: "client disconnected, aborted processing", checked on whisper.cpp 1.9.4. Its own page then gets its text within a second of its normal time.
+
+#### What a station hands to the hub's pool
+
+`transcript_pending: "pool"`:
+- A context clip, when its own queue is 60 s behind and the hub says a worker elsewhere could take a clip that long now.
+- A clip it would shed, under the same condition. Otherwise it is skipped here as before; there is never a round trip back to the sender.
+- What it stops with. Pre-alert classes go only when the hub said lately that a GPU worker is idle and quick. Anything else goes while there is room. The rest is saved to `stt-queue.json` (written with fsync, and an unreadable one is kept as `.bad`). The next start queues it again at its own class, alerts as ever.
+
+  The clip whisper is on gets 3 s. If whisper finishes it before the exit, its text goes up first and the hub keeps that one: a transmission is applied once.
+
+On the hub, a handed-over clip the pool can't take:
+- a live class goes to AWS, else to the station's whisper;
+- a context class goes to the catch-up, which keeps its own AWS cap (`CATCHUP_AWS_PCT`).
+
+The pool's catch-up keeps the catch-up's bounds on any worker:
+- one greedy pass;
+- 20 s at most;
+- clips of 30 s at most;
+- paused by fire work;
+- a station's whisper never gets its own station's clips.
+
+#### Pre-alert sources
+
+The sources the radio pre-alerts push alerts from are HIGH at least, in the station's queue and the pool, whatever their tier. On the hub they come from `sizeup.intel.is_push_source` or `push_sources()`.
+- The hub's leader sends them to the station (`set_stt_alert_keys`) when the revision the station reports differs.
+- The station compares its channel keys normalised the same way (`app.push_key`: "tg:<n>" becomes "p25:westchester:<n>", a label becomes "fm:" or "air:").
+- The set is cached (5 s), never computed per clip under a lock.
+
+#### Public API and Health
+
+- `Transcriber.withdraw()`, `current()`, `stop(timeout)`, `behind_live()`.
+- The catch-up takes the rows a stopped station left before other shed clips.
+- Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
 
 ## Phone pre-alert (Tapout)
 

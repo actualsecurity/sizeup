@@ -127,6 +127,7 @@ def test_three_stations_of_different_load_lose_nothing_while_any_whisper_is_idle
     hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a"))
     reg = hub.app.hub.stations
     tokens = {s: reg.add(s) for s in ("st-a", "st-b", "st-c")}
+    hub.app.hub.workers.act({"action": "pool", "stations": {"st-a": True, "st-b": True, "st-c": True}})   # (an admin's)
     busy = FakeStation(hub.url, tokens["st-a"], busy=True).start()          # its own capture load: never claims
     quick = FakeStation(hub.url, tokens["st-b"], text="Engine 99 back in quarters").start()
     slow = FakeStation(hub.url, tokens["st-c"], slow_s=0.3, text="Ladder 98 in service").start()
@@ -168,6 +169,7 @@ def test_with_no_worker_idle_a_handed_over_clip_waits_for_the_catch_up_never_dro
         assert [r["id"] for r in app.cad.comms.shed_clips(now - 3600)[0]] == ["9570-1794-call_90"]
         # a station's whisper free now: the catch-up sends it to the pool and it is done
         token = app.hub.stations.add("st-b")
+        app.hub.workers.act({"action": "pool", "stations": {"st-b": True}})
         w = FakeStation(hub.url, token).start()
         try:
             assert wait(lambda: app.sttpool.ready(CATCHUP)[0], 10)
@@ -184,6 +186,7 @@ def test_an_aws_channels_clip_goes_to_aws_rather_than_wait_on_a_station_whisper(
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a", **aws_cfg(fake)))
     token = hub.app.hub.stations.add("st-b")
+    hub.app.hub.workers.act({"action": "pool", "stations": {"st-b": True}})
     w = FakeStation(hub.url, token).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready_workers() == ["station:st-b"], 10)
@@ -196,16 +199,46 @@ def test_an_aws_channels_clip_goes_to_aws_rather_than_wait_on_a_station_whisper(
         fake.close()
 
 
-def test_the_stations_whisper_can_be_left_out_of_the_pool(tmp_path):
+def test_a_stations_whisper_is_out_of_the_pool_until_an_admin_puts_that_station_in(tmp_path):
     hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a"))
     try:
+        reg = hub.app.hub.workers
         token = hub.app.hub.stations.add("st-b")
-        hub.app.hub.workers.act({"action": "pool", "stations": False})
+        assert reg.enabled(LOW) is False                     # no GPU worker, no station in: nothing changes (#651)
         code, out = call(hub.url + "/api/station/stt/claim", "POST", {"wait": 0}, token=token)
         assert code == 403 and out["reason"] == "stations_off"
-        assert hub.app.pool_word("st-b") == {"on": False, "worker": False, "ready": 0}
+        assert hub.app.pool_word("st-b")["worker"] is False and hub.app.pool_word("st-b")["on"] is False
+        notes = []
+        reg.act({"action": "pool", "stations": {"st-b": True}}, "admin", lambda k, o, n: notes.append((k, o, n)))
+        assert notes == [("stt workers/pool/station st-b", "off", "on")] and reg.enabled(LOW)
+        assert reg.stations_on("st-b") and not reg.stations_on("st-c")
+        assert call(hub.url + "/api/station/stt/claim", "POST", {"wait": 0}, token=token) == (200, {"job": None})
     finally:
         hub.close()
+
+
+def test_an_admin_turns_a_stations_whisper_on_from_its_row_in_settings(tmp_path):
+    import json as _json
+    from sizeup.cad.api import CadApi
+    from sizeup.cloud.hubstore import MonitorDb
+    from sizeup.cloud.stations import StationRegistry
+    from sizeup.cloud.sttworkers import WorkerRegistry
+    from tests.test_station_identity import CASEY, Identity, make_cad, people
+    cad = make_cad(tmp_path)
+    people(cad)
+    mdb = MonitorDb(tmp_path / "hub.sqlite")
+    cad.stations = StationRegistry(mdb, log=lambda m: None)
+    cad.stt_workers = WorkerRegistry(mdb, log=lambda m: None)
+    cad.stations.add("st-north")
+    api, me = CadApi(cad), Identity(email=CASEY)
+    rows = _json.loads(api.get("/api/cad/stations", "", me)[1])["stations"]
+    assert rows[0]["pool_whisper"] is False                           # off by default
+    body = _json.dumps({"action": "pool_whisper", "id": "st-north", "on": True}).encode()
+    assert api.post("/api/cad/stations", body, me)[0] == 200
+    assert _json.loads(api.get("/api/cad/stations", "", me)[1])["stations"][0]["pool_whisper"] is True
+    assert "stt workers/pool/station st-north" in _json.dumps(cad.settings.audit_log("system"))
+    assert api.post("/api/cad/stations", _json.dumps({"action": "pool_whisper", "id": "nope", "on": True}).encode(),
+                    me)[0] == 400
 
 
 # -- a station: hands over what it would shed, and everything waiting when it stops ---------------------------------------
@@ -306,7 +339,9 @@ def test_a_clip_the_station_would_shed_goes_to_the_pool_instead(tmp_path):
     from sizeup.app import App
     from tests.test_cloud import base
     app = App(base(clips_dir=str(tmp_path / "clips")))
-    app.link = SimpleNamespace(pool_takes=lambda: True, pool_has_room=lambda: True)
+    room = {"ready": True, "max_s": 30.0}
+    app.link = SimpleNamespace(pool_takes=lambda: True, pool_has_room=lambda seconds=None: room["ready"] and (
+        seconds is None or seconds <= room["max_s"]))
     app.forwarding = lambda: True
     app._emit = lambda kind, d, clip=None: sent.append((kind, d))
     t = Traffic("MRRSOps-1", "MRRS Ops", 1.0, 4.0, "", status="pending")
@@ -316,9 +351,15 @@ def test_a_clip_the_station_would_shed_goes_to_the_pool_instead(tmp_path):
     # behind by more than OFFLOAD_WAIT_S with room elsewhere: a context clip goes at once; a fire one never
     app.stt.stats = lambda: {"queued": 10, "service_s": 16.0}
     assert app._offload_now(LOW) and not app._offload_now(URGENT) and not app._offload_now(LIVE)
+    assert not app._offload_now(LOW, 40.0)                       # (longer than any worker elsewhere takes: stays here)
     app.stt.stats = lambda: {"queued": 1, "service_s": 16.0}
     assert not app._offload_now(LOW)
-    app.link = SimpleNamespace(pool_takes=lambda: False, pool_has_room=lambda: False)
+    room["ready"] = False                                        # no room elsewhere: a shed clip is skipped here as ever
+    t3 = Traffic("MRRSOps-3", "MRRS Ops", 1.0, 4.0, "", status="pending")
+    sent.clear()
+    app._stt_dropped(t3, f"{SHED}: speech-to-text 15 min behind, a context talkgroup")
+    assert t3.status == "skipped" and not [d for k, d in sent if k == "traffic" and d.get("transcript_pending")]
+    app.link = SimpleNamespace(pool_takes=lambda: False, pool_has_room=lambda seconds=None: False)
     t2 = Traffic("MRRSOps-2", "MRRS Ops", 1.0, 4.0, "", status="pending")
     assert app._stt_offload(t2, CTX, LOW, "x") is False                  # an older hub: nothing handed over
 
@@ -344,34 +385,181 @@ class FakeClient:
         return self.audio
 
 
-def test_the_stations_worker_claims_only_when_its_own_clips_are_done_and_its_cpu_allows():
-    from sizeup.stt import wav_bytes
-    own = {"n": 2}
-    stt = SimpleNamespace(busy=lambda catchup=True: own["n"], stats=lambda: {"queued": own["n"], "service_s": 9.0},
-                          client=SimpleNamespace(transcribe_wav=lambda wav, prompt="", fast=False: {
-                              "text": " Car 12 clear", "segments": [{"start": 0, "end": 1, "text": "Car 12 clear",
-                                                                    "words": [{"word": "Car", "probability": 0.9}]}]}))
+class OneAtATimeWhisper:
+    """A whisper-server stand-in on a port: one request at a time (as whisper-server is), decode time = audio seconds x
+    factor, and a request whose client goes away stops at once (whisper-server's "client disconnected, aborted")."""
+
+    def __init__(self, factor=0.3):
+        import http.server
+        import select
+        import socket
+        import wave as _wave
+        import io as _io
+        self.factor, self.aborted, self.done = factor, [], []
+        lock = threading.Lock()
+        me = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers["Content-Length"]))
+                i = raw.find(b"RIFF")
+                with _wave.open(_io.BytesIO(raw[i:])) as w:
+                    secs = w.getnframes() / w.getframerate()
+                with lock:
+                    end = time.monotonic() + secs * me.factor
+                    while time.monotonic() < end:
+                        r, _w, _x = select.select([self.connection], [], [], 0.02)
+                        if r and self.connection.recv(1, socket.MSG_PEEK) == b"":
+                            me.aborted.append(secs)
+                            return
+                    me.done.append(secs)
+                    body = _json.dumps({"text": f"{secs:.0f} seconds heard", "segments": []}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+        import json as _json
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/inference"
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def station_worker(whisper, client, monkeypatch, cpu=20.0):
+    """A station's real Transcriber on the one-at-a-time whisper, and its pool worker."""
+    from sizeup.cloud import stationworker
+    from sizeup.stt import Transcriber, WhisperClient
+    monkeypatch.setattr(stationworker, "QUIET_S", 0.0)
+    done = []
+    stt = Transcriber(WhisperClient(whisper.url), lambda item: done.append((item.id, time.monotonic(), item.raw)))
     app = SimpleNamespace(stt=stt, whisper=SimpleNamespace(state="ok"), cfg=SimpleNamespace(stt_model="m/ggml-small.bin"))
     link = SimpleNamespace(pool={"worker": True})
-    cpu = {"v": 20.0}
-    client = FakeClient(job={"lease": "0123456789abcdef", "audio": "/x", "lease_s": 10.0, "prompt": "", "fast": True},
-                        audio=wav_bytes(np.zeros(16000, np.float32), 16000))
-    w = StationWorker(app, link, client, log=lambda m: None, cpu=lambda: cpu["v"])
-    assert w.why_not().startswith("its own clips first")
-    own["n"] = 0
-    cpu["v"] = 97.0
-    assert w.why_not().startswith("the CPU busy")
-    cpu["v"] = 20.0
-    assert w.why_not() == ""
-    link.pool = {"worker": False}
-    assert "doesn't take stations" in w.why_not()
-    link.pool = {"worker": True}
-    assert w.run_job(client.job) == "done"
-    done = [b for p, b in client.posts if p.endswith("/complete")][0]
-    assert done["text"] == " Car 12 clear" and done["segments"][0]["words"][0]["word"] == "Car"
-    stt.client.transcribe_wav = lambda *a, **k: (_ for _ in ()).throw(OSError("whisper down"))
-    assert w.run_job({"lease": "fedcba9876543210", "audio": "/x", "lease_s": 10.0}) == "released"
-    assert any(p.endswith("fedcba9876543210/release") for p, _b in client.posts)
+    return StationWorker(app, link, client, log=lambda m: None, cpu=lambda: cpu), stt, done, link
+
+
+def remote_job(seconds, lease="0123456789abcdef"):
+    from sizeup.stt import wav_bytes
+    return {"lease": lease, "audio": "/x", "lease_s": 10.0, "prompt": ""}, wav_bytes(np.zeros(int(16000 * seconds),
+                                                                                              np.float32), 16000)
+
+
+def test_a_page_arriving_mid_remote_job_cuts_it_and_gets_its_text_at_its_normal_time(monkeypatch):
+    whisper = OneAtATimeWhisper(factor=0.3)
+    try:
+        job, audio = remote_job(12.0)                           # another station's clip: 3.6 s of decode here
+        client = FakeClient(job=job, audio=audio)
+        w, stt, done, _link = station_worker(whisper, client, monkeypatch)
+        stt.start()
+        # the page alone first: its normal time
+        page0 = SimpleNamespace(id="page-0", fm=False, low_energy=False)
+        t0 = time.monotonic()
+        stt.submit(page0, np.zeros(16000 * 2, np.float32) + 0.1, URGENT, "South 2")
+        assert wait(lambda: done, 5)
+        normal = done[0][1] - t0
+        done.clear()
+        out = {}
+        th = threading.Thread(target=lambda: out.setdefault("r", w.run_job(job)))
+        th.start()
+        time.sleep(0.6)                                          # mid-way through the remote decode ...
+        page = SimpleNamespace(id="page-1", fm=False, low_energy=False)
+        t1 = time.monotonic()
+        stt.submit(page, np.zeros(16000 * 2, np.float32) + 0.1, URGENT, "South 2")   # ... a page of its own
+        assert wait(lambda: done, 5)
+        took = done[0][1] - t1
+        th.join(10)
+        assert out["r"] == "preempted" and whisper.aborted == [pytest.approx(12.0, abs=0.1)]   # the remote decode cut
+        assert took < normal + 1.0, (took, normal)                # within ~1 s of its normal time (not 3 s later)
+        assert any(p.endswith("/release") for p, _b in client.posts) and w.stats["preempted"] == 1
+    finally:
+        whisper.close()
+
+
+def test_the_stations_worker_gates_quiet_spell_own_work_cpu_and_clip_length(monkeypatch):
+    from sizeup.cloud import stationworker
+    whisper = OneAtATimeWhisper(factor=0.05)
+    try:
+        job, audio = remote_job(3.0)
+        client = FakeClient(job=job, audio=audio)
+        w, stt, done, link = station_worker(whisper, client, monkeypatch, cpu=97.0)
+        assert w.why_not().startswith("the CPU busy")
+        w.cpu = lambda: 20.0
+        assert w.why_not() == ""
+        monkeypatch.setattr(stationworker, "QUIET_S", 90.0)
+        stt.ours_heard()                                         # its own traffic just now: a quiet spell first
+        assert w.why_not().startswith("its own traffic")
+        monkeypatch.setattr(stationworker, "QUIET_S", 0.0)
+        stt.submit(SimpleNamespace(id="own"), np.zeros(1600, np.float32), LOW, "tg:383")
+        assert w.why_not().startswith("its own clips first")
+        # claimed while its own work came: handed back at once, never decoded
+        assert w.run_job(job) == "released" and whisper.done == [] and whisper.aborted == []
+        stt.withdraw()
+        link.pool = {"worker": False}
+        assert "isn't in the pool" in w.why_not()
+        link.pool = {"worker": True}
+        # its pace: the longest clip it would take is what it decodes in MAX_DECODE_S
+        stt.timed.extend([(0, LIVE, 0.1, 6.0, 3.0)] * 5)          # 2 s of decode per audio second
+        assert w.rtf() == 2.0 and w.load()["max_s"] == stationworker.MAX_DECODE_S / 2.0
+        assert w.run_job(job) == "done" and whisper.done                     # one greedy pass (fast)
+        done_body = [b for p, b in client.posts if p.endswith("/complete")][0]
+        assert done_body["text"] == "3 seconds heard"
+    finally:
+        whisper.close()
+
+
+def test_the_pool_never_hands_a_station_a_clip_longer_than_it_decodes_quickly_nor_its_own():
+    clock = Clock()
+    p = Pool(enabled=lambda c: True, clock=clock, log=lambda s: None)
+    w = idle(p, "station:st-b", "station")
+    w.load = {"max_s": 4.0}
+    long = Job("long", LOW, CTX, "traffic", 10.0, audio=lambda: b"", on_done=lambda j, r: None,
+               on_fallback=lambda j, why: None)
+    own = Job("own", LOW, CTX, "traffic", 2.0, audio=lambda: b"", on_done=lambda j, r: None,
+              on_fallback=lambda j, why: None, extra={"origin": "st-b"})
+    assert p.ready(LOW, seconds=10.0)[0] is False and p.ready(LOW, origin="st-b")[0] is False
+    p._queue += [long, own]
+    assert p.claim("station:st-b", 0) is None                 # neither: too long, and its own
+    assert p.word("st-b")["ready"] == 0 and p.word("st-c")["max_s"] == 4.0
+
+
+def test_the_stop_path_runs_before_whisper_and_the_link_stop(tmp_path, monkeypatch):
+    from sizeup.app import App
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    order = []
+    monkeypatch.setattr(app, "_stt_stop_queue", lambda *a, **k: order.append("stt queue") or {})
+    monkeypatch.setattr(app.whisper, "stop", lambda: order.append("whisper"))
+    app.stop()
+    assert order[:2] == ["stt queue", "whisper"]
+
+
+def test_a_stopping_station_hands_pre_alert_clips_over_only_to_an_idle_gpu_and_saves_the_rest(tmp_path):
+    from sizeup.app import App
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    sent = []
+    word = {"gpu_idle": False, "room": True}
+    app.link = SimpleNamespace(pool_takes=lambda: True, pool_gpu_idle=lambda: word["gpu_idle"],
+                               pool_has_room=lambda seconds=None: word["room"])
+    app.forwarding = lambda: True
+    app._emit = lambda kind, d, clip=None: sent.append((kind, d))
+    fire = Traffic("FG1-7", "FG1", 1.0, 4.0, "", status="pending")
+    ctx = Traffic("MRRSOps-7", "MRRS Ops", 1.0, 4.0, "", status="pending")
+    app.stt.withdraw = lambda priority=None: [(URGENT, fire, None, "FG1", 1.0), (LOW, ctx, None, CTX, 1.0)]
+    app.stt.stop = lambda timeout=0.0: None
+    n = app._stt_stop_queue()
+    assert n == {"pool": 1, "saved": 1, "reruns": 0}           # the context clip to the pool, Fire/EMS saved here
+    saved = __import__("json").loads((tmp_path / "stt-queue.json").read_text())
+    assert [(e["id"], e["class"]) for e in saved] == [("FG1-7", URGENT)]
+    # a saved queue that can't be read is kept aside, said, never crashes the start
+    (tmp_path / "stt-queue.json").write_text("{not json")
+    assert app._stt_resume() == 0 and (tmp_path / "stt-queue.bad").is_file()
 
 
 # -- the public whisper-queue API (the radio session's encoder; restart hand-over) -------------------------------------
@@ -422,22 +610,49 @@ def test_withdraw_current_and_stop_hand_back_everything_in_order():
 
 def test_a_source_the_pre_alerts_push_from_is_high_at_least_whatever_its_tier(tmp_path, monkeypatch):
     from sizeup import intel
-    from sizeup.app import App
+    from sizeup.app import App, push_key
     from sizeup.incidents import Traffic
     from sizeup.stt import HIGH
     from tests.test_cloud import base
+    monkeypatch.delattr(intel, "is_push_source", raising=False)        # (the set path; the engine's below if it has one)
     app = App(base(clips_dir=str(tmp_path / "clips")))
     app.tg.info[("mrrs", 9212)] = {"name": "Tac", "tier": "text"}
     t = Traffic("9212-1-call_1", "Tac", 1.0, 3.0, "", status="pending")
     t.source_key = "p25:mrrs:9212"
-    assert app._stt_priority(t, "p25:mrrs:9212") == LOW                       # a text-tier talkgroup: context
-    monkeypatch.setattr(intel, "push_sources", lambda: (frozenset({"p25:mrrs:9212"}), 3), raising=False)
-    assert app._stt_priority(t, "p25:mrrs:9212") == HIGH                      # its alerts: never shed as context
+
+    def push(keys, rev):
+        monkeypatch.setattr(intel, "push_sources", lambda: (frozenset(keys), rev), raising=False)
+        app._push_cache = (0.0, frozenset(), 0)                       # (read again: the cache is PUSH_CACHE_S)
+    assert app._stt_priority(t, "p25:mrrs:9212") == LOW                 # a text-tier talkgroup: context
+    push({"p25:mrrs:9212"}, 3)
+    assert app._stt_priority(t, "p25:mrrs:9212") == HIGH                # its alerts: never shed as context
+    # the queue's keys normalised to the engine's row-style ones: the county's "tg:<n>", an FM label, an airband one
+    assert push_key("tg:383") == "p25:westchester:383" and push_key("FG9") == "fm:FG9"
+    assert push_key("Tower", "airband") == "air:Tower" and push_key("p25:mrrs:9212") == "p25:mrrs:9212"
+    push({"p25:westchester:383", "fm:MRRS Ops"}, 4)
+    ctx = Traffic("383-1-call_1", "WCPD", 1.0, 3.0, "", status="pending", talkgroup=383)
+    app.tg.main = lambda tg, system=None: False                          # (a county talkgroup heard as context: LOW)
+    assert app._stt_class(ctx, "tg:383") == LOW and app._stt_priority(ctx, "tg:383") == HIGH
+    fmx = Traffic("MRRSOps-1", "MRRS Ops", 1.0, 3.0, "", status="pending")
+    app._stt_class = lambda item, key: LOW                               # (an FM channel's clip as context)
+    assert App._stt_priority(app, fmx, "MRRS Ops") == HIGH
+    del app._stt_class
     fire = Traffic("FG1-1", "FG1", 1.0, 3.0, "", status="pending")
-    monkeypatch.setattr(intel, "push_sources", lambda: (frozenset({"FG1"}), 4), raising=False)
-    assert app._stt_priority(fire, "FG1") == URGENT                           # (never lowered)
+    push({"fm:FG1"}, 5)
+    assert app._stt_priority(fire, "FG1") == URGENT                     # (never lowered)
     monkeypatch.setattr(intel, "push_sources", lambda: (_ for _ in ()).throw(RuntimeError("no engine")), raising=False)
-    assert app._stt_priority(t, "p25:mrrs:9212") == LOW                       # a failing source raises nothing
+    app._push_cache = (0.0, frozenset(), 0)
+    assert app._stt_priority(t, "p25:mrrs:9212") == LOW                 # a failing source raises nothing
+
+
+def test_the_station_and_the_engine_normalise_keys_alike():
+    from sizeup import intel
+    from sizeup.app import push_key
+    fn = getattr(intel, "is_push_source", None)
+    if fn is None:
+        pytest.skip("sizeup.intel.is_push_source (#716) isn't here yet")
+    for key, kind in (("tg:383", ""), ("p25:mrrs:9212", ""), ("FG1", ""), ("Tower", "airband")):
+        assert isinstance(push_key(key, kind), str) and isinstance(fn(key, kind), bool)
 
 
 def test_the_hub_sends_its_stations_the_alert_sources_when_their_revision_differs(tmp_path, monkeypatch):
@@ -451,12 +666,12 @@ def test_the_hub_sends_its_stations_the_alert_sources_when_their_revision_differ
     try:
         st = station(station_cfg(tmp_path, hub.url), {})
         assert wait(lambda: st.stt_alert_rev == 7, 20)
-        assert st.stt_alert_keys() == frozenset({"p25:mrrs:9212"})
+        assert st._push_set() == frozenset({"p25:mrrs:9212"})
         st.tg.info[("mrrs", 9212)] = {"name": "Tac", "tier": "text"}
         t = Traffic("9212-2-call_1", "Tac", 1.0, 3.0, "", status="pending")
         assert st._stt_priority(t, "p25:mrrs:9212") == HIGH                   # the station's queue too
         state.update(keys=frozenset(), rev=8)                                  # the set changes: sent again
-        assert wait(lambda: st.stt_alert_rev == 8 and st.stt_alert_keys() == frozenset(), 20)
+        assert wait(lambda: st.stt_alert_rev == 8 and st._push_set() == frozenset(), 20)
     finally:
         if st is not None:
             st.link.stop()

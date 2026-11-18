@@ -37,7 +37,8 @@ from sizeup.stt import CATCHUP, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LI
 # transmission end -> text p50 <= 5 s, p95 <= 15 s, so their wait and cap are short)
 BUDGETS: dict[float, tuple[float, float, float]] = {
     URGENT: (2.5, 4.0, 8.0), HIGH: (2.5, 4.0, 8.0), CONTEXT_FALLBACK: (2.5, 4.0, 8.0), CONTEXT: (2.5, 4.0, 8.0),
-    LIVE: (5.0, 10.0, 20.0), RERUN: (10.0, 15.0, 45.0), LOW: (30.0, 20.0, 60.0), CATCHUP: (120.0, 30.0, 120.0)}
+    LIVE: (5.0, 10.0, 20.0), RERUN: (10.0, 15.0, 45.0), LOW: (30.0, 20.0, 60.0), CATCHUP: (120.0, 20.0, 20.0)}
+# (a catch-up clip keeps the catch-up's own bounds on any worker: one greedy pass, 20 s at most, sttcatchup's clip cap)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
                           # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
@@ -69,7 +70,7 @@ FAST_CLASSES = (URGENT, HIGH, CONTEXT_FALLBACK, CONTEXT)
 
 
 def _extra(job) -> float:
-    return 0.0 if job.cls in FAST_CLASSES else PER_AUDIO_S * max(0.0, job.seconds)
+    return 0.0 if job.cls in FAST_CLASSES or job.cls == CATCHUP else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
 
@@ -116,7 +117,8 @@ class Job:
         return {"lease": self.lease, "id": self.id, "kind": self.kind, "channel": self.channel,
                 "class": class_key(self.cls), "prompt": self.prompt, "seconds": round(self.seconds, 2),
                 "lease_s": round(max(0.0, self.expires - (self.claimed_at or 0.0)), 1), "cap_at": self.cap_at,
-                "fast": self.cls in FAST_CLASSES, "audio": f"/api/station/stt/jobs/{self.lease}/audio"}
+                "fast": self.cls in FAST_CLASSES or self.cls == CATCHUP or self.extra.get("kind") == "station",
+                "audio": f"/api/station/stt/jobs/{self.lease}/audio"}
 
 
 @dataclass
@@ -261,7 +263,7 @@ class Pool:
             if kind in KINDS:
                 w.kind = kind
             if isinstance(load, dict):
-                w.load = {k: load[k] for k in ("queue", "own", "cpu_pct", "service_s", "why")
+                w.load = {k: load[k] for k in ("queue", "own", "cpu_pct", "service_s", "why", "max_s", "rtf")
                           if isinstance(load.get(k), (int, float, str)) and not isinstance(load.get(k), bool)}
             if state in STATES:
                 if state != "online" and w.state == "online":
@@ -329,6 +331,17 @@ class Pool:
         last = max(w.probe_at, w.fast[-1][0] if w.fast else 0.0)
         return now - last >= PROBE_S
 
+    def word(self, sid: str, now: float | None = None) -> dict:
+        """What the pool tells a station (its state answer, #639 phase 2): ready, the workers other than its own whisper
+        that could take a context clip of its now; max_s, the longest clip one of them would take; gpu_idle, a GPU
+        worker idle and quick on pre-alert clips now (a stopping station hands those over only then)."""
+        now = self.clock() if now is None else now
+        with self._cv:
+            others = [w for w in self.workers.values() if self._ready(w, now) and w.id != f"station:{sid}"]
+            max_s = max((float(w.load.get("max_s", 1e9)) if w.kind == "station" else 1e9 for w in others), default=0.0)
+            gpu_idle = any(w.kind == "gpu" and self._fast_ok(w, now) for w in others)
+        return {"ready": len(others), "max_s": round(min(max_s, 3600.0), 1), "gpu_idle": gpu_idle}
+
     def _gpu_idle(self, now: float) -> bool:
         return any(w.kind == "gpu" and w.polling > 0 and not w.leases and self._ready(w, now)
                    for w in self.workers.values())
@@ -338,12 +351,15 @@ class Pool:
         than AWS), and only once a GPU worker that could take it now has had STATION_DEFER_S to. A GPU worker: a
         pre-alert clip only when _fast_ok."""
         if w.kind == "station":
-            if j.cls in FAST_CLASSES or j.gpu_only:
-                return False
+            if j.cls in FAST_CLASSES or j.gpu_only or j.extra.get("origin") == w.id.removeprefix("station:"):
+                return False                       # (never a station's own clip back to it: no round trip)
+            if j.seconds > float(w.load.get("max_s", 1e9)):
+                return False                       # (only what it decodes in a few seconds: its own pages never wait long)
             return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now))
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
 
-    def ready(self, cls: float, now: float | None = None, gpu_only: bool = False) -> tuple[bool, str]:
+    def ready(self, cls: float, now: float | None = None, gpu_only: bool = False, origin: str = "",
+              seconds: float | None = None) -> tuple[bool, str]:
         """Can the pool take a clip of this class now: (yes, why not). gpu_only: on a GPU worker (an AWS channel's clip:
         a station's whisper is slower than AWS); a pre-alert class always is."""
         now = self.clock() if now is None else now
@@ -358,7 +374,9 @@ class Pool:
             return False, "stopped"
         with self._cv:
             ready = [w for w in self.workers.values() if self._ready(w, now)
-                     and (w.kind == "gpu" or not (gpu_only or cls in FAST_CLASSES))]
+                     and (w.kind == "gpu" or not (gpu_only or cls in FAST_CLASSES
+                                                  or (origin and w.id == f"station:{origin}")
+                                                  or (seconds is not None and seconds > float(w.load.get("max_s", 1e9)))))]
             if not ready:
                 return False, "no worker ready"
             if cls in FAST_CLASSES:
@@ -391,7 +409,8 @@ class Pool:
     def submit(self, job: Job) -> bool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
-        ok, _why = self.ready(job.cls, gpu_only=job.gpu_only)
+        ok, _why = self.ready(job.cls, gpu_only=job.gpu_only, origin=str(job.extra.get("origin") or ""),
+                              seconds=job.seconds)
         if not ok or self._stop.is_set():
             return False
         with self._cv:

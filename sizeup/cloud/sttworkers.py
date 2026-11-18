@@ -158,7 +158,7 @@ class WorkerRegistry:
     def pool_settings(self) -> dict:
         """{on, stations, classes: {name: bool}}: the defaults (on, the stations' whisper in the pool, every class) with
         what an admin changed."""
-        out = {"on": True, "stations": True, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
+        out = {"on": True, "stations": {}, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
         try:
             saved = json.loads(self.mdb.get(META_POOL, "") or "{}")
         except ValueError:
@@ -166,8 +166,8 @@ class WorkerRegistry:
         if isinstance(saved, dict):
             if isinstance(saved.get("on"), bool):
                 out["on"] = saved["on"]
-            if isinstance(saved.get("stations"), bool):
-                out["stations"] = saved["stations"]
+            if isinstance(saved.get("stations"), dict):          # (station id -> its whisper in the pool; off by default)
+                out["stations"] = {str(k): v for k, v in saved["stations"].items() if isinstance(v, bool)}
             for k, v in (saved.get("classes") or {}).items() if isinstance(saved.get("classes"), dict) else ():
                 if k in out["classes"] and isinstance(v, bool):
                     out["classes"][k] = v
@@ -175,28 +175,32 @@ class WorkerRegistry:
 
     def enabled(self, cls: float) -> bool:
         """Do this class's clips go to the pool first now: the pool is on, the class is on, and a worker can be there (a
-        GPU worker added, or the stations' whisper in the pool: #639 phase 2)."""
+        GPU worker added, or a station's whisper an admin put in the pool: #639 phase 2)."""
         s = self.pool_settings()
         if not s["on"] or not s["classes"].get(sttpool.class_key(cls), False):
             return False
-        return bool(s["stations"]) or self.any()
+        return any(s["stations"].values()) or self.any()
 
-    def stations_on(self) -> bool:
-        """The stations' whisper are pool workers (Settings > Station > STT workers, on by default)."""
+    def stations_on(self, sid: str | None = None) -> bool:
+        """This station's whisper is a pool worker (Settings > Station > Stations, per station; off by default). sid None:
+        any station's is."""
         s = self.pool_settings()
-        return bool(s["on"]) and bool(s["stations"])
+        if not s["on"]:
+            return False
+        return any(s["stations"].values()) if sid is None else bool(s["stations"].get(sid, False))
 
     def set_pool(self, on=None, classes=None, stations=None) -> tuple[dict, dict]:
         old = self.pool_settings()
-        new = {"on": old["on"], "stations": old["stations"], "classes": dict(old["classes"])}
+        new = {"on": old["on"], "stations": dict(old["stations"]), "classes": dict(old["classes"])}
         if on is not None:
             if not isinstance(on, bool):
                 raise WorkerError("on: true or false")
             new["on"] = on
         if stations is not None:
-            if not isinstance(stations, bool):
-                raise WorkerError("stations: true or false")
-            new["stations"] = stations
+            if not isinstance(stations, dict) or not all(isinstance(k, str) and isinstance(v, bool)
+                                                         for k, v in stations.items()):
+                raise WorkerError("stations: {station id: true or false}")
+            new["stations"] = {**old["stations"], **{k[:64]: v for k, v in stations.items()}}
         if classes is not None:
             if not isinstance(classes, dict):
                 raise WorkerError("classes: an object")
@@ -352,8 +356,10 @@ class WorkerRegistry:
             old, new = self.set_pool(body.get("on"), body.get("classes"), body.get("stations"))
             if old["on"] != new["on"]:
                 note("stt workers/pool", "on" if old["on"] else "off", "on" if new["on"] else "off")
-            if old["stations"] != new["stations"]:
-                note("stt workers/pool/stations", "on" if old["stations"] else "off", "on" if new["stations"] else "off")
+            for sid in sorted(set(old["stations"]) | set(new["stations"])):
+                was, now_ = bool(old["stations"].get(sid)), bool(new["stations"].get(sid))
+                if was != now_:
+                    note(f"stt workers/pool/station {sid}", "on" if was else "off", "on" if now_ else "off")
             for k, v in new["classes"].items():
                 if old["classes"].get(k) != v:
                     note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
@@ -431,8 +437,8 @@ class WorkerApi:
             if not sid:
                 m = TOKEN.fullmatch(bearer)
                 return self._refuse(e, m.group(1) if m and self.reg.row(m.group(1)) is not None else "")
-            if not self.reg.stations_on():
-                return _json(403, {"error": "the stations' whisper isn't in the pool (Settings > Station > STT workers)",
+            if not self.reg.stations_on(sid):
+                return _json(403, {"error": "this station's whisper isn't in the pool (Settings > Station > Stations)",
                                    "reason": "stations_off"})
             wid, kind = f"{STATION_PREFIX}{sid}", "station"
         if not self.may_write():

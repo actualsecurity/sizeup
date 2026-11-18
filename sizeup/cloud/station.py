@@ -268,9 +268,17 @@ class StationLink:
         """The hub takes clips this station hands to its pool (#639 phase 2): it knows them, and its pool is on."""
         return POOL_CAP in self.hub_caps and bool(self.pool.get("on"))
 
-    def pool_has_room(self) -> bool:
-        """The hub's last word: a worker other than this station's whisper could take a context clip now."""
-        return self.pool_takes() and int(self.pool.get("ready") or 0) > 0
+    def pool_has_room(self, seconds: float | None = None) -> bool:
+        """The hub's last word: a worker other than this station's whisper could take a context clip (this long) now.
+        Never a round trip: a clip no worker elsewhere could take stays here."""
+        if not self.pool_takes() or int(self.pool.get("ready") or 0) <= 0:
+            return False
+        return seconds is None or seconds <= float(self.pool.get("max_s") or 0.0)
+
+    def pool_gpu_idle(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker idle and quick on pre-alert clips now (a stopping station
+        hands those over only then; else they are saved here and transcribed first at the next start)."""
+        return self.pool_takes() and bool(self.pool.get("gpu_idle")) and self.connected()
 
     def stt_input(self, item, audio) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
