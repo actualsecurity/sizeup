@@ -1264,9 +1264,9 @@ activate() {
   [ ! -f "$sys/../../sizeup/radio/trunkrecd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"
   for t in sizeup-usbfs.service sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
            sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-ais.service sizeup-logread.service \
-           sizeup-adsb.service sizeup-trunk-recorder.service; do
+           sizeup-adsb.service sizeup-trunk-recorder.service sizeup-stt-encode.service; do
     [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71;
-                                                               # sizeup-usbfs: #269)
+                                                               # sizeup-usbfs: #269; sizeup-stt-encode: #709)
     install -m 0644 "$sys/systemd/$t" "/etc/systemd/system/$t"
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
@@ -1373,6 +1373,7 @@ PY
   [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
   [ ! -f /etc/systemd/system/sizeup-ais.service ] || systemctl enable --quiet sizeup-ais.service
   [ ! -f /etc/systemd/system/sizeup-logread.service ] || systemctl enable --quiet sizeup-logread.service
+  [ ! -f /etc/systemd/system/sizeup-stt-encode.service ] || systemctl enable --quiet sizeup-stt-encode.service
   # no usbfs buffer limit (#269), at every boot and now, before the dongles' services (re)start; never fails the switch
   if [ -f /etc/systemd/system/sizeup-usbfs.service ]; then
     systemctl enable --quiet sizeup-usbfs.service || warn "sizeup-usbfs: couldn't enable it"
@@ -1384,6 +1385,11 @@ PY
   t0=$(date +%s%N)
   systemctl restart sizeup-station.service
   t1=$(date +%s%N)
+  # the STT input encoder (#709): the same release's code as sizeup-station (PartOf: restarted with it; started here
+  # the first time). Not there or not starting: the station makes the FLAC on its own thread, as before
+  if [ -f /etc/systemd/system/sizeup-stt-encode.service ]; then
+    systemctl restart sizeup-stt-encode.service || warn "sizeup-stt-encode: didn't start (systemctl status sizeup-stt-encode)"
+  fi
   # whisper-server is a service of its own: restarted only when its program, model or flags change
   want=$("$LIB/start-whisper" --print 2>/dev/null || true)
   have=$(whisper_argv)
@@ -1608,7 +1614,7 @@ activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
     /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-ais.service /etc/systemd/system/sizeup-trunk-recorder.service \
-    /etc/systemd/system/sizeup-logread.service \
+    /etc/systemd/system/sizeup-logread.service /etc/systemd/system/sizeup-stt-encode.service \
     /etc/systemd/system/sizeup-usbfs.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi

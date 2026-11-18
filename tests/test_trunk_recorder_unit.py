@@ -477,7 +477,7 @@ def test_the_unit_runs_the_supervisor_as_the_sizeup_user_with_no_privilege():
 def test_the_installer_installs_the_service_and_the_cli_knows_it():
     sh = INSTALLER.read_text()
     for want in ('install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"',
-                 "sizeup-adsb.service sizeup-trunk-recorder.service; do", "tr_was=$(tr_sig)",
+                 "sizeup-adsb.service sizeup-trunk-recorder.service sizeup-stt-encode.service; do", "tr_was=$(tr_sig)",
                  'trunk_recorder_service "$tr_was"', "sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py",
                  "/etc/systemd/system/sizeup-trunk-recorder.service \\"):
         assert want in sh, want
