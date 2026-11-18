@@ -55,6 +55,7 @@ import time
 import wave
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -539,6 +540,8 @@ class App:
         # Antenna groups (sizeup/radio/groups.py): dongles locked to jobs, by priority. None saved: as before.
         self._groups_file = self._mode_file.with_name(antenna.FILE) if self._mode_file and self.shared else None
         self.groups, self._groups_problem = antenna.load(self._groups_file)
+        self._kind = {c.label: c.kind for c in cfg.channels}     # (also below; _parkable needs it now)
+        self._unpark_unparkable()
         if self._groups_problem:               # never silently: the dongles run unlocked until the groups are saved
             log(f"sdr: CRITICAL antenna groups dropped: {self._groups_problem}; every dongle runs unlocked until "
                 "they are saved again (Settings > Radios > Receivers)")
@@ -3810,9 +3813,32 @@ class App:
         return job != P25_MODE and self._kind.get(job) != "paging"
 
     def _parked(self, mode: str, gs: list | None = None) -> str:
-        """Why `mode` may run on no dongle: parked in its antenna group (#637: switched off there on purpose), or ""."""
-        g = antenna.of_job(self.groups if gs is None else gs, mode) if mode != OFF_MODE else None
+        """Why `mode` may run on no dongle: parked in its antenna group (#637: switched off there on purpose), or "".
+        Never the county's or paging (_parkable): a person can always pick those, whatever a file says."""
+        if mode == OFF_MODE or not self._parkable(mode):
+            return ""
+        g = antenna.of_job(self.groups if gs is None else gs, mode)
         return f"{mode} is parked in {g.name}: unpark it first" if g is not None and mode in g.parked else ""
+
+    def _unpark_unparkable(self) -> None:
+        """At startup: a parked job that may not be parked (the county's, paging) in the groups file (edited by hand,
+        a backup put back, a fireground made a paging channel since) is unparked, said CRITICAL once, and the file
+        written again: its "no dongle has" warning is back, and nothing keeps a person from picking it."""
+        out, dropped = [], []
+        for g in self.groups:
+            bad = [j for j in g.parked if not self._parkable(j)]
+            dropped += [(g.name, j) for j in bad]
+            out.append(dataclasses.replace(g, parked=tuple(j for j in g.parked if j not in bad)) if bad else g)
+        if not dropped:
+            return
+        self.groups = out
+        for name, j in dropped:
+            log(f"sdr: CRITICAL antenna group {name}: {j} can't be parked (fire coverage): unparked")
+        try:
+            if self._groups_file is not None:
+                antenna.save(self._groups_file, out)
+        except OSError as e:
+            log(f"sdr: antenna groups: couldn't write the unparked groups back: {e}")
 
     def _group_runnable(self, job: str, on: set[str]) -> bool:
         """A job a group may give a dongle, beside the jobs `on`: the county's trunk-recorder only when one dongle

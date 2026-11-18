@@ -1124,3 +1124,44 @@ def test_a_wall_clock_step_back_never_lengthens_the_countys_wait(tmp_path):
     mrrs._m = 1000.0 + trunkrecd.COUNTY_WAIT_S
     assert mrrs._county_first(200.0, w, base) is False and mrrs.county_done == 5
     assert mrrs._county_first(201.0, w, base) is False                   # once per move
+
+
+# -- the second review of #702 (G1): a county or paging job parked in the file is unparked at load --------------------
+
+def test_a_parked_county_or_paging_job_in_the_file_is_unparked_at_start_and_said(rig, tmp_path):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    for sd in ("uhf-a", "uhf-b", "spare-1"):
+        assert app.set_mode("Off", sd) is None
+    assert app.set_antenna_groups(uhf4()) is None
+    app.stop()
+    f = tmp_path / "antenna_groups.json"                                  # edited by hand, or a backup put back
+    f.write_text(json.dumps({"groups": uhf4([P25, "South 2"])}))
+    again = make().start()
+    assert again.groups[0].parked == ()
+    assert "sdr: CRITICAL antenna group UHF: Fire/EMS 15 can't be parked (fire coverage): unparked" in logs
+    assert "sdr: CRITICAL antenna group UHF: South 2 can't be parked (fire coverage): unparked" in logs
+    assert "parked" not in json.loads(f.read_text())["groups"][0]          # written back
+    _rows, alerts = group_alerts(again)
+    assert [a["title"] for a in alerts] == ["Antenna group UHF check"]      # "no dongle has" is back
+    assert "Fire/EMS 15" in alerts[0]["text"] and "South 2" in alerts[0]["text"]
+    assert again.set_mode(P25, "uhf-a") is None and on(again, P25) == "uhf-a"   # a person can always pick it
+
+
+def test_a_fireground_parked_then_made_paging_is_unparked_and_never_refused(rig, tmp_path):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    assert app.set_mode("Off", "spare-1") is None
+    assert park(app, uhf4(["FG2"])) is None
+    app.stop()
+    from sizeup.config import ChannelCfg
+    paging = (ChannelCfg("South 2", 470.2, "paging"), ChannelCfg("FG1", 453.0375, "traffic"),
+              ChannelCfg("FG2", 458.0375, "paging"))                      # FG2 re-kinded as paging since
+    again = make(channels=paging).start()
+    assert again.groups[0].parked == () and any("FG2 can't be parked" in x for x in logs)
+    assert again.set_mode("FG2", "spare-1") is None and on(again, "FG2") == "spare-1"
+    # and should the groups hold one anyway (in memory), it is never refused as parked
+    again.groups = [replace(again.groups[0], parked=("FG2",)), again.groups[1]]
+    assert again._parked("FG2") == "" and "parked" not in (again.set_mode("FG2", "uhf-c") or "")
