@@ -1,0 +1,1579 @@
+{
+ "why": "A callsign said right before a distance (#648, #650's follow-up): a number word too big to be a distance on final is never glued onto the flight number before it (JetBlue 123 25 miles out: JBU123); a short flight and its distance read as before when both readings are on ADS-B (JetBlue 12 4 mile final, JBU12 and JBU124 around: JBU12); a written flight whose distance digit was lost keeps its digits (JBU1234 mile final: JBU1234, not JBU1); with nothing on ADS-B, a short flight stays short (JetBlue 45 2 miles out: JBU45). Then a written flight keeps its digits with a shorter one on ADS-B (JBU1234 3 mile final, JBU12 around: JBU1234), and a flight number said in groups before a distance too big for final is joined (JetBlue 12 34 mile final: JBU1234). And 21 to 99 miles out is a check-in's distance (JetBlue 12 25 miles out: JBU12).",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 10,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, JetBlue 123 25 miles out, declaring an emergency, engine failure"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 10.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ]
+      ]
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 10.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: emergency declared: JBU123 (alert high 99%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: emergency declared: JBU123",
+     "message": "“Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure” · JBU123 (A320) · 9.0 NM from HPN · 2,880 ft · arriving 34 · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 50,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 50.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 50.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 60,
+    "id": "twr-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, JetBlue 12 4 mile final, we have smoke in the cabin"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 60.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 50.0
+       },
+       {
+        "callsign": "JBU12",
+        "hex": "b00012",
+        "spoken": "JBU12",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 41.0,
+        "lon": -73.7,
+        "alt": 1280,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 4.0,
+        "pos_at": 50.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 110,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 110.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 110.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 120,
+    "id": "twr-3",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester traffic JBU1234 mile final for runway 34 Westchester"
+   }
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 170,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 170.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 170.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 180,
+    "id": "twr-4",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 180.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-3",
+        "at": 120.0,
+        "channel": "HPN Tower",
+        "text": "Westchester traffic JBU1234 mile final for runway 34 Westchester",
+        "hits": [],
+        "context": true
+       },
+       {
+        "id": "twr-4",
+        "at": 180.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 170.0
+       },
+       {
+        "callsign": "JBU1234",
+        "hex": "b01234",
+        "spoken": "JBU1234",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 41.03,
+        "lon": -73.7,
+        "alt": 640,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 2.0,
+        "pos_at": 170.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 230,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 230.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-3",
+        "at": 120.0,
+        "channel": "HPN Tower",
+        "text": "Westchester traffic JBU1234 mile final for runway 34 Westchester",
+        "hits": [],
+        "context": true
+       },
+       {
+        "id": "twr-4",
+        "at": 180.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 230.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 240,
+    "id": "twr-5",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester traffic JBU1234 3 mile final for runway 34"
+   }
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 290,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 290.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-3",
+        "at": 120.0,
+        "channel": "HPN Tower",
+        "text": "Westchester traffic JBU1234 mile final for runway 34 Westchester",
+        "hits": [],
+        "context": true
+       },
+       {
+        "id": "twr-4",
+        "at": 180.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 290.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 300,
+    "id": "twr-6",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, JetBlue 12 34 mile final, runway 34"
+   }
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 350,
+    "planes": [
+     {
+      "hex": "b00123",
+      "flight": "JBU123",
+      "type": "A320",
+      "lat": 40.92,
+      "lon": -73.7,
+      "alt": 2880,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 9.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00012",
+      "flight": "JBU12",
+      "type": "A320",
+      "lat": 41.0,
+      "lon": -73.7,
+      "alt": 1280,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 4.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b00124",
+      "flight": "JBU124",
+      "type": "A320",
+      "lat": 40.97,
+      "lon": -73.7,
+      "alt": 1920,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 6.0,
+      "age": 0.0
+     },
+     {
+      "hex": "b01234",
+      "flight": "JBU1234",
+      "type": "A320",
+      "lat": 41.03,
+      "lon": -73.7,
+      "alt": 640,
+      "gs": 140,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 2.0,
+      "age": 0.0
+     }
+    ]
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:JBU123",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 350.0,
+     "title": "HPN ATC: emergency declared: JBU123",
+     "detail": "aircraft emergency · heard: declaring an emergency, engine failure · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+        "hits": [
+         "declaring an emergency",
+         "engine failure"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-2",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+        "hits": [
+         "smoke in the cabin"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-3",
+        "at": 120.0,
+        "channel": "HPN Tower",
+        "text": "Westchester traffic JBU1234 mile final for runway 34 Westchester",
+        "hits": [],
+        "context": true
+       },
+       {
+        "id": "twr-4",
+        "at": 180.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "JBU123",
+        "hex": "b00123",
+        "spoken": "JBU123",
+        "match": 1.0,
+        "type": "A320",
+        "lat": 40.92,
+        "lon": -73.7,
+        "alt": 2880,
+        "gs": 140,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 9.0,
+        "pos_at": 350.0
+       }
+      ],
+      "location": {
+       "placed": false,
+       "approx": true,
+       "basis": "runway 34 (not enough to place it on the map)",
+       "runway": "34"
+      },
+      "phrases": [
+       "runway 34"
+      ],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "fire_acft"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "JBU123 · A320"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "engine · emergency"
+       ],
+       [
+        "Track",
+        "2,880 ft · 9.0 NM · arriving"
+       ],
+       [
+        "Where",
+        "HPN Tower"
+       ]
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 360,
+    "id": "twr-7",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, JetBlue 12 25 miles out, with you for runway 34"
+   }
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 380
+   },
+   "console": {
+    "read": "open",
+    "open": [
+     "A1"
+    ]
+   }
+  }
+ ]
+}

@@ -254,7 +254,7 @@ def hub(tmp_path, jwks):
 
 
 def test_hub_with_access_refuses_pages_and_api_without_a_token(keys, hub):
-    for path in ("/cad", "/", "/monitor", "/comms", "/static/cad.js", "/api/cad/state", "/api/state", "/api/cad/whoami"):
+    for path in ("/cad", "/", "/monitor", "/comms", "/static/cad.js", "/static/bundle/cad.js", "/api/cad/state", "/api/state", "/api/cad/whoami"):
         code, body = req(hub.url + path)
         assert code == 401, path
         assert (b"Cloudflare Access" in body) if isinstance(body, bytes) else "Cloudflare Access" in body["error"]

@@ -10,8 +10,9 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
-POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
@@ -42,7 +43,9 @@ POST /api/station-mode {"forward": bool?, "hub_url": str?, "operator": str?}  on
 POST /api/station-mode/test {"hub_url": str?}  the hub's /healthz and station path with the token
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py).
                                Views: Dispatch, Overview, Radio (/cad#radio?unit=&channel=&event=&q=: every transmission
-                               with its rig, radio ID, channel and events), Settings (/cad#settings/<section>)
+                               with its rig, radio ID, channel and events), Settings (/cad#settings/<section>).
+                               Its scripts and stylesheets as one file each when the image built them
+                               (static/bundle/, sizeup/web/bundle.py); /cad?bundle=0: the separate files
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 Caching (#137): /static/... named by version from the pages (?v=, kept a year), else revalidated (ETag, 304);
 the layers' data (airport, GIS catalog and layers, roads) ETag + max-age, must-revalidate; text gzipped.
@@ -136,6 +139,7 @@ from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
 from sizeup.api.v1.handler import V1
+from sizeup.web import bundle as bundle_mod
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
@@ -182,14 +186,17 @@ def compressible(ctype: str) -> bool:
 class Assets:
     """The static folder as served: each file's bytes, ETag, version (from its content) and gzip, re-read
     when it changes on disk. Pages (.html) and stylesheets have their /static/... references versioned
-    (?v=<the file's version>), so a browser keeps each version for good and a deploy names new ones."""
+    (?v=<the file's version>), so a browser keeps each version for good and a deploy names new ones. A page's
+    bundle blocks are replaced by their bundles when the image built them (sizeup/web/bundle.py), unless
+    bundled=False (/cad?bundle=0)."""
 
     def __init__(self, root: Path):
         self.root = root.resolve()
+        self.bundles = bundle_mod.Bundles(self.root)
         self._cache: dict[str, tuple[tuple[int, int], dict]] = {}
         self._lock = threading.Lock()
 
-    def get(self, rel: str) -> dict | None:
+    def get(self, rel: str, bundled: bool = True) -> dict | None:
         """{"body", "etag", "version", "ctype"} or None when it isn't a file under the folder."""
         target = (self.root / rel).resolve()
         if self.root not in target.parents:
@@ -201,22 +208,27 @@ class Assets:
         if not target.is_file():
             return None
         stamp, refs = (st.st_mtime_ns, st.st_size), target.suffix in (".html", ".css")
+        key = rel if bundled or target.suffix != ".html" else rel + "#files"
         with self._lock:
-            hit = self._cache.get(rel)
+            hit = self._cache.get(key)
         if hit and hit[0] == stamp and not refs:
             return hit[1]
         body = target.read_bytes()
         if refs:                        # what it names may have changed even if it didn't
-            body = VERSIONED.sub(self._ref, body.decode("utf-8")).encode("utf-8")
+            text = body.decode("utf-8")
+            if target.suffix == ".html":
+                text = bundle_mod.render(text, self.bundles if bundled else None)
+            body = VERSIONED.sub(self._ref, text).encode("utf-8")
             if hit and hit[0] == stamp and hit[1]["body"] == body:
                 return hit[1]
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        ctype = ("application/json" if target.suffix == ".map"         # a bundle's source map
+                 else mimetypes.guess_type(target.name)[0] or "application/octet-stream")
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
         etag = etag_of(body)
         a = {"body": body, "etag": etag, "version": etag.strip('"')[:10], "ctype": ctype, "gz": None}
         with self._lock:
-            self._cache[rel] = (stamp, a)
+            self._cache[key] = (stamp, a)
         return a
 
     def _ref(self, m: re.Match) -> str:
@@ -240,8 +252,13 @@ class Broadcaster:
     a page merges it into what it has (live.js). An id from another boot, or none: the whole state."""
     MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
 
-    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0):
+    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
+        # reuse: state_fn hands back the same object for a section that hasn't changed and never changes one in place
+        # (Cad.state: its cached sections, rebuilt only on a new store.rev): that section's JSON is kept, not made again
+        # each second (the incidents and units are most of ~400 KB; #446)
+        self.reuse = reuse
+        self._made: dict[str, tuple[object, bytes]] = {}     # key -> (the object last serialized, its JSON)
         self.boot = secrets.token_hex(4)
         self._wake = threading.Event()
         self._cond = threading.Condition()
@@ -277,7 +294,7 @@ class Broadcaster:
             st = self.state_fn() if st is None else st
             if not isinstance(st, dict):
                 raise TypeError(f"state is a {type(st).__name__}, not a dict")
-            parts = {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+            parts = self._serialize(st)
         except Exception as e:  # never let one bad state kill the display
             parts = {"time": json.dumps(time.time()).encode(), "error": json.dumps(f"{type(e).__name__}: {e}").encode()}
         with self._cond:
@@ -288,6 +305,21 @@ class Broadcaster:
             self._seq, self._sections, self._gone = seq, sections, gone
             self._cond.notify_all()
         return seq
+
+    def _serialize(self, st: dict) -> dict[str, bytes]:
+        if not self.reuse:
+            return {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+        made, out = {}, {}
+        for k, v in st.items():
+            k = str(k)
+            was = self._made.get(k)
+            # the same object (held here, so its id is never another's) and a container: its JSON as made last time.
+            # A scalar or a new object: made again (cheap, or changed)
+            b = was[1] if was is not None and was[0] is v and isinstance(v, (dict, list)) else \
+                json.dumps(v, separators=(",", ":")).encode()
+            made[k], out[k] = (v, b), b
+        self._made = made
+        return out
 
     # -- what a page is sent ----------------------------------------------------------------------------------
 
@@ -758,7 +790,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path in ("/", "/index.html") and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
                 return self._redirect("/cad")
             if path in ("/cad", "/cad.html", "/monitor") and cad is not None:
-                return self._static("cad.html")
+                # one script and one stylesheet when the image built them (sizeup/web/bundle.py); ?bundle=0: the files
+                return self._static("cad.html", bundled=("bundle", "0") not in parse_qsl(url.query))
             if path in ("/comms", "/comms.html") and cad is not None:   # Comms is the CAD's Radio view now
                 return self._redirect("/cad#radio" + (f"?{url.query}" if url.query else ""))
             if path == "/api/cad/stream" and cad_b is not None:
@@ -930,7 +963,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, b'{"error":"bad or too large body (%d KB max)"}' % (limit // 1024),
                                       "application/json")
                 return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()),
-                                  {"Cache-Control": "no-store"} if path == "/api/cad/stations" else None)   # a new token
+                                  {"Cache-Control": "no-store"} if path in ("/api/cad/stations", "/api/cad/stt-workers")
+                                  else None)   # a new token
             if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, client=self._client())):
                 self.close_connection = True     # the body is left unread
                 return self._send(*refused)
@@ -946,6 +980,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         if got is None:
                             raise ValueError("source: p25:<system>:<talkgroup>")
                         tier = body.get("tier")
+                        # (the county's too: its system says it is the county's even where the number is also
+                        # another system's; the hub sends it bare to a station from before #409)
                         err = set_talkgroup(got[1], body.get("record"), body.get("main"),
                                             None if tier is None else str(tier), got[0])
                     else:
@@ -1274,8 +1310,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
 
-        def _static(self, rel: str, query: str = "") -> None:
-            a = assets.get(rel)
+        def _static(self, rel: str, query: str = "", bundled: bool = True) -> None:
+            a = assets.get(rel, bundled)
             if a is None:
                 return self._send(404, b"not found\n", "text/plain")
             v = next((x for k, x in parse_qsl(query) if k == "v"), "")
@@ -1315,7 +1351,7 @@ class WebServer:
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
-        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
+        self.cad_broadcaster = Broadcaster(cad.cad.state, reuse=True) if cad is not None and role != "station" else None
         self.perf = perf                # sizeup/perf.py Perf (the hub, #425): each request thread's CPU as it ends
 
         class Httpd(ThreadingHTTPServer):
@@ -1386,6 +1422,14 @@ class WebServer:
         threading.Thread(target=run, name="drain", daemon=True).start()
 
     def shutdown(self) -> None:
+        """Stop serving (tests; a deploy drains instead). The station's long poll ends now, empty, as in drain():
+        left waiting, its request thread would answer up to 25 s later, after the server was gone (#665). Every request
+        after this one gets 503 and its connection closed (a station still running backs off; without it, on its
+        kept-alive connection, it would poll again at once, get [] at once, and so on, thousands a second)."""
+        self.gate.draining.set()
+        jobs = getattr(self.station, "jobs", None)
+        if jobs is not None and hasattr(jobs, "close"):
+            jobs.close()
         self.broadcaster.stop()
         if self.cad_broadcaster:
             self.cad_broadcaster.stop()

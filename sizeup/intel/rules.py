@@ -15,7 +15,12 @@ A pack says which radio sources it reads (scope), what its categories are and th
 Phrases: words in order, case and punctuation aside; "..." a gap of up to GAP_WORDS words with no "no" / "not" in it
 (sizeup/cad/alarms.py's grammar); "(a|b|c d)" one of the alternatives, each one or more words. A rule hits a text
 when any of its phrases is in it and none of its "not" phrases is. "re:" in front: a regular expression instead
-(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d").
+(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d"). An expression must not backtrack
+without bound: its separator and word classes share no character ("[^\\w'.?!]+" beside "[\\w']+"; never "\\W+"
+beside "[\\w']+", which both take an apostrophe), and each character of a run is taken by one alternative only (the
+police pack's ellipsis, "\\.(?=\\.)|(?<=\\.)\\.(?!\\.)": a dot beside a dot, never a sentence's end).
+tests/test_intel_packs.py times every pack's expressions on hostile texts, and an expression reads only the first
+RE_TEXT_MAX characters.
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
 
@@ -34,6 +39,13 @@ without "normalize" matches exactly as before. Suppress phrases are tried on bot
 the file's). With an area, the address lookup searches those towns (and the towns said), and an event placed outside
 them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
 (the police pack, whose sources are local): every place counts, as before.
+
+A category with "place": true (the police pack's fire_call) is held at log until its event has a place a crew can
+drive to (an address, intersection, block or landmark) in the source's towns ("towns"), else the pack's area: a
+burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
+words, or a read-back by the call's talker or units within minutes). "words": the words that tie a later transmission
+to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
+category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
 
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
@@ -62,7 +74,9 @@ GAP = "..."
 GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
-RE_MAX = 200
+RE_MAX = 300
+RE_TEXT_MAX = 4000              # a "re:" expression reads at most this many characters of a transmission (minutes of
+                                # speech): bounds the time an expression with backtracking can take on a freak text
 PHRASE_MAX = 120
 RULES_MAX = 400
 WILD = "*"                      # a rule for every category (a dispatch cue): counts only beside a real hit
@@ -231,7 +245,7 @@ class Phrase:
 
     def found(self, text: str, ws: list[str]) -> bool:
         if self.rx is not None:
-            return self.rx.search(text or "") is not None
+            return self.rx.search((text or "")[:RE_TEXT_MAX]) is not None
         return any(_match_at(ws, i, self.items) for i in range(len(ws)))
 
 
@@ -384,7 +398,12 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
+                   "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
+                   "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
+    for c, cd in cats.items():
+        if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
+            raise ValueError(f"{name}.{c}.defer_to: another of {name}'s categories")
     rules = []
     seen = set()
     for r in d.get("rules") or []:

@@ -388,7 +388,8 @@ def test_settings_api(server):
     code, a = server.j("GET", "/api/cad/settings/audit?section=lists")
     assert code == 200 and a["audit"][0]["key"] == "event_types/MVA" and a["audit"][0]["operator"] == "JD"
     code, exp = server.j("GET", "/api/cad/settings/export")
-    assert code == 200 and exp["overrides"] == {"event_types": {"MVA": {"name": "MVA", "color": "#0000FF"}}}
+    assert code == 200 and exp["overrides"] == {"event_types": {"MVA": {"name": "MVA", "color": "#0000FF"}},
+                                             "radio_services": {}}       # (always: {} with no choices)
     code, dry = server.j("POST", "/api/cad/settings/import", {"action": "dry_run", "settings": exp})
     assert code == 200 and dry["changes"] == []
 

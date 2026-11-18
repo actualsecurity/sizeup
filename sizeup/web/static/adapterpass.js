@@ -3,6 +3,7 @@
 // version; the hub can't read it back, and nothing here keeps it (no form element: never a GET with it in the URL; the
 // fields are emptied as the request goes). GET /api/cad/adapter-password: the version, when and who saved it, the
 // next save, the station adapter's state. Its own card and poll, so typing is never wiped by another panel's render.
+"use strict";
 const AdapterPasswordCard = (() => {
   const POLL_MS = 15000;
   let card = null, status = null, form = null, timer = null, busy = false, saving = false, last = null, said = "";

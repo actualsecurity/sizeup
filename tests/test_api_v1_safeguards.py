@@ -200,9 +200,15 @@ def hub_with_v1(tmp_path, monkeypatch):
         raise RuntimeError("secret body " + (ctx.headers.get("Authorization") or ""))
     routes = table(seen) + [Route("GET", "/api/v1/boom", boom, "public", "reads")]
     on = Switches(lambda: True, lambda: {"reads": True})
-    monkeypatch.setattr(web_server, "V1", lambda **kw: V1(routes, **{**kw, "switches": on}))
+    built = []                         # the V1 the server makes (a test that needs its limiter's clock reaches it here)
+
+    def make(**kw):
+        built.append(V1(routes, **{**kw, "switches": on}))
+        return built[-1]
+    monkeypatch.setattr(web_server, "V1", make)
     h = HubRun(hub_cfg(tmp_path, mobile_enabled=True))
     h.seen = seen
+    h.v1s = built
     yield h
     h.close()
 
@@ -510,6 +516,9 @@ def test_the_configs_document_the_switch():
 
 def test_a_flood_from_one_address_is_a_429_through_the_servers_address_wiring(hub_with_v1):
     h = hub_with_v1
+    for v in h.v1s:                    # the limiter refills on the real clock: a slow machine would earn a 16th request
+        now = v.limits.clock()
+        v.limits.clock = lambda now=now: now
     codes = [http(h.url, "/api/v1/meta", headers={"Cf-Connecting-Ip": "203.0.113.5"})[0] for _ in range(20)]
     assert codes == [200] * 15 + [429] * 5                       # burst 15 from one address, as Cloudflare names it
     status, headers, body = http(h.url, "/api/v1/meta", headers={"Cf-Connecting-Ip": "203.0.113.5"})

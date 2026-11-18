@@ -5,10 +5,9 @@ import numpy as np
 import pytest
 
 from sizeup.app import App
-from sizeup.config import Config
 from sizeup.radio.fm import RATE, Channel, Segment
 from sizeup.radio.p25 import Call
-from sizeup.radio.tones import ToneCode
+from tests.appcfg import cfg  # noqa: F401 - the shared helper (other tests import it from here)
 
 PAGE_TEXT = ("Port Chester Fire Department, respond to an activated fire alarm. 209 West Chester Avenue, "
              "cross of Pearl Street, Port Chester. Time out 1432.")
@@ -22,12 +21,6 @@ class FakeWhisper:
 
     def transcribe(self, audio, prompt=""):
         return self.texts[round(len(audio) / RATE)], 0.9
-
-
-def cfg(tmp_path):
-    return Config("t", "Test", "127.0.0.1", 0, "rtl_fm", (), (ToneCode("Port Chester FD", 349.1, 311.1, "PCFD"),),
-                  frozenset({"Port Chester FD", "Rye Brook FD"}), "whisper-server", "m.bin", 1, 1, "",
-                  "", clips_dir=str(tmp_path / "clips"))
 
 
 def voice(s, seed=0):

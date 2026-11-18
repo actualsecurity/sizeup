@@ -292,6 +292,9 @@ class StationMode:
             return {"forward": self.forward, "hub_url": self.hub_url, "from": self.source,
                     "config_role": self.cfg.cloud_role or "all-in-one",
                     "running": bool(self.link is not None and self.link.running),
+                    # the id the hub assigns this station once it has said (StationLink.adopt), its config's beside it
+                    "station_id": str(getattr(self.link, "station_id", "") or self.cfg.station_id),
+                    "config_id": self.cfg.station_id,
                     "status": self.status(), "secrets": self.secrets(), "keychain": keychain_available(),
                     "update": dict(self.updates.status(), busy=self.busy())}
 

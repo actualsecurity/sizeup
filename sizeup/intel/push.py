@@ -1,4 +1,4 @@
-"""The push for an intel event: composed from an allow-list of fields, then scrubbed, failing closed.
+"""The push for an intel event: composed from an allow-list of fields, then (push_pii off) scrubbed, failing closed.
 
     Title  "PD · Smoke / fire reported · Port Chester"         the pack's label, the category's, the town
     Body   "100 Example Ave · 14:32 · high"                    the gazetteer's address when the words confirm it
@@ -10,10 +10,17 @@
     Tags   the category's tag, police_car (a police pack)      Priority: the category's
     Click  <public url>/radio?view=police&intel=<id>           behind Cloudflare Access
 
-Never in it: transcript words, a talker, a roster alias, a radio ID, a plate, a date of birth, a person's name. Only
-the fields above go in, and scrub() checks the result anyway: any of the event's transmissions' talkers / radio IDs /
-units, a 6+ digit number (a radio ID), a plate-like letters-and-digits token, a date: the push is not sent and the
-event says suppressed "scrub" (logged without the text).
+Not among its fields: transcript words, a talker, a roster alias, a radio ID, a plate, a date of birth, a person's
+name. Only the fields above go in, and (push_pii off) scrub() checks the result anyway: any of the event's
+transmissions' talkers / radio IDs / units, a 6+ digit number (a radio ID), a plate-like letters-and-digits token, a
+date: the push is not sent and the event says suppressed "scrub" (logged without the text).
+
+push_pii (Settings > System > Intel, on by default; admin decision, 2026-11-17): intel output is not scrubbed, access
+to it is limited instead, so with it on the engine skips scrub() and a name, a plate or another PII token in these
+fields passes through. Off: scrub() as above, unchanged. The fields are the same allow-list either way (no transcript
+words are added), and the locator's own checks stay (a place label shaped like a plate or an ID is no place:
+scrub_label(); a house number the words put after a plate / ID word: the street alone), as they are about where, not
+who. ntfy topics are readable by anyone who knows the name (sizeup/notify.py).
 """
 
 from __future__ import annotations

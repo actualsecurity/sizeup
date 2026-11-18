@@ -1,7 +1,7 @@
 # sizeup station config. Copy to config.toml (gitignored) and edit. Unknown keys are rejected.
 
 [station]
-id = "pcfd-hq"                     # the hub keys this station's token, history and outbox on it: never change it
+id = "pcfd-hq"                     # the hub keys its token and history on it; rename on the hub (Stations > Set id): it adopts that
 name = "Port Chester FD South End"  # shown in Settings, health and alerts
 # Where the station PC and its antennas are: the South End firehouse, 51-53 Grace Church St (#271), not HQ. Our ADS-B
 # receiver's position (readsb --lat/--lon). Leave out for these defaults.
@@ -51,6 +51,10 @@ squelch_db = 10                    # FM quieting (dB below the idle hiss) needed
 #                                  # through a fade (traffic: 0.4 s, unchanged)
 # continue_s = 3                   # paging: the carrier back within this long after a page closed (even
 #                                  # under squelch_db) is more of the same page; it's sent on after this
+# split_s = 0                      # key-ups: a carrier drop this long ends a transmission inside the hang
+#                                  # (traffic 0.2, airband 0.15; paging 0: a simulcast fades mid-page)
+# jump_db = 0                      # ... so does one after 0.1 s gone that comes back this far over its level
+#                                  # (traffic 10, airband 6; paging 0: off, a page must stay whole). Both 0: off
 
 [[radio.channels]]
 label = "FG1"                      # PCFD / Rye Brook primary fireground (county list 2024-11-06)
@@ -341,7 +345,7 @@ heartbeat_every_min = 360            # Tapout's heartbeat period (every 6 h; it 
 # airport_names = ["westchester", "west chester", "hpn", "white plains"]   # ours: an alert naming another airport
 #                                    #   (Danbury, Teterboro ...) and none of these is not HPN's
 
-# [alerts]: our own ntfy topics for pushes that page a person (sizeup/notify.py), two kinds:
+# [alerts]: our own ntfy topics for pushes that page a person (sizeup/notify.py), three kinds:
 #   ntfy_topic    the alarms: the emergency buttons (P25, MDC, FleetSync), a mayday heard on our fire channels
 #                 (sizeup/cad/alarms.py, #128), an aircraft emergency squawk near HPN, each at max priority with
 #                 who and where, and their acknowledgement, all clear and "Ended" notices
@@ -350,8 +354,10 @@ heartbeat_every_min = 360            # Tapout's heartbeat period (every 6 h; it 
 #                 outbox backing up, its disk filling, its whisper queue behind; Amazon Transcribe failing and
 #                 its monthly budget at 80 % / 100 %; shown as a banner on /cad and /monitor, logged, and pushed
 #                 (at most once per alert per repeat_min, plus its recovery)
-#   intel_topic   radio pre-alerts (sizeup/intel: police / fire chatter, what and where); empty: the alerts topic
-# Only one of ntfy_topic / status_topic set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
+#   intel_topic   radio pre-alerts (sizeup/intel: police / fire chatter, what and where), on a channel of their own:
+#                 empty: no intel pushes (never the alerts or status topic); the same name as ntfy_topic or
+#                 status_topic (case aside): refused at startup (logged), intel pushes off
+# Only one of ntfy_topic / status_topic set: alarms and status both go to it (intel never does). ntfy topics are public by name: long random ones (e.g.
 # `openssl rand -hex 12`). NEVER Tapout's topics (the pre-alert ring pages the fire crew):
 # refused (the protected set: [prealert] topics, env, Settings) here and again before every send. Empty or left out: no pushes. Env
 # SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_INTEL_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push

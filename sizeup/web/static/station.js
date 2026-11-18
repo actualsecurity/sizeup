@@ -152,7 +152,7 @@ function route() {
       changed: refreshHub,
       offText: "Stop forwarding to the hub? Radios keep running; nothing new is sent. Queued items wait here.",
       time: (t) => fmtTime(t, true),
-      onState: (d) => { sta.hub = d; renderHub(); },
+      onState: (d) => { sta.hub = d; renderHub(); renderSystem(); },
     });
     renderSystem();
   }
@@ -351,9 +351,13 @@ function fillChannels(all, pages) {
 // ---- Settings: this install -----------------------------------------------------------------------------
 
 function renderSystem() {
+  if (!$("#sys-facts")) return;
   const h = sta.health || {}, sc = (sta.scene && sta.scene.station) || {};
   // the name first (#271: the id pcfd-hq is the hub's key, not where the station is)
-  const rows = [["Station", sc.name || "—"], ["Station id", sc.id || h.station || "—"], ["Role", h.role || "—"],
+  // the id the hub assigns (the station adopts it); its config's beside it when that still says another
+  const hb = sta.hub || {}, id = hb.station_id || sc.id || h.station || "—";
+  const sid = id + (hb.config_id && hb.station_id && hb.config_id !== hb.station_id ? ` (config ${hb.config_id})` : "");
+  const rows = [["Station", sc.name || "—"], ["Station id", sid], ["Role", h.role || "—"],
                 ["Version", h.version || "—"], ["Build", h.build || "—"]];
   $("#sys-facts").replaceChildren(...rows.map(([k, v]) => {
     const d = el("div");
