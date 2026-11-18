@@ -40,6 +40,8 @@
                                   (Cad.from_monitor): the event's page plays from the event itself
                       mention     the transcript names a unit on the event, its address or its place;
                       fireground  on the event's working fireground channel (sizeup/cad/radiolog.py, #311)
+                      opchannel   on the county talkgroup the event is worked on (its operating channel), and not
+                                  another call's as far as can be told (sizeup/cad/opchannel.py); unit = the channel
     A page is a row like any transmission (id = the page id, channel South 2, talker 60 Control), with
     its tone pairs (tones: [{a_hz, b_hz, names, ours}], JSON) and where the voice starts (voice_at, seconds
     into the clip: play skips the tones). Read back, each row says what kind of page it is (page, #80):
@@ -172,7 +174,8 @@ def rig_rows_sql(n: int) -> str:
 EMERGENCY_WHERE = "(t.emergency = 1 OR t.id IN (SELECT traffic_id FROM alarms))"
 # Links the radio log made from words alone (#311, sizeup/cad/radiolog.py): they don't keep a transmission's audio or row
 # past the normal retention until a person keeps them (radio_link_kept).
-AUTO_UNSURE = ("mention", "fireground")
+OPCHANNEL = "opchannel"     # on the incident's operating channel only (sizeup/cad/opchannel.py)
+AUTO_UNSURE = ("mention", "fireground", OPCHANNEL)
 KEPT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS radio_link_kept (
   traffic_id TEXT NOT NULL,
@@ -193,8 +196,8 @@ CREATE TABLE IF NOT EXISTS radio_activity (
 );
 CREATE INDEX IF NOT EXISTS radio_activity_minute ON radio_activity(minute);
 """
-# A link that keeps its transmission: any but an unconfirmed mention / fireground one
-SURE_LINK = ("(l.why NOT IN ('mention', 'fireground') OR EXISTS (SELECT 1 FROM radio_link_kept k "
+# A link that keeps its transmission: any but an unconfirmed mention / fireground / operating-channel one
+SURE_LINK = ("(l.why NOT IN ('mention', 'fireground', 'opchannel') OR EXISTS (SELECT 1 FROM radio_link_kept k "
              "WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id))")
 
 
@@ -236,6 +239,11 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
+        # (t, rigs) -> ({incident: (why, unit)}, {incident}): the operating channels' links for a transmission and the
+        # "on this channel" links it must not keep (sizeup/cad/opchannel.py rule_links), asked before record()'s
+        # transaction; None: none. on_pages_linked(iid, page ids): after link_pages committed.
+        self.channel_links = None
+        self.on_pages_linked = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
         self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
@@ -283,6 +291,13 @@ class Comms:
         now = self.clock()
         start = float(t["start"])
         rigs = [r.strip() for r in (t.get("rig") or "").split(",") if r.strip()]
+        chan: tuple[dict, set] = ({}, set())
+        if p25 and self.channel_links is not None and not sources.other_p25({"talkgroup": t.get("talkgroup"),
+                                                                             "system": str(t.get("system") or "")}):
+            try:                                # (outside the transaction: it reads the radio log's context)
+                chan = self.channel_links(t, rigs)
+            except Exception as e:  # noqa: BLE001 - the transmission is logged whatever this does
+                self.log(f"CAD: operating channel: {type(e).__name__}")
         with self.store.tx() as db:
             have = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
                               "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
@@ -345,6 +360,7 @@ class Comms:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
                 self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
+                self._channel_apply(db, tid, *chan)
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
             # On no incident, before or after (no link made, to it or to another turn of its call), and no row of the
@@ -400,6 +416,23 @@ class Comms:
                 self._auto(db, tid, iid, why, unit)
         if p25 and turn is not None and tg in self.incident_tgs:
             self._dispatcher_links(db, tid, call_id, turn, disp, links)
+
+    def _channel_apply(self, db, tid: str, add: dict, drop) -> None:
+        """The operating channels' links for one transmission (opchannel.py rule_links): an "on this channel" link that
+        nobody kept dropped where it can be told to be another call's; the links to make, never over a link it has
+        (but an "on this channel" one, which a unit link takes the place of), never where a person took it off."""
+        for iid in drop:
+            if db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ? AND why = ? AND NOT EXISTS "
+                          "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = ? AND k.incident_id = ?)",
+                          (tid, iid, OPCHANNEL, tid, iid)).rowcount:
+                self.touch(tid)
+        for iid, (why, unit) in add.items():
+            had = db.execute("SELECT why FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
+            if had is not None:
+                if had[0] != OPCHANNEL or why == OPCHANNEL:
+                    continue
+                db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
+            self._auto(db, tid, iid, why, unit)
 
     @staticmethod
     def _count(db, source: str, at: float, seconds: float = 0.0, calls: int = 1, radios=()) -> None:
@@ -665,6 +698,11 @@ class Comms:
                 self.touch(pid)
             if n:
                 self.rev += 1
+        if self.on_pages_linked is not None:
+            try:
+                self.on_pages_linked(iid, [str(p) for p in page_ids if p])
+            except Exception as e:  # noqa: BLE001 - the pages are on it whatever this does
+                self.log(f"CAD: operating channel: {type(e).__name__}")
         return n
 
     def link(self, tid: str, iid: int, operator: str = "") -> dict:
@@ -1810,6 +1848,8 @@ def why_text(why: str, unit: str = "") -> str:
         return f"names its {unit}" if unit in ("address", "place") else f"names {unit or 'a unit on it'}"
     if why == "fireground":
         return f"its fireground channel {unit}".rstrip()
+    if why == OPCHANNEL:
+        return f"on its channel {unit}".rstrip()
     return why
 
 

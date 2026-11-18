@@ -12,7 +12,9 @@ plays the clip and shows the transcript) when
                 known: its external CAD feed names it (extra "fireground"), and no other open incident has it. Never
                 guessed from who is talking (#163). why "fireground", unit: the channel
 
-and a page for it already goes on it (comms.link_pages, why "page").
+and a page for it already goes on it (comms.link_pages, why "page"). An incident's operating channel (another county
+talkgroup it is worked on, sizeup/cad/opchannel.py) counts as our talkgroup for it while it is on; a link by words
+takes the place of its "on this channel" one.
 
 False-positive guards: an analog key-up from a radio nobody named is never linked by its words (#163: only a known
 fireground channel takes it); only our dispatch and fire channels (the 60 Control feed's and the incident talkgroups,
@@ -50,7 +52,7 @@ import threading
 import time
 
 from sizeup import sourcekeys as sources
-from sizeup.cad.comms import AUTO_UNSURE
+from sizeup.cad.comms import AUTO_UNSURE, OPCHANNEL
 from sizeup.cad.feed import unit_forms
 from sizeup.cad.sources import (ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, match_address, place_key, same_place,
                                 street_part)
@@ -294,8 +296,10 @@ class RadioLog:
                 off.setdefault(r["incident_id"], set()).add(r["field"][5:])
         for iid, names in off.items():                   # a person's unit stays theirs only while it is on (or went)
             names -= {r["name"] for r in assigns.get(iid, []) if r["cleared_at"] is None or r["worked"]}
+        op = getattr(self.cad, "opchan", None)           # the incidents' operating channels then (sizeup/cad/opchannel.py)
         return {"tgs": tgs, "fm": fm, "paging": set(self.cad.s.paging), "tactical": set(self.cad.s.tactical),
-                "board": self.board(), "incs": incs, "assigns": assigns, "feeds": feeds, "depts": self._depts(), "since": since, "off": off}
+                "board": self.board(), "incs": incs, "assigns": assigns, "feeds": feeds, "depts": self._depts(), "since": since, "off": off,
+                "op": op.windows(lo, hi) if op is not None else []}
 
     def _depts(self) -> set[str]:
         """A feed's department entries (Sources.department_units, #370): never a unit here."""
@@ -341,7 +345,9 @@ class RadioLog:
         if t["talkgroup"] is not None and (t.get("system") or sources.COUNTY) != sources.COUNTY:
             return {}                       # another P25 system's traffic (#409): never on our incident by a rule
         if t["talkgroup"] is not None:
-            if t["talkgroup"] not in ctx["tgs"]:
+            if t["talkgroup"] not in ctx["tgs"] and not any(   # ... or an open incident's operating channel then
+                    w["tg"] == t["talkgroup"] and w["since"] <= t["start"] and (w["until"] is None or w["until"] >= t["start"])
+                    for w in ctx.get("op", ())):
                 return {}
             paging = False
         else:
@@ -397,6 +403,9 @@ class RadioLog:
         got = []
         with self.store.tx() as db:
             rows = db.execute("SELECT incident_id, why, unit FROM radio_links WHERE traffic_id = ?", (tid,)).fetchall()
+            # on an incident's operating channel only (opchannel.py): a link by words takes its place
+            weak = {r[0] for r in rows if r[1] == OPCHANNEL and r[0] in found}
+            rows = [r for r in rows if r[0] not in weak]
             have = {r[0] for r in rows}
             auto = {r[0] for r in rows if r[1] in AUTO_UNSURE}
             named = {r[2]: r[0] for r in rows if r[1] == "mention" and r[2] not in ("address", "place")}
@@ -405,6 +414,10 @@ class RadioLog:
             if len(auto | {iid for iid, v in new.items() if v[0] in AUTO_UNSURE}) > MAX_PER_TX:
                 return []                                # more than that: it isn't about one call
             for iid, (why, unit) in new.items():
+                if iid in weak:
+                    db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ? AND why = ?",
+                               (tid, iid, OPCHANNEL))
+                    self.cad.comms.touch(tid)
                 before = db.total_changes
                 self.cad.comms._auto(db, tid, iid, why, unit)
                 if db.total_changes != before:
@@ -414,6 +427,12 @@ class RadioLog:
                                    "VALUES (?, ?, ?, ?, ?)", (tid, iid, unit, self.cad.clock(), int(widened)))
         if got:
             self.cad.comms.rev += 1
+            op = getattr(self.cad, "opchan", None)
+            if op is not None:                           # it may move the call to another talkgroup (opchannel.py)
+                try:
+                    op.heard(tid)
+                except Exception as e:  # noqa: BLE001 - the link stands whatever this does
+                    self.cad.log(f"CAD: operating channel: {type(e).__name__}")
         return got
 
     def consider(self, tid: str) -> list[int]:
@@ -590,8 +609,8 @@ class RadioLog:
         return n
 
     def _ours_sql(self, ctx: dict) -> tuple[str, list]:
-        """A WHERE part: our channels only (the talkgroups, the FM channels)."""
-        tgs, fm = sorted(ctx["tgs"]), sorted(ctx["fm"])
+        """A WHERE part: our channels only (the talkgroups, the incidents' operating channels, the FM channels)."""
+        tgs, fm = sorted(set(ctx["tgs"]) | {w["tg"] for w in ctx.get("op", ())}), sorted(ctx["fm"])
         parts, args = [], []
         if tgs:
             parts.append(f"talkgroup IN ({','.join('?' * len(tgs))})")

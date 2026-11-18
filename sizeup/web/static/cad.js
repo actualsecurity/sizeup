@@ -969,7 +969,8 @@ async function rereadTones(t) {
 // ID never goes on an incident by itself (#163): it stays in the Radio view, saying why there is no ID.
 
 const RADIO_WHY = { unit: "Unit", dispatcher: "60 Control", manual: "Added", page: "Page", airport: "Airport TG", mention: "Named",
-                    fireground: "Fireground" };
+                    fireground: "Fireground", opchannel: "Channel" };
+const AUTO_WORDS = new Set(["mention", "fireground", "opchannel"]);    // auto links kept only once a person keeps them
 // The dispatch mode's chips and undo (dispatchmode.js, #311)
 function autoDeps() {
   return { api, operator, canDo, toast: UI.toast, confirm: UI.confirm, time: (t) => fmtTime(t, true), readonly: BOARD };
@@ -1230,7 +1231,7 @@ function radioRow(t, ctx = {}) {
     w.title = t.why === "unit" ? `${t.link_unit || t.rig} was on this incident` : t.why === "manual"
       ? `Added${t.link_unit ? ` by ${t.link_unit}` : " by hand"}` : t.why === "page" ? "The 60 Control page for this event"
       : t.why === "airport" ? "On the Airport Incident talkgroup while this was the open airport event"
-      : t.why === "mention" || t.why === "fireground" ? `Auto: ${whyText(t.why, t.link_unit)}`
+      : AUTO_WORDS.has(t.why) ? `Auto: ${whyText(t.why, t.link_unit)}`
       : `60 Control answering ${t.link_unit || "a unit on it"}`;
     meta.append(w);
     if (ctx.scope === "inc" && ctx.current && !BOARD && canDo("dispatch")) {   // one click off this incident (#311)
@@ -1239,7 +1240,7 @@ function radioRow(t, ctx = {}) {
       x.title = "Remove from this incident";
       x.setAttribute("aria-label", "Remove from this incident");
       x.addEventListener("click", () => unlinkTx(t, { id: ctx.current, number: (incidents().find((i) => i.id === ctx.current) || {}).number || "" }));
-      if (t.why === "mention" || t.why === "fireground") {   // auto from words: its recording kept only when confirmed
+      if (AUTO_WORDS.has(t.why)) {   // auto from words or the channel: its recording kept only when confirmed
         const k = el("button", "mini", t.link_kept ? "Kept" : "Keep");
         k.type = "button";
         k.setAttribute("aria-pressed", String(!!t.link_kept));
@@ -1535,7 +1536,8 @@ function whyText(why, unit) {
     : why === "dispatcher" ? `60 Control answering ${unit || "a unit on it"}` : why === "page" ? "the 60 Control page"
     : why === "airport" ? "Airport Incident talkgroup, the open airport event"
     : why === "mention" ? (unit === "address" || unit === "place" ? `names its ${unit}` : `names ${unit || "a unit on it"}`)
-    : why === "fireground" ? `its fireground channel ${unit || ""}`.trim() : why;
+    : why === "fireground" ? `its fireground channel ${unit || ""}`.trim()
+    : why === "opchannel" ? `on its channel ${unit || ""}`.trim() : why;
 }
 
 // ---- a transmission's "⋯" menu (ui.js UI.menu): Add to event ▸, Remove from <each>, Re-transcribe, Copy text ----
@@ -1733,7 +1735,11 @@ function renderRadio(inc) {
   const assigned = (inc.assignments || []).map((a) => a.name);
   const all = [...new Set([...assigned, ...items.flatMap((x) => x.units)])];
   const u = cad.radioUnit;
-  const shownItems = u ? items.filter((x) => x.units.includes(u)) : items;
+  renderChannels(inc);
+  const filtered = u ? items.filter((x) => x.units.includes(u)) : items;
+  // on the incident's operating channel only (opchannel.py): folded under the channel, after the rest
+  const onChan = filtered.filter((x) => x.kind === "radio" && x.t.why === "opchannel");
+  const shownItems = filtered.filter((x) => !(x.kind === "radio" && x.t.why === "opchannel"));
   const nr = items.filter((x) => x.kind === "radio").length, nn = items.length - nr;
   setText($("#d-radio-sum"), [nr ? `${nr} TX` : "", nn ? `${nn} note${nn === 1 ? "" : "s"}` : ""].filter(Boolean).join(" / "));
   $("#d-radio-all").href = `#radio?event=${encodeURIComponent(inc.number || inc.id)}` + (u ? `&unit=${encodeURIComponent(u)}` : "");
@@ -1771,6 +1777,55 @@ function renderRadio(inc) {
     fill: (li, g) => (g.kind === "xch" ? fillExchange(li, g, one) : one.fill(li, g.x)),
     empty: "None",
   });
+  const fold = $("#d-radio-onchan");
+  if (fold._for !== inc.id) { fold._for = inc.id; fold.open = false; }
+  const names = [...new Set(onChan.map((x) => x.t.link_unit).filter(Boolean))];
+  setText(fold.querySelector("summary"), `On ${names.join(", ") || "its channel"} · ${onChan.length}`);
+  fold.title = "Heard on this incident's channel; not tied to it by unit or words";
+  syncList($("#d-radio-onchan-list"), onChan, { key: one.key, sig: one.sig, make: () => el("li"), fill: one.fill, empty: "" });
+  show(fold, onChan.length > 0);
+}
+// The incident's operating channels (sizeup/cad/opchannel.py): the county talkgroup it is worked on, when not ours.
+// One chip each (how it was found on hover), ✕ to take one off, "+ Channel" to add one (dispatchers and admins).
+const CHAN_FROM = { dispatch: "said on dispatch", feed: "the CAD feed", units: "its units' radios", manual: "added" };
+function renderChannels(inc) {
+  const box = $("#d-radio-chan");
+  const list = inc.channels || [], edit = !BOARD && canDo("dispatch") && inc.status !== "dismissed";
+  const choices = ((cad.state && cad.state.op_channels) || []).filter((c) => !list.some((x) => x.tg === c.tg));
+  const sig = JSON.stringify([inc.id, list, edit, choices.map((c) => c.tg)]);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  const out = [];
+  for (const c of list) {
+    const chip = el("span", "chip", c.name);
+    chip.title = `Channel since ${fmtTime(c.since, true)}: ${CHAN_FROM[c.source] || c.source}${c.operator ? ` (${c.operator})` : ""}`;
+    out.push(chip);
+    if (edit) {
+      const x = el("button", "mini auto-undo", "✕");
+      x.type = "button";
+      x.title = `Remove channel ${c.name}`;
+      x.setAttribute("aria-label", x.title);
+      x.addEventListener("click", () => setChannel(inc, c.tg, true));
+      out.push(x);
+    }
+  }
+  if (edit && choices.length && (inc.status !== "closed" || list.length)) {
+    const b = UI.menu.button("Add a channel", () => choices.map((c) => ({ label: c.name, run: () => setChannel(inc, c.tg, false) })),
+                             { key: `inc-chan:${inc.id}` });
+    b.classList.remove("icon");
+    b.replaceChildren("+ Channel");
+    out.push(b);
+  }
+  box.replaceChildren(...out);
+  show(box, out.length > 0);
+}
+async function setChannel(inc, tg, remove) {
+  try {
+    await api("POST", `/api/cad/incident/${inc.id}/channel`, { talkgroup: tg, remove, operator: operator() });
+  } catch (err) {
+    UI.toast(`Channel: ${err.message}`, "err");
+  }
+  txChanged();
 }
 // An incident chip on a transmission (the feed, an incident's radio list): that incident. (The Radio view
 // filters to it instead: radio-view.js.)

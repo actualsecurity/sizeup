@@ -371,6 +371,20 @@ class SttQueue:
                     return e[2]
         return None
 
+    def raise_channel(self, channel: str, priority: int = URGENT) -> int:
+        """A channel's waiting live and context clips raised to `priority` (a county talkgroup an incident of ours is
+        now worked on, sizeup/cad/opchannel.py: no longer shed as context); a re-run or a catch-up stays as it is. How
+        many."""
+        n = 0
+        with self._cv:
+            for e in self._items:
+                if e[4] == channel and e[0] in (LIVE, LOW) and e[0] > priority:
+                    e[0] = priority
+                    n += 1
+            if n:
+                self._cv.notify()
+        return n
+
     def withdraw(self, priority: int = CATCHUP) -> list:
         """Every waiting item of that class taken out (the station is about to update): the items."""
         with self._cv:
@@ -580,6 +594,9 @@ class Transcriber:
 
     def promote(self, match: Callable[[object], bool], priority: int = RERUN):
         return self._q.promote(match, priority)
+
+    def raise_channel(self, channel: str, priority: int = URGENT) -> int:
+        return self._q.raise_channel(channel, priority)
 
     def withdraw_catchup(self) -> list:
         return self._q.withdraw(CATCHUP)
