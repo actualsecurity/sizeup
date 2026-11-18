@@ -45,6 +45,14 @@
     {
       "if": {
         "type": "object",
+        "properties": {"t": {"const": "urgent_delivered", "description": "`t` is `urgent_delivered`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/urgent_delivered"}
+    },
+    {
+      "if": {
+        "type": "object",
         "properties": {"t": {"const": "paging_finished", "description": "`t` is `paging_finished`."}},
         "required": ["t"]
       },
@@ -198,6 +206,15 @@
       "additionalProperties": true,
       "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch `n` counts in, 16 hex characters."}, "n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "Every row at or below this is taken."}}
     },
+    "urgent_delivered": {
+      "title": "urgent_delivered",
+      "description": "The hub answered 200 for the app's take-over event that carries this key (all-in-one: the app's `cad.alarms` took it). The only way capture learns what the app's lane delivered: the row becomes `app`, the banner clears, and capture never sends it. A key capture does not hold is ignored.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "rev"],
+      "additionalProperties": true,
+      "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's key."}, "rev": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "The item's revision."}, "gen": {"$ref": "lease.schema.json#/$defs/counter", "description": "Optional: the hub's generation in its answer to that event. With it the row joins the resend rule; without it the row is never sent again."}}
+    },
     "paging_finished": {
       "title": "paging_finished",
       "description": "The live page became a finished page (today's `LivePaging.finished`). Without it the live page ends on its own hold timeout.",
@@ -304,7 +321,7 @@
       "type": "object",
       "required": ["urgent_epoch", "n"],
       "additionalProperties": true,
-      "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch the app's cursor belongs to, 16 hex characters. When it is not the file's, capture answers from 0."}, "n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The app's cursor: rows above it are wanted. 0: from the start."}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200, "description": "The most rows in one reply."}}
+      "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch the app's cursor belongs to, 16 hex characters. When it is not the file's, capture answers from 0."}, "n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The app's cursor: rows above it are wanted. 0: from the start."}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200, "description": "The most rows in one reply."}, "memory_after": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "default": 0, "description": "The memory items wanted are those after this `m` (the last reply's `memory_last`); 0 from the first, and 0 again after a new `pid` in `hello`."}}
     },
     "args-credentials": {
       "title": "credentials",

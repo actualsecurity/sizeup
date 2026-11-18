@@ -155,7 +155,7 @@
         "pending_alarms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Alarms not yet answered for, a count."},
         "unsent": {
           "type": "array",
-          "description": "The alarms the hub has not answered for, oldest first, and the alarms this lane gave up on (`rejected`) that the hub does not have by the app's lane yet: what the station's page shows as not delivered once one is 10 s old.",
+          "description": "The alarms the hub has not had by either lane (no answer to capture, no `urgent_delivered` from the app), oldest first, and the alarms this lane gave up on (`rejected`) that the hub does not have by the app's lane yet: what the station's page shows as not delivered once one is 10 s old.",
           "items": {
             "title": "One unsent alarm",
             "description": "An alarm the hub has not answered for.",
@@ -171,8 +171,10 @@
         "last_sent_at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the hub last answered for an item, Unix seconds; null for never."},
         "last_ms": {"type": ["number", "null"], "minimum": 0, "description": "How long the last answered request took, hand-over to answer, milliseconds; null for none."},
         "sent": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Items the hub answered for (`applied`, `duplicate`, `stale`) since capture started, a count."},
+        "delivered_app": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Rows marked `app`: alarms the hub has by the app's lane (`urgent_delivered`), which capture never sends, a count."},
         "rejected": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Items that ended `rejected` since capture started (a `rejected` in a 200, the hub's 400/413/422 refusal of an item already sent alone, 5 status words it could not read), a count. A rejected alarm still rides the app's lane, and Health is critical for it."},
         "expired": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Page items that expired unsent (120 s) since capture started, a count. Alarms never expire."},
+        "lost": {"type": "array", "description": "The alarms the hub may have lost and capture did not send again (over the resend cap): rows with `lost_gen` set in the last 24 h. Rebuilt from the rows at start, never kept only in memory; a critical Health item names them.", "items": {"title": "One alarm possibly lost", "description": "An alarm with `lost_gen` set.", "x-complete": true, "type": "object", "required": ["key", "channel", "unit", "event_at"], "additionalProperties": true, "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The alarm's `key`."}, "channel": {"type": "string", "description": "Its channel label."}, "unit": {"type": "string", "description": "Its unit alias, or the radio id."}, "event_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it was pressed, Unix seconds."}}}},
         "last_error": {"type": "string", "description": "The last failure: a status and the hub's reason, never a body, never a token; \"\" for none."},
         "hub_gen": {
           "oneOf": [{"$ref": "lease.schema.json#/$defs/counter"}, {"type": "null"}],

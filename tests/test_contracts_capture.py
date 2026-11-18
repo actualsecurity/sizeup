@@ -75,7 +75,7 @@ def test_the_schemas_the_harness_skips_for_unknown_keys_are_covered_here():
 
 
 # What docs/native/capture-split.md 10 "Contract artifacts" says a reader may rely on, row by row (copied from the
-# design at 225b06ff; test_the_design_documents_table_is_this_one compares it with the document once that is here).
+# design at 5f143a80; test_the_design_documents_table_is_this_one compares it with the document once that is here).
 REQUIRED = {
     "Spool sidecar, `kind: \"segment\"`": [
         "v", "kind", "id", "seq", "spool_epoch", "channel.label", "channel.kind", "start", "end", "closed_boot", "boot",
@@ -89,13 +89,15 @@ REQUIRED = {
     "Spool cursor": ["v", "spool_epoch", "seq"],
     "Urgent item (a row's `data`, and an item of the request)": [
         "key", "rev", "kind", "at", "event_at", "age_s", "age_src", "boot", "wall", "data", "data", "source", "start",
-        "radio_id", "emergency", "emergency_via", "data", "channel", "started", "pairs", "phase", "ended", "trimmed"],
+        "radio_id", "emergency", "emergency_via", 'emergency_via: "P25"', "system", "talkgroup", "key_time", "data",
+        "channel", "started", "pairs", "phase", "ended", "trimmed"],
     "`POST /api/station/urgent`, request": ["v", "station", "items"],
     "`POST /api/station/urgent`, answers": ["ok", "gen", "results", "key", "rev", "status", "error", "reason"],
     "Socket, capture to client": ["v", "t", "at", "t"],
-    "Socket, client to capture": ["v", "t", "urgent_taken", "urgent_epoch", "n", "v", "t: \"request\"", "id", "op", "args",
-                                  "expires_boot"],
-    "Socket, replies": ["v", "t: \"reply\"", "id", "ok", "ok: false", "reason", "error", "confirm"],
+    "Socket, client to capture": ["v", "t", "urgent_taken", "urgent_epoch", "n", "urgent_delivered", "key", "rev", "v",
+                                  "t: \"request\"", "id", "op", "args", "expires_boot"],
+    "Socket, replies": ["v", "t: \"reply\"", "id", "ok", "ok: false", "reason", "error", "confirm", "urgent_since", "result",
+                        "urgent_epoch", "rows", "memory", "memory_last", "more", "memory"],
     "Wish file": ["v", "seq", "mode", "paths", "channels", "dongles"],
     "Status file": ["v", "at", "at_boot", "boot", "pid", "contract", "wish_seq", "channels", "sdrs", "refusals", "spool",
                     "urgent", "label", "kind", "run", "state", "spool", "urgent"],
@@ -304,7 +306,7 @@ def test_a_boot_clock_value_is_never_a_wall_clock_time_and_the_reverse():
             elif prop.get("exclusiveMaximum") == c.TIME_LIMIT:
                 wall_fields += 1
                 assert not key.endswith(("_s", "_ms", "_boot")), (name, path)
-    assert boot_fields == 6 and wall_fields >= 40          # closed_, published_, event_, expires_, at_, creds_at_boot
+    assert boot_fields == 7 and wall_fields >= 40          # closed_, published_, event_, expires_, at_, creds_at_, start_boot
     assert 1_900_000_000 > 1000000000 > 20 * 365 * 86400             # no uptime reaches it; every date today is over it
 
 
@@ -825,6 +827,8 @@ def run(sc: dict, **params) -> cc.Hub:
             hub.ack(step["ack"])
         elif "all_clear" in step:
             hub.all_clear(step["all_clear"])
+        elif "skew" in step:
+            hub.measure_skew(step["skew"]["value"], step["skew"]["spread"], step["skew"].get("step_at"))
         elif "state_paging" in step:
             hub.state(station, step["state_paging"])
         elif "holds" in step:
@@ -841,7 +845,8 @@ def holds(hub: cc.Hub, then: dict) -> None:
            "traffic_ids": [a["traffic_id"] for a in hub.alarms],
            "push_age_s": hub.pushes[0]["age_s"] if hub.pushes else None,
            "still_set": sum(a["still_set"] for a in hub.alarms), "sources": hub.alarms[0]["sources"] if hub.alarms else [],
-           "labels": [a["label"] for a in hub.alarms]}
+           "labels": [a["label"] for a in hub.alarms], "before_clear": sum(a["before_clear"] for a in hub.alarms),
+           "approximate": [p["approximate"] for p in hub.pushes]}
     for key, want in then.items():
         if key == "page":
             page = hub.pages[("st-north", want["key"])]
@@ -870,7 +875,7 @@ def test_the_table_covers_the_designs_rows_and_says_what_is_not_decided():
     assert SCENARIOS["params"]["max_age_s"] == 1800 and SCENARIOS["params"]["max_age_s_decided"] is False
     assert SCENARIOS["params"]["age_margin"] == cc.AGE_MARGIN == 1.1
     assert "NOT DECIDED" in SCENARIOS["description"] and "A7" in README
-    kinds = {"urgent", "event", "hello", "ack", "all_clear", "state_paging", "hub", "holds"}
+    kinds = {"urgent", "event", "hello", "ack", "all_clear", "state_paging", "hub", "holds", "skew"}
     for sc in SCENARIOS["scenarios"]:
         assert set(sc) <= {"name", "design", "steps", "then", "hub", "depends_on"}, sc["name"]
         for step in sc["steps"]:
@@ -1374,7 +1379,7 @@ def test_an_answer_capture_cannot_read_gets_five_tries_after_the_healthy_items_a
     assert lane.request("alarm", wall=W0 + 10.0, boottime=B0 + 10.0) is None
     assert lane.not_delivered() == [A] and len(lane.health()) == 1 and A in lane.health()[0]
     assert lane.health()[0].startswith("critical")
-    lane.app_delivered(A)                                      # the hub has it by the other lane
+    lane.delivered(A, 0, wall=W0 + 11.0, boottime=B0 + 11.0)  # the app's lane delivered it: `urgent_delivered`
     assert lane.not_delivered() == [] and lane.health() == []
 
 
@@ -1586,7 +1591,12 @@ def test_the_urgent_file_is_the_designs_ddl_and_keeps_its_promises(tmp_path):
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2                     # FULL
         cols = [r[1] for r in db.execute("PRAGMA table_info(urgent)")]
         assert cols == ["n", "key", "rev", "kind", "at", "at_boot", "event_at", "event_boot", "boot", "data", "state",
-                        "sent_at", "sent_boot", "sent_boot_id", "hub", "hub_gen", "tries", "last_error"]
+                        "sent_at", "sent_boot", "sent_boot_id", "hub", "hub_gen", "tries", "last_error", "lost_gen"]
+        assert [r[1] for r in db.execute("PRAGMA table_info(requests)")] == ["id", "op", "reply", "at", "at_boot", "boot"]
+        db.execute("INSERT INTO requests (id, op, at, at_boot, boot) VALUES ('r-1', 'reception_start', 1.0, 2.0, 'b')")
+        assert db.execute("SELECT reply FROM requests WHERE id = 'r-1'").fetchone() == (None,)       # recorded first
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO requests (id, op, at, at_boot, boot) VALUES ('r-1', 'pick', 1.0, 2.0, 'b')")
         held = valid("capture-socket-event")["urgent-alarm.json"]
         row = (held["key"], held["rev"], held["kind"], held["at"], 5114.36, held["event_at"], held["event_boot"],
                held["boot"], json.dumps(held["data"]))
@@ -1614,7 +1624,7 @@ def test_the_urgent_file_is_the_designs_ddl_and_keeps_its_promises(tmp_path):
     finally:
         db.close()
     held_keys = set(c.load("capture-urgent-item")["$defs"]["held"]["properties"])
-    assert held_keys - {"durable"} <= set(cols)                                        # the held item is the row's columns
+    assert held_keys - {"durable", "m"} <= set(cols)                                  # (`m`: a counter of the process)                                        # the held item is the row's columns
     # the reference models keep exactly what the file has columns for
     lane = cc.Lane()
     press(lane, t=0.39)
@@ -1785,7 +1795,7 @@ def test_a_request_is_applied_once_by_its_id_and_never_after_its_deadline():
     assert go(ask["probe.json"])["result"] == "audio"
     for i in range(cc.REQUEST_IDS):                            # the id memory is bounded: 256 ids, 10 min
         go(dict(ok, id=f"fill-{i}"), boottime=5329.0)
-    assert len(rq.seen) <= cc.REQUEST_IDS + 1
+    assert len(rq.db) <= cc.REQUEST_IDS + 1
     for gap, applied in ((cc.REQUEST_IDS_S - 0.5, 1), (cc.REQUEST_IDS_S, 2)):          # remembered under 10 min; at
         rq2 = cc.Requests(apply_pick)                                                 # exactly 10 min, forgotten
         rq2.handle(ok, role="reader", uid=1000, boottime=5000.0, wall=1900000000.0)
@@ -1806,7 +1816,7 @@ def test_the_credentials_request_is_roots_alone():
         refused = rq.handle(creds, role=role, uid=1000, boottime=5329.0, wall=1900000200.0)
         assert (refused["ok"], refused["reason"]) == (False, "forbidden") and c.errors("capture-socket-reply", refused) == []
         assert rq.handle(creds, role=role, uid=0, boottime=5329.0, wall=1900000200.0)["ok"] is True
-    assert rq.seen == {} and len(rq.applied) == 2              # never kept in the id memory: no reply replays a secret
+    assert rq.db == {} and len(rq.applied) == 2              # never kept in the id memory: no reply replays a secret
     late = rq.handle(creds, role="reader", uid=0, boottime=creds["expires_boot"], wall=1900000200.0)
     assert (late["ok"], late["reason"]) == (False, "expired") and len(rq.applied) == 2     # root's too has its deadline
     doc = c.load("capture-socket-request")["$defs"]["args-credentials"]
@@ -2027,7 +2037,7 @@ def test_the_readme_maps_every_schema_to_its_design_section_and_says_what_is_sti
     assert still == [f"S{i}" for i in range(1, len(still) + 1)] and 5 <= len(still) <= 15
     found = re.findall(r"^\| (Y\d+) \|", section, re.M)                        # where the design is still ambiguous
     assert found == [f"Y{i}" for i in range(1, len(found) + 1)] and len(found) >= 5
-    assert "Still to confirm" in section and "radio maintainers" in section and "225b06ff" in section
+    assert "Still to confirm" in section and "radio maintainers" in section and "5f143a80" in section
     assert "A7" in section and "not decided" in section
     for word in ("specification aid", "not production code"):
         assert word in section or word in (ROOT / "tests" / "contracts_capture.py").read_text(encoding="utf-8").lower()
@@ -2123,9 +2133,15 @@ def test_the_resend_cap_keeps_the_newest_32_by_answer_time_then_n_and_names_the_
     lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 60.0, boottime=B0 + 60.0)
     again = lane.unsent()
     assert len(again) == 32 and set(again) == {f"CHA-live-{1900000000000 + i}" for i in range(8, 40)}  # the higher n
-    assert sorted(lane.beyond) == [f"CHA-live-{1900000000000 + i}" for i in range(8)]
+    assert lane.lost() == [f"CHA-live-{1900000000000 + i}" for i in range(8)]
+    assert {lane.rows[(k, 0)]["lost_gen"] for k in lane.lost()} == {"6"}
+    lane.crash()                                               # the warning is rebuilt from the rows' lost_gen
+    lane.start(wall=W0 + 70.0, boottime=B0 + 70.0)
+    assert len(lane.lost()) == 8
     health = lane.health()
     assert len(health) == 1 and health[0].startswith("critical") and "CHA-live-1900000000000" in health[0]
+    lane.wall = W0 + 41.0 + cc.LOST_KEEP_S                     # ... and kept 24 h (from the answer's time)
+    assert lane.lost() == [] and lane.health() == []
 
 
 def test_an_emergency_item_has_four_signs_and_never_loses_its_audio_to_a_bound(tmp_path):
@@ -2232,3 +2248,243 @@ def test_a_boot_clock_5_percent_fast_or_slow_with_routine_corrections_loses_and_
     hub.now = T0 + 1885.0
     lane.answer(*hub.urgent(body), wall=w, boottime=b)
     assert len(hub.alarms) == len(hub.pushes) == 1 and lane.unsent() == [] and lane.request("alarm", wall=w, boottime=b) is None
+
+
+# -- the third adversarial review (docs/native/capture-split.md at 5f143a80) ----------------------------------------------
+
+def test_one_byte_count_everywhere_the_utf8_of_the_json_as_sent():
+    """A size is the UTF-8 length of the JSON exactly as it is sent: the hub model and the sender count it the same
+    way, so a body of non-ASCII names is never under the limit for one and over it for the other."""
+    req = valid("capture-urgent-request")["an-alarm.json"]
+    item = req["items"][0]
+    for unit in ("U", "Ü"):                                     # 1 and 2 bytes a character in UTF-8
+        body = dict(req, items=[dict(item, data=dict(item["data"], unit=unit))])
+        pad = cc.REQUEST_MAX_BYTES - cc.encoded(body)
+        exact = dict(req, items=[dict(item, data=dict(item["data"], unit=unit + "x" * pad))])
+        over = dict(req, items=[dict(item, data=dict(item["data"], unit=unit + "x" * (pad + 1)))])
+        assert cc.encoded(exact) == cc.REQUEST_MAX_BYTES and cc.encoded(over) == cc.REQUEST_MAX_BYTES + 1
+        assert cc.Hub().urgent(exact)[0] == 200 and cc.Hub().urgent(over)[0] == 413, unit
+    assert cc.encoded({"a": "Ü"}) == len('{"a":"Ü"}'.encode())
+
+
+def test_urgent_since_is_filled_only_while_its_frame_fits_and_pages_the_memory():
+    """No frame over 65,536 bytes. 200 rows of about 380 bytes are about 76 KB: the reply is cut short with
+    `more: true`, and the app asks again from the last `n`. 300 alarms in memory (the disk failed) come over several
+    pages by `memory_after` / `memory_last`, memory first. An item over 48 KB is framed trimmed, never dropped.
+    Every item is taken over, once."""
+    lane = cc.Lane()
+    for i in range(200):
+        press(lane, f"CHA-live-{1900000100000 + i}", t=float(i), data=dict(ALARM_DATA, radio_id=str(8000 + i)))
+    taken, n, pages = set(), 0, 0
+    while True:
+        reply = lane.since(lane.epoch, n, rid=f"r-{pages}", wall=W0 + 300.0)
+        assert len(cc.frame(reply)) <= 8 + cc.MAX_HEADER and c.errors("capture-socket-reply", reply) == []
+        rows = reply["result"]["rows"]
+        taken |= {(r["key"], r["rev"]) for r in rows}
+        pages += 1
+        if not reply["result"]["more"]:
+            break
+        n = rows[-1]["n"]
+    assert len(taken) == 200 and pages >= 2
+    lane = cc.Lane()
+    lane.disk = "full"
+    for i in range(300):
+        press(lane, f"CHA-live-{1900000200000 + i}", t=float(i), data=dict(ALARM_DATA, radio_id=str(9000 + i)))
+    after, got, pages = 0, [], 0
+    while True:
+        reply = lane.since(lane.epoch, 0, memory_after=after, rid=f"m-{pages}", wall=W0 + 400.0)
+        assert len(cc.frame(reply)) <= 8 + cc.MAX_HEADER and c.errors("capture-socket-reply", reply) == []
+        res = reply["result"]
+        assert all(m["durable"] is False and m["n"] is None and m["m"] > after for m in res["memory"])
+        got += [m["key"] for m in res["memory"]]
+        after, pages = res["memory_last"], pages + 1
+        if not res["more"]:
+            break
+    assert len(got) == len(set(got)) == 300 and pages >= 2
+    lane = cc.Lane()
+    garbled = [{"id": str(10000 + i), "system": "mdc", "emergency": True, "from": "live"} for i in range(1500)]
+    press(lane, t=0.0, data=dict(ALARM_DATA, ids=garbled))
+    framed = lane.frames()[0]
+    assert framed["data"]["trimmed"] is True and cc.encoded(framed) <= cc.ITEM_MAX_BYTES
+    assert c.errors("capture-socket-event", {"v": 1, "t": "urgent", "at": W0, "urgent_epoch": lane.epoch, **framed}) == []
+    assert cc.ITEM_MAX_BYTES == 49_152 and cc.ITEM_MAX_BYTES + 16 * 1024 == cc.REQUEST_MAX_BYTES == cc.MAX_HEADER
+
+
+def test_a_lone_too_large_trims_the_item_and_is_not_a_refusal():
+    """The hub's `too_large` for a request holding one item not yet trimmed: the item is trimmed and sent alone
+    again, and that is not counted as a refusal. A `too_large` for it trimmed and alone is the second refusal."""
+    lane = cc.Lane()
+    press(lane, t=0.0, data=dict(ALARM_DATA, unit="U" * 30000))          # under 48 KB: sent whole
+    body = lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0)
+    assert "trimmed" not in body["items"][0]["data"]
+    lane.answer(413, {"error": "body over 65536 bytes", "reason": "too_large"}, wall=W0 + 1.1, boottime=B0 + 1.1)
+    assert lane.unsent() == [KEY] and lane.rows[(KEY, 0)]["state"] == "new"
+    body = lane.request("alarm", wall=W0 + 2.0, boottime=B0 + 2.0)
+    assert body["items"][0]["data"]["trimmed"] is True and len(body["items"][0]["data"]["unit"]) == 200
+    lane.answer(413, {"error": "body over 65536 bytes", "reason": "too_large"}, wall=W0 + 2.1, boottime=B0 + 2.1)
+    assert lane.rows[(KEY, 0)]["state"] == "rejected" and len(lane.health()) == 1
+
+
+def test_an_item_that_fails_the_check_is_rejected_as_invalid_and_never_splits_a_batch():
+    """Each item is checked against the item schema and the route's caps before it goes in a request. One that fails
+    is never in a request: `rejected` with `last_error` `invalid`, a critical Health item, and the app's lane carries
+    it. The other alarms still go together."""
+    lane, hub = cc.Lane(), cc.Hub()
+    press(lane, "CHA-live-1900000000100", t=0.0, data=dict(ALARM_DATA, radio_id="7101"))
+    p25 = SCENARIOS["items"]["p25"]
+    lane.press(p25["key"], "alarm", {k: v for k, v in p25["data"].items() if k != "key_time"}, wall=W0 + 0.1, boottime=B0 + 0.1)
+    press(lane, "CHA-live-1900000000300", t=0.2, data=dict(ALARM_DATA, radio_id="7103"))
+    got = send(lane, hub, t=1.0)
+    assert [r["key"] for r in got[1]["results"]] == ["CHA-live-1900000000100", "CHA-live-1900000000300"]
+    assert lane.rows[(p25["key"], 0)]["state"] == "rejected" and lane.rows[(p25["key"], 0)]["last_error"] == "invalid"
+    assert lane.not_delivered() == [p25["key"]] and "invalid" in lane.health()[0]
+    lane.delivered(p25["key"], 0, 7, wall=W0 + 3.0, boottime=B0 + 3.0)   # the app's lane has it
+    assert lane.not_delivered() == [] and lane.health() == []
+
+
+def test_urgent_delivered_clears_the_banner_and_capture_never_sends_that_alarm():
+    """`urgent-mode write`: no sender; the app takes each alarm over and its lane delivers it. `urgent_delivered`
+    (the hub answered 200 for the take-over event) makes the row `app`: delivered, the banner clears, and after a
+    switch to `send` capture never sends it. A key capture does not hold changes nothing; a `sent` row stays `sent`."""
+    lane, hub = cc.Lane(), cc.Hub()
+    press(lane, t=0.0)
+    assert lane.not_delivered() == [KEY]
+    hub.now = W0 + 0.6                                         # the app's take-over event; the hub's answer carries gen
+    code, answer = hub.events_answer("st-north", {"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
+                                                  "start": W0 + 0.12, "end": W0 + 0.39})
+    assert code == 200 and answer["gen"] == hub.gen
+    note = {"v": 1, "t": "urgent_delivered", "key": KEY, "rev": 0, "gen": answer["gen"]}
+    assert c.errors("capture-socket-request", note) == []
+    lane.delivered("CHA-live-1899999999999", 0, wall=W0 + 0.7, boottime=B0 + 0.7)            # not held: nothing
+    lane.delivered(note["key"], note["rev"], note["gen"], wall=W0 + 0.7, boottime=B0 + 0.7)
+    row = lane.rows[(KEY, 0)]
+    assert (row["state"], row["hub_gen"]) == ("app", "1") and lane.not_delivered() == [] and lane.unsent() == []
+    assert lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0) is None          # switched to `send`: nothing
+    # 40 old alarms the app delivered, then a switch to send and a fresh alarm: the fresh one goes, alone, at once
+    lane, hub = cc.Lane(), cc.Hub()
+    for i in range(40):
+        press(lane, f"CHA-live-{1899990000000 + i}", t=-3000.0 + i, data=dict(ALARM_DATA, radio_id=str(8000 + i)))
+        lane.delivered(f"CHA-live-{1899990000000 + i}", 0, wall=W0 - 2999.0 + i, boottime=B0 - 2999.0 + i)
+    press(lane, t=0.0)
+    got = send(lane, hub, t=0.5)
+    assert [r["key"] for r in got[1]["results"]] == [KEY] and hub.notices == [] and len(hub.pushes) == 1
+    # 40 old alarms the app never delivered (it was down), then a fresh one: fresh first, then the backlog
+    lane, hub = cc.Lane(), cc.Hub()
+    for i in range(40):
+        press(lane, f"CHA-live-{1899990000000 + i}", t=-3000.0 + i, data=dict(ALARM_DATA, radio_id=str(8000 + i)))
+    press(lane, t=0.0)
+    body = lane.request("alarm", wall=W0 + 0.5, boottime=B0 + 0.5)
+    assert body["items"][0]["key"] == KEY and [i["key"] for i in body["items"][1:4]] == [
+        f"CHA-live-{1899990000000 + i}" for i in range(3)]                       # the backlog: oldest first
+    # a sent row stays sent; an `app` row joins the resend rule only when its gen is known
+    lane = cc.Lane()
+    press(lane, "CHA-live-1900000000001", t=0.0)
+    press(lane, "CHA-live-1900000000002", t=0.1, data=dict(ALARM_DATA, radio_id="7002"))
+    lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 5}, wall=W0 + 0.2, boottime=B0 + 0.2)
+    lane.delivered("CHA-live-1900000000001", 0, 5, wall=W0 + 1.0, boottime=B0 + 1.0)
+    lane.delivered("CHA-live-1900000000002", 0, None, wall=W0 + 1.0, boottime=B0 + 1.0)
+    lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 50.0, boottime=B0 + 50.0)
+    assert lane.unsent() == ["CHA-live-1900000000001"]         # re-sent under the gen rule; the gen-less one is not
+
+
+def test_in_every_request_fresh_alarms_go_first_then_resends_then_the_backlog():
+    """Fresh: never yet put in a request and under 120 s old, in `n` order; then the gen rule's resends, newest
+    first; then the backlog, oldest first. A fresh alarm waits at most for the one request already in flight."""
+    lane = cc.Lane()
+    for i in range(10):                                        # 10 alarms answered, then the hub restores
+        press(lane, f"CHA-live-{1900000000000 + i}", t=float(i) / 10, data=dict(ALARM_DATA, radio_id=str(7100 + i)))
+    body = lane.request("alarm", wall=W0 + 2.0, boottime=B0 + 2.0)
+    lane.answer(200, dict(OK, results=[{"key": i["key"], "rev": 0, "status": "applied"} for i in body["items"]]),
+                wall=W0 + 2.0, boottime=B0 + 2.0)
+    for i in range(40):                                        # 40 old alarms never sent (the uplink was down)
+        press(lane, f"CHA-live-{1899990000000 + i}", t=-3000.0 + i, data=dict(ALARM_DATA, radio_id=str(8000 + i)))
+    lane.requested |= set(lane.memory)                         # (each was tried before)
+    lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 30.0, boottime=B0 + 30.0)
+    press(lane, "CHA-live-1900000030000", t=30.0, data=dict(ALARM_DATA, radio_id="7999"))      # the fresh one
+    body = lane.request("alarm", wall=W0 + 30.1, boottime=B0 + 30.1)
+    keys = [i["key"] for i in body["items"]]
+    assert keys[0] == "CHA-live-1900000030000"
+    assert keys[1:11] == [f"CHA-live-{1900000000000 + i}" for i in range(9, -1, -1)]   # resends, newest first
+    assert keys[11:] == [f"CHA-live-{1899990000000 + i}" for i in range(21)]           # the backlog, oldest first
+
+
+def test_ids_and_keys_are_valid_for_any_label():
+    """4.1 "Ids", 4.3 the key rule: a label whose slug does not start with a letter or digit (`#`, `(`), or is longer
+    than 107 characters, gets the plain slug without its leading odd characters, cut to 98, `_` and 8 hex digits of
+    its SHA-256; so every id matches CLIP_ID and is at most 121 characters. A key over 200 characters is cut to 191,
+    `~` and 8 hex digits. A label of letters, digits, `._-` and spaces keeps today's id."""
+    assert cc.slug("CH A") == "CHA" and cc.segment_id("CH A", 1900000000.123) == "CHA-1900000000123"
+    for label in ("#1 Dispatch", "(North) Tac", "#", "((", "Fire Dispatch " + "x" * 136, "y" * 300, "Ä Kanal"):
+        sid, key = cc.segment_id(label, 1900000000.123), cc.live_key(label, 1900000000.123)
+        assert cc.CLIP_ID.fullmatch(sid) and len(sid) <= 121, (label, sid)
+        assert len(key) <= 200 and len(cc.page_key(label, 1900000100.25)) <= 200, label
+        side = dict(valid("capture-spool-sidecar")["segment-with-an-emergency-id.json"], id=sid)
+        assert c.errors("capture-spool-sidecar", side) == [], label
+        item = dict(valid("capture-urgent-item")["alarm-raised-live.json"], key=key)
+        assert c.errors("capture-urgent-item", item) == [], label
+    assert cc.slug("#1 Dispatch").startswith("1Dispatch_") and cc.slug("#").startswith("ch_")
+    assert cc.slug("#1 Dispatch") != cc.slug("(1 Dispatch")                       # the hash keeps them apart
+    long = cc.page_key("z" * 300, 1900000100.25)
+    assert len(long) == 200 and long[191] == "~" and long == cc.urgent_key("page:" + "z" * 300 + ":1900000100.25")
+    assert cc.call_id("4101-1900000300_851012500.0-call_17") == "4101-1900000300_851012500.0-call_17"
+    mended = cc.call_id("#odd stem " + "w" * 200)
+    assert cc.CLIP_ID.fullmatch(mended) and len(mended) <= 121
+
+
+def test_request_ids_outlive_capture_and_one_cut_mid_apply_is_interrupted():
+    """The id is recorded in urgent.sqlite (`requests`) BEFORE the request is applied and the reply after. A repeat
+    gets the first reply even after capture restarted: `reception_start` is never applied twice. A repeat whose id
+    has no reply (capture stopped mid-apply) gets `interrupted`: the person looks and asks again under a new id."""
+    started = []
+
+    def apply(op, args):
+        if op == "reception_start":
+            started.append(args)
+            if args.get("crash"):
+                raise cc.Crash("capture stopped while applying it")
+            return True, "", "", False, None
+        return None
+    req = dict(valid("capture-socket-request")["reception-start.json"])
+    table: dict = {}
+    rq = cc.Requests(apply, table)
+    first = rq.handle(req, role="reader", uid=1000, boottime=5329.0, wall=1900000200.0)
+    rq = cc.Requests(apply, table)                             # capture restarted; the table is in the file
+    again = rq.handle(req, role="reader", uid=1000, boottime=5329.5, wall=1900000200.5)
+    assert first["ok"] is True and again == dict(first, at=again["at"]) and len(started) == 1
+    cut = dict(req, id="r-cut", args=dict(req.get("args") or {}, crash=True))
+    with pytest.raises(cc.Crash):
+        cc.Requests(apply, table).handle(cut, role="reader", uid=1000, boottime=5329.8, wall=1900000201.0)
+    assert table["r-cut"]["reply"] is None
+    late = cc.Requests(apply, table).handle(cut, role="reader", uid=1000, boottime=5329.9, wall=1900000201.5)
+    assert (late["ok"], late["reason"]) == (False, "interrupted") and c.errors("capture-socket-reply", late) == []
+    assert len(started) == 2                                   # never applied a third time
+    other = cc.Requests(apply, table, boot="boot-2")           # another boot: kept by wall time, 10 min
+    assert other.handle(req, role="reader", uid=1000, boottime=12.0, wall=1900000700.0) == dict(first, at=1900000700.0)
+    fresh = cc.Requests(apply, table, boot="boot-2")
+    fresh.handle(dict(req, id="r-other"), role="reader", uid=1000, boottime=20.0, wall=1900000200.0 + 600.0)
+    assert req["id"] not in table                              # exactly 10 min by the wall clock: forgotten
+
+
+def test_the_alarm_travels_in_a_small_post_of_its_own_with_a_total_deadline():
+    """11 H1m as of 5f143a80: the take-over `alarm` event, or a call event with an emergency flag or an `alarm_key`,
+    goes alone and without clips, with a TOTAL 8 s deadline (one monotonic budget across connect, send and every
+    receive); at it the post is aborted and counts as not delivered. Its clip follows in a normal batch, which keeps
+    today's timeouts. A clip-carrying batch never shares a post with an alarm."""
+    events = [{"type": "traffic", "id": "CHB-1900000001000", "clip": b"x" * 100},
+              {"type": "alarm", "id": KEY, "clip": b"y" * 100},
+              {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "system": "examplesys", "alarm_key": "k",
+               "emergency": True, "clip": b"z" * 100},
+              {"type": "traffic", "id": "4101-1900000400_851012500.0-call_18", "system": "examplesys", "emergency": False}]
+    out = cc.posts(events)
+    alarms = [p for p in out if p["kind"] == "alarm"]
+    assert [p["events"][0]["id"] for p in alarms] == [KEY, "4101-1900000300_851012500.0-call_17"]
+    for p in out:
+        clips = [e for e in p["events"] if e.get("clip") is not None]
+        assert not (p["kind"] == "alarm" and clips) and (len(p["events"]) == 1 or p["kind"] == "batch")
+        assert p.get("deadline_s", cc.ALARM_POST_S) == cc.ALARM_POST_S
+    batch = next(p for p in out if p["kind"] == "batch")
+    assert batch["timeout_s"] == 60.0 and {e["id"] for e in batch["events"] if e.get("type") == "clip"} == {
+        KEY, "4101-1900000300_851012500.0-call_17"}            # the alarms' clips follow in the batch
+    assert cc.alarm_post([0.5, 0.2, 1.0]) == (True, pytest.approx(1.7))
+    assert cc.alarm_post([3.0, 3.0, 3.0]) == (False, cc.ALARM_POST_S)      # each under 8 s, the total is not
+    assert cc.alarm_post([2.0, 6.0])[0] is False                           # exactly 8 s: aborted

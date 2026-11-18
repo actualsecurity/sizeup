@@ -1,6 +1,6 @@
 # The live socket: framing and rules (designed)
 
-**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.2, 4.3 "Credentials" and 7.5 (#773).
+**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.2, 4.3 "Credentials" and 7.5 (#773, as of `5f143a80`).
 `/run/sizeup-radio/live.sock` is a Unix stream socket that capture listens on: mode 0660 in a 0750 directory, the
 peer's uid checked on every connection (`SO_PEERCRED`: the `sizeup` user or root, nobody else). Frames out are
 [`capture-socket-event`](../schemas/capture-socket-event.schema.json), frames in are
@@ -21,7 +21,9 @@ payload  raw bytes                          unused in version 1 (there for audio
 
 | Rule | |
 |---|---|
-| Header | one JSON object (RFC 8259: no `NaN`, no `Infinity`), at most 65536 bytes (#709's `MAX_HEADER`). A reader refuses a longer one from the lengths alone, before it reads or allocates anything |
+| Header | one JSON object (RFC 8259: no `NaN`, no `Infinity`), at most 65536 bytes (#709's `MAX_HEADER`), and capture never sends a longer one. A reader refuses a longer one from the lengths alone, before it reads or allocates anything |
+| A size | the UTF-8 length of the JSON exactly as it is sent (compact, not ASCII-escaped). Every byte limit of the contract is counted that way: a frame's header, a hub request's body, one item inside either |
+| One item | in any frame or reply, at most `ITEM_MAX_BYTES` = 49,152 bytes (48 KB) as encoded. A larger one is framed **trimmed**, by the hub request's rule (`urgent.md`), with `data.trimmed: true`, never dropped. 48 KB fits both a frame and a hub request (65,536 bytes each) with 16 KB to spare for their own fields |
 | Payload | a version 1 writer sends none (length 0). A version 1 reader skips a payload of up to 1 MiB and closes the connection on a longer one |
 | A bad frame | a length over its limit, a header that is not JSON or not an object: the reader closes the connection. A client comes back and gets a snapshot |
 | A stream | frames follow each other with nothing between them, and a read may end anywhere inside one |
@@ -47,13 +49,17 @@ The hello of a client is 56 bytes on the wire:
 | Nothing is queued for an absent client | live state is latest-wins. What must not be lost is in the spool or the urgent file |
 | A reader is attached | while a client that said `role: "reader"` is connected; the status file reports it (`reader`) |
 | Epochs | a `spool_epoch` that is not the cursor's resets the spool cursor; an `urgent_epoch` that is not the app's starts its urgent cursor at 0 (its set of taken `(key, rev)` still holds) |
-| `urgent` frames | carry the item whole; the app takes an item over once, by `(key, rev)`. `durable: false` means no row yet and `n` null; if the row is written later a second frame for the same `(key, rev)` follows with its `n` and `durable: true`, and only moves the cursor |
+| `urgent` frames | carry the item whole (trimmed past 48 KB); the app takes an item over once, by `(key, rev)`. `durable: false` means no row yet, `n` null, and `m` (the memory counter of this capture process); if the row is written later a second frame for the same `(key, rev)` follows with its `n` and `durable: true`, and only moves the cursor |
 
 ## Notices (no answer)
 
 Each one's own fields are required; `at` is optional on a client's frame. `hello` (`role`, `contract`, `subscribe`),
 `poke` (`what: "wish"`), `cursor` (the spool cursor moved), `urgent_taken` (`urgent_epoch` and `n`, both: capture
 ignores a notice for another epoch, so an `n` from before a reset can never mark new rows as taken),
+`urgent_delivered` (`key`, `rev` required, `gen` optional: the hub answered 200 for the app's take-over event that
+carries that key, and `gen` is the generation in that answer; all-in-one, the app's `cad.alarms` took it. It is the
+only way capture learns what the app's lane delivered; `urgent_taken` only says the app took an item over. The row
+becomes `app`: the banner clears and capture never sends it. A key capture does not hold is ignored),
 `paging_finished` (`ch`, `page_id`, `end`).
 
 ## Requests and replies
@@ -65,13 +71,13 @@ there are two fields, as the station routes' answers have: **`reason`**, one wor
 
 | Rule | |
 |---|---|
-| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each id once and remembers the last 256 for 10 min (on the boot clock): a repeat gets the first reply again and changes nothing, even after its deadline |
+| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each id once. It records the id in `urgent.sqlite` (table `requests`, fsync'd) **before** it applies the request, and the reply after; it keeps the last 256 for 10 min (on the boot clock; one from another boot by its wall time). So a repeat gets the first reply again and changes nothing, even after its deadline and **even after capture restarted**. A repeat that finds the id recorded with no reply (capture stopped while applying it) gets `ok: false, reason: "interrupted"`: the person looks at the state and asks again under a new id. `credentials` is never recorded |
 | `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture at or after it is answered `reason: "expired"` and not applied. A stepped wall clock expires nothing |
-| No reply in time | the client sends the same id again when it reconnects, or gives up and tells the person. Either is safe |
+| No reply in time (capture restarting) | the client sends the same id again when it reconnects, or gives up and tells the person. Either is safe, because the id outlives capture's restart (row above): an op that is not idempotent by itself, such as `reception_start`, is never applied twice |
 | `ok: true` | capture has applied it. The app then records it in the wish file, which is what makes it outlive a restart of capture |
 | `ok: false` | nothing was changed. `reason` says why in a word, `error` in text; `confirm: true` (with `reason: "confirm"`) means the refusal only needs the person's yes, and `error` is the question |
 | The person's yes | a new request, **under a new id**, with `args.confirm: true`: the same id would only get the first reply again |
-| The `reason` words | `stale` (a `squelch_apply` whose `expect` is not what runs), `expired`, `unsupported` (an op capture does not know), `forbidden`, `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm`. A word a client does not know is a plain refusal |
+| The `reason` words | `stale` (a `squelch_apply` whose `expect` is not what runs), `expired`, `unsupported` (an op capture does not know), `forbidden`, `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `interrupted` (capture stopped while applying this id), `confirm`. A word a client does not know is a plain refusal |
 | Who may ask | a client that said `role: "reader"`; a `viewer` gets `reason: "forbidden"`. The role is self-declared and both are the same uid: it keeps a status tool from changing anything by mistake, and is no defence against a process of that user |
 | What no request can do | return a secret, take a path, take a command line |
 
@@ -83,7 +89,7 @@ there are two fields, as the station routes' answers have: **`reason`**, one wor
 | `probe` | `sdr` | not idle; held; `result`: `audio` or `none` |
 | `airband_ab` | `label`, `minutes`, `phase_s` | not an airband channel; not running |
 | `check` | `what` (`groups`, `adsb`), `value`, `confirm` | `invalid`; `confirm`; `held`. Advisory only: it changes nothing, and capture validates again when it applies the wish |
-| `urgent_since` | `urgent_epoch`, `n` (both needed), `limit` (200, at most 500) | `result`: `{urgent_epoch, rows, more, memory}`: the rows above the cursor in `n` order; `more`: ask again from the last `n`; `memory`: on the first page, the items that have no row (yet), in full |
+| `urgent_since` | `urgent_epoch`, `n` (both needed), `limit` (200, at most 500), `memory_after` (0) | `result`: `{urgent_epoch, rows, memory, memory_last, more}`. `memory`: the items that have no row (yet), after `memory_after`, in the order capture made them (each with its `m`; a new `pid` in `hello` starts the counter again, and the app then asks from 0). `rows`: the rows above the cursor in `n` order, at most `limit`. **The reply is filled only while its encoded frame stays within 65,536 bytes**: memory first (the items at risk), then rows, each at most 48 KB. `memory_last`: the `m` of the last memory item given. `more: true` when anything was left out: ask again from the last `n` given, with `memory_after: memory_last`. 200 rows of a few hundred bytes are about 76 KB, so the default page is often cut short: that is normal |
 | `credentials` | `token`, `access_id`, `access_secret` (all three, `""` for none) | **uid 0 only**, below |
 | `snapshot` | none (`{}`) | `result`: the snapshot |
 

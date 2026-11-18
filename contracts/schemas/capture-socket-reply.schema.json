@@ -14,7 +14,7 @@
     "t": {"const": "reply", "description": "Always `reply`."},
     "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The request's `id`."},
     "ok": {"type": "boolean", "description": "true: applied (or answered, for an op that changes nothing). false: refused, nothing changed."},
-    "reason": {"type": "string", "description": "With `ok` false: why, as one word for the client to act on. `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived at or after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0), `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm` (it needs the person's yes). A client takes a word it does not know as a plain refusal.", "x-known": ["stale", "expired", "unsupported", "forbidden", "parked", "taken", "held", "busy", "invalid", "confirm"]},
+    "reason": {"type": "string", "description": "With `ok` false: why, as one word for the client to act on. `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived at or after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0), `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm` (it needs the person's yes). A client takes a word it does not know as a plain refusal.", "x-known": ["stale", "expired", "unsupported", "forbidden", "parked", "taken", "held", "busy", "invalid", "interrupted", "confirm"]},
     "error": {"type": "string", "description": "With `ok` false: why, as text for a person (`refused: parked`; with `confirm`, the question). No client parses it."},
     "confirm": {"type": "boolean", "description": "With `ok` false: true (with `reason` `confirm`) when the refusal only needs the person's yes."},
     "result": {"description": "With `ok` true, for an op that returns something: `urgent_since` (`$defs/urgent-since-result`), `snapshot` (capture-socket-event.schema.json `$defs/snapshot`), `probe` (`audio` or `none`). The reply does not name its op: the client knows it by `id`."},
@@ -32,13 +32,13 @@
       "description": "One page of the urgent rows above the asked cursor.",
       "x-complete": true,
       "type": "object",
-      "required": ["urgent_epoch", "rows", "more", "memory"],
+      "required": ["urgent_epoch", "rows", "memory", "memory_last", "more"],
       "additionalProperties": true,
       "properties": {
         "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch now, 16 hex characters. Not the one asked for: the file was reset and the rows are from 0."},
-        "rows": {"type": "array", "description": "The rows above the cursor in `n` order, at most `limit`; each with `durable` true.", "maxItems": 500, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}},
-        "more": {"type": "boolean", "description": "There are more rows: ask again from the last `n`."},
-        "memory": {"type": "array", "description": "On the first page: the items capture holds that have no row (yet), in full, each with `n` null and `durable` false. They move no cursor.", "maxItems": 256, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}}
+        "rows": {"type": "array", "description": "The rows above the cursor in `n` order, at most `limit`, while the frame stays within 65,536 bytes; each with `durable` true and at most 49,152 bytes (trimmed past that, `data.trimmed`).", "maxItems": 500, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}},
+        "more": {"type": "boolean", "description": "A row or a memory item was left out to keep the frame within 65,536 bytes, or past `limit`: ask again from the last `n` given, with `memory_after: memory_last`."},
+        "memory": {"type": "array", "description": "The items capture holds that have no row (yet), after `memory_after`, in the order capture made them, each with `n` null, `durable` false and its `m`. They move no cursor. They go first (they are the ones at risk); no count limit, the frame's 65,536 bytes bound them.", "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}}, "memory_last": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "The `m` of the last memory item given (the asked `memory_after` when none was): the next page's `memory_after`."}
       }
     }
   }

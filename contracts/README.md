@@ -274,7 +274,7 @@ The contract a future `sizeup-radio` service (radio capture as its own process, 
 native daemon later) and the station app will speak. The design is `docs/native/capture-split.md` (#773), approved as
 the boundary by the radio maintainers; **nothing of it is implemented**, so everything here is `designed`: schemas,
 hand-written vectors with made-up values, and tests of the vectors and of the rules. No code under `sizeup/` changes.
-These files follow the design as of `225b06ff`, which answered the first version's questions and the second review's.
+These files follow the design as of `5f143a80`, which answered the first version's questions and the second and third reviews'.
 
 | schema | the design's name (10) | from | what |
 |---|---|---|---|
@@ -324,19 +324,23 @@ The first version of these files listed 33 choices (C1 to C33) for the radio mai
 where the design did not fit itself (X1 to X18). The design answered them (`79b788a8`, `6a777c98`). A second
 adversarial review of the models found sequences that lost an emergency or pushed twice; the fixes went into the
 design first (`d05339e3`), and the radio maintainers confirmed all of them (`225b06ff`, with one wording: the alarm
-after an All clear reads "emergency still set after All clear"). These files follow it everywhere. The six with the
-most weight are the design's decisions now; what is left to confirm is that these files hold them as meant:
+after an All clear reads "emergency still set after All clear", and only within 10 min of the radio's last flag
+before the clear, `3fcec010`). A third review found three more (the socket's sizes, a call from before an All
+clear, what the app's lane delivered); they went into the design (`65bcd699`), were confirmed by the radio
+maintainers, and the alarm's own small post on the events lane was settled by the main session (`5f143a80`). These
+files follow it everywhere. The six with the most weight are the design's decisions now; what is left to confirm is
+that these files hold them as meant:
 
 | was | decision | where it is held |
 |---|---|---|
 | C29 | The route is opened by a station's own `sz1` token only. The hub's older shared station token does not open it: a station still on it runs in `urgent-mode write` until it has its own token | `routes.json` `designed`; `capture-urgent-request` |
 | C18 | An alarm key in the hub's dedupe store has one of three states. `raised` and `stale` answer an urgent item `duplicate`; `seen` (the events lane met the key and raised nothing) does not: the item is judged on its own age. A `stale` entry keeps `stale_src`, and only a boot-sourced one stops a later event. A restore puts back the whole state as of its point. Every cutoff on an emergency is `max_age_s` x 1.1 | `Hub`; scenarios "stepped back 40 min", "carries the alarm_key and no emergency", "older than the age limit", "1 h fast", "before its upgrade to raised" |
 | C20 | A live P25 alarm and its call are matched on the station, by capture's ingest (system + talkgroup + unit, the grant inside the call's span +-10 s; the boot clock only after a wall step of over 5 s), and carried as the call's `alarm_key`: the hub compares no clocks. The key is made from the grant's own time | `match_call`, `WallSteps`, `p25_key`; scenarios "60 s ahead" |
-| C19 | The same radio pressing again, from this station or another, joins its open alarm (not cleared, acknowledged or not) raised under `REPEAT_S` before: one alarm, one push. P25 flags go through the press window on the hub's receive time: armed only by a flag that raised or joined an alarm, joining only an open one under 600 s, ended by an All clear | `Hub`; scenarios "pressing again", "two stations hear one press", "acknowledged at 4 s", "300 s later", "ending 35, 28, 21, 14, 7, 1 min ago", "notices are off", "15 min behind" |
-| C15 | Only an answer in the hub's shape counts. A word the sender does not know gets 5 tries, each after the healthy items and alone, then `rejected`; an item missing from a 200, `200 {}`, an edge's 422 cost no try. The hub's own 400/413/422 splits the request, and is final only for an item already alone. The body never encodes over 65,536 bytes: an oversize alarm goes trimmed. A rejected alarm still rides the app's lane, with a critical Health item | `Lane`; `test_an_answer_capture_cannot_read_...`, `test_what_is_not_the_hubs_answer_...`, `test_a_hub_refusal_...`, `test_an_alarm_over_the_byte_limit_...` |
+| C19 | The same radio pressing again, from this station or another, joins its open alarm (not cleared, acknowledged or not) raised under `REPEAT_S` before: one alarm, one push. P25 flags go through the press window on the hub's receive time: armed only by a flag that raised or joined an alarm, joining only an open one under 600 s, ended by an All clear. A call that started before the clear (placed past `U` by a boot age or a fresh skew) attaches to the cleared alarm with no push; when unsure it alarms | `Hub`; scenarios "a disregard call from before the All clear", "inside U", "pressing again", "two stations hear one press", "acknowledged at 4 s", "300 s later", "ending 35, 28, 21, 14, 7, 1 min ago", "notices are off", "15 min behind" |
+| C15 | Only an answer in the hub's shape counts. A word the sender does not know gets 5 tries, each after the healthy items and alone, then `rejected`; an item missing from a 200, `200 {}`, an edge's 422 cost no try. The hub's own 400/413/422 splits the request, and is final only for an item already alone; a lone `too_large` trims first. One byte count (UTF-8 of the JSON as sent); every item at most 48 KB, trimmed past that, in frames and requests alike; `urgent_since` filled while its frame fits. Fresh alarms first, then resends, then the backlog. `urgent_delivered` makes a row `app`: never sent by capture. A rejected alarm still rides the app's lane, with a critical Health item | `Lane`; `test_urgent_since_is_filled_...`, `test_urgent_delivered_...`, `test_in_every_request_fresh_...`, `test_an_answer_capture_cannot_read_...`, `test_what_is_not_the_hubs_answer_...`, `test_a_hub_refusal_...`, `test_an_alarm_over_the_byte_limit_...` |
 | C11 + C8 | The sidecar always goes first when an item is deleted or its audio dropped, and capture's start removes what such a removal left half done. `seq` is taken before the audio's rename; the next number at every start is the largest of `SEQ`, the file names (`items/`, `quarantine/`) and the cursor, plus 1. An emergency item (four signs) never loses its audio at a bound | `spool.md`; `check_spool`, `Spool`, `recover_seq`, `is_emergency` |
 
-Then what these files chose where the design, as of `225b06ff`, says nothing. Each is a proposal for the radio
+Then what these files chose where the design, as of `5f143a80`, says nothing. Each is a proposal for the radio
 maintainers (S9, S10: for whoever writes the sender and the hub's route) until confirmed.
 
 | # | where | chosen here |
@@ -349,31 +353,35 @@ maintainers (S9, S10: for whoever writes the sender and the hub's route) until c
 | S6 | a reply's `at` | required, by 4.2's "every header has `v`, `t`, `at`"; 10's row lists `v`, `t`, `id`, `ok` |
 | S7 | the route's 503 | its body is today's, `{error, updating}` (10 lists the 4xx bodies only) |
 | S8 | `shadow`, 4.3's table | the app writes as in the `inline` row of the same `urgent-mode`, and the shadow instance writes its own file beside it |
-| S9 | the sender, where the reference had to pick a mechanism | the resend is made durable by putting the row back to `new`; "in doubt" across boots is a wall time that lies in the future; the 256 bound frees page items first, then the copies of alarms that have a row; the resend cap sorts by `sent_boot` when every candidate is of one boot and by `sent_at` otherwise; items are added to a request in order and the first that does not fit waits for the next request (a trimmed item may share a request); `SEQ` one behind a file name is no fault while a publish is under way |
-| S10 | the hub, likewise | the press window's flag of an alarm that was cleared keeps the window ended; the label "emergency still set after All clear" is on a live P25 item's alarm too, when the window was ended by an All clear (the design names "the next flag") |
+| S9 | the sender, where the reference had to pick a mechanism | the resend is made durable by putting the row back to `new`; "in doubt" across boots is a wall time that lies in the future; the 256 bound frees page items first, then the copies of alarms that have a row; the resend cap sorts by `sent_boot` when every candidate is of one boot and by `sent_at` otherwise; items are added to a request in order and the first that does not fit waits for the next request; `SEQ` one behind a file name is no fault while a publish is under way; "never yet put in a request" is this process's memory (after a restart every unsent alarm under 120 s is fresh again); `m` counts every item the process puts in its memory, those loaded at start too; a lost-alarm warning's 24 h run from the row's `sent_at` |
+| S10 | the hub, likewise | the press window's flag of an alarm that was cleared keeps the window ended; the label "emergency still set after All clear" is on a live P25 item's alarm too; "at least `U` before" is inclusive; a call's age for the gate, from `start_boot`, is the start's age less the call's length; the events answer carries `gen` only on a 200 |
 | S11 | `tests/test_contracts_routes.py` | #774's wider net accepts a path that has a row under `designed`, so capture's sender (step 8b) can merge with or after the hub's route; the test that a served path must be promoted stays. (A patch that no longer fits its base is #774's `Unfit`: this branch adds nothing to `tests/contracts.py`) |
-| S12 | an urgent item's `data` | the keys of every kind are typed in one object (`$defs/data`), and only which are required follows `kind`: a kind added later must not reuse one of these names with another type. `key_time` and `trimmed` are optional there |
+| S12 | an urgent item's `data` | the keys of every kind are typed in one object (`$defs/data`), and only which are required follows `kind`: a kind added later must not reuse one of these names with another type. `key_time` and `trimmed` are typed there; the three P25 keys are required when `emergency_via` is `P25` |
+| S13 | the status, the socket | `delivered_app` and `lost` are optional keys of the `urgent` block (the design lists them; older readers need not have them); a memory item's `m` is optional in `$defs/held`; `urgent_delivered`'s `gen` is a `counter`; an empty mended call stem is `call_` and 8 hex digits |
+| S14 | the forwarder (11 H1m) | an "alarm event" that travels alone is an event of type `alarm`, or an event with a `system` (a P25 call) and an emergency flag or an `alarm_key`; an analog finished transmission with an `alarm_key` goes in the normal batch with its clip |
 
 ### Still ambiguous in the design
 
-Section, text, and what does not fit, as of `225b06ff`. The schemas and models follow the reading given. (The first
-version's Y1, the P25 key's time, and Y5, what a wall step is, were answered by the radio maintainers: the grant's
-own time, and a change of over 5 s between samples at most 5 s apart.)
+Section, text, and what does not fit, as of `5f143a80`. The schemas and models follow the reading given. (Answered
+since the first version: the P25 key's time and what a wall step is, by the radio maintainers; at `65bcd699` an id
+for any label, what tells capture that the app's lane delivered (`urgent_delivered`), and how long the "after All
+clear" label lasts, `3fcec010`.)
 
 | # | section | the text | the problem | read here as |
 |---|---|---|---|---|
 | Y1 | 4, 4.5, 4.2 | "every limit ... is exclusive on the inside"; "more than 15 s past `at_boot`"; "a request that reaches capture after it"; "remembers ... for 10 min" | the three sentences read as inclusive of the limit | the general rule: a status exactly 15 s old is down, a request exactly at `expires_boot` is expired, an id exactly 10 min old is forgotten |
 | Y2 | 4.1 | "Capture crashes": debris is removed, "then `SEQ` is recovered"; "Sequence": recovered from the file names, "debris included" | once the debris is removed its number is no longer on disk | the highest number is read before anything is removed |
-| Y3 | 4.1 | "every `id` matches `CLIP_ID` ... and is at most 200 characters" | `CLIP_ID` allows 121; and a label whose slug starts with `.`, `_` or `-` (`_x`, a label of one odd character) gives an id `CLIP_ID` refuses | the schema holds `id` to `CLIP_ID` |
-| Y4 | 4.2 | the frame table's `reply` row: `id`, `ok`, `error`, `confirm`, `result` | no `reason`, which the text below it and 10 require | with `reason` |
-| Y5 | 4.3 | a rejected alarm is shown "as not delivered until the hub has it by the other lane" | capture writes `urgent.unsent`, and nothing tells it what the app's lane delivered | `Lane.app_delivered`: the contract needs a notice for it, or the app works the banner out |
-| Y6 | 4.3, 11 H1j | the two-station join rule "holds from the start"; "the hub takes one station until multi-station lands" | while it takes one station the second one's request is a 409: there is nothing to join | the rule is live once a second station is taken |
-| Y7 | 4.3 | `seen` because "notices are off for it"; the item is then "judged on its own": `applied` | what `applied` raises on a channel whose notices are off is the alarm code's levels | not modelled |
-| Y8 | 6 step 8b, 11 | "a client string `/api/station/urgent` under `sizeup/` fails the fail-closed route test until `contracts/routes.json` lists the route as served" | S11 accepts a `designed` row, so that the sender can merge with or after the hub's route | as S11; the promotion test stays |
-| Y9 | 4.3 | the P25 match through a step: "the grant's `event_boot` within the call's length plus 70 s before the moment the ingest took the call (10 s of slack and the ingest's settle wait)" | the 70 s holds the "+-10 s" slack, which is inclusive, and the settle wait, which is a limit: the edge could be either | a limit: exactly the call's length plus 70 s is outside |
-| Y10 | 4.3, 6 | after an All clear "the next flag raises an alarm at any gap, labelled 'emergency still set after All clear'"; and "a new press 20 min after an All clear ... a new alarm" | a real new press hours after an All clear is also "the next flag", so it is labelled "still set"; no window bounds the label | the next flag at any gap, as written |
-| Y11 | 4.3 "Clocks" | a step is an offset change of over 5 s "between two samples at most 5 s apart" | samples further apart (capture stalled, or a host asleep) never show a step, so the P25 match cannot fall back to the boot clock across one | as written: no step; the match then rests on the wall test alone |
-| Y12 | 4.3 the sender | the resend cap's order: "`sent_boot` within one boot, else `sent_at`" | candidates of two boots: which clock orders them | `sent_at` for all of them (S9) |
+| Y3 | 4.2 | the frame table's `reply` row: `id`, `ok`, `error`, `confirm`, `result` | no `reason`, which the text below it and 10 require | with `reason` |
+| Y4 | 4.3, 11 H1j | the two-station join rule "holds from the start"; "the hub takes one station until multi-station lands" | while it takes one station the second one's request is a 409: there is nothing to join | the rule is live once a second station is taken |
+| Y5 | 4.3 | `seen` because "notices are off for it"; the item is then "judged on its own": `applied` | what `applied` raises on a channel whose notices are off is the alarm code's levels | not modelled |
+| Y6 | 6 step 8b, 11 | "a client string `/api/station/urgent` under `sizeup/` fails the fail-closed route test until `contracts/routes.json` lists the route as served" | S11 accepts a `designed` row, so that the sender can merge with or after the hub's route | as S11; the promotion test stays |
+| Y7 | 4.3 | the P25 match through a step: "the grant's `event_boot` within the call's length plus 70 s before the moment the ingest took the call (10 s of slack and the ingest's settle wait)" | the 70 s holds the "+-10 s" slack, which is inclusive, and the settle wait, which is a limit: the edge could be either | a limit: exactly the call's length plus 70 s is outside |
+| Y8 | 4.3 "Clocks" | a step is an offset change of over 5 s "between two samples at most 5 s apart" | samples further apart (capture stalled, or a host asleep) never show a step, so the P25 match cannot fall back to the boot clock across one | as written: no step; the match then rests on the wall test alone |
+| Y9 | 4.3 the sender | the resend cap's order: "`sent_boot` within one boot, else `sent_at`" | candidates of two boots: which clock orders them | `sent_at` for all of them (S9) |
+| Y10 | 4.3 "The file", the DDL | "every row with `lost_gen` set in the last 24 h"; "never while `lost_gen` is set, kept 24 h" | the row has no time for when `lost_gen` was set | from the row's `sent_at` (S9) |
+| Y11 | 4.3 the sender | fresh alarms are those "never yet put in a request" | whether that survives capture's restart: the file has no column for it | this process's memory (S9) |
+| Y12 | 4.3, 11 H1d | `U` for the boot age covers "a request's transit, which H1m's 8 s timeout bounds" | at `5f143a80` the 8 s is a total deadline on the alarm post only; a call event without an emergency flag or `alarm_key` goes in a normal batch (60 s), yet the rule may place its start | the rule is applied only to flagged calls, which travel in the alarm post |
+| Y13 | 11 H1m | the alarm post holds "a call event that carries an emergency flag or an `alarm_key`" | an analog finished transmission with an `alarm_key` (a `traffic` event) is not named | it goes in the normal batch with its clip (S14) |
 
 ### Running
 

@@ -1,0 +1,8 @@
+{
+  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "patch": [
+    {"op": "replace", "path": "/data/emergency_via", "value": "P25"},
+    {"op": "add", "path": "/data/system", "value": "examplesys"},
+    {"op": "add", "path": "/data/key_time", "value": "grant"}
+  ]
+}

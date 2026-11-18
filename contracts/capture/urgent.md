@@ -1,6 +1,6 @@
 # The urgent lane: items, clocks, the route and its idempotency (designed)
 
-**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.3, 7.5 and 11 (#773, as of `225b06ff`);
+**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.3, 7.5 and 11 (#773, as of `5f143a80`);
 live P25 emergencies are #775 and the hub's handoff measurement #776. What cannot wait for the app (an emergency
 alarm, a live page) is written by capture to its own SQLite file and sent by capture itself to
 `POST /api/station/urgent`. The app still takes each item over into its own lane, so the hub sees it again with the
@@ -22,14 +22,16 @@ What is still to confirm is listed in [`../README.md`](../README.md) "Capture sp
 
 | `kind` | When | `key` | `rev` |
 |---|---|---|---|
-| `alarm`, analog, live | the live tap decodes an emergency packet | `<label without spaces>-live-<int(carrier start * 1000)>` | 0 |
+| `alarm`, analog, live | the live tap decodes an emergency packet | `<slug>-live-<int(carrier start * 1000)>`, the slug of the ids rule (spool.md): today's key for every label of letters, digits, `._-` and spaces | 0 |
 | `alarm`, analog, at close | the whole-clip decode finds an emergency the tap did not raise | the transmission's own item id | 0 |
-| `alarm`, P25 live (#775) | the emergency bit on a grant, on a transition only. **Not live until #775 lands** | `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`: the grant's own time as trunk-recorder stamps it, so one grant on one station always gives one key (a restart or a replay is a `duplicate`). Only when the grant carries no time, capture's `at`; `data.key_time` says which (`grant` \| `capture`) | 0 |
+| `alarm`, P25 live (#775) | the emergency bit on a grant, on a transition only. **Not live until #775 lands** | `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`: the grant's own time as trunk-recorder stamps it, so one grant on one station always gives one key (a restart or a replay is a `duplicate`). Only when the grant carries no time, capture's `at`; `data.key_time` says which (`grant` \| `capture`). `system`, `talkgroup` and `key_time` are **required** on every P25 live alarm | 0 |
 | `page` | every page `LivePaging` shows, ours or not: the first pair that is certain, then each change | `page:<channel>:<started, 2 decimals>` | 0, 1, 2, ... |
 
 On the station an item's identity is `(key, rev)`; on the hub it is `(station, key, rev)`, the station from the
 token. An alarm has one revision, 0. `n` is only a row's place in the file. `at` is set once, when capture makes the
-item, before any insert, and is the same in the row, in every frame and in every request.
+item, before any insert, and is the same in the row, in every frame and in every request. **Every key is at most 200
+characters**: a longer one (a page of a very long label) is cut to 191, then `~` and the first 8 hex digits of the
+SHA-256 of the whole key. With the slug rule every key capture makes is valid.
 
 ## Limits
 
@@ -71,19 +73,34 @@ Every limit is exclusive on the inside: under the limit is inside, **exactly the
 | How the app gets the rows | from capture, never from the file: each `urgent` frame carries the item, and after a reconnect the app asks `urgent_since`, page by page. The app keeps the cursor `(urgent_epoch, n)` and the set of `(key, rev)` it has taken (24 h). Take-over is by `(key, rev)`: an item is taken once, however it arrives |
 | Insert | `INSERT OR IGNORE` on `(key, rev)`. A failed insert is tried again every 5 s while the item is in memory |
 | Checkpoints | by capture only, `PASSIVE`, never while an item waits for its commit; `TRUNCATE` at start |
-| Pruned | `sent` rows the app has taken over, an hour after `sent_at`, never inside the resend window; `expired` and `rejected` rows after 24 h; at most 10,000 rows, the oldest `sent` first. **An unsent alarm is never pruned** |
+| Delivered by the app | `urgent_delivered` (socket.md) sets the row's `state` to `app` (from `new` or `rejected`; a `sent` row stays `sent`), with `sent_at`, `sent_boot`, `sent_boot_id` from when the notice came and `hub_gen` from it. A memory item gets the mark in memory, and its row is written as `app`. Such a row is delivered (the banner clears, it leaves `unsent`), is **never sent by capture**, and joins the resend rule like a `sent` row only when its `hub_gen` is known. So a station in `write` mode no longer keeps every alarm "not delivered" for good, and a later switch to `send` does not send that backlog |
+| Lost alarms | the resend cap's leftovers get `lost_gen` (the gen they may have been lost under) and are named in a critical Health item; at start every row with `lost_gen` set in the last 24 h goes back into that warning: it is rebuilt from the rows, never kept only in memory |
+| Socket request ids | the `requests` table: the id recorded before a request is applied, the reply after (socket.md) |
+| Pruned | `sent` and `app` rows the app has taken over, an hour after `sent_at`, never inside the resend window and never while `lost_gen` is set (kept 24 h); `expired` and `rejected` rows after 24 h; at most 10,000 rows, the oldest `sent` first. **An unsent alarm is never pruned** |
 | Corrupt or unreadable at start | renamed `urgent.sqlite.bad-<epoch s>`; a new file with a new `urgent_epoch`; a CRITICAL log line; `urgent.resets` and `urgent.reset_at` in the status. The app's cursor starts at 0 for the new epoch; its taken set still holds |
 | Never in it | a token, a body, a transcript. `last_error` holds a status and the hub's `reason` only |
 
 ## The sender
 
 Two kept-alive connections: one carries alarms and nothing else, the other page items; a request never holds both.
-At most 32 items and 65,536 bytes (the whole body as sent) a request, one request in flight per connection. **The
-byte limit is enforced before sending**: items are added in order while the encoded body fits. An item over the
-limit on its own is never sent as one oversize request and never dropped: it goes with its `data` cut to the
-essentials and `trimmed: true` (an alarm: `source`, `start`, `end`, `radio_id`, `unit`, `emergency`, `emergency_via`,
-`system`, `talkgroup`, each string at most 200 characters, no `ids`; a page: `channel`, `started`, `phase`, `ours`,
-`ended`, `until` and as many `pairs` as fit). The row keeps the full `data`; the app's lane carries it whole.
+At most 32 items and 65,536 bytes a request (the UTF-8 of the body as sent, the count of every size in this
+contract), one request in flight per connection. **Alarms go in this order, in every request:** 1. fresh: never yet
+put in a request and under 120 s old, in `n` order; 2. the gen rule's resends, newest first; 3. the backlog, oldest
+first. Items that are alone or had an unknown word go after these, each in a request of its own. So a fresh alarm
+waits at most for the one request already in flight, never behind resends or a backlog. **The byte limit is enforced
+before sending**: items are added in that order while the encoded body stays within it. **Every item is at most
+48 KB** (`ITEM_MAX_BYTES`, 49,152 bytes, the same as a frame's): a larger one is sent **trimmed**, never as an
+oversize request and never dropped. Its `data` is cut to the essentials, `trimmed: true` beside them (an alarm:
+`source`, `start`, `end`, `radio_id`, `unit`, `emergency`, `emergency_via`, `system`, `talkgroup`, `key_time`, each
+string at most 200 characters, no `ids`; a page: `channel`, `started`, `phase`, `ours`, `ended`, `until` and as many
+`pairs` as fit). The row keeps the full `data`; the finished transmission reaches the hub by the app's lane with all
+its ids.
+
+**Checked before sending.** Each item is checked against
+[`capture-urgent-item`](../schemas/capture-urgent-item.schema.json) and the route's caps (a key of 1 to 200
+characters, `rev` an integer of at least 0) before it goes in a request. Keys are valid by construction, so this
+should never fail. An item that does is never put in a request: it becomes `rejected` with `last_error: "invalid"`
+and a critical Health item, and the app's lane carries it. One bad item can never make the hub refuse a batch.
 
 **What is an answer.** A 200, 400, 413 or 422 counts only with a body in the hub's shape: for a 200, one that passes
 [`capture-urgent-response`](../schemas/capture-urgent-response.schema.json) with `ok: true`; for the three 4xx, an
@@ -99,15 +116,16 @@ the item stays `new`, and no try is counted.
 | 200 in the hub's shape, the item named with a word the sender does not know | kept and tried again, at most 5 times, after the items that are healthy and in a request of its own, so it never stands in front of another alarm. Only this counts toward the 5. Then it counts as `rejected` |
 | No answer, a timeout (5 s), 502, 503, 530, 429, any status not listed here, or a 200/400/413/422 not in the hub's shape | retried: 0.5 s doubling to 2 s for the first 3 min, then to 15 s; `Retry-After` when given. Nothing is dropped, no try is counted |
 | 401, 403, 409 | kept and retried every 30 s; `urgent.state` is `refused`, with the hub's `reason` when the body is in its shape |
-| 400, 413, 422 in the hub's shape | the hub refused the request whole and applied nothing of it. The first such refusal of any request, of one item or many, marks each of its items **alone**: each is sent in a request of its own, after the healthy items, backed off. Only the refusal of a request holding exactly one item that was already alone makes that item `rejected`: a lone pending alarm needs two refusals of itself |
+| 400, 413, 422 in the hub's shape | the hub refused the request whole and applied nothing of it. A `too_large` for a request holding one item not yet trimmed is not counted as a refusal: the item is trimmed and sent alone again. Otherwise the first such refusal of any request, of one item or many, marks each of its items **alone**: each is sent in a request of its own, after the healthy items, backed off. Only the refusal of a request holding exactly one item that was already alone makes that item `rejected`: a lone pending alarm needs two refusals of itself |
 | 404, 405 | a hub without the route: `urgent.state` is `no_route`, tried again every 5 min |
 
 | Rule | |
 |---|---|
-| An alarm that ends `rejected` | is never only that: the app's lane already carries it, a critical Health item names its key, and the station's page shows it as not delivered until the hub has it by the other lane |
+| An alarm that ends `rejected` | is never only that: the app's lane already carries it, a critical Health item names its key, and the station's page shows it as not delivered until the hub has it by the other lane (`urgent_delivered`) |
+| The station's own signal | an alarm unsent for 10 s is shown by the app as "EMERGENCY not delivered to the hub" until the hub has it by either lane: capture's own answer, or `urgent_delivered` from the app, which is the only way in `write` mode |
 | The send does not wait for the disk | the sender takes the item from memory and waits for its commit at most 50 ms. An item with no row is `durable: false`; a row whose answer came first is written as answered, never left `new` |
 | The memory | at most 256 items: page items, and the copies of items that have a row (those are read back from the file). **An alarm without a row is never dropped to make room**: a page item goes, the oldest first. Alarms without rows are bounded only at 10,000; past that the oldest is written out as a CRITICAL log line and let go |
-| At start | into the senders go every `new` row, the oldest alarm first (a page revision only if it is still sendable), and every alarm row answered at or after the last sighting of the hub's `gen` minus 120 s, as "answered under `hub_gen`" |
+| At start | into the senders go every `new` row, the oldest alarm first (a page revision only if it is still sendable), and every alarm row (`sent` or `app`) answered at or after the last sighting of the hub's `gen` minus 120 s, as "answered under `hub_gen`". The lost-alarm warning is rebuilt from `lost_gen` |
 | What stops the sending | any of three: `urgent-mode` not `send`; `hub.forward` false in the wish; a hub that does not list `urgent` in `hub.caps`. Then `urgent.state` is `off`. None of them stops the writing in service mode: the rows and frames are how the app learns of a live alarm at all |
 | `urgent.state` | one word, the first that holds: `off`, `no_credentials`, `no_route`, `refused`, `retrying`, `ok`. A reset of the file is not a state: `resets`, `reset_at` |
 
@@ -117,12 +135,12 @@ A hub crash can lose about 30 s of its newest writes, alarms it had answered `ap
 
 | Rule | |
 |---|---|
-| Every answer carries `gen` | the hub's fencing generation: in the route's 200, and in the answer to the 50 s `GET /api/station/hello` on the alarm connection, which therefore **always runs in `send` mode**: an idle sender learns of a restore within 50 s, not at its next alarm |
+| Every answer carries `gen` | the hub's fencing generation: in the route's 200, in `/api/station/events`' answer (for `urgent_delivered`), and in the answer to the 50 s `GET /api/station/hello` on the alarm connection, which therefore **always runs in `send` mode**: an idle sender learns of a restore within 50 s, not at its next alarm |
 | What capture keeps, in the file | in `meta`: the last `gen` it saw and when it last saw it (wall, boot clock, boot id); on each row: the `gen` it was answered under (`hub_gen`) and when (`sent_at`, `sent_boot`, `sent_boot_id`). So the rule holds across capture's own restart |
 | By value | 5 and "5" are one generation |
-| Another `gen` | capture sends again every alarm that was answered under a different `gen` at or after **the last sighting of the old `gen` minus 120 s**. The window is anchored there, not at now: it holds however long the hub was away |
+| Another `gen` | capture sends again every alarm (`sent`, or `app` with a known gen) that was answered under a different `gen` at or after **the last sighting of the old `gen` minus 120 s**. The window is anchored there, not at now: it holds however long the hub was away |
 | Clocks | the boot clock within a boot; a row or a sighting from another boot uses wall time, and when that leaves doubt the row is sent: a duplicate is harmless |
-| Bounds | 32 such alarms at most: the newest by when the hub answered for them (`sent_boot` within one boot, else `sent_at`), and between equal times the higher `n`. Any beyond the 32 are counted and named in a critical Health item. Pages are never sent again |
+| Bounds | 32 such alarms at most: the newest by when the hub answered for them (`sent_boot` within one boot, else `sent_at`), and between equal times the higher `n`. Any beyond the 32 get `lost_gen` in their rows and are named in a critical Health item, rebuilt from the rows after a restart and kept 24 h. Pages are never sent again |
 
 ## The route
 
@@ -166,8 +184,28 @@ live P25 item skipping this step (the station judged it a new press); 3. otherwi
 gate with its margin, notices off, the same-radio join, a new alarm and a push), and the window becomes
 `{that alarm, t}` only if that raised or joined one. A negative gap is a new press. An All clear ends the window:
 the next flag raises an alarm at any gap, **labelled "emergency still set after All clear"** (the radio maintainers'
-wording). The rule applies from H1 on, to end-of-call flags before #775 too: it can only join an open alarm, so it
-can never hide one.
+wording) when it comes within 10 min, by the hub's receive time, of that radio's last flag before the clear; later
+than that it is a new press and is labelled as one. The rule applies from H1 on, to end-of-call flags before #775
+too: it can only join an open alarm, so it can never hide one.
+
+**A call from before the All clear** (checked after step 2, before step 3): a flagged call of a radio whose window's
+alarm was cleared, and whose **start** came before the clear, attaches to the cleared alarm with **no push**; its row
+says "emergency flag on a call from before the All clear", and the window is left as it was. "Before" is judged
+only on a clock the hub can trust, and only past its uncertainty `U`: the start, placed on the hub's clock, must be
+at least `U` before the hub's time of the clear. The placing: (i) H1m's boot age (the call's `start_boot` against the
+request's own boot time), `U` = 10 s + 10 % of the age; else (ii) the station's `start` corrected by `hub.skew`, only
+when the skew was measured in the last 60 s and no wall step was reported since the call started, `U` = 5 s + 2 x
+the skew's spread. With neither, or inside `U`, the hub is unsure and the call alarms by step 3, with the label above.
+A real new press starts after the clear, so it is never attached.
+
+**Ages on the events lane** (H1m, required): the take-over `alarm` event carries the item's `event_boot` and `boot`,
+a call's event its `start_boot`, and the forwarder adds the request's own boot time at sending; the hub has a
+boot-clock age for the age gate, for the push, and for the rule above. Without one (an older station, a wall step)
+the age is the hub's now minus the station's `end`, and the push says it is **approximate**. The alarm travels in
+**a small post of its own**: the take-over `alarm` event, or a call event with an emergency flag or an `alarm_key`,
+alone and without clips (the clip follows in a normal batch), with a **total** deadline of 8 s (one monotonic budget
+across connect, send and every receive; at it the post is aborted and counts as not delivered). Normal batches keep
+today's timeouts.
 
 Each row is one or more scenarios of [`urgent-scenarios.json`](urgent-scenarios.json):
 
@@ -184,7 +222,7 @@ Each row is one or more scenarios of [`urgent-scenarios.json`](urgent-scenarios.
 | 9 | a `traffic` event carrying the `alarm_key` with `emergency: false` first, then the item | `seen`, then `applied` |
 | 10 | at or past the cutoff | `stale` with its `stale_src`: a late notice, no push. A retry is `duplicate`; a later event raises nothing when the age was boot-sourced, and is judged on its own when it was wall-sourced |
 | 11 | a P25 live alarm and the end-of-call alarm of the same press (#775), in either order | one emergency, by `alarm_key`: capture matched the call to its live alarm on the station, and the hub compares no clocks. An event with no `alarm_key` (an older capture) is matched by the live item's own `data.start` inside the call's span +-10 s, station time against station time |
-| 12 | the same radio's next call with the bit still set | the press window: it joins the radio's open alarm, no push, and the alarm says "emergency still set". After an All clear the next flag raises an alarm labelled "emergency still set after All clear" |
+| 12 | the same radio's next call with the bit still set | the press window: it joins the radio's open alarm, no push, and the alarm says "emergency still set". After an All clear: a call that started before the clear (placed past `U`) attaches to the cleared alarm with no push; otherwise the next flag raises an alarm, labelled "emergency still set after All clear" within 10 min of the radio's last flag before the clear, else a new press |
 | 13 | the same radio pressing again while its alarm is open, acknowledged or not | `applied`; it joins the open alarm: no second alarm, no second push |
 | 14 | two stations hearing one press | two keys, one per station; the second item is `applied` and joins the open alarm (acknowledged or not) of that radio on that channel (P25: system and talkgroup) raised under `REPEAT_S` before, both placed on the hub's clock: one alarm, one push, two sources. Until multi-station lands the hub takes one station (409 `multi_station_off`) |
 | 15 | a page item | the highest `rev` per `(station, key)` wins: higher `applied`, equal `duplicate`, lower `stale`. The entry's expiry is the hub's own: `until` only by its distance from the same request's `sent_at`, kept within 0 to 300 s; with none, 300 s after the last revision |
@@ -249,5 +287,18 @@ Each row of the design's table is a test (`tests/test_contracts_capture.py`) or 
 | A page lasts 130 s | each revision has its own 120 s and `ended` has 10 min: it is sent. If it never is, the hub ends the entry after 300 s |
 | The hub answers an alarm with a word capture does not know, again and again | 5 tries, each after the healthy items, then `rejected` with a critical Health item; the app's lane carries the alarm |
 | More than 256 items wait in memory | page items go first; an alarm without a row is never dropped for room |
-| `urgent-mode write` (no sender), the station's wall clock stepped back more than 30 min | the alarm reaches the hub only by the app's lane, whose event looks too old: **dropped, as it would be today**. Closed by `send` mode and by the design's H1m. Stated, not hidden |
+| `urgent-mode write` (no sender), the station's wall clock stepped back more than 30 min | the app's lane carries a boot-clock age (H1m, required in the first version): not dropped. Without H1m it would be dropped, as today; `send` mode closes it too |
+| A live P25 alarm; the radio's first call joins it; a "disregard" call (still in emergency) from +330 to +360; All clear at +380; that call's event at +420 | its boot age places its start 50 s before the clear, past `U`: attached to the cleared alarm, no push, "emergency flag on a call from before the All clear". One alarm, one push |
+| The same with no boot age and a stale skew | the hub is unsure: an alarm, labelled "emergency still set after All clear". A person looks; nothing is lost |
+| A real new press 3 s (or 20 s) after the All clear | its call starts after the clear: never attached. An alarm and a push |
+| `urgent_since` with 200 rows of about 380 bytes | filled while the frame fits, `more: true`; the app asks again from the last `n` |
+| 300 alarms in memory after the disk failed, then the app reconnects | memory first, page by page (`memory_after`), each page within the frame. Every alarm is taken over |
+| `urgent-mode write`, one alarm whose `data` is over 48 KB | framed trimmed, never dropped: the app takes it over and its lane delivers it |
+| `urgent-mode write`, the app up | the app sends `urgent_delivered` when the hub acks each take-over event; the row becomes `app`, the banner clears |
+| A switch from `write` to `send` with 40 old alarms, then a fresh alarm | delivered ones are `app` rows, never sent; the fresh alarm is first in the first request, then resends, then the backlog |
+| The hub answers `too_large` for one alarm alone | it is trimmed and sent alone again; not counted as a refusal |
+| A channel label starting with `#` or `(`, or 150 or 300 characters long | the slug is mended with a short hash: a valid id and key |
+| More than 32 alarms in the resend window, then capture restarts | the rows over the cap carry `lost_gen`; Health's lost-alarm warning is rebuilt from them |
+| `reception_start` sent, capture restarts before replying, the same id again | recorded before applying: the first reply again, or `interrupted` if capture stopped mid-apply. Never two tests |
+| An end-of-call alarm with no boot age by the events lane | its push age is the hub's now minus the station's end: labelled approximate |
 | Two captures, or capture beside an inline app | cannot both hold `radio.lock` |

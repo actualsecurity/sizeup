@@ -10,7 +10,7 @@
   "required": ["key", "rev", "kind", "at", "event_at", "age_s", "age_src", "data"],
   "additionalProperties": true,
   "properties": {
-    "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`, the grant's own time; capture's `at` only when the grant carries none (`data.key_time`). A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
+    "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<slug>-live-<int(carrier start * 1000)>`, the slug of the ids rule (capture-spool-sidecar `id`). An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`, the grant's own time; capture's `at` only when the grant carries none (`data.key_time`). A page: `page:<channel>:<started, 2 decimals>`. A key over 200 characters is cut to 191, then `~` and the first 8 hex digits of the SHA-256 of the whole key. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
     "rev": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "The revision of the item under its key: always 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. On the station an item's identity is (key, rev)."},
     "kind": {"type": "string", "description": "What the item is. The hub answers an unknown kind `rejected` (reason `kind`) and takes the rest of the request.", "x-known": ["alarm", "page"]},
     "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture made the item, Unix seconds (the station's wall clock). Set once: the same value in the row, in every frame and in every request that carries the item."},
@@ -74,7 +74,12 @@
               "data": {
                 "description": "An alarm's data: what a reader may rely on.",
                 "required": ["source", "start", "radio_id", "emergency", "emergency_via"],
-                "properties": {"emergency": {"const": true, "description": "An alarm: always true."}}
+                "properties": {"emergency": {"const": true, "description": "An alarm: always true."}},
+                "if": {
+                  "properties": {"emergency_via": {"const": "P25", "description": "A P25 live alarm (#775)."}},
+                  "required": ["emergency_via"]
+                },
+                "then": {"description": "A P25 live alarm: its system, talkgroup and which time made its key, all three.", "required": ["system", "talkgroup", "key_time"]}
               }
             }
           }
@@ -100,7 +105,7 @@
       "additionalProperties": true,
       "properties": {
         "n": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991, "description": "The item's row number in the urgent file: its place there and nothing else; the app's cursor is (urgent_epoch, n). null exactly while the item has no row (`durable` false)."},
-        "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`, the grant's own time; capture's `at` only when the grant carries none (`data.key_time`). A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
+        "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<slug>-live-<int(carrier start * 1000)>`, the slug of the ids rule (capture-spool-sidecar `id`). An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`, the grant's own time; capture's `at` only when the grant carries none (`data.key_time`). A page: `page:<channel>:<started, 2 decimals>`. A key over 200 characters is cut to 191, then `~` and the first 8 hex digits of the SHA-256 of the whole key. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
         "rev": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "The revision of the item under its key: always 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. On the station an item's identity is (key, rev)."},
         "kind": {"type": "string", "description": "What the item is. A reader leaves an unknown kind alone.", "x-known": ["alarm", "page"]},
         "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture made the item, Unix seconds (the station's wall clock). Set once: the same value in the row, in every frame and in every request that carries the item."},
@@ -108,6 +113,7 @@
         "event_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The same moment as `event_at` on CLOCK_BOOTTIME, seconds since boot `boot`."},
         "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id `event_boot` belongs to. Opaque: compared for equality only."},
         "data": {"$ref": "#/$defs/data"},
+        "m": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "An item in capture's memory with no row (`durable` false): a counter of the capture process, in the order capture made its items; `urgent_since` pages the memory by it (`memory_after`). A new `pid` in `hello` starts it again. Optional."},
         "durable": {"type": "boolean", "description": "The item has a row, committed and fsync'd. false: it lives in capture's memory only (a failed insert, a stalled disk) and `n` is null; when its row is written a second frame for the same (key, rev) follows with its `n` and `durable` true."}
       },
       "allOf": [

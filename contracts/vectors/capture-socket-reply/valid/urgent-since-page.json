@@ -7,6 +7,7 @@
   "result": {
     "urgent_epoch": "9c2d7e10a4b35f68",
     "more": false,
+    "memory_last": 3,
     "rows": [
       {
         "n": 57,
@@ -40,6 +41,7 @@
         "event_boot": 5304.5,
         "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c",
         "durable": false,
+        "m": 3,
         "data": {
           "source": "CH A",
           "start": 1900000190.5,
