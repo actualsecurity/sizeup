@@ -6,7 +6,9 @@ get:
     foreground (then open `/api/v1/stream`). With no `after` it returns the log's head and epoch and no changes: where a
     live app starts, next to its snapshot. A cursor older than the log (kept 7 days, at most 100,000 entries) is a 410
     `cursor_too_old` with `oldest`, the smallest cursor still served; a different `epoch`, or an `after` beyond the head,
-    is a 409 `epoch_changed` with the current `epoch`. Either way the app loads a snapshot again. Served only while
+    is a 409 `epoch_changed` with the current `epoch`. An `after` without its `epoch` is a 400 `bad_cursor` (a bare number
+    could be from any run of the hub). The epoch is new at every start of the hub, so a cursor never survives a restart or
+    a deploy: the app gets a 409 once and loads a snapshot again. Either way the app loads a snapshot again. Served only while
     the `stream` feature is on; needs a signed-in device with at least the `read` role.
   parameters:
     - name: after
@@ -17,7 +19,7 @@ get:
     - name: epoch
       in: query
       required: false
-      description: The epoch the cursor came from.
+      description: The epoch the cursor came from. Required with `after`.
       schema: {type: string}
     - name: limit
       in: query

@@ -4,21 +4,27 @@ its own kinds). A reference carries no payload, no position and no transcript: t
 own role's filter) when it sees a new rev. `rev` is a hash of the whole row (rev.py): it is no more than a
 confirmation oracle for a row someone could already guess.
 
-Storage: hub.sqlite (never cad.sqlite's tables), three tables created on first use while the `stream` flag is on (a hub
-with mobile off never creates them), through their own connection behind the fence (a fenced task writes nothing):
+Storage: hub.sqlite only (the log never writes to cad.sqlite: it only reads it), three tables created on first use
+while the `stream` flag is on (a hub with mobile off never creates them), through their own connection behind the fence
+(a fenced task writes nothing):
 
-    mobile_changelog       seq (AUTOINCREMENT: never reused, so a cursor is never ambiguous), kind, id, rev, at
-    mobile_changelog_head  the last rev logged per (kind, id): what a change is measured against, and what lets the next
-                           task after a handoff go on from where this one stopped (the cursor is in the database,
-                           not the process)
-    mobile_changelog_meta  epoch (random, new if the log is ever reset), floor (the highest seq pruned), baselined,
-                           cad_hw (the CAD's high-water ids when the last batch was written)
+    mobile_changelog       seq (AUTOINCREMENT: never reused), kind, id, rev, at
+    mobile_changelog_head  the last rev logged per (kind, id): what a change is measured against (rebuilt at each start)
+    mobile_changelog_meta  floor (the highest seq pruned)
+
+EPOCH: a new random epoch at every start of the log (one per process, held in memory). A cursor is `<epoch>-<seq>`,
+so a cursor from an earlier run answers 409 and the app resnapshots. That is what makes a restore safe without any
+check: after a crash failover Litestream may give back a hub.sqlite a second behind, with a lower `sqlite_sequence`,
+and the next process would hand out seqs a stream already sent; under a new epoch no old cursor can be mistaken for a
+new one. The cost: every hub restart or deploy makes connected apps resnapshot once. Rows of an earlier epoch stay
+until retention prunes them; a new epoch's first seq is above them (`start_seq`), so nothing of them is ever served
+again.
 
 Writes: a CAD commit only pokes the Recorder (an Event.set; never a lock a request thread can hold). Its one thread
 wakes on a poke, waits BATCH_S so the commits of a busy minute become one transaction, and appends what changed
 since the last rev it logged. Nothing runs on a request thread (a GET never writes: the first reader is told 503
-`unavailable` + Retry-After 1 while the recorder makes the baseline), nothing at startup, and with the flag off a poke
-returns at once. The tables and the epoch are made by the recorder's first run.
+`unavailable` + Retry-After 1 while the recorder makes the tables and the baseline: the heads of what is on the board
+now), nothing at startup, and with the flag off a poke returns at once.
 
 Why `Broadcaster.poke` (the console's state stream, sizeup/web/server.py) is not reused: its ids reset on every handoff,
 it holds no history and its payload is the UI blob for everyone (docs/mobile-api.md section 3.4).
@@ -31,22 +37,15 @@ by a thread that is waiting for `store.lock`):
     ChangeLog._lock  (the log's connection: leaf, nothing is called from under it but sqlite)
     Feed._mu, Subscription._cv   (leaves)
 
-Restore: the epoch is random and stored in hub.sqlite, so a restored older hub.sqlite brings its old epoch back. The log
-checks itself against the CAD at its first run (check_anchor): the CAD carries the epoch it last logged under and, after
-a clean drain, the head it reached; the CAD's own high-water ids are kept in the log. A CAD older than the log, a log
-that does not match the CAD's epoch or one older than a clean drain's head is reset (a new epoch: every app gets a 409
-and resnapshots). A hub.sqlite restored to a point after the last clean drain cannot be told from a crash: run
-`reset` (docs/cloud.md) after restoring either database.
-
 Cost (tests/test_api_v1_changes.py): about one 4 KB page per change in the log plus its head row, in one transaction
 per batch; a change of an object that keeps its rev writes nothing. Each flush also reads the open incidents and the
-board (two scans, hashed outside the CAD's lock), skipped when the CAD has not committed since the last one.
+board (a few small queries, hashed outside the CAD's lock: never every chronology row), skipped when the CAD has not
+committed since the last one.
 
 Retention: RETENTION_S (7 days) and at most MAX_ROWS rows, pruned an hour at a time in passes of PRUNE_ROWS; a cursor
 older than what is kept (`floor`) is a 410 and the app resnapshots. A deletion is a row whose rev is ""."""
 from __future__ import annotations
 
-import json
 import secrets
 import sqlite3
 import threading
@@ -78,12 +77,6 @@ VALID_EVERY_S = 5.0            # a stream asks whether its device is still valid
 
 MOBILE_KINDS = frozenset({"incident", "unit"})
 
-# What a `rev` is: the hash of the reads' serializers' output (cad_follow). Phase A of #561 hashed raw rows ("" in the
-# meta: no rev_def): a log written under another definition is reset at its first run (check_rev_definition).
-REV_DEFINITION = "reads-serializers-v2"
-
-MARK_EPOCH, MARK_CLEAN = "mobile_log_epoch", "mobile_log_clean"       # the CAD's meta keys (see check_anchor)
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mobile_changelog (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
                                              id TEXT NOT NULL, rev TEXT NOT NULL, at REAL NOT NULL);
@@ -106,13 +99,6 @@ def public(c: Change, epoch: str) -> dict:
     return {"seq": c.seq, "epoch": epoch, "kind": c.kind, "id": c.id, "rev": c.rev, "at": c.at}
 
 
-class Anchor(NamedTuple):
-    """What the log knows of the CAD it follows: its meta (get/put) and its high-water ids (never lower on one CAD)."""
-    get: Callable[[str], str | None]
-    put: Callable[[str, str], None]
-    hw: Callable[[], list]
-
-
 class ChangeLogClosed(RuntimeError):
     """The log was closed (the hub is draining): it is not opened again."""
 
@@ -128,7 +114,8 @@ class ChangeLog:
         self._lock = threading.RLock()
         self._db: sqlite3.Connection | None = None
         self._closed = False
-        self._epoch = ""
+        self._epoch = secrets.token_hex(6)    # new at every start (see the module docstring)
+        self._start_seq = 0                   # the head when this run opened the log: its entries all come after it
         self._pruned_at = 0.0
         self.commits = 0                      # transactions committed through this log (a test counts them)
 
@@ -149,11 +136,8 @@ class ChangeLog:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'mobile_changelog_meta'").fetchone():
                 self._guard()
                 db.executescript(SCHEMA)        # (a fenced task raises here: nothing made, and tried again later)
-            if not db.execute("SELECT 1 FROM mobile_changelog_meta WHERE key = 'epoch'").fetchone():
-                self._guard()
-                db.execute("INSERT OR IGNORE INTO mobile_changelog_meta (key, value) VALUES ('epoch', ?)",
-                           (secrets.token_hex(6),))
-            self._epoch = db.execute("SELECT value FROM mobile_changelog_meta WHERE key = 'epoch'").fetchone()[0]
+            r = db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'mobile_changelog'").fetchone()
+            self._start_seq = int(r[0]) if r else 0
             self._db = db
             return db
 
@@ -191,7 +175,6 @@ class ChangeLog:
 
     @property
     def epoch(self) -> str:
-        self._open()
         return self._epoch
 
     def _meta(self, key: str) -> str | None:
@@ -201,8 +184,9 @@ class ChangeLog:
         return r[0] if r else None
 
     def floor(self) -> int:
-        """The smallest cursor (`after`) that is still served: entries up to it were pruned."""
-        return int(self._meta("floor") or 0)
+        """The smallest cursor (`after`) that is still served: entries up to it were pruned, or are an earlier run's."""
+        self._open()
+        return max(int(self._meta("floor") or 0), self._start_seq)
 
     def head(self) -> int:
         db = self._open()
@@ -226,9 +210,6 @@ class ChangeLog:
             rows = db.execute("SELECT kind, id, rev FROM mobile_changelog_head").fetchall()
         return {(k, i): r for k, i, r in rows}
 
-    def baselined(self) -> bool:
-        return self._meta("baselined") is not None
-
     # -- writing (the Recorder's; one transaction per batch) -------------------------------------------------------
 
     @staticmethod
@@ -236,7 +217,7 @@ class ChangeLog:
         db.execute("INSERT INTO mobile_changelog_meta (key, value) VALUES (?, ?) "
                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
-    def append(self, entries: list[tuple[str, str, str | None]], hw: list | None = None) -> list[Change]:
+    def append(self, entries: list[tuple[str, str, str | None]]) -> list[Change]:
         """(kind, id, rev) each, in one transaction: the entries and the heads. rev "" is a deletion; rev None only
         drops the head (an object that left the followed window, as a long-closed incident: no entry). FencedWrite when
         this task is not the leader (nothing written). Entries whose rev is already the head's are skipped."""
@@ -259,19 +240,14 @@ class ChangeLog:
                 else:
                     db.execute("INSERT INTO mobile_changelog_head (kind, id, rev) VALUES (?, ?, ?) "
                                "ON CONFLICT(kind, id) DO UPDATE SET rev = excluded.rev", (kind, id_, rev))
-            if out and hw is not None:
-                self._put_meta(db, "cad_hw", json.dumps(hw))
         return out
 
-    def baseline(self, entries: list[tuple[str, str, str]], hw: list | None = None) -> None:
-        """Heads only, no entries: what exists when the log is first made. Nothing is announced that a cursor never
-        had (an app takes its first cursor from the head, which is after these)."""
+    def baseline(self, entries: list[tuple[str, str, str]]) -> None:
+        """The heads of what exists now, no entries (rebuilt at each start: an earlier run's heads may be from a
+        restored database). Nothing is announced that a cursor never had: an app takes its first cursor at the head."""
         with self._txn() as db:
-            db.executemany("INSERT INTO mobile_changelog_head (kind, id, rev) VALUES (?, ?, ?) "
-                           "ON CONFLICT(kind, id) DO UPDATE SET rev = excluded.rev", entries)
-            self._put_meta(db, "baselined", "1")
-            if hw is not None:
-                self._put_meta(db, "cad_hw", json.dumps(hw))
+            db.execute("DELETE FROM mobile_changelog_head")
+            db.executemany("INSERT INTO mobile_changelog_head (kind, id, rev) VALUES (?, ?, ?)", entries)
 
     def prune(self, force: bool = False) -> int:
         """Entries older than the retention, and any beyond MAX_ROWS: deleted, at most PRUNE_ROWS a pass (a pass that
@@ -281,7 +257,7 @@ class ChangeLog:
         if not force and now - self._pruned_at < PRUNE_EVERY_S:
             return 0
         with self._lock:
-            floor = self.floor()
+            floor = int(self._meta("floor") or 0)
             db = self._open()
             old = db.execute("SELECT MAX(seq) FROM mobile_changelog WHERE at < ?", (now - self.retention_s,)).fetchone()
             cut = old[0] or 0
@@ -299,53 +275,12 @@ class ChangeLog:
             return n
 
     def reset(self) -> str:
-        """The log started over (an operator's, or a restored database): a new epoch, so every cursor is refused with a
-        409 and the apps resnapshot. Returns the new epoch."""
-        with self._txn() as db:
-            new = secrets.token_hex(6)
-            db.execute("DELETE FROM mobile_changelog")
-            db.execute("DELETE FROM mobile_changelog_head")
-            db.execute("DELETE FROM mobile_changelog_meta WHERE key IN ('floor', 'baselined', 'cad_hw')")
-            self._put_meta(db, "epoch", new)
-            self._epoch = new
-        return new
-
-    def check_rev_definition(self) -> bool:
-        """The rev's definition changed since this log's rows were written (REV_DEFINITION): reset, a new epoch, so
-        every app resnapshots and no cursor mixes two kinds of rev. A log that has never been written just records
-        it. True when it reset (the CAD must be told the new epoch)."""
-        have = self._meta("rev_def")
-        if have == REV_DEFINITION:
-            return False
-        fresh = have is None and not self.baselined() and self.head() == 0
-        if not fresh:
-            self.reset()
-        with self._txn() as db:
-            self._put_meta(db, "rev_def", REV_DEFINITION)
-        return not fresh
-
-    def check_anchor(self, anchor: Anchor) -> bool:
-        """The log against the CAD it follows, at this task's first run: reset (True) when the CAD is older than the log
-        has seen, when the CAD names another epoch or none for a log that has begun, or when a clean drain reached a
-        head this log has not (a hub.sqlite restored to before it). Else the CAD is told the epoch."""
-        marker, clean = anchor.get(MARK_EPOCH), anchor.get(MARK_CLEAN)
-        seen = self._meta("cad_hw")
-        now = anchor.hw()
-        stale = (marker is not None and marker != self.epoch) or (marker is None and self.baselined())
-        if seen:
-            stale = stale or any(n < r for n, r in zip(now, json.loads(seen)))
-        if clean:
-            epoch, _, head = clean.rpartition(":")
-            stale = stale or (epoch == self.epoch and head.isdigit() and int(head) > self.head())
-        if stale:
-            self.reset()
-        if marker != self.epoch:
-            anchor.put(MARK_EPOCH, self.epoch)
-        return stale
-
-    def mark_clean(self, anchor: Anchor) -> None:
-        """A clean drain: the CAD is told how far this log got (check_anchor's third check)."""
-        anchor.put(MARK_CLEAN, f"{self.epoch}:{self.head()}")
+        """Start a new epoch now (an operator's, in code): every cursor is refused with a 409 and the apps resnapshot.
+        Nothing is deleted: the entries so far are never served again (`start_seq`). Returns the new epoch."""
+        with self._lock:
+            self._epoch = secrets.token_hex(6)
+            self._start_seq = self.head()
+            return self._epoch
 
 
 # -- who is told -----------------------------------------------------------------------------------------------
@@ -389,16 +324,15 @@ class Subscription:
 class Recorder:
     """Turns CAD commits into log entries, off every request thread. `follow`: [(kind, scan)], each scan(heads of that
     kind) -> {id: rev} for the objects it follows now (rev "": gone; None: left the followed window, head dropped).
-    `active`: the `stream` flag (a poke with it off does nothing and starts nothing). `anchor`: the CAD (check_anchor).
+    `active`: the `stream` flag (a poke with it off does nothing and starts nothing).
     `version`: the CAD's commit counter, so a flush with no commit since the last reads nothing."""
 
     def __init__(self, log: ChangeLog, follow: list[tuple[str, Callable[[dict], dict]]], active: Callable[[], bool],
                  notify: Callable[[list[Change]], None], batch_s: float = BATCH_S,
-                 report: Callable[[str], None] | None = None, anchor: Anchor | None = None,
-                 version: Callable[[], int] | None = None):
+                 report: Callable[[str], None] | None = None, version: Callable[[], int] | None = None):
         self.log, self.follow, self.active, self.notify = log, follow, active, notify
         self.batch_s, self.report = batch_s, report or (lambda m: None)
-        self.anchor, self.version = anchor, version
+        self.version = version
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -445,23 +379,14 @@ class Recorder:
                 seen[(kind, id_)] = got
         return seen
 
-    def _hw(self) -> list | None:
-        return self.anchor.hw() if self.anchor is not None else None
-
     def prepare(self) -> None:
-        """Once: the log checked against the CAD and given its baseline (the heads of what is on the board now), so the
-        first commit after the flag went on is a change and not the state to start from. Runs on the recorder's thread
-        (a GET never writes); holds `_base` across the CAD scan, which poke never takes."""
+        """Once per run: the log's tables and baseline (the heads of what is on the board now), so the first commit
+        after the flag went on is a change and not the state to start from. Runs on the recorder's thread (a GET never
+        writes); holds `_base` across the CAD scan, which poke never takes."""
         with self._base:
             if self._ready:
                 return
-            if self.log.check_rev_definition() and self.anchor is not None:
-                self.anchor.put(MARK_EPOCH, self.log.epoch)          # (the reset's new epoch, told to the CAD at once)
-            if self.anchor is not None:
-                self.log.check_anchor(self.anchor)
-            if not self.log.baselined():
-                seen = self._scan(self.log.heads())
-                self.log.baseline([(k, i, r) for (k, i), r in seen.items() if r], self._hw())
+            self.log.baseline([(k, i, r) for (k, i), r in self._scan({}).items() if r])
             self._ready = True
 
     def flush(self) -> list[Change]:
@@ -477,7 +402,7 @@ class Recorder:
             seen = self._scan(heads)
             changes = [(k, i, r) for (k, i), r in seen.items()
                        if heads.get((k, i), "") != r and (r is not None or (k, i) in heads)]
-            out = self.log.append(changes, self._hw()) if changes else []
+            out = self.log.append(changes) if changes else []
             self._seen_version = v
             self.log.prune()
             if out:
@@ -499,8 +424,7 @@ class Recorder:
             return []
 
     def stop(self) -> None:
-        """The hub is draining: the last batch is written and the CAD told how far the log got (so the next task's
-        cursor has it and a restore of an older database is noticed), the thread ends."""
+        """The hub is draining: the last batch is written, the thread ends."""
         self._stop.set()
         self._wake.set()
         t = self._thread
@@ -509,13 +433,6 @@ class Recorder:
         if t is not threading.current_thread():
             t.join(5)
         self.flush()
-        try:
-            if self.anchor is not None and self._ready and self.active():
-                self.log.mark_clean(self.anchor)
-        except Exception:  # noqa: BLE001 - FencedWrite or closed: nothing to say
-            # (a clean marker that could not be written, or was not because the flag is off, looks like a crash to the
-            # next start: it only loses the "older hub.sqlite" check, never a cursor)
-            pass
 
 
 # -- the CAD's objects as references ----------------------------------------------------------------------------
@@ -525,14 +442,12 @@ def cad_follow(store) -> list[tuple[str, Callable[[dict], dict]]]:
     REV THE READS SERVE (docs/mobile-api.md section 3.4): the hash of reads' own serializers' output
     (serialize.incident_summary and serialize.unit through rev_of, as with_rev does), so a log entry's (kind, id, rev)
     equals the rev of that object in GET /api/v1/incidents (list items and the snapshot) and /api/v1/units. It is
-    never a hash of a raw row: a column the API does not show (a unit's notes) is not a change, and a scrubbed field
-    changes the rev when its scrubbed form does. The detail GET /api/v1/incidents/{id} serves a different object
-    (events, building notes, the role's view), so its rev is its own; a chronology-only change (a note) does not
-    change the summary, so it is not a log entry. Incidents are the ones the reads list: open ones and those closed in
-    the last day (store.incidents()); the rows come from the store under its lock and are serialized and hashed after
-    it is released."""
+    never a hash of a raw row. The detail GET /api/v1/incidents/{id} serves a different object, so its rev is its own.
+    Incidents are the ones the reads list (open, and closed in the last day). The scan is lean: store.incidents_lean()
+    reads the incident rows, their assignments and the newest chronology id of each, never the chronologies; the rows
+    come from the store under its lock and are serialized and hashed after it is released."""
     def incidents(heads: dict) -> dict:
-        out = {str(i["id"]): rev_of(incident_summary(i)) for i in store.incidents()}
+        out = {str(i["id"]): rev_of(incident_summary(i)) for i in store.incidents_lean()}
         for i in heads:
             out.setdefault(i, None)                      # it left the window (closed long ago): not a deletion
         return out
@@ -543,17 +458,6 @@ def cad_follow(store) -> list[tuple[str, Callable[[dict], dict]]]:
             out.setdefault(i, "")                        # it was followed and is gone
         return out
     return [("incident", incidents), ("unit", units)]
-
-
-def cad_anchor(store) -> Anchor:
-    """The CAD's meta and high-water ids: the highest id of each table whose rows come with a followed change (ids
-    only grow on one database, so a lower one is an older database). Assumes ids never fall: a future retention DELETE
-    of the newest rows would only cause a harmless reset)."""
-    def hw() -> list:
-        tables = ("incidents", "events", "unit_history", "dispatches")
-        r = store.q("SELECT " + ", ".join(f"(SELECT IFNULL(MAX(id), 0) FROM {t}) AS {t}" for t in tables))[0]
-        return [r[t] for t in tables]
-    return Anchor(store.meta_get, store.meta_put, hw)
 
 
 class Feed:
@@ -569,21 +473,19 @@ class Feed:
                  visible: Callable[[object, Change], bool] | None = None, kinds: frozenset = MOBILE_KINDS,
                  fence_ok: Callable[[], bool] | None = None, report=None, batch_s: float = BATCH_S,
                  heartbeat_s: float = HEARTBEAT_S, tick_s: float = TICK_S, queue: int = SUBSCRIBER_QUEUE,
-                 valid: Callable[[object], bool] | None = None, anchor: Anchor | None = None,
-                 version: Callable[[], int] | None = None):
+                 valid: Callable[[object], bool] | None = None, version: Callable[[], int] | None = None):
         self.log, self.kinds, self.visible, self.fence_ok = log, kinds, visible, fence_ok
         self.valid = valid
         self.heartbeat_s, self.tick_s, self.queue = heartbeat_s, tick_s, queue
         self._subs: set[Subscription] = set()
         self._mu = threading.Lock()
-        self.recorder = Recorder(log, follow or [], active, self._notify, batch_s, report, anchor, version)
+        self.recorder = Recorder(log, follow or [], active, self._notify, batch_s, report, version)
 
     def poke(self) -> None:
         self.recorder.poke()
 
     def bind(self, store) -> None:
-        """Tie the recorder to a CAD store: its meta and high-water ids, and its commit counter."""
-        self.recorder.anchor = self.recorder.anchor or cad_anchor(store)
+        """Tie the recorder to a CAD store's commit counter (the gate that skips a flush with no commit since)."""
         self.recorder.version = self.recorder.version or (lambda: store.rev)
 
     def attach(self, store) -> None:

@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
 from . import reads
 from .errors import JSON, error
-from .limits import Limits
+from .limits import STREAMS_PER_DEVICE, Limits
 from .principal import Resolver, none_yet, person
 from .routes import ROUTES, Ctx, Route
 from .stream import Body, StreamPlan
@@ -53,6 +54,8 @@ class V1:
         self.log = log or _stderr
         # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
         self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
+        self._streams: dict[str, list] = {}        # device -> its open streams, oldest first (newest wins, #561)
+        self._streams_mu = threading.RLock()
         self.changes = changes            # the change log's Feed (#561): /changes and /stream; None: not on this host
 
     def handles(self, path: str) -> bool:
@@ -137,11 +140,26 @@ class V1:
             self.limits.leave()
 
     def _stream(self, plan: StreamPlan, principal) -> tuple[int, Body, str, dict]:
-        """2 streams per device and the global cap (limits.open_stream): over it a 429 in the envelope. The body ends
-        itself when mobile or the `stream` flag goes off (read as it runs), and gives its slot back when it ends."""
-        if not self.limits.open_stream(principal.device):
-            return error(429, "too_many_streams", "too many open streams: close one", 10)
+        """2 streams per device and the global cap (limits.open_stream). A device over its two gets the NEWEST: its
+        oldest stream is closed (reason `superseded`) and the new one accepted (a phone that changed networks leaves a
+        stale stream open until the hub notices it, and would otherwise be refused). Only the global cap is a 429. The
+        body ends itself when mobile or the `stream` flag goes off (read as it runs), and gives its slot back when it
+        ends."""
         device = principal.device
-        body = Body(plan, lambda: self.limits.close_stream(device),
-                    lambda: not (self.switches.enabled() and self.switches.allows("stream")))
+        with self._streams_mu:
+            if not self.limits.open_stream(device):
+                mine = self._streams.get(device, [])
+                if len(mine) < STREAMS_PER_DEVICE:                       # not the per-device cap: the global one
+                    return error(429, "too_many_streams", "too many open streams: try again", 10)
+                mine.pop(0).evict()                                      # (gives its slot back, and drops itself)
+                if not self.limits.open_stream(device):
+                    return error(429, "too_many_streams", "too many open streams: try again", 10)
+
+            def done() -> None:
+                with self._streams_mu:
+                    self.limits.close_stream(device)
+                    if body in self._streams.get(device, []):
+                        self._streams[device].remove(body)
+            body = Body(plan, done, lambda: not (self.switches.enabled() and self.switches.allows("stream")))
+            self._streams.setdefault(device, []).append(body)
         return 200, body, "text/event-stream", {"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"}

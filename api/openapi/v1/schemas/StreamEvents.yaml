@@ -28,6 +28,6 @@ properties:
     properties:
       reason:
         type: string
-        enum: [stopping, handover, slow, epoch_changed, revoked]
+        enum: [stopping, handover, slow, epoch_changed, revoked, superseded]
         description: Then the connection ends and the app reconnects (an unknown reason is read as stopping).
       server_time: {type: number}

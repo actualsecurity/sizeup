@@ -385,14 +385,18 @@ production, and native SSE clients are small (URLSession bytes, OkHttp-sse).
 change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/events`, `/api/v1/changes` and
 `/api/v1/stream` are three views of it with different scopes and hydrators.
 
-- The epoch lives in the database, not the process, so it survives handoffs.
+- The epoch is new at every start of the hub (a random token held in memory): a cursor from an earlier run answers 409
+  and the app resnapshots once, so a restore (Litestream may give back a hub.sqlite a second behind) can never hand a
+  phone a seq it already has. The log never writes to cad.sqlite.
 - Writes to it are batched off the request path, and none happen at startup (the startup-writes rule, PR #507).
 - **As built (#561):** `sizeup/api/v1/changelog.py` (the log, the recorder, the feed), `changes.py`, `stream.py`, `rev.py`.
   The log lives in `hub.sqlite`; kinds so far are `incident` and `unit` (the radio log, alarms and positions are not
   logged); a deletion is a row with an empty `rev`. `410 cursor_too_old` carries `oldest` (the smallest cursor still
   served), `409 epoch_changed` the new `epoch`. Events: `hello`, `change`, `heartbeat`, `close`.
   **DEVIATION from the design:** the SSE `id` and `Last-Event-ID` carry `<epoch>-<seq>` (not a bare cursor), so
-  EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works.
+  EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works, and a seq with no
+  epoch (`after=57`, `Last-Event-ID: 57`) is a 400 `bad_cursor`. A device over its two streams gets the newest: its oldest is
+  closed with reason `superseded` (the global cap is the only 429).
   `rev` is a hash of the whole row: a confirmation oracle only for a row someone could already guess, no practical attack.
   The log's `rev` equals the reads' `rev`: `cad_follow` hashes the output of the reads' serializers
   (`incident_summary`, `unit` through `rev_of`), never a raw row, so a log entry's `(kind, id, rev)` is the `rev` of that
@@ -751,7 +755,7 @@ Tracked as a checklist in #556.
 | Change-log writes add Litestream frames and S3 cost | Batched off the request path, references only, created lazily, positions never logged |
 | Real data in the public spec or fixtures | Synthetic examples, a CI denylist from secrets, PRs grepped for exact strings |
 | No staging today, so app review hits production | Staging before the first external TestFlight build; the review account only on staging |
-| Handoffs mid-stream | 503 + Retry-After already exists. The cursor is database-backed, so a reconnect after a handoff resumes instead of resnapshotting |
+| Handoffs mid-stream | 503 + Retry-After already exists. The epoch is new at every hub start, so a reconnect after a handoff is one 409 and a resnapshot (not a silent gap after a restore) |
 
 ## Could not verify
 

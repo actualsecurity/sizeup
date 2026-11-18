@@ -2,6 +2,7 @@
 cursor, as references `(seq, epoch, kind, id, rev, at)`; the app fetches an object when it sees a rev it does not have.
 
 - no `after`: the log's head and epoch, no entries (where a live app starts from, next to its snapshot);
+- `after` without `epoch`: 400 `bad_cursor` (a bare number could be from any run of the hub);
 - `after` older than what is kept: 410 `cursor_too_old` with `oldest` (the smallest cursor still served);
 - `epoch` that is not the log's, or an `after` beyond its head (a log restored from something older): 409
   `epoch_changed` with the current `epoch`. Either way the app resnapshots;
@@ -57,6 +58,8 @@ def parse_cursor(feed: Feed, after: str | None, epoch: str | None) -> tuple[int 
         return None, None
     if not DIGITS.fullmatch(after):
         return None, problem(400, "bad_cursor", "after is a whole number")
+    if epoch is None:                          # a bare number could be from any run: the epoch says which
+        return None, problem(400, "bad_cursor", "after needs the epoch it came from")
     n = int(after)
     if n > log.head():
         return None, problem(409, "epoch_changed", "that cursor is ahead of the log: load a snapshot again",

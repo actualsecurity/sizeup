@@ -7,19 +7,22 @@ foreground. References only (kind, id, rev), as /api/v1/changes returns them.
     event: heartbeat       data {"server_time"}              every 15 s idle, no id (it moves no cursor)
     event: close           data {"reason","server_time"}     then the connection ends: reconnect
 
-Resume: `Last-Event-ID: <epoch>-<seq>` (what EventSource sends by itself), or `?after=<seq>&epoch=<e>`; with neither,
-from the head. A cursor of another epoch is a 409 and one older than the log a 410, before the stream opens
-(changes.py), so the app resnapshots. The cursor is the log's seq in hub.sqlite: a reconnect after a task handoff
-resumes.
+Resume: `Last-Event-ID: <epoch>-<seq>` (what EventSource sends by itself), or `?after=<seq>&epoch=<e>` (a seq with no
+epoch is a 400); with neither, from the head. A cursor of another epoch is a 409 and one older than the log a 410,
+before the stream opens (changes.py), so the app resnapshots. The epoch is new at every start of the hub
+(changelog.py): a resume across a restart or deploy is a 409, and a reconnect within one run resumes from the log.
 
 Caps (safeguard 4): two streams per device and the global cap (limits.open_stream), taken by the handler's caller
-(V1). A stream's queue is bounded (changelog.Subscription): a client that cannot keep up is closed, and resumes from
-the database. A stream ends cleanly (event `close`, reason) when the mobile switch or the `stream` flag goes off or
-the hub drains (stopping), when it loses its lease (handover), when the log's epoch changes (epoch_changed), when its
-device is no longer valid (revoked) and when the client closes. It holds its thread only while it is open: a thread
-waiting on a Condition, woken by a flush, a heartbeat or the tick (feed.tick_s, which only checks the stop
-conditions); an idle stream reads nothing from the database. A stream is a request in the server's Gate (`inflight`)
-until it ends: the drain closes the feed first, so the streams end within a tick and `wait_idle` does not run to its
+(V1). A device over its two gets the newest: its oldest stream is closed (reason `superseded`), because a phone that
+switched networks leaves a stale stream open until the hub notices. A stream's queue is bounded
+(changelog.Subscription): a client that cannot keep up is closed, and resumes from the database. A stream ends
+cleanly (event `close`, reason) when the mobile switch or the `stream` flag goes off or the hub drains (stopping),
+when it loses its lease (handover), when the log's epoch changes (epoch_changed), when a newer stream of its device
+took its slot (superseded), when its device is no longer valid (revoked) and when the client closes. It holds its
+thread only while it is open: a thread waiting on a Condition, woken by a flush, a heartbeat or the tick
+(feed.tick_s, which only checks the stop conditions); an idle stream reads nothing from the database. A stream is a
+request in the server's Gate (`inflight`) until it ends: the drain closes the feed first, so the streams end within a
+tick and `wait_idle` does not run to its
 timeout."""
 from __future__ import annotations
 
@@ -48,8 +51,9 @@ def event(name: str, data: dict, id_: str | None = None) -> bytes:
 
 
 def last_event_id(raw: str | None) -> tuple[str | None, str | None]:
-    """The `Last-Event-ID` header as (epoch, seq): "<epoch>-<seq>" splits at its last dash. Anything without a dash is
-    (None, the whole value), which parse_cursor then refuses as a bad cursor. No header: (None, None)."""
+    """The `Last-Event-ID` header as (epoch, seq): "<epoch>-<seq>" splits at its last dash. A value with no dash (a bare
+    number from an old build or a client of its own) is (None, the whole value): the seq with no epoch, which
+    parse_cursor refuses with a 400 `bad_cursor`, as it refuses `?after=` without `?epoch=`. No header: (None, None)."""
     if not raw:
         return None, None
     epoch, sep, seq = raw.rpartition("-")
@@ -76,8 +80,14 @@ class Body:
 
     def __init__(self, plan: StreamPlan, on_close: Callable[[], None], stop: Callable[[], bool]):
         self.plan, self._on_close, self._stop = plan, on_close, stop
-        self._closed = False
+        self._closed = self._evicted = False
         self._valid_at = time.monotonic()
+
+    def evict(self) -> None:
+        """A newer stream of the same device takes this one's slot: it ends within a tick (reason `superseded`), and its
+        slot is given back now (close is once)."""
+        self._evicted = True
+        self.close()
 
     def close(self) -> None:
         if not self._closed:
@@ -157,6 +167,8 @@ class Body:
         feed = self.plan.feed
         if self._stop() or stop() or sub.closed:
             return "stopping"
+        if self._evicted:
+            return "superseded"
         if not feed.writable():
             return "handover"
         if sub.dropped:

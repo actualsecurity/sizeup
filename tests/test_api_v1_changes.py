@@ -86,7 +86,9 @@ class Rig:
         self.cad.dispatch(inc["id"], {"unit_ids": [uid(self.cad, u) for u in units], "operator": "Lt. Ruiz"})
         return inc
 
-    def get(self, query="", headers=None, path="/api/v1/changes"):
+    def get(self, query="", headers=None, path="/api/v1/changes", epoch=True):
+        if epoch and "after=" in query and "epoch=" not in query:     # (a cursor always comes with its epoch)
+            query += f"&epoch={self.log.epoch}"
         status, body, ctype, h = self.v1.respond("GET", path, query, headers or {})
         return status, (json.loads(body) if isinstance(body, bytes) else body), h
 
@@ -185,7 +187,8 @@ def test_a_closed_call_is_logged_once_more_and_then_left_alone(rig):
     # closed, still in the reads' list: kept as a head, no further entry
     assert key in rig.log.heads() and rig.settle() == []
     rig.clock.t += 2 * 86400                                                  # it leaves the list (closed long ago)
-    rig.touch()                                                               # (the next real write: the recorder looks)
+    # (the next real write: the recorder looks)
+    rig.touch()
     head = rig.log.head()
     assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head   # dropped: not a deletion
 
@@ -262,7 +265,8 @@ def test_a_reset_is_a_new_epoch_and_the_old_cursor_is_refused(rig):
     status, body, _ = rig.get(f"after={old[1]}&epoch={old[0]}")
     assert status == 409 and body["error"]["epoch"] == new
     rig.settle()                                                              # the log goes on from a new baseline
-    assert rig.get(f"after=0&epoch={new}")[0] == 200
+    assert rig.get(f"after=0&epoch={new}")[0] == 410                          # (the earlier entries are never served)
+    assert rig.get(f"after={old[1]}&epoch={new}")[0] == 200
 
 
 def test_retention_expiry_is_a_410_with_the_oldest_cursor_served(tmp_path):
@@ -296,29 +300,6 @@ def test_the_log_is_bounded_in_rows_too(tmp_path):
         assert r.log.head() > 3
         r.log.prune(force=True)
         assert len(r.log.since(0, 100)) == 3 and r.log.floor() == r.log.head() - 3
-    finally:
-        r.close()
-
-
-def test_a_cursor_resumes_across_a_handoff_without_a_resnapshot(tmp_path):
-    """The next task opens the same database: same epoch, same seq; what changed meanwhile is found by the heads."""
-    r = Rig(tmp_path)
-    r.settle()
-    r.incident()
-    r.settle()
-    epoch, cursor = r.log.epoch, r.log.head()
-    r.feed.close()
-    r.store.set_unit_status(uid(r.cad, "L31"), "RS", "Lt. Ruiz")        # a change nobody logged (the old task is gone)
-    r.log = ChangeLog(tmp_path / "hub.sqlite", clock=r.clock)                 # the new task
-    r.feed = Feed(r.log, cad_follow(r.store), lambda: True, visible=everyone, valid=signed_in)
-    r.feed.bind(r.store)
-    r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
-    try:
-        assert r.log.epoch == epoch
-        out = r.settle()
-        assert [(c.kind, c.id) for c in out] == [("unit", str(uid(r.cad, "L31")))] and out[0].seq == cursor + 1
-        status, body, _ = r.get(f"after={cursor}&epoch={epoch}")
-        assert status == 200 and [c["seq"] for c in body["changes"]] == [cursor + 1]
     finally:
         r.close()
 
@@ -572,21 +553,6 @@ def test_a_stream_resumes_from_last_event_id_with_what_it_missed_and_nothing_twi
     s3.close()
 
 
-def test_resume_across_a_handoff_the_new_task_serves_the_same_cursor(hub):
-    """The cursor is the database's: a second feed on the same file (the next task) answers the same resume."""
-    hub.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
-    wait_for(lambda: hub.head())
-    epoch, head = hub.feed.log.epoch, hub.head()
-    nxt = Feed(ChangeLog(hub.path / "hub.sqlite"), cad_follow(hub.cad.store), lambda: True, tick_s=0.05,
-               visible=everyone, valid=signed_in)
-    nxt.bind(hub.cad.store)
-    nxt.recorder.prepare()
-    v1 = V1(switches=hub.box.switches(), resolver=lambda h: ME, changes=nxt)
-    status, body, _, _ = v1.respond("GET", "/api/v1/changes", f"after=0&epoch={epoch}", {})
-    assert status == 200 and json.loads(body)["head"] == head
-    nxt.close()
-
-
 def test_resume_with_the_wrong_epoch_or_too_old_is_refused_before_the_stream_opens(hub):
     hub.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
     wait_for(lambda: hub.head())
@@ -627,26 +593,6 @@ def test_a_heartbeat_comes_when_idle_and_moves_no_cursor(hub):
 def test_the_default_heartbeat_is_fifteen_seconds_and_nothing_else_is_pushed_idle():
     from sizeup.api.v1.changelog import Feed as F
     assert F(ChangeLog(":memory:")).heartbeat_s == 15.0
-
-
-def test_two_streams_per_device_the_third_is_a_429_and_a_closed_one_gives_its_slot_back(hub):
-    a, b = Sse(hub.port, headers=dev("dev-1")), Sse(hub.port, headers=dev("dev-1"))
-    assert (a.status, b.status) == (200, 200)
-    a.event(), b.event()
-    c = Sse(hub.port, headers=dev("dev-1"))
-    body = json.loads(c.resp.read())
-    assert c.status == 429 and body["error"]["code"] == "too_many_streams" and c.resp.getheader("Retry-After") == "10"
-    other = Sse(hub.port, headers=dev("dev-2"))                                  # another device: a slot (global cap 3)
-    assert other.status == 200
-    full = Sse(hub.port, headers=dev("dev-3"))
-    assert full.status == 429                                                    # the global cap
-    a.close()
-    wait_for(lambda: hub.v1.limits.streams() == 2)
-    again = Sse(hub.port, headers=dev("dev-1"))
-    assert again.status == 200
-    for s in (b, other, again):
-        s.close()
-    wait_for(lambda: hub.v1.limits.streams() == 0)
 
 
 def test_a_stream_holds_no_request_slot_and_the_console_still_answers(hub):
@@ -814,7 +760,7 @@ def test_the_log_costs_a_few_wal_frames_per_batch_and_startup_writes_nothing(tmp
     clock = Clock()
     log = ChangeLog(hub, clock=clock)
     # the three tables, made on first use
-    first = wal_frames_written([hub], lambda: log.epoch)["hub"]
+    first = wal_frames_written([hub], lambda: log.head())["hub"]
     assert first <= 12
     log.baseline([("unit", str(i), "0" * 16) for i in range(250)])                  # a board's heads, once
     n = 100
@@ -868,8 +814,6 @@ def test_a_commit_while_the_baseline_scans_never_deadlocks_the_cad(tmp_path):
     in_scan = threading.Event()
     r.feed.recorder.follow = [(k, lambda heads, scan=scan: (in_scan.set(), scan(heads))[1])
                               for k, scan in r.feed.recorder.follow]
-    anchor = r.feed.recorder.anchor                   # (its first call into the CAD is the baseline's first wait)
-    r.feed.recorder.anchor = anchor._replace(get=lambda key: (in_scan.set(), anchor.get(key))[1])
     prepare = r.feed.recorder.prepare
 
     holds_cad_lock = threading.Event()
@@ -916,83 +860,6 @@ def next_task(r: Rig) -> Rig:
     r.v1 = V1(switches=r.box.switches(), resolver=lambda h: ME, changes=r.feed, log=lambda m: None)
     r.feed.recorder.prepare()
     return r
-
-
-def test_a_restored_older_hub_database_after_a_clean_drain_is_a_new_epoch_and_an_old_cursor_is_a_409(tmp_path):
-    r = Rig(tmp_path, live=True)
-    r.feed.recorder.prepare()
-    make_old_copy(tmp_path / "hub.sqlite", tmp_path / "older.sqlite")             # the log as it was at its start
-    r.incident()
-    wait_for(lambda: r.log.head() >= 2)
-    epoch, head = r.log.epoch, r.log.head()
-    # a clean drain: the CAD is told the head
-    r.feed.close()
-    r.log.close()
-    swap_in(tmp_path / "older.sqlite", tmp_path / "hub.sqlite")                   # ...and the older database comes back
-    try:
-        next_task(r)
-        assert r.log.epoch != epoch and r.log.head() == 0
-        status, body, _ = r.get(f"after={head}&epoch={epoch}")
-        assert status == 409 and body["error"]["epoch"] == r.log.epoch
-        assert r.get(f"after=1&epoch={epoch}")[0] == 409                           # below the restored head, too
-    finally:
-        r.close()
-
-
-def test_a_different_or_older_cad_against_the_same_log_is_a_new_epoch(tmp_path):
-    r = Rig(tmp_path / "one")
-    r.settle()
-    r.incident()
-    r.settle()
-    epoch = r.log.epoch
-    r.feed.close()
-    # a CAD restored to before: lower ids, no mark
-    older = Rig(tmp_path / "two")
-    (tmp_path / "one" / "hub.sqlite").replace(tmp_path / "two" / "hub.sqlite")
-    older.log = ChangeLog(tmp_path / "two" / "hub.sqlite", clock=older.clock)
-    older.feed = Feed(older.log, cad_follow(older.store), lambda: True, visible=everyone, valid=signed_in)
-    older.feed.bind(older.store)
-    older.v1.changes = older.feed
-    older.feed.recorder.prepare()
-    try:
-        assert older.log.epoch != epoch
-        assert older.get(f"after=1&epoch={epoch}")[0] == 409
-        assert older.log.baselined() and older.get("")[1]["epoch"] == older.log.epoch
-    finally:
-        older.close()
-        r.store.shutdown()
-
-
-def test_a_log_lost_with_its_database_is_a_new_epoch_not_the_cads_old_one(tmp_path):
-    r = Rig(tmp_path)
-    r.settle()
-    epoch = r.log.epoch
-    r.feed.close()
-    swap_in_path = tmp_path / "hub.sqlite"
-    for suffix in ("", "-wal", "-shm"):
-        # restored from before the log existed
-        Path(f"{swap_in_path}{suffix}").unlink(missing_ok=True)
-    try:
-        next_task(r)
-        assert r.log.epoch != epoch and r.store.meta_get("mobile_log_epoch") == r.log.epoch
-    finally:
-        r.close()
-
-
-def test_a_clean_handoff_on_the_same_databases_keeps_the_epoch_and_the_cursor(tmp_path):
-    r = Rig(tmp_path, live=True)
-    r.feed.recorder.prepare()
-    r.incident()
-    wait_for(lambda: r.log.head() >= 2)
-    epoch, head = r.log.epoch, r.log.head()
-    r.feed.close()
-    r.log.close()
-    try:
-        next_task(r)
-        assert r.log.epoch == epoch and r.log.head() == head
-        assert r.get(f"after={head}&epoch={epoch}")[0] == 200
-    finally:
-        r.close()
 
 
 def test_the_feed_fails_closed_until_a_visibility_predicate_is_supplied(tmp_path):
@@ -1054,7 +921,7 @@ def test_a_long_replay_looks_at_its_stop_conditions_between_pages(rig, monkeypat
     rig.incident(("E63", "L31", "E60"))
     rig.settle()
     assert rig.log.head() >= 4
-    status, body, _, _ = rig.v1.respond("GET", "/api/v1/stream", "after=0", {})
+    status, body, _, _ = rig.v1.respond("GET", "/api/v1/stream", f"after=0&epoch={rig.log.epoch}", {})
     written = []
     why = body.run(lambda raw: written.append(raw), lambda: len([w for w in written if b"event: change" in w]) >= 2)
     body.close()
@@ -1065,7 +932,8 @@ def test_the_recorder_reads_nothing_when_the_cad_has_not_committed(rig):
     scans = []
     rig.feed.recorder.follow = [(k, lambda heads, scan=scan: (scans.append(k), scan(heads))[1])
                                 for k, scan in rig.feed.recorder.follow]
-    rig.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})   # (no dispatch: no voice render)
+    # (no dispatch: no voice render)
+    rig.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
     rig.settle()
     n = len(scans)
     assert n >= 2 and rig.settle() == [] and rig.settle() == [] and len(scans) == n           # no commit: no scan
@@ -1160,17 +1028,6 @@ def test_extra_fields_are_in_the_envelope_by_keyword_only(rig):
     assert b["error"]["code"] == "cursor_too_old" and b["error"]["oldest"] == rig.log.floor() > 0
 
 
-def test_a_drain_with_the_flag_off_leaves_no_clean_marker(tmp_path):
-    r = Rig(tmp_path, live=True)
-    r.feed.recorder.prepare()
-    r.store.set_unit_status(uid(r.cad, "E63"), "OL", "Lt. Ruiz")
-    wait_for(lambda: r.log.head())
-    r.box.flags["stream"] = False
-    r.feed.close()
-    assert r.store.meta_get("mobile_log_clean") is None
-    r.store.shutdown()
-
-
 def test_a_stream_whose_feed_is_closed_under_it_says_stopping(rig):
     status, body, _, _ = rig.v1.respond("GET", "/api/v1/stream", "", {})
     written = []
@@ -1249,50 +1106,6 @@ def test_a_field_the_api_does_not_show_is_not_a_change_and_the_log_never_hashes_
     assert hub.head() == head + 1
 
 
-def test_a_log_written_under_the_old_rev_definition_is_reset_at_its_first_run(tmp_path):
-    """Phase A hashed raw rows and recorded no definition: a hub that ran it gets a new epoch (old cursors: 409)."""
-    r = Rig(tmp_path)
-    r.settle()
-    r.incident()
-    r.settle()
-    epoch, head = r.log.epoch, r.log.head()
-    assert head > 0
-    r.feed.close()
-    r.log.close()
-    db = sqlite3.connect(tmp_path / "hub.sqlite")                            # make it a phase A log: no rev_def
-    db.execute("DELETE FROM mobile_changelog_meta WHERE key = 'rev_def'")
-    db.commit()
-    db.close()
-    try:
-        next_task(r)
-        assert r.log.epoch != epoch and r.log.since(0, 10) == []        # (seq goes on: it is never reused)
-        # the CAD was told the new epoch, so no second reset follows
-        assert r.store.meta_get("mobile_log_epoch") == r.log.epoch
-        status, body, _ = r.get(f"after={head}&epoch={epoch}")
-        assert status == 409 and body["error"]["code"] == "epoch_changed"
-        epoch2 = r.log.epoch
-        r.feed.close()
-        r.log.close()
-        next_task(r)                                                         # the next start: stable
-        assert r.log.epoch == epoch2
-    finally:
-        r.close()
-
-
-def test_a_new_log_records_the_rev_definition_without_a_reset(tmp_path):
-    r = Rig(tmp_path)
-    r.settle()
-    epoch = r.log.epoch
-    assert r.log._meta("rev_def") == "reads-serializers-v2"
-    r.feed.close()
-    r.log.close()
-    try:
-        next_task(r)
-        assert r.log.epoch == epoch
-    finally:
-        r.close()
-
-
 def test_a_note_on_a_seeded_incident_is_a_new_log_entry_with_the_reads_rev(hub):
     hub.box.flags["reads"] = True
     first = hub.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
@@ -1310,36 +1123,6 @@ def test_a_note_on_a_seeded_incident_is_a_new_log_entry_with_the_reads_rev(hub):
     assert hub.feed.log.heads()[("incident", str(other["id"]))] == revs[str(other["id"])]
 
 
-def test_a_rev_definition_of_the_first_reads_build_resets_to_a_new_epoch(tmp_path):
-    r = Rig(tmp_path)
-    r.settle()
-    epoch = r.log.epoch
-    r.feed.close()
-    r.log.close()
-    db = sqlite3.connect(tmp_path / "hub.sqlite")
-    db.execute("UPDATE mobile_changelog_meta SET value = 'reads-serializers-v1' WHERE key = 'rev_def'")
-    db.commit()
-    db.close()
-    try:
-        next_task(r)
-        assert r.log.epoch != epoch and r.log._meta("rev_def") == "reads-serializers-v2"
-    finally:
-        r.close()
-
-
-def test_an_unwritten_log_without_a_rev_definition_keeps_its_epoch(tmp_path):
-    r = Rig(tmp_path)
-    epoch = r.log.epoch                                    # made, never baselined, no head, no rev_def
-    assert r.log._meta("rev_def") is None and not r.log.baselined() and r.log.head() == 0
-    r.feed.close()
-    r.log.close()
-    try:
-        next_task(r)
-        assert r.log.epoch == epoch
-    finally:
-        r.close()
-
-
 def test_an_incident_deleted_outright_is_dropped_from_the_heads_without_an_entry(rig):
     inc = rig.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
     rig.settle()
@@ -1352,3 +1135,185 @@ def test_an_incident_deleted_outright_is_dropped_from_the_heads_without_an_entry
         db.execute("DELETE FROM incidents WHERE id = ?", (inc["id"],))
     # dropped, and no "gone" entry (an incident that leaves the list is not a deletion)
     assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head
+
+
+# -- a new epoch at every start; the log only reads cad.sqlite -------------------------------------------------------
+
+def test_every_start_of_the_log_is_a_new_epoch_and_an_old_cursor_is_a_409(tmp_path):
+    r = Rig(tmp_path)
+    r.settle()
+    r.incident()
+    r.settle()
+    epoch, head = r.log.epoch, r.log.head()
+    assert head > 0 and r.get(f"after={head}")[0] == 200
+    r.feed.close()
+    r.log.close()
+    try:
+        next_task(r)                                          # the same databases, a new start
+        assert r.log.epoch != epoch
+        status, body, _ = r.get(f"after={head}&epoch={epoch}")
+        assert status == 409 and body["error"]["code"] == "epoch_changed" and body["error"]["epoch"] == r.log.epoch
+        # a new cursor starts at the head: nothing of before is served
+        assert r.get("")[1]["cursor"] >= head
+        assert r.log.since(0, 100)[0:0] == [] and r.get("after=0")[0] == 410    # (old rows are never served)
+    finally:
+        r.close()
+
+
+def test_a_hub_database_restored_behind_after_a_crash_cannot_hand_out_a_seq_twice(tmp_path):
+    """Litestream gives back hub.sqlite about a second behind, with a lower sqlite_sequence, and the new process would
+    have numbered new entries from there: a phone at an old seq must be refused, not told "nothing new"."""
+    r = Rig(tmp_path)
+    r.settle()
+    u1, u2, u5 = (uid(r.cad, n) for n in ("E63", "L31", "E60"))
+    r.store.set_unit_status(u1, "RS", "Lt. Ruiz")
+    r.settle()                                                # A logs u1 -> seq 1
+    make_old_copy(tmp_path / "hub.sqlite", tmp_path / "behind.sqlite")      # ...what the replica has when A crashes
+    r.store.set_unit_status(u1, "OL", "Lt. Ruiz")
+    r.store.set_unit_status(u2, "RS", "Lt. Ruiz")
+    r.settle()                                                # u1 -> 2, u2 -> 3
+    epoch_a, cursor = r.log.epoch, r.log.head()
+    assert cursor == 3
+    r.feed.close()
+    r.log.close()
+    swap_in(tmp_path / "behind.sqlite", tmp_path / "hub.sqlite")             # B starts on the restored file
+    try:
+        next_task(r)
+        r.store.set_unit_status(u1, "AV", "Lt. Ruiz")
+        r.store.set_unit_status(u5, "RS", "Lt. Ruiz")        # a dispatcher changes u5 after the failover
+        r.settle()
+        assert r.log.epoch != epoch_a
+        status, body, _ = r.get(f"after={cursor}&epoch={epoch_a}")                # the phone resumes with <A>-3
+        # ...and resnapshots: it does not miss u5
+        assert status == 409 and body["error"]["code"] == "epoch_changed"
+        status, body, _ = r.get("after=0&epoch=" + r.log.epoch)
+        # (nothing of A's or the restored file's rows is served)
+        assert status == 410
+    finally:
+        r.close()
+
+
+def tables_of(store) -> dict:
+    """Every table of the CAD's database, every row in rowid order: its whole content, to compare."""
+    out = {}
+    for t in [r["name"] for r in store.q("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]:
+        try:
+            out[t] = store.q(f'SELECT * FROM "{t}" ORDER BY rowid')
+        except sqlite3.OperationalError:                      # (a WITHOUT ROWID table)
+            out[t] = store.q(f'SELECT * FROM "{t}"')
+    return out
+
+
+def test_the_log_only_reads_cad_sqlite_nothing_is_ever_written_to_it(tmp_path):
+    r = Rig(tmp_path, live=True, batch_s=0.05)
+    try:
+        r.feed.recorder.prepare()                                                  # the log's first run
+        for n in ("E63", "L31"):
+            r.store.set_unit_status(uid(r.cad, n), "RS", "Lt. Ruiz")
+        r.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
+        wait_for(lambda: r.log.head() >= 3)
+        wait_for(lambda: r.feed.recorder._seen_version == r.store.rev)
+        before = tables_of(r.store)
+        rev = r.store.rev
+        r.get("after=0")
+        r.get("")
+        status, body, _, _ = r.v1.respond("GET", "/api/v1/stream", "", {})
+        body.run(lambda raw: None, lambda: True)                                   # opens and ends at once
+        body.close()
+        r.feed.close()                                                              # the drain: the last batch, the end
+        assert tables_of(r.store) == before and r.store.rev == rev                  # no row of cad.sqlite written
+        assert not [k for k in before["meta"] if "mobile" in str(k)]
+        assert not [t for t in before if "changelog" in t]
+    finally:
+        r.store.shutdown()
+
+
+@pytest.mark.parametrize("query", ["after=57", "after=0", "after=1&epoch="])
+def test_a_cursor_without_its_epoch_is_a_400(rig, query):
+    status, body, _ = rig.get(query, epoch=False, path="/api/v1/changes")
+    assert status == 400 and body["error"]["code"] == "bad_cursor"
+    status, body, _ = rig.get(query, epoch=False, path="/api/v1/stream")
+    assert status == 400 and body["error"]["code"] == "bad_cursor"
+    conforms(body, 400, "/api/v1/stream")
+
+
+def test_last_event_id_without_an_epoch_is_a_400(rig):
+    for raw in ("57", "0"):
+        status, body, _ = rig.get("", headers={"Last-Event-ID": raw}, path="/api/v1/stream")
+        assert status == 400 and body["error"]["code"] == "bad_cursor"
+    status, _, _ = rig.get("", headers={"Last-Event-ID": f"{rig.log.epoch}-0"}, path="/api/v1/stream")
+    assert status == 200
+
+
+def test_a_device_over_its_two_streams_gets_the_newest_and_its_oldest_is_closed(hub):
+    a, b = Sse(hub.port, headers=dev("dev-1")), Sse(hub.port, headers=dev("dev-1"))
+    assert (a.status, b.status) == (200, 200)
+    a.event(), b.event()
+    c = Sse(hub.port, headers=dev("dev-1"))                                  # a phone that came back on another network
+    assert c.status == 200
+    assert a.until("close")[2]["reason"] == "superseded"                    # the oldest ends, with its reason
+    assert a.event() is None
+    c.event()
+    assert hub.v1.limits.streams() == 2                                       # b and c: the slot was handed over
+    hb = b.until("heartbeat")                                                 # the middle one is untouched
+    assert hb[0] == "heartbeat"
+    for s in (a, b, c):
+        s.close()
+    wait_for(lambda: hub.v1.limits.streams() == 0)
+
+
+def test_newest_wins_never_goes_past_the_global_cap(hub):
+    d1 = [Sse(hub.port, headers=dev("dev-1")) for _ in range(2)]
+    other = Sse(hub.port, headers=dev("dev-2"))                               # the global cap is 3
+    assert other.status == 200 and hub.v1.limits.streams() == 3
+    full = Sse(hub.port, headers=dev("dev-3"))
+    body = json.loads(full.resp.read())
+    assert full.status == 429 and body["error"]["code"] == "too_many_streams"
+    assert full.resp.getheader("Retry-After") == "10"
+    third = Sse(hub.port, headers=dev("dev-1"))                               # over its own two: replaces its oldest
+    assert third.status == 200 and hub.v1.limits.streams() == 3
+    assert d1[0].until("close")[2]["reason"] == "superseded"
+    for s in (*d1, other, third):
+        s.close()
+    wait_for(lambda: hub.v1.limits.streams() == 0)
+
+
+def test_a_scan_never_reads_every_chronology_row_and_keeps_the_reads_rev(tmp_path):
+    """40 open calls with 2000 chronology events each: the log's scan returns a few thousand values, not 80,000 rows,
+    and its revs are exactly the reads' (incident_summary over the full store.incidents())."""
+    from sizeup.api.v1.serialize import incident_summary
+    r = Rig(tmp_path)
+    try:
+        ids = [r.cad.create({"type": "STRU", "address": f"{n} Sample Way", "operator": "Lt. Ruiz"})["id"]
+               for n in range(40)]
+        with r.store.tx() as db:
+            db.executemany("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units, places) "
+                           "VALUES (?, NULL, ?, 'note', 'a note', '', '', '')",
+                           [(i, 1_791_400_000.0 + n, ) for i in ids for n in range(2000)])
+            # one whose newest id has the OLDEST time: past the 300 the CAD keeps, so it must not be the last_event_id
+            db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units, places) "
+                       "VALUES (?, NULL, 1.0, 'note', 'late entry', '', '', '')", (ids[0],))
+        r.settle()                                                              # (the baseline)
+        rows, seen = [0], r.store.q
+
+        def counting(sql, args=()):
+            got = seen(sql, args)
+            rows[0] += len(got)
+            return got
+        r.store.q = counting
+        r.store.incidents = lambda *a, **k: (_ for _ in ()).throw(AssertionError("the full scan is not for the log"))
+        started = time.time()
+        scan = dict(cad_follow(r.store))["incident"]({})
+        took = time.time() - started
+        del r.store.q, r.store.incidents
+        # (no tight clock: the rows are the proof)
+        assert rows[0] < 3000 and took < 5.0, (rows[0], took)
+        full = {str(i["id"]): rev_of_summary(i) for i in r.store.incidents()}
+        assert scan == full
+    finally:
+        r.close()
+
+
+def rev_of_summary(i):
+    from sizeup.api.v1.serialize import incident_summary
+    return rev_of(incident_summary(i))

@@ -4,10 +4,12 @@ get:
   description: >
     The change log as `text/event-stream`, for an app in the foreground. Events: `hello` (epoch, head, server_time), `change`
     (a Change with `server_time`; its SSE `id` is `<epoch>-<seq>`), `heartbeat` (every 15 s when idle, no id) and `close`
-    (reason: stopping, handover, slow, epoch_changed; then the connection ends and the app reconnects). Resume with
-    `Last-Event-ID` (EventSource sends it itself) or `after` and `epoch`; with neither the stream starts at the head. A
+    (reason: stopping, handover, slow, epoch_changed, revoked, superseded; then the connection ends and the app reconnects). Resume with
+    `Last-Event-ID` (EventSource sends it itself) or `after` and `epoch` (a seq without its epoch is a 400 `bad_cursor`);
+    with neither the stream starts at the head. The epoch is new at every start of the hub. A
     cursor of another epoch is a 409 and one older than the log a 410, before the stream opens, as for `/api/v1/changes`.
-    At most 2 streams per device (a third is a 429 `too_many_streams`) and a global cap. A client that cannot keep up is
+    At most 2 streams per device: a third replaces the device's oldest, which ends with reason `superseded` (a phone that
+    changed networks leaves a stale stream open). The global cap is a 429 `too_many_streams`. A client that cannot keep up is
     closed and resumes by its id. Served only while the `stream` feature is on.
   parameters:
     - name: after
@@ -35,7 +37,7 @@ get:
             $ref: ../schemas/StreamEvents.yaml
           example: "retry: 3000\n\nevent: hello\ndata: {\"epoch\":\"9f3a1c6e2b4d\",\"head\":41,\"server_time\":1767225600.5}\n\nid: 9f3a1c6e2b4d-42\nevent: change\ndata: {\"seq\":42,\"epoch\":\"9f3a1c6e2b4d\",\"kind\":\"unit\",\"id\":\"14\",\"rev\":\"c1d2e3f4a5b60789\",\"at\":1767225601.2,\"server_time\":1767225601.3}\n\n"
     "409":
-      description: The epoch changed.
+      description: The epoch changed (the hub restarted, or the log started over).
       content:
         application/json:
           schema:
@@ -65,7 +67,7 @@ get:
           schema:
             $ref: ../schemas/Error.yaml
     "429":
-      description: "Rate limited (rate_limited), or too_many_streams: two streams are open for this device, or the hub's cap."
+      description: "Rate limited (rate_limited), or too_many_streams: the hub's cap on all streams is reached (a device over its own two replaces its oldest instead)."
       headers:
         Retry-After:
           description: Seconds to wait; the same as error.retry_after_s.

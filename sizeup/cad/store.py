@@ -1956,14 +1956,48 @@ class Store:
             r["joint_call"] = self.lists.joint_call(r)      # "Rye Brook": their call (their units first)
         return list(by.values())
 
-    def incidents(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
-        """Every open one (queued, pending, active: however old, a road closure can last days),
-        plus those closed or dismissed in the last closed_s."""
+    def incident_rows(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
+        """The rows incidents() starts from: every open one (queued, pending, active: however old, a road closure can
+        last days), plus those closed or dismissed in the last closed_s. No assignments, chronology or dispatches."""
         cutoff = self.clock() - closed_s
         rows = self.q("SELECT * FROM incidents WHERE status IN ('queued', 'pending', 'active') ORDER BY created_at DESC")
         rows += self.q("SELECT * FROM incidents WHERE status IN ('closed', 'dismissed') AND closed_at >= ? "
                        "ORDER BY closed_at DESC LIMIT ?", (cutoff, closed_max))
-        return self._attach(rows)
+        return rows
+
+    def incidents(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
+        """Every open one (queued, pending, active: however old, a road closure can last days),
+        plus those closed or dismissed in the last closed_s."""
+        return self._attach(self.incident_rows(closed_s, closed_max))
+
+    def incidents_lean(self, max_events: int = 300) -> list[dict]:
+        """incidents() with only what the app's summary reads (sizeup/api/v1/serialize.py incident_summary), without
+        loading the chronology or the dispatch log: `assignments` as _attach builds them (unit, name, status, times) and
+        `events` as just the newest id (the largest id among the last max_events by time, as _attach keeps). The change
+        log scans this on every flush (#561): its cost is the open calls, not their chronologies."""
+        rows = self.incident_rows()
+        if not rows:
+            return rows
+        ids = json.dumps([r["id"] for r in rows])
+        by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[]) for r in rows}
+        for a in self.q("SELECT a.incident_id, a.unit_id, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, "
+                        "u.name, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+                        "WHERE a.incident_id IN (SELECT value FROM json_each(?)) ORDER BY a.id", (ids,)):
+            by[a["incident_id"]]["assignments"].append(a)
+        many = []
+        for e in self.q("SELECT incident_id, MAX(id) AS newest, COUNT(*) AS n FROM events "
+                        "WHERE incident_id IN (SELECT value FROM json_each(?)) GROUP BY incident_id", (ids,)):
+            if e["n"] <= max_events:                      # (all of them are kept: the largest id is the newest)
+                by[e["incident_id"]]["events"] = [{"id": e["newest"]}]
+            else:
+                many.append(e["incident_id"])
+        if many:                                          # more than are kept: the largest id of the newest by time
+            for e in self.q("SELECT incident_id, MAX(id) AS newest FROM (SELECT incident_id, id, ROW_NUMBER() OVER "
+                            "(PARTITION BY incident_id ORDER BY at DESC, id DESC) AS rn FROM events WHERE incident_id "
+                            "IN (SELECT value FROM json_each(?))) WHERE rn <= ? GROUP BY incident_id",
+                            (json.dumps(many), max_events)):
+                by[e["incident_id"]]["events"] = [{"id": e["newest"]}]
+        return list(by.values())
 
     def full(self, iid: int) -> dict:
         """One event with everything (the Incident Database opens old ones this way)."""
