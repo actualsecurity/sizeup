@@ -32,7 +32,7 @@ def traffic(k: int, at: float = T) -> dict:
 
 
 def page(k: int, at: float = T) -> dict:
-    return {"id": f"South 2-{int(at * 1000) + k}", "label": "South 2", "start": at + k, "end": at + k + 8,
+    return {"id": f"South2-{int(at * 1000) + k}", "label": "South 2", "start": at + k, "end": at + k + 8,
             "codes": ["PCFD"], "status": "pending"}
 
 
@@ -64,7 +64,7 @@ class FakeHub:
                            {"error": "too large", "reason": "too_large"})
         if any(e["data"].get("id") in self.poison for e in evs):
             raise HubError("hub said 400: bad request: invalid literal", 400, None, {"error": "bad request: invalid literal"})
-        self.got += [e["data"]["id"] for e in evs]
+        self.got += [e["data"].get("id") for e in evs]
         self.acked = max([e["seq"] for e in evs], default=self.acked)
         return {"ok": True, "acked": self.acked, "applied": len(evs)}
 
@@ -118,8 +118,8 @@ def test_one_bad_event_in_fifty_the_other_49_go_in_order_and_it_is_quarantined_w
     assert "invalid literal" in q["rows"][0]["error"] and q["rows"][0]["next_at"] is None     # never sent again
     assert any("refused a traffic" in s for s in link.logs_said)
     a = alerts(link)
-    assert a["rejected:traffic"]["severity"] == "warning"
-    assert a["rejected:traffic"]["title"] == "Station event rejected by hub: traffic"
+    assert a["rejected_minor:traffic"]["severity"] == "warning"
+    assert a["rejected_minor:traffic"]["title"] == "Station event rejected by hub: traffic"
     # Everything after it goes in whole batches again.
     for k in range(50, 60):
         link.outbox.add("traffic", traffic(k), None)
@@ -174,7 +174,7 @@ def test_a_413_splits_by_size_and_an_event_too_large_alone_goes_without_its_clip
     hub = FakeHub(max_bytes=100_000)
     drain(link, hub)
     assert hub.got == [traffic(k)["id"] for k in range(13)] + [page(13)["id"]]
-    assert link.outbox.summary()["n"] == 0 and link.outbox.dropped_audio == 1
+    assert link.outbox.summary()["n"] == 0 and link.outbox.too_large_audio == 1 and link.outbox.dropped_audio == 0
     assert any("sent without its clip" in s for s in link.logs_said)
 
 
@@ -271,7 +271,7 @@ def test_the_hub_lists_each_event_it_cannot_take_and_takes_the_rest(tmp_path):
         code, r = call(hub.url + "/api/station/events", "POST", batch)
         assert code == 200 and r["acked"] == 4 and r["applied"] == 2
         assert sorted((x["i"], x["seq"], x["reason"]) for x in r["rejected"]) == [
-            (1, 2, "apply_failed"), (2, None, "malformed"), (3, None, "malformed"), (4, 3, "apply_failed")]
+            (1, 2, "malformed"), (2, None, "malformed"), (3, None, "malformed"), (4, 3, "malformed")]
         assert {t["id"] for t in all_traffic(hub.app.state())} == {"FG1-1", "FG1-4"}
         # A batch it can't read at all: why, for the station.
         code, r = call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": "no"})
@@ -307,9 +307,185 @@ def test_through_a_real_hub_a_batch_too_large_splits_and_an_event_it_cannot_appl
         assert wait(lambda: st.link.outbox.pending()[0] == 0, 10)
         assert hub.app.has_clip(ids[0])
         q = st.link.outbox.summary()
-        assert q["n"] == 1 and q["rows"][0]["kind"] == "page_text" and q["rows"][0]["reason"] == "apply_failed"
-        assert q["critical"] == 1                                     # a page's text: sent again later, an alert
+        assert q["n"] == 1 and q["rows"][0]["kind"] == "page_text" and q["rows"][0]["reason"] == "malformed"
+        assert q["critical"] == 0                   # a bad id never applies: kept, never sent again, never critical
     finally:
         if st is not None:
             st.link.stop()
         hub.close()
+
+
+def test_a_retried_post_after_a_503_still_lists_the_event_the_hub_could_not_apply(tmp_path, monkeypatch):
+    """The hub applied event 1 badly, then lost its lease on event 2 (503): the station sends both again, and the answer
+    still says event 1 was refused (its cursor is already past it)."""
+    from sizeup import fence as fence_mod
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        h, apply = hub.app.hub, hub.app.apply
+        fail = {"FG1-1": RuntimeError("a hub bug"), "FG1-2": fence_mod.FencedWrite("not the leader")}
+
+        def flaky(kind, d, audio):
+            if d.get("id") in fail:
+                raise fail[d["id"]]
+            return apply(kind, d, audio)
+        monkeypatch.setattr(hub.app, "apply", flaky)
+        now = time.time()
+        batch = json.dumps({"epoch": "e1", "events": [_traffic_event(1, "FG1-1", now),
+                                                      _traffic_event(2, "FG1-2", now)]}).encode()
+        with pytest.raises(fence_mod.FencedWrite):
+            h._events(batch)
+        del fail["FG1-2"]
+        code, body, _ = h._events(batch)
+        r = json.loads(body)
+        assert r["acked"] == 2 and [(x["seq"], x["reason"]) for x in r["rejected"]] == [(1, "apply_failed")]
+    finally:
+        hub.close()
+
+
+def test_the_hub_attaches_a_late_page_events_clip_to_the_page_its_text_made(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        now = time.time()
+        pid = f"South2-{int(now * 1000)}"
+        d = {"id": pid, "label": "South 2", "mhz": 470.2, "start": now - 20, "end": now - 10,
+             "raw": "Engine 60 respond to a drill",
+             "status": "done", "kind": "voice", "tones": []}
+        wav = wav_bytes(np.zeros(8000, np.float32), 8000)
+        r = call(hub.url + "/api/station/events", "POST",
+                 {"epoch": "e1", "events": [{"seq": 1, "at": now, "type": "page_text", "data": d}]})[1]
+        assert r["applied"] == 1 and not hub.app.audio.has(pid)
+        r = call(hub.url + "/api/station/events", "POST",
+                 {"epoch": "e1", "events": [{"seq": 2, "at": now, "type": "page", "data": d,
+                                             "audio": base64.b64encode(wav).decode()}]})[1]
+        assert r["acked"] == 2 and "rejected" not in r and hub.app.audio.has(pid)
+        assert sum(p.id == pid for p in hub.app.pages) == 1                 # still one page
+    finally:
+        hub.close()
+
+
+# -- source events: a snapshot never goes back -------------------------------------------------------------------------
+
+
+def _feed(source="county", ref="A1", units=("E60",), typ="ALARM/COMM", where="12 Example Ave", seen=T):
+    return {"source": source, "label": "County feed", "rank": 1, "seen_at": seen, "first_seen": T,
+            "event": {"source": source, "event_id": ref, "type": typ, "location": where, "units": list(units)}}
+
+
+def test_a_quarantined_source_event_is_dropped_once_the_feed_has_a_newer_report(link):
+    old = _feed()
+    link.outbox.add("source_event", old, None)
+    class Refuse(FakeHub):
+        def request(self, method, path, body=None, timeout=None, **kw):
+            if any(e["type"] == "source_event" and e["data"]["seen_at"] == T for e in body["events"]):
+                self.posts += 1
+                raise HubError("hub said 400: bad request", 400, None, {"error": "bad request"})
+            return super().request(method, path, body, timeout, **kw)
+    hub = Refuse()
+    drain(link, hub, now=T)
+    assert link.outbox.summary()["critical"] == 1                 # a feed's event: critical, sent again later
+    link.outbox.add("source_event", _feed(units=("E60", "L31"), seen=T + 60), None)     # the feed moved on
+    drain(link, hub, now=T + 60)
+    drain(link, hub, now=T + 700)                                 # its time to go again: superseded, dropped
+    assert link.outbox.summary()["n"] == 0 and link.outbox.pending()[0] == 0
+    assert any("newer report" in s for s in link.logs_said)
+
+
+def test_the_hub_ignores_a_snapshot_older_than_the_one_it_applied(tmp_path):
+    from tests.test_incident_sources import Rig as SourceRig
+    rig = SourceRig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 Example Ave", units=("E60",), times={"dispatched": rig.clock.t})
+    rig.poll()
+    [inc] = rig.incidents()
+    snap1 = [d for k, d in rig.sent if k == "source_event"][-1]
+    rig.at(60)
+    rig.feed.change("A1", type="STRU", location="14 Example Ave", units=("E60", "L31"))
+    rig.poll()
+    after = rig.cad.store.incident(inc["id"])
+    assert (after["type"], after["address"]) == ("STRU", "14 Example Ave")
+    lines = rig.feed_lines(inc["id"])
+    rig.at(700)
+    rig.cad.sources.apply("source_event", snap1)                  # the station's quarantine sends the old one again
+    again = rig.cad.store.incident(inc["id"])
+    assert (again["type"], again["address"]) == ("STRU", "14 Example Ave")
+    assert rig.feed_lines(inc["id"]) == lines                     # nothing on the timeline
+    assert json.loads(rig.cad.store.one("SELECT data FROM source_reports WHERE ref = 'A1'")["data"])["units"] == ["E60", "L31"]
+
+
+# -- critical, but never forever ------------------------------------------------------------------------------------
+
+
+def test_a_critical_one_is_stuck_after_its_tries_and_a_person_drops_it(tmp_path, capsys):
+    path = tmp_path / "outbox.sqlite"
+    ob = Outbox(path)
+    ob.add("page", page(1), None)
+    row = ob.batch(meta=True)[0]
+    t = T
+    q = ob.quarantine(row, "http_400", "bad request", now=t)
+    for _ in range(outbox_mod.CRITICAL_TRIES):
+        t = q["next_at"] or t
+        [copy] = [r for r in ob.batch(meta=True) if r["qid"]] or [None] if ob.requeue_due(now=t) else [None]
+        q = ob.quarantine(copy, "http_400", "bad request", now=t)
+    assert q["state"] == "stuck" and q["next_at"] is None and ob.requeue_due(now=t + 10 ** 6) == []
+    s = ob.summary()
+    assert s["kinds"]["page"] == {"n": 1, "critical": 1, "stuck": 1, "late": 0}
+    r = Rig()
+    r.at(0, status=station_status(outbox={"pending": 0, "oldest": None, "dropped_audio": 0, "quarantine": s}))
+    a = {x["key"]: x for x in r.h.alerts()}
+    assert a["rejected:page"]["severity"] == "critical" and "stuck" in a["rejected:page"]["text"]
+    ob.close()
+    assert outbox_mod.main(["--path", str(path), "list"]) == 0
+    qid = s["rows"][0]["id"]
+    assert f"{qid:>6}  page" in capsys.readouterr().out
+    assert outbox_mod.main(["--path", str(path), "drop", str(qid)]) == 0
+    ob = Outbox(path)
+    assert ob.summary()["n"] == 0
+    ob.close()
+
+
+def test_a_quarantined_clip_is_capped_and_a_resend_keeps_the_outbox_under_its_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(outbox_mod, "QUARANTINE_CLIP", 1500)
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=3000)
+    ob.add("page", page(1), b"a" * 2000)
+    ob.add("page", page(2), b"b" * 1000)
+    rows = ob.batch(meta=True)
+    big = ob.quarantine(rows[0], "http_400", "bad request", now=T)
+    ob.quarantine(rows[1], "http_400", "bad request", now=T)
+    ob.add("traffic", traffic(3), b"c" * 2500)                       # the outbox nearly full again
+    assert [x["kind"] for x in ob.requeue_due(now=T + 601)] == ["page", "page"]
+    assert ob.audio_bytes <= 3000
+    copies = [r for r in ob.batch(meta=True) if r["qid"]]
+    assert copies[0]["qid"] == big["id"] and copies[0]["audio"] is None and copies[0]["audio_dropped"]   # over the cap
+    ob.close()
+
+
+def test_an_alarm_sent_again_too_late_to_raise_stays_critical_as_late(link):
+    end = T - 3600
+    al = {"id": f"FG1-{int(end * 1000)}", "source": "FG1", "start": end - 5, "end": end, "emergency": True,
+          "radio_id": "6301", "unit": "", "talkgroup": None, "rig": "", "text": ""}
+    link.outbox.add("alarm", al, None)
+    hub = FakeHub(poison={al["id"]})
+    drain(link, hub, now=T)
+    hub.poison.clear()
+    drain(link, hub, now=T + 601)
+    q = link.outbox.summary()
+    assert q["n"] == 1 and q["rows"][0]["state"] == "late" and q["rows"][0]["next_at"] is None
+    assert hub.got[-1] == al["id"]                                  # delivered, once
+    a = alerts(link)
+    assert a["rejected:alarm"]["severity"] == "critical"
+    assert a["rejected:alarm"]["title"] == "Station alarm delivered late, not raised"
+    assert drain(link, hub, now=T + 99999) == 0                     # never sent again
+
+
+def test_muting_the_other_types_never_hides_a_critical_one(link):
+    from sizeup.cloud.health import alert_kind
+    link.outbox.add("traffic", traffic(0), None)
+    link.outbox.add("page", page(1), None)
+    hub = FakeHub(poison={traffic(0)["id"], page(1)["id"]})
+    drain(link, hub, now=T)
+    r = Rig()
+    r.h.mutes = lambda: {"rejected_minor": {"until": None}}
+    ob = {"pending": 0, "oldest": None, "dropped_audio": 0, "quarantine": link.outbox.summary()}
+    r.at(0, status=station_status(outbox=ob))
+    a = {x["key"]: x for x in r.h.alerts()}
+    assert a["rejected_minor:traffic"]["muted"] and not a["rejected:page"].get("muted")
+    assert (alert_kind("rejected:page"), alert_kind("rejected_minor:traffic")) == ("rejected", "rejected_minor")

@@ -321,6 +321,8 @@ class Hub:
         self.epoch = app.mdb.get("station_epoch")
         self.seq = int(app.mdb.get("station_seq", "0") or 0)
         self._failed: tuple[str, int, int] = ("", 0, 0)   # (epoch, seq, tries) of a source_event that failed to apply
+        # the events it couldn't apply lately, {(epoch, seq): {seq, type, reason, error}}: listed again on a retry
+        self._rejections: OrderedDict[tuple[str, int], dict] = OrderedDict()
 
     # -- health --------------------------------------------------------------------------------------
 
@@ -840,12 +842,16 @@ class Hub:
             n = 0
             for seq, i, ev in sorted(events, key=lambda x: (x[0], x[1])):
                 if seq <= self.seq:
-                    continue                   # delivered before (the station retried): already applied
+                    # delivered before (the station retried): already applied. One it couldn't apply is listed again
+                    # (the post that said so may have ended in a 503 later on, never reaching the station)
+                    if (self.epoch, seq) in self._rejections:
+                        rejected.append(dict(self._rejections[(self.epoch, seq)], i=i))
+                    continue
                 kind = str(ev.get("type"))
                 refused = fence_mod.refused()
                 try:
                     if not isinstance(ev.get("data") or {}, dict):
-                        raise ValueError("data: a JSON object")
+                        raise BadEvent("data: a JSON object")
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
                     self.app.apply(kind, ev.get("data") or {}, audio)
                     n += 1
@@ -859,8 +865,15 @@ class Hub:
                     self.log(f"hub: could not apply {kind} #{seq}: {type(e).__name__}")
                     if kind == "source_event" and not isinstance(e, SourceError) and self._retry(seq):
                         break                  # not acked: the station sends it again (a malformed one is skipped)
-                    rejected.append({"i": i, "seq": seq, "type": kind[:40], "reason": "apply_failed",
-                                     "error": f"{type(e).__name__}{said}"[:200]})
+                    # malformed: never applies, whenever it is sent (the station doesn't keep sending it); else it may
+                    # once the hub is fixed
+                    bad = {"seq": seq, "type": kind[:40],
+                           "reason": "malformed" if isinstance(e, (BadEvent, SourceError)) else "apply_failed",
+                           "error": f"{type(e).__name__}{said}"[:200]}
+                    rejected.append(dict(bad, i=i))
+                    self._rejections[(self.epoch, seq)] = bad
+                    while len(self._rejections) > REJECTIONS_KEPT:
+                        self._rejections.popitem(last=False)
                 if fence_mod.refused() != refused or not self.app._may_write_audio():
                     # a write of this event was refused (the lease went, #501), even if something on the way caught
                     # it, or the lease is gone now: neither it nor anything after it is acked (seq stays), the
@@ -877,6 +890,11 @@ class Hub:
 
 SOURCE_KINDS = ("source_event", "source_health", "source_seen")   # an external incident source's (#297)
 SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malformed one) is retried this often, then skipped
+REJECTIONS_KEPT = 200       # the events it couldn't apply, remembered to say so again on a retried post (Hub._events)
+
+
+class BadEvent(ValueError):
+    """A station event that can never apply (a bad id, data that isn't an object): "malformed" in the answer."""
 AUDIO_UPLOAD_S = 5.0        # the audio uploader's round (#414): the clips the ingest couldn't store, then the migration
 AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
@@ -1164,14 +1182,20 @@ class HubApp(App):
     def _id(d: dict) -> str:
         cid = str(d.get("id") or "")
         if not CLIP_ID.fullmatch(cid) or ".." in cid:
-            raise ValueError(f"bad id {cid[:40]!r}")
+            raise BadEvent(f"bad id {cid[:40]!r}")
         return cid
 
     def _apply_page(self, d: dict, audio: bytes | None) -> None:
         pid = self._id(d)
         with self._lock:
-            if any(p.id == pid for p in self.pages):
-                return
+            have = next((p for p in self.pages if p.id == pid), None)
+        if have is not None:
+            # here before (its page_text came first: the page event was late, or sent again from the station's
+            # quarantine): its clip, if it has none yet, and its row in Radio again (with play)
+            if audio and not self.audio.has(pid):
+                self.audio.put(pid, audio, "clip", at=have.end, channel=have.label)
+                self._page_to_cad(have)
+            return
         page = page_from_dict(d)
         if audio:
             self.audio.put(pid, audio, "clip", at=page.end, channel=page.label)

@@ -29,6 +29,9 @@
 #   sizeup-station stt [--hours H] [--bench clip.wav]
 #                                why speech-to-text is behind (#300): whisper's model, threads and pace, CPU use and
 #                                niceness of the radios, readsb and whisper, clips shed or skipped (read-only)
+#   sizeup-station quarantine [list | drop ID | drop all]
+#                                the events the hub refused for good, kept on the station (sizeup/cloud/outbox.py): a
+#                                critical one stuck or an alarm delivered too late stays on Health until dropped here
 #   sizeup-station version
 #
 # Never prints a secret: the hub check goes through the station itself (POST /api/station-mode/test).
@@ -398,6 +401,11 @@ case "$cmd" in
     cd /
     exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -S -P -m sizeup.radio.sdrserial "$@" ;;   # (-S: root never reads the venv's site-packages: #301)
   stt) exec python3 -I "$APP/tools/stt_diag.py" "$@" ;;
+  quarantine)
+    need_root quarantine "$@"
+    cd /
+    exec runuser -u sizeup -- env HOME=/var/lib/sizeup PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 \
+      "$VENV/bin/python" -P -m sizeup.cloud.outbox --path /var/lib/sizeup/state/outbox.sqlite "$@" ;;
   version)
     echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
     git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true

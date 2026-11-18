@@ -34,18 +34,23 @@ alone and reads each FLAC on its own, so the lock add() needs is only ever held 
 
 Quarantine: an event the hub refuses for good (sizeup/cloud/station.py _rejected: a 400 / 413 / 422 its batch was split
 down to, or one the hub lists as "rejected" after it failed to apply) moves to the quarantine table, with the hub's
-reason and error, so the events behind it go on. Kept on disk across restarts, bounded (QUARANTINE_ROWS /
-QUARANTINE_AUDIO: the oldest non-critical go first). A critical one (CRITICAL_KINDS: a page, its text, a P25
-emergency, an incident source's event) is never dropped: it is sent again on a slow schedule (RETRY_S), as a new event
-at the end of the outbox (its row carries qid, the quarantine row's id), until the hub takes it; the hub keys pages,
-transmissions and alarms by their ids, so a copy is harmless. Each one goes up in the station's status (summary()),
-and the hub raises "Station event rejected by hub: <type>" (sizeup/cloud/health.py: critical for a critical one).
+reason and error, so the events behind it go on. Kept on disk across restarts, bounded (QUARANTINE_ROWS: the oldest
+non-critical rows go; QUARANTINE_AUDIO: the oldest clips go, the rows stay; a clip over QUARANTINE_CLIP is not kept).
+A critical one (CRITICAL_KINDS: a page, its text, a P25 emergency, an incident source's event; never one the hub calls
+malformed) is sent again on a slow schedule (RETRY_S), as a new event at the end of the outbox (its row carries qid),
+for CRITICAL_TRIES / CRITICAL_FOR_S, then "stuck"; the hub keys pages, transmissions and alarms by their ids, so a
+copy is harmless. A source_event is a snapshot: a quarantined one the feed has a newer snapshot of since
+(source_latest) is dropped, never sent again over it (the hub also ignores an older one: sizeup/cad/sources.py
+on_event). An alarm the hub took too late to raise stays, "late". Each goes up in the station's status (summary()), and
+the hub raises "Station event rejected by hub: <type>" (sizeup/cloud/health.py); a person drops one with
+`sizeup-station quarantine drop ID` (main()).
 
     quarantine(row, reason, error)   moved (or, already acked: copied) out of the outbox; a requeued copy updates its row
     requeue_due()                    the critical ones whose time has come, back at the end of the outbox
-    released(qids)                   the hub took these copies: gone from the quarantine
+    released(qids) / late(qid, why)  the hub took these copies: gone / kept as "late"
     strip_audio(seq)                 an event too large for the hub with its clip: sent without it (the station keeps
                                      the clip in its own store)
+    drop(id | None)                  a person's
 """
 
 from __future__ import annotations
@@ -69,6 +74,20 @@ RETRY_S = (600.0, 1800.0, 3600.0)   # a critical one sent again after this long 
 QUARANTINE_ROWS = 500               # kept at most (the critical ones always)
 QUARANTINE_AUDIO = 50 * 1024 * 1024     # ... and their clips
 QUARANTINE_ERROR = 300              # the hub's error, kept this long
+QUARANTINE_CLIP = 8 * 1024 * 1024   # a clip over this is not kept in the quarantine (the event is; the station's own
+                                    # store still has the clip)
+CRITICAL_TRIES = 8                  # a critical one is sent again this many times at most (about 7 h) ...
+CRITICAL_FOR_S = 24 * 3600.0        # ... or for this long: then "stuck", kept for a person (the alert stays)
+PERMANENT_REASONS = ("malformed",)  # the hub's reasons that never change with a retry: never critical
+SOURCE_LATEST_S = 7 * 24 * 3600.0   # a feed event's latest snapshot seq is kept this long (source_latest)
+
+
+def _source_key(data: dict) -> str:
+    """A source_event's feed event: "<source> <event id>" ("" when it doesn't say)."""
+    ev = data.get("event") if isinstance(data, dict) else None
+    src = data.get("source") if isinstance(data, dict) else None
+    ref = ev.get("event_id") if isinstance(ev, dict) else None
+    return f"{src}\x1f{ref}" if src and ref else ""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -103,8 +122,10 @@ CREATE TABLE IF NOT EXISTS quarantine (
     last_at REAL NOT NULL,
     tries INTEGER NOT NULL DEFAULT 1,
     critical INTEGER NOT NULL DEFAULT 0,
-    next_at REAL
+    next_at REAL,
+    state TEXT NOT NULL DEFAULT 'held'
 );
+CREATE TABLE IF NOT EXISTS source_latest (key TEXT PRIMARY KEY, seq INTEGER NOT NULL, at REAL NOT NULL);
 """
 
 
@@ -145,6 +166,7 @@ class Outbox:
         self.dropped_stt_pre = 0        # ... of them, the pre-alert channels' (only once nothing lower was left)
         self.dropped_stt_fire = 0       # ... and fire traffic's
         self.quarantine_evicted = 0     # this run: quarantined (non-critical) events dropped to stay under its bound
+        self.too_large_audio = 0        # this run: clips left off an event the hub refused as too large with them
 
     def _drop_stt(self) -> None:
         """STT inputs, the lowest priority first and the oldest first within it, until they are inside their own budget
@@ -249,26 +271,36 @@ class Outbox:
 
     def add(self, kind: str, data: dict, audio: bytes | None = None, at: float | None = None, context: bool = False) -> int:
         with self._lock:
+            now = time.time() if at is None else at
             cur = self.db.execute("INSERT INTO outbox (at, kind, data, audio, context) VALUES (?, ?, ?, ?, ?)",
-                                  (time.time() if at is None else at, kind, json.dumps(data, separators=(",", ":"), default=_plain),
+                                  (now, kind, json.dumps(data, separators=(",", ":"), default=_plain),
                                    audio, int(bool(context))))
+            if kind == "source_event" and (key := _source_key(data)):
+                # the latest snapshot of this feed event: a quarantined older one is never sent again (requeue_due)
+                self.db.execute("INSERT INTO source_latest (key, seq, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE "
+                                "SET seq = excluded.seq, at = excluded.at", (key, cur.lastrowid, now))
+                self.db.execute("DELETE FROM source_latest WHERE at < ?", (now - SOURCE_LATEST_S,))
             self.audio_bytes += len(audio or b"")
             if context:
                 self.context_bytes += len(audio or b"")
-            self._drop_stt()                    # (first: the STT inputs go before any clip)
-            self._drop_context(int(self.max_audio_bytes * CONTEXT_SHARE), whole=True)
-            while self.audio_bytes > self.max_audio_bytes:
-                old = self.db.execute("SELECT seq, LENGTH(audio) FROM outbox WHERE audio IS NOT NULL "
-                                      "ORDER BY seq LIMIT 20").fetchall()
-                if not old:
-                    break
-                for seq, n in old:
-                    self.db.execute("UPDATE outbox SET audio = NULL, audio_dropped = 1 WHERE seq = ?", (seq,))
-                    self.audio_bytes -= n
-                    self.dropped_audio += 1
-                    if self.audio_bytes <= self.max_audio_bytes:
-                        break
+            self._limit_audio()
             return int(cur.lastrowid)
+
+    def _limit_audio(self) -> None:
+        """Over max_audio_bytes: the STT inputs first, then context audio, then the oldest clips (the events stay)."""
+        self._drop_stt()                    # (first: the STT inputs go before any clip)
+        self._drop_context(int(self.max_audio_bytes * CONTEXT_SHARE), whole=True)
+        while self.audio_bytes > self.max_audio_bytes:
+            old = self.db.execute("SELECT seq, LENGTH(audio) FROM outbox WHERE audio IS NOT NULL "
+                                  "ORDER BY seq LIMIT 20").fetchall()
+            if not old:
+                break
+            for seq, n in old:
+                self.db.execute("UPDATE outbox SET audio = NULL, audio_dropped = 1 WHERE seq = ?", (seq,))
+                self.audio_bytes -= n
+                self.dropped_audio += 1
+                if self.audio_bytes <= self.max_audio_bytes:
+                    break
 
     def batch(self, max_bytes: int = 4 * 1024 * 1024, max_events: int = 200, meta: bool = False) -> list[dict]:
         """The oldest events, at least one, up to max_bytes of data + audio. meta: each also says whether it is
@@ -301,31 +333,51 @@ class Outbox:
 
     def quarantine(self, row: dict, reason: str, error: str, now: float | None = None) -> dict:
         """The hub refused `row` (a batch() row) for good: out of the outbox (if still there), into the quarantine. A
-        requeued copy (row["qid"]) updates its quarantine row instead. Returns {id, kind, tries, critical, next_at}."""
+        requeued copy (row["qid"]) updates its quarantine row instead. Critical (sent again) only for a CRITICAL_KINDS
+        event the hub didn't call malformed (that never changes), and only for CRITICAL_TRIES or CRITICAL_FOR_S: then
+        "stuck" (kept, the alert stays, a person drops it: `sizeup-station quarantine`). A clip over QUARANTINE_CLIP is
+        not kept. Returns {id, kind, tries, critical, state, next_at}."""
         now = time.time() if now is None else now
         kind = str(row["type"])
-        critical = kind in CRITICAL_KINDS
         reason, error = str(reason or "rejected")[:40], str(error or "")[:QUARANTINE_ERROR]
+        critical = kind in CRITICAL_KINDS and reason not in PERMANENT_REASONS
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 q = row.get("qid")
-                cur = self.db.execute("SELECT tries FROM quarantine WHERE id = ?", (q,)).fetchone() if q else None
+                cur = (self.db.execute("SELECT tries, first_at, critical FROM quarantine WHERE id = ?", (q,)).fetchone()
+                       if q else None)
                 tries = (cur[0] + 1) if cur else 1
-                nxt = now + RETRY_S[min(tries, len(RETRY_S)) - 1] if critical else None
+                first = cur[1] if cur else now
+                critical = critical and (not cur or bool(cur[2]))
+                state, nxt = "held", None
+                if critical:
+                    if tries > CRITICAL_TRIES or now - first > CRITICAL_FOR_S:
+                        state = "stuck"
+                    else:
+                        nxt = now + RETRY_S[min(tries, len(RETRY_S)) - 1]
                 if cur:
-                    self.db.execute("UPDATE quarantine SET reason = ?, error = ?, last_at = ?, tries = ?, next_at = ? "
-                                    "WHERE id = ?", (reason, error, now, tries, nxt, q))
+                    self.db.execute("UPDATE quarantine SET reason = ?, error = ?, last_at = ?, tries = ?, next_at = ?, "
+                                    "critical = ?, state = ? WHERE id = ?",
+                                    (reason, error, now, tries, nxt, int(critical), state, q))
                     qid = int(q)
                 else:
                     audio = row.get("audio")
+                    big = bool(audio) and len(audio) > QUARANTINE_CLIP
                     qid = int(self.db.execute(
                         "INSERT INTO quarantine (seq, at, kind, data, audio, audio_dropped, context, reason, error, "
-                        "first_at, last_at, tries, critical, next_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                        "first_at, last_at, tries, critical, next_at, state) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                         (int(row["seq"]), float(row.get("at") or now), kind,
-                         json.dumps(row.get("data") or {}, separators=(",", ":"), default=_plain), audio,
-                         int(bool(row.get("audio_dropped"))), int(bool(row.get("context"))), reason, error, now, now,
-                         int(critical), nxt)).lastrowid)
+                         json.dumps(row.get("data") or {}, separators=(",", ":"), default=_plain),
+                         None if big else audio, int(bool(row.get("audio_dropped")) or big), int(bool(row.get("context"))),
+                         reason, error, now, now, int(critical), nxt, state)).lastrowid)
+                    if kind == "source_event" and (key := _source_key(row.get("data") or {})):
+                        # an older quarantined snapshot of the same feed event: this one replaces it
+                        for oid, odata in self.db.execute("SELECT id, data FROM quarantine WHERE kind = 'source_event' "
+                                                          "AND id != ? AND seq < ?", (qid, int(row["seq"]))).fetchall():
+                            if _source_key(json.loads(odata)) == key:
+                                self.db.execute("DELETE FROM quarantine WHERE id = ?", (oid,))
                 self.db.execute("DELETE FROM outbox WHERE seq = ?", (int(row["seq"]),))
                 self._bound_quarantine()
                 self.db.execute("COMMIT")
@@ -333,38 +385,51 @@ class Outbox:
                 self.db.execute("ROLLBACK")
                 raise
             self._recount()
-        return {"id": qid, "kind": kind, "tries": tries, "critical": critical, "next_at": nxt}
+        return {"id": qid, "kind": kind, "tries": tries, "critical": critical, "state": state, "next_at": nxt}
 
     def _bound_quarantine(self) -> None:
-        """At most QUARANTINE_ROWS rows and QUARANTINE_AUDIO of clips: the oldest non-critical rows go (never a
-        critical one)."""
-        while True:
-            n, b = self.db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(audio)), 0) FROM quarantine").fetchone()
-            if n <= QUARANTINE_ROWS and b <= QUARANTINE_AUDIO:
-                return
+        """At most QUARANTINE_ROWS rows (the oldest non-critical go; never a critical one) and QUARANTINE_AUDIO of clips
+        (the oldest clips go, the non-critical ones' first: the rows stay, marked audio_dropped)."""
+        while self.db.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0] > QUARANTINE_ROWS:
             old = self.db.execute("SELECT id FROM quarantine WHERE critical = 0 ORDER BY id LIMIT 1").fetchone()
             if old is None:
-                return
+                break
             self.db.execute("DELETE FROM quarantine WHERE id = ?", (old[0],))
             self.quarantine_evicted += 1
+        while self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM quarantine").fetchone()[0] > QUARANTINE_AUDIO:
+            old = self.db.execute("SELECT id FROM quarantine WHERE audio IS NOT NULL ORDER BY critical, id LIMIT 1").fetchone()
+            if old is None:
+                break
+            self.db.execute("UPDATE quarantine SET audio = NULL, audio_dropped = 1 WHERE id = ?", (old[0],))
 
     def requeue_due(self, now: float | None = None) -> list[dict]:
         """The critical quarantined events whose time has come (and that have no copy in the outbox yet): back at the end
-        of the outbox, as a new event carrying qid. [{id, kind, tries}]."""
+        of the outbox, as a new event carrying qid, within the outbox's audio limit (add()'s). A source_event the feed
+        has a newer snapshot of since (source_latest) is dropped instead: sending the older one would put back what the
+        feed changed. [{id, kind, tries, superseded}]."""
         now = time.time() if now is None else now
         out = []
         with self._lock:
-            due = self.db.execute("SELECT id, at, kind, data, audio, audio_dropped, context, tries FROM quarantine "
+            due = self.db.execute("SELECT id, seq, kind, data, audio, audio_dropped, context, tries FROM quarantine "
                                   "WHERE critical = 1 AND next_at IS NOT NULL AND next_at <= ? AND id NOT IN "
                                   "(SELECT qid FROM outbox WHERE qid IS NOT NULL) ORDER BY id LIMIT 20", (now,)).fetchall()
-            for qid, at, kind, data, audio, dropped, context, tries in due:
+            for qid, seq, kind, data, audio, dropped, context, tries in due:
+                if kind == "source_event" and (key := _source_key(json.loads(data))):
+                    latest = self.db.execute("SELECT seq FROM source_latest WHERE key = ?", (key,)).fetchone()
+                    if latest is not None and latest[0] > seq:
+                        self.db.execute("DELETE FROM quarantine WHERE id = ?", (qid,))
+                        out.append({"id": qid, "kind": kind, "tries": tries, "superseded": True})
+                        continue
                 # (queued now: the oldest event's age is the outbox's backlog on Health, never this one's first refusal;
                 # the hub reads an event's times from its data)
                 self.db.execute("INSERT INTO outbox (at, kind, data, audio, audio_dropped, context, qid) "
                                 "VALUES (?, ?, ?, ?, ?, ?, ?)", (now, kind, data, audio, dropped, context, qid))
-                out.append({"id": qid, "kind": kind, "tries": tries})
-            if out:
-                self._recount()
+                self.audio_bytes += len(audio or b"")
+                if context:
+                    self.context_bytes += len(audio or b"")
+                out.append({"id": qid, "kind": kind, "tries": tries, "superseded": False})
+            if any(not x["superseded"] for x in out):
+                self._limit_audio()
         return out
 
     def released(self, qids) -> int:
@@ -375,28 +440,49 @@ class Outbox:
         with self._lock:
             return self.db.execute(f"DELETE FROM quarantine WHERE id IN ({','.join('?' * len(qids))})", qids).rowcount
 
+    def late(self, qid: int, why: str, now: float | None = None) -> None:
+        """The hub took a requeued copy too late to act on it (an alarm past alarms.MAX_AGE_S): kept, not sent again,
+        state "late" (the critical alert stays: a person hears it was never raised, and drops it)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self.db.execute("UPDATE quarantine SET state = 'late', next_at = NULL, reason = 'late', error = ?, last_at = ? "
+                            "WHERE id = ?", (str(why)[:QUARANTINE_ERROR], now, int(qid)))
+
+    def drop(self, qid: int | None = None) -> int:
+        """A person drops a quarantined event (`sizeup-station quarantine drop ID|all`). None: all of them."""
+        with self._lock:
+            if qid is None:
+                return self.db.execute("DELETE FROM quarantine").rowcount
+            return self.db.execute("DELETE FROM quarantine WHERE id = ?", (int(qid),)).rowcount
+
     def strip_audio(self, seq: int) -> bool:
-        """An event the hub refuses as too large with its clip: sent without it from now on (audio_dropped)."""
+        """An event the hub refuses as too large with its clip: sent without it from now on (audio_dropped). Counted in
+        too_large_audio (not dropped_audio: that one is the outbox's own limit)."""
         with self._lock:
             k = self.db.execute("UPDATE outbox SET audio = NULL, audio_dropped = 1 WHERE seq = ? AND audio IS NOT NULL",
                                 (int(seq),)).rowcount
             if k:
-                self.dropped_audio += 1
+                self.too_large_audio += 1
                 self._recount()
             return bool(k)
 
     def summary(self, limit: int = 10) -> dict:
-        """The quarantine for the status: how many (critical), and the newest rows, the critical first. Kinds, reasons
-        and the hub's error only, never an event's data."""
+        """The quarantine for the status: how many (critical), per kind ({kind: {n, critical, stuck, late}}), and the
+        newest rows, the critical first. Kinds, states, reasons and the hub's error only, never an event's data; an
+        incident source's error never leaves the station (it may quote the county's data, #297)."""
         with self._lock:
             n, crit = self.db.execute("SELECT COUNT(*), COALESCE(SUM(critical), 0) FROM quarantine").fetchone()
-            rows = self.db.execute("SELECT kind, reason, error, first_at, last_at, tries, critical, next_at FROM quarantine "
-                                   "ORDER BY critical DESC, id DESC LIMIT ?", (int(limit),)).fetchall()
-        # (an incident source's error never leaves the station: it may quote the county's data, #297)
+            kinds = {k: {"n": int(c), "critical": int(cr or 0), "stuck": int(st or 0), "late": int(la or 0)}
+                     for k, c, cr, st, la in self.db.execute(
+                         "SELECT kind, COUNT(*), SUM(critical), SUM(state = 'stuck'), SUM(state = 'late') FROM quarantine "
+                         "GROUP BY kind ORDER BY kind LIMIT 40")}
+            rows = self.db.execute("SELECT id, kind, reason, error, first_at, last_at, tries, critical, next_at, state "
+                                   "FROM quarantine ORDER BY critical DESC, id DESC LIMIT ?", (int(limit),)).fetchall()
         return {"n": int(n), "critical": int(crit or 0), "evicted": self.quarantine_evicted,
-                "rows": [{"kind": k, "reason": r, "error": "" if k.startswith("source_") else e, "first_at": f,
-                          "last_at": la, "tries": t, "critical": bool(c), "next_at": nx}
-                         for k, r, e, f, la, t, c, nx in rows]}
+                "too_large_audio": self.too_large_audio, "kinds": kinds,
+                "rows": [{"id": i, "kind": k, "reason": r, "error": "" if k.startswith("source_") else e, "first_at": f,
+                          "last_at": la, "tries": t, "critical": bool(c), "next_at": nx, "state": st}
+                         for i, k, r, e, f, la, t, c, nx, st in rows]}
 
     def pending(self) -> tuple[int, float | None]:
         """(events waiting, when the oldest was queued)."""
@@ -407,3 +493,42 @@ class Outbox:
     def close(self) -> None:
         with self._lock:
             self.db.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`sizeup-station quarantine [list | drop ID | drop all]` (python -m sizeup.cloud.outbox --path ... ): the events the
+    hub refused, and a person dropping one (a critical one stuck, an alarm delivered too late, a page they have
+    handled). The running station reads the quarantine afresh for every status: nothing to restart."""
+    import argparse
+    p = argparse.ArgumentParser(prog="sizeup-station quarantine")
+    p.add_argument("--path", default="/var/lib/sizeup/state/outbox.sqlite")
+    p.add_argument("cmd", nargs="?", default="list", choices=("list", "drop"))
+    p.add_argument("what", nargs="?", default="")
+    a = p.parse_args(argv)
+    if not Path(a.path).is_file():
+        print(f"no outbox at {a.path}")
+        return 1
+    ob = Outbox(a.path)
+    try:
+        if a.cmd == "drop":
+            if a.what != "all" and not a.what.isdigit():
+                print("drop: an id from `sizeup-station quarantine`, or all")
+                return 2
+            n = ob.drop(None if a.what == "all" else int(a.what))
+            print(f"dropped {n}")
+            return 0 if n else 1
+        s = ob.summary(limit=200)
+        if not s["n"]:
+            print("nothing refused by the hub")
+        for r in s["rows"]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["first_at"]))
+            nxt = f", next try {time.strftime('%H:%M', time.localtime(r['next_at']))}" if r["next_at"] else ""
+            print(f"{r['id']:>6}  {r['kind']:<12} {r['state']:<6} {'critical' if r['critical'] else '        '}  since {when}, "
+                  f"refused {r['tries']}x{nxt}: {r['reason']}" + (f": {r['error'][:120]}" if r["error"] else ""))
+        return 0
+    finally:
+        ob.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

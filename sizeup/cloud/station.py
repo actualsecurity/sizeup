@@ -72,6 +72,7 @@ import numpy as np
 
 from sizeup import sourcekeys, tz
 from sizeup.cad import dispatcher
+from sizeup.cad.alarms import MAX_AGE_S as ALARM_MAX_AGE_S
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
 from sizeup.cloud.adapters import request_reset
@@ -458,7 +459,10 @@ class StationLink:
         it still goes; the critical ones are sent again on a slow schedule and raise a critical alert on the hub
         (health.py "rejected"). Anything else (5xx, network, a refused token) is retried as it is, with backoff."""
         for q in self.outbox.requeue_due(now):
-            self.log(f"hub link: sending a {q['kind']} the hub refused again (refused {q['tries']} time(s) so far)")
+            if q["superseded"]:
+                self.log(f"hub link: a {q['kind']} the hub refused is dropped: the feed has a newer report of it")
+            else:
+                self.log(f"hub link: sending a {q['kind']} the hub refused again (refused {q['tries']} time(s) so far)")
         iso = self._isolate
         rows = (self.outbox.batch(max_bytes=iso["bytes"], max_events=iso["n"], meta=True) if iso
                 else self.outbox.batch(meta=True))
@@ -486,9 +490,19 @@ class StationLink:
             if row["seq"] in bad:
                 self._quarantined(row, str(bad[row["seq"]].get("reason") or "apply_failed"),
                                   str(bad[row["seq"]].get("error") or ""), now)
-        self.outbox.released([x["qid"] for x in rows if x["qid"] and x["seq"] <= acked and x["seq"] not in bad])
+        t = time.time() if now is None else now
         for x in rows:
-            if x["qid"] and x["seq"] <= acked and x["seq"] not in bad:
+            if not (x["qid"] and x["seq"] <= acked and x["seq"] not in bad):
+                continue
+            end = x["data"].get("end") if x["type"] == "alarm" else None
+            if isinstance(end, (int, float)) and t - end > ALARM_MAX_AGE_S:
+                # the hub raises no alarm this old (sizeup/cad/alarms.py MAX_AGE_S): taken, never raised. Kept, its
+                # critical alert on: a person hears it, and drops it
+                why = f"alarm delivered late, not raised ({(t - end) / 60:.0f} min after it ended)"
+                self.outbox.late(x["qid"], why, now)
+                self.log(f"hub link: CRITICAL: {why}")
+            else:
+                self.outbox.released([x["qid"]])
                 self.log(f"hub link: the hub took the {x['type']} it had refused")
         self.outbox.ack(acked)
         self.sent += sum(1 for x in rows if x["seq"] <= acked and x["seq"] not in bad)
@@ -503,23 +517,11 @@ class StationLink:
 
     def _rejected(self, client: HubClient, rows: list[dict], e: HubError, now: float | None = None) -> float | None:
         """The hub refused this batch for good. Split it in halves (by size, too, for a 413) until the event it refuses
-        is alone, then quarantine that one; the rest goes in order. A hub that says which events (its answer's
-        "events": [{seq}]) has them quarantined at once. Returns 0 (go on now), or None: not the events' fault after all
-        (a hub that refuses even an empty batch), retried as it is with backoff."""
+        is alone, then quarantine that one; the rest goes in order. Returns 0 (go on now), or None: not the events' fault
+        after all (a hub that refuses even an empty batch), retried as it is with backoff."""
         doc = e.body if isinstance(e.body, dict) else {}
         reason = str(doc.get("reason") or ("too_large" if e.status == 413 else f"http_{e.status}"))[:40]
         error = str(doc.get("error") or e)[:300]
-        named = {x.get("seq") for x in (doc.get("events") if isinstance(doc.get("events"), list) else [])
-                 if isinstance(x, dict)}
-        hit = [row for row in rows if row["seq"] in named]
-        if hit:
-            if not self._probe(client):
-                return None                         # the hub refuses everything: hold every event, as for an outage
-            for row in hit:
-                self._quarantined(row, str(next(x for x in doc["events"] if isinstance(x, dict)
-                                                and x.get("seq") == row["seq"]).get("reason") or reason)[:40],
-                                  error, now)
-            return 0.0
         if len(rows) > 1:
             iso = self._isolate or {"hi": rows[-1]["seq"], "probed": False}
             size = sum(len(json.dumps(x["data"], default=str)) + len(x["audio"] or b"") for x in rows)
@@ -530,14 +532,14 @@ class StationLink:
                                  bytes=max(1, size // 2) if e.status == 413 else (iso.get("bytes") or 4 * 1024 * 1024))
             return 0.0
         row = rows[0]
+        if not self._probe(client):
+            return None                             # the hub refuses everything: hold every event, as for an outage
         if e.status == 413 and row["audio"]:
             # too large with its clip: it goes without it (the station keeps the clip in its own store)
             self.outbox.strip_audio(row["seq"])
             self.log(f"hub link: a {row['type']} too large for the hub ({len(row['audio']) // 1024} KB of audio): "
                      "sent without its clip")
             return 0.0
-        if e.status != 413 and not self._probe(client):
-            return None                             # the hub refuses everything: hold every event, as for an outage
         self._quarantined(row, reason, error, now)
         return 0.0
 
@@ -565,7 +567,10 @@ class StationLink:
         q = self.outbox.quarantine(row, reason, error, now)
         self._isolate = None                        # (found: whole batches again; another bad one is split out the same way)
         said = "" if row["type"] in ("source_event", "source_health", "source_seen") else f": {error[:160]}"
-        if q["critical"]:
+        if q["critical"] and q["state"] == "stuck":
+            self.log(f"hub link: CRITICAL: the hub refused a {row['type']} again ({reason}{said}); refused {q['tries']} "
+                     "time(s): kept on the station, not sent again (sizeup-station quarantine)")
+        elif q["critical"]:
             self.log(f"hub link: CRITICAL: the hub refused a {row['type']} ({reason}{said}); kept on the station, "
                      f"sent again in {int((q['next_at'] - (now or time.time())) // 60)} min (refused {q['tries']} time(s))")
         else:
