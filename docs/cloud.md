@@ -277,11 +277,11 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
     on the station for it, until it answers again. A **dead** worker (not there, refused, reset): the helper makes that
     clip; 3 in a row, the helper makes them for 5 min. Each change of state is logged once. `stop()` shuts the socket,
     so it returns at once.
-- **Held while whisper is behind on live traffic**: a clip of a live class (`URGENT`, `HIGH`, `LIVE`; never a context
-  talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) waiting `stt.BEHIND_S` (120 s). `PRE` and `FIRE`
-  are never held. `NORMAL` and `LOW` wait, bounded and with their priorities, and drain highest first once whisper has
-  caught up, or after 5 min of one hold (`stt_input.held`). It reads the whisper queue's own list
-  (`StationLink._whisper_behind`): a public `Transcriber.behind_live()` would be better, for the STT session.
+- **Held while whisper is behind on live traffic** (`Transcriber.behind_live()`): the oldest clip of a live class
+  (`URGENT`, `HIGH`, `LIVE`; never a context talkgroup's, kept up to 15 or 30 min by design, nor a re-run's or the
+  catch-up's) has waited more than `stt.BEHIND_S` (120 s). `PRE` and `FIRE` are never held. `NORMAL` and `LOW` wait,
+  bounded and with their priorities, and drain highest first once whisper has caught up, or after 5 min of one hold
+  (`stt_input.held`). Any error asking it: not held.
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
   before any clip. Its order is an index (`stt_inputs_order`): a batch picks its rows from the index and reads each
   FLAC on its own, so an event's `add()` (the emergency button's too) never waits on the lane.
