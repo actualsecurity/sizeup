@@ -201,11 +201,12 @@ def test_a_deleted_object_is_a_row_with_no_rev(rig):
 
 
 def test_the_cad_is_untouched_by_the_log(rig):
-    rig.incident()
-    tables = lambda: [r[0] for r in rig.store.db.execute("SELECT name FROM sqlite_master ORDER BY name")]
-    t0 = tables()
+    # (no dispatch: no async render)
+    rig.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
+    before, rev = tables_of(rig.store), rig.store.rev
     rig.settle()
-    assert tables() == t0 and not [t for t in t0 if "changelog" in t]
+    assert tables_of(rig.store) == before and rig.store.rev == rev          # every row of every table, as it was
+    assert not [t for t in before if "changelog" in t]
     assert {r[0] for r in sqlite3.connect(rig.path / "hub.sqlite").execute("SELECT name FROM sqlite_master")} >= {
         "mobile_changelog", "mobile_changelog_head", "mobile_changelog_meta"}
 
@@ -1155,7 +1156,7 @@ def test_every_start_of_the_log_is_a_new_epoch_and_an_old_cursor_is_a_409(tmp_pa
         assert status == 409 and body["error"]["code"] == "epoch_changed" and body["error"]["epoch"] == r.log.epoch
         # a new cursor starts at the head: nothing of before is served
         assert r.get("")[1]["cursor"] >= head
-        assert r.log.since(0, 100)[0:0] == [] and r.get("after=0")[0] == 410    # (old rows are never served)
+        assert r.get("after=0")[0] == 410    # (old rows are never served)
     finally:
         r.close()
 
@@ -1207,22 +1208,26 @@ def tables_of(store) -> dict:
 def test_the_log_only_reads_cad_sqlite_nothing_is_ever_written_to_it(tmp_path):
     r = Rig(tmp_path, live=True, batch_s=0.05)
     try:
-        r.feed.recorder.prepare()                                                  # the log's first run
+        # (the CAD's own writes first: the log is not running)
+        r.box.flags["stream"] = False
         for n in ("E63", "L31"):
             r.store.set_unit_status(uid(r.cad, n), "RS", "Lt. Ruiz")
         r.cad.create({"type": "STRU", "address": "5 Sample Way", "operator": "Lt. Ruiz"})
-        wait_for(lambda: r.log.head() >= 3)
-        wait_for(lambda: r.feed.recorder._seen_version == r.store.rev)
-        before = tables_of(r.store)
-        rev = r.store.rev
+        before, rev = tables_of(r.store), r.store.rev              # before the log is created, started or has flushed
+        assert not r.feed.recorder.ready and r.feed.recorder._thread is None
+        r.box.flags["stream"] = True
+        r.feed.recorder.prepare()                                  # the log's first run: tables, baseline
+        r.settle()                                                 # its first flush
+        r.store.q("SELECT 1")                                      # (a read)
         r.get("after=0")
         r.get("")
         status, body, _, _ = r.v1.respond("GET", "/api/v1/stream", "", {})
-        body.run(lambda raw: None, lambda: True)                                   # opens and ends at once
+        body.run(lambda raw: None, lambda: True)                   # opens and ends at once
         body.close()
-        r.feed.close()                                                              # the drain: the last batch, the end
-        assert tables_of(r.store) == before and r.store.rev == rev                  # no row of cad.sqlite written
-        assert not [k for k in before["meta"] if "mobile" in str(k)]
+        r.feed.close()                                             # the drain: the last batch, the end
+        names = {x[0] for x in sqlite3.connect(tmp_path / "hub.sqlite").execute("SELECT name FROM sqlite_master")}
+        assert "mobile_changelog" in names                         # (the log did run: its tables exist)
+        assert tables_of(r.store) == before and r.store.rev == rev     # no row of cad.sqlite written, under any key
         assert not [t for t in before if "changelog" in t]
     finally:
         r.store.shutdown()
@@ -1273,6 +1278,8 @@ def test_newest_wins_never_goes_past_the_global_cap(hub):
     third = Sse(hub.port, headers=dev("dev-1"))                               # over its own two: replaces its oldest
     assert third.status == 200 and hub.v1.limits.streams() == 3
     assert d1[0].until("close")[2]["reason"] == "superseded"
+    # eviction is per device: dev-2 is untouched
+    assert other.until("heartbeat")[0] == "heartbeat"
     for s in (*d1, other, third):
         s.close()
     wait_for(lambda: hub.v1.limits.streams() == 0)
@@ -1317,3 +1324,33 @@ def test_a_scan_never_reads_every_chronology_row_and_keeps_the_reads_rev(tmp_pat
 def rev_of_summary(i):
     from sizeup.api.v1.serialize import incident_summary
     return rev_of(incident_summary(i))
+
+
+def test_a_stream_slot_is_released_exactly_once_when_evict_and_the_streams_own_end_race(tmp_path):
+    """evict() (another request's thread) and the stream's own close() both reach close(): one release, never two."""
+    from sizeup.api.v1.stream import Body
+    barrier = threading.Barrier(2)
+    released = []
+
+    class Racy(Body):
+        """Both threads read `_closed` together, as the old check-then-set let them: if the check and the set are not
+        one step, both see False. (Under the fix the second waits on the lock, and the barrier times out.)"""
+        @property
+        def _closed(self):
+            seen = self._c                          # read first, then wait for the other thread to have read
+            try:
+                barrier.wait(0.5)
+            except threading.BrokenBarrierError:
+                pass
+            return seen
+
+        @_closed.setter
+        def _closed(self, v):
+            self._c = v
+    body = Racy(object(), lambda: released.append(1), lambda: False)
+    t = [threading.Thread(target=body.close), threading.Thread(target=body.evict)]
+    for x in t:
+        x.start()
+    for x in t:
+        x.join(10)
+    assert not any(x.is_alive() for x in t) and released == [1]

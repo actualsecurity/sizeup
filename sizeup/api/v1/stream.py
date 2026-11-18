@@ -27,6 +27,7 @@ timeout."""
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Callable
 
@@ -81,6 +82,7 @@ class Body:
     def __init__(self, plan: StreamPlan, on_close: Callable[[], None], stop: Callable[[], bool]):
         self.plan, self._on_close, self._stop = plan, on_close, stop
         self._closed = self._evicted = False
+        self._close_mu = threading.Lock()
         self._valid_at = time.monotonic()
 
     def evict(self) -> None:
@@ -90,9 +92,13 @@ class Body:
         self.close()
 
     def close(self) -> None:
-        if not self._closed:
+        """Once, whichever thread gets here first (evict() runs on another request's thread): the check and the set are
+        one step under a leaf lock, and _on_close (which takes the handler's lock and the limits') runs outside it."""
+        with self._close_mu:
+            if self._closed:
+                return
             self._closed = True
-            self._on_close()
+        self._on_close()
 
     def run(self, write: Callable[[bytes], None], stop: Callable[[], bool] = lambda: False) -> str:
         """Write until the client goes (write raises: left to the caller), `stop()` or ours says so. Returns why it

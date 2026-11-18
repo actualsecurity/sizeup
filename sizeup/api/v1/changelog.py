@@ -17,8 +17,8 @@ so a cursor from an earlier run answers 409 and the app resnapshots. That is wha
 check: after a crash failover Litestream may give back a hub.sqlite a second behind, with a lower `sqlite_sequence`,
 and the next process would hand out seqs a stream already sent; under a new epoch no old cursor can be mistaken for a
 new one. The cost: every hub restart or deploy makes connected apps resnapshot once. Rows of an earlier epoch stay
-until retention prunes them; a new epoch's first seq is above them (`start_seq`), so nothing of them is ever served
-again.
+until retention prunes them; a new epoch's first seq is above them (`start_seq`, the head when the log is first
+opened as leader), so nothing of them is ever served again.
 
 Writes: a CAD commit only pokes the Recorder (an Event.set; never a lock a request thread can hold). Its one thread
 wakes on a poke, waits BATCH_S so the commits of a busy minute become one transaction, and appends what changed
@@ -115,7 +115,8 @@ class ChangeLog:
         self._db: sqlite3.Connection | None = None
         self._closed = False
         self._epoch = secrets.token_hex(6)    # new at every start (see the module docstring)
-        self._start_seq = 0                   # the head when this run opened the log: its entries all come after it
+        # the head when this run first opened the log as leader: its entries all come after it
+        self._start_seq = 0
         self._pruned_at = 0.0
         self.commits = 0                      # transactions committed through this log (a test counts them)
 
