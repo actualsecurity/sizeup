@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/roles.schema.json",
+  "title": "Roles of one node",
+  "description": "Designed (docs/nodes.md 1 \"Roles\"), not implemented. The roles an admin gave one node, as an object {role name: that role's options}. A role is a permission and a duty at once: it opens the node's routes and is the only way work reaches it. A role that is absent is not held. A node ignores a role name it does not know, and an option it does not know. The hub assigns nothing by itself; a role whose needs the node's capabilities do not meet may still be set (it waits).",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "additionalProperties": {"type": "object", "description": "A role this schema does not know yet: an object of options."},
+  "properties": {
+    "radio-receive": {
+      "title": "radio-receive",
+      "description": "Needs a station token and at least one SDR. Many nodes may hold it.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "channels": {
+          "type": "array",
+          "description": "The node's channel set: each job it should run, with its coverage. Antenna groups stay on the node.",
+          "items": {
+            "title": "One job in the channel set",
+            "description": "A conventional channel, paging, or a P25 system (one job per node).",
+            "x-complete": true,
+            "type": "object",
+            "required": ["job", "coverage"],
+            "additionalProperties": true,
+            "properties": {
+              "job": {"type": "string", "minLength": 1, "description": "The job's name."},
+              "coverage": {
+                "enum": ["exclusive", "overlap", "failover"],
+                "description": "`exclusive` runs on this node only; `overlap` on every listed node, copies deduplicated on the hub; `failover` on the first healthy node of a ranked list."
+              }
+            }
+          }
+        }
+      }
+    },
+    "feed-adapter": {
+      "title": "feed-adapter",
+      "description": "Needs a station token and the adapter installed and configured. Exactly one node is active at a time, by a lease (lease.schema.json).",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 1, "description": "This node's place in the role's priority list, 1 first. One list for the whole cluster."}
+      }
+    },
+    "stt-light": {
+      "title": "stt-light",
+      "description": "Needs a station token and whisper up. A station's whisper as a pool worker, behind every gate it has today (own queue empty, a 90 s quiet spell, CPU under 85 %, the pool taking stations).",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "pool": {"type": "boolean", "default": false, "description": "The station's whisper is in the pool. Off on a new node."},
+        "classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "The pool classes it may take: never a pre-alert class.",
+          "items": {"enum": ["live", "rerun", "low", "catchup"], "description": "A pool class that is not a pre-alert class (sizeup/sttpool.py)."}
+        },
+        "max_s": {"type": "number", "exclusiveMinimum": 0, "description": "The longest clip it is offered, seconds of audio. An upper bound only: the station's own measured pace can lower it, never raise it."}
+      }
+    },
+    "stt-heavy": {
+      "title": "stt-heavy",
+      "description": "Needs a worker token and whisper reported. A GPU worker's whisper.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "The pool classes it may take.",
+          "items": {"enum": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"], "description": "A pool class (sizeup/sttpool.py CLASSES)."}
+        },
+        "fast": {"type": "boolean", "description": "It may take the pre-alert classes. This can only narrow the hub's measured speed gate, never bypass it."},
+        "max_s": {"type": "number", "exclusiveMinimum": 0, "description": "The longest clip it is offered, seconds of audio."}
+      }
+    },
+    "infer": {
+      "title": "infer",
+      "description": "Needs a worker token and a language model reported. Prompts go only to a node with a worker token and this role.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "llm_jobs": {"type": "boolean", "default": true, "description": "It takes language-model jobs."},
+        "models": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 80}, "description": "The models it may be asked for. Absent: any model the node serves."}
+      }
+    },
+    "adsb": {
+      "title": "adsb",
+      "description": "Needs a station token and a dongle for it. The ADS-B receiver; every node with the role runs, and the hub merges by aircraft address.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}
+      }
+    },
+    "ais": {
+      "title": "ais",
+      "description": "Needs a station token and a dongle for it. The AIS receiver; every node with the role runs, and the hub merges by vessel id.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}
+      }
+    },
+    "training": {
+      "title": "training",
+      "description": "Needs a worker token and a GPU. One node at a time. Named in the design, its options are not designed yet.",
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "error": "no station token (Authorization: Bearer)",
+  "reason": "no_token"
+}

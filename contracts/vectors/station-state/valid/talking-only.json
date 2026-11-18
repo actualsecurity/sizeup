@@ -1,0 +1,99 @@
+{
+  "at": 1794990004.0,
+  "talking": [
+    {
+      "key": "p25:countynet:grant:4101:990001",
+      "system": "p25",
+      "channel": "Fire Dispatch 1",
+      "tg": 4101,
+      "radio_id": "990001",
+      "alias": "",
+      "rig": "",
+      "label": "",
+      "since": 1794990001.25,
+      "talk_since": 1794990001.25,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "main": true
+    },
+    {
+      "key": "fm:Fireground 1:1794990002.50:990002",
+      "system": "fm",
+      "channel": "Fireground 1",
+      "tg": null,
+      "radio_id": "990002",
+      "alias": "",
+      "rig": "E1",
+      "label": "Portable 2",
+      "since": 1794990002.5,
+      "talk_since": 1794990002.75,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "main": true,
+      "id_on_release": false
+    },
+    {
+      "key": "fm:Fireground 1:1794990002.50:",
+      "system": "fm",
+      "channel": "Fireground 1",
+      "tg": null,
+      "radio_id": "",
+      "alias": "",
+      "rig": "",
+      "label": "",
+      "since": 1794990002.5,
+      "talk_since": 1794990002.75,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "main": true,
+      "id_on_release": true
+    },
+    {
+      "key": "p25:countynet:grant:4101:990003",
+      "system": "p25",
+      "channel": "Fire Dispatch 1",
+      "tg": 4101,
+      "radio_id": "990003",
+      "alias": "Northfield Ctrl 2",
+      "rig": "",
+      "label": "",
+      "since": 1794990001.25,
+      "talk_since": 1794990001.25,
+      "ended": true,
+      "until": 1794990009.0,
+      "dispatcher": true,
+      "main": true
+    }
+  ],
+  "paging": [
+    {
+      "key": "page:Paging 1:1794990003.00",
+      "channel": "Paging 1",
+      "started": 1794990003.0,
+      "pairs": [
+        {
+          "a": 716.1,
+          "b": 600.9,
+          "names": [
+            "Northfield · Fire"
+          ],
+          "ours": true
+        },
+        {
+          "a": 1082.1,
+          "b": 1232.0,
+          "names": [],
+          "ours": false
+        }
+      ],
+      "phase": "tones",
+      "ours": true,
+      "ended": false,
+      "until": null,
+      "page_id": ""
+    }
+  ]
+}

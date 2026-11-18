@@ -1,0 +1,8 @@
+{
+  "stt-light": {
+    "pool": true,
+    "classes": [
+      "urgent"
+    ]
+  }
+}

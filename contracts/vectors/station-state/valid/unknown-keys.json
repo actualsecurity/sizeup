@@ -1,0 +1,330 @@
+{
+  "at": 1794990000.0,
+  "talking": [
+    {
+      "key": "p25:countynet:grant:4101:990001",
+      "system": "p25",
+      "channel": "Fire Dispatch 1",
+      "tg": 4101,
+      "radio_id": "990001",
+      "alias": "",
+      "rig": "",
+      "label": "",
+      "since": 1794990001.25,
+      "talk_since": 1794990001.25,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "main": true,
+      "from_the_future": 1
+    }
+  ],
+  "paging": [
+    {
+      "key": "page:Paging 1:1794990003.00",
+      "channel": "Paging 1",
+      "started": 1794990003.0,
+      "pairs": [
+        {
+          "a": 716.1,
+          "b": 600.9,
+          "names": [
+            "Northfield · Fire"
+          ],
+          "ours": true
+        },
+        {
+          "a": 1082.1,
+          "b": 1232.0,
+          "names": [],
+          "ours": false
+        }
+      ],
+      "phase": "tones",
+      "ours": true,
+      "ended": false,
+      "until": null,
+      "page_id": "",
+      "from_the_future": {
+        "x": 1
+      }
+    }
+  ],
+  "status": {
+    "id": "st-north",
+    "config_id": "st-north",
+    "name": "North firehouse",
+    "radios": [
+      {
+        "label": "Paging 1",
+        "mhz": 460.1,
+        "state": "ok",
+        "detail": "",
+        "restarts": 0,
+        "open": false,
+        "last_heard": 1794986400.0,
+        "quieting_db": null,
+        "open_s": null,
+        "stuck": false,
+        "open_db": 10.0,
+        "close_db": 6.0,
+        "hiss_db": -31.2,
+        "floor_db": -52.0,
+        "min_open_s": 0.3,
+        "short_per_min": 0.0,
+        "squelch_default": {
+          "open_db": 10.0,
+          "close_db": 6.0,
+          "min_open_s": 0.3
+        },
+        "channel_kind": "paging"
+      },
+      {
+        "label": "Fireground 1",
+        "mhz": 453.1,
+        "state": "ok",
+        "detail": "",
+        "restarts": 0,
+        "open": true,
+        "last_heard": 1794989960.0,
+        "quieting_db": 17.5,
+        "open_s": 2.1,
+        "stuck": false,
+        "open_db": 10.0,
+        "close_db": 6.0,
+        "hiss_db": -31.2,
+        "floor_db": -52.0,
+        "min_open_s": 0.3,
+        "short_per_min": 0.0,
+        "squelch_default": {
+          "open_db": 10.0,
+          "close_db": 6.0,
+          "min_open_s": 0.3
+        },
+        "channel_kind": "traffic",
+        "keyups": {
+          "n": 0,
+          "no_speech": 0,
+          "tones": {},
+          "bare_s": [],
+          "bare_q": [],
+          "recent": []
+        }
+      },
+      {
+        "label": "County P25",
+        "mhz": null,
+        "state": "ok",
+        "detail": "control channel 98 %",
+        "open": false,
+        "quieting_db": null,
+        "restarts": 0,
+        "last_heard": 1794989988.0
+      },
+      {
+        "label": "STT",
+        "mhz": null,
+        "state": "ok",
+        "detail": "",
+        "open": false,
+        "quieting_db": null,
+        "restarts": 0,
+        "last_heard": null
+      },
+      {
+        "label": "Voice",
+        "mhz": null,
+        "state": "off",
+        "detail": "no voice on this machine",
+        "open": false,
+        "quieting_db": null,
+        "restarts": 0,
+        "last_heard": null
+      }
+    ],
+    "sdr": null,
+    "rerun": {
+      "total": 0,
+      "done": 0,
+      "changed": 0,
+      "failed": 0,
+      "pending": 0
+    },
+    "channels": {
+      "prefs": {},
+      "aws": {
+        "ok": true,
+        "why": "",
+        "reserve": []
+      },
+      "tones": 0,
+      "squelch": {},
+      "squelch_ok": true,
+      "deny_ok": true,
+      "sig": "0b022a41e225"
+    },
+    "p25_systems": [],
+    "reception": null,
+    "stt_terms": {
+      "v": "",
+      "sets": {}
+    },
+    "outbox": {
+      "pending": 2,
+      "oldest": 1794989998.5,
+      "dropped_audio": 0,
+      "from_the_future": "x"
+    },
+    "stt_input": {
+      "queued": 0,
+      "waiting": 1,
+      "bytes": 48213,
+      "made": 412,
+      "sent": 411,
+      "dropped": {
+        "queue": 0,
+        "too_big": 0,
+        "failed": 0,
+        "outbox": 0,
+        "refused": 0
+      },
+      "hub_takes": true,
+      "dropped_pre": 0,
+      "dropped_fire": 0,
+      "encoder": "process",
+      "held": false,
+      "worker": {
+        "where": "process",
+        "state": "ok",
+        "detail": "",
+        "unhealthy": false,
+        "in_flight": false
+      }
+    },
+    "pool_worker": {
+      "claimed": 0,
+      "done": 0,
+      "released": 0,
+      "preempted": 0,
+      "lost": 0,
+      "error": "",
+      "state": "off",
+      "why": "this station's whisper isn't in the pool"
+    },
+    "stt_alert_rev": 3,
+    "version": {
+      "build": "3f9c2ab71d04e5a6b7c8d9e0f1a2b3c4d5e6f708",
+      "hub": "3f9c2ab71d04e5a6b7c8d9e0f1a2b3c4d5e6f708",
+      "update": {
+        "state": "idle",
+        "since": 1794982800.0,
+        "failed": {}
+      },
+      "adapter": {
+        "state": "running",
+        "repo": "example-adapter",
+        "commit": "0a1b2c3d4e5f",
+        "text": "example-adapter 0a1b2c3 installed · Example feed ok",
+        "health": [
+          {
+            "source": "example",
+            "label": "Example feed",
+            "state": "ok",
+            "reason": ""
+          }
+        ]
+      },
+      "state": "ok",
+      "text": "up to date (3f9c2ab)"
+    },
+    "logship": {
+      "state": "ok",
+      "reason": "",
+      "level": "info",
+      "on": true,
+      "adapter": false,
+      "spool_batches": 0,
+      "spool_bytes": 0,
+      "spool_max": 52428800,
+      "sent_lines": 9120,
+      "sent_batches": 31,
+      "sent_bytes": 801233,
+      "last_ok": 1794989980.0,
+      "error": ""
+    },
+    "metrics": {
+      "pending": 4,
+      "dropped": 0,
+      "sent": 1830,
+      "rejected": 0,
+      "last_ok": 1794989965.0,
+      "error": ""
+    },
+    "health": {
+      "started": 1794903600.0,
+      "boot": 1794385200.0,
+      "host": "st-north",
+      "cpu_pct": 38.0,
+      "load1": 1.2,
+      "cpus": 4,
+      "mem_pct": 44.0,
+      "mem_total": 17179869184,
+      "temp_c": 51.0,
+      "disk_path": "/var/lib/sizeup",
+      "disk_pct": 12.5,
+      "disk_free": 236223201280,
+      "disk_total": 269490393088,
+      "whisper": {
+        "state": "ok",
+        "detail": ""
+      },
+      "jobs": {
+        "Paging 1": {
+          "state": "ok",
+          "restarts": 0,
+          "detail": "",
+          "expected": true
+        },
+        "Fireground 1": {
+          "state": "ok",
+          "restarts": 0,
+          "detail": "",
+          "expected": true
+        }
+      },
+      "usb": {
+        "devices": [],
+        "duplicates": []
+      },
+      "heard": {}
+    },
+    "talkgroups": [
+      {
+        "tg": 4101,
+        "name": "Fire Dispatch 1",
+        "group": "Fire",
+        "encrypted": false,
+        "record": true,
+        "main": true,
+        "count": 12,
+        "last": 1794989988.0,
+        "dropped": 0,
+        "system": "countynet",
+        "source": "p25:countynet:4101",
+        "key": "tg:4101",
+        "ours": true,
+        "service": "fire",
+        "service_auto": "fire",
+        "department": "",
+        "tier": null
+      }
+    ],
+    "from_the_future": [
+      1,
+      2
+    ]
+  },
+  "from_the_future": {
+    "x": 1
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capabilities.schema.json",
+  "title": "Node capabilities",
+  "description": "Designed (docs/nodes.md 1 \"Capabilities\"), not implemented. What a node reports about its own hardware and programs, under the key `capabilities`. They advise the admin and the scheduler checks them at run time; they are never trusted for security, and a speed a node reports is never used (the hub measures speed itself). A station reports the station keys, a worker the worker keys, a node that is both reports both; every key is optional and a reader ignores one it does not know. Not to be confused with `caps`, the hub's list of capability strings in its state answer.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "cpu": {
+      "title": "CPU",
+      "description": "From stations and workers.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "cores": {"type": "integer", "minimum": 1, "description": "Logical CPU cores, a count."},
+        "load1": {"type": "number", "minimum": 0, "description": "The 1-minute load average (runnable tasks, not a percentage)."},
+        "pct": {"type": "number", "minimum": 0, "maximum": 100, "description": "CPU in use now, percent of all cores."}
+      }
+    },
+    "mem": {
+      "title": "Memory",
+      "description": "From stations and workers.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "total_gb": {"type": "number", "minimum": 0, "description": "Installed memory, GiB."},
+        "free_gb": {"type": "number", "minimum": 0, "description": "Memory available now, GiB."}
+      }
+    },
+    "disk": {
+      "title": "Disk",
+      "description": "From stations and workers.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "clips_free_gb": {"type": "number", "minimum": 0, "description": "Free space on the volume that holds the clips, GiB."}
+      }
+    },
+    "gpu": {
+      "title": "GPU",
+      "description": "From workers: the graphics card; null for none.",
+      "x-complete": true,
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string", "maxLength": 120, "description": "The card's name, as its driver gives it."},
+        "vram_gb": {"type": "number", "minimum": 0, "description": "Its memory, GiB."},
+        "vram_free_gb": {"type": "number", "minimum": 0, "description": "Its memory free now, GiB."}
+      }
+    },
+    "sdrs": {
+      "type": "array",
+      "description": "From stations: one row per RTL-SDR dongle (today's App.sdr rows).",
+      "items": {
+        "title": "One dongle",
+        "description": "One RTL-SDR dongle on the node.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["serial", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "serial": {"type": "string", "maxLength": 64, "description": "The dongle's serial as its EEPROM gives it."},
+          "tuner": {"type": "string", "maxLength": 64, "description": "The tuner chip or product name; \"\" when not read."},
+          "state": {"enum": ["ok", "out", "held", "off"], "description": "`ok` running its job; `out` opens but streams nothing; `held` by another program; `off` no job."},
+          "job": {"type": "string", "description": "The job it is set to (a channel's label or a P25 system's job); \"\" for none."},
+          "group": {"type": "string", "description": "The antenna group it belongs to; \"\" for none."},
+          "held_by_other_app": {"type": "boolean", "description": "Another application on the machine holds this dongle through the shared claim files."}
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "description": "From stations: the antenna groups (dongles locked to a set of jobs), as the station reports them today in `status.sdr.groups`.",
+      "items": {"type": "object", "description": "One antenna group."}
+    },
+    "channels": {
+      "type": "array",
+      "description": "From stations: what each job in the node's channel set is doing now. The hub sends the wish; this is the node's answer, and failover is decided from it.",
+      "items": {
+        "title": "One channel's running state",
+        "description": "One job (a conventional channel, a P25 system, paging) on this node.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["job", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "job": {"type": "string", "minLength": 1, "description": "The job's name, as in the role's channel set."},
+          "state": {
+            "enum": ["running", "waiting", "out", "held", "shed", "not_in_set", "local"],
+            "description": "`running`; `waiting` no dongle for it; `out` a dongle that streams nothing or decodes nothing; `held` by another program; `shed` to a higher job of its antenna group; `not_in_set` runs here but is not in the node's set; `local` a person's override on the node. Anything but `running` counts as not covered."
+          }
+        }
+      }
+    },
+    "whisper": {
+      "title": "Whisper",
+      "description": "From stations and workers: the local speech-to-text model.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "model": {"type": "string", "maxLength": 80, "description": "The model's name."},
+        "up": {"type": "boolean", "description": "Its server answers."},
+        "threads": {"type": "integer", "minimum": 1, "description": "CPU threads it decodes with, a count."},
+        "behind_live": {"type": "boolean", "description": "Stations only: its queue is behind on live traffic now."}
+      }
+    },
+    "llm": {
+      "description": "From workers: the language model it serves; \"\" while it serves none (stopped, for example while the machine is used for a game).",
+      "oneOf": [
+        {"const": ""},
+        {
+          "title": "Language model",
+          "description": "The model served now.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["model"],
+          "additionalProperties": true,
+          "properties": {
+            "model": {"type": "string", "minLength": 1, "maxLength": 80, "description": "The model's name."},
+            "version": {"type": "string", "maxLength": 80, "description": "The model server's version."}
+          }
+        }
+      ]
+    },
+    "adapter": {
+      "title": "Incident-source adapter",
+      "description": "From stations: whether the private incident-source adapter could run here. Never a credential and never a value read from a source.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "installed": {"type": "array", "items": {"type": "string", "maxLength": 120}, "description": "The ids of the sources the installed adapter provides; [] when none is installed."},
+        "configured": {"type": "boolean", "description": "Its credentials are in place on this node."}
+      }
+    },
+    "state": {
+      "enum": ["online", "gaming", "paused"],
+      "description": "From workers: `online`, `gaming` (the machine is in use: no jobs) or `paused` (today's sttpool.STATES)."
+    },
+    "net": {
+      "title": "Network",
+      "description": "From stations and workers: the link to the hub as the node measures it.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "hub_rtt_ms": {"type": "number", "minimum": 0, "description": "The round trip of a state post, milliseconds."},
+        "up_kbps": {"type": "number", "minimum": 0, "description": "The upload rate measured on the outbox or the speech-to-text inputs, kilobits per second."}
+      }
+    },
+    "build": {
+      "type": "string",
+      "maxLength": 40,
+      "description": "The git sha the node runs; \"\" when unknown. A station follows the hub's build; a worker reports its own."
+    }
+  }
+}

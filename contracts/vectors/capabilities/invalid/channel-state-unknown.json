@@ -1,0 +1,92 @@
+{
+  "cpu": {
+    "cores": 4,
+    "load1": 1.2,
+    "pct": 38
+  },
+  "mem": {
+    "total_gb": 16,
+    "free_gb": 9
+  },
+  "disk": {
+    "clips_free_gb": 220
+  },
+  "sdrs": [
+    {
+      "serial": "00000101",
+      "tuner": "R820T",
+      "state": "ok",
+      "job": "Paging 1",
+      "group": "roof",
+      "held_by_other_app": false
+    },
+    {
+      "serial": "00000102",
+      "tuner": "R820T",
+      "state": "ok",
+      "job": "Fireground 1",
+      "group": "roof",
+      "held_by_other_app": false
+    },
+    {
+      "serial": "00000103",
+      "tuner": "R820T",
+      "state": "out",
+      "job": "countynet",
+      "group": "",
+      "held_by_other_app": false
+    },
+    {
+      "serial": "00000104",
+      "tuner": "R820T",
+      "state": "held",
+      "job": "",
+      "group": "",
+      "held_by_other_app": true
+    },
+    {
+      "serial": "00000105",
+      "tuner": "",
+      "state": "off",
+      "job": "",
+      "group": "",
+      "held_by_other_app": false
+    }
+  ],
+  "groups": [
+    {
+      "name": "roof",
+      "sdrs": [
+        "00000101",
+        "00000102"
+      ],
+      "jobs": [
+        "Paging 1",
+        "Fireground 1"
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "job": "Paging 1",
+      "state": "ok"
+    }
+  ],
+  "whisper": {
+    "model": "small.en",
+    "up": true,
+    "threads": 4,
+    "behind_live": false
+  },
+  "adapter": {
+    "installed": [
+      "example"
+    ],
+    "configured": true
+  },
+  "net": {
+    "hub_rtt_ms": 38,
+    "up_kbps": 4200
+  },
+  "build": "3f9c2ab71d04e5a6b7c8d9e0f1a2b3c4d5e6f708"
+}

@@ -1,0 +1,4 @@
+{
+  "error": "multi-station isn't enabled yet: this hub takes one station: it takes st-north, not st-south",
+  "reason": "multi_station_off"
+}

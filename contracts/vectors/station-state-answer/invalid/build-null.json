@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "build": null,
+  "caps": [
+    "p25_systems",
+    "stt_input",
+    "stt_pool"
+  ],
+  "pool": {
+    "on": false,
+    "worker": false,
+    "ready": 0,
+    "max_s": 0.0,
+    "gpu_idle": false,
+    "gpu_idle_n": 0
+  },
+  "services": {},
+  "station": "st-north"
+}
