@@ -17,7 +17,7 @@ import sizeup.app as appmod
 import sizeup.radio.claims as claims
 from sizeup.radio import fm, usbreset
 from sizeup.radio.fm import Channel, NfmReceiver
-from tests.test_antenna_groups import DONGLES, GROUPS, P25, grouped, on, rig, uhf4  # noqa: F401 - rig: the fixture
+from tests.test_antenna_groups import DONGLES, GROUPS, P25, grouped, on, park, rig, uhf4  # noqa: F401 - rig: the fixture
 
 
 @pytest.fixture
@@ -209,7 +209,7 @@ def test_a_parked_job_is_never_started_by_it(st):
     from tests.test_antenna_groups import mapped
     mapped(app)
     assert app.set_mode("Off", "spare-1") is None
-    assert app.set_antenna_groups(uhf4(["FG2"])) is None
+    assert park(app, uhf4(["FG2"])) is None
     app.set_by.pop("spare-1")                                               # a spare
     out(app, "South 2")
     app._sdr_arrivals()
