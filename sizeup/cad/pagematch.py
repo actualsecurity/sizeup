@@ -10,7 +10,14 @@ anything weaker is only a button for a person.
                   - unique: it is the only such incident (two open county calls in the window: a person picks)
                   - no page is on it yet
                   - the street exactly the feed's (exact_street: the same name, directions before and after, and the
-                    same suffix, said on both); a street the page misheard ("snapped") is weak at most
+                    same suffix, said on both); a street the page misheard ("snapped") is weak at most, but for one
+                    letter off (below)
+                  - one letter off (one_letter): the page's street one edit from the feed's (a letter wrong, in, out,
+                    or two swapped: one_edit; names of SHORT letters or more), the same directions and suffix said, the
+                    feed's street on the map in the call's towns and no other street there as close to the heard name
+                    (one edit, or within SNAP_MARGIN of the feed's similarity: a street of ours one letter from
+                    another is never guessed at), the house number exactly the feed's (never doubled, misread or
+                    near), the same family of call (both known): then as an exact street
                   - the feed's location has a house number
                   - the feed is fresh: its last report "ok" and recent (the page's own event may simply be late)
                   - the page within STRONG_S (sources.SAME_CALL_S) of the feed's dispatch
@@ -21,11 +28,13 @@ anything weaker is only a button for a person.
                     address (a chain's two stores) never is, and one that is only town names, department or agency
                     words or the street's own words ("PORT CHESTER", "SAMPLE POST" on Sample Post Rd) is no name. A
                     cross street, the family of call or being the only open call are supporting evidence only (shown),
-                    never enough
+                    never enough. A cross street the page says that the map doesn't know in the call's towns (a
+                    garbled one) is no evidence either way (with no street list there, compared as said)
     against     on the street as typed, any house number but the same or doubled (one digit off, "418" or "413" for
                 412, is the house next door); on a misheard street another number ("near" stays neutral there, a digit
-                in or out is for it); another of the department's places on that street named, or the feed's own name
-                when the list has it elsewhere too and the page says no number of ours; cross streets with none in
+                in or out is for it); another of the department's places on that street (a misheard one: the feed's)
+                named, or the feed's own name when the list has it elsewhere too and the page says no number of ours;
+                cross streets with none in
                 common; types of no common family; apparatus on both sides, none in common (one building, two calls);
                 another town the page says the call is in or goes to ("in / to <town>": a town named as a landmark,
                 "by the Sample border", is no evidence); a mutual-aid page ("mutual aid", "to the City of ...")
@@ -100,6 +109,21 @@ def number_fit(heard: str, typed: str, halved: str = "") -> str:
     return "other"
 
 
+def one_edit(a: str, b: str) -> bool:
+    """Two street names (lower case) one edit apart: a letter wrong, one in or out, or two side by side swapped
+    ("samplefird" / "sampleford", "sampel" / "sample"); never the same, never a name under fuzzy.SHORT letters."""
+    from sizeup.cad.fuzzy import SHORT
+    a, b = re.sub(r"[^a-z0-9]", "", str(a or "").lower()), re.sub(r"[^a-z0-9]", "", str(b or "").lower())
+    if a == b or min(len(a), len(b)) < SHORT or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and a[diff[0]] == b[diff[1]]
+                                  and a[diff[1]] == b[diff[0]])
+    long, short = (a, b) if len(a) > len(b) else (b, a)
+    return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
+
+
 def name_words(name: str) -> list[str]:
     """A place's name (or a page's text) as compared: the place search's words (commonplaces.name_key), no filler."""
     from sizeup.cad.commonplaces import name_key
@@ -125,6 +149,7 @@ class Evidence:
     """One feed incident against the page: for (what joins it), against (what says another call), and the verdict."""
     inc: dict
     street: str = ""                                  # "" | "same" (exact_street) | "snapped" (misheard: the map's)
+    one_letter: bool = False                          # snapped: one letter off the feed's, no other street that close
     number: str = ""                                  # number_fit's
     feed_numbered: bool = False                       # the feed's location has a house number
     place: str = ""                                   # the named place said on the page (for)
@@ -169,9 +194,16 @@ class Evidence:
             out.append("type family")
         return out
 
+    def _street_ok(self) -> bool:
+        """The street enough for a join: the feed's exactly, or one letter off it with the number exact and the same
+        family of call."""
+        return self.street == "same" or (self.street == "snapped" and self.one_letter and self.number == "exact"
+                                         and self.family == "same")
+
     def kinds(self) -> list[str]:
         """The evidence's kinds, for the log (never a location or a name)."""
-        return ["street", *(k for k, on in (("place", self.place), ("number", self._number_for()),
+        street = "street one letter" if self.street == "snapped" and self.one_letter else "street"
+        return [street, *(k for k, on in (("place", self.place), ("number", self._number_for()),
                                              ("cross", self.cross == "match"), ("type", self.family == "same")) if on)]
 
     def cons(self) -> list[str]:
@@ -205,18 +237,25 @@ def decide(evs: list[Evidence]) -> Evidence | None:
         if (not e.street or e.town == "differ" or e.mutual == "differ" or e._number_against()
                 or len(cons) > 1):
             e.decision = "none"
-        elif (unique and not e.taken and e.street == "same" and e.feed_numbered and e.fresh and timely and not cons
+        elif (unique and not e.taken and e._street_ok() and e.feed_numbered and e.fresh and timely and not cons
               and e._the_place()):
             e.decision = "strong"
         else:
             e.decision = "weak"
-        street = "street" + (" (as the map spells it)" if e.street == "snapped" else "")
+        street = "street" + (" (one letter misheard)" if e.street == "snapped" and e.one_letter else
+                             " (as the map spells it)" if e.street == "snapped" else "")
+        misheard = ([] if e.street == "same" else
+                    ["the street misheard"] if not e.one_letter else
+                    [x for x, on in (("the street misheard, the house number not the county's exactly",
+                                      e.number != "exact"),
+                                     ("the street misheard, the type family not known the same", e.family != "same"))
+                     if on])
         if e.decision == "strong":
             e.why = [street, "the only open county call", *pros]
         elif e.decision == "weak":
             e.why = [street, *pros] + [f"not joined: {x}" for x in (
                 *([] if unique else ["another open county call"]), *(["a page is on it"] if e.taken else []),
-                *([] if e.street == "same" else ["the street misheard"]),
+                *misheard,
                 *([] if e.feed_numbered else ["no house number from the county"]),
                 *([] if e.fresh else ["the county feed not fresh"]),
                 *([] if timely else [f"{round(abs(e.lag_s) / 60)} min from the county's dispatch"]),

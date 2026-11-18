@@ -5,6 +5,9 @@
   -> departments ["Port Chester FD"], type "Fire alarm" (category fire), location text
      "209 West Chester Avenue", cross street "Pearl Street", time out "14:32"
 
+The cross streets are the next two streets after the address; a street said with the address's own house number in
+front ("47 Sample Avenue ... 47 Model Avenue": the page read again, misheard) is never one.
+
 The incident vocabulary is a first guess at 60 Control phrasing; it is meant to be tuned on
 real captured pages (docs/PLAN.md). Unknown types are kept as "Unknown" with the raw text:
 the display never invents a type.
@@ -280,7 +283,10 @@ def parse(text: str, known=None) -> Dispatch:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
         after = masked[a.end():]
         crosses = []
+        again = re.compile(rf"\b{re.escape(a.group(1))}\s*[,.]?\s*$")
         for sm in STREET.finditer(after[:160]):
+            if again.search(after[:sm.start()]):
+                continue                                   # the address read again, however misheard: never a cross
             name = _road(sm.group(1), tw)
             if name and name not in crosses and name != _clean_street(a.group(2)):
                 crosses.append(name)

@@ -56,7 +56,8 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                a page that joined (on_page_swept)
     scored     (sizeup/cad/pagematch.py) a page none of the above joins is scored against the open feed incidents
                dispatched up to pagematch.WINDOW_S before it. It joins only the one such incident, on exactly its
-               street, with a house number, from a fresh feed, within SAME_CALL_S, nothing against it, and the place
+               street (or one letter off it, the map holding no other street that close, the number exact and the
+               same family of call: one_letter_street), with a house number, from a fresh feed, within SAME_CALL_S, nothing against it, and the place
                itself on the page: its name (the feed's "@NAME", the common place at its address, #575) or its house
                number (the same, or said twice). A cross street, the family of call or being the only call never
                suffice. "Page hh:mm matched by: ..." on its timeline (page, rematch_page, a card swept when the feed
@@ -144,7 +145,7 @@ from statistics import median
 from typing import Callable
 
 from sizeup.cad import pagematch
-from sizeup.cad.fuzzy import STREET_SIM, misread, name_sim, snap
+from sizeup.cad.fuzzy import SNAP_MARGIN, STREET_SIM, fold, misread, name_sim, snap
 from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.dispatch import split_joined
 from sizeup.fence import FencedWrite
@@ -1153,6 +1154,36 @@ def heard_place(heard: str, typed: str, towns=()) -> str:
         return "other"
     sure = how == "snap" and kh[2] == kt[2] and kh[5] == kt[5]
     return "num" if sure else "weak"
+
+
+def one_letter_street(heard: tuple, typed: tuple, towns) -> bool:
+    """A page's street (place_key) one letter off a feed's (pagematch.one_edit), sure enough to join on (pagematch
+    one_letter): the same directions before and after and the same suffix, said on both; the feed's street on the map
+    in those towns; and no other street there (any suffix) as close to the heard name: one edit from it or the same
+    folded, or within SNAP_MARGIN of the feed's street's similarity (fuzzy.name_sim). False with no street list there:
+    nobody can tell it isn't another street."""
+    if heard is None or typed is None or heard[0] != "addr" or typed[0] != "addr":
+        return False
+    (_, _, hp, hs, hn, hq), (_, _, tp, ts, tn, tq) = heard, typed
+    if not (hs and hs == ts and hp == tp and hq == tq):
+        return False
+    h, t = " ".join(sorted(hn)), " ".join(sorted(tn))
+    if not pagematch.one_edit(h, t):
+        return False
+    known = [(n, st) for town in dict.fromkeys(str(x).lower() for x in towns or () if x) for n, st, _ in STREETS.get(town, ())]
+    if not any(st[2] == tn and _same_street(st, typed[2:]) for _, st in known):
+        return False                                       # the feed's street not on the map there: unsure
+    near = name_sim(h, t)
+    return not any(st[2] != tn and (n == h or pagematch.one_edit(n, h) or fold(n) == fold(h)
+                                    or name_sim(n, h) >= near - SNAP_MARGIN) for n, st in known)
+
+
+def known_street_name(name: frozenset, towns) -> bool | None:
+    """A street name (_street's name words) is a street the map has in those towns; None with no street list there."""
+    towns = [t for t in dict.fromkeys(str(x).lower() for x in towns or () if x) if t in STREETS]
+    if not towns:
+        return None
+    return any(st[2] == name for t in towns for _, st, _ in STREETS[t])
 
 
 def _towns_agree(a: str, b: str) -> bool:
@@ -2504,14 +2535,15 @@ class Sources:
             return e
         mine = [place_key(x) for x in theirs if _towns_agree(location, x)]
         on = [kt for kt in mine if pagematch.exact_street(kp[2:], kt[2:])]
+        where_t = tuple(dict.fromkeys(t for t in (_town(location), *towns, *(_town(x) for x in theirs)) if t))
         if on:
             e.street = "same"
         else:
-            where_t = tuple(dict.fromkeys(t for t in (_town(location), *towns, *(_town(x) for x in theirs)) if t))
+            one = [kt for kt in mine if one_letter_street(kp, kt, where_t)]   # one letter off, nothing else as close
             how, st = snap_street(location, where_t)
-            on = [kt for kt in mine if how == "snap" and pagematch.exact_street(st, kt[2:])]
+            on = one or [kt for kt in mine if how == "snap" and pagematch.exact_street(st, kt[2:])]
             if on:
-                e.street = "snapped"
+                e.street, e.one_letter = "snapped", bool(one)
         if not e.street:
             return e
         e.feed_numbered = any(kt[1] for kt in on)
@@ -2521,7 +2553,8 @@ class Sources:
         e.number = next((x for x in ("exact", "doubled", "misread", "near", "other") if x in fits), "")
         # the named place: the feed's own ("@NAME"), the department's common place at its address (and its aliases)
         words = pagematch.name_words(text)
-        ours, other, ambiguous, near = self._place_names(inc, raw, d, theirs, kp, {*where, *named, *said})
+        street = kp if e.street == "same" else (*kp[:2], *on[0][2:])   # misheard: the places on the feed's street
+        ours, other, ambiguous, near = self._place_names(inc, raw, d, theirs, street, {*where, *named, *said})
         e.place = next((n for n in ours if pagematch.says_name(words, n)), "")
         if not e.place:
             e.other_place = next((n for n in other if pagematch.says_name(words, n)), "")
@@ -2529,6 +2562,7 @@ class Sources:
             e.elsewhere = next((n for n in ambiguous if pagematch.says_name(words, n)), "")
             e.elsewhere_near = bool(e.elsewhere) and any(pagematch.says_name(words, n) for n in near)
         mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
+        mine_x = {x for x in mine_x if known_street_name(x, where_t) is not False}   # one not on the map: garbled
         if mine_x:                                           # the feed's only when the page says some
             feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
             if feed_x:
