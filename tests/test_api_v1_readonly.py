@@ -18,10 +18,10 @@ from sizeup.api.v1.switches import Switches
 from tests.test_api_v1_reads import link_radio, seed
 from tests.test_settings import post
 
-# The ONLY non-GET routes /api/v1 may have, by (method, path): the app's own device bookkeeping (sign-in sessions and push
-# registration, in hub.sqlite; never the CAD). Empty on purpose: the pull requests that build them add their routes here,
-# each with the reason, and the owner decides the boundary. A route that changes a unit, an acknowledgement, a note, a
-# dispatch or an incident is never allowed here (docs/mobile-api.md "Scope").
+# The ONLY non-GET routes /api/v1 may have, by (method, path): the app's own device bookkeeping (sign-in sessions and
+# push registration, in hub.sqlite; never the CAD). Empty on purpose: the pull requests that build them add their routes
+# here, each with the reason, and the owner decides the boundary. A route that changes a unit, an acknowledgement, a
+# note, a dispatch or an incident is never allowed here (docs/mobile-api.md "Scope").
 DEVICE_BOOKKEEPING: dict[tuple[str, str], str] = {}
 
 PEOPLE = {"Bearer t-viewer": "val@example.org", "Bearer t-dispatcher": "jordan@example.org",
@@ -77,7 +77,7 @@ def test_the_writes_flag_does_not_exist():
     from sizeup.api.v1.switches import FEATURES
     assert "writes" not in FEATURES
     on = Switches(lambda: True, lambda: {"reads": True, "writes": True})
-    assert "writes" not in on.features() and on.allows("writes") is False             # an unknown flag is off, however set
+    assert "writes" not in on.features() and on.allows("writes") is False        # an unknown flag is off
 
 
 @pytest.fixture
