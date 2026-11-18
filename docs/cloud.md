@@ -239,6 +239,16 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**A seq is never handed out twice under one epoch.** The outbox runs WAL with `synchronous = NORMAL`, so a power cut
+can set the file back past seqs the hub already has. Each opener leaves a marker in the file (a synced commit) and
+takes it out when the station stops in order. A marker found at start that is nobody's (another boot, a process that is
+gone, a copy taken while open) gets the file a **new epoch**: the hub counts it from the start, and the few events it
+had but had not acked are applied again (keyed by id), never skipped. One fsync per start, not one per event.
+
+**The outbox's own damage never stops the station.** A row it cannot read back (its data not JSON, its audio stored as
+text) goes to the quarantine as `unreadable` and the rest go on. A file SQLite cannot open is moved aside (kept as
+`outbox.sqlite.unreadable-<time>`, with its `-wal`) and a new outbox starts. Both are in the log and a hint on Health.
+
 **An event the hub refuses never blocks the rest.** The hub skips an event it can't parse or apply and lists it in its
 answer (`rejected: [{i, seq, type, reason, error}]`). `reason` is `malformed` (a bad id, data that isn't an object, a
 source error: it never applies) or `apply_failed` (it may apply once the hub is fixed). It is listed again if the
@@ -259,7 +269,10 @@ The station treats 400 / 413 / 422 as "refused for good":
   new event after 10 min, 30 min, then hourly, for 8 tries or 24 h, then "stuck" until a person drops it.
 - A `source_event` is a snapshot. A quarantined one is dropped once the feed has sent a newer report of the same event,
   and the hub ignores a report more than 2 min older than the one it applied (`source_reports.seen_at`; within 2 min
-  it is applied, so the station's clock stepping back never drops a newer one).
+  it is applied, so the station's clock stepping back never drops a newer one). A copy the quarantine sends again
+  carries its `qid`, and the hub applies it only over an older snapshot, however close (a newer one may have come from a
+  build that didn't note it in `source_latest`). The cost: a re-sent copy that was in fact the newer one, behind only
+  because the station's clock stepped back, is dropped too, and the hub keeps the older report until the feed changes.
 - An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late" for 24 h, then clears.
 - A page event whose `page_text` came first still brings its clip.
 
