@@ -337,6 +337,7 @@ def test_gaming_aborts_hands_back_and_stops_llama_server_after_a_while(tmp_path,
         wait_for(lambda: w.llm_ok, what="llama-server ok")      # (the fake answers on its port: adopted, not started)
         assert procs == []
         llama.stop()                                            # it goes away: the worker starts its own
+        w._llm_started_at = -1e9                                # (its 5 s between looks at the port: not waited out)
         wait_for(lambda: procs, what="llama-server started")
         env = procs[0].kw["env"]
         assert env["LLAMA_API_KEY"] == w.llm.key and len(w.llm.key) >= 32
