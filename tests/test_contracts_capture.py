@@ -2544,6 +2544,21 @@ def test_suppressed_is_delivery_and_ends_the_alarm_with_no_resend_loop():
     lane.mode = "send"                                         # switched to send: nothing goes, nothing loops
     assert lane.not_delivered() == [] and lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0) is None
     assert hub.alarms == [] and hub.store[("st-north", KEY)]["state"] == "suppressed"
+    shown = [n for n in hub.notices if n.get("kind") == "suppressed"]
+    assert hub.pushes == [] and [(n["key"], n["source"]) for n in shown] == [(KEY, "CH A")]   # never silent
+
+
+def test_a_suppressed_emergency_on_the_urgent_route_is_never_silent():
+    """The same deliberate setting on the urgent route: answered `applied` (recorded, final), no alarm and no push,
+    but a notice on Health and on its row, once, however often it comes (the radio maintainers' requirement)."""
+    lane, hub = cc.Lane(), cc.Hub(off_channels=(ALARM_DATA["source"],))
+    press(lane, t=0.0)
+    assert statuses(send(lane, hub, t=0.3)) == ["applied"]
+    assert hub.alarms == [] and hub.pushes == [] and hub.store[("st-north", KEY)]["state"] == "suppressed"
+    hub.events_answer("st-north", [{"type": "alarm", "id": KEY, "radio_id": "7001", "source": ALARM_DATA["source"],
+                                    "start": W0 + 0.12, "end": W0 + 0.39}])
+    shown = [n for n in hub.notices if n.get("kind") == "suppressed"]
+    assert len(shown) == 1 and shown[0]["key"] == KEY and "no alarm" in shown[0]["text"]
 
 
 def test_a_trimmed_item_keeps_its_matching_fields_and_joins_the_same_radios_alarm():

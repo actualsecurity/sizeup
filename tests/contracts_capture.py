@@ -1292,6 +1292,14 @@ class Hub:
         self.outcome: str | None = None                       # the last event's outcome (the events answer)
         self.history: list[tuple[float, dict]] = [(float("-inf"), self._state())]
 
+    def _suppressed_notice(self, station: str, key: str, data: dict) -> None:
+        """A suppressed emergency is never silent (the radio maintainers' requirement): no alarm and no push, by the
+        channel's setting, but a notice on Health and on its transmission row, once per (station, key)."""
+        if not any(n.get("kind") == "suppressed" and n["station"] == station and n["key"] == key for n in self.notices):
+            self.notices.append({"station": station, "key": key, "kind": "suppressed",
+                                 "source": str(data.get("source") or ""),
+                                 "text": "emergency: no alarm by this channel's setting"})
+
     @property
     def cutoff(self) -> float:
         return round(self.max_age_s * AGE_MARGIN, 6)          # (1980.0, not 1980.0000000000002)
@@ -1374,6 +1382,7 @@ class Hub:
             return "stale", ""                                # (and the press window is not armed)
         if str(d.get("source") or "") in self.off_channels:   # the admin's settings: no alarm. Recorded, final
             self._set(station, key, SUPPRESSED)
+            self._suppressed_notice(station, key, d)          # never silent: Health and the row show it
             return "applied", ""
         at = self.now - age_s
         cur = self._open(d, at) or self._raise(station, key, d, at=at, age_s=age_s,
@@ -1630,6 +1639,7 @@ class Hub:
             self.log.append(f"{tid}: too old to raise now (logged only)")
             return done(SEEN)
         if str(ev.get("source") or "") in self.off_channels:  # notices are off for it: a deliberate setting, final
+            self._suppressed_notice(station, tid, ev)         # never silent: Health and the row show it
             return done(SUPPRESSED)
         joined = self._open(ev, self.now)
         cur = joined or self._raise(station, tid, ev, at=self.now - age_s, age_s=age_s, span=span,
