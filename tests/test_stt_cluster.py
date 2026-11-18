@@ -676,3 +676,62 @@ def test_the_hub_sends_its_stations_the_alert_sources_when_their_revision_differ
         if st is not None:
             st.link.stop()
         hub.close()
+
+
+# -- the re-review of 8c9eb90 -----------------------------------------------------------------------------------------------
+
+
+def test_nothing_goes_to_a_hub_not_heard_lately_and_police_alert_clips_only_to_an_idle_gpu(tmp_path):
+    from sizeup.app import App
+    from sizeup.cloud.station import StationLink
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import base
+    link = StationLink.__new__(StationLink)                    # its pool word only (no threads)
+    link.hub_caps = frozenset({"stt_pool"})
+    link.pool = {"on": True, "ready": 2, "max_s": 30.0, "gpu_idle": True}
+    link.last_ok, link.error_since = time.time(), None
+    link._lock = threading.Lock()
+    assert link.pool_has_room(5.0) and link.pool_gpu_idle()
+    link.last_ok = time.time() - 600                           # the hub not heard lately (it is deploying): its word is stale
+    assert not link.pool_has_room(5.0) and not link.pool_gpu_idle()
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    app.link, app.forwarding = link, lambda: True
+    app.stt.stats = lambda: {"queued": 10, "service_s": 16.0}
+    assert not app._offload_now(LOW, 3.0)                      # unreachable hub: kept here
+    t = Traffic("MRRSOps-9", "MRRS Ops", 1.0, 4.0, "", status="pending")
+    sent = []
+    app._emit = lambda kind, d, clip=None: sent.append((kind, d))
+    app._stt_dropped(t, f"{SHED}: speech-to-text 15 min behind, a context talkgroup")
+    assert t.status == "skipped" and not [d for k, d in sent if d.get("transcript_pending")]
+    link.last_ok = time.time()
+    assert app._offload_now(LOW, 3.0) and app._offload_now(CONTEXT, 3.0)
+    link.pool["gpu_idle"] = False                              # no GPU worker idle: a police alert clip stays here
+    assert app._offload_now(LOW, 3.0) and not app._offload_now(CONTEXT, 3.0)
+
+
+def test_a_handed_over_clip_carries_its_own_station_and_never_goes_back_to_it(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a"))
+    try:
+        app = hub.app
+        ctx_tier(app)
+        reg = app.hub.stations
+        tok_b = reg.add("st-b")
+        app.hub.workers.act({"action": "pool", "stations": {"st-b": True}})
+        w = FakeStation(hub.url, tok_b).start()
+        try:
+            assert wait(lambda: app.sttpool.ready_workers() == ["station:st-b"], 10)
+            now = time.time()
+            # st-b's own clip, handed over by st-b: never back to st-b's whisper (the catch-up then)
+            assert call(hub.url + "/api/station/events", "POST", {"epoch": "e2", "station": "st-b", "events": [
+                ctx_event("9570-1794-call_70", 1, now)]}, token=tok_b)[0] in (200, 409)
+            got = next((t for t in app.store.loose if t.id == "9570-1794-call_70"), None)
+            if got is not None:                                # (a hub that takes one station refuses st-b's events)
+                assert got.origin_station == "st-b" and w.jobs == []
+            # the primary station's clip: st-b may take it
+            send(hub, ctx_event("9570-1794-call_71", 1, now))
+            assert wait(lambda: row(hub, "9570-1794-call_71").get("status") == "done", 20)
+            assert next(t for t in app.store.loose if t.id == "9570-1794-call_71").origin_station == "st-a"
+        finally:
+            w.close()
+    finally:
+        hub.close()

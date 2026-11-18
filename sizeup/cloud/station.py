@@ -269,9 +269,10 @@ class StationLink:
         return POOL_CAP in self.hub_caps and bool(self.pool.get("on"))
 
     def pool_has_room(self, seconds: float | None = None) -> bool:
-        """The hub's last word: a worker other than this station's whisper could take a context clip (this long) now.
-        Never a round trip: a clip no worker elsewhere could take stays here."""
-        if not self.pool_takes() or int(self.pool.get("ready") or 0) <= 0:
+        """The hub's last word, heard lately: a worker other than this station's whisper could take a context clip (this
+        long) now. Never a round trip: a clip no worker elsewhere could take stays here; nor to a hub not heard lately
+        (its last word may be stale: a hub deploying), which keeps it here (saved, or queued) instead."""
+        if not self.pool_takes() or int(self.pool.get("ready") or 0) <= 0 or not self.connected():
             return False
         return seconds is None or seconds <= float(self.pool.get("max_s") or 0.0)
 

@@ -49,7 +49,9 @@ HEARTBEAT_S = 5.0         # a word to the hub at least this often, while it does
 CPU_MAX_PCT = 85.0        # the machine busier than this: no clips of others
 QUIET_S = 90.0            # none of its own clips heard for this long first (sizeup/stt.py CATCHUP_QUIET_S)
 MAX_DECODE_S = 8.0        # only clips it decodes in this long at its own pace (its own page waits that long at most,
-                          # and the pre-emption cuts even that short)
+                          # and the pre-emption cuts even that short). max_s = MAX_DECODE_S / rtf ignores whisper's
+                          # fixed cost per clip (model and prompt setup: a short clip costs more than its rtf says), so
+                          # it is a soft bound: the pre-emption is the real guard of the station's own pages
 DEFAULT_RTF = 1.0         # its pace before it has transcribed anything: decode seconds per audio second
 PREEMPT_POLL_S = 0.1      # how often a remote decode looks whether its own live work came
 IDLE_POLL_S = 2.0         # how often it looks whether it may claim

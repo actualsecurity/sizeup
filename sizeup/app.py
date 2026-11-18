@@ -2738,6 +2738,8 @@ class App:
         link = self.link
         if prio not in OFFLOAD_CLASSES or link is None or not self.forwarding() or not hasattr(link, "pool_has_room"):
             return False
+        if prio in (CONTEXT, CONTEXT_FALLBACK) and not (hasattr(link, "pool_gpu_idle") and link.pool_gpu_idle()):
+            return False                       # (police alert: only a GPU worker takes it; else it'd go to the catch-up)
         if not link.pool_has_room(seconds):
             return False
         st = self.stt.stats()

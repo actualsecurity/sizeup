@@ -806,8 +806,6 @@ class Hub:
             raise ValueError("{epoch, events: [...]}")
         if p is not None:
             self._claim(p, d.get("station"))     # (one outbox cursor still: a cursor per station is design step A3)
-            if p.id:
-                self.app.clip_origin = p.id       # whose clips these are (a pool job never goes back to its sender)
         epoch = str(d.get("epoch") or "")[:40]
         with self._ingest:
             if epoch != self.epoch:
@@ -823,7 +821,11 @@ class Hub:
                 refused = fence_mod.refused()
                 try:
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
-                    self.app.apply(kind, ev.get("data") or {}, audio)
+                    data = ev.get("data") or {}
+                    if p is not None and p.id and isinstance(data, dict) and kind in ("traffic", "page_text"):
+                        # whose clip it is, on the clip (a pool job never goes back to the station it came from)
+                        data = {**data, "origin_station": p.id}
+                    self.app.apply(kind, data, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
                     if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
@@ -894,7 +896,16 @@ class HubApp(App):
     """App with no radios: the station's events go through the same code (apply), the station's
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
-    clip_origin = ""                     # the station the clips come from (the events' sender; one until multi-station)
+    @property
+    def clip_origin(self) -> str:
+        """The station the catch-up's clips come from: the one station this hub takes until multi-station (a clip handed
+        over carries its own, origin_station; the catch-up per station's rows is #725, with multi-station)."""
+        hub = getattr(self, "hub", None)
+        reg = getattr(hub, "stations", None)
+        try:
+            return reg.legacy_id() if reg is not None else ""
+        except Exception:  # noqa: BLE001 - none known
+            return ""
 
     def __init__(self, cfg, log: Callable[[str], None] = print, fence=None):
         self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
@@ -1611,7 +1622,8 @@ class HubApp(App):
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          extra={"pcm": pcm, "page": page, "handed": True, "origin": self.clip_origin})
+                          extra={"pcm": pcm, "page": page, "handed": True,
+                                 "origin": str(getattr(item, "origin_station", "") or self.clip_origin)})
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "no pool worker could take it now")
         self.sync()
