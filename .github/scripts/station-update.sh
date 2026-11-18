@@ -60,6 +60,10 @@ test "$(current)" = "$A"
 systemctl daemon-reload
 systemctl restart sizeup-station.service
 wait_for 120 is_build "$A"
+# no settling here (a burst of hub deploys coalesced: tests/test_autoupdate.py), so each step switches at once
+mkdir -p /etc/systemd/system/sizeup-update.service.d
+printf '[Service]\nEnvironment=SIZEUP_UPDATE_SETTLE_S=0\n' > /etc/systemd/system/sizeup-update.service.d/ci-no-settle.conf
+systemctl daemon-reload
 systemctl enable --now sizeup-update.path sizeup-update.timer
 sizeup-station status || true
 
