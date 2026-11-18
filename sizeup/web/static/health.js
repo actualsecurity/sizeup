@@ -117,6 +117,7 @@ const StationHealth = (() => {
         : n.on ? `Pushed to the status topic; "Recovered" once clear ${th.settle_min || 15} min` : "Push off: it clears here and in the log only";
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
+      if (a.dismiss) r.append(dismissBtn(a));
       return r;
     });
   }
@@ -520,6 +521,27 @@ const StationHealth = (() => {
     if (window.Help && Help.info) thr.append(" ", Help.info(rules, "Alert rules")); else thr.title = rules;
     kids.push(thr);
     card.replaceChildren(...kids);
+  }
+
+  // A station event the hub refused for good, stuck (no more tries) or an alarm delivered too late: the station drops
+  // them (POST /api/cad/health/dismiss: a quarantine_dismiss call; who pressed it is audited on the hub). Admins only.
+  function dismissBtn(a) {
+    const btn = el("button", "", "Dismiss");
+    btn.title = `Drop the station's stuck / late ${a.dismiss} event(s) (sizeup-station quarantine shows them)`;
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Dismiss ${a.title}?\nThe station drops these ${a.dismiss} event(s); the hub never gets them.`)) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/cad/health/dismiss", { method: "POST",
+          headers: { "Content-Type": "application/json", "X-Sizeup-Action": "dismiss" },
+          body: JSON.stringify({ kind: a.dismiss }) });
+        const d = await res.json().catch(() => ({}));
+        btn.title = res.ok ? `Dismissed ${d.dismissed || 0}` : (d.error || `HTTP ${res.status}`);
+        if (res.ok) btn.textContent = "Dismissed";
+        else btn.disabled = false;
+      } catch (e) { btn.title = String(e); btn.disabled = false; }
+    });
+    return btn;
   }
 
   // An incident source stopped itself (#301, e.g. a login it won't retry): its reset() on the station, admins only

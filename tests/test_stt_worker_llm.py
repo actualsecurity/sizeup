@@ -318,6 +318,20 @@ def test_an_answer_outside_the_schema_still_goes_back_at_once_and_a_think_block_
     assert w.llm_counts["invalid"] == 2
 
 
+def test_a_non_finite_number_in_an_answer_goes_back_invalid_never_as_null(tmp_path, ihub, whisper, llama):
+    # (the wire nulls a NaN (dumps): the answer must be None here, never {..., "x": null} the hub could take as valid)
+    good = json.dumps(GOOD)[:-1]
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    with running(w):
+        wait_for(lambda: w.llm_ok, what="llama-server ok")
+        for n, bad in enumerate((good + ', "x": NaN}', good + ', "x": -Infinity}', good + ', "x": 1e999}'), 1):
+            llama.answer = bad
+            ihub.add_infer()
+            wait_for(lambda: len(ihub.infer_done("complete")) == n, what=f"answer {n}")
+    assert [d["output"] for d in ihub.infer_done("complete")] == [None, None, None]
+    assert w.llm_counts["invalid"] == 3
+
+
 def test_a_pre_alert_clip_preempts_the_generation(tmp_path, ihub, whisper, llama):
     llama.delay = 3.0
     w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)

@@ -160,8 +160,8 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 `worker.py` is pinned to a commit. Check its hash after the download:
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/28e55b4274d2826507bc0a57f97017e84e5344c5/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '68EFDCFC95A3FAA1F98365046C5BE05DB258785D035C6E443780BF8BB60740B6'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/0d243f8770971808569cdb2e09347bbf94598f94/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq 'C06E7054EF1C104FEF2C13E98BA669E3446C0E159432164B291CD3DAE6856A1E'   # True
 notepad "$d\worker.toml"
 ```
 
