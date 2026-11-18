@@ -1567,8 +1567,10 @@ class App:
 
     def _call(self, call: Call) -> None:
         # late (#747): written while sizeup was down, ingested at this start. Its rows go to the radio log, speech-to-text
-        # and the hub like any (t.late on each), but nothing that alerts hears it: no alarm, pre-alert or push
-        # (_alarm_now, _alarm, _atc, Comms.record / retext with "late")
+        # and the hub like any (t.late on each), and no pre-alert hears it (_atc, Comms.record / retext with "late": no
+        # intel, status hint, dispatch step, possible incoming or airport level). The one exception is an emergency: its
+        # button or a mayday still alarms and pushes (_alarm_now, _alarm), labelled late, at its own time
+        # (alarms.late_note), and deduped with an alarm the same call or radio raised live before the restart
         late = bool(getattr(call, "late", False))
         if self._late_dup(call):
             return
@@ -1604,7 +1606,8 @@ class App:
                     self._alarm_now(mark)
             else:
                 log(f"p25: {call.label} {call.id}: EMERGENCY flag (radio {', '.join(call.units) or 'unknown'})"
-                    + (" from while sizeup was down: logged late, no alarm" if late else ""))
+                    + (f" (from while sizeup was down, {max(1, round((time.time() - call.end) / 60))} min ago)"
+                       if late else ""))
                 # The emergency window (alarms.Windows): this talkgroup, and the radio that pressed it anywhere, kept
                 # for [p25] emergency_window_min after this call (someone else's: at most WINDOW_MAX_KEPT calls).
                 windows.open(call.talkgroup, call.label, pressed, call.end, ours=ours)
@@ -1638,7 +1641,7 @@ class App:
                 t.call_id, t.turn = call.id, k  # the whole call it is a key-up of (= cad/comms.py split_call)  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 if late:
-                    t.late = True  # from while sizeup was down (#747): never alerts  # type: ignore[attr-defined]
+                    t.late = True  # from while sizeup was down (#747): no pre-alert; an emergency alarms, labelled late  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
                 if kept:
@@ -1816,14 +1819,15 @@ class App:
     def _alarm(self, t: Traffic, text: str | None = None) -> None:
         """A transmission (new, or new text) to the alarms: the CAD of record raises them. A station forwarding
         to a hub doesn't (the hub does, from the same transmission). Another P25 system's (#409) raises none,
-        whichever way it comes (new, a re-run's text, the hub's copy); nor does a late one (#747: from while sizeup was
-        down)."""
-        if self.forwarding() or getattr(t, "system", "") or getattr(t, "late", False):
+        whichever way it comes (new, a re-run's text, the hub's copy). A late one (#747: from while sizeup was down) still
+        does, labelled late (the alarms dedupe it by its id, and by its radio at the time it was said)."""
+        if self.forwarding() or getattr(t, "system", ""):
             return
         d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
              "emergency": bool(getattr(t, "emergency", False)), "via": getattr(t, "emergency_via", ""),
-             "alarm_key": getattr(t, "alarm_key", ""), "stuck": getattr(t, "flag_stuck", "")}
+             "alarm_key": getattr(t, "alarm_key", ""), "stuck": getattr(t, "flag_stuck", ""),
+             "late": bool(getattr(t, "late", False))}
         d["unit"] = ", ".join(x.removesuffix(" EMERGENCY") for x in (t.unit or "").split(", ") if x)
         try:
             self.cad.alarms.on_traffic(d)
@@ -1833,10 +1837,8 @@ class App:
     def _alarm_now(self, t: Traffic) -> None:
         """The emergency button (P25 at the end of its call; MDC / FleetSync at the key-up and again at the end
         of the transmission): raised here, or sent to the hub at once (an "alarm" event with its clip when
-        there is one yet, ahead of the transcript). A late one (#747: from while sizeup was down) raises none: its row
-        says emergency, in the radio log and the hub's."""
-        if getattr(t, "late", False):
-            return
+        there is one yet, ahead of the transcript). A late one (#747: from while sizeup was down) too: a firefighter in
+        trouble during a restart is never left unalarmed; "late" goes with it and the alarm says so."""
         if self.forwarding():
             self._emit("alarm", {k: v for k, v in t.as_dict().items() if k not in ("pairs", "raw_audio")}
                        | {"pairs": [list(p) for p in getattr(t, "pairs", None) or []]},
@@ -2674,8 +2676,10 @@ class App:
         (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
         but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
         dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event). late: a P25
-        call from while sizeup was down (#747; the row's own t.late says so too): the same, but the per-incident radio
-        log still takes it (Comms.retext late), and "late" on the retext event."""
+        call from while sizeup was down (#747; the row's own t.late says so too): no pre-alert either (no ATC, and
+        Comms.retext late: only the per-incident radio log), but its words still go to the alarms (a mayday that only
+        AWS heard alarms, labelled late; the same transmission's alarm is updated, never raised twice); "late" on the
+        retext event."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
@@ -2704,9 +2708,10 @@ class App:
             self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, late=late)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
-        if t is not None and text and not quiet and not late:
+        if t is not None and text and not quiet:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
-            self._atc(t, text)
+            if not late:
+                self._atc(t, text)
         if changed:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))

@@ -57,7 +57,8 @@ service restarts for every auto-update, about a dozen times a day), so a call ca
 capture dir. CallIngest keeps a high-water mark per capture dir (mark_path, beside the station's state): the newest
 sidecar it handed on, (mtime, path), and the few at or before it still waiting for their WAV. At start a sidecar newer
 than the mark (or one of those waiting) and no older than REPLAY_S is ingested late (Call.late: the radio log, speech-
-to-text and the hub take it; nothing that alerts does, sizeup/app.py); anything older is primed as seen, as before.
+to-text and the hub take it, no pre-alert does, and an emergency still alarms, labelled late: sizeup/app.py);
+anything older is primed as seen, as before.
 With no mark (the first start, a new capture dir) or one that can't be read, every sidecar on disk is primed, as
 before. The mark moves only once on_call has taken a call, and is written (tmp + rename, no fsync) at most every
 MARK_SAVE_S and at stop. Taken calls' files are removed by the app (App._drop_recorder_files), so a crash between two
@@ -115,7 +116,7 @@ class Call:
     signal: float | None = None   # the call JSON's "signal" / "noise" (dB; 5.x), None when it has none (0 / 0)
     noise: float | None = None
     freq: float | None = None     # its voice channel, Hz
-    late: bool = False         # written while sizeup was down, ingested at the next start (#747): never a live alert
+    late: bool = False         # written while sizeup was down, ingested at the next start (#747): no pre-alert
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]

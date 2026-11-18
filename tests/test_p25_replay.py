@@ -21,9 +21,9 @@ RADIO = 9900001                 # invented radio IDs
 OTHER = 9900002
 
 
-def put(d, name, age=0.0, tg=307, emergency=False):
+def put(d, name, age=0.0, tg=307, emergency=False, radio=RADIO):
     """A finished call as trunk-recorder writes it, its files `age` seconds old."""
-    write_call(d, name, tg, [RADIO])
+    write_call(d, name, tg, [radio])
     t = time.time() - age
     meta = json.loads((d / f"{name}.json").read_text())
     meta.update(start_time=int(t - 2), stop_time=int(t), emergency=int(emergency))
@@ -234,64 +234,106 @@ def spies(app, monkeypatch):
     return got
 
 
-@pytest.fixture
-def pushes(monkeypatch):
-    """No push leaves this machine; each one tried is noted."""
-    import sizeup.notify as notify
-    sent = []
+class Push:
+    """The alarms' notifier, kept here: each push it was asked for."""
+    enabled = True
 
-    def keep(req, *a, **kw):
-        sent.append(req.full_url)
-        raise OSError("no pushes in these tests")
-    monkeypatch.setattr(notify, "urlopen", keep)
-    return sent
+    def __init__(self):
+        self.sent = []
+
+    def send(self, title, body, priority=3, tags=(), click="", who=None):
+        self.sent.append((title, body))
+        return True
 
 
-def test_a_late_emergency_call_is_logged_but_raises_no_alarm_pre_alert_or_push(tmp_path, monkeypatch, pushes):
+LATE = "from while sizeup was down, "
+
+
+def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert(tmp_path, monkeypatch):
+    """A firefighter in trouble during a restart is never left unalarmed: the button and the mayday on a call from while
+    sizeup was down alarm and push once, labelled late at the call's own time. Nothing else that alerts hears it."""
     from sizeup.app import App
+    from sizeup.cad.alarms import _hms, line
     from tests.test_cloud import base as cloud_base
     app = App(cloud_base(clips_dir=str(tmp_path / "clips"), cad_db=str(tmp_path / "cad.sqlite"),
                          p25_talkgroups={307: "Fire/EMS 15"}))
     try:
         app.stt.client = Says("mayday mayday mayday, invented unit trapped")
         app.stt.start()
+        push = app.cad.alarms.notifier = Push()
         got = spies(app, monkeypatch)
         d = day_dir(tmp_path / "p25")
         mark = tmp_path / "state" / "p25_ingest_mark.json"
         run(tmp_path / "p25", mark, [], [], on_call=app._call).stop()
-        put(d, "307-1-call_1", age=30, emergency=True)        # the button, while sizeup was down
+        put(d, "307-1-call_1", age=150, emergency=True)       # the button, while sizeup was down: 2.5 min ago
         ing = run(tmp_path / "p25", mark, [], [], on_call=app._call)
         assert [c.id for c in settle(ing)] == ["307-1-call_1"]
         assert wait(lambda: rows(app).get("307-1-call_1", {}).get("status") == "done")
         r = rows(app)["307-1-call_1"]
         assert r["emergency"] == 1 and r["text"].startswith("mayday")              # in the radio log, as heard
-        assert getattr(app.store.loose[0], "late", False) is True
-        assert app.has_clip("307-1-call_1")
-        assert got["radiolog"] == ["307-1-call_1"]                                 # the per-incident log still takes it
-        assert {k: v for k, v in got.items() if k != "radiolog"} == {
-            "alarm": [], "intel": [], "hints": [], "incoming": [], "airport": [], "context": []}
-        assert not app.cad.store.q("SELECT * FROM alarms") and pushes == []
-        # a later re-run of its words (a person's, or AWS's text arriving): still nothing that alerts
+        assert getattr(app.store.loose[0], "late", False) is True and app.has_clip("307-1-call_1")
+        # one alarm (the button, then its words on the same alarm), one push, both saying it is late
+        al = app.cad.store.q("SELECT * FROM alarms")
+        assert len(al) == 1 and al[0]["traffic_id"] == "307-1-call_1" and al[0]["emergency"] == 1
+        a = app.cad.alarms.get(al[0]["id"])
+        assert a["keywords"] and 140 <= a["late"] <= 200
+        said = float(json.loads((tmp_path / "emergency" / "307-1-call_1.json").read_text())["start_time"])
+        assert said <= a["at"] <= said + 1 and time.time() - a["at"] >= 150     # when it was said, not when it came in
+        assert a["what"].endswith(f"({LATE}3 min ago)") and line(a).endswith(f"at {_hms(a['at'])} ({LATE}3 min ago)")
+        assert len(push.sent) == 1 and f"({LATE}3 min ago)" in push.sent[0][0]
+        assert push.sent[0][1].startswith(_hms(a["at"]))                             # its own time, not now
+        # no pre-alert of any kind; the per-incident radio log still takes it
+        assert got["radiolog"] == ["307-1-call_1"]
+        assert {k: v for k, v in got.items() if k in ("intel", "hints", "incoming", "airport", "context")} == {
+            "intel": [], "hints": [], "incoming": [], "airport": [], "context": []}
+        # a later re-run of its words (a person's, or AWS's text arriving): the same alarm, never a second push
         app._retext("307-1-call_1", "mayday mayday, invented unit still trapped", "done", 0.9, "m.bin")
-        assert got["alarm"] == got["intel"] == got["hints"] == [] and got["radiolog"] == ["307-1-call_1"] * 2
-        assert not app.cad.store.q("SELECT * FROM alarms")
+        assert len(app.cad.store.q("SELECT * FROM alarms")) == 1 and len(push.sent) == 1
+        assert got["intel"] == got["hints"] == [] and got["radiolog"] == ["307-1-call_1"] * 2
         # taken before a restart the mark didn't hear of (a crash between two writes): dropped, never a second row
         again = Call("307-1-call_1", 307, "Fire/EMS 15", time.time() - 30, time.time() - 28, [str(RADIO)],
-                     np.zeros(32000, np.float32), "", [Turn(0.0, str(RADIO), str(RADIO))], late=True)
+                     np.zeros(32000, np.float32), "", [Turn(0.0, str(RADIO), str(RADIO))], emergency=True, late=True)
         app._call(again)
-        assert len(app.store.loose) == 1
-        # the same call live: the alarm and the hooks do hear it (the spies are wired)
-        put(d, "307-2-call_2", emergency=True)
+        assert len(app.store.loose) == 1 and len(push.sent) == 1
+        # a call live, from someone else: its own alarm, not late, and the pre-alert hooks hear it (the spies are wired)
+        put(d, "307-2-call_2", emergency=True, radio=OTHER)
         assert [(c.id, c.late) for c in settle(ing)] == [("307-2-call_2", False)]
         assert wait(lambda: rows(app).get("307-2-call_2", {}).get("status") == "done")
-        assert wait(lambda: app.cad.store.q("SELECT * FROM alarms"))
-        assert "307-2-call_2" in [x["id"] for x in got["alarm"]]
+        assert wait(lambda: len(app.cad.store.q("SELECT * FROM alarms")) == 2)
+        live = app.cad.store.one("SELECT * FROM alarms WHERE traffic_id = '307-2-call_2'")
+        assert live["late"] == 0 and LATE not in app.cad.alarms.get(live["id"])["what"]
         assert "307-2-call_2" in got["intel"] and "307-2-call_2" in got["hints"]
     finally:
         app.stop()
 
 
-def test_a_station_sends_a_late_call_up_marked_and_raises_no_alarm_event(tmp_path, monkeypatch):
+def test_a_late_emergency_already_alarmed_live_before_the_restart_alarms_once(tmp_path):
+    """The alarms dedupe a late emergency by its id and by its radio at the time it was said (not when it arrived): the
+    button that radio pressed live just before the restart is the same emergency."""
+    from tests.test_radios import Clock, cad
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    push = c.alarms.notifier = Push()
+    t0 = clock.t
+
+    def em(tid, at, radio=str(RADIO), late=False):
+        return {"id": tid, "start": at, "end": at + 3, "source": "Fire/EMS 15", "talkgroup": 307, "unit": radio, "rig": "",
+                "radio_id": radio, "text": "", "emergency": True, **({"late": True} if late else {})}
+    first = c.alarms.on_traffic(em("307-1-call_1", t0 - 3))                     # live, before the restart
+    assert first is not None and len(push.sent) == 1
+    clock.t = t0 + 400                                                          # sizeup comes back 6+ min later
+    # the same call again (a crash between two mark writes): its own alarm, no second push
+    assert c.alarms.on_traffic(em("307-1-call_1", t0 - 3, late=True))["id"] == first["id"]
+    # the same radio's next call, written while it was down: the same emergency (its start within REPEAT_S of the last)
+    assert c.alarms.on_traffic(em("307-2-call_2", t0 + 30, late=True))["id"] == first["id"]
+    assert len(c.store.q("SELECT * FROM alarms")) == 1 and len(push.sent) == 1
+    # another radio's button from while it was down: its own alarm, labelled late
+    other = c.alarms.on_traffic(em("307-3-call_3", t0 + 60, radio=str(OTHER), late=True))
+    assert other["id"] != first["id"] and other["late"] > 0 and LATE in other["what"]
+    assert len(push.sent) == 2 and LATE in push.sent[1][0]
+
+
+def test_a_station_sends_a_late_emergency_up_as_a_late_alarm(tmp_path, monkeypatch):
     from sizeup.app import App
     from tests.test_cloud import base as cloud_base
     app = App(cloud_base(clips_dir=str(tmp_path / "clips"), cad_db=str(tmp_path / "cad.sqlite"),
@@ -306,47 +348,55 @@ def test_a_station_sends_a_late_call_up_marked_and_raises_no_alarm_event(tmp_pat
         app._call(Call("307-7-call_7", 307, "Fire/EMS 15", now, now + 2, [str(OTHER)], np.full(32000, 0.2, np.float32),
                        "", [Turn(0.0, str(OTHER), str(OTHER), at=now)], emergency=True, late=True))
         assert wait(lambda: any(k == "traffic" for k, _d in sent))
-        assert [k for k, _d in sent if k == "alarm"] == []                 # no alarm ahead of it, as a live one would
+        alarm = [d for k, d in sent if k == "alarm"]                   # ahead of its transcript, as a live one's
+        assert len(alarm) == 1 and alarm[0]["late"] is True and alarm[0]["start"] == now
         t = next(d for k, d in sent if k == "traffic")
         assert t["id"] == "307-7-call_7" and t["late"] is True and t["emergency"] is True
     finally:
         app.stop()
 
 
-def test_the_hub_logs_a_late_call_from_its_station_without_alerting(tmp_path):
+def test_the_hub_alarms_a_late_emergency_from_its_station_once_and_nothing_else(tmp_path):
     from tests.test_cloud import HubRun, call, hub_cfg
     hub = HubRun(hub_cfg(tmp_path))
     try:
         app, now = hub.app, time.time()
+        push = app.cad.alarms.notifier = Push()
         heard = {"text": [], "late": []}
         app.cad.comms.on_text = heard["text"].append
         app.cad.comms.on_late_text = heard["late"].append
 
         def ev(seq, tid, kind="traffic", **kw):
-            data = {"id": tid, "source": "Fire/EMS 15", "talkgroup": 307, "start": now - 40, "end": now - 37,
+            data = {"id": tid, "source": "Fire/EMS 15", "talkgroup": 307, "start": now - 240, "end": now - 237,
                     "text": "mayday mayday mayday", "raw": "mayday mayday mayday", "status": "done", "model": "m.bin",
                     "unit": str(OTHER), "radio_id": str(OTHER), "emergency": True, **kw}
             if kind == "retext":
                 data = {"id": tid, "text": kw.get("text", ""), "status": "done", "model": "m.bin",
                         **({"late": True} if kw.get("late") else {})}
             return {"seq": seq, "at": now, "type": kind, "data": data}
-        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev(1, "307-8-call_8", late=True)]})[0] == 200
+        post = lambda e: call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [e]})[0]  # noqa: E731
         row = lambda tid: app.cad.store.one("SELECT text, emergency FROM radio_traffic WHERE id = ?", (tid,)) or {}  # noqa: E731
+        alarms = lambda: app.cad.store.q("SELECT * FROM alarms ORDER BY id")  # noqa: E731
+        assert post(ev(1, "307-8-call_8", late=True)) == 200
         assert wait(lambda: row("307-8-call_8").get("text") == "mayday mayday mayday", 10)
         assert row("307-8-call_8")["emergency"] == 1
-        assert heard == {"text": [], "late": ["307-8-call_8"]} and not app.cad.store.q("SELECT * FROM alarms")
-        # its words again from the station (whisper standing in, a re-run): still late, still no alarm
-        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [
-            ev(2, "307-8-call_8", "retext", text="mayday mayday, invented unit trapped", late=True)]})[0] == 200
+        assert wait(lambda: len(alarms()) == 1, 10)
+        a = app.cad.alarms.get(alarms()[0]["id"])
+        assert a["traffic_id"] == "307-8-call_8" and a["at"] == now - 240 and a["what"].endswith(f"({LATE}4 min ago)")
+        assert len(push.sent) == 1 and f"({LATE}4 min ago)" in push.sent[0][0]
+        assert heard == {"text": [], "late": ["307-8-call_8"]}                    # no pre-alert hook
+        # its words again from the station (whisper standing in, a re-run): the same alarm, no second push
+        assert post(ev(2, "307-8-call_8", "retext", text="mayday mayday, invented unit trapped", late=True)) == 200
         assert wait(lambda: row("307-8-call_8").get("text") == "mayday mayday, invented unit trapped", 10)
-        assert heard["text"] == [] and not app.cad.store.q("SELECT * FROM alarms")
-        # the same event again (the outbox resends): one row
-        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev(3, "307-8-call_8", late=True)]})[0] == 200
+        assert heard["text"] == [] and len(alarms()) == 1 and len(push.sent) == 1
+        # the same event again (the outbox resends): one row, one alarm
+        assert post(ev(3, "307-8-call_8", late=True)) == 200
         assert len(app.cad.store.q("SELECT id FROM radio_traffic WHERE id = '307-8-call_8'")) == 1
-        # a live one: the alarm
-        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev(4, "307-9-call_9")]})[0] == 200
-        assert wait(lambda: app.cad.store.q("SELECT * FROM alarms WHERE traffic_id = '307-9-call_9'"), 10)
-        assert heard["text"] == ["307-9-call_9"]
+        assert len(alarms()) == 1 and len(push.sent) == 1
+        # a live one from another radio: its own alarm, not late, and the pre-alert hook hears it
+        assert post(ev(4, "307-9-call_9", radio_id=str(RADIO), unit=str(RADIO), start=now - 3, end=now)) == 200
+        assert wait(lambda: len(alarms()) == 2, 10)
+        assert alarms()[1]["late"] == 0 and heard["text"] == ["307-9-call_9"]
     finally:
         hub.close()
 

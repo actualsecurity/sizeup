@@ -101,7 +101,8 @@ ADSB_CHANNEL = "ADS-B (public data)"
 ADSB_NOTE = "Public ADS-B data, not official"
 COLUMNS = (("source", "TEXT NOT NULL DEFAULT ''"), ("subject", "TEXT NOT NULL DEFAULT ''"),   # added after #128
            ("clear_by", "TEXT NOT NULL DEFAULT ''"), ("clear_at", "REAL"),                    # All clear, 2026-10-14
-           ("stuck", "TEXT NOT NULL DEFAULT ''"))                                            # #190
+           ("stuck", "TEXT NOT NULL DEFAULT ''"),                                            # #190
+           ("late", "REAL NOT NULL DEFAULT 0"))                                             # #747
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 CHANNEL = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
@@ -133,7 +134,8 @@ CREATE TABLE IF NOT EXISTS alarms (
   subject TEXT NOT NULL DEFAULT '',     -- adsb: what the emergency is ("squawk 7700 (emergency)")
   clear_by TEXT NOT NULL DEFAULT '',    -- All clear: resolved (its emergency window closed), who and when
   clear_at REAL,
-  stuck TEXT NOT NULL DEFAULT ''        -- the flag turned out stuck (#190): on whom, "BUS237 (21237)"
+  stuck TEXT NOT NULL DEFAULT '',       -- the flag turned out stuck (#190): on whom, "BUS237 (21237)"
+  late REAL NOT NULL DEFAULT 0          -- #747: a P25 call from while sizeup was down: s after it ended it was raised
 );
 CREATE INDEX IF NOT EXISTS alarms_ack ON alarms(ack_at);
 """
@@ -287,10 +289,19 @@ def what(a: dict) -> str:
     return " + ".join(x for x in (button if a.get("emergency") else "", said) if x)
 
 
+def late_note(a: dict) -> str:
+    """"from while sizeup was down, 4 min ago" for an alarm raised late (#747: a P25 call written while sizeup was down,
+    ingested at its next start), "" otherwise. The minutes are how long after the transmission ended it was raised."""
+    late = a.get("late") or 0
+    return f"from while sizeup was down, {max(1, round(float(late) / 60))} min ago" if late else ""
+
+
 def line(a: dict) -> str:
-    """The chronology's line: "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10"."""
+    """The chronology's line: "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10" (raised late, #747: "... at 14:32:10 (from
+    while sizeup was down, 4 min ago)": the transmission's own time, never when it was raised)."""
+    note = late_note(a)
     return (("DRILL — " if a.get("drill") else "") + f"EMERGENCY: {who(a)} {what(a)} on {a.get('channel') or '?'} "
-            f"at {_hms(a.get('at'))}")
+            f"at {_hms(a.get('at'))}" + (f" ({note})" if note else ""))
 
 
 PHASES = {"departing": "departing HPN", "near": "near HPN", "ground": "on the ground at HPN", "low": "low in the area",
@@ -674,15 +685,20 @@ class Alarms:
                         db.execute("UPDATE alarms SET traffic_id = ?, end = ? WHERE id = ?", (tid, end, cur["id"]))
                     cur = self.store.one("SELECT * FROM alarms WHERE id = ?", (cur["id"],))
             rid = str(t.get("radio_id") or "")
+            # a late one (#747: from while sizeup was down) is matched by when it was said, not when it arrived: an alarm
+            # on that radio raised live before the restart (or since) within the window of this transmission's start
+            late = bool(t.get("late"))
+            near = ("(created_at >= ? OR COALESCE(end, at) >= ?)" if late else "(created_at >= ? OR 0 = ?)")
             if cur is None and emergency and rid:       # the same radio's button again, its alarm still open
                 cur = self.store.one("SELECT * FROM alarms WHERE emergency = 1 AND ack_at IS NULL AND radio_id = ? "
-                                     "AND channel = ? AND created_at >= ? ORDER BY id DESC LIMIT 1",
-                                     (rid, str(t.get("source") or ""), now - REPEAT_S))
+                                     f"AND channel = ? AND {near} ORDER BY id DESC LIMIT 1",
+                                     (rid, str(t.get("source") or ""), now - REPEAT_S, start - REPEAT_S if late else 1))
                 if cur is None and not heard and not fire and not self._ours(rig):
                     # someone else's (#190): raised once while that radio keeps flagging, seen or not (not after All clear)
                     cur = self.store.one("SELECT * FROM alarms WHERE emergency = 1 AND clear_at IS NULL AND radio_id = ? "
-                                         "AND channel = ? AND created_at >= ? ORDER BY id DESC LIMIT 1",
-                                         (rid, str(t.get("source") or ""), now - STUCK_WITHIN_S))
+                                         f"AND channel = ? AND {near} ORDER BY id DESC LIMIT 1",
+                                         (rid, str(t.get("source") or ""), now - STUCK_WITHIN_S,
+                                          start - STUCK_WITHIN_S if late else 1))
                 if cur is not None:
                     self.log(f"alarms: {tid}: radio {rid}'s emergency button again: alarm {cur['id']}")
                     if not heard:
@@ -704,12 +720,13 @@ class Alarms:
                     self._touch(tid)
                     aid = db.execute(
                         "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, via, keywords, spans, "
-                        "text, named, channel, talkgroup, unit, rig, radio_id, drill) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "text, named, channel, talkgroup, unit, rig, radio_id, drill, late) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (tid, start, end, now, now, level, int(emergency), via if emergency else "", json.dumps(heard),
                          json.dumps(spans), text,
                          json.dumps(named), str(t.get("source") or ""), t.get("talkgroup"), str(t.get("unit") or ""), rig,
-                         str(t.get("radio_id") or ""), int(bool(cfg["drill"])))).lastrowid
+                         str(t.get("radio_id") or ""), int(bool(cfg["drill"])),
+                         max(1.0, now - end) if late else 0.0)).lastrowid
                 a = self.get(aid)
                 self.log(f"alarms: {'DRILL ' if a['drill'] else ''}{level.upper()} {line(a)}"
                          + (f": {text}" if text else ""))
@@ -966,6 +983,8 @@ class Alarms:
             return
         adsb = a.get("source") == "adsb"
         head = what(a).upper()
+        if late_note(a):                          # (#747) its own time in the body; how late, in the title
+            head += f" ({late_note(a)})"
         title = ("DRILL: " if a["drill"] else "") + ("Ended: " if ended else "Acknowledged: " if ack else "") + head
         body = [f"{_hms(a['at'])}" + (f" · radio {a['radio_id']}" if a["radio_id"] else "")]
         if ended:
@@ -1010,6 +1029,8 @@ class Alarms:
         for r in rows:
             a = self._row(r)
             a["what"], a["who"] = what(a), who(a)
+            if late_note(a):                      # (#747) the screens say it is late: "... (from while sizeup was down, ...)"
+                a["what"] += f" ({late_note(a)})"
             a["talker"] = self.who_of(a)
             try:
                 a["has_clip"] = bool(self.cad.has_clip(a["traffic_id"]))
