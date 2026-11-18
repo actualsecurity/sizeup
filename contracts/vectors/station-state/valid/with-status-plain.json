@@ -83,7 +83,12 @@
     "p25_systems": [],
     "reception": null,
     "stt_terms": {"v": "", "sets": {}},
-    "outbox": {"pending": 0, "oldest": null, "dropped_audio": 0},
+    "outbox": {
+      "pending": 0,
+      "oldest": null,
+      "dropped_audio": 0,
+      "quarantine": {"n": 0, "critical": 0, "evicted": 0, "too_large_audio": 0, "kinds": {}, "rows": []}
+    },
     "stt_input": {
       "queued": 0,
       "waiting": 0,
