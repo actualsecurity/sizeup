@@ -1,6 +1,6 @@
 Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority,Tier,Service,Department
 9211,23fb,PD Dispatch,T,"Port Chester / Rye / Rye Brook PD dispatch",Police,MRRS,1,alert,police,
-9212,23fc,PD Tac,T,"Port Chester / Rye / Rye Brook PD tactical",Police,MRRS,1,text,police,
+9212,23fc,PD Tac,T,"Port Chester / Rye / Rye Brook PD tactical",Police,MRRS,2,text,police,
 9213,23fd,PD Secure,TE,"Port Chester / Rye / Rye Brook PD secure",Police,MRRS,3,activity,police,
 9570,2562,PC-Rye EMS,T,"Port Chester / Rye / Rye Brook EMS (secondary: primary EMS is on the county system)",EMS,MRRS,1,alert,ems,
 9563,255b,Harrison PD-EMS,T,"Harrison PD / EMS dispatch",Police,MRRS,2,text,police,Harrison PD

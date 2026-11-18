@@ -70,8 +70,8 @@ the last one (watchdog). [p25] watchdog_* in /etc/sizeup/config.toml change the 
 Its output into the journal (#547, Shipper): the control channel's decode rate (when trunk-recorder first logs it, when
 it is lost or back, and a summary every RATE_LOG_S), and its error / warning / control channel lines, radio IDs masked,
 at most SHIP_BURST different lines per SHIP_WINDOW_S (then a count): the station's logs go to the hub. A watched
-talkgroup's grants (its config.json's "sizeup" "reception" "watch" list) are said as what became of each, recorded,
-encrypted or not recorded, at most one line per talkgroup a minute (then a count)."""
+talkgroup's grants that weren't recorded (its config.json's "sizeup" "reception" "watch" list) are said as why
+(encrypted, no recorder, off, no source), at most one line per talkgroup a minute (then a count)."""
 
 from __future__ import annotations
 
@@ -591,10 +591,11 @@ class Watchdog:
 
 class Shipper:
     """trunk-recorder's own lines worth seeing, into the journal (#547), filtered and rate-limited: line() each line of
-    its output, tick() now and then (the count of lines held back). A watched talkgroup's call lines (watch(): its
-    config's reception "watch" list) are said as what became of the grant, "<tag>: TG 9212 PD Tac: grant (encrypted,
-    not recorded)", at most one per talkgroup per WATCHED_EVERY_S, then "(+N more: ...)": no traffic is then told
-    from traffic it can't record."""
+    its output, tick() now and then (the count of lines held back). A watched talkgroup's grants that were NOT
+    recorded (watch(): its config's reception "watch" list) are said as what became of them, "<tag>: TG 9212 PD Tac:
+    grant (encrypted, not recorded)", at most one per talkgroup per WATCHED_EVERY_S, then "(+N more: ...)": no traffic
+    is then told from traffic it can't record. A recorded one is traffic already: never said (systems.Activity counts
+    it)."""
 
     def __init__(self, log, tag: str = "p25"):
         self.log, self.tag = log, tag
@@ -618,7 +619,9 @@ class Shipper:
         if self.watched and "TG:" in line:
             c = call_line(line)
             if c is not None and c[0] in self.watched:
-                return self._call(*c, now)
+                if c[1] != "recording":                  # a recorded call is traffic already: counted (Activity) only
+                    self._call(*c, now)
+                return
         m = CC_RATE.search(line) if "ontrol" in line else None
         if m:
             try:
@@ -1086,7 +1089,7 @@ class Supervisor:
                 if any(w in low for w in SAYS):
                     self.said = line[-160:]
                 try:
-                    t = time.monotonic()
+                    t = self.mono()                  # the watchdog's and the shipper's tick()'s clock
                     self.watchdog.line(line, t)
                     self.shipper.line(line, t)
                 except Exception:  # noqa: BLE001 - the drain must never stop (trunk-recorder would block on its output)
