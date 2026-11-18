@@ -67,13 +67,22 @@ window.SignalChart = (() => {
       return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) / 1000) - Math.floor(t);
     } catch (_) { return 0; }
   }
-  // Time ticks on whole hours / local days.
+  // Time ticks on whole hours / local days: stepped in the zone's wall-clock time and each one turned back into a
+  // time with the offset at that tick, so a DST change on the way never leaves them on 23:00 or 01:00 (#686).
   function timeTicks(x0, x1, n) {
     const span = x1 - x0;
     const step = [900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 259200, 604800].find((x) => span / x <= n) || 604800;
-    const off = step >= 3600 ? tzOffset(x0) : 0;
     const out = [];
-    for (let t = Math.ceil((x0 + off) / step) * step - off; t <= x1; t += step) out.push(t);
+    if (step < 3600) {
+      for (let t = Math.ceil(x0 / step) * step; t <= x1; t += step) out.push(t);
+      return out;
+    }
+    const utc = (w) => { const t = w - tzOffset(w - tzOffset(w)); return w - tzOffset(t); };   // wall clock -> time
+    for (let w = Math.ceil((x0 + tzOffset(x0)) / step) * step, k = 0; k < 1000; w += step, k++) {
+      const t = utc(w);
+      if (t > x1) break;
+      if (t >= x0 && (!out.length || t > out[out.length - 1])) out.push(t);
+    }
     return out;
   }
 

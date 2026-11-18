@@ -276,7 +276,12 @@ def test_health_links_a_shift_hint_to_its_chart_and_draws_the_sparks(tmp_path):
                                                  "trunk": {"last_call": NOW - 60, "quiet_s": 60, "window_s": 900, "gaps": 3},
                                                  "hints": [{"channel": "FG1", "level": "warn", "kind": "metrics_shift",
                                                             "text": "idle quieting +4.2 dB since 14:05 (SDR change)",
-                                                            "link": "#settings/radios/signal?s=FG1&at=1799989200"}]},
+                                                            "link": "#settings/radios/signal?s=FG1&at=1799989200"},
+                                                           {"channel": "FG2", "level": "info", "kind": "metrics_shift",
+                                                            "text": "level not checked: too little traffic since 14:05 "
+                                                                    "(station restart)",
+                                                            "title": "kept voice in 4 half hours before, 2 after",
+                                                            "link": "#settings/radios/signal?s=FG2&at=1799989200"}]},
                                       "alerts": [], "notify": {}, "thresholds": {}, "history": []}},
                                   "/api/cad/perf": {"status": 403, "body": {}}}}
     out = run(tmp_path, r"""
@@ -290,10 +295,14 @@ for (let i = 0; i < 20; i++) await flush();
 const hints = cls(box, "hl-hints")[0];
 const links = all(hints, (n) => n.tag === "a").map((a) => [a.textContent, a.href]);
 const sparks = cls(box, "hl-spark").map((a) => [a.href, cls(a, "sg-spark").map((s) => s.attrs["aria-label"])]);
-console.log(JSON.stringify({ hint: text(hints), links, sparks }));
+const notes = hints.children.map((p) => [p.className, p.title]);
+console.log(JSON.stringify({ hint: text(hints), links, sparks, notes }));
 """, data)
     assert out["hint"].startswith("FG1: idle quieting +4.2 dB since 14:05 (SDR change)")
-    assert out["links"] == [["Chart", "#settings/radios/signal?s=FG1&at=1799989200"]]
+    assert out["links"] == [["Chart", "#settings/radios/signal?s=FG1&at=1799989200"],
+                            ["Chart", "#settings/radios/signal?s=FG2&at=1799989200"]]
+    # #686: a level that wasn't checked is an info line, why on hover
+    assert out["notes"] == [["notice", ""], ["notice info", "kept voice in 4 half hours before, 2 after"]]
     assert out["sparks"] == [["#settings/radios/signal?s=p25", ["p25 decode rate 24 h · now 40 msg/s"]],
                              ["#settings/radios/signal?s=FG1", ["Idle q90 24 h · now 9 dB", "Noise opens/min 24 h · now 0.1"]]]
 
@@ -308,3 +317,46 @@ const hm = (t) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York
 console.log(JSON.stringify(ticks.map(hm)));
 """, {"now": NOW, "fetch": {}})
     assert len(out) == 7 and set(out) == {"00:00"}                    # the console's midnights, not UTC's
+
+
+# -- the re-review's follow-ups (#686) --------------------------------------------------------------------------------
+
+def test_apply_sends_the_squelch_the_suggestion_was_for_not_what_the_card_shows(tmp_path):
+    data = squelch_data()
+    data["squelch"]["channels"][0]["running"] = {"open_db": 10.1, "close_db": 6.1, "min_open_s": 0.3}   # (near: Apply)
+    out = run(tmp_path, SQUELCH, data)
+    assert out["applies"] == 1
+    # the suggestion's own cur_open / cur_close: the server compares them with what runs and refuses 10.1 / 6.1 itself
+    assert out["posted"][0][1]["expect"] == {"open_db": 10, "close_db": 6}
+
+
+def test_a_subject_two_stations_report_shows_the_one_with_data_in_its_window(tmp_path):
+    data = squelch_data()
+    chans = data["fetch"]["/api/cad/metrics?view=squelch"]["body"]["channels"]
+    old = mi.suggest([], [], mi.DEFAULTS, NOW)                            # an old station id: no floor data in 7 days
+    chans.append({**old, "subject": "FG1", "station": "old-id"})
+    out = run(tmp_path, SQUELCH, data)
+    assert out["cells"][0][0][0] == "13 dB Apply"                       # not blanked by the old id
+    chans.append({**chans[0], "station": "pcfd-annex"})                 # two that both have data: which would Apply set?
+    out = run(tmp_path, SQUELCH, data)
+    assert out["cells"][0][0][0] == "—"
+
+
+TICKS = r"""
+load("signal-chart.js");
+const fmt = (t) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(t * 1000));
+console.log(JSON.stringify(data.spans.map(([a, b, n]) => window.SignalChart.timeTicks(a, b, n).map(fmt))));
+"""
+
+
+def test_ticks_stay_on_local_midnights_and_hours_across_a_dst_change(tmp_path):
+    fall, spring = 1793509200, 1772953200        # 2026-11-01 05:00 UTC (01:00 EDT, the first 01:00), 2026-03-08 07:00 UTC (03:00 EDT)
+    spans = [[fall - 4 * DAY, fall + 3 * DAY, 7], [spring - 3 * DAY, spring + 4 * DAY, 7],
+             [fall - 12 * 3600, fall + 12 * 3600, 8], [spring - 12 * 3600, spring + 12 * 3600, 8]]
+    week_f, week_s, day_f, day_s = run(tmp_path, TICKS, {"now": NOW, "fetch": {}, "spans": spans})
+    for week, first in ((week_f, "Oct 29"), (week_s, "Mar 6")):
+        assert len(week) == 7 and {w.split(", ")[1] for w in week} == {"00:00"}      # never 23:00 after the change
+        assert week[0].startswith(first) and len({w.split(", ")[0] for w in week}) == 7   # a date each, none twice
+    for day in (day_f, day_s):
+        assert all(w.split(", ")[1].endswith(":00") and int(w.split(", ")[1][:2]) % 3 == 0 for w in day), day
