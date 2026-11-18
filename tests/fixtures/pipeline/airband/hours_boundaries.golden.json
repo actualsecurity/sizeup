@@ -1,0 +1,967 @@
+{
+ "why": "NY Approach's schedule at its boundaries (07:00 to 126.4, 23:00 to 120.8): a hand-off to 120.8 one second before and at 07:00, and to 120.8 one second before and at 23:00 (the Where line of each aircraft's pre-alert).",
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 14390,
+    "id": "tx-14390",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November one zero one alfa alfa, going around, we have a flap failure, we have to run a checklist"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N101AA",
+     "group": "",
+     "at": 14390.0,
+     "updated_at": 14390.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N101AA",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14390",
+        "at": 14390.0,
+        "channel": "HPN Tower",
+        "text": "N101AA, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N101AA",
+        "hex": null,
+        "spoken": "N101AA",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N101AA"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 14390.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps, checklist · N101AA (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps, checklist · N101AA",
+     "message": "“N101AA, going around, we have a flap failure, we have to run a checklist” · N101AA · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14391,
+    "id": "tx-14391",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November two zero two bravo bravo, going around, we have a flap failure, we have to run a checklist"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N202BB",
+     "group": "",
+     "at": 14391.0,
+     "updated_at": 14391.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N202BB",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14391",
+        "at": 14391.0,
+        "channel": "HPN Tower",
+        "text": "N202BB, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N202BB",
+        "hex": null,
+        "spoken": "N202BB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N202BB"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 14391.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps, checklist · N202BB (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps, checklist · N202BB",
+     "message": "“N202BB, going around, we have a flap failure, we have to run a checklist” · N202BB · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14399,
+    "id": "ho-0659",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November one zero one alfa alfa, contact New York approach one two zero point eight"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N101AA",
+     "group": "",
+     "at": 14390.0,
+     "updated_at": 14399.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N101AA",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14390",
+        "at": 14390.0,
+        "channel": "HPN Tower",
+        "text": "N101AA, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-0659",
+        "at": 14399.0,
+        "channel": "HPN Tower",
+        "text": "N101AA, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N101AA",
+        "hex": null,
+        "spoken": "N101AA",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N101AA"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14400,
+    "id": "ho-0700",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November two zero two bravo bravo, contact New York approach one two zero point eight"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N202BB",
+     "group": "",
+     "at": 14391.0,
+     "updated_at": 14400.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N202BB",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14391",
+        "at": 14391.0,
+        "channel": "HPN Tower",
+        "text": "N202BB, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-0700",
+        "at": 14400.0,
+        "channel": "HPN Tower",
+        "text": "N202BB, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N202BB",
+        "hex": null,
+        "spoken": "N202BB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N202BB"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8 · not on now · tracking by ADS-B"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71990,
+    "id": "tx-71990",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November three zero three charlie charlie, going around, we have a flap failure, we have to run a checklist"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N101AA",
+     "group": "",
+     "at": 14390.0,
+     "updated_at": 14399.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N101AA",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "expired",
+     "outcome_at": 71990.0,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14390",
+        "at": 14390.0,
+        "channel": "HPN Tower",
+        "text": "N101AA, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-0659",
+        "at": 14399.0,
+        "channel": "HPN Tower",
+        "text": "N101AA, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N101AA",
+        "hex": null,
+        "spoken": "N101AA",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N101AA"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    },
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N202BB",
+     "group": "",
+     "at": 14391.0,
+     "updated_at": 14400.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N202BB",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "expired",
+     "outcome_at": 71990.0,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-14391",
+        "at": 14391.0,
+        "channel": "HPN Tower",
+        "text": "N202BB, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-0700",
+        "at": 14400.0,
+        "channel": "HPN Tower",
+        "text": "N202BB, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N202BB",
+        "hex": null,
+        "spoken": "N202BB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N202BB"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8 · not on now · tracking by ADS-B"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    },
+    {
+     "id": "A3",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N303CC",
+     "group": "",
+     "at": 71990.0,
+     "updated_at": 71990.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N303CC",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-71990",
+        "at": 71990.0,
+        "channel": "HPN Tower",
+        "text": "N303CC, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N303CC",
+        "hex": null,
+        "spoken": "N303CC",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N303CC"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 71990.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 06:59:50 expired (unanswered 30 min): HPN ATC: go-around · flaps, checklist · N101AA",
+     "operator": ""
+    },
+    {
+     "incident": null,
+     "at": 71990.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 06:59:51 expired (unanswered 30 min): HPN ATC: go-around · flaps, checklist · N202BB",
+     "operator": ""
+    },
+    {
+     "incident": null,
+     "at": 71990.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps, checklist · N303CC (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps, checklist · N303CC",
+     "message": "“N303CC, going around, we have a flap failure, we have to run a checklist” · N303CC · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71991,
+    "id": "tx-71991",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November four zero four delta delta, going around, we have a flap failure, we have to run a checklist"
+   },
+   "alerts": [
+    {
+     "id": "A4",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N404DD",
+     "group": "",
+     "at": 71991.0,
+     "updated_at": 71991.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N404DD",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-71991",
+        "at": 71991.0,
+        "channel": "HPN Tower",
+        "text": "N404DD, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N404DD",
+        "hex": null,
+        "spoken": "N404DD",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N404DD"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 71991.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps, checklist · N404DD (alert medium 75%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps, checklist · N404DD",
+     "message": "“N404DD, going around, we have a flap failure, we have to run a checklist” · N404DD · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71999,
+    "id": "ho-2259",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November three zero three charlie charlie, contact New York approach one two zero point eight"
+   },
+   "alerts": [
+    {
+     "id": "A3",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N303CC",
+     "group": "",
+     "at": 71990.0,
+     "updated_at": 71999.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N303CC",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-71990",
+        "at": 71990.0,
+        "channel": "HPN Tower",
+        "text": "N303CC, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-2259",
+        "at": 71999.0,
+        "channel": "HPN Tower",
+        "text": "N303CC, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N303CC",
+        "hex": null,
+        "spoken": "N303CC",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N303CC"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8 · not on now · tracking by ADS-B"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 72000,
+    "id": "ho-2300",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November four zero four delta delta, contact New York approach one two zero point eight"
+   },
+   "alerts": [
+    {
+     "id": "A4",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N404DD",
+     "group": "",
+     "at": 71991.0,
+     "updated_at": 72000.0,
+     "title": "HPN ATC: go-around · flaps, checklist · N404DD",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.75,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "tx-71991",
+        "at": 71991.0,
+        "channel": "HPN Tower",
+        "text": "N404DD, going around, we have a flap failure, we have to run a checklist",
+        "hits": [
+         "flap failure",
+         "have to run a checklist",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "ho-2300",
+        "at": 72000.0,
+        "channel": "HPN Tower",
+        "text": "N404DD, contact New York approach 120 point eight",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N404DD",
+        "hex": null,
+        "spoken": "N404DD",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N404DD"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps · checklist"
+       ],
+       [
+        "Where",
+        "NY App 120.8"
+       ]
+      ],
+      "pushed": 0.75
+     }
+    }
+   ]
+  }
+ ]
+}

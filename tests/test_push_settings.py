@@ -212,23 +212,68 @@ def test_the_hub_status_endpoint_and_the_health_panel_never_name_a_topic(tmp_pat
 
 def test_the_intel_topic_is_set_tested_turned_off_and_audited_like_the_others(rig):
     INTEL = notify.INTEL
-    assert rig.eff(INTEL) == {"topic": SSM_ALERTS, "source": "fallback"}          # day one: the alerts topic
+    assert rig.eff(INTEL) == {"topic": "", "source": "none"}          # day one: no intel pushes (never the alerts topic)
     by = {k["kind"]: k for k in rig.page()[1]["kinds"]}
-    assert by["intel"]["label"] == notify.LABELS[INTEL] and by["intel"]["source_text"] == "shared (the alerts topic)"
-    assert rig.post({"action": "test", "key": "intel"})[0] == 200
-    assert rig.fake.got[-1]["topic"] == SSM_ALERTS and rig.fake.got[-1]["title"] == "sizeup test: intel topic"
+    assert by["intel"]["label"] == notify.LABELS[INTEL] and by["intel"]["source_text"] == "not set"
+    n = len(rig.fake.got)
+    assert rig.post({"action": "test", "key": "intel"})[0] == 400 and len(rig.fake.got) == n     # nothing to test
     own = "pcfd-xmpl-intel-thread"
     assert rig.post({"action": "set", "key": "intel", "topic": own})[0] == 200
     assert rig.eff(INTEL) == {"topic": own, "source": "settings"} and rig.eff(ALERTS)["topic"] == SSM_ALERTS
+    assert rig.post({"action": "test", "key": "intel"})[0] == 200
+    assert rig.fake.got[-1]["topic"] == own and rig.fake.got[-1]["title"] == "sizeup test: intel topic"
     code, out = rig.post({"action": "set", "key": "intel", "topic": "example-ring-topic"})
     assert code == 400 and "protected" in out["error"]
     assert rig.post({"action": "off", "key": "intel"})[0] == 200
     assert rig.eff(INTEL)["topic"] == "" and rig.eff(ALERTS)["topic"] == SSM_ALERTS
-    assert rig.post({"action": "reset", "key": "intel"})[0] == 200 and rig.eff(INTEL)["source"] == "fallback"
+    assert rig.post({"action": "reset", "key": "intel"})[0] == 200 and rig.eff(INTEL) == {"topic": "", "source": "none"}
     audit = rig.cad.settings_audit_log({"section": ["system"]})["audit"]
     assert {a["key"] for a in audit} >= {"notify/intel", "notify/intel/test"}
     assert own not in json.dumps(audit) and own not in "\n".join(rig.logs)
     assert rig.post({"action": "set", "key": "nope", "topic": own})[0] == 400
+
+
+def test_an_intel_topic_equal_to_the_alerts_or_status_one_is_refused_either_way(rig):
+    INTEL = notify.INTEL
+    for same in (SSM_ALERTS, SSM_STATUS, SSM_ALERTS.upper(), f"  {SSM_STATUS}  "):      # trimmed, case aside
+        code, out = rig.post({"action": "set", "key": "intel", "topic": same})
+        assert code == 400 and notify.INTEL_SAME_WHY in out["error"] and same.strip() not in out["error"]
+        assert rig.eff(INTEL) == {"topic": "", "source": "none"}
+    # an alerts topic set in Settings is the alerts' channel too; the alerts turned off: their SSM topic still is
+    mine = "pcfd-xmpl-alerts-settings"
+    assert rig.post({"action": "set", "key": "alerts", "topic": mine})[0] == 200
+    assert rig.post({"action": "set", "key": "intel", "topic": mine.upper()})[0] == 400
+    assert rig.post({"action": "off", "key": "alerts"})[0] == 200
+    assert rig.post({"action": "set", "key": "intel", "topic": SSM_ALERTS})[0] == 400
+    assert rig.post({"action": "reset", "key": "alerts"})[0] == 200
+    # the other way: an intel topic in effect, then an alerts / status topic equal to it
+    own = "pcfd-xmpl-intel-thread"
+    assert rig.post({"action": "set", "key": "intel", "topic": own})[0] == 200
+    for key in ("alerts", "status"):
+        code, out = rig.post({"action": "set", "key": key, "topic": own.upper()})
+        assert code == 400 and notify.INTEL_SAME_WHY in out["error"]
+    assert rig.eff(ALERTS)["topic"] == SSM_ALERTS and rig.eff(STATUS)["topic"] == SSM_STATUS
+    assert rig.eff(INTEL) == {"topic": own, "source": "settings"}
+    # the protected-topic and shape rules still come first
+    assert "protected" in rig.post({"action": "set", "key": "intel", "topic": "example-ring-topic"})[1]["error"]
+    assert "at least" in rig.post({"action": "set", "key": "intel", "topic": "short"})[1]["error"]
+
+
+def test_the_health_panel_has_a_warning_row_while_intel_has_no_topic(tmp_path, monkeypatch, capsys):
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    app = HubApp(hub_cfg(tmp_path, alerts_ntfy_topic=SSM_ALERTS, alerts_status_topic=SSM_STATUS,
+                         alerts_ntfy_topic_source="env", alerts_status_topic_source="env"), log=print)
+    try:
+        rows = app.health.panel()["intel"]
+        assert rows[0] == {"pack": "push", "label": "Intel pushes", "on": True, "level": "warn",
+                           "text": "no intel topic set", "title": rows[0]["title"]}
+        assert "intel \u2192 off (no intel topic set)" in capsys.readouterr().out
+        assert not app.health.alerts()                          # shown, never an alert (nothing pushed about it)
+        app.cad.settings.section = lambda s: {"intel": {"topic": "pcfd-xmpl-intel-thread"}} if s == notify.SECTION else {}
+        assert all(r["pack"] != "push" for r in app.health.panel()["intel"] or [])
+    finally:
+        app.stop()
 
 
 # -- the topics the app SUBSCRIBES to, and the extra protected ones: in the DB, never in the repo ---------------------

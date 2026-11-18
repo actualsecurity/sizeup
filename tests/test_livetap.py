@@ -294,7 +294,7 @@ def test_the_tap_rides_on_the_receivers_squelch_and_every_new_one(tmp_path):
     seen = []
 
     class Tap(LiveTap):
-        def frame(self, channel, frame, squelch):
+        def frame(self, channel, frame, squelch, made=True):
             seen.append((channel.label, squelch.open))
     Tap(lambda _l: "traffic").attach(r)
     for f in frames(hiss(3.0)):

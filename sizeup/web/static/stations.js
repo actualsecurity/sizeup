@@ -1,8 +1,11 @@
 // Settings > Station > Stations (sizeup/cloud/stations.py): each station's own token, admins, the hub only.
 // GET /api/cad/stations: the stations (id, name, last used, revoked) and the shared token's state; never a token or a
-// hash. POST /api/cad/stations {action: add | rename | rotate | revoke | retire_shared | restore_shared}: add and rotate
+// hash. POST /api/cad/stations {action: add | rename | rotate | revoke | retire_shared | restore_shared | shared_id}:
+// shared_id while its station is live answers 409 {error: the question, confirm: true}: asked, then sent with confirm
+// (audited as confirmed). The shared token's former ids ("aliases") are still taken from it. add and rotate
 // answer the new token and its status token, shown here ONCE (kept in this page's memory until Done, never stored) with
 // a copy button. Its own card and poll, so typing is never wiped by another panel's render.
+"use strict";
 const StationsCard = (() => {
   const POLL_MS = 15000;
   const LIVE_S = 30;                       // used this recently: "now"
@@ -17,7 +20,7 @@ const StationsCard = (() => {
     const r = await fetch("/api/cad/stations", { method: "POST", cache: "no-store",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`), { confirm: d.confirm === true });
     return d;
   }
 
@@ -127,7 +130,9 @@ const StationsCard = (() => {
     if (window.Help && Help.info) {
       head.append(Help.info("Each station has its own token (sz1.<id>.…); the hub keeps only its hash. Rotate: a new token, "
         + `the old one works ${Math.round((d.grace_s || 600) / 60)} min more. Revoke: refused from its next request. `
-        + "The shared token is one station until it is retired. docs/cloud.md: How station authentication works", "About"));
+        + "The shared token is one station until it is retired. Set id renames it: the station takes the new id from the "
+        + "hub, its old id is still taken and its history moves; asked first while it's connected. "
+        + "docs/cloud.md: How station authentication works", "About"));
     }
     const t = el("table", "evtable");
     const hr = el("tr");
@@ -187,7 +192,18 @@ const StationsCard = (() => {
         i.maxLength = 64;
         i.spellcheck = false;
         i.title = "The station's [station] id. Empty: back to [cloud] legacy_station_id" + (sh.config ? ` (${sh.config})` : "");
-        const save = () => { editing = ""; act({ action: "shared_id", id: i.value.trim() }, "Shared token's station set"); };
+        const save = async () => {
+          editing = "";
+          const body = { action: "shared_id", id: i.value.trim() };
+          said = "";
+          try { await post(body); said = "Shared token's station set"; } catch (e) {
+            // its station is connected: the hub's question, asked here, then sent again with confirm (audited)
+            if (e.confirm && await UI.confirm(e.message, { ok: "Change", danger: true })) {
+              try { await post({ ...body, confirm: true }); said = "Shared token's station set"; } catch (e2) { said = e2.message; }
+            } else if (!e.confirm) said = e.message;
+          }
+          poll(true);
+        };
         i.addEventListener("keydown", (e) => {
           if (e.key === "Enter") { e.preventDefault(); save(); }
           if (e.key === "Escape") { editing = ""; render(); }
@@ -196,9 +212,22 @@ const StationsCard = (() => {
         setTimeout(() => i.focus(), 0);
       } else {
         idCell.textContent = sh.station || "—";
+        if ((sh.aliases || []).length) {
+          const al = el("span", "dim small", ` · was ${sh.aliases.join(", ")}`);
+          al.title = "Former ids, still taken from the shared token as this one (a station not yet reconfigured)";
+          idCell.append(al);
+        }
         acts.prepend(btn("Set id", "sm", () => { editing = "\0shared"; render(); }));
       }
       tr.append(el("td", "dim", "Shared token"), idCell, tw, el("td", "t", ago(sh.last_used)), acts);
+      t.tBodies[0].append(tr);
+    }
+    if (d.mismatch) {
+      const m = d.mismatch;
+      const tr = el("tr");
+      const w = el("td", "hl-bad", "rejected");
+      w.title = `id mismatch: the station says ${m.said || "?"}, its token is ${m.token}. Set id here, or its [station] id`;
+      tr.append(el("td", "dim", "Id mismatch"), el("td", "mono", m.said || "?"), w, el("td", "t", ago(m.at)), el("td", ""));
       t.tBodies[0].append(tr);
     }
     for (const [id, at] of Object.entries(d.others || {})) {

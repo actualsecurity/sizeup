@@ -17,7 +17,10 @@
 //              position, phase, source, time; and its emergency alarm's state (open / acknowledged by): one event,
 //              shown once; DRILL in drill mode
 //
-//   AirportAlerts.column(list, state, deps)   deps: {api, operator, time, readonly, select(id), alarms: the state's}
+//   More info  a link to the pre-alert's own page (/cad#prealert/airport/<id>, prealert-info.js): the transmissions and
+//              their audio, the place, site history, the outcome; every viewer (not the wall board: deps.more)
+//
+//   AirportAlerts.column(list, state, deps)   deps: {api, operator, time, readonly, more, select(id), alarms: the state's}
 //   AirportAlerts.notify(state)               a toast (and the chime) per new pre-alert (radio.js's prealert setting)
 "use strict";
 
@@ -85,6 +88,15 @@ window.AirportAlerts = (() => {
     return done && done.ack_by ? `Alarm acknowledged by ${done.ack_by}` : "Alarm acknowledged";
   }
 
+  // the pre-alert's own page (prealert-info.js): every viewer may open it
+  function moreInfo(a) {
+    const m = el("a", "nav mini aa-more", "More info");
+    m.href = window.PrealertInfo ? PrealertInfo.href("airport", a.id) : `#prealert/airport/${a.id}`;
+    m.title = "Its page: the transmissions and their audio, the place, site history, the outcome";
+    m.addEventListener("click", (ev) => ev.stopPropagation());
+    return m;
+  }
+
   function card(a, deps) {
     const d = a.data || {};
     const li = el("li", `aa aa-${a.level}` + (d.drill ? " aa-drill" : ""));
@@ -150,8 +162,12 @@ window.AirportAlerts = (() => {
     } else if ((d.phrases || []).length) {
       li.append(el("div", "aa-loc", "Heard: " + d.phrases.join("; ")));
     }
-    if (deps.readonly) return li;
+    if (deps.readonly) {
+      if (deps.more) { const r = el("div", "aa-btns"); r.append(moreInfo(a)); li.append(r); }
+      return li;
+    }
     const row = el("div", "aa-btns");
+    if (deps.more) row.append(moreInfo(a));
     const busy = st.busy.has(a.id);
     const lvl = Number((d.alert_level || {}).level || 0);
     const standby = lvl === 1 && !a.incident_id;          // an Alert 1: a standby, never an event (#369)

@@ -116,7 +116,9 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
 MTA TrainTime (sizeup/traintime.py, #362): an undocumented MTA API with GPS positions, speed, consist, per-car load,
 milepost, posted track and OTP. While it reads well it is merged into the feed above by train number and run date
 (Trains.view; a train then also carries "tt", "mp" and "pos_src"); after FALLBACK_AFTER bad polls in a row the layer
-is this module's GTFS-realtime alone, as before.
+is this module's GTFS-realtime alone, as before. A train only TrainTime has (Amtrak's: never in Metro-North's
+GTFS-realtime) is drawn from it alone, "agency" Amtrak, its next stop TrainTime's (Model.tt_next). A TrainTime SIGNAL
+location (the block a train entered, not a GPS fix) is taken block to block on its own terms (SIGNAL_STALE_S).
 """
 
 from __future__ import annotations
@@ -1012,13 +1014,17 @@ class Model:
                 s, mode = prev[1], "stopped"             # the feed hasn't said it left
         lane, ev, how = self.which_track(t, anchors, p, n, s, d, mem)
         lat, lon = self.where(d, s, lane)                # on its own numbered track, else its direction's
+        tt_nx = self.tt_next(t, s, d) if nxt is None and not anchors else None   # (a train only TrainTime has: Amtrak's)
         hold_s, kind = s, "stop"
         if mode != "stopped":
-            stop = nxt[1] if nxt is not None else None
+            stop = nxt[1] if nxt is not None else tt_nx["s"] if tt_nx is not None else None
             if fix is not None:
-                # a GPS fix (TrainTime, #362) isn't at one of the MTA's reporting points: the fallback distance
+                # a GPS fix (TrainTime, #362) isn't at one of the MTA's reporting points: the fallback distance (a SIGNAL
+                # location's, the reporting points' shorter one: it has no GPS speed to run on)
                 ahead = points.ahead(s, d) if points is not None and fix.get("src", "gtfs") == "gtfs" else None
-                fall = HOLD_FALLBACK_TT_M if fix.get("src") == "traintime" else HOLD_FALLBACK_M
+                fall = (fix["block_m"] + SIGNAL_LATE_S * (fix.get("v") or 0.0) if fix.get("block_m") else HOLD_FALLBACK_M) \
+                    if fix.get("signal") \
+                    else HOLD_FALLBACK_TT_M if fix.get("src") == "traintime" else HOLD_FALLBACK_M
                 hold_s, kind = (ahead, "reporting_point") if ahead is not None else (s + d * fall, "fallback")
                 if stop is not None and (hold_s - stop) * d > 0:
                     hold_s, kind = stop, "stop"
@@ -1029,7 +1035,7 @@ class Model:
             hold_s = max(0.0, min(self.line.length, hold_s))
         b = self.line.heading(s)
         bearing = fix["bearing"] if fix is not None and fix.get("bearing") is not None else (b if d > 0 else (b + 180) % 360)
-        nx = None
+        nx = tt_nx
         if nxt is not None:
             st = nxt[0]
             nx = {"stop_id": st["stop_id"], "name": self.stops.get(st["stop_id"], st["stop_id"]), "s": round(nxt[1], 1),
@@ -1046,6 +1052,18 @@ class Model:
                 **self.ref.at_s(s),
                 **({"v_fix": fix["v"], "a_fix": fix.get("a") or 0.0, "v_gps": fix.get("vf_raw"), "v_moved": fix.get("moved"),
                     "v_bad": fix.get("bad") or ""} if fix is not None and fix.get("v") is not None else {})}
+
+    def tt_next(self, t: dict, s: float, d: int) -> dict | None:
+        """A train with no GTFS-realtime stops (one only MTA TrainTime has: Amtrak's, which aren't in Metro-North's feed):
+        its next stop as TrainTime says it, when that is a station on our line not behind it (more than AT_STOP_M);
+        the shape of place()'s "next". None otherwise: then nothing limits it but the hold distance."""
+        x = (t.get("tt") or {}).get("next") or {}
+        ch = self.by_code.get(x.get("code") or "")
+        if ch is None or (ch - s) * d < -AT_STOP_M:
+            return None
+        sid = next((k for k, st in self.stations.items() if st.get("code") == x["code"]), x["code"])
+        return {"stop_id": sid, "name": x.get("name") or self.stops.get(sid, sid), "s": round(ch, 1), "arr": x.get("sched"),
+                "dep": x.get("sched"), "status": x.get("status") or "", "track": x.get("track") or ""}
 
     def facts(self, t: dict, now: float) -> dict:
         """What the panel and the click box say of a train: its line, destination, next stop, delay, track."""
@@ -1099,7 +1117,9 @@ class Model:
             key, label = DIRS[d]
             x = (self.facts(t, now) | p | {"id": t["id"], "dir": key, "dir_label": label, "d": d, "lat": round(p["lat"], DP),
                                             "lon": round(p["lon"], DP), "vehicle_status": t.get("vstatus") or "",
-                                            "vehicle_stop_id": t.get("vstop") or ""}
+                                            "vehicle_stop_id": t.get("vstop") or "",
+                                            # whose train (TrainTime: Amtrak's are on the line too, never in Metro-North's feed)
+                                            "agency": (t.get("tt") or {}).get("agency") or "Metro-North"}
                  | ({"cars": t["cars"]} if t.get("cars") else {}) | self.tt_facts(t, p, now))
             other = out.get(x["train"])                  # one train drawn once: a reported one over an estimate of it
             if other is None or other["fix_at"] is None and x["fix_at"] is not None:
@@ -1120,8 +1140,13 @@ class Model:
                "mp": mp if mp is not None else (round(p["s"] / MILE_M, 1) if fix else None)}
         if tt.get("cars"):
             out["cars"] = min(int(tt["cars"]), MAX_CARS)
+        signal = fix and (t.get("pos") or {}).get("loc") == "SIGNAL"
+        if signal:
+            out["stale_s"] = SIGNAL_STALE_S              # a signal's block: a minute or more old is normal (the page's motion too)
+            out["cruise_s"] = TT_HORIZON_S               # on at its block speed to the end of its block, no "no news" ease
         if fix and now is not None:
-            out["stale"] = now - p["fix_at"] > STALE_S   # by its own fix, not the GTFS-realtime feed's age
+            # by its own fix, not the GTFS-realtime feed's age
+            out["stale"] = now - p["fix_at"] > (SIGNAL_STALE_S if signal else STALE_S)
         rec_v = p.get("v_fix")
         if fix and isinstance(rec_v, (int, float)):
             out["v"] = round(rec_v, 2)                   # m/s, filtered (along_filter): the page carries it on at this
@@ -1294,6 +1319,23 @@ STOP_JITTER_M = 150.0            # a train already stopped: a fix less than this
                                  # stays put. The first stopped fix after it moved is taken as it is (forward only).
 A_MIN, A_MAX = -1.5, 1.0         # the filter's acceleration (m/s^2), clamped: past a service brake is noise
 A_BRAKE = -0.2                   # falling faster than this (m/s^2): braking (the page brakes it too: motion.js RAIL_BRAKE_A)
+# A SIGNAL location (MTA TrainTime "SIGNAL": where Metro-North's signal system has the train, the block it entered, and
+# when it entered it; Amtrak's trains on the New Haven Line, and a Metro-North train whose GPS is out) is a fixed point,
+# not a GPS fix: the same one stays until the train enters the next block, 1 to 3 km on, then it jumps there. Each is
+# taken as it is (never filtered: along_filter would draw the train halfway between two signals); a repeat is the train
+# still in that block, not a new fix (its time stays when it got there); a jump on is expected (judge allows a block,
+# SPACING_M, plus MAX_MPS over the time since). Its speed: the feed's when it gives one, else the mean over the block it
+# just ran (signal_speed), else none: then the page holds it at the signal, unpredicted. Carried on at that speed with
+# no ease for want of news (cruise_s: the page's RAIL_CRUISE_S is a GPS fix's) to the end of its block: as far on as the
+# block it just ran was long (block_m; the next signal is where it gets a new fix, and where it would wait at a red), and
+# SIGNAL_LATE_S of its travel more (the next signal's fix reaches the page up to a poll or two late: the drawn train runs
+# on through it rather than braking for it; held at a red, it overshoots by that and is glided back), HOLD_FALLBACK_M
+# when the block isn't known, never past its next stop; dimmed "at signal" only after SIGNAL_STALE_S (a minute between
+# signals is normal; a few at a red one).
+SIGNAL_STALE_S = 180.0
+SIGNAL_MAX_MPS = VMAX            # a block-to-block speed over this is the feed's timing, not the train: capped
+SIGNAL_BLOCK_M = (500.0, SPACING_M)   # a block's length taken for the next one's, within these
+SIGNAL_LATE_S = 10.0
 TT_HORIZON_S = 75.0              # a GPS fix is carried on at most this long past its time (predict_until). The page runs it
                                  # on at its speed (no slowing on age alone) for RAIL_CRUISE_S (20 s: TrainTime's fixes are
                                  # 3 to 16 s old when read, measured #375, read every 5 s), then eases it to a stop at its
@@ -1390,6 +1432,20 @@ def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None,
     return out
 
 
+def signal_speed(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float | None, float | None]:
+    """(speed m/s, block-to-block speed m/s) of a SIGNAL location at s (time t): the feed's speed when it gives one;
+    else the mean over the block the train just ran: from its last SIGNAL fix (when that was another signal, behind it,
+    under RESET_S before) to this one, at most SIGNAL_MAX_MPS; else none."""
+    moved = None
+    if last is not None and last.get("signal") and last.get("s") is not None and 0 < t - last["fix_at"] <= RESET_S:
+        step = (s - last["s"]) * d
+        if step > CLUSTER_M:
+            moved = min(SIGNAL_MAX_MPS, step / (t - last["fix_at"]))
+    if isinstance(v_feed, (int, float)) and v_feed >= 0:
+        return v_feed, moved
+    return moved, moved
+
+
 def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float, float, float]:
     """(s, v m/s, a m/s^2) for a new GPS fix measured at s (on the line) at time t, from the train's last filtered fix
     {s, v, a, vf, fix_at} (None: none, or too old): predicted on at its speed (braking at a when it was, to a stop at
@@ -1460,12 +1516,13 @@ def page_params(x: dict) -> dict:
     return out
 
 
-def gps_run(v: float, a: float, tau: float, room: float = math.inf, dyn: dict | None = None) -> tuple[float, float]:
+def gps_run(v: float, a: float, tau: float, room: float = math.inf, dyn: dict | None = None,
+            cruise: float = RAIL_CRUISE_S) -> tuple[float, float]:
     """motion.js gpsRun, line for line: (distance on, speed now) tau s after a GPS fix at v m/s, its acceleration a,
-    room metres to a scheduled stop ahead (inf: none), dyn the consist."""
+    room metres to a scheduled stop ahead (inf: none), dyn the consist, cruise how long it runs on before the ease."""
     dyn = dyn if dyn and isinstance(dyn.get("b"), (int, float)) else _EMU
     brake = a if a < A_BRAKE else 0.0
-    if not brake and not room < math.inf and tau <= RAIL_CRUISE_S:
+    if not brake and not room < math.inf and tau <= cruise:
         return v * tau, v
     x = t = 0.0
     cap = (lambda x_: math.sqrt(2 * dyn["bs"] * max(0.0, room - x_))) if room < math.inf else (lambda x_: math.inf)
@@ -1473,8 +1530,8 @@ def gps_run(v: float, a: float, tau: float, room: float = math.inf, dyn: dict | 
     while t < tau - 1e-9 and u > 0:
         h = min(RAIL_STEP_S, tau - t)
         du = brake * h
-        if not brake and t + h > RAIL_CRUISE_S:
-            du = -min(dyn["b"], RAIL_JERK * (t + h - RAIL_CRUISE_S)) * min(h, t + h - RAIL_CRUISE_S)
+        if not brake and t + h > cruise:
+            du = -min(dyn["b"], RAIL_JERK * (t + h - cruise)) * min(h, t + h - cruise)
         u1 = max(0.0, min(u + du, cap(x + u * h)))
         x += (u + u1) * h / 2
         u = u1
@@ -1615,9 +1672,12 @@ class Tracker:
                 continue                                 # none this read: its last good fix stands a while (fix)
             raw = (p["lat"], p["lon"])
             src = p.get("src") or "gtfs"                 # "traintime": a GPS fix with its own time (#362)
+            sig = src == "traintime" and p.get("loc") == "SIGNAL"    # a signal's block, not a GPS fix (SIGNAL_STALE_S)
             if (rec is not None and rec["raw"] == raw and rec["ok"] and rec.get("src", "gtfs") == src
-                    and not (src == "traintime" and (p.get("ts") or 0) > rec.get("fix_at", 0))):
-                rec["present"] = True                    # where it was: its fix_at stays (a GPS fix: unless it is newer)
+                    and not (src == "traintime" and not (sig and rec.get("signal")) and (p.get("ts") or 0) > rec.get("fix_at", 0))):
+                # where it was: its fix_at stays (a GPS fix: unless it is newer; the same signal again, however new: still
+                # in that block, its time when it got there)
+                rec["present"] = True
                 continue
             anchors = model.anchors(t)
             d = model.direction(t, anchors)
@@ -1656,15 +1716,21 @@ class Tracker:
                 else:
                     rec.update(raw=raw, ok=False, cand=nc)
                 continue
-            if src == "traintime" and last is not None and last.get("page") and 0 < fix_at - last["fix_at"] <= RESET_S:
-                self._residual(t, last, s, d, fix_at, now)
+            if src == "traintime" and not sig and last is not None and last.get("page") and 0 < fix_at - last["fix_at"] <= RESET_S:
+                self._residual(t, last, s, d, fix_at, now)     # (the GPS predictor's: a signal's block jump isn't its error)
             if last is not None and abs(s - last["s"]) <= CLUSTER_M and src == "gtfs":
                 rec.update(raw=raw, ok=True, present=True)   # back at (or a hair from) its last good fix: the same one
                 continue
             v = a = vf = None
             chk: dict = {}
             s_raw, gps = s, p.get("loc", "GPS") == "GPS"
-            if src == "traintime":                       # along the track, filtered (along_filter)
+            if sig:                                      # a signal's block: where it is, as it is (SIGNAL_STALE_S)
+                vf, moved = signal_speed(last, s, d, fix_at, p.get("speed"))
+                v, a, chk = vf, 0.0, {"moved": moved}
+                step = (s - last["s"]) * d if last is not None and last.get("signal") else 0.0
+                chk["block_m"] = (min(SIGNAL_BLOCK_M[1], max(SIGNAL_BLOCK_M[0], step)) if step > CLUSTER_M
+                                  else last.get("block_m") if last is not None else None)
+            elif src == "traintime":                     # along the track, filtered (along_filter)
                 if last is not None and last["raw"] == raw and gps and last.get("gps", True):
                     # the same GPS position again, newer: it hasn't moved, whatever its speed says (#375). (A SIGNAL
                     # location is a fixed point: the same one again says nothing, #379.)
@@ -1679,9 +1745,10 @@ class Tracker:
                                "bearing": p.get("bearing"), "fix_at": fix_at, "first_read": first and src == "gtfs", "src": src,
                                "v": v, "a": a, "vf": vf, "s_raw": s_raw, "gps": gps, "vf_raw": p.get("speed"),
                                "moved": chk.get("moved"), "bad": chk.get("bad", ""), "fell": chk.get("fell", False),
-                               "vf_held": chk.get("held"), "repeat": bool(chk.get("repeat")),
+                               "vf_held": chk.get("held"), "repeat": bool(chk.get("repeat")), "signal": sig,
+                               "block_m": chk.get("block_m"),
                                "stopped_prev": rec.get("stopped") if rec is not None else gone.get(tid)}
-            if src == "traintime":                       # what the page will predict it on from (the residuals), viewer or not
+            if src == "traintime" and not sig:           # what the page will predict it on from (the residuals), viewer or not
                 self._page(model, t, anchors, d, now, self.fixes[tid])
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)

@@ -1,0 +1,7 @@
+{"do": "scenario", "t0": "day", "why": "Alert 1 alone is a standby: its own pre-alert (source radio), pushed at priority 5, the feed polled, never an incident; Accept acknowledges it (no event) and it stays open; another airport's alert and a drill's level 2 never make an incident; the cancel ends it."}
+{"do": "radio", "t": 0, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, urgent"}
+{"do": "radio", "t": 20, "id": "fire-2", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, currently on a 5 mile final for runway 16"}
+{"do": "accept", "t": 40, "alert": "A1", "operator": "Disp One"}
+{"do": "radio", "t": 60, "id": "fire-3", "tg": 307, "text": "60 Control, be advised Danbury airport has an alert 1 for a Cessna, no response needed"}
+{"do": "radio", "t": 600, "id": "fire-4", "tg": 307, "text": "60 Control, car 9901, alert level one is canceled, aircraft landed without incident"}
+{"do": "radio", "t": 700, "id": "fire-5", "tg": 307, "text": "60 Control, car 9901, this is a drill, alert level 2 drill at the airport, runway 16"}

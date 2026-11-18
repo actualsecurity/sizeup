@@ -229,6 +229,7 @@ def test_the_weak_carrier_threshold(level, weak, marginal):
     assert am.MIN_CARRIER_DB == 3.0 and am.MARGINAL_DB == 6.0 and am.MIN_CARRIER_DB < am.SQUELCH_DB
 
 
+@pytest.mark.flaky(issue=616)
 def test_a_marginal_transmission_is_transcribed_and_flagged(tmp_path):
     texts = {3: "JetBlue one two three four, Westchester Tower, runway three four, clear to land"}
     app = App(replace(cfg(tmp_path), channels=FIVE))

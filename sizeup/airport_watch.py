@@ -940,7 +940,7 @@ class AirportWatch:
     def _called_first(self, text: str) -> bool:
         """The transmission starts with a callsign (the controller calling an aircraft; a pilot ends with it)."""
         try:
-            ms = atc.find_mentions(text, self.index)
+            ms = [m for m in atc.find_mentions(text, self.index) if m.alone]
         except Exception:  # noqa: BLE001
             return False
         return bool(ms) and min(m.start for m in ms) == 0

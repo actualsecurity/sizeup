@@ -307,7 +307,7 @@ def test_the_template_follows_the_hub():
 def test_the_hub_image_is_built_with_its_git_sha():
     """The station follows the hub's build: CI must pass the full sha it builds from."""
     wf = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
-    assert "SIZEUP_BUILD=${{ env.SHA }}" in wf and "SHA: ${{ github.event.workflow_run.head_sha || github.sha }}" in wf
+    assert "SIZEUP_BUILD=${{ env.SHA }}" in wf and "SHA: ${{ needs.pick.outputs.sha }}" in wf   # the full sha it picked
     assert "ARG SIZEUP_BUILD" in (ROOT / "Dockerfile").read_text()
 
 
