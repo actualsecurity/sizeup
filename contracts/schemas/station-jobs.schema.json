@@ -216,7 +216,7 @@
       }
     },
     "sources_reset": {
-      "description": "`sources_reset`: an admin on the hub resets an incident source on the station (Hub.reset_source). The hub waits 30 s. Outcome: `result`, a sentence. Arguments that are no object are taken as {} by the station: every source (J5).",
+      "description": "`sources_reset`: an admin on the hub resets an incident source on the station (Hub.reset_source). The hub waits 30 s. Outcome: `result`, a sentence. The station takes only an object with a string `source` (\"\" for every source, asked for by name) and refuses anything else (#791; before it, arguments that were no object reset every source, J5).",
       "x-complete": true,
       "required": [
         "source",
@@ -236,7 +236,7 @@
       }
     },
     "call": {
-      "description": "`call`: run one function of the station's App (Hub.remote; StationLink._call). The hub waits 12 s (10 s for sources_poll_now). The arguments are positional today: `args` is the list the function is called with, so each function's list is closed at the function's last parameter, and one argument too many is answered ok false with the TypeError's text (J4). `x-names` on each list below gives the parameter each position lands on, checked against the App's signatures; `x-forms` the lengths the hub sends today.",
+      "description": "`call`: run one function of the station's App (Hub.remote; StationLink._call). The hub waits 12 s (10 s for sources_poll_now). The hub sends the arguments by position (a list), for older stations. A station from #791 on takes them by position or by name (an object keyed by `x-names`), ignores a name it does not know and a position past the function's last parameter, and refuses a call that leaves out a required parameter (before #791 one argument too many was answered ok false with the TypeError's text, J4). `x-names` on each list below gives the parameter each position lands on, checked against the App's signatures; `x-forms` the lengths the hub sends today.",
       "x-complete": true,
       "required": [
         "fn",
@@ -268,7 +268,7 @@
         },
         "args": {
           "type": "array",
-          "description": "The positional arguments, by `fn`: the lists below (that they are lists is said here, once). A missing or empty one calls the function with its defaults (J5); anything but a list: `args: a list`."
+          "description": "The arguments, by `fn`: the lists below, as the hub sends them (that they are lists is said here, once); to a station from #791 on also an object by name. Missing or null: refused (`<fn>: no args ...`); a required parameter left out: refused (`TypeError: <fn>() missing argument ...`); anything but a list or an object: `args: a list or an object` (before #791 a missing or empty one ran the function on its defaults, J5)."
         }
       },
       "allOf": [
@@ -729,7 +729,7 @@
       ]
     },
     "call.retranscribe": {
-      "description": "App.retranscribe(ids=None, as_alt=False): run speech-to-text again. The hub sends [ids], and [ids, true] for the alternative text of a channel set to both engines. [null] is every recording still on the station's disk; so is an empty or missing argument list (J5). Result: how many were queued (an integer).",
+      "description": "App.retranscribe(ids=None, as_alt=False): run speech-to-text again. The hub sends [ids], and [ids, true] for the alternative text of a channel set to both engines. [null] is every recording still on the station's disk, asked for by name; an empty or missing argument list is refused (#791; before it, every recording too, J5). Result: how many were queued (an integer).",
       "x-names": [
         "ids",
         "as_alt"

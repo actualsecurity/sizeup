@@ -15,7 +15,8 @@
         "stt_prompt_time": true,
         "alt": {"text": "Engine 5 on location, nothing showing", "model": "other.bin"},
         "catchup": true,
-        "vocab_v": "terms-7"
+        "vocab_v": "terms-7",
+        "late": true
       },
       "audio": null,
       "audio_dropped": false

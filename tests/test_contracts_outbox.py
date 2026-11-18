@@ -40,11 +40,11 @@ TABLES = ("outbox", "meta", "stt_inputs", "quarantine", "source_latest")
 # -- known deviations (contracts/README.md "Known deviations"), pinned as the code is today ------------------------------
 # Each test below states today's behaviour and the fixed one. When a fix lands, flip its line here from True to False
 # (nothing else) and mark the row in contracts/README.md fixed.
-O1_A_FILE_SET_BACK_HANDS_OUT_THE_SAME_SEQ_AGAIN = True   # fixed: never the same seq twice under one epoch
+O1_A_FILE_SET_BACK_HANDS_OUT_THE_SAME_SEQ_AGAIN = False   # fixed: never the same seq twice under one epoch
 O2_NAN_IS_STORED_AS_A_TOKEN_THAT_IS_NOT_JSON = True      # fixed: stored as null, like #779 on the wire
-O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER = True        # fixed: that row is set aside, the ones behind it go up
-O4_A_FILE_SQLITE_CANNOT_OPEN_STOPS_THE_STATION = True    # fixed: the file is moved aside, a new outbox, the station starts
-O5_A_RESENT_SNAPSHOT_PUTS_BACK_WHAT_THE_FEED_CHANGED = True   # fixed: the hub never applies a re-sent copy (qid) older
+O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER = False        # fixed: that row is set aside, the ones behind it go up
+O4_A_FILE_SQLITE_CANNOT_OPEN_STOPS_THE_STATION = False    # fixed: the file is moved aside, a new outbox, the station starts
+O5_A_RESENT_SNAPSHOT_PUTS_BACK_WHAT_THE_FEED_CHANGED = False   # fixed: the hub never applies a re-sent copy (qid) older
 #                                                                      than its snapshot of that event
 
 
@@ -260,10 +260,10 @@ class Run:
         """Do one step; what it returned, as the sequence writes it."""
         op, ob = s["op"], self.ob
         a = {k: v for k, v in s.items() if k not in ("op", "returns", "after")}
-        if op == "open":
-            assert ob is None and set(a) == {"file", "max_audio_bytes"}, s
+        if op == "open":                                  # (arm: false, as the quarantine command opens it, #791)
+            assert ob is None and {"file", "max_audio_bytes"} <= set(a) <= {"file", "max_audio_bytes", "arm"}, s
             self.file = a["file"]
-            self.ob = Outbox(self.path(self.file), a["max_audio_bytes"])
+            self.ob = Outbox(self.path(self.file), a["max_audio_bytes"], arm=a.get("arm", True))
             assert HEX16.fullmatch(self.ob.epoch), self.ob.epoch
             if self.ob.epoch not in self.epochs:
                 self.epochs.append(self.ob.epoch)
@@ -302,6 +302,9 @@ class Run:
             return ob.dismiss(a["kind"])
         if op == "strip_audio":
             return ob.strip_audio(a["seq"])
+        if op in ("release", "resume"):                  # the station stops / starts again over the same file (#791)
+            assert not a, s
+            return getattr(ob, op)()
         if op == "summary":
             assert set(a) <= {"limit"}, s
             return ob.summary(**a)
@@ -423,7 +426,8 @@ def test_the_sequences_cover_every_operation_and_the_checks_on_them_fail_when_th
     and a sequence run against an Outbox that behaves otherwise (here: one that would reuse a seq, one that would
     drop the oldest audio before the context audio) fails."""
     ops = {s["op"] for n in SEQUENCE_NAMES for s in sequence(n)["steps"]}
-    quarantine = {"quarantine", "requeue_due", "released", "late", "drop", "dismiss", "strip_audio", "summary"}
+    quarantine = {"quarantine", "requeue_due", "released", "late", "drop", "dismiss", "strip_audio", "summary",
+                  "release", "resume"}
     assert ops == {"open", "close", "remove", "add", "batch", "ack", "add_stt", "stt_batch", "stt_ack", "sql"} | quarantine
     public = {n for n, f in vars(Outbox).items() if callable(f) and not n.startswith("_")}
     assert public == {"add", "batch", "ack", "pending", "add_stt", "stt_batch", "stt_ack", "stt_pending", "close"} \
@@ -572,6 +576,19 @@ def test_the_speech_to_text_lane_goes_by_priority_and_fresh_first():
     assert reopened["totals"]["stt_bytes"] == 150 and reopened["totals"]["stt_pending"] == 5
     # the lane and the events share the file and nothing else: an event's seq and an input's n count apart
     assert next(s["returns"] for s, _ in ev if s["op"] == "add") == 1
+
+
+def test_a_released_outbox_hands_out_nothing_and_an_unarmed_one_arms_before_it_does():
+    """release-resume.json, in words (#791): a marker per opener while it may hand out seqs; released, nothing goes out
+    (add still queues) until resume(); opened with arm false, no marker until its first batch; a stop in order keeps
+    the epoch."""
+    ev = events("release-resume")
+    marks = [s["returns"][0][0] for s, _ in ev if s["op"] == "sql"]
+    assert marks == [1, 0, 1, 0, 1, 1]
+    assert [[r["seq"] for r in s["returns"]] for s, _ in ev if s["op"] == "batch"] == [[], [1, 2], [3]]
+    assert [s["returns"] for s, _ in ev if s["op"] == "add"] == [1, 2, 3]
+    assert {s["returns"]["epoch"] for s, _ in ev if s["op"] == "open"} == {"epoch-1"}
+    assert [s.get("arm", True) for s, _ in ev if s["op"] == "open"] == [True, False, True]
 
 
 def test_the_quarantine_keeps_what_the_hub_refused_and_sends_the_critical_ones_again():

@@ -21,7 +21,7 @@
   "$defs": {
     "event": {
       "title": "One event",
-      "description": "One row of the station's outbox (sizeup/cloud/outbox.py). The hub skips an item of `events` that is not an object.",
+      "description": "One row of the station's outbox (sizeup/cloud/outbox.py). An item of `events` that is not an object is not applied and is listed under `rejected` as `malformed` (#762).",
       "x-complete": true,
       "type": "object",
       "required": ["seq", "at", "type", "data", "audio", "audio_dropped"],
@@ -190,7 +190,8 @@
         "type": {"type": "string", "description": "What the event is: it picks the shape of `data`. The hub logs and acks a type it does not know, and applies nothing.", "x-known": ["page", "page_text", "traffic", "alarm", "retext", "rerun", "alt_text", "heard", "activity", "source_event", "source_health", "source_seen"]},
         "data": {"type": "object", "description": "The event itself, by `type`: see $defs."},
         "audio": {"type": ["string", "null"], "pattern": "^UklGR[A-Za-z0-9+/]*={0,2}$", "contentEncoding": "base64", "contentMediaType": "audio/wav", "description": "The event's clip: a whole RIFF / WAVE file in base64 (RFC 4648 section 4: the standard alphabet, with padding, no line breaks), so it always starts `UklGR`. null for an event without a clip and for one whose clip the outbox dropped. The station sends PCM, mono, 16-bit, 8000 frames a second (its 16 kHz clip, every other sample). The hub checks none of that: it decodes the base64 without validation and stores the bytes as they are."},
-        "audio_dropped": {"type": "boolean", "description": "The outbox dropped this event's clip to stay under its size cap (`audio` is then null). Sent, never read by the hub."}
+        "audio_dropped": {"type": "boolean", "description": "The outbox dropped this event's clip to stay under its size cap (`audio` is then null). Sent, never read by the hub."},
+        "qid": {"type": "integer", "minimum": 1, "description": "Present only on a copy of an event the hub refused that the station's quarantine sends again (sizeup/cloud/outbox.py requeue_due, #762): the quarantine row's id. The hub reads it on a `source_event` only (#791): it marks that snapshot `resent`, and a re-sent snapshot older than the one it applied is dropped, however small the gap (a first send keeps the 120 s tolerance). The hub's cursor treats the copy as any event (a new `seq`)."}
       }
     },
     "clip_id": {"type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._-]{0,120}$", "description": "A clip id: a letter or digit, then at most 120 letters, digits, `.`, `_` or `-`, never two dots in a row. The hub fails the event for any other id."},
@@ -233,7 +234,8 @@
           }
         },
         "catchup": {"const": true, "description": "Present (true) only for a shed clip caught up later: the words may be hours old, so on the hub nothing that alerts hears them."},
-        "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt. Present only when one did. The hub cuts it to 80 characters."}
+        "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt. Present only when one did. The hub cuts it to 80 characters."},
+        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub nothing that pre-alerts hears them; an emergency still alarms, labelled late."}
       }
     },
     "rerun": {
@@ -553,6 +555,7 @@
         "emergency_via": {"type": "string", "description": "FM: which signalling carried the emergency packet. Present only with an FM emergency.", "x-known": ["MDC", "FleetSync"], "x-hub": "read"},
         "alarm_key": {"type": "string", "description": "FM: the id of the alarm already raised at the key-up of this carrier (`<label without spaces>-live-<start in ms>`), which this transmission takes over. Present only when there was one.", "x-hub": "read"},
         "kept": {"type": "string", "description": "P25: why a call on a talkgroup whose Record switch is off was kept. Present only then.", "x-known": ["emergency"], "x-hub": "read"},
+        "late": {"type": "boolean", "description": "P25: true on a call written while sizeup was down and ingested at its next start (#747): it goes to the radio log and speech-to-text like any, no pre-alert hears it, and an emergency still alarms, labelled late. An emergency's alarm mark always carries it (false when live); a transmission only when true.", "x-hub": "read"},
         "flag_stuck": {"type": "string", "description": "P25: the emergency flag on this call is one the station found stuck (a radio left in emergency mode, a talkgroup held in emergency): who or what it is stuck on, for people. Present only then; never together with `emergency` true.", "x-hub": "read"},
         "evidence": {"type": "object", "additionalProperties": true, "description": "P25 emergency: trunk-recorder's own record of the call (its JSON, in its own format, with `file` added and `srcList` / `freqList` cut to 200 entries), kept for audit. Present only with a P25 emergency whose record could be read. Not described here: it is another program's format.", "x-hub": "read"},
         "fm": {"type": "boolean", "description": "False: the clip needs no FM de-emphasis (decoded P25 voice, AM airband). Absent on an FM channel, which is taken as true. Read when the clip is transcribed again.", "x-hub": "read"},

@@ -19,6 +19,7 @@
         "radio_id": "990003",
         "emergency": false,
         "flag_stuck": "990003",
+        "late": false,
         "pairs": []
       },
       "audio": null,

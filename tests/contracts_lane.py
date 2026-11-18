@@ -148,14 +148,17 @@ def p25_call(st, name: str = "4101-1794990000_476075000.0-call_1", tg: int = 410
 
 
 def context_call(st, name: str = "7001-1794990000_770181250.0-call_2", tg: int = 7001, radio: str = "880001",
-                 seconds: float = 2.0, at: float | None = None) -> None:
-    """A finished call on a talkgroup of the other P25 system ("east"): context, by its talkgroup's tier."""
+                 seconds: float = 2.0, at: float | None = None, late: bool = False) -> None:
+    """A finished call on a talkgroup of the other P25 system ("east"): context, by its talkgroup's tier. late: written
+    while sizeup was down, ingested at its next start (#747)."""
     from sizeup.radio.p25 import Call, Turn
     from tests.test_app import voice
     at = time.time() if at is None else at
     rt = st.systems["east"]
-    st._call_system(rt, Call(name, tg, rt.system.talkgroups[tg]["name"], at, at + seconds, [radio], voice(seconds, 1), "",
-                             [Turn(0.0, radio, radio, "", at=at)], system="east"))
+    call = Call(name, tg, rt.system.talkgroups[tg]["name"], at, at + seconds, [radio], voice(seconds, 1), "",
+                [Turn(0.0, radio, radio, "", at=at)], system="east")
+    call.late = late
+    st._call_system(rt, call)
 
 
 # -- an event's data against the sub-schema of its type ------------------------------------------------------------------
@@ -347,6 +350,8 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     ids["context"] = "7001-1794990000_770181250.0-call_2"
     context_call(st, name="7002-1794990000_770181250.0-call_4", tg=7002, at=t + 195)   # record only: status off
     ids["context_record_only"] = "7002-1794990000_770181250.0-call_4"
+    context_call(st, name="7001-1794990050_770181250.0-call_8", at=t + 197, late=True)  # late (#747)
+    ids["context_late"] = "7001-1794990050_770181250.0-call_8"
     st._p25_activity("p25:east:7003", int((t + 200) // 60), 3, ["880001", "880002"])
     def all_there() -> bool:                 # every transmission so far is on the hub, with its words or without
         got = {ev["data"]["id"] for ev in lv.events("traffic")}
@@ -373,8 +378,9 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     assert st.retranscribe([ids["fm"]]) == 1                                    # retext, rerun
     assert st.retranscribe([ids["airband"]], True) == 1                         # alt_text
     assert wait(lambda: len(lv.events("rerun")) >= 1 and len(lv.events("alt_text")) >= 1, 30)
+    # stt_prompt_time, alt, catchup, vocab_v, late
     st._retext(ids["fm_cut"], SAID_AGAIN, "done", 0.8, "m.bin", alt={"text": SAID, "model": "other.bin"},
-               quiet=True, vocab_v="terms-7", prompted=True)                    # stt_prompt_time, alt, catchup, vocab_v
+               quiet=True, vocab_v="terms-7", prompted=True, late=True)
     # an incident source's adapter on the station
     feed = FakeFeed(source="demo", label="Demo feed")
     st.sources_runner = SourceRunner([feed], st._source_out, log=lambda m: None)
