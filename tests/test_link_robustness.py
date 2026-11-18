@@ -126,7 +126,54 @@ def test_a_refused_status_is_logged_once_per_reason_and_said_on_the_silent_alert
     h = hub.app.health
     hub.app.hub.last_state = time.time() - 3600                 # no post taken for an hour: silent
     alerts, _ = h.conditions(h.model(), time.time())
-    assert "its status is refused: status.radios: a list" in alerts["silent"]["text"]
+    assert "its posts are refused: status.radios: a list" in alerts["silent"]["text"]
+
+
+TALKER = {"key": "fm:FG1:1.00:", "system": "fm", "channel": "FG1", "tg": None, "radio_id": "", "alias": "", "rig": "",
+          "label": "", "since": 1.0, "talk_since": 1.0, "ended": False, "until": None, "dispatcher": False, "main": True}
+PAGE = {"key": "page:South 2:1.00", "channel": "South 2", "started": 1.0, "phase": "tones", "ours": True,
+        "ended": False, "until": None, "page_id": "", "pairs": [{"a": 349.1, "b": 311.1, "names": ["Test FD"], "ours": True}]}
+BAD_LIVE = [
+    ("talker until a string", {"talking": [dict(TALKER, ended=True, until="soon")]}),
+    ("talker since a string", {"talking": [dict(TALKER, since="x")]}),
+    ("talker tg a word", {"talking": [dict(TALKER, tg="x")]}),
+    ("page until a string", {"paging": [dict(PAGE, ended=True, until="soon")]}),
+    ("page pair a word", {"paging": [dict(PAGE, pairs=[{"a": "x", "b": 311.1}])]}),
+    ("page pair not an object", {"paging": [dict(PAGE, pairs=[5])]}),
+]
+
+
+@pytest.mark.parametrize("name,bad", BAD_LIVE, ids=[n for n, _ in BAD_LIVE])
+def test_a_wrong_typed_talker_or_page_is_refused_and_the_last_good_ones_stay(hub, name, bad):
+    now = time.time()
+    good = {"talking": [dict(TALKER, since=now, talk_since=now)], "paging": [dict(PAGE, started=now)]}
+    assert post(hub, dict(GOOD), **good)[0] == 200
+    assert len(hub.app.hub.live.state()) == 1 and len(hub.app.hub.live.paging_state()) == 1
+    code, body = post(hub, dict(GOOD, name="Test station 2"), **dict(good, **bad))
+    assert code == 400 and body["reason"] == "bad_live" and body["error"].startswith("bad state: ")
+    assert hub.app.hub.status["name"] == "Test station"                     # nothing of the post taken
+    assert len(hub.app.hub.live.state()) == 1 and len(hub.app.hub.live.paging_state()) == 1
+    for path, (c, b) in read_all(hub).items():
+        assert c == 200, (path, c, b)
+    ended = {"talking": [dict(TALKER, ended=True, until=now + 30)], "paging": [dict(PAGE, ended=True, until=now + 30)]}
+    assert post(hub, dict(GOOD), **ended)[0] == 200 and len(hub.app.hub.live.state()) == 1
+
+
+def test_what_the_live_state_always_dropped_is_still_dropped_not_refused(hub):
+    now = time.time()
+    for extra in ({"talking": 5}, {"talking": [5, "x"]}, {"paging": 5}, {"paging": [dict(PAGE, started=now, pairs=5)]}):
+        code, _ = post(hub, dict(GOOD), **{"talking": [], "paging": [], **extra})
+        assert code == 200, extra
+        assert hub.app.hub.live.state() == [] and hub.app.hub.live.paging_state() == []
+
+
+def test_a_stored_talker_or_page_with_a_wrong_typed_until_never_breaks_the_cad_state(hub):
+    assert post(hub, dict(GOOD))[0] == 200
+    hub.app.hub.live.update([dict(TALKER, ended=True, until="soon")], time.time(),
+                            [dict(PAGE, ended=True, until=["x"])])            # behind the check's back
+    assert hub.app.hub.live.state() == [] and hub.app.hub.live.paging_state() == []
+    for path, (c, b) in read_all(hub).items():
+        assert c == 200, (path, c, b)
 
 
 # a stored value of another type (set behind the check's back: an older hub's, a bug): every reader survives it

@@ -995,7 +995,7 @@ class StationHealth:
                              "text": (f"no word from {name} since {_hhmm(since)} · radios and transcripts not reaching the hub"
                                       if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})")
                                      + (" · its posts are refused: id mismatch" if mm else "")
-                                     + (f" · its status is refused: {sr['why']}"
+                                     + (f" · its posts are refused: {sr['why']}"
                                         if isinstance(sr := getattr(self.hub, "status_refused", None), dict) else ""),
                              "since": since}
         if silent is None:

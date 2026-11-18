@@ -242,6 +242,12 @@ class Jobs:
             return len(self._open())
 
 
+def _until(e: dict) -> float:
+    """An ended talker's / page's `until` (0: gone now): never a value of another type (statusshape.live_problem)."""
+    u = e.get("until")
+    return float(u) if isinstance(u, (int, float)) and not isinstance(u, bool) and math.isfinite(u) else 0.0
+
+
 class RemoteLive:
     """The station's "talking now", standing in for LiveTalk on the hub. Rigs are looked up again
     in the hub's own radio registry (the one people edit here)."""
@@ -272,7 +278,7 @@ class RemoteLive:
         with self._lock:
             if now - self._at > LIVE_STALE_S:
                 return []
-            return [dict(p) for p in self._paging if not (p.get("ended") and (p.get("until") or 0) <= now)]
+            return [dict(p) for p in self._paging if not (p.get("ended") and _until(p) <= now)]
 
     def state(self) -> list[dict]:
         now = self.clock()
@@ -282,7 +288,7 @@ class RemoteLive:
             entries = [dict(e) for e in self._entries]
         out = []
         for e in entries:
-            if e.get("ended") and (e.get("until") or 0) <= now:
+            if e.get("ended") and _until(e) <= now:
                 continue
             rid = str(e.get("radio_id") or "")
             if rid:
@@ -638,6 +644,10 @@ class Hub:
         bad = statusshape.problem(d["status"]) if d.get("status") is not None else None
         if bad:
             return self._refuse_status(bad, sid or (p.id if p is not None else ""))
+        # ... and so are the talkers and the pages going out (a wrong-typed `until` broke the CAD state's readers)
+        bad = statusshape.live_problem(d.get("talking"), d.get("paging"))
+        if bad:
+            return self._refuse_status(bad, sid or (p.id if p is not None else ""), "bad_live")
         now = time.time()
         self.last_state = now
         if isinstance(d.get("at"), (int, float)):
@@ -677,10 +687,11 @@ class Hub:
                            "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
                            **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
 
-    def _refuse_status(self, why: str, sid: str = "") -> tuple[int, bytes, str]:
-        """400 {error, reason: bad_status}: the station's status is not of the shape the hub reads. Nothing of the post
-        is taken (the last good status stays; Health's "Station silent" says so once it lasts); logged once per reason
-        an hour. self.status_refused: {at, why, n} of the latest, None once a status is taken again."""
+    def _refuse_status(self, why: str, sid: str = "", reason: str = "bad_status") -> tuple[int, bytes, str]:
+        """400 {error, reason: bad_status | bad_live}: the station's status (or its talkers / pages going out) is not
+        of the shape the hub reads. Nothing of the post is taken (the last good status and talkers stay; Health's
+        "Station silent" says so once it lasts); logged once per reason an hour. self.status_refused: {at, why, n,
+        since} of the latest, None once a status is taken again."""
         now = time.time()
         r = self.status_refused or {}
         self.status_refused = {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now}
@@ -688,7 +699,7 @@ class Hub:
             self._refused_said[("bad_status:" + why, sid)] = now
             self.log(f"hub: station status refused: {why}" + (f" (station {sid})" if sid else "")
                      + ": the last good status is kept")
-        return _json(400, {"error": f"bad status: {why}", "reason": "bad_status"})
+        return _json(400, {"error": f"bad {'status' if reason == 'bad_status' else 'state'}: {why}", "reason": reason})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""

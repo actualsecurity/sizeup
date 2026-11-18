@@ -77,6 +77,17 @@ NESTED: dict[str, dict] = {"sdr": SDR, "rerun": RERUN, "channels": CHANNELS, "re
 ROWS: dict[str, dict] = {"radios": RADIO_ROW, "p25_systems": {}, "talkgroups": TALKGROUP}   # lists of objects
 
 
+OBOOL = (_opt(lambda v: isinstance(v, bool)), "true, false or null")
+OINT = (_opt(_int), "an integer or null")
+# "talking" and "paging", beside the status (RemoteLive on the hub: each entry until its `until`)
+TALKER = {"key": OSTR, "system": OSTR, "channel": OSTR, "tg": OINT, "radio_id": OSTR, "alias": OSTR, "rig": OSTR,
+          "label": OSTR, "since": ONUM, "talk_since": ONUM, "ended": OBOOL, "until": ONUM, "dispatcher": OBOOL,
+          "main": OBOOL, "id_on_release": OBOOL}
+PAGE = {"key": OSTR, "channel": OSTR, "started": ONUM, "pairs": LIST, "phase": OSTR, "ours": OBOOL, "ended": OBOOL,
+        "until": ONUM, "page_id": OSTR}
+PAIR = {"a": ONUM, "b": ONUM, "names": OLIST, "ours": OBOOL}
+
+
 def _fields(d: dict, spec: dict, path: str) -> str | None:
     for k, (ok, what) in spec.items():
         if k in d and not ok(d[k]):
@@ -105,4 +116,22 @@ def problem(status) -> str | None:
     for j, v in jobs.items():
         if not isinstance(v, dict):
             return "status.health.jobs.*: objects"
+    return None
+
+
+def live_problem(talking, paging) -> str | None:
+    """None when the hub can take a state post's "talking" and "paging"; else why not, as problem() says it
+    ("talking[0].until: a number or null"). What RemoteLive already drops passes as it always did: a list that is not
+    one (as none), an entry that is not an object, a page without a list of pairs. An entry it keeps is checked."""
+    for name, entries, spec in (("talking", talking, TALKER), ("paging", paging, PAGE)):
+        for i, e in enumerate(entries if isinstance(entries, list) else []):
+            if not isinstance(e, dict) or (name == "paging" and not isinstance(e.get("pairs"), list)):
+                continue
+            if bad := _fields(e, spec, f"{name}[{i}]"):
+                return bad
+            for j, pr in enumerate(e["pairs"] if name == "paging" else []):
+                if not isinstance(pr, dict):
+                    return f"{name}[{i}].pairs[{j}]: an object"
+                if bad := _fields(pr, PAIR, f"{name}[{i}].pairs[{j}]"):
+                    return bad
     return None
