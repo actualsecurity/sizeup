@@ -47,7 +47,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, UNTIL_GRACE_S, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -185,6 +185,10 @@ def _bool(body: dict, key: str) -> bool | None:
 def services_rev(m: dict | None) -> str:
     """A short fingerprint of the admins' service choices ("" none): the pages ask again when it moves."""
     return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:10] if m else ""
+
+
+
+STATE_CLOCK_S = 60.0   # Cad.state / clears: rebuilt at least this often, a write or not (what ages with the clock)
 
 
 class Cad:
@@ -437,7 +441,10 @@ class Cad:
     def state(self) -> dict:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
-        if self._state is None or self._state[0] != rev:
+        # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one)
+        key = (rev, int(self.clock() // STATE_CLOCK_S))
+        if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
@@ -448,7 +455,7 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
-            self._state = (rev, {
+            self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
@@ -473,6 +480,8 @@ class Cad:
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
+                # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
+                "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -779,9 +788,9 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        rev = self.store.rev
-        if self._clears is None or self._clears[0] != rev:
-            self._clears = (rev, self.store.recent_clears(now - mapview.RECENT_S))
+        key = (self.store.rev, int(now // STATE_CLOCK_S))      # (and the minute: a clear ages out with no write)
+        if self._clears is None or self._clears[0] != key:
+            self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
 
     def locations(self, units: list[dict] | None = None, now: float | None = None) -> dict[str, dict | None]:
@@ -919,6 +928,8 @@ class Cad:
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
+        if f.get("until_at") is not None and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            raise CadError("Until is in the past: check the day (or leave it empty)")   # it would expire at once
         self._place(f)
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
@@ -929,6 +940,12 @@ class Cad:
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
+        if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
+            old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
+            if old["until_at"] is not None and f["until_at"] // 60 == old["until_at"] // 60:
+                del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
+            elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
+                raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
@@ -989,6 +1006,16 @@ class Cad:
 
     def close(self, iid: int, body: dict) -> dict:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
+
+    def expire_until(self, now: float | None = None) -> list[dict]:
+        """Non-emergency events whose Until has passed closed (Store.expire_until; Sources' ticker calls this at its
+        start and every TICK_S), each one a line in the hub log."""
+        done = self.store.expire_until(now)
+        for d in done:
+            until = datetime.fromtimestamp(d["until_at"], TZ).strftime("%m/%d %H:%M")
+            self.log(f"CAD: {d['number'] or d['id']}: until {until} passed: "
+                     + ("closed (Expired)" if d["closed"] else f"kept open, {', '.join(d['units'])} on it"))
+        return done
 
     def reopen(self, iid: int, body: dict) -> dict:
         """A closed or dismissed event back on the boards (#89): see Store.reopen. A feed's in service no longer closes

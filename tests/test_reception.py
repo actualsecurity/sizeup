@@ -34,7 +34,7 @@ from tests.test_p25_systems import MRRS, finder, service, system_dir
 from tests.test_roles import CASEY, DEE, JORDAN, VAL
 from tests.test_trunk_recorder_unit import SERVICE_PID
 
-PD, PD_SECURE, EMS = 9211, 9213, 9570
+PD, PD_TAC, PD_SECURE, EMS = 9211, 9212, 9213, 9570
 DONGLES = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "trunk"), (2, "RTL2838UHIDIR", "page"), (3, "RTL2838UHIDIR", "air"),
            (4, "RTL2838UHIDIR", "spare")]
 JOBS = {"v4": "FG1", "trunk": "Fire/EMS 15", "page": "South 2", "air": "HPN Tower"}
@@ -92,7 +92,7 @@ def a_call(tg: int, name: str = "1", secs: float = 4.0, errors: int = 0, signal=
 def test_the_shipped_system_logs_its_decode_rate_and_says_what_a_test_is_about():
     conf = json.loads((Path(MRRS.dir) / "config.json").read_text())
     assert conf["controlWarnRate"] == -1                       # trunk-recorder logs the rate every 3 s, good or bad
-    assert MRRS.reception["watch"] == [PD, EMS] and "its own feed" in MRRS.reception["antenna"]
+    assert MRRS.reception["watch"] == [PD, PD_TAC, EMS] and "its own feed" in MRRS.reception["antenna"]
     assert "LTE" in MRRS.reception["caveat"] and conf["systems"][0]["control_channels"][0] == 769906250
 
 
@@ -118,7 +118,7 @@ def test_a_side_measures_the_control_channel_the_site_the_grants_and_the_voice()
     assert r["site"] == {"seen": {"sysid": "26D", "wacn": "91FE8", "nac": "51", "rfss": 81, "site": 81}, "match": True,
                          "differs": []}
     tgs = {t["tg"]: t for t in r["talkgroups"]}
-    assert [t["tg"] for t in r["talkgroups"]] == [PD, EMS]             # the watched ones first; nothing encrypted listed
+    assert [t["tg"] for t in r["talkgroups"]] == [PD, PD_TAC, EMS]     # the watched ones first; nothing encrypted listed
     assert (tgs[PD]["grants"], tgs[PD]["uncovered"], tgs[PD]["calls"], tgs[PD]["audio_s"], tgs[PD]["err_per_s"]) == (2, 1, 1, 4.0, 0.5)
     assert (tgs[EMS]["grants"], tgs[EMS]["calls"], tgs[EMS]["calls_per_h"], tgs[PD]["calls_per_h"]) == (1, 0, 0.0, 120.0)
     assert (r["encrypted_grants"], r["unknown_grants"]) == (2, 1)      # counted: no radio ID, no talkgroup row
@@ -238,11 +238,11 @@ def test_the_hint_says_what_to_try_in_plain_words():
     assert v == {"grade": "good", "hint": "", "short": False}
     # granted on RF, its voice channel on the side this dongle doesn't cover
     v = side([40] * 100, grants=[PD, PD, EMS])["verdict"]
-    assert v["grade"] == "good" and v["hint"].startswith("9211 / 9570: 3 grants, no voice on the 770 side")
+    assert v["grade"] == "good" and v["hint"].startswith("9211 / 9212 / 9570: 3 grants, no voice on the 770 side")
     # nothing granted at all: run longer; after an hour, the LTE caveat
-    assert side([40] * 100)["verdict"]["hint"] == "No 9211 / 9570 grant yet: run 1 h or more."
+    assert side([40] * 100)["verdict"]["hint"] == "No 9211 / 9212 / 9570 grant yet: run 1 h or more."
     v = side([40] * 3600)["verdict"]
-    assert v["grade"] == "good" and v["hint"] == ("No 9211 / 9570 grant in 3.0 h. Some traffic is carried over LTE and "
+    assert v["grade"] == "good" and v["hint"] == ("No 9211 / 9212 / 9570 grant in 3.0 h. Some traffic is carried over LTE and "
                                                   "never on RF. Compare with a scanner over the same time.")
     v = side([40] * 20, secs=60.0, job="MRRS 773")["verdict"]
     assert v["short"] and v["hint"].endswith("Short test (60 s).")
@@ -274,7 +274,7 @@ def test_a_tests_verdict_is_its_best_sides():
     assert reception.overall([a])["grade"] == "none" and reception.overall([]) is None
     s = reception.summary(b)
     assert (s["job"], s["grade"], s["cc_mhz"], s["decoded_pct"], s["site"]) == ("MRRS 773", "good", 769.90625, 95.0, True)
-    assert [(w["tg"], w["grants"], w["calls"]) for w in s["watch"]] == [(PD, 1, 1), (EMS, 0, 0)]
+    assert [(w["tg"], w["grants"], w["calls"]) for w in s["watch"]] == [(PD, 1, 1), (PD_TAC, 0, 0), (EMS, 0, 0)]
 
 
 # -- the test itself: an app with the fire jobs, an airband channel and a spare dongle ---------------------------------------
@@ -1091,7 +1091,9 @@ def test_a_tests_calls_are_counted_never_transcribed_or_logged_and_the_sample_is
     assert not app.cad.store.q("SELECT * FROM radio_traffic") and not app.store.loose      # no row, no transmission
     assert not list(app.clips_dir.glob("*.wav"))               # no clip
     assert not (d / f"{name}.wav").exists() and not (d / f"{name}.json").exists()          # trunk-recorder's own: gone
-    assert rt.activity.state() == {"unknown": [], "encrypted": []}                         # no radio ID kept as activity
+    act = rt.activity.state()
+    assert (act["unknown"], act["encrypted"]) == ([], [])                                 # no radio ID kept as activity
+    assert {w["tg"] for w in act["watched"]} == {PD, PD_TAC, EMS} and not any(w["grants"] for w in act["watched"])
     assert not rt.live.grants("mrrs", PD, 0, 2e10)
     clock.t += 61
     rt.activity.flush(everything=True)
@@ -1199,7 +1201,7 @@ def test_the_state_says_what_can_be_tested_and_on_which_dongle(lab):
         {"name": "probe-westchester", "label": "County", "kind": "county", "watch": [307, 333],
          "jobs": [{"job": "County probe", "mhz": 477.19375, "cc": [476.075, 476.1125, 476.2125, 476.2375]}],
          "alert": [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "Airport Incident"}], "caveat": ""},
-        {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, EMS],
+        {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, PD_TAC, EMS],
          "jobs": [{"job": "MRRS 770", "mhz": 770.52188, "cc": [769.90625, 770.18125, 770.46875, 770.71875]},
                   {"job": "MRRS 773", "mhz": 772.72187, "cc": [772.48125, 773.03125, 773.68125]}],
          "alert": [{"tg": PD, "name": "PD Dispatch"}, {"tg": EMS, "name": "PC-Rye EMS"}],
