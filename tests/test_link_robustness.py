@@ -510,3 +510,22 @@ def test_a_station_whose_talkers_the_hub_refuses_keeps_its_heartbeat_without_the
     finally:
         st.link.stop()
         hub.close()
+
+
+def test_an_older_updaters_state_file_never_gets_the_status_refused(tmp_path):
+    import json as _json
+    from sizeup.cloud.autoupdate import Watch
+    p = tmp_path / "state.json"
+    p.write_text(_json.dumps({"state": 5, "since": "x", "to": ["abcdef1"], "last": "rolled back", "retry": [],
+                              "equivalent": "none", "hold": 0, "failed": ["abcdef1"]}))
+    st = Watch(own="1234567", run_dir="", state_path=str(p), log=lambda m: None).state()
+    assert st == {"last": {}, "retry": {}, "equivalent": {}, "hold": {}, "failed": {}}
+    assert statusshape.problem(dict(GOOD, version={"build": "1234567", "update": st})) is None
+
+
+def test_the_station_reads_the_hubs_refusal_by_its_reason_word():
+    from sizeup.cloud.station import refused_part
+    assert refused_part(HubError("hub said 400: anything", 400, reason="bad_status")) == "status"
+    assert refused_part(HubError("hub said 400: anything", 400, reason="bad_live")) == "live"
+    assert refused_part(HubError("hub said 400: bad status: x", 400)) == ""          # (no reason: another 400)
+    assert refused_part(HubError("hub said 503", 503, reason="bad_status")) == ""

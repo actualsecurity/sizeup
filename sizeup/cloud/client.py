@@ -28,10 +28,11 @@ REFUSED_HINT = {
 
 
 class HubError(RuntimeError):
-    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None):
+    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None, reason: str = ""):
         super().__init__(msg)
         self.status = status       # 0 = never reached the hub (network, TLS, timeout)
         self.retry_after = retry_after   # the hub's Retry-After (a deploy's handoff: 503 + 2 s), seconds
+        self.reason = reason       # the hub's word for a refusal ({error, reason}: "bad_status", ...), "" none
 
 
 def retry_after(value) -> float | None:
@@ -165,9 +166,10 @@ class HubClient:
                 if (r.status == 401 and reason) or (r.status == 409 and reason == "multi_station_off"):
                     # the hub refused this station's token (sizeup/cloud/stations.py): what and what to do, never the token
                     raise HubError(f"hub refused this station ({reason}): {msg}"
-                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status)
+                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status,
+                                   reason=reason)
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
-                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")))
+                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")), reason)
             try:
                 return json.loads(raw or b"{}")
             except ValueError as e:

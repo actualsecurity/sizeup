@@ -579,6 +579,14 @@ class Watch:
         st = self._read[1]
         out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry",
                                   "hold") if k in st}
+        for k in ("last", "equivalent", "retry", "hold"):     # (one shape, whatever an older run wrote: as report())
+            if k in out and not isinstance(out[k], dict):
+                out[k] = {}
+        for k in ("state", "to", "from"):
+            if k in out and not isinstance(out[k], str):
+                del out[k]
+        if "since" in out and not (isinstance(out["since"], (int, float)) and not isinstance(out["since"], bool)):
+            del out["since"]
         out["failed"] = _newest_failed(st.get("failed") if isinstance(st.get("failed"), dict) else {}, 5)
         return out
 

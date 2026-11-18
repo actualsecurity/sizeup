@@ -173,12 +173,11 @@ def _cpu_pct() -> float | None:
 
 
 def refused_part(e: HubError) -> str:
-    """What of a state post the hub refused for its shape (Hub._refuse_status: 400, "bad status: ..." for the status,
-    "bad state: ..." for the talkers / pages): "status" | "live" | "" (another error)."""
-    text = str(e)
+    """What of a state post the hub refused for its shape (Hub._refuse_status: 400 with reason bad_status for the
+    status, bad_live for the talkers / pages): "status" | "live" | "" (another error)."""
     if getattr(e, "status", 0) != 400:
         return ""
-    return "status" if "400: bad status: " in text else "live" if "400: bad state: " in text else ""
+    return {"bad_status": "status", "bad_live": "live"}.get(getattr(e, "reason", ""), "")
 
 
 class StationLink:
