@@ -36,12 +36,22 @@ E5_NO_READABLE_ANSWER_TO_A_POST_OVER_THE_LIMIT = True   # fixed: the station's c
 
 # -- the golden sequences against a real hub -----------------------------------------------------------------------------
 
+FILE_MINUTE = 29916500           # the golden file's activity events are in the minutes after this one ...
+
+
+def minute(m: int) -> int:
+    """... and are replayed in the minutes of half an hour ago: the hub drops activity older than its retention when
+    it starts, so a fixed minute would fail the restart sequence some weeks after the file was written."""
+    return int(time.time() // 60) - 30 + (m - FILE_MINUTE)
+
+
 def event(seq, name: str):
     """One item of a post's `events` from the golden file's [seq, event name]."""
     spec = GOLDEN["events"][name]
     if "item" in spec:
         return spec["item"]
-    ev = {"at": c.T0, "type": spec["type"], "data": spec["data"], "audio": None, "audio_dropped": False}
+    data = dict(spec["data"], minute=minute(spec["data"]["minute"])) if spec["type"] == "activity" else spec["data"]
+    ev = {"at": c.T0, "type": spec["type"], "data": data, "audio": None, "audio_dropped": False}
     return ev if seq is None else dict(ev, seq=seq)
 
 
@@ -55,7 +65,7 @@ def applied_times(lv) -> dict[str, int]:
     """How many times each named activity event of the golden file has been applied on this hub."""
     rows = {(r["source"], r["minute"]): r["calls"] for r in
             lv.hub.app.cad.store.q("SELECT source, minute, calls FROM radio_activity")}
-    return {name: rows.get((spec["data"]["source"], spec["data"]["minute"]), 0)
+    return {name: rows.get((spec["data"]["source"], minute(spec["data"]["minute"])), 0)
             for name, spec in GOLDEN["events"].items() if spec.get("type") == "activity"}
 
 
@@ -500,7 +510,8 @@ def test_known_deviation_one_cursor_for_every_sender(tmp_path):
             "st-south", "South firehouse"))
         assert code == 409 and ans["reason"] == "multi_station_off"              # a second station: refused today
         one, two = Outbox(tmp_path / "one.sqlite"), Outbox(tmp_path / "two.sqlite")
-        act = lambda k: {"source": "p25:east:7003", "minute": 29916500 + k, "calls": 1, "radios": []}   # noqa: E731
+        base = minute(FILE_MINUTE)
+        act = lambda k: {"source": "p25:east:7003", "minute": base + k, "calls": 1, "radios": []}       # noqa: E731
         send = lambda ob: lv.post({"epoch": ob.epoch, "station": c.STATION, "events": [                 # noqa: E731
             dict(r, audio=None) for r in ob.batch()]})[1]
         for k in (1, 2):
@@ -509,7 +520,7 @@ def test_known_deviation_one_cursor_for_every_sender(tmp_path):
         assert send(one) == {"ok": True, "acked": 2, "applied": 2}
         assert send(two) == {"ok": True, "acked": 1, "applied": 1}
         again = send(one)                                     # one's answer was lost: it sends the batch again
-        counts = {r["minute"] - 29916500: r["calls"] for r in lv.hub.app.cad.store.q("SELECT minute, calls FROM radio_activity")}
+        counts = {r["minute"] - base: r["calls"] for r in lv.hub.app.cad.store.q("SELECT minute, calls FROM radio_activity")}
         if E3_ONE_CURSOR_FOR_EVERY_SENDER:
             assert again == {"ok": True, "acked": 2, "applied": 2} and counts == {1: 2, 2: 2, 3: 1}
         else:
@@ -518,7 +529,7 @@ def test_known_deviation_one_cursor_for_every_sender(tmp_path):
         twin = {"epoch": one.epoch, "station": c.STATION, "events": [
             {"seq": 1, "at": c.T0, "type": "activity", "data": act(9), "audio": None, "audio_dropped": False}]}
         assert lv.post(twin)[1] == {"ok": True, "acked": 2, "applied": 0}
-        assert not lv.hub.app.cad.store.q("SELECT 1 FROM radio_activity WHERE minute = ?", (29916509,))
+        assert not lv.hub.app.cad.store.q("SELECT 1 FROM radio_activity WHERE minute = ?", (base + 9,))
         one.close()
         two.close()
     finally:
