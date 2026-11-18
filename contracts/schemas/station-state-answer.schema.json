@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-state-answer.schema.json",
+  "title": "Station state answer",
+  "description": "The hub's 200 answer to POST /api/station/state, as it sends it today (Hub._state, sizeup/cloud/hub.py). It is the hub's only regular word to the station: its build (which the station follows), the capability strings that switch features on, the pool's state, the admins' service per source and the id the hub took the post as. The station reads the named keys and ignores the rest; an answer that is not an object is taken as a heartbeat only.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok", "build", "caps", "pool", "services"],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "Always true. The station does not read it: any 2xx JSON answer counts as connected."},
+    "build": {
+      "type": "string",
+      "description": "The git sha this hub was built from (its SIZEUP_BUILD); \"\" when it has none. The station takes it only as 7 to 40 hex characters, lower-cased, and once the same value has held for 30 s it asks its updater for that build. Anything else, or \"\", means: do not update."
+    },
+    "caps": {
+      "type": "array",
+      "description": "Capability strings: what this hub understands. Each answer replaces the station's whole set, and the station keeps the last set on disk across restarts. An answer without `caps` clears the set. A station must ignore a string it does not know. Today: `p25_systems` (the hub files rows of other P25 systems: without it the station sends none), `stt_input` (the hub takes POST /api/station/stt), `stt_pool` (the hub takes clips handed to its speech-to-text pool).",
+      "items": {"type": "string", "description": "One capability name, lower case with underscores."},
+      "uniqueItems": true,
+      "x-known": ["p25_systems", "stt_input", "stt_pool"]
+    },
+    "pool": {
+      "title": "The pool's word",
+      "description": "The hub's speech-to-text pool as this station hears it (HubApp.pool_word). A station takes a missing or non-object `pool` as {} (everything off).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["on", "worker", "ready", "max_s", "gpu_idle", "gpu_idle_n"],
+      "additionalProperties": true,
+      "properties": {
+        "on": {"type": "boolean", "description": "The pool takes the lowest class of clips: the station may hand clips over."},
+        "worker": {"type": "boolean", "description": "This station's whisper is in the pool: it may claim jobs."},
+        "ready": {"type": "integer", "minimum": 0, "description": "How many workers other than this station's whisper could take a context clip now."},
+        "max_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "The longest clip one of them would take, seconds of audio (0 when none is ready; 3600 stands for no limit)."
+        },
+        "gpu_idle": {"type": "boolean", "description": "A GPU worker is idle and quick on pre-alert clips now."},
+        "gpu_idle_n": {"type": "integer", "minimum": 0, "description": "How many are."}
+      }
+    },
+    "services": {
+      "type": "object",
+      "description": "The admins' service per radio source, {source key: service}; {} for none. The station tags its rows with it and keeps it on disk. A value the station does not know is dropped, never an error; a missing or non-object `services` leaves the station's as they were.",
+      "additionalProperties": {"type": "string", "description": "One of `fire`, `police`, `ems`, `transit`, `air`, `other` today."}
+    },
+    "station": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The station id the hub took this post as: the id the bearer token proves. Left out only for a shared token that has not been given an id yet. The station adopts it (memory only) when it is at most 64 printable characters and differs from the id it used."
+    },
+    "refused": {
+      "type": "array",
+      "description": "From #782 on, and only when the hub left a part of this post out for its shape (a known key of the wrong type): which parts. `status`: the status was not taken, the one the hub had stays. `live`: a talker or a page going out was left out, the others were taken. The rest of the post, the heartbeat first, is taken as always, and the answer is the normal 200. Absent: nothing was left out. Not sent by the code before #782. A station must ignore a word it does not know here, and an older station ignores the key.",
+      "items": {"type": "string", "description": "A part of the post that was left out.", "x-known": ["status", "live"]},
+      "minItems": 1
+    },
+    "reason": {
+      "type": "string",
+      "description": "From #782 on, with `refused`: where the shape was wrong and what it must be, for the station's log (`status.radios: a list`, `talking[0].until: a number or null`; several joined with `; `). Not sent by the code before #782."
+    }
+  }
+}

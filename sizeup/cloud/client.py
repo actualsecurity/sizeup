@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import random
 import ssl
 import time
@@ -27,11 +28,68 @@ REFUSED_HINT = {
 }
 
 
+def _plain(o):
+    """json.dumps' default: a numpy scalar as its Python value, anything else as its text."""
+    return o.item() if hasattr(o, "item") else str(o)
+
+
+def finite(v):
+    """v with every NaN / Infinity (a float, or a numpy scalar that is one) as None, through dicts, lists and tuples."""
+    if isinstance(v, dict):
+        return {k: finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [finite(x) for x in v]
+    if hasattr(v, "item") and not isinstance(v, (str, bytes)):
+        try:
+            v = v.item()
+        except (TypeError, ValueError):     # an array of more than one: json.dumps' default writes its text
+            return v
+    return None if isinstance(v, float) and not math.isfinite(v) else v
+
+
+def dumps(obj, default: Callable | None = _plain) -> bytes:
+    """Station <-> hub JSON is RFC 8259 (no NaN, no Infinity: contracts/README.md), compact. A number that is not
+    finite goes as null: json.dumps' default wrote the bare token NaN, which no other reader takes, and the hub's clock
+    skew read from one was NaN. Strict first; the walk only when that refuses for that reason. The hub's answers
+    (sizeup/cloud/hub.py _json) pass default=None: an object it can't write stays a TypeError there."""
+    try:
+        return json.dumps(obj, separators=(",", ":"), default=default, allow_nan=False).encode()
+    except ValueError as e:
+        if "Out of range float" not in str(e):    # (a circular reference: as before)
+            raise
+        return json.dumps(finite(obj), separators=(",", ":"), default=default, allow_nan=False).encode()
+
+
+def _null(_name: str) -> None:
+    return None
+
+
+def _finite_float(s: str) -> float | None:
+    """A number token as a float, None when it doesn't fit one (1e999 reads as Infinity otherwise)."""
+    f = float(s)
+    return f if math.isfinite(f) else None
+
+
+def loads(raw: bytes | str):
+    """JSON from the other side, with the bare tokens NaN / Infinity / -Infinity (an older sender) and a number too big
+    for a float (1e999) read as None: nothing made from one is ever NaN or infinite."""
+    return json.loads(raw, parse_constant=_null, parse_float=_finite_float)
+
+
+# The hub refused what was sent itself, not the station or the moment: the same body is refused again (a malformed
+# event, a batch too large). The outbox splits such a batch to find the event (sizeup/cloud/station.py _rejected);
+# everything else (5xx, network, 401 / 403 / 404 / 409 / 429) is retried as it is, with backoff.
+REJECTED = frozenset({400, 413, 422})
+
+
 class HubError(RuntimeError):
-    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None):
+    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None, reason: str = "",
+                 body: dict | None = None):
         super().__init__(msg)
         self.status = status       # 0 = never reached the hub (network, TLS, timeout)
         self.retry_after = retry_after   # the hub's Retry-After (a deploy's handoff: 503 + 2 s), seconds
+        self.reason = reason       # the hub's word for a refusal ({error, reason}: "id_mismatch", ...), "" none
+        self.body = body           # the hub's JSON answer, when it sent one ({error, reason, ...})
 
 
 def retry_after(value) -> float | None:
@@ -127,8 +185,7 @@ class HubClient:
         """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped). gzip_body:
         the body gzipped (the aircraft posts, #235: an endpoint that takes it). raw_gzip: a JSON body already gzipped
         (the station's spooled log batches, sizeup/cloud/logship.py), sent as it is."""
-        data = (json.dumps(body, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)).encode()
-                if body is not None else raw_gzip)
+        data = dumps(body) if body is not None else raw_gzip
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
         if raw_gzip is not None and body is None:
             headers["Content-Encoding"] = "gzip"
@@ -155,21 +212,24 @@ class HubClient:
                 self.close()
             if not 200 <= r.status < 300:
                 self.close()
-                reason = ""
+                reason, doc = "", None
                 try:
-                    doc = json.loads(raw)
+                    doc = loads(raw)
                     msg = doc.get("error") or raw[:200].decode(errors="replace")
                     reason = str(doc.get("reason") or "")[:40]
                 except (ValueError, AttributeError):
+                    doc = None
                     msg = raw[:200].decode(errors="replace").strip() or r.reason
                 if (r.status == 401 and reason) or (r.status == 409 and reason == "multi_station_off"):
                     # the hub refused this station's token (sizeup/cloud/stations.py): what and what to do, never the token
                     raise HubError(f"hub refused this station ({reason}): {msg}"
-                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status)
+                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status,
+                                   reason=reason)
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
-                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")))
+                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")), reason,
+                               doc if isinstance(doc, dict) else None)
             try:
-                return json.loads(raw or b"{}")
+                return loads(raw or b"{}")
             except ValueError as e:
                 self.close()
                 raise HubError(f"hub sent something that isn't JSON ({r.getheader('Content-Type')}): "

@@ -1,0 +1,137 @@
+{
+  "description": "Pairs of lease ids (`gen`) and how they compare: -1 a is older than b, 0 the same lease id, 1 a is newer. Every implementation must agree on every row.",
+  "cases": [
+    {
+      "a": [
+        7,
+        14
+      ],
+      "b": [
+        7,
+        14
+      ],
+      "expect": 0,
+      "why": "the same pair"
+    },
+    {
+      "a": [
+        7,
+        15
+      ],
+      "b": [
+        7,
+        14
+      ],
+      "expect": 1,
+      "why": "the lease generation moved on"
+    },
+    {
+      "a": [
+        8,
+        1
+      ],
+      "b": [
+        7,
+        99
+      ],
+      "expect": 1,
+      "why": "the leader generation comes first: a new leader's first lease is newer than anything of the one before"
+    },
+    {
+      "a": [
+        7,
+        99
+      ],
+      "b": [
+        8,
+        1
+      ],
+      "expect": -1,
+      "why": "the same, the other way round"
+    },
+    {
+      "a": [
+        "7",
+        "14"
+      ],
+      "b": [
+        7,
+        14
+      ],
+      "expect": 0,
+      "why": "a string of digits and the number are the same counter"
+    },
+    {
+      "a": [
+        "10",
+        0
+      ],
+      "b": [
+        "9",
+        0
+      ],
+      "expect": 1,
+      "why": "by value: as strings \"10\" sorts before \"9\""
+    },
+    {
+      "a": [
+        7,
+        "10"
+      ],
+      "b": [
+        7,
+        "9"
+      ],
+      "expect": 1,
+      "why": "the same in the second place"
+    },
+    {
+      "a": [
+        "9007199254740993",
+        0
+      ],
+      "b": [
+        "9007199254740992",
+        0
+      ],
+      "expect": 1,
+      "why": "exact above 2^53: as 64-bit floats these two are equal"
+    },
+    {
+      "a": [
+        "9007199254740992",
+        0
+      ],
+      "b": [
+        9007199254740991,
+        0
+      ],
+      "expect": 1,
+      "why": "a string above 2^53 - 1 against the largest plain number"
+    },
+    {
+      "a": [
+        0,
+        0
+      ],
+      "b": [
+        0,
+        1
+      ],
+      "expect": -1,
+      "why": "from zero"
+    },
+    {
+      "a": [
+        "18446744073709551615",
+        0
+      ],
+      "b": [
+        "18446744073709551614",
+        5
+      ],
+      "expect": 1,
+      "why": "the top of an unsigned 64-bit counter, exact"
+    }
+  ]
+}

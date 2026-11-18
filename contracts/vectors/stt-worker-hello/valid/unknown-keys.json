@@ -1,0 +1,28 @@
+{
+  "state": "sleeping",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "gpu": {
+    "util_pct": 3,
+    "mem_used_mb": 1210,
+    "mem_total_mb": 12282,
+    "others": 0,
+    "from_the_future": {
+      "x": [
+        1,
+        {
+          "y": null
+        }
+      ]
+    }
+  },
+  "worker": "gpu-1",
+  "from_the_future": {
+    "x": [
+      1,
+      {
+        "y": null
+      }
+    ]
+  }
+}

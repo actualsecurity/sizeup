@@ -1,0 +1,6 @@
+{
+  "base": "station-state/valid/talking-only.json",
+  "patch": [
+    {"op": "remove", "path": "/talking"}
+  ]
+}

@@ -155,6 +155,7 @@ FEED_SOURCE = "CAD feed"               # incidents.source of one an external fee
 PAGE_SOURCE = "60 Control page"
 ALERT_SOURCE = "60 Control radio"     # incidents.source of an airport alert level declared on the fire radio (#369)
 MATCH_WINDOW_S = 20 * 60.0
+SNAPSHOT_SKEW_S = 120.0    # on_event: a feed report older than the applied one by more than this is ignored (a replay)
 ALERT_WINDOW_S = MATCH_WINDOW_S        # an airport alert (#369) and a report that is an alert already: this far apart
 SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
 PAGE_LAG_S = 8 * 60.0                  # a "misheard" page this long after the feed's dispatch: still the same call
@@ -222,6 +223,7 @@ CREATE TABLE IF NOT EXISTS source_reports (
   data TEXT NOT NULL DEFAULT '{}',      -- the report as last seen (a feed: FeedEvent.as_dict; paging: the page's fields)
   merged_into TEXT NOT NULL DEFAULT '', -- the feed merged this event into that one (its aliases): retired, ignored after
   gone_at REAL,                         -- the feed's snapshot stopped listing it while it was open here (source_seen)
+  seen_at REAL,                         -- the station's seen_at of the snapshot applied last: an older one is ignored
   PRIMARY KEY (source, ref)
 );
 CREATE INDEX IF NOT EXISTS source_reports_incident ON source_reports(incident_id);
@@ -1206,6 +1208,7 @@ class Sources:
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL"),
+                               ("source_reports", "seen_at REAL"),
                                ("source_health", "bad_since REAL"), ("source_health", "ok_since REAL"),
                                ("source_health", "held_state TEXT"), ("source_health", "held_reason TEXT"),
                                ("source_health", "ok_at REAL"), ("source_health", "stopped INTEGER")):
@@ -1479,16 +1482,18 @@ class Sources:
         return self.store.one("SELECT * FROM source_reports WHERE source = ? AND ref = ?", (source, ref))
 
     def _put(self, source: str, ref: str, rank: int, label: str, first_seen: float, data: dict,
-             incident_id: int | None = None) -> None:
+             incident_id: int | None = None, seen_at: float | None = None) -> None:
+        """seen_at: the station's seen_at of this snapshot (a feed's event), kept to refuse an older one (on_event)."""
         now = self.clock()
         with self.store.tx() as db:
-            db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, data) "
-                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, ref) DO UPDATE SET rank = excluded.rank, "
-                       "label = excluded.label, incident_id = COALESCE(source_reports.incident_id, excluded.incident_id), "
+            db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, data, "
+                       "seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, ref) DO UPDATE SET "
+                       "rank = excluded.rank, label = excluded.label, "
+                       "incident_id = COALESCE(source_reports.incident_id, excluded.incident_id), "
                        "first_seen = MIN(source_reports.first_seen, excluded.first_seen), updated_at = excluded.updated_at, "
-                       "data = excluded.data",
+                       "data = excluded.data, seen_at = COALESCE(excluded.seen_at, source_reports.seen_at)",
                        (source, ref, rank, label, incident_id, first_seen, now,
-                        json.dumps(data, separators=(",", ":"), default=str)))
+                        json.dumps(data, separators=(",", ":"), default=str), seen_at))
 
     def _units_of(self, iid: int) -> list[str]:
         """The units on an incident now: assignments not cleared, and the units its reports name."""
@@ -1777,6 +1782,8 @@ class Sources:
         label = str(d.get("label") or ev.source)[:60]
         now = self.clock()
         seen = float(d.get("first_seen") or d.get("seen_at") or now)
+        snap = d.get("seen_at") if isinstance(d.get("seen_at"), (int, float)) and not isinstance(d.get("seen_at"), bool) \
+            else None                                       # when the station read this snapshot (its clock)
         data = ev.as_dict()
         self._towns()                                        # the towns and streets the address is written with
         with self._lock:
@@ -1784,11 +1791,19 @@ class Sources:
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
                 into = self._report(ev.source, rep["merged_into"])
                 return into["incident_id"] if into else None
+            if rep and snap is not None and rep.get("seen_at") is not None and snap < rep["seen_at"] - SNAPSHOT_SKEW_S:
+                # an older snapshot than the one applied (the station's quarantine sending one again: 10 min stale at
+                # least): applying it would put back what the feed has changed since (type, location, units). Within
+                # SNAPSHOT_SKEW_S it is applied: the station's clock stepping back (NTP, a reboot) never drops a newer
+                # one (the runner doesn't send an unchanged event again); the station drops its own replays anyway
+                # (outbox.py source_latest)
+                self.log(f"incident sources: {label}: an older report of an event ignored (a newer one is applied)")
+                return rep["incident_id"]
             prev = json.loads(rep["data"]) if rep else None
             if rep and rep["incident_id"]:
                 closing = data["closed"] and not (prev or {}).get("closed")
                 cards = self._sweepable(rep["incident_id"]) if closing else []   # while the call is still open here
-                self._put(ev.source, ev.event_id, rank, label, seen, data)
+                self._put(ev.source, ev.event_id, rank, label, seen, data, seen_at=snap)
                 if rep["gone_at"] is not None:                # listed again
                     with self.store.tx() as db:
                         db.execute("UPDATE source_reports SET gone_at = NULL WHERE source = ? AND ref = ?",
@@ -1822,12 +1837,12 @@ class Sources:
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
                     self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
-                self._put(ev.source, ev.event_id, rank, label, seen, data, incident_id=inc["id"])
+                self._put(ev.source, ev.event_id, rank, label, seen, data, incident_id=inc["id"], seen_at=snap)
                 self._attached(inc, ev.source, label, rank, seen)
                 self._apply(inc["id"], None, data, label, rank, attach=True)
                 self._merge(ev.source, ev.event_id, inc["id"], data, label)
                 return inc["id"]
-            self._put(ev.source, ev.event_id, rank, label, seen, data)
+            self._put(ev.source, ev.event_id, rank, label, seen, data, seen_at=snap)
             disp = data["times"].get("dispatched") or (min(data["times"].values()) if data["times"] else None)
             ended = data["closed"] or data["times"].get("in_service") is not None
             if ended:                                        # over before we heard of it: on record, no incident

@@ -87,6 +87,12 @@ leading pieces (a cut under ~1.5 s into a transmission) and the `ID flip` / `ID 
 turns, MRRS goes `on` first, then the county. A bench's own unpatched build ignores the setting: such transmissions
 stay merged unless a grant names the next radio.
 
+Those lines are info level and name radios, so they stay in `trunk-recorder.log`; the station log (and CloudWatch)
+gets their counts instead (#647), one line per system an hour and when trunk-recorder stops, counts only:
+`p25 mrrs: split (log) last hour: 3 would split, 1 ID flips, 2 aliases, in 120 calls (2.5% of calls)` (the % is the
+calls with at least one cut; with `on`, `N splits`). Settings > Radios shows the same counts since sizeup started in
+the system's hover.
+
 `pos` (both lists) is the sum of the earlier transmissions' lengths, each from its sample count: exactly where the
 transmission starts in the call WAV, which ffmpeg makes by concatenating them. 5.2.0 runs the call WAV through
 loudnorm by default (a short call then comes out at 192 kHz); that changes its level, never its length. sizeup cuts

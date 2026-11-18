@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-hello-answer.schema.json",
+  "title": "Station hello answer",
+  "description": "The hub's 200 answer to GET /api/station/hello (Hub.handle, sizeup/cloud/hub.py): the bearer token works, and as which station. The request has no body. It is the station's Test connection: answered by a standby hub and for a station that is not the hub's primary, and it never counts as the station being connected. The station reads only the outcome (2xx or not), not the body.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok", "station", "token"],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "Always true."},
+    "station": {"type": "string", "description": "The station id the token proves; \"\" for a shared token that has not been given an id yet."},
+    "token": {
+      "type": "string",
+      "description": "The kind of token: `own`, the station's own (sz1.<id>.<secret>), or `shared`, the hub's shared station token.",
+      "x-known": ["own", "shared"]
+    }
+  }
+}

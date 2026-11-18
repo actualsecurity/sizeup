@@ -239,6 +239,38 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**An event the hub refuses never blocks the rest.** The hub skips an event it can't parse or apply and lists it in its
+answer (`rejected: [{i, seq, type, reason, error}]`). `reason` is `malformed` (a bad id, data that isn't an object, a
+source error: it never applies) or `apply_failed` (it may apply once the hub is fixed). It is listed again if the
+station resends the post. The hub refuses a whole batch only when it can't read it: `413 {reason: too_large,
+max_bytes}` or `400 {reason: bad_json | bad_batch}`.
+
+The station treats 400 / 413 / 422 as "refused for good":
+
+- It splits the batch in halves (by size too, for a 413) until the refused event is alone. Everything behind it goes
+  on in order.
+- Before it quarantines anything, it checks that the hub takes an empty batch. A hub that refuses everything is an
+  outage: every event waits as before.
+- An event too large only because of its clip goes without the clip (the station keeps the clip).
+- The refused event moves to the outbox's quarantine table with the hub's reason and error, kept across restarts. Over
+  500 rows the oldest non-critical go; over 50 MB of clips the oldest clips go (the rows stay); a clip over 8 MB isn't
+  kept.
+- A page, its text, an alarm or a `source_event` (not one the hub calls malformed) is critical: it is sent again as a
+  new event after 10 min, 30 min, then hourly, for 8 tries or 24 h, then "stuck" until a person drops it.
+- A `source_event` is a snapshot. A quarantined one is dropped once the feed has sent a newer report of the same event,
+  and the hub ignores a report more than 2 min older than the one it applied (`source_reports.seen_at`; within 2 min
+  it is applied, so the station's clock stepping back never drops a newer one).
+- An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late" for 24 h, then clears.
+- A page event whose `page_text` came first still brings its clip.
+
+Health shows **Station event rejected by hub: *type*** (`rejected:<type>`, critical) for those, **Station alarm
+delivered late, not raised** for a late alarm, and a warning for other types for 24 h (`rejected_minor:<type>`: muting
+it never hides a critical one). A stuck or late one has **Dismiss** on Health (admins; `POST /api/cad/health/dismiss`,
+audited): the station drops those. `sudo sizeup-station quarantine` lists them; `... drop ID` (or `drop all`) drops
+one, with any copy queued to go again.
+5xx, network errors and refused tokens are retried as before, with backoff. Older releases on either side keep
+working: an older hub's bare 400 is split the same way, and an older station ignores `rejected`.
+
 **The speech-to-text input** (`sizeup/cloud/sttinput.py`). Each transmission's and page's exact whisper input
 (`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis already applied; a page's voice without
 its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
@@ -473,6 +505,8 @@ works from the rows alone and the panel says so.
 | *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
 | P25 trunk silent | trunk-recorder running but no call on **any** talkgroup for `p25_silent_min` (20 min; `p25_silent_night_min`, 60 min, for a silence that reaches 00-06; longer when the system's learned gaps say so), or trunk-recorder losing the control channel (decode rate under 2/s) for 2 min (below) | critical |
 | Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
+| Station event rejected by hub: *type* | a page, its text, an alarm or an incident source's event the hub refuses for good, held in the station's quarantine ([What flows](#what-flows)): sent again every 10 min to 1 h, then stuck until `sizeup-station quarantine drop`; "Station alarm delivered late, not raised" for one taken too late | critical |
+| Station event rejected by hub: *type* (other) | another type refused, for 24 h after it was refused (`rejected_minor`) | warning |
 | Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
 | Speech-to-text behind | the station's whisper queue: its oldest clip that matters (not a shed context clip) waiting 10 min; one episode until it has been under 2 min for 15 min. Pushed once, when the oldest has waited 20 min | warning |
 | ADS-B receiver down | the station's decoder down for `down_min` ([our receiver](#our-own-receiver-on-the-station-235)) | warning |
@@ -1082,7 +1116,9 @@ Access sends every request it lets through to the origin with a signed JWT
   `https://<access_team>/cdn-cgi/access/certs` (cached an hour; fetched again for an unknown key id,
   at most every 30 s; the cached keys are kept if a fetch fails), `aud` contains the AUD tag, `iss`
   is `https://<access_team>`, `exp` / `nbf` with 60 s leeway. Any other algorithm (`none`, `HS256`)
-  is refused. The `Cf-Access-Authenticated-User-Email` header is never trusted on its own.
+  is refused. The `Cf-Access-Authenticated-User-Email` header is never trusted on its own. A token
+  that passed is kept (its SHA-256, the last 1,024) so later requests skip the RSA check: `exp` /
+  `nbf` are still checked on every request, and a key the refresh no longer has ends its tokens.
 * **requires it** on every page and API except `/healthz` (the health check) and `/api/station/*`
   (the station's bearer token): 401 otherwise. A service token's JWT (no email, `common_name` =
   client id: the station) is a machine and never an operator.
@@ -1433,6 +1469,8 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - The lease is the job's own deadline. A worker gone gaming or paused, its LLM stopped, unheard for 12 s or revoked: the job goes back to the queue. Three invalid answers or lost leases in a row: no infer jobs for 2 min.
   - Switches: the pool's On (Settings > Station > STT workers) turns the lane off too (`available()` false, no claims). Each GPU worker has an "LLM jobs" switch there, on by default and audited; off, it gets no prompts (a job it holds goes back to the queue). Only a GPU worker's own token (`sw1`) reaches `/api/station/stt/infer/*`: anything else (a station's whisper in the pool) gets 403 and never sees a prompt.
   - Futures are resolved on the lane's own result thread, never on a worker's request thread or under a lock; a job is answered at its deadline (the lane wakes for the earliest one). A done-callback must not log the answer.
+  - `available()` and `submit()` never wait: they read what the lane last worked out (set on every worker request, switch, lease change and tick, under a lock that never does I/O). The switches are read from hub.sqlite outside the lane's lock (the tick at most once a second, a worker new to the lane, and at once on an admin's change), and a claim asks the STT pool before taking the lane's lock.
+  - The worker side (`tools/stt_worker/worker.py`, `llm_url`): llama.cpp's `llama-server` on 127.0.0.1, its GGUF checked against a pinned SHA-256, a random API key per start, constrained output (`response_format: json_schema`); a pre-alert clip, gaming or a pause aborts a generation and hands the job back; gaming stops llama-server after 60 s. The model chosen: Qwen3-8B Q4_K_M, thinking off (the comparison: `tools/stt_worker/llm_eval/`).
   - Privacy: prompts and answers exist only in memory on their way to the worker and back. They are never logged, never in Health, `stt_runs` or a database. Health ("GPU workers: LLM") shows each worker's STT and LLM models, and per task the jobs an hour, p50 / p95, token counts and the failures by why.
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).

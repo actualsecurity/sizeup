@@ -1,0 +1,10 @@
+{
+  "state": "online",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "gpu": [
+    3,
+    1210,
+    12282
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "base": "station-state/valid/with-status.json",
+  "patch": [
+    {"op": "replace", "path": "/status/radios/0/state", "value": "held"},
+    {"op": "replace", "path": "/status/p25_systems/0/state", "value": "held"},
+    {"op": "replace", "path": "/status/talkgroups/0/tier", "value": "watch"},
+    {"op": "replace", "path": "/status/version/state", "value": "staged"}
+  ]
+}

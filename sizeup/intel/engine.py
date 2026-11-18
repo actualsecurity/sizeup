@@ -161,7 +161,10 @@ MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|contin
 # a dispatcher / HQ talker (they voice every job); never a unit's alias such as "RYE PD CAR 3"
 DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
-SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
+SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing; nor
+                                                                    # is any category its pack marks "safety" (_safe)
+OTHER_JOB = re.compile(r"\b(other|another|different|second) (job|call|incident|scene|assignment)\b", re.I)
+DEESCALATED = "de-escalated"           # the note a category's "deescalate" phrase leaves on its open event
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
@@ -726,6 +729,13 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if not suppressed and pack.resolved and pack.resolves(text, ws):
+            changed += [x for x in self._resolve(pack, key, at, tid) if not any(x is c for c in changed)]
+        if not suppressed and pack.calm:
+            for x in (self._uncalm(pack, key, at, tid, ws, win.entries[tid], event_of)
+                      + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
+                if not any(x is c for c in changed):
+                    changed.append(x)
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -1241,6 +1251,10 @@ class IntelEngine:
         if ev is not None and ev.note == "possibly cancelled" and speaks:
             reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
             ev.note = "re-opened"
+        elif ev is not None and ev.note == DEESCALATED and speaks:
+            ev.note = ""                      # the weapon is back in it: the note goes; a safety category's escalation
+            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)):   # ("pulled out a gun",
+                reopened, ev.note = True, "re-opened"                                               # never "in custody")
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
@@ -1432,13 +1446,19 @@ class IntelEngine:
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
         # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
         # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
-        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category in SAFETY]:
-            ev.note, ev.updated_at = "possibly cancelled", self.clock()
+        # a call whose category has "cancel_ttl_min" (EDP, a dispute) flagged by an earlier disregard: this one ends it
+        again = [] if named else [ev for ev in open_ if ev.note == "possibly cancelled" and self._soft(pack, ev.category)]
+        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and self._safe(pack, ev.category)
+                                    and ev not in again]:
+            now = self.clock()
+            ev.note, ev.updated_at = "possibly cancelled", now
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            if self._soft(pack, ev.category):            # "cancel_ttl_min": it lives no longer than this after it
+                ev.until = min(ev.until or now, now + float(pack.category(ev.category)["cancel_ttl_min"]) * 60)
             self.events.save(ev)
             self.sink.event(ev, "updated")
             out.append(ev)
-        for ev in named or [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category not in SAFETY]:
+        for ev in (named or [ev for ev in open_ if current & set(ev.traffic_ids) and not self._safe(pack, ev.category)]) + again:
             ev.status, ev.updated_at = "ended", self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
             self.events.save(ev)
@@ -1446,6 +1466,93 @@ class IntelEngine:
             out.append(ev)
         self._consume(pack.name, key)
         return out
+
+    def _deescalate(self, pack, row: dict, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
+        """A category's "deescalate" phrase (rules.py; the weapons category: "the gun was secured", "the firearm
+        has been recovered"): its open event on this source within merge_min (the span an open
+        event takes a new mention: the follow-up often comes once units are there) is noted DEESCALATED, with this row
+        in its traffic. Only an event this row ties to (_same_job: the category's own words, a unit, the talker, the
+        place), and with more than one such event open, only the one at the place this row says (none said or none
+        there: nothing is marked); the same when the row speaks of another job ("at the other call") or names only
+        units the event's rows don't. Never a row that itself says the category ("the gun was secured, the second
+        male has a machete"), never over a "possibly cancelled" note, never a push, an end or a new event. A later row that says the
+        category again clears the note (_raise), and pushes again when it alone is over the threshold."""
+        out = []
+        for cat in pack.deescalated(text, ws):
+            if any(r.category == cat and w > 0 for r, w in entry.hits):
+                continue
+            open_ = [e for e in self._open_for(pack, cat, key, at, self._merge_span(pack))
+                     if self._same_job(pack, e, entry, ws, {r.category for r, w in entry.hits if w > 0})]
+            if len(open_) > 1 or any(self._elsewhere(pack, e, entry) for e in open_):
+                if entry.place is None and self.locate is not None:
+                    entry.place = self._where(pack, row, key, [text], list(entry.who))
+                open_ = [e for e in open_ if entry.place is not None and e.precision != "none"
+                         and same_place(entry.place, e.place())]
+                if len(open_) != 1:
+                    continue
+            if not open_ or open_[0].note in (DEESCALATED, "possibly cancelled"):
+                continue
+            ev = open_[0]
+            ev.note, ev.updated_at = DEESCALATED, self.clock()
+            ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
+        return out
+
+    def _uncalm(self, pack, key: str, at: float, tid: str, ws: list[str], entry, event_of: dict) -> list[Event]:
+        """A row that says a category again, not raised (under the threshold by itself: the call-out's rows have left
+        the window): the note DEESCALATED on its open event comes off; a safety category's escalation ("escalate",
+        rules.py) re-opens it and pushes it again, as _raise does within the window."""
+        out = []
+        mine = {r.category for r, w in entry.hits if w > 0}
+        for cat in mine & set(pack.calm) - set(event_of):
+            for ev in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+                if ev.note != DEESCALATED or not self._same_job(pack, ev, entry, ws, mine):
+                    continue
+                now = self.clock()
+                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws):
+                    before = copy.deepcopy(ev)
+                    ev.note, ev.last_at, ev.updated_at = "re-opened", max(ev.last_at, at), now
+                    ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+                    self.events.save(ev)
+                    self._after(pack, ev, "reopened", now, before)
+                else:
+                    ev.note, ev.updated_at = "", now
+                    self.events.save(ev)
+                    self.sink.event(ev, "updated")
+                out.append(ev)
+        return out
+
+    def _safe(self, pack, cat: str) -> bool:
+        """A safety call: never ended by a disregard that names nothing, only "possibly cancelled". The engine's own
+        list, and in a police pack every category the pack marks "safety" (EDP, a dispute, an officer); the fire and
+        EMS packs keep the engine's list only."""
+        return cat in SAFETY or (pack.domain == "police" and pack.is_safety(cat))
+
+    def _soft(self, pack, cat: str) -> bool:
+        """A safety call a second disregard or a "resolved" phrase ends ("cancel_ttl_min": EDP, a dispute)."""
+        return self._safe(pack, cat) and pack.category(cat).get("cancel_ttl_min") is not None
+
+    def _resolve(self, pack, key: str, at: float, tid: str) -> list[Event]:
+        """A "resolved" phrase ("unfounded", "the caller called back"): the source's "possibly cancelled" calls with
+        "cancel_ttl_min" end."""
+        out = []
+        for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
+            if ev.note == "possibly cancelled" and self._soft(pack, ev.category):
+                ev.status, ev.updated_at = "ended", self.clock()
+                ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+                self.events.save(ev)
+                self.sink.event(ev, "ended")
+                out.append(ev)
+        return out
+
+    def _elsewhere(self, pack, ev: Event, entry) -> bool:
+        """The row speaks of another job ("at the other call"), or names units and none of the event's own."""
+        if OTHER_JOB.search(entry.text or ""):
+            return True
+        mine = frozenset(u for e in self._event_entries(pack, ev) for u in e.units)
+        return bool(entry.units) and not entry.units & mine
 
     def _consume(self, pack_name: str, key: str) -> None:
         """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""

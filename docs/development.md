@@ -211,6 +211,14 @@ these tests look for `node` on `PATH`, then in `/opt/homebrew/bin` and `/usr/loc
 skip without it. One focus-order test in `tests/test_new_call.py` also wants `jsdom` where node can `require` it, and
 `tests/test_tts.py` wants the Kokoro voice set up (`tools/setup_tts.sh`, ~1.3 GB); both skip otherwise.
 
+### Contract tests
+
+`contracts/` holds a JSON Schema for each interface between a station (or any node) and the hub, with bodies that
+must and must not validate. `tests/test_contracts_*.py` check that today's hub, station and worker client send
+exactly that and ignore keys they don't know, and that every `/api/station/` route has its row in `contracts/routes.json`. A new key on
+the wire or a new route fails there until its schema or its row is brought up to date:
+[`contracts/README.md`](../contracts/README.md).
+
 ### The /cad bundles
 
 The hub image joins `/cad`'s scripts into one file and its stylesheets into another (`sizeup/web/bundle.py`, run by the

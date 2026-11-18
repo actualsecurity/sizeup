@@ -1,0 +1,24 @@
+{
+  "base": "station-state/valid/with-status.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/outbox/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/radios/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/radios/2/freqs/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/sdr/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/sdr/sdrs/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/sdr/groups/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/p25_systems/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/p25_systems/0/jobs/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/reception/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/reception/history/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/talkgroups/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/health/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/health/jobs/Tower/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/health/usb/devices/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/logship/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/version/adapter/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/status/stt_input/worker/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

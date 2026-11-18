@@ -1,0 +1,7 @@
+{
+  "state": "online",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "gpu": "Example GPU 12G",
+  "worker": "gpu-1"
+}

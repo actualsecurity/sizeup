@@ -23,3 +23,6 @@ include = ["sizeup*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test still running after 5 min: every thread's stack on stderr (an xdist worker's reaches the CI log), and it goes
+# on (dump only, no exit). A stall then says where it is (#740: CI sat at 98% with no output until the job timeout).
+faulthandler_timeout = 300

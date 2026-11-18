@@ -1,0 +1,9 @@
+{
+  "role": "feed-adapter",
+  "holder": "st-north",
+  "gen": [
+    "1e3",
+    14
+  ],
+  "ttl_s": 90
+}

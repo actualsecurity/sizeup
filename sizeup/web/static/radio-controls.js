@@ -1366,9 +1366,17 @@ window.RadioControls = (() => {
       const rest = w.grants - w.recording - w.encrypted;
       return `${w.tg} ${w.name}: ${w.grants} grants, ${w.recording} recorded, ${w.encrypted} encrypted${rest > 0 ? `, ${rest} not recorded` : ""}`;
     }).join("; ") : "");
+    // the split patch's counts (#647, systems.Activity): would split (log) / splits (on), ID flips, aliases, of its calls
+    const split = (x) => {
+      const p = x.split;
+      if (!p || !(p.calls || p.would || p.split || p.flip || p.alias)) return "";
+      const cut = p.split ? `${p.split} splits` : `${p.would} would split`;
+      return `\nSplit since ${fmtTime(p.since)}: ${cut}, ${p.flip} ID flips, ${p.alias} aliases, in ${p.calls} calls`
+        + (p.calls ? ` (${Math.min(100, (100 * p.cut) / p.calls).toFixed(1)}%)` : "");
+    };
     n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
       + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")
-      + watched(x)).join("\n\n");
+      + watched(x) + split(x)).join("\n\n");
     show(n.systems, sys.length > 0);
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
     const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);

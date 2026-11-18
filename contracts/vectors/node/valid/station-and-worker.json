@@ -1,0 +1,30 @@
+{
+  "id": "gpu-2",
+  "name": "",
+  "kind": "station+worker",
+  "roles": {
+    "stt-heavy": {
+      "classes": [
+        "urgent",
+        "high",
+        "live",
+        "rerun",
+        "context-fallback",
+        "context",
+        "low",
+        "catchup"
+      ],
+      "fast": true,
+      "max_s": 300
+    },
+    "infer": {
+      "llm_jobs": true,
+      "models": [
+        "example-llm-8b"
+      ]
+    },
+    "radio-receive": {
+      "channels": []
+    }
+  }
+}

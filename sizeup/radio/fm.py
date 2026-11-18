@@ -54,6 +54,12 @@ which ends with reason "key-up".
 
 One rtl_fm per channel; if it dies, stalls or the dongle is unplugged, the loop restarts it
 with backoff, forever (same pattern as shortfinal's receivers).
+
+A finished transmission is handed off the reader (SegmentWorkers): the thread that reads rtl_fm's pipe only feeds the
+squelch and the live tap (radio/tap.py: the talker, the emergency alarm, a page going out), and each channel's own
+worker thread runs on_segment (App._segment: the ID decode of the whole transmission, its clip) in the order the
+transmissions ended. A 2-minute transmission took about 1 s there on a fast PC (about 4 s on the station's i5), while
+rtl_fm's pipe holds about 2 s of audio: the reader stalled and audio could be lost with the carrier up.
 """
 
 from __future__ import annotations
@@ -94,6 +100,8 @@ SPEECH_DB = 8.0                # a speech frame: voice band this far over the de
 EDGE_SPEECH_FRAMES = 2         # ... 0.1 s of them between a data-like run and the edge: not a PTT-ID
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
+SEG_BEHIND = 4                 # a channel's finished transmissions waiting for its worker: logged from this many ...
+SEG_QUEUE_MAX = 64             # ... and the reader waits for the worker at this many (never one dropped)
 STUCK_S = 120.0                # open continuously this long: shown as "open 4:12 (stuck?)", logged once (#116)
 HF_BAND = (4000.0, 7500.0)
 # A second, weaker carrier on a simplex channel. FG1 2026-10-07 17:17-17:21: PCFD radios quiet the
@@ -165,6 +173,99 @@ class Segment:
     split: str = ""
     prev_start: float | None = None
     first_start: float | None = None
+    # Work left for the segment's worker (radio/am.py: the AGC and the tone notch), run by finish() before on_segment:
+    # audio is the transmission's only once it has run
+    pending: Callable[["Segment"], None] | None = field(default=None, repr=False, compare=False)
+
+
+def finish(seg: Segment) -> Segment:
+    """The segment as on_segment gets it: its pending work done (once)."""
+    fn = getattr(seg, "pending", None)
+    if fn is not None:
+        seg.pending = None
+        fn(seg)
+    return seg
+
+
+class SegmentWorkers:
+    """A receiver's finished transmissions, off its reader thread (module doc): one worker thread per channel (an
+    airband dongle hears several: radio/am.py), each running handler(channel, segment) for its channel's segments in
+    the order they were put. Bounded: SEG_BEHIND waiting is logged (and when it has caught up), and at SEG_QUEUE_MAX
+    the reader waits for the worker (logged): a transmission is never dropped. A reader that is stopping (put's
+    stopping) stops waiting and queues it over the limit (logged). close() lets the workers finish what is queued and
+    end; drain() waits for that. The App keeps one per channel for every receiver it makes of it (a dongle move makes
+    a new receiver: its transmissions queue behind the old one's, in order, never two at once)."""
+
+    def __init__(self, name: str, handler: Callable[[Channel, Segment], None], on_event: Callable[[str], None]):
+        self.name, self.handler, self.on_event = name, handler, on_event
+        self._cv = threading.Condition()
+        self._q: dict[str, deque] = {}          # per channel label: (channel, segment), the one being handled first
+        self._threads: dict[str, threading.Thread] = {}
+        self._behind: set[str] = set()
+        self._closed = False
+
+    def put(self, channel: Channel, seg: Segment, stopping: Callable[[], bool] | None = None) -> None:
+        label = channel.label
+        with self._cv:
+            q = self._q.setdefault(label, deque())
+            if len(q) >= SEG_QUEUE_MAX:
+                self.on_event(f"{label}: {len(q)} transmissions waiting to be handled: the receiver waits for them")
+                while len(q) >= SEG_QUEUE_MAX and not self._closed:
+                    if stopping is not None and stopping():
+                        self.on_event(f"{label}: stopping with {len(q)} waiting: this one queued after them")
+                        break
+                    self._cv.wait(0.25)
+            q.append((channel, seg))
+            if len(q) >= SEG_BEHIND and label not in self._behind:
+                self._behind.add(label)
+                self.on_event(f"{label}: {len(q)} transmissions waiting to be handled (falling behind)")
+            t = self._threads.get(label)
+            if t is None or not t.is_alive():
+                t = self._threads[label] = threading.Thread(target=self._work, args=(label,), daemon=True,
+                                                            name=f"segment-{label}")
+                t.start()
+            self._cv.notify_all()
+
+    def _work(self, label: str) -> None:
+        while True:
+            with self._cv:
+                q = self._q[label]
+                while not q:
+                    if self._closed:
+                        return
+                    self._cv.wait()
+                channel, seg = q[0]             # (still counted as waiting until it is handled: pending, drain)
+            try:
+                self.handler(channel, finish(seg))
+            except Exception as e:  # noqa: BLE001 - one transmission's handler never stops the channel's worker
+                self.on_event(f"segment handler error: {type(e).__name__}: {e}")
+            with self._cv:
+                q.popleft()
+                if not q and label in self._behind:
+                    self._behind.discard(label)
+                    self.on_event(f"{label}: caught up with its transmissions")
+                self._cv.notify_all()
+
+    def pending(self, label: str | None = None) -> int:
+        """Transmissions put and not yet handled (one channel's, or all)."""
+        with self._cv:
+            return sum(len(q) for k, q in self._q.items() if label is None or k == label)
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+
+    def drain(self, timeout: float) -> bool:
+        """Wait (up to timeout s) until every transmission put has been handled. True if they all were."""
+        end = time.monotonic() + timeout
+        with self._cv:
+            while any(self._q.values()):
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cv.wait(left)
+        return True
 
 def data_frames(frames: list[np.ndarray]) -> list[bool]:
     """Which 50 ms frames are an MDC-1200 burst (1200 baud MSK, 1200/1800 Hz: Motorola PTT-ID, sent
@@ -1047,6 +1148,12 @@ class NfmReceiver:
         # the first of each start). Each called from this receiver's own thread; one that raises is ignored.
         self.on_stall: Callable[[], None] | None = None
         self.on_audio: Callable[[], None] | None = None
+        # Its finished transmissions, off the reader (SegmentWorkers, module doc): from start(), its owner's (workers:
+        # the App's, the same for every receiver of the channel) or its own. One never started (the tests' receivers,
+        # fed by hand) hands each to on_segment at once, as before.
+        self.workers: SegmentWorkers | None = None
+        self.segments: SegmentWorkers | None = None
+        self._thread: threading.Thread | None = None
 
     def _absent(self, detail: str) -> None:
         """Its dongle isn't there (looked for again every 15 s): said once, not at every look (#547)."""
@@ -1100,8 +1207,26 @@ class NfmReceiver:
                 or (self.device if isinstance(self.device, str) else "") or "any")
 
     def start(self) -> NfmReceiver:
-        threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True).start()
+        self._open_segments()
+        self._thread = threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True)
+        self._thread.start()
         return self
+
+    def _open_segments(self) -> None:
+        self.segments = self.workers or SegmentWorkers(self.channel.label, lambda ch, seg: self.on_segment(ch, seg),
+                                                       lambda m: self.on_event(m))
+
+    def pending(self, label: str | None = None) -> bool:
+        """A finished transmission of this channel (label: of that one of its channels) not yet handled."""
+        return self.segments is not None and self.segments.pending(label) > 0
+
+    def drain(self, timeout: float = 10.0) -> bool:
+        """After stop(): wait (up to timeout s) for its reader to end (what the squelch held goes out: _flush) and for
+        every finished transmission to be handled. True if they all were."""
+        end = time.monotonic() + timeout
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(max(0.0, end - time.monotonic()))
+        return self.segments is None or self.segments.drain(max(0.0, end - time.monotonic()))
 
     def stop(self) -> None:
         self._stop.set()
@@ -1224,6 +1349,8 @@ class NfmReceiver:
                 self._hook(self.on_stall)
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+        if self.segments is not None and self.segments is not self.workers:
+            self.segments.close()       # its own workers finish what is queued, then end (drain() waits for them)
 
     def _program(self) -> str:
         """What this receiver runs, for its messages (radio/am.py: rtl_sdr and the channelizer for several)."""
@@ -1286,7 +1413,10 @@ class NfmReceiver:
         if seg is None:
             return
         self.last_heard = seg.end
+        if self.segments is not None:   # its channel's worker (module doc): the reader goes straight back to the pipe
+            self.segments.put(channel or self.channel, seg, self._stop.is_set)
+            return
         try:
-            self.on_segment(channel or self.channel, seg)
+            self.on_segment(channel or self.channel, finish(seg))
         except Exception as e:
             self.on_event(f"segment handler error: {type(e).__name__}: {e}")

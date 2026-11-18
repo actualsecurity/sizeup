@@ -761,7 +761,8 @@ def test_shutdown_releases_the_job_and_says_paused(tmp_path, hub, whisper):
     wait_for(lambda: whisper.aborted == 1, what="whisper-server saw the client go")
     assert w.counts["failed"] == 0
     assert hub.calls("/state")[-1][3] | {"gpu": None} == {"state": "paused", "reason": "shutdown", "gpu": None,
-                                                         "model": "large-v3-turbo-q5_0", "version": W.VERSION}
+                                                         "model": "large-v3-turbo-q5_0", "version": W.VERSION,
+                                                         "models": {"stt": "large-v3-turbo-q5_0", "llm": "", "llm_version": ""}}
 
 
 def test_audio_only_from_the_hub():

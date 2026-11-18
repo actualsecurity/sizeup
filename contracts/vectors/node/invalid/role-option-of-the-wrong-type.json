@@ -1,0 +1,8 @@
+{
+  "id": "st-north",
+  "roles": {
+    "feed-adapter": {
+      "priority": "first"
+    }
+  }
+}
