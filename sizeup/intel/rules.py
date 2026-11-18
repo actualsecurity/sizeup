@@ -55,8 +55,10 @@ category: "pulled out a gun", "shots fired"; never with "in custody", "for the r
 re-opens the event and pushes it again; any other row that says the category only takes the note off;
 "escalate_always" ("shots fired") does so whatever "escalate_not" says. "cancel_ttl_min": a safety category of a police
 pack that a nameless disregard marks "possibly cancelled" lives at most this long after it, and a second disregard or one
-of the pack's "resolved" phrases ("unfounded", "the caller called back") ends it. A rule's "unless" phrases set its
-"not" phrases aside ("pointed a gun at" beside "a bat in his bedroom").
+of the pack's "resolved" phrases ("unfounded", "the caller called back") ends it. A rule's "not" phrases are hard
+(negations, questions, unknowns, toys, the police's own equipment, the past): nothing sets them aside. Its "soft_not"
+phrases are context ("a bat in her bedroom", "a contractor has a hammer"), and its "unless" phrases set those aside
+("pointed a gun at", "swinging it at the clerk").
 
 "describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
 rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone.
@@ -293,15 +295,17 @@ class Rule:
     enabled: bool = True
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None    # the pack's table (None: the words as transcribed only)
-    unless: list = field(default_factory=list)   # phrases that set the "not" phrases aside ("pointed a gun at")
+    unless: list = field(default_factory=list)   # phrases that set the "soft_not" phrases aside ("pointed a gun at")
+    soft: list = field(default_factory=list)     # "soft_not": context exclusions ("a bat in her bedroom") "unless" beats
 
     def hit(self, text: str, ws: list[str]) -> bool:
-        """One reading where a phrase is found and no "not" phrase is, unless an "unless" phrase is (see the module's
-        doc)."""
+        """One reading where a phrase is found, no "not" phrase is (never set aside: negations, questions, unknowns),
+        and no "soft_not" phrase is unless an "unless" phrase is (see the module's doc)."""
         if not self.enabled:
             return False
         return any(any(p.found(t, w) for p in self.any)
-                   and (not any(p.found(t, w) for p in self.nots) or any(p.found(t, w) for p in self.unless))
+                   and not any(p.found(t, w) for p in self.nots)
+                   and (not any(p.found(t, w) for p in self.soft) or any(p.found(t, w) for p in self.unless))
                    for t, w in readings(text, ws, self.norm))
 
 
@@ -524,7 +528,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                           _phrases(r.get("any") or [], f"rule {rid}"), _phrases(r.get("not") or [], f"rule {rid} not"),
                           _mode(o.get("mode", r.get("mode", "push")), f"rule {rid} mode"),
                           bool(o.get("enabled", r.get("enabled", True))), dict(r), norm,
-                          _phrases(r.get("unless") or [], f"rule {rid} unless")))
+                          _phrases(r.get("unless") or [], f"rule {rid} unless"),
+                          _phrases(r.get("soft_not") or [], f"rule {rid} soft_not")))
     for rid, o in ro.items():                           # an admin's own rule (local.*)
         if rid.startswith("local.") and isinstance(o, dict) and o.get("pack") == name and rid not in seen:
             cat = str(o.get("category") or "")
@@ -536,7 +541,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                               norm))
     if norm is not None:                                # a "not" in heard spelling would miss the fixed reading
         for r in rules:
-            for p in r.nots:
+            for p in [*r.nots, *r.soft]:
                 check_spelling(p, norm, f"rule {r.id} not")
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
@@ -628,7 +633,7 @@ def ruleset_hash(packs: list[Pack]) -> str:
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
                         p.scope, list(p.area),
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots],
-                          *([[x.src for x in r.unless]] if r.unless else [])]
+                          *([[x.src for x in r.unless]] if r.unless else []), *([[x.src for x in r.soft]] if r.soft else [])]
                          for r in p.rules], [x.src for x in p.suppress],
                         *([[x.src for x in p.resolved]] if p.resolved else []),
                         {k: [[[x.src for x in a], [x.src for x in n]] for a, n in v] if isinstance(v, list)

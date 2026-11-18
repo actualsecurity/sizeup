@@ -144,13 +144,39 @@ def test_a_de_escalation_from_another_job_needs_the_place():
 
 
 @pytest.mark.parametrize("text", ["units be advised, shots fired, one in custody",
-                                  "be advised now he pulled a gun, he had the knife before"])
+                                  "be advised now he pulled a gun, he had the knife before",
+                                  "be advised now he pulled out the gun"])
 def test_shots_or_a_new_weapon_after_a_de_escalation_push_again_whatever_else_is_said(text):
     e, sink = engine()
     [ev] = e.feed(row("t1", GUN_CALL, 1000))
     e.feed(row("t2", SECURED, 1100))
     e.feed(row("t3", text, 1110))
     assert e.events.get(ev.id).note == "re-opened" and pushed(sink) == ["weapons", "weapons"]
+
+
+@pytest.mark.parametrize("text", [
+    "he's threatening to kill himself, no weapons involved",
+    "caller states no weapons involved, he's swinging his fists at people",
+    "is there a weapon involved? he is threatening her",
+    "weapons involved? unknown, he is threatening the clerk",
+    "she doesn't think he has a gun, he's threatening to come back",
+    "toy gun seen, the kid is waving it around",
+    "unknown if he has a knife, he's threatening his mother",
+    "kids swinging a bat at the little league field",
+    "the kids are swinging a bat at the batting cage",
+])
+def test_threat_words_never_set_a_hard_exclusion_aside(text):
+    e, sink = engine()
+    e.feed(row("t1", CUE + text, 1000))
+    assert "weapons" not in pushed(sink), [(h.rule_id, h.weight) for h in sink.hits]
+
+
+def test_now_he_has_the_gun_in_an_evidence_bag_never_pushes_again():
+    e, sink = engine()
+    [ev] = e.feed(row("t1", GUN_CALL, 1000))
+    e.feed(row("t2", SECURED, 1100))
+    e.feed(row("t3", "now he has the gun in an evidence bag, he's in custody", 1110))
+    assert e.events.get(ev.id).note != "re-opened" and pushed(sink) == ["weapons"]
 
 
 @pytest.mark.parametrize("text", ["respond to 100 Example Ave for an EDP, he is threatening to jump",
@@ -293,6 +319,7 @@ def test_weapons_edp_and_dispute_tie_by_telling_words_only():
     ("he's got a gun, same as last time", "weapons"),
     (CUE + "she has a bat in her bedroom, she's swinging it at him", "weapons"),        # "unless" sets the exclusion aside
     ("he's a hunter, he pointed the gun at his wife", "weapons"),
+    ("officer down at the station, he's been shot", "officer"),                     # the hurt overrides "down at the station"
     # assaults whose context words once silenced them
     (CUE + "a male was assaulted today in front of the store", "assault"),
     (CUE + "the victim was assaulted, she is at the station, bleeding from the head", "assault"),
