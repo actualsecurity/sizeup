@@ -52,7 +52,8 @@ overruns are fixed where they are caused:
    here).
 
 Items 1 and 2 were not built or measured. What supports them: with a close handler running in another thread of the
-same interpreter, idle channels' frames were 0.17 ms late at the median (p99 1.9 ms), the same as the control.
+same interpreter, idle channels' frames were 0.17 ms late at the median, the same as the control (0.18 ms); p99 was 1.9 ms against
+0.58 ms.
 
 These were handed, with the benchmarks, to whoever maintains the radio and speech-to-text code.
 

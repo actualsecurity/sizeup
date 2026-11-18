@@ -37,7 +37,7 @@ Before any component is ported, and independently of whether one ever is:
 3. **One compatibility rule, stated once:** unknown keys are ignored both ways; new behaviour is switched on by
    named capabilities in both directions; a version field means something; an older build can read a file a newer
    build wrote (a station rolls back in seconds).
-4. **The gaps above are fixed in Python as part of this**, each with its test, by the sessions that own the code.
+4. **The gaps above are fixed in Python as part of this**, each with its test, by whoever maintains that code.
 
 ## Alternatives
 

@@ -106,8 +106,8 @@ What they support instead, in order:
    per-transmission work off the receiver thread, two output-identical speed-ups (×2.3 to ×2.8 on one decoder, ×9.5
    to ×42 on one filter step: ×2.4 to ×8.3 on the whole voice filter), a shorter GIL switch interval on the station, one compression per push, a cached status-word repair, a cached Access check, and
    a durable cursor for P25 ingest so calls that end during a restart are not lost.
-2. **The capture split** (ADR 0002): capture as its own service behind a spool contract. It removes most restarts of
-   capture, and it is the seam a native radio daemon would later implement.
+2. **The capture split** (ADR 0002): capture as its own service behind a spool contract. It removes between about half and most restarts
+   of capture, and it is the seam a native radio daemon would later implement.
 3. **Contracts** (ADR 0004): schemas and conformance tests, needed in any case for several stations and for nodes.
 4. **A larger hub task** before several stations (1 vCPU doubles the headroom; the second core adds little).
 
@@ -120,7 +120,7 @@ What they support instead, in order:
 | A native station agent (Go) | A native radio daemon exists, a station class with 1 to 2 GB of memory or several unattended stations is planned, and the schemas exist. Then the agent is the last Python on the box |
 | A native fan-out (Go, or asyncio in Python) | Several hundred clients hold streams at once (mobile on streams, not polling). The CPU is equal; it would be decided by memory, operations and where the Access check lives |
 | A native squelch (Rust) | A station with 16 or more busy analog channels on a small ARM board, after the Python fixes. 278 test cases pin its behaviour today |
-| The FLAC codec for speech-to-text input as a native library | Its decode shows in the hub's `perf` lines as clip volume grows: decoding a 2-minute clip is 759 ms of local CPU, an estimated 2.3 s on the hub, and is not in the hub model. A pure function with bit-exact vectors: the cleanest library candidate |
+| The hub's FLAC decoder for speech-to-text input as a native library | Its decode shows in the hub's `perf` lines as clip volume grows: decoding a 2-minute clip is 759 ms of local CPU, an estimated 2.3 s on the hub, and is not in the hub model. A pure function with bit-exact vectors: the cleanest library candidate |
 
 ## What was not measured
 
@@ -131,7 +131,10 @@ What they support instead, in order:
   spectral lines a clip has.
 - Any ARM board.
 - The two worker changes of ADR 0001 (they were not built), slow SSE clients, a browser on a shared-compression
-  stream, and the hub's camera DVR (3.4 % of 0.5 vCPU now; it scales with cameras).
+  stream, and TLS, Access and the tunnel in front of the fan-out.
+- The hub model at scale: nothing was run on Fargate with more stations or consoles than today.
+- The P25 ingest path's own cost (bounded by the station process's 8.5 % of one core), and how the hub's camera DVR
+  scales with cameras (3.4 % of 0.5 vCPU now).
 
 ## Benchmarks
 

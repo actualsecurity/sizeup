@@ -8,7 +8,7 @@ The hypothesis was a Go service for the hub's real-time state push (the per-seco
 because the hub is one Python process on 0.5 vCPU and several stations, more consoles and mobile clients are
 planned.
 
-Production (the hub's own `perf` lines, 16 before and 10 after the state-push cache of #699; ECS metrics; the access
+Production (the hub's own `perf` lines, those of the day before and the 10 after the state-push cache of #699; ECS metrics; the access
 log's timings: numbers only). The 10 "after" samples are each the first five minutes of a new task in the two hours
 after the deploy, and the same deploys carried two changes to how often the Settings page reloads, which also
 lower the request figures:
