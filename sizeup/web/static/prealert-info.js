@@ -249,6 +249,7 @@ window.PrealertInfo = (() => {
       ["Ack", o.acknowledged ? `${o.acknowledged.by || ""} · ${tm(o.acknowledged.at)}` : ""],
       ["Event", o.incident ? incLink(o.incident) : ""],
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
+      ["FD", o.fd || "", "The FD was already there: no pre-alert (an FYI only when the words added something)"],
       ["Push", o.pushed_at ? tm(o.pushed_at) : o.suppressed ? `held: ${o.suppressed}` : o.pushed ? "pushed" : "",
         o.suppressed ? "Not pushed, and why" : ""],
       ["Votes", fb.join("; ")],

@@ -53,6 +53,11 @@ window.IntelCard = (() => {
       li.append(sug);
     }
     if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
+    if (e.fd_shown) {                    // the FD already there (sizeup/intel/engine.py _fire): "FD on scene · #26-000123"
+      const fd = el("div", "aa-loc", e.fd_shown);
+      fd.title = "The FD was already there when PD put this out: an FYI, not a pre-alert";
+      li.append(fd);
+    }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
@@ -110,7 +115,7 @@ window.IntelCard = (() => {
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, st.busy.has(e.id), st.playing]));
+      e.suppressed, e.pushed_at, e.fd_shown, st.busy.has(e.id), st.playing]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((e) => card(e, deps)));
@@ -238,6 +243,13 @@ window.IntelSettings = (() => {
     top.append(line(elab, [
       field("quiet from", hm("quiet_from", "Quiet from (no pushes; empty: none)", "Quiet hours from, local time (no pushes; empty: none)"), "in-w-time"),
       field("to", hm("quiet_to", "Quiet until", "Quiet hours until, local time"), "in-w-time"),
+    ]));
+    // a fire-related PD call the FD is already at (sizeup/intel/engine.py _fire): logged, an FYI only when it adds something
+    const fdl = el("span", "", "FD there");
+    fdl.title = "A fire-related PD call at one of our incidents (ours or the county feed's): no pre-alert; an FYI only when the words add something";
+    top.append(line(fdl, [
+      field("min", lnum("fd_window_min", 5, 720, "Our incidents first seen this many minutes before", "Minutes: our incidents first seen this long before the call (open, or closed since)")),
+      field("m", lnum("fd_radius_m", 25, 2000, "Within this many metres", "Metres: an incident this close is the call's (or the same address or block)")),
     ]));
     const kids = [top];
     const ran = new Map((((d.counters || {}).packs) || []).map((x) => [x.pack, x]));     // what each pack was handed

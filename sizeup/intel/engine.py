@@ -91,6 +91,21 @@ How a row becomes an event, per pack whose scope it is in:
                       NEAR_INCIDENT_M) while that incident is open: the job we already have, linked
                       (Event.near_incident), never a new lead. A safety category is linked and NOT held: a hazard at
                       our own scene is what a crew most needs to hear.
+     A category with "fire_related": true (rules.py; the police pack's fire_report, fire_call, hazmat, alarm) is checked
+     for the FD already being there before it pushes (_fire; admin, 2026-11-17: a pre-alert is a jump on a call, and
+     PD's dispatch of a fire the FD is already working is not one): our incident (the CAD's own and the incident
+     sources', the county feed's included: fire_incidents) at its place (the same address or block, or within
+     fd_radius_m), first seen up to fd_window_min before it, open or closed since; with no place, an open one whose
+     street the words name. Linked (Event.near_incident) and Event.fd set either way:
+       fd_on_scene    a unit on scene: held at log, unless the words are a safety change ("fd_present" "safety": a
+                      weapon, violence, an explosion or collapse, a member down): then an FYI at safety_priority
+       fd_dispatched  units assigned or en route (or a closed one): held at log, unless the words add something
+                      ("add_info": people inside or trapped, a weapon, injuries, spread, hazmat): then an FYI at
+                      fyi_priority (2)
+       fd_there       none of ours, but the words say the FD is there ("FD's out with a car fire": another
+                      department's call, not in our feed): as fd_dispatched
+     An FYI's title starts "FYI" and its body says "FD on scene · #<number>". An event pushed before the FD was known is
+     linked only, never lowered. An event of another category is never checked.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
      A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
      (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
@@ -142,6 +157,7 @@ SAME_PLACE_M = 150.0                   # two places this close are the same inci
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+FD_HELD = ("fd_on_scene", "fd_dispatched", "fd_there")   # a fire-related event held for the FD being there (_fire)
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
@@ -255,6 +271,11 @@ class IntelEngine:
         # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
         # sets it; replay may), for near_incident. None: no incidents, nothing linked.
         self.incidents = None
+        # fire_incidents(since) -> [{id, number, lat, lon, label, address, created_at, closed_at, fd}]: our incidents
+        # (the CAD's own and the incident sources', the county feed's included) first seen since then, open or closed
+        # since, fd "on_scene" | "dispatched", for a fire-related event (_fire). None: never checked.
+        self.fire_incidents = None
+        self._numbers: dict = {}              # incident id -> its number, as fire_incidents last gave it (the push)
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -912,13 +933,80 @@ class IntelEngine:
                 best = (at, int(inc["id"]))
         return best[1] if best else None
 
+    def _fire(self, pack, ev: Event) -> str:
+        """A fire-related event with the FD already there (the module's doc, step 6): links it (near_incident), sets
+        ev.fd and, for an FYI, its priority. Returns why it is held ("fd_on_scene" | "fd_dispatched" | "fd_there"),
+        or "" (no FD there, or an FYI: pushed as one). An event pushed as a pre-alert before the FD was known is linked
+        only: never held, never made an FYI."""
+        texts = self._texts(pack, ev.source_key, ev.traffic_ids)
+        inc = self._fire_incident(ev, texts)
+        if inc is not None:
+            ev.near_incident = int(inc["id"])
+        if ev.pushed_at is not None and not ev.fd:
+            return ""
+        state = ("on_scene" if inc.get("fd") == "on_scene" else "dispatched") if inc is not None else (
+            "there" if pack.fd_said("there", texts) else "")
+        ev.fd = state
+        if not state:
+            return ""
+        prio = pack.fd or {}
+        if state == "on_scene":
+            if pack.fd_said("safety", texts):
+                ev.priority = int(prio.get("safety_priority", 4))
+                return ""
+            return "fd_on_scene"
+        if pack.fd_said("add_info", texts) or pack.fd_said("safety", texts):
+            ev.priority = int(prio.get("fyi_priority", 2))
+            return ""
+        return f"fd_{state}"
+
+    def _fire_incident(self, ev: Event, texts) -> dict | None:
+        """Our incident at a fire-related event's place (_fire): first seen at most fd_window_min before the event (and
+        at most INCIDENT_AFTER_S after its last transmission), open or closed within that window; at the same address
+        or block, or within fd_radius_m (and half the place's radius). With no place: an open one whose street the
+        words name (fire_street_said). The one with a unit on scene first, then an open one, then the newest."""
+        if self.fire_incidents is None:
+            return None
+        win = float(self.policy.cfg.get("fd_window_min", 60)) * 60
+        rad = float(self.policy.cfg.get("fd_radius_m", 300))
+        since = ev.first_at - win
+        try:
+            incs = self.fire_incidents(since) or []
+        except Exception as e:  # noqa: BLE001 - no incidents: pushed as before
+            self.log(f"intel: fire incidents: {type(e).__name__}")
+            return None
+        placed = ev.precision != "none" and ev.lat is not None and ev.lon is not None
+        best = None
+        for inc in incs:
+            at = float(inc.get("created_at") or 0.0)
+            closed = inc.get("closed_at")
+            if not at or at < since or at > ev.last_at + INCIDENT_AFTER_S:
+                continue
+            if closed is not None and float(closed) < since:
+                continue
+            if placed:
+                hit = fire_place(ev, inc, rad)
+            else:
+                hit = closed is None and fire_street_said(inc, texts)
+            if not hit:
+                continue
+            if inc.get("number"):
+                if len(self._numbers) > 500:
+                    self._numbers.clear()     # (a few a day: never grows without bound)
+                self._numbers[int(inc["id"])] = str(inc["number"])
+            rank = (inc.get("fd") == "on_scene", closed is None, at)
+            if best is None or rank > best[0]:
+                best = (rank, inc)
+        return best[1] if best else None
+
     def _hold(self, pack, ev: Event, mode: str | None = None) -> None:
         """Out of area, or our own incident's: held at log (the module's doc, step 6). Only a pack with an area (the
-        county-wide packs): the police pack's events are never linked, and held only in a "place": true category
-        (unplaced, _unplaced). An event already pushed is never held
+        county-wide packs): the police pack's events are linked only in a "fire_related" category (_fire), and held
+        only there or in a "place": true category (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
-        if not pack.area and not pack.category(ev.category).get("place"):
+        cat = pack.category(ev.category)
+        if not pack.area and not cat.get("place") and not cat.get("fire_related"):
             return
         if ev.suppressed == "placed_late" and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")  # placed too late to be a pre-alert: stays at log
@@ -926,7 +1014,10 @@ class IntelEngine:
         if pack.area:
             ev.near_incident = self._incident(ev)
         why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
-        if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
+        fd = self._fire(pack, ev) if cat.get("fire_related") else None     # linked whatever else holds it
+        if fd is not None:
+            why = why or fd
+        elif not why and ev.near_incident is not None and not cat.get("safety"):
             why = "near_incident"
         if why and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")
@@ -940,7 +1031,7 @@ class IntelEngine:
             else:
                 ev.suppressed = ""
                 ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
-        elif ev.suppressed in ("out_of_area", "near_incident"):
+        elif ev.suppressed in ("out_of_area", "near_incident", *FD_HELD):
             ev.suppressed = ""
             if mode is not None:
                 ev.mode = max(ev.mode, mode, key=mode_rank)
@@ -1319,7 +1410,8 @@ class IntelEngine:
         if d.would_push:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
-            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful)
+            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful,
+                                   number=self._numbers.get(ev.near_incident or 0, ""))
             # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
             why = "" if self.policy.cfg.get("push_pii", True) else push_mod.scrub(msg, self._who(pack, ev))
             if why:
@@ -1507,7 +1599,7 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
 
 def _same(a: Event, b: Event) -> bool:
     keys = ("what_score", "level", "rules", "traffic_ids", "mode", "priority", "precision", "lat", "lon", "label_full",
-            "confirmed", "status", "category", "near_incident", "suppressed")
+            "confirmed", "status", "category", "near_incident", "suppressed", "fd")
     return all(getattr(a, k) == getattr(b, k) for k in keys)
 
 
@@ -1614,3 +1706,55 @@ def same_place(a, b) -> bool:
     if None in (a.lat, a.lon, b.lat, b.lon):
         return False
     return _m(a.lat, a.lon, b.lat, b.lon) <= SAME_PLACE_M
+
+
+def _block_of(label: str) -> str:
+    """"100 block of Example Rd, Town" as an address of that block ("100 Example Rd, Town"); else the label."""
+    return re.sub(r"^\s*(\d+)\s+block\s+of\s+", r"\1 ", label or "", flags=re.I)
+
+
+def fire_place(ev: Event, inc: dict, radius_m: float) -> bool:
+    """The event's place is the incident's (_fire_incident): the same address (sizeup/cad/sources.py same_place) or the
+    same block of the same street (the house numbers' hundreds), or within radius_m (and half the place's radius)."""
+    from sizeup.cad.sources import _same_street, _town, place_key
+    from sizeup.cad.sources import same_place as same_address
+    mine = _block_of(ev.label_full)
+    theirs = [x for x in (str(inc.get("address_raw") or ""), str(inc.get("address") or ""), str(inc.get("label") or "")) if x]
+    if mine:
+        ka, ta = place_key(mine), _town(mine)
+        for t in theirs:
+            if same_address(mine, t):
+                return True
+            kb, tb = place_key(t), _town(t)
+            if (ka and kb and ka[0] == kb[0] == "addr" and not (ta and tb and ta != tb) and _same_street(ka[2:], kb[2:])
+                    and _hundreds(ka[1]) is not None and _hundreds(ka[1]) == _hundreds(kb[1])):
+                return True
+    if inc.get("lat") is None or inc.get("lon") is None:
+        return False
+    return _m(ev.lat, ev.lon, float(inc["lat"]), float(inc["lon"])) <= radius_m + float(ev.radius_m or 0.0) / 2
+
+
+def _hundreds(num: str) -> int | None:
+    m = re.match(r"\d+", num or "")
+    return int(m.group(0)) // 100 if m else None
+
+
+def fire_street_said(inc: dict, texts) -> bool:
+    """An event with no place: the incident's street (its name words, then its suffix: "Example Road"; a street with no
+    suffix never, too loose), or one of its intersection's, said in the words."""
+    from sizeup.cad.sources import ABBR, place_key
+    k = place_key(str(inc.get("address_raw") or inc.get("address") or inc.get("label") or ""))
+    if k is None:
+        return False
+    streets = [k[2:]] if k[0] == "addr" else list(k[1]) if k[0] == "x" else []
+    streets = [(st[1], st[2]) for st in streets if st[1] and st[2]]          # (suffix, name words)
+    if not streets:
+        return False
+    for text in texts or ():
+        ws = [ABBR.get(w, w) for w in re.findall(r"[a-z0-9]+", str(text).lower())]
+        for suffix, name in streets:
+            n = len(name)
+            for i in range(len(ws) - n):
+                if ws[i + n] == suffix and set(ws[i:i + n]) == set(name):
+                    return True
+    return False

@@ -364,6 +364,7 @@ class Cad:
                                      worker=True)            # its calls on the "infer" thread, never the engine's
         self.intel_admin = IntelAdmin(self, self.intel)
         self.intel.incidents = self.intel_incidents             # an event at one of ours: linked, never a new lead
+        self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
@@ -726,6 +727,42 @@ class Cad:
             "AND emergency = 1 AND status NOT IN ('queued', 'dismissed') AND accepted_at IS NOT NULL "
             "AND lat IS NOT NULL AND lon IS NOT NULL AND (closed_at IS NULL OR closed_at >= ?) "
             "ORDER BY created_at DESC LIMIT 200", (since, since))]
+
+    def intel_fire_incidents(self, since: float) -> list[dict]:
+        """Our incidents a fire-related PD event may be (sizeup/intel/engine.py _fire): emergency ones made since then
+        (a person's, a page's, an incident source's: the county feed's too, queued ones included, never a dismissed
+        one), open or closed since, with where the FD is: "on_scene" (a unit of ours on scene and not cleared, or a
+        unit the feed has on location and not in service, or the event itself), else "dispatched". A read on the intel thread, only for
+        such an event; created_at first (incidents_created), then the few incidents' assignments and reports."""
+        rows = [dict(r) for r in self.store.q(
+            "SELECT id, number, lat, lon, geo_label AS label, address, address_raw, created_at, closed_at FROM incidents "
+            "WHERE created_at >= ? AND emergency = 1 AND status != 'dismissed' AND (closed_at IS NULL OR closed_at >= ?) "
+            "ORDER BY created_at DESC LIMIT 100", (since, since))]
+        if not rows:
+            return rows
+        ids = [r["id"] for r in rows]
+        marks = ",".join("?" * len(ids))
+        on = {r["incident_id"] for r in self.store.q(
+            f"SELECT DISTINCT incident_id FROM assignments WHERE incident_id IN ({marks}) AND onscene_at IS NOT NULL "
+            "AND cleared_at IS NULL", ids)}
+        for r in self.store.q(f"SELECT incident_id, data FROM source_reports WHERE incident_id IN ({marks}) "
+                              "AND merged_into = ''", ids):
+            if r["incident_id"] in on:
+                continue
+            try:
+                d = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            if d.get("closed"):
+                continue
+            ut = d.get("unit_times") if isinstance(d.get("unit_times"), dict) else {}
+            whole = d.get("times") if isinstance(d.get("times"), dict) else {}
+            if any(isinstance(t, dict) and t.get("on_location") and not t.get("in_service")
+                   for t in [*ut.values(), whole]):
+                on.add(r["incident_id"])
+        for r in rows:
+            r["fd"] = "on_scene" if r["id"] in on and r["closed_at"] is None else "dispatched"
+        return rows
 
     def intel_state(self, now: float | None = None) -> dict | None:
         """Radio pre-alerts for the console's card (sizeup/intel): signed-in viewers only; never breaks the console."""

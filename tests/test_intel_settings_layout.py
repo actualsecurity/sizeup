@@ -191,7 +191,7 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
     packs = len(site.j("GET", "/api/cad/intel")[1]["packs"])
     assert packs == 5                                                        # the first pack and the four log-only ones
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
-                                         "model", "/day", "$/month", "sample %", "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
+                                         "model", "/day", "$/month", "sample %", "quiet from", "to", "min", "m"] + ["mode", "threshold", "window s"] * packs
     for text, title, field_title in labels:
         assert len(title) > len(text) and title == field_title, (text, title)
     hovers = {t: h for t, h, _ in labels}
@@ -251,6 +251,8 @@ def test_every_control_posts_what_it_did(site, browser):
         (f"{CARD} [aria-label^='Of rows with a hit']", "5", {"action": "set", "key": "infer_sample_pct", "value": 5}),
         (f"{CARD} [aria-label^='Quiet from']", "22:30", {"action": "set", "key": "quiet_from", "value": "22:30"}),
         (at("Quiet until"), "06:15", {"action": "set", "key": "quiet_to", "value": "06:15"}),
+        (at("Our incidents first seen this many minutes before"), "45", {"action": "set", "key": "fd_window_min", "value": 45}),
+        (at("Within this many metres"), "250", {"action": "set", "key": "fd_radius_m", "value": 250}),
         (at(f"{pack['label']} pack mode"), "map", {"action": "pack", "pack": pack["name"], "mode": "map"}),
         (f"{CARD} [aria-label^='Threshold']", "0.55", {"action": "pack", "pack": pack["name"], "threshold": 0.55}),
         (f"{CARD} [aria-label^='Seconds of one source merged']", "90", {"action": "pack", "pack": pack["name"], "window_s": 90}),
@@ -276,7 +278,7 @@ def test_every_control_posts_what_it_did(site, browser):
     if kinds:
         ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
         assert len(d["packs"]) == 5 and nrule > 80                           # every pack's rows, each with its own controls
-        assert kinds[:5] == [5, 15 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        assert kinds[:5] == [5, 17 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
         names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
         assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved

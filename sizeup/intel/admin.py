@@ -33,7 +33,7 @@ from sizeup.intel import policy as policy_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.events import VERDICTS
 from sizeup.intel.model import MODES
-from sizeup.intel.push import category_label
+from sizeup.intel.push import category_label, fd_text
 
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 LIST_S = 24 * 3600
@@ -200,9 +200,23 @@ class IntelAdmin:
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
                 "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
                 "near_incident": e.get("near_incident"),
+                "fd": e.get("fd") or "", "fd_shown": self._fd_shown(e),
                 # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
                 "suggested": label if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
                 and e["mode"] != "push" else ""}
+
+    def _fd_shown(self, e: dict) -> str:
+        """"FD on scene · #26-000123" for an event the FD was already at (engine.py _fire); "" for none."""
+        if not e.get("fd"):
+            return ""
+        number = ""
+        if e.get("near_incident"):
+            try:
+                r = self.cad.store.one("SELECT number FROM incidents WHERE id = ?", (int(e["near_incident"]),))
+                number = (r or {}).get("number") or ""
+            except Exception:  # noqa: BLE001 - shown without its number
+                number = ""
+        return fd_text(e["fd"], number)
 
     def state(self, now: float | None = None) -> dict | None:
         """The console's card: open events at map or push, newest first; None for a viewer who may not see them."""
