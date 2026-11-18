@@ -321,7 +321,8 @@ class Runtime:
                                  path=(state_dir / f"p25_{system.name}_activity.json") if state_dir else None,
                                  on_minute=on_activity)
         self.ingest = CallIngest(system.capture_dir, system.labels(), lambda call: on_call(self, call), on_event=log,
-                                 name=system.label)
+                                 name=system.label,     # (#747: calls written while sizeup was down come in late)
+                                 mark_path=(state_dir / f"p25_{system.name}_ingest_mark.json") if state_dir else None)
         self.ingest.record_all = False                    # a talkgroup that isn't in its file is never taken
         self.ingest.grants = self.live.grants
         self.ingest.alias_of = lambda src: self.live.aliases.get(src, "")

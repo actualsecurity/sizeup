@@ -1268,7 +1268,8 @@ class HubApp(App):
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
                          quiet=bool(d.get("catchup")),      # (a shed clip caught up: old words, nothing alerts)
-                         vocab_v=str(d.get("vocab_v") or "")[:80])
+                         vocab_v=str(d.get("vocab_v") or "")[:80],
+                         late=bool(d.get("late")))          # (#747: a call from while the station was down: the same)
             if str(d.get("status") or "done") in ("done", "no_speech"):     # the station's whisper's text (#639)
                 self._stt_ran(pid, "station-whisper", str(d.get("model") or ""), str(d.get("text") or ""),
                               str(d.get("status") or "done"), d.get("confidence"), role=role,

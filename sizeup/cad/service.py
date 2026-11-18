@@ -373,6 +373,7 @@ class Cad:
         self.intel.incidents = self.intel_incidents             # an event at one of ours: linked, never a new lead
         self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
+        self.comms.on_late_text = self._on_late_text          # a P25 call from while sizeup was down (#747)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
@@ -552,6 +553,14 @@ class Cad:
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
+
+    def _on_late_text(self, tid: str) -> None:
+        """A transcript on a P25 call written while sizeup was down (#747): the per-incident radio log (#311) only. It is
+        minutes old: no pre-alert, status suggestion, dispatch step, possible incoming or airport alert level from it."""
+        try:
+            self.radiolog.consider(tid)
+        except Exception as e:  # noqa: BLE001 - the log never stops the transcript
+            self.log(f"CAD: radio log: {type(e).__name__}")
 
     def _display_incs(self, incs: list[dict]) -> None:
         """A page's transcript in an event's remarks and timeline as shown: vocabulary phrases without AWS's hyphens
