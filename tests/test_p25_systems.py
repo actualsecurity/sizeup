@@ -1304,7 +1304,7 @@ def test_no_ids_hub_caps_and_queue_stats(tmp_path):
     link._set_caps(["p25_systems"])
     assert json.loads(link._caps_file.read_text()) == ["p25_systems"] and link.hub_caps == {"p25_systems"}
     src = (ROOT / "sizeup" / "cloud" / "station.py").read_text()
-    assert 'with_name("hub_caps.json")' in src and "self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))" in src
+    assert 'with_name("hub_caps.json")' in src and "kept = json.loads(self._caps_file.read_text())" in src
     q = stt.SttQueue(lambda item, why: None)
     q.put((stt.CONTEXT, None, "pd", None, "p25:mrrs:9211"))
     q.put((stt.LIVE, None, "fire", None, "tg:301"))
@@ -1548,6 +1548,10 @@ def test_unsigned_sweep_on_a_real_station_and_a_real_hub_without_access(tmp_path
     try:
         assert isinstance(hub.app, HubApp) and not hub.app.access_enforced and not st.access_enforced
         assert wait(lambda: "p25_systems" in st.link.hub_caps, 10)               # the hub said what it knows
+        from sizeup.cloud import statusshape                                       # (D5 of #774: a P25 station's real
+        full = st.link.status()                                                   # status, its systems and talkgroups,
+        assert full["p25_systems"] and full["talkgroups"] and statusshape.problem(full) is None   # is taken)
+        assert wait(lambda: hub.app.hub.status is not None, 10) and hub.app.hub.status_refused is None
         iid, (fire, pd) = _with_context_traffic(st)
         # it is recorded on the station and reaches the hub's log, with its words
         assert wait(lambda: (hub.app.cad.store.one("SELECT text FROM radio_traffic WHERE id = ?", (pd,)) or {}).get("text")
