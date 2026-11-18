@@ -311,3 +311,46 @@ def test_a_late_transcript_with_no_rule_words_beside_an_open_event_is_no_error()
     e.feed(row("t3", "Car 6 on location.", clock() - 5))
     assert e.feed(row("t2", "Car 6 copy.", clock() - 200)) == []          # was a KeyError (engine._feed_pack)
     assert len(pushed(sink)) == 1
+
+
+# -- a cleared, negated or not-a-call barricade: no barricade from that transmission ----------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Not a hostage situation.",
+    "It is not a barricade situation, subject came out.",
+    "Subject is no longer barricaded, ESU clearing.",
+    "Unfounded, no hostage situation.",
+    "Barricade situation resolved, subject in custody.",
+    "Negative on the hostage, ESU can stand down.",
+    "ESU setting up a barricade on Example Road for the parade.",
+    "Barricade on Example Road, ESU on scene for the detail.",
+    "SWAT drill at the school, barricade scenario.",                      # suppressed like training
+    "Respond to 12 Example Road, caller says it is not a hostage situation.",  # a dispatch cue beside it: still nothing
+])
+def test_a_cleared_or_negated_barricade_does_not_push(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert not [ev for ev in e.events.all() if ev.category == "barricade"] and pushed(sink) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Respond to 12 Example Road, barricaded subject.",
+    "Respond to 12 Example Road, barricaded subject, no hostages.",        # "no hostages" is no clearing
+    "Male barricaded in the apartment at 12 Example Road.",
+    "Caller states her husband is holding the kids hostage.",
+    "Male barricaded inside 12 Example Road, ESU en route.",
+    "Hostage at 12 Example Road, subject is armed with a knife.",
+    "Subject refusing to come out at 12 Example Road.",
+    "Barricade at 12 Example Road, SWAT requested.",
+])
+def test_the_real_shapes_still_push_beside_the_not_phrases(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert [ev.category for ev, _d in pushed(sink) if ev.category == "barricade"] == ["barricade"]
+
+
+def test_a_drill_is_suppressed_like_training():
+    raw = json.loads((rules_mod.DATA / "police.json").read_text())
+    assert any("drill" in x and "training" in x for x in raw["suppress"])
+    e, sink = engine()
+    assert e.feed(row("t1", "Shots fired at the school, this is a drill.", e.clock())) == [] and pushed(sink) == []
