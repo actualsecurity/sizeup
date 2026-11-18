@@ -110,7 +110,7 @@ from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALL
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.audiostore import STT_SRC
-from sizeup.cloud import sttinput
+from sizeup.cloud import statusshape, sttinput
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -166,6 +166,14 @@ EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names,
 
 class StationOffline(RuntimeError):
     pass
+
+
+def _part(status, key: str, kind: type = dict):
+    """The station's status' `key` when the status is a dict and the value a `kind`, else None: a reader never gets a
+    value of another type (each status is checked as it comes, sizeup/cloud/statusshape.py; this keeps the readers
+    safe from a value stored otherwise)."""
+    v = status.get(key) if isinstance(status, dict) else None
+    return v if isinstance(v, kind) else None
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
@@ -312,6 +320,7 @@ class Hub:
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
+        self.status_refused: dict | None = None  # the latest status refused for its shape ({at, why, n, since})
         self.talkgroups: list[dict] = []
         self.skew = 0.0                          # hub clock - station clock (s)
         self.errors, self.last_error = 0, ""
@@ -332,14 +341,15 @@ class Hub:
     def health(self) -> dict:
         """{state, word, detail}: the "Station" row and the console's header pill."""
         now = time.time()
-        name = (self.status or {}).get("name") or "the station"
+        name = _part(self.status, "name", str) or "the station"
         reg = getattr(self, "stations", None)
         if not (reg.ingest_on() if reg is not None else self.token):
             return {"state": "down", "word": "no token",
                     "detail": "no station token configured on the hub (SIZEUP_STATION_TOKEN): the station can't connect"}
         if self.connected():
             ago = 0 if self.polling else int(now - (self.last_seen or now))
-            q = ((self.status or {}).get("outbox") or {}).get("pending") or 0
+            q = (_part(self.status, "outbox") or {}).get("pending")
+            q = q if isinstance(q, int) and not isinstance(q, bool) and q > 0 else 0
             # the seconds only once they matter (as the word does): a count ticking every second between two
             # polls would change the pushed state every second for nothing (#146)
             detail = (f"{name}: connected" + (f", last seen {ago} s ago" if ago >= 5 else "")
@@ -369,8 +379,8 @@ class Hub:
         """{state, text}: the station's version against this hub's build ("up to date", "updating",
         "update to abc1234 failed ..."), from what the station last reported; None from a station
         that doesn't report one."""
-        v = (self.status or {}).get("version")
-        if not isinstance(v, dict):
+        v = _part(self.status, "version")
+        if v is None:
             return None
         return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
 
@@ -388,7 +398,9 @@ class Hub:
         unknown with what they last said (never a stale "ok")."""
         rows = [self.station_row()]
         on = self.connected()
-        for r in (self.status or {}).get("radios") or []:
+        for r in _part(self.status, "radios", list) or []:
+            if not isinstance(r, dict):
+                continue
             r = dict(r)
             if not on:
                 r.update(state="unknown", open=False, quieting_db=None, word="",
@@ -399,10 +411,10 @@ class Hub:
 
     def sdr(self) -> dict | None:
         """The station's SDR switches, only while it is there to switch them."""
-        return (self.status or {}).get("sdr") if self.connected() else None
+        return _part(self.status, "sdr") if self.connected() else None
 
     def rerun(self) -> dict:
-        r = (self.status or {}).get("rerun") if self.connected() else None
+        r = _part(self.status, "rerun") if self.connected() else None
         return dict(r) if isinstance(r, dict) else {"total": 0, "done": 0, "changed": 0, "failed": 0, "pending": 0}
 
     def cad_cloud(self) -> dict:
@@ -621,6 +633,11 @@ class Hub:
             raise ValueError("a JSON object")
         claimed = d["status"].get("id") if isinstance(d.get("status"), dict) else None
         sid = self._claim(p, claimed) if p is not None else ""
+        # a status of another shape than the hub reads (sizeup/cloud/statusshape.py): refused whole, before anything is
+        # taken; the last good one stays (a wrong-typed field stored would break every reader of it until the next)
+        bad = statusshape.problem(d["status"]) if d.get("status") is not None else None
+        if bad:
+            return self._refuse_status(bad, sid or (p.id if p is not None else ""))
         now = time.time()
         self.last_state = now
         if isinstance(d.get("at"), (int, float)):
@@ -639,7 +656,7 @@ class Hub:
                                    else r for r in tgs]
                 if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
                     getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
-            self.status, self.status_at = st, now
+            self.status, self.status_at, self.status_refused = st, now, None
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
@@ -659,6 +676,19 @@ class Hub:
                            "pool": self.app.pool_word(sid or (p.id if p is not None else "")),
                            "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
                            **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
+
+    def _refuse_status(self, why: str, sid: str = "") -> tuple[int, bytes, str]:
+        """400 {error, reason: bad_status}: the station's status is not of the shape the hub reads. Nothing of the post
+        is taken (the last good status stays; Health's "Station silent" says so once it lasts); logged once per reason
+        an hour. self.status_refused: {at, why, n} of the latest, None once a status is taken again."""
+        now = time.time()
+        r = self.status_refused or {}
+        self.status_refused = {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now}
+        if now - self._refused_said.get(("bad_status:" + why, sid), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[("bad_status:" + why, sid)] = now
+            self.log(f"hub: station status refused: {why}" + (f" (station {sid})" if sid else "")
+                     + ": the last good status is kept")
+        return _json(400, {"error": f"bad status: {why}", "reason": "bad_status"})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
@@ -1014,7 +1044,7 @@ class HubApp(App):
         # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
         self.cad.source_rows = lambda: self.hub.talkgroups or []
         self.cad.source_systems = lambda: {self.tg.county: "County", **{
-            str(x.get("name")): str(x.get("label") or x.get("name")) for x in ((self.hub.status or {}).get("p25_systems") or [])
+            str(x.get("name")): str(x.get("label") or x.get("name")) for x in (_part(self.hub.status, "p25_systems", list) or [])
             if isinstance(x, dict) and x.get("name")}}
         self.paging_state = self.live.paging_state     # the station's page going out now
         self.cad.remote_voice = self.hub.render_voice
@@ -1091,8 +1121,8 @@ class HubApp(App):
             if obj is not None:
                 self.perf.gauge(name, size(obj, attr))
         # context clips the station's whisper shed (#300, radio-intel PR 3): lost recall that would otherwise look quiet
-        self.perf.gauge("stt_shed_context", lambda: ((self.hub.status or {}).get("health") or {}).get("stt_queue", {})
-                        .get("shed_context") if isinstance(getattr(self.hub, "status", None), dict) else None)
+        self.perf.gauge("stt_shed_context", lambda: q.get("shed_context") if isinstance(
+            q := (_part(self.hub.status, "health") or {}).get("stt_queue"), dict) else None)
         # ... and caught up later (sizeup/sttcatchup.py): the backlog waiting, and caught up in the last 24 h
         self.perf.gauge("stt_catchup_waiting", lambda: self.catchup.stats().get("waiting"))
         self.perf.gauge("stt_caught_up_24h", lambda: self.catchup.stats().get("caught_24h"))
@@ -1973,10 +2003,10 @@ class HubApp(App):
         return {f: d.get(f) for f in channels.SQUELCH} if isinstance(d, dict) else super().squelch_defaults(key)
 
     def _deny_ok(self) -> bool:
-        return bool(((self.hub.status or {}).get("channels") or {}).get("deny_ok"))
+        return bool((_part(self.hub.status, "channels") or {}).get("deny_ok"))
 
     def _squelch_ok(self) -> bool:
-        return bool(((self.hub.status or {}).get("channels") or {}).get("squelch_ok"))
+        return bool((_part(self.hub.status, "channels") or {}).get("squelch_ok"))
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""
@@ -2011,7 +2041,7 @@ class HubApp(App):
         want = self.channel_desired()
         a = want["aws"]
         self._aws_word_log(a["ok"], a["why"], a["reserve"], a.get("deny") or [], a.get("deny_why") or "")
-        got = (self.hub.status or {}).get("channels") or {}
+        got = _part(self.hub.status, "channels") or {}
         if got.get("sig") == want["sig"] or not self.hub.connected():
             return
         now = time.time()
@@ -2027,7 +2057,8 @@ class HubApp(App):
             try:
                 res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"],
                                       *([want["squelch"]] if want["squelch"] is not None else []))
-                if isinstance(res, dict) and self.hub.status is not None:
+                if isinstance(res, dict) and self.hub.status is not None \
+                        and statusshape.problem({"channels": res}) is None:      # (of the shape a status' is)
                     self.hub.status["channels"] = res
                 self._chan_push["error"] = ""
             except (StationOffline, RuntimeError) as e:
@@ -2049,11 +2080,11 @@ class HubApp(App):
         if push is None:
             push = self._terms_push = stt_terms.StationPush(
                 self.stt_terms_payload, lambda p: self.hub.remote("set_stt_terms", p), log=self.hub.log)
-        push.check((self.hub.status or {}).get("stt_terms"), self.hub.connected())
+        push.check(_part(self.hub.status, "stt_terms"), self.hub.connected())
 
     def channels_sync(self) -> dict:
         want = self.channel_desired()
-        got = (self.hub.status or {}).get("channels") or {}
+        got = _part(self.hub.status, "channels") or {}
         if not self.hub.status:
             return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
         if got.get("sig") == want["sig"] and self._sq_ov and not self._squelch_ok():
@@ -2189,8 +2220,7 @@ class HubApp(App):
     def state(self) -> dict:
         st = super().state()
         st["talkgroups"] = self.hub.talkgroups
-        systems = (self.hub.status or {}).get("p25_systems")
-        st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
+        st["p25_systems"] = _part(self.hub.status, "p25_systems", list) or []      # (#409) the station's other P25 systems
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return self._hide_context(st)       # (#419: the station's lists too, where nobody is signed in)
@@ -2231,8 +2261,8 @@ class HubApp(App):
 
     def reception_state(self) -> dict | None:
         """The station's reception tests as it last reported them (admins only: server.py); None while it is away."""
-        rec = (self.hub.status or {}).get("reception")
-        return rec if isinstance(rec, dict) and self.hub.connected() else None
+        rec = _part(self.hub.status, "reception")
+        return rec if rec is not None and self.hub.connected() else None
 
     def reception_seen(self, rec) -> None:
         """The station's report: each test that ended since the last one, and each paused job that came back late,
@@ -2371,8 +2401,7 @@ class HubApp(App):
         last = getattr(self.hub, "status_at", None) or 0.0
         if last <= after or time.time() - last > CATCHUP_STATUS_S:
             return False, "waiting for the station's report"
-        hl = (self.hub.status or {}).get("health")
-        hl = hl if isinstance(hl, dict) else {}
+        hl = _part(self.hub.status, "health") or {}
         wh = hl.get("whisper") if isinstance(hl.get("whisper"), dict) else {}
         if wh.get("state") not in (None, "ok"):
             return False, "whisper not ready"

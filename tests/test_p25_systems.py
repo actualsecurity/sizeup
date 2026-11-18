@@ -1304,7 +1304,7 @@ def test_no_ids_hub_caps_and_queue_stats(tmp_path):
     link._set_caps(["p25_systems"])
     assert json.loads(link._caps_file.read_text()) == ["p25_systems"] and link.hub_caps == {"p25_systems"}
     src = (ROOT / "sizeup" / "cloud" / "station.py").read_text()
-    assert 'with_name("hub_caps.json")' in src and "self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))" in src
+    assert 'with_name("hub_caps.json")' in src and "kept = json.loads(self._caps_file.read_text())" in src
     q = stt.SttQueue(lambda item, why: None)
     q.put((stt.CONTEXT, None, "pd", None, "p25:mrrs:9211"))
     q.put((stt.LIVE, None, "fire", None, "tg:301"))
