@@ -469,3 +469,60 @@ def test_the_usb_reset_runs_outside_the_lock(st, monkeypatch):
     monkeypatch.setattr(appmod.usbreset, "reset", lambda sd: seen.append(app._noaudio_lock.locked()) or "")
     stall(app, "South 2")
     assert seen == [False]
+
+
+# -- the confirming review of #710 (d4063af2) --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("since", ["Infinity", "NaN", "1e300", "true", "-1", '"x"'])
+def test_a_bad_since_in_the_file_is_skipped_and_the_station_starts(st, tmp_path, since):
+    plugged, logs, make, resets = st
+    (tmp_path / "antenna_noaudio.json").write_text(
+        '{"uhf-b": {"since": %s, "job": "South 2", "usb": null}, "uhf-c": {"since": %.1f, "job": "FG1", "usb": null}}'
+        % (since, time.time() - 60))
+    app = make().start()                                                    # no OverflowError / ValueError at start
+    assert "uhf-b" not in app._noaudio and "uhf-c" in app._noaudio
+
+
+def test_a_bad_entry_that_raises_is_logged_and_skipped(st, tmp_path, monkeypatch):
+    plugged, logs, make, resets = st
+    (tmp_path / "antenna_noaudio.json").write_text(json.dumps({"uhf-b": {"since": time.time() - 60, "job": "South 2",
+                                                                         "usb": [1, 2]}}))
+    monkeypatch.setattr(appmod.usbreset, "ident", lambda sd: 1 / 0)
+    app = make().start()
+    assert not app._noaudio and any("entry 'uhf-b' skipped (ZeroDivisionError)" in x for x in logs)
+
+
+@pytest.mark.parametrize("body, ok", [("sleep 1.5\nexec cat /dev/zero\n", True), ("exec sleep 30\n", False)])
+def test_the_probe_gives_a_slow_dongle_its_stall_time_to_open(st, monkeypatch, tmp_path, body, ok):
+    plugged, logs, make, resets = st
+    monkeypatch.setattr(appmod, "NOAUDIO_PROBE_LEN_S", 1.0)
+    monkeypatch.setattr(fm, "STALL_S", 3.0)
+    app = spared(make)
+    out(app, "South 2")
+    exe = _exe(tmp_path, body)
+    monkeypatch.setattr(app, "_probe_argv", lambda idx, mhz: [exe])
+    t0 = time.monotonic()
+    assert app._probe("uhf-b") is ok
+    assert time.monotonic() - t0 < 6
+
+
+def test_saves_from_two_threads_never_share_a_temp_file(st, tmp_path):
+    import threading
+    plugged, logs, make, resets = st
+    app = grouped(make)
+    out(app, "South 2")
+    errs: list[BaseException] = []
+
+    def save():
+        try:
+            for _ in range(50):
+                app._save_noaudio()
+        except BaseException as e:  # noqa: BLE001
+            errs.append(e)
+    ts = [threading.Thread(target=save) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errs and not any("couldn't keep the no-audio dongles" in x for x in logs)
+    assert json.loads((tmp_path / "antenna_noaudio.json").read_text())["uhf-b"]["job"] == "South 2"

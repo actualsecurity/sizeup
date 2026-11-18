@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import select as select_mod
 import json
+import math
 import uuid
 import os
 import re
@@ -73,6 +74,7 @@ from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
                               pl_text, speech_seconds, voice_floor_db)
 from sizeup.radio.fm import _mmss as fm_mmss
+from sizeup.radio import fm as fm_mod
 from sizeup.radio.am import AmReceiver
 from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
@@ -157,7 +159,8 @@ NOAUDIO_STALLS = 3         # this many such stalls in a row ...
 NOAUDIO_WINDOW_S = 120.0   # ... within this long (after one USB reset, where there is one): the dongle counts as failed
 NOAUDIO_GRACE_S = 120.0    # after startup (a restart, an update): stalls not counted, dongles may still be attaching
 NOAUDIO_PROBE_S = (120.0, 600.0, 1800.0)   # a failed dongle, idle, tried again this long after (per try in a row)
-NOAUDIO_PROBE_LEN_S = 8.0  # ... with rtl_fm on it this long at most: any audio and it is back
+NOAUDIO_PROBE_LEN_S = 8.0  # ... with rtl_fm on it: audio this long from its first byte (that within STALL_S) and it is back
+NOAUDIO_SINCE_MIN = 1577836800.0   # (2020-01-01) a saved "since" before this, or past tomorrow: not one
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
@@ -3851,7 +3854,7 @@ class App:
                    for sd, st in self._noaudio.items()}
         try:
             if cur:
-                tmp = p.with_name(f".{p.name}.{os.getpid()}")
+                tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}")   # (two threads may save at once)
                 tmp.write_text(json.dumps(cur))
                 os.replace(tmp, p)
             else:
@@ -3870,18 +3873,24 @@ class App:
             d = {}
         here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s} if d else set()
         for sd, st in (d.items() if isinstance(d, dict) else ()):
-            if sd not in here or not isinstance(st, dict) or not isinstance(st.get("since"), (int, float)):
-                continue
-            usb = tuple(st["usb"]) if isinstance(st.get("usb"), list) and len(st["usb"]) == 2 else None
-            now_at = usbreset.ident(sd)
-            if usb is not None and now_at is not None and now_at != usb:
-                log(f"sdr: SDR {self.sdr_name(sd)} was out for no audio; on a new USB address now: tried again")
-                continue
-            self._noaudio[sd] = {"since": float(st["since"]), "job": str(st.get("job") or ""), "tries": 0,
-                                 "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usb, "gone": 0}
-            self._gusable[sd], self._gseen[sd] = False, (False, time.monotonic())
-            log(f"sdr: SDR {self.sdr_name(sd)} still out for no audio (since {time.strftime('%H:%M', time.localtime(st['since']))}, "
-                "as when sizeup stopped)")
+            try:                                     # (one bad entry never keeps the station's radios from starting)
+                since = st.get("since") if isinstance(st, dict) else None
+                if sd not in here or not isinstance(since, (int, float)) or isinstance(since, bool) \
+                        or not math.isfinite(since) or not NOAUDIO_SINCE_MIN <= since <= time.time() + 86400:
+                    continue
+                usb = tuple(st["usb"]) if isinstance(st.get("usb"), list) and len(st["usb"]) == 2 else None
+                now_at = usbreset.ident(sd)
+                if usb is not None and now_at is not None and now_at != usb:
+                    log(f"sdr: SDR {self.sdr_name(sd)} was out for no audio; on a new USB address now: tried again")
+                    continue
+                self._noaudio[sd] = {"since": float(since), "job": str(st.get("job") or "")[:60], "tries": 0,
+                                     "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usb, "gone": 0}
+                self._gusable[sd], self._gseen[sd] = False, (False, time.monotonic())
+                log(f"sdr: SDR {self.sdr_name(sd)} still out for no audio (since "
+                    f"{time.strftime('%H:%M', time.localtime(since))}, as when sizeup stopped)")
+            except Exception as e:  # noqa: BLE001
+                self._noaudio.pop(sd, None)
+                log(f"sdr: {self.NOAUDIO_FILE}: entry {str(sd)[:40]!r} skipped ({type(e).__name__})")
         if d and not self._noaudio:
             self._save_noaudio()
 
@@ -3958,18 +3967,26 @@ class App:
         try:
             p = subprocess.Popen(self._probe_argv(idx, mhz), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                  start_new_session=True, env=child_env())
-            start = last = time.monotonic()
-            end, got = start + NOAUDIO_PROBE_LEN_S, 0
-            while time.monotonic() < end and p.poll() is None:
+            # the first bytes within STALL_S (a dongle can be slow to open, over usbipd), then audio for
+            # NOAUDIO_PROBE_LEN_S from that first byte with no gap over a second
+            opened, first, last, got = time.monotonic(), None, None, 0
+            while p.poll() is None:
+                now = time.monotonic()
+                if first is None and now - opened > fm_mod.STALL_S:
+                    return False                            # never started
+                if first is not None and now - first >= NOAUDIO_PROBE_LEN_S:
+                    break
                 r, _w, _x = select_mod.select([p.stdout], [], [], 0.25)
                 if r:
                     chunk = os.read(p.stdout.fileno(), 65536)
                     if not chunk:
                         break
                     got, last = got + len(chunk), time.monotonic()
-                elif time.monotonic() - last > 1.0:
+                    first = first if first is not None else last
+                elif last is not None and time.monotonic() - last > 1.0:
                     return False                            # a gap: not streaming
-            return time.monotonic() >= end and got >= 24000 * NOAUDIO_PROBE_LEN_S   # (half its 2 bytes a sample)
+            return first is not None and time.monotonic() - first >= NOAUDIO_PROBE_LEN_S \
+                and got >= 24000 * NOAUDIO_PROBE_LEN_S      # (half its 2 bytes a sample at least)
         except OSError:
             return False
         finally:
