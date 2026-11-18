@@ -265,7 +265,7 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         d = day_dir(tmp_path / "p25")
         mark = tmp_path / "state" / "p25_ingest_mark.json"
         run(tmp_path / "p25", mark, [], [], on_call=app._call).stop()
-        put(d, "307-1-call_1", age=150, emergency=True)       # the button, while sizeup was down: 2.5 min ago
+        put(d, "307-1-call_1", age=200, emergency=True)       # the button, while sizeup was down: 3+ min ago
         ing = run(tmp_path / "p25", mark, [], [], on_call=app._call)
         assert [c.id for c in settle(ing)] == ["307-1-call_1"]
         assert wait(lambda: rows(app).get("307-1-call_1", {}).get("status") == "done")
@@ -276,7 +276,7 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         al = app.cad.store.q("SELECT * FROM alarms")
         assert len(al) == 1 and al[0]["traffic_id"] == "307-1-call_1" and al[0]["emergency"] == 1
         a = app.cad.alarms.get(al[0]["id"])
-        assert a["keywords"] and 140 <= a["late"] <= 200
+        assert a["keywords"] and 190 <= a["late"] <= 260
         said = float(json.loads((tmp_path / "emergency" / "307-1-call_1.json").read_text())["start_time"])
         assert said <= a["at"] <= said + 1 and time.time() - a["at"] >= 150     # when it was said, not when it came in
         assert a["what"].endswith(f"({LATE}3 min ago)") and line(a).endswith(f"at {_hms(a['at'])} ({LATE}3 min ago)")
