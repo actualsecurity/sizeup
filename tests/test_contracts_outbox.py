@@ -1250,15 +1250,18 @@ def test_known_deviation_a_resent_snapshot_puts_back_what_the_feed_changed_after
     build has no such table); the hub applies S2. Back on today's code, requeue_due() finds no newer snapshot noted and
     sends S1 again, and the hub applies it: sizeup/cad/sources.py on_event skips an older snapshot only when it is more
     than SNAPSHOT_SKEW_S (120 s) older than the one applied. So the incident's type, location and units go back to S1's
-    and stay so until the feed changes the event again; nobody is told. Fixed (the hub's maintainers' choice): the
-    station says a copy is a re-send (`qid` on the event in the post), and the hub applies a re-sent copy only if its
-    seen_at is not older than its own snapshot of that event, whatever the skew; a first send keeps the 120 s
-    tolerance (checked here too). Not chosen: the station reconciling source_latest from the outbox when it opens a
-    file."""
+    and stay so until the feed changes the event again; nobody is told. Fixed (the hub's maintainers' choice, #791):
+    the station says a copy is a re-send (`qid` on the event in the post), the hub marks that source_event `resent`,
+    and on_event drops a re-sent copy whose seen_at is older than the applied report's, however small the gap, said
+    once in the log; a first send keeps the 120 s tolerance (checked here too). Not chosen: the station reconciling
+    source_latest from the outbox when it opens a file."""
     now = time.time()
     lv = lane.Lane(tmp_path / "hub")
     client = HubClient(lv.url, lv.own, timeout=30.0)
     sources = lv.hub.app.cad.sources
+    said: list[str] = []
+    real_log = sources.log
+    sources.log = lambda m: (said.append(m), real_log(m))[1]
 
     def snapshot(seen: float, kind: str, where: str, units: list[str]) -> dict:
         return {"source": "demo", "label": "Demo feed", "rank": 1, "seen_at": seen, "first_seen": now - 600,
@@ -1307,9 +1310,11 @@ def test_known_deviation_a_resent_snapshot_puts_back_what_the_feed_changed_after
         if O5_A_RESENT_SNAPSHOT_PUTS_BACK_WHAT_THE_FEED_CHANGED:
             assert "qid" not in posted[0]["events"][0]                                 # (nothing says it is a re-send)
             assert on_the_hub() == ("ALARM", "12 Example Ave", ["E5"])                # S1 over S2: the change is gone
+            assert not any("re-sent older report" in m for m in said)
         else:
             assert posted[0]["events"][0]["qid"] == 1
             assert on_the_hub() == ("STRUCTURE FIRE", "14 Example Ave", ["E5", "L2"])  # S2 stays
+            assert sum("re-sent older report" in m for m in said) == 1                 # said once
         # a first send (no qid) a minute older than the hub's snapshot: applied, as today (a clock stepping back)
         s3 = snapshot(now - 300, "ALARM", "16 Example Ave", ["E7"])
         ob.add("source_event", s3, at=now - 300)
@@ -1325,6 +1330,6 @@ def test_each_outbox_deviation_has_its_switch_and_its_test():
     """O1.. are pinned here: each switch at the top of this file is read by exactly one test whose docstring starts
     with its number."""
     src = Path(__file__).read_text(encoding="utf-8")
-    switches = re.findall(r"^(O\d+)_[A-Z0-9_]+ = True\b", src, re.M)
+    switches = re.findall(r"^(O\d+)_[A-Z0-9_]+ = (?:True|False)\b", src, re.M)
     pinned = re.findall(r'def test_known_deviation_\w+\(.*\):\n    \"\"\"(O\d+)\. ', src)
     assert switches == pinned == [f"O{i}" for i in range(1, len(switches) + 1)] and len(switches) == 5
