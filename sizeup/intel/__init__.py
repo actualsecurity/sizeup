@@ -9,3 +9,11 @@ def push_sources() -> tuple[frozenset[str], int]:
     (frozenset(), 0) when no engine runs here (a station: the hub's)."""
     from sizeup.intel import engine
     return engine.push_sources()
+
+
+def is_push_source(channel_key: str, kind: str = "") -> bool:
+    """A speech-to-text channel key ("tg:307", "p25:mrrs:9211", a bare "FG1" / "HPN Tower"; kind: the channel's kind,
+    "airband" for an airband label) is one intel could push from now. Normalised as rows are keyed (engine.source_key):
+    call this, never `key in push_sources()[0]` with the raw key. False when no engine runs here."""
+    from sizeup.intel import engine
+    return engine.is_push_source(channel_key, kind)

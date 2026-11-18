@@ -22,6 +22,8 @@
     engine.push_sources() (frozenset of source keys, revision): the sources intel could push from right now, for
                           speech-to-text's priority (see "Push sources" below); sizeup.intel.push_sources() without
                           the engine at hand
+    engine.is_push_source(channel_key, kind="")   that check for one speech-to-text channel key ("tg:307", "FG1"):
+                          sizeup.intel.is_push_source() without the engine
 
 Push sources (the hook for speech-to-text's queue: a source intel can push from is transcribed at HIGH or above).
 The engine runs on the HUB (the CAD of record; all-in-one too). A station's engine is idle (active() is False while it
@@ -44,6 +46,15 @@ from the hub over whatever hub-to-station channel speech-to-text uses (nothing h
           here / not computed" (sizeup.intel.push_sources() on a station). The set is recomputed after reload() (the
           packs, intel's Settings) and sources_changed() (any Settings change: radio_services, the notify topics), and
           at most PUSH_REFRESH_S after the last (a station's talkgroups list arriving at the hub); otherwise cached.
+
+    is_push_source(channel_key, kind="") -> bool: the check speech-to-text should make (sizeup.intel.is_push_source()
+    without the engine), never a raw `key in keys`. STT keys a transmission by its channel key (sourcekeys.channel_key,
+    app.traffic_key): "tg:<n>" for the county's talkgroup, "p25:<system>:<n>" for another system's, and the BARE label
+    for an FM or airband channel ("FG1", "HPN Tower"). The set holds source keys as rows carry them, so the key is
+    normalised the way rows are keyed (source_key()): a talkgroup by sourcekeys.service_key ("tg:307" is
+    "p25:westchester:307"); a bare label by sourcekeys.fm(label, kind) as App._row_source does it (kind "airband":
+    "air:<label>", any other kind: "fm:<label>"; kind not given: either one, a channel's label being unique here); a
+    key already "fm:" / "air:" as it is. A caller that compares itself must normalise the same way (source_key()).
 
 The sink (no side effect happens in the engine itself):
 
@@ -347,6 +358,12 @@ class IntelEngine:
                 if keys != self._push:
                     self._push, self._push_rev = keys, push_rev(keys)
             return self._push, self._push_rev
+
+    def is_push_source(self, channel_key: str, kind: str = "") -> bool:
+        """The channel (as speech-to-text keys it: "tg:307", "p25:mrrs:9211", a bare "FG1") is one intel could push
+        from now (push_sources(), cached), its key normalised as rows are keyed (source_key(); the module's doc)."""
+        keys, _rev = self.push_sources()
+        return any(k in keys for k in source_key(channel_key, kind))
 
     def _push_keys(self) -> frozenset[str]:
         if not self.enabled or not self.policy.cfg.get("push", True):
@@ -1371,6 +1388,23 @@ def push_rev(keys) -> int:
     return h or 1
 
 
+def source_key(channel_key: str, kind: str = "") -> tuple[str, ...]:
+    """The source keys (as rows carry them) a speech-to-text channel key may be: "tg:<n>" / "p25:<system>:<n>" ->
+    sourcekeys.service_key's qualified key; "fm:<label>" / "air:<label>" as it is; a bare label -> sourcekeys.fm(label,
+    kind) (App._row_source's: "air:" for kind "airband", else "fm:"), or with no kind both ("fm:" first). () for none."""
+    from sizeup import sourcekeys
+    key = str(channel_key or "")
+    if not key:
+        return ()
+    if sourcekeys.parse(key) is not None:
+        return (sourcekeys.service_key(key),)
+    if key.startswith(("fm:", "air:")):
+        return (key,)
+    if kind:
+        return (sourcekeys.fm(key, kind),)
+    return (sourcekeys.fm(key), sourcekeys.fm(key, "airband"))
+
+
 def can_push(pack) -> bool:
     """The pack could push an event: its mode is push, and one of its rules is on, at push, in one of its categories
     at push (a "*" cue alone never raises an event). As compiled, so with Settings' overrides (rules.load_packs)."""
@@ -1442,6 +1476,12 @@ def push_sources() -> tuple[frozenset[str], int]:
     except Exception:  # noqa: BLE001 - not known to be the one that reads: none
         return frozenset(), 0
     return e.push_sources()
+
+
+def is_push_source(channel_key: str, kind: str = "") -> bool:
+    """IntelEngine.is_push_source() of this process's engine; False when none runs here (as push_sources())."""
+    keys, _rev = push_sources()
+    return any(k in keys for k in source_key(channel_key, kind))
 
 
 def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:

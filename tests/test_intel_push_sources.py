@@ -281,3 +281,55 @@ def test_a_hash_of_zero_is_one(monkeypatch):
             return bytes(32)
     monkeypatch.setattr(engine_mod.hashlib, "sha256", lambda b=b"": Zero())
     assert push_rev({"p25:mrrs:9211"}) == 1
+
+
+# -- is_push_source: speech-to-text's channel keys ("tg:307", a bare "FG1") normalised as rows are keyed -----------------
+
+def fire_at_push() -> dict:
+    """Settings that raise the fire pack (shipped at log: pack, categories and rules) to push."""
+    fire = {p.name: p for p in rules_mod.load_packs()}["fire"]
+    return {"intel_packs": {"fire": {"mode": "push", "categories": {c: {"mode": "push"} for c in fire.categories}}},
+            "intel_rules": {r.id: {"mode": "push"} for r in fire.rules}}
+
+
+def test_a_talkgroup_key_and_a_bare_fm_label_map_as_rows_are_keyed():
+    e, _cfg = engine(fire_at_push())
+    keys, _rev = e.push_sources()
+    assert {"p25:westchester:307", "fm:South 2", "fm:FG1"} <= keys and "tg:307" not in keys and "FG1" not in keys
+    # speech-to-text's keys (sourcekeys.channel_key / app.traffic_key): the county's "tg:<n>", a bare label
+    assert e.is_push_source("tg:307") and e.is_push_source("p25:westchester:307")
+    assert e.is_push_source("FG1") and e.is_push_source("FG1", "traffic") and e.is_push_source("South 2", "paging")
+    assert e.is_push_source("fm:FG1")
+    assert not e.is_push_source("FG1", "airband")              # an airband channel of that name would be air:FG1
+    assert e.is_push_source("p25:mrrs:9211") and not e.is_push_source("p25:mrrs:9570")
+    assert not e.is_push_source("tg:9211")                      # a bare number is the county's, never MRRS's
+    assert not e.is_push_source("") and not e.is_push_source("Nowhere")
+    # with the fire pack at log again: none of them (the police pack's own still are)
+    e2, _ = engine()
+    assert not e2.is_push_source("tg:307") and not e2.is_push_source("FG1") and e2.is_push_source("p25:mrrs:9211")
+
+
+def test_an_airband_label_maps_to_its_air_key():
+    raw = json.loads((rules_mod.DATA / "police.json").read_text())
+    raw.update(name="air_test", label="AIR", scope={"sources": ["air:*"]}, towns={})
+    e = IntelEngine(packs=rules_mod.load_packs([raw]), events=MemoryEvents(), sink=RecordingSink(), thread=False,
+                    clock=Clock())
+    e.notifier = Topic()
+    tg = prefs()
+    e.sources = lambda: source_rows(tg.state(), CHANNELS)
+    assert e.push_sources()[0] == frozenset({"air:HPN Tower"})
+    assert e.is_push_source("HPN Tower") and e.is_push_source("HPN Tower", "airband") and e.is_push_source("air:HPN Tower")
+    assert not e.is_push_source("HPN Tower", "traffic") and not e.is_push_source("FG1")
+
+
+def test_the_module_check_normalises_too_and_is_false_with_no_engine():
+    assert sizeup.intel.is_push_source("p25:mrrs:9211") is False      # (conftest: no engine left registered)
+    e, _cfg = engine(fire_at_push())
+    engine_mod.set_live(e)
+    assert sizeup.intel.is_push_source("tg:307") and sizeup.intel.is_push_source("FG1")
+    assert sizeup.intel.is_push_source("p25:mrrs:9211")
+    e.active = lambda: False                                    # a station forwarding: the hub's engine decides
+    assert not sizeup.intel.is_push_source("tg:307")
+    assert engine_mod.source_key("tg:307") == ("p25:westchester:307",)
+    assert engine_mod.source_key("HPN Tower") == ("fm:HPN Tower", "air:HPN Tower")
+    assert engine_mod.source_key("HPN Tower", "airband") == ("air:HPN Tower",)
