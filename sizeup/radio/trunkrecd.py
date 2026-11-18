@@ -379,7 +379,7 @@ def watched_talkgroups(workdir: str | Path) -> dict[int, str]:
     except (OSError, ValueError, AttributeError, TypeError):
         return {}
     names: dict[int, str] = {}
-    for s in conf.get("systems") or []:
+    for s in conf.get("systems") if isinstance(conf.get("systems"), list) else []:
         tg_file = s.get("talkgroupsFile") if isinstance(s, dict) else None
         if not tg_file:
             continue
@@ -1059,7 +1059,10 @@ class Supervisor:
     def _drain(self, p, workdir: str) -> None:
         """Everything it says, into trunk-recorder.log (capped: LOG_MAX_BYTES, one previous file kept), which sizeup reads
         as it grows; the unit script's grant lines come the same way (its stdout is trunk-recorder's)."""
-        self.shipper.watch(watched_talkgroups(workdir))     # its config's reception "watch" list, as it starts
+        try:
+            self.shipper.watch(watched_talkgroups(workdir))  # its config's reception "watch" list, as it starts
+        except Exception:  # noqa: BLE001 - a config it can't read watches nothing; the drain must still run
+            pass
         path = Path(workdir) / LOG
         log = None
         try:

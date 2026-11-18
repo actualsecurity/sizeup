@@ -170,3 +170,14 @@ def test_watched_grants_are_counted_by_what_became_of_them(tmp_path):
     assert w[PD_TAC]["since"] == 1_763_400_000.0
     assert a.state()["encrypted"] == []                              # a clear talkgroup's: never activity rows
     assert FAKE_RADIO not in json.dumps(a.state())
+    # Settings > Radios: a watched talkgroup's encrypted grants on the system's line, every count in its hover
+    js = (TR.parent.parent / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
+    assert "(x.watched || []).filter((w) => w.encrypted).map((w) => ` · TG ${w.tg} encrypted ×${w.encrypted}`)" in js
+    assert "+ watched(x)).join" in js and "${w.recording} recorded, ${w.encrypted} encrypted" in js
+
+
+def test_a_config_it_cannot_read_watches_nothing(tmp_path):
+    for bad in ("[]", "{\"sizeup\": 3}", "{\"sizeup\": {\"reception\": {\"watch\": [\"x\", true, 9212]}}, \"systems\": 4}",
+                "{\"sizeup\": {\"reception\": {\"watch\": [9212]}}, \"systems\": [{\"talkgroupsFile\": \"gone.csv\"}]}", "{"):
+        (tmp_path / "config.json").write_text(bad)
+        assert trunkrecd.watched_talkgroups(tmp_path) in ({}, {PD_TAC: ""})
