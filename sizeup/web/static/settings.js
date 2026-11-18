@@ -1684,6 +1684,11 @@ function sUnitRow(u, i, n, kinds, boards) {
   if (u.incident_number) meta.append(el("span", "warn small", `On ${u.incident_number}`));
   meta.append(sState(u.state, u.retired));
   if (!u.named && !u.retired) meta.append(sConfirm(""));
+  if (u.made_fire) {                    // an old edit saved another agency's unit as our engine: Reset puts it back
+    const w = el("span", "warn small made-fire", "Made a fire unit by an old edit: Reset?");
+    w.title = "Saved as Engine / Fire by a Settings edit made before this was fixed. Reset restores the data file's unit.";
+    meta.append(w);
+  }
   meta.append(el("span", "dim small", u.used ? `${u.used} records` : "no history"));
   li.append(meta, el("span", "spacer"));
   if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} restored`)));

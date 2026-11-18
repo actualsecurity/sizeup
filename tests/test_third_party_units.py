@@ -221,6 +221,51 @@ def test_a_saved_edit_from_before_keeps_the_data_files_statuses():
     assert c.lists.agency_set("SPTAR") == "responder"
 
 
+def test_editing_one_field_of_a_board_only_agency_code_keeps_it_another_agencys():
+    """CONED-G, KEYHOLDER1, BAT12 have no units entry (board-only codes): an edit sends only what changed, which used to save
+    them as {"kind": "engine", "response": "fire"}, our engines (the radio's and the feed's unit lists, automation)."""
+    c = make_cad()
+    for code in ("CONED-G", "KEYHOLDER1", "BAT12", "DPW1"):
+        assert code not in c.lists.units
+    post(c, "units", action="edit", code="CONED-G", unit={"status_set": "keyholder"})
+    post(c, "units", action="edit", code="KEYHOLDER1", unit={"status_set": "third_party"})
+    post(c, "units", action="edit", code="BAT12", unit={"title": "Invented title"})
+    post(c, "units", action="edit", code="DPW1", unit={"spoken": "Invented works"})
+    post(c, "units", action="edit", code="CONED-E3", unit={"department": "Invented utility"})
+    L = c.lists
+    for code, want in (("CONED-G", "keyholder"), ("KEYHOLDER1", "third_party"), ("BAT12", "responder"),
+                       ("DPW1", "third_party"), ("CONED-E3", "third_party")):
+        assert (L.unit(code)["kind"], L.response(code), L.agency_set(code)) == ("agency", "agency", want), code
+    assert L.units["BAT12"]["title"] == "Invented title" and L.units["DPW1"]["spoken"] == "Invented works"
+    assert not {"CONED-G", "KEYHOLDER1", "BAT12", "DPW1", "CONED-E3"} & set(load_cfg(L).units)
+    assert not {"CONED-G", "KEYHOLDER1", "BAT12"} & {u["name"] for u in c.auto._ours().values()}
+    assert not any(r["made_fire"] for r in c.settings_get()["units"]["rows"])
+
+
+def test_a_unit_an_old_edit_made_an_engine_is_flagged_not_rewritten():
+    logged = []
+    c = make_cad()
+    c.log = logged.append
+    with c.store.tx() as db:                    # as the old edit saved them (one field sent)
+        for code, v in (("CONED-G1", {"kind": "engine", "response": "fire", "title": "Invented"}),
+                        ("KEYHOLDER2", {"kind": "engine", "response": "fire", "spoken": "Invented"}),
+                        ("E60", {"kind": "engine", "response": "fire", "title": "Invented"}),          # ours: fine
+                        ("BAT14", {"kind": "engine", "response": "fire", "spoken": "x", "spare": True})):  # more: a choice
+            db.execute("INSERT INTO settings_overrides (section, key, value, updated_at, operator) VALUES ('units', ?, ?, 0, 'x')",
+                       (code, json.dumps(v)))
+    c.settings.startup()
+    assert c.lists.response("CONED-G1") == "fire"                          # left as saved: nothing rewritten
+    assert [m for m in logged if "saved as our engines" in m] == [
+        "CAD: settings: 2 other agencies' units saved as our engines by an old edit (CONED-G1, KEYHOLDER2): Settings > Units, Reset"]
+    rows = {r["code"]: r for r in c.settings_get()["units"]["rows"]}
+    assert [k for k, r in rows.items() if r["made_fire"]] == ["CONED-G1", "KEYHOLDER2"]
+    post(c, "units", action="reset", code="CONED-G1")
+    assert c.lists.third_party("CONED-G1")
+    assert c.settings.made_fire() == ["KEYHOLDER2"]
+    js = (STATIC / "settings.js").read_text()
+    assert "Made a fire unit by an old edit: Reset?" in js and "u.made_fire" in js
+
+
 def test_the_activity_says_each_unit_as_it_went_on(api):  # noqa: F811
     c = api.cad
     code, inc = call(api, "/api/cad/incident", {"type": "SERVICE", "address": ADDR, "emergency": False}, JORDAN)

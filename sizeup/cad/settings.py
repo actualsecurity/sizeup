@@ -519,6 +519,19 @@ class Editor:
                 return None
             return db.total_changes, db.execute("PRAGMA data_version").fetchone()[0]
 
+    MADE_FIRE_KEYS = {"kind", "response", "title", "spoken", "department"}
+
+    def made_fire(self, units_ov: dict | None = None) -> list[str]:
+        """Codes an old edit turned into one of our engines: a saved units edit of only kind engine (response fire or
+        none) and a name, title or department, for a code the data file makes another agency's (a board-only code like
+        CONED-G, or an agency kind). Before the fix, editing one field of a board-only code saved it so (_units_op).
+        Shown in Settings > Units to reset, logged once at start; never rewritten here."""
+        o = self.overrides().get("units", {}) if units_ov is None else units_ov
+        on = {c for c, _, _ in self.base.board_units()}
+        return sorted(c for c, v in o.items() if isinstance(v, dict) and not c.startswith("_") and c in on
+                      and v.get("kind") == "engine" and v.get("response", "fire") == "fire"
+                      and set(v) <= self.MADE_FIRE_KEYS and self.base.response(c) == "agency")
+
     def build(self, ov: dict) -> lists_mod.Lists:
         try:
             return lists_mod.build(overlay(self.defaults, ov), "settings", self.path)
@@ -532,6 +545,10 @@ class Editor:
         self._use_services(ov)                  # (whatever the lists make of the rest: a source's tag never waits)
         if not ov:
             return
+        bad = self.made_fire(ov.get("units") or {})
+        if bad:                                 # said once, left as they are: Settings > Units offers Reset on each
+            self.cad.log(f"CAD: settings: {len(bad)} other agencies' units saved as our engines by an old edit "
+                         f"({', '.join(bad)}): Settings > Units, Reset")
         try:
             L = self.build(ov)
         except CadError as e:
@@ -1242,6 +1259,9 @@ class Editor:
         for code, v in o.items():
             if isinstance(v, dict) and v.get("deleted"):
                 rows.append(dict(self._unit_row(self.base, code, "", 0, {}, used, base_on, live), state="deleted"))
+        bad = set(self.made_fire(o))            # another agency's unit an old edit made our engine: Reset offered
+        for r in rows:
+            r["made_fire"] = r["code"] in bad and r.get("state") != "deleted"
         return {"rows": rows, "edited": bool(o), "layout_edited": "_boards" in o,
                 "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])],
                 "status_sets": [{"id": k, "title": v.get("title") or k, "third_party": bool(v.get("third_party")),
@@ -1926,7 +1946,9 @@ class Editor:
                                 [("units", code, None, dict(u, board=board))])
         if cur is None and not on_board and not (action == "reset" and code in o):
             raise CadError(f"no unit {code!r}")
-        cur = dict(cur or {})
+        # A board-only code (CONED-G, KEYHOLDER1, BAT10 ...: no units entry) is what the lists make of it, another agency's:
+        # an edit that sends one field never makes it an engine (_clean_unit's default for a new unit), so never ours.
+        cur = dict(cur or ({"kind": L.unit(code)["kind"]} if on_board or code in live else {}))
         if action == "station":                         # home firehouse only (the maps' station picker)
             old = L.station(code)
             u = self._clean_unit({"station": body.get("station")}, cur)
