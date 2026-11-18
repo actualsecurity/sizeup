@@ -1391,6 +1391,7 @@ clip waits for one only as long as its class allows. After that the clip goes th
 | `sizeup/cloud/sttworkers.py` | the workers' tokens (`sw1.<id>.<secret>`, hash only, made on first use); the pool's switches; the API under `/api/station/stt/` |
 | `sizeup/cloud/hub.py` | the routing (`_pool_first`, `_pool_done`, `_pool_fallback`, the catch-up's `pool` route) |
 | `sizeup/sttruns.py` | every transcript as written, plus the latency per channel |
+| `sizeup/cloud/infer.py` | the LLM lane: a worker's local model for the intel engine's JSON classifications (`submit`, `available`) |
 
 - **Which clips:**
   - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
@@ -1425,6 +1426,14 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - `offline`: no word for 30 s.
   - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
 - **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
+- **The LLM lane** (`sizeup/cloud/infer.py`): a worker that also serves a local LLM (llama.cpp's `llama-server`, next to its whisper; no cloud model) answers the intel engine's short JSON classifications.
+  - `submit(task, messages, schema, deadline_s=20, priority=0, meta=False)` returns a Future: a dict that validates against the schema, or `None` (no worker, gaming, the deadline, an invalid answer). `meta=True` adds `{model, model_version, worker, latency_ms, tokens_in, tokens_out, why}`. It never raises and never blocks. `available()`: a worker advertising an LLM is ready.
+  - Off unless a worker advertises one: every request may carry `models: {stt, llm, llm_version}`; `llm` empty means none now (a gaming worker stops its `llama-server`).
+  - Its own queue (priority, then the oldest) and leases, at `/api/station/stt/infer/*` with the same token. A worker takes an infer job only while it holds no pre-alert lease, one at a time; infer leases never count in the STT pool's limits or estimates. A pre-alert clip that comes mid-generation makes the worker abort and hand the job back; it is leased again while 1 s of its deadline is left.
+  - The lease is the job's own deadline. A worker gone gaming or paused, its LLM stopped, unheard for 12 s or revoked: the job goes back to the queue. Three invalid answers or lost leases in a row: no infer jobs for 2 min.
+  - Switches: the pool's On (Settings > Station > STT workers) turns the lane off too (`available()` false, no claims). Each GPU worker has an "LLM jobs" switch there, on by default and audited; off, it gets no prompts (a job it holds goes back to the queue). Only a GPU worker's own token (`sw1`) reaches `/api/station/stt/infer/*`: anything else (a station's whisper in the pool) gets 403 and never sees a prompt.
+  - Futures are resolved on the lane's own result thread, never on a worker's request thread or under a lock; a job is answered at its deadline (the lane wakes for the earliest one). A done-callback must not log the answer.
+  - Privacy: prompts and answers exist only in memory on their way to the worker and back. They are never logged, never in Health, `stt_runs` or a database. Health ("GPU workers: LLM") shows each worker's STT and LLM models, and per task the jobs an hour, p50 / p95, token counts and the failures by why.
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
   - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
