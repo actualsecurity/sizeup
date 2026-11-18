@@ -416,7 +416,9 @@ def test_a_channels_term_vocabulary_holds_its_own_vocabulary_first_then_the_list
     tv.want("county_fire", "")
     assert wait(lambda: tv.ready("county_fire", "").startswith("sizeup-terms-county_fire-none-"))
     tv.sync({})                                                          # the list taken away: its vocabularies go
-    assert tv.ready("county_fire", "sizeup-pcfd") == "" and not any(n.startswith("sizeup-terms-") for n in api.vocabs)
+    # (want()'s sync may still be running: then this one only asks it to go round again)
+    assert wait(lambda: tv.ready("county_fire", "sizeup-pcfd") == ""
+                and not any(n.startswith("sizeup-terms-") for n in api.vocabs))
 
 
 def test_aws_refusing_leaves_the_channel_on_its_own_and_its_words_out_of_the_log():
@@ -785,20 +787,20 @@ def test_each_pool_job_carries_the_vocab_v_of_its_own_prompt(tmp_path, monkeypat
         app = hub.app
         app.stt_terms.refresh()
         ts = app.stt_terms.get("county_fire")
-        jobs, pool = [], app.sttpool
-        app.sttpool = SimpleNamespace(ready=lambda cls: (True, ""), submit=lambda job: jobs.append(job) or True,
-                                      has=lambda cid: False)
+        jobs = []
+        monkeypatch.setattr(app, "sttpool", SimpleNamespace(ready=lambda cls: (True, ""), has=lambda cid: False,
+                                                            submit=lambda job: jobs.append(job) or True))
         pcm = np.zeros(8000 * 2, np.int16)
         t = Traffic("FG1-901", "FG1", 1.0, 3.0, "")
         assert app._pool_first(t, pcm, "FG1")
         assert "Zephyrton" in jobs[-1].prompt and jobs[-1].extra["vocab_v"] == ts.vocab_v
         t2 = Traffic("FG1-902", "FG1", 1.0, 3.0, "")
         t2.vocab_v = "county_fire@ffffffffffff"                 # an earlier prompt's, and this one fails to build
-        monkeypatch.setattr(app, "_prompt", lambda item: 1 / 0)
+        real = app._prompt_v
+        monkeypatch.setattr(app, "_prompt_v", lambda item: 1 / 0)
         assert app._pool_first(t2, pcm, "FG1")
         assert jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
-        monkeypatch.undo()
-        monkeypatch.delenv("LITESTREAM_BUCKET", raising=False)
+        monkeypatch.setattr(app, "_prompt_v", real)
         # the catch-up's
         t3 = Traffic("FG1-903", "FG1", 1.0, 3.0, "")
         monkeypatch.setattr(app, "_catchup_pcm", lambda *a: pcm)
@@ -808,8 +810,8 @@ def test_each_pool_job_carries_the_vocab_v_of_its_own_prompt(tmp_path, monkeypat
         monkeypatch.setattr(app, "_find", lambda cid: (None, ""))
         sent, _why = app._catchup_pool({"id": "FG1-904", "key": "FG1", "source": "FG1", "start": 1.0, "seconds": 2.0})
         assert sent and jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
-        app.sttpool = pool
     finally:
+        monkeypatch.undo()                                                # (the real pool back before the hub stops)
         hub.close()
 
 

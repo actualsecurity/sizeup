@@ -1029,10 +1029,10 @@ def test_ctrl_c_stops_the_worker(tmp_path, hub, whisper):
     old = signal.signal(signal.SIGINT, signal.default_int_handler)
     timer = threading.Timer(0.5, _thread.interrupt_main)
     deadline = threading.Timer(10.0, w.stop)
-    timer.start()
-    deadline.start()
     t0 = time.monotonic()
-    try:
+    try:                                                     # (the timers inside: the interrupt never lands outside)
+        timer.start()
+        deadline.start()
         w.run()                                              # in this (the main) thread, as `worker.py run` does
     finally:
         timer.cancel()

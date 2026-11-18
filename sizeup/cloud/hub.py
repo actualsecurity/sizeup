@@ -1541,7 +1541,7 @@ class HubApp(App):
             self._save_page(item)
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt(item), str(getattr(item, "vocab_v", "") or "")
+            prompt, vocab_v = self._prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
@@ -1646,8 +1646,7 @@ class HubApp(App):
             return False, "no recording"
         item = self._find(cid)[0]
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt = self._prompt(item) if item is not None else ""
-            vocab_v = str(getattr(item, "vocab_v", "") or "") if prompt else ""
+            prompt, vocab_v = self._prompt_v(item) if item is not None else ("", "")
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         end = row.get("start")
