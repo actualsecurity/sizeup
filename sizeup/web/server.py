@@ -241,6 +241,32 @@ class Assets:
         return a["gz"]
 
 
+# A gzip stream's header as zlib writes it (no name, no mtime, OS unix): a gzipped SSE stream starts with it, then
+# carries deflate_segment()s. The trailer (CRC, length) is never written: a stream ends by its connection closing,
+# as it always has.
+GZIP_HEAD = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"
+
+
+def deflate_segment(raw: bytes, level: int = 6, after: bytes = b"") -> bytes:
+    """raw as deflate blocks ended by a sync flush (byte-aligned, not final), so segments can follow one another on a
+    gzip stream. They refer to nothing before them, so any number of them in any order make a valid deflate stream;
+    or, with after (the bytes the stream decoded last: zlib's preset dictionary, its last 32 KB), back into those
+    bytes too, which is right only on a stream whose last bytes are exactly those (as one zlib stream per page was:
+    a section that changed a little since the last event costs a little)."""
+    z = zlib.compressobj(level, zlib.DEFLATED, -15, zdict=after[-32768:]) if after else \
+        zlib.compressobj(level, zlib.DEFLATED, -15)
+    return z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)
+
+
+class _Event:
+    __slots__ = ("mu", "raw", "gz")
+
+    def __init__(self):
+        self.mu = threading.Lock()
+        self.raw: bytes | None = None
+        self.gz: dict[tuple | None, bytes] = {}       # the event this one follows on the page (None: any) -> gzip
+
+
 class Broadcaster:
     """The state, rebuilt every period_s (or at once on poke()), kept as sections: each top-level key
     serialized on its own, with the push (seq) it last changed at. A page is sent the whole state once
@@ -251,6 +277,7 @@ class Broadcaster:
     ?since= (X-State-Id on GET). A delta is {"_delta": 1, <changed sections>, "_gone": [removed keys]?};
     a page merges it into what it has (live.js). An id from another boot, or none: the whole state."""
     MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
+    EVENTS_KEPT = 64   # event(): (push, since) pairs kept, of the newest two pushes only (then: not kept)
 
     def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
@@ -266,6 +293,9 @@ class Broadcaster:
         self._sections: dict[str, tuple[bytes, int]] = {}     # key -> (JSON, the seq it last changed at)
         self._gone: dict[str, int] = {}                      # key -> the seq it went away at
         self._full: tuple[int, bytes] = (0, b"{}")
+        self._ev_mu = threading.Lock()
+        self._events: dict[tuple[int, int | None], _Event] = {}   # (seq, since) -> the event, made once (event())
+        self._ev_top = 0
         self.stopped = False
 
     def start(self) -> None:
@@ -357,6 +387,47 @@ class Broadcaster:
         if went:
             parts.append(b'"_gone":' + json.dumps(went).encode())
         return b"{" + b",".join(parts) + b"}"
+
+    def event(self, snap, since: int | None, gz: bool = False, after: tuple[int, int | None] | None = None) -> bytes:
+        """The SSE event for snap as a page that has since gets it ("id: ...\\ndata: <body>\\n\\n"), made once per
+        (push, since) and shared by every stream that asks: most pages are one push behind, so one delta and, gz, one
+        compression serve them all, not one per page (with 200 pages and a change each second that was ~680 ms of CPU
+        a second; native-notes FINDINGS §3.5). gz: the event as deflate blocks ended by a sync flush (GZIP_HEAD once,
+        then these: deflate_segment), compressed against the event the page got last (after: its (seq, since), what
+        this returned it) while that one is still kept, else against nothing, so it decodes the same on any page's
+        stream. Concurrent askers wait for the first to make it rather than making it again.
+        What makes the dictionary right: an event's bytes are a pure function of (seq, since) (body() of that push's
+        sections, ident of this boot), and _stream writes nothing between two events."""
+        seq, key = snap[0], (snap[0], since)
+        e = self._events.get(key)                # (a dict read: safe without the lock; most pages find it here)
+        if e is None:
+            with self._ev_mu:
+                e = self._events.get(key)
+                if e is None:
+                    if seq > self._ev_top:          # a new push: the ones before the last are nobody's any more
+                        self._ev_top = seq
+                        self._events = {k: v for k, v in self._events.items() if k[0] >= seq - 1}
+                    e = _Event()
+                    if len(self._events) < self.EVENTS_KEPT:   # full (pages at many places): made for this page alone
+                        self._events[key] = e
+        raw = e.raw
+        if raw is None:
+            with e.mu:
+                if e.raw is None:
+                    e.raw = b"id: " + self.ident(seq).encode() + b"\ndata: " + self.body(snap, since) + b"\n\n"
+                raw = e.raw
+        if not gz:
+            return raw
+        prev = self._events.get(after) if after is not None else None
+        last = prev.raw if prev is not None else None
+        on = after if last is not None else None
+        out = e.gz.get(on)
+        if out is None:
+            with e.mu:
+                out = e.gz.get(on)
+                if out is None:
+                    out = e.gz[on] = deflate_segment(raw, after=last or b"")
+        return out
 
     def latest(self) -> tuple[int, bytes]:
         """(seq, the whole state)."""
@@ -1281,15 +1352,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             """SSE: the whole state first (or, with an id from this boot, only what changed since: Last-Event-ID
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
             changed but the clock: {"_delta":1,"time":...}, so the page knows the stream is alive.
-            gzip (a browser that takes it): one stream, flushed at each event (Z_SYNC_FLUSH)."""
+            gzip (a browser that takes it): one gzip stream, each event its own sync-flushed deflate blocks, compressed
+            once per push for every page that is at the same place (Broadcaster.event)."""
             self.answered = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store, no-transform")
             self.send_header("X-Accel-Buffering", "no")       # proxies: pass events through, don't buffer
             self.send_header("Connection", "close")
-            z = zlib.compressobj(6, zlib.DEFLATED, 31) if stream_gzip and accepts_gzip(self.headers) else None
-            if z is not None:
+            z = bool(stream_gzip and accepts_gzip(self.headers))
+            if z:
                 self.send_header("Content-Encoding", "gzip")
                 self.send_header("Vary", "Accept-Encoding")
             self.end_headers()
@@ -1300,19 +1372,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 threading.current_thread().name = "http-stream"
             since = b.since(self.headers.get("Last-Event-ID")
                             or next((v for k, v in parse_qsl(urlsplit(self.path).query) if k == "since"), None))
-            out = (lambda raw: z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)) if z is not None else (lambda raw: raw)
             try:
                 # Reconnect after 2 s; and 2 KB of comment so proxies that hold a response until they
                 # have "enough" of it pass the first event straight on (pages also poll if this fails).
                 # Gzipped, 2 KB of spaces would shrink to nothing: random hex instead.
-                pad = secrets.token_hex(1024).encode() if z is not None else b" " * 2048
-                self.wfile.write(out(b"retry: 2000\n:" + pad + b"\n\n"))
+                hello = b"retry: 2000\n:" + (secrets.token_hex(1024).encode() if z else b" " * 2048) + b"\n\n"
+                self.wfile.write(GZIP_HEAD + deflate_segment(hello) if z else hello)
+                last = None                       # the event this page got last: the next one compressed against it
                 while not b.stopped:
                     snap = b.snapshot()
-                    body = b.body(snap, since)
-                    self.wfile.write(out(b"id: " + b.ident(snap[0]).encode() + b"\ndata: " + body + b"\n\n"))
+                    self.wfile.write(b.event(snap, since, z, last))
                     self.wfile.flush()
-                    since = snap[0]
+                    last, since = (snap[0], since), snap[0]
                     b.wait(since)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
