@@ -395,7 +395,9 @@ class Broadcaster:
         a second; native-notes FINDINGS §3.5). gz: the event as deflate blocks ended by a sync flush (GZIP_HEAD once,
         then these: deflate_segment), compressed against the event the page got last (after: its (seq, since), what
         this returned it) while that one is still kept, else against nothing, so it decodes the same on any page's
-        stream. Concurrent askers wait for the first to make it rather than making it again."""
+        stream. Concurrent askers wait for the first to make it rather than making it again.
+        What makes the dictionary right: an event's bytes are a pure function of (seq, since) (body() of that push's
+        sections, ident of this boot), and _stream writes nothing between two events."""
         seq, key = snap[0], (snap[0], since)
         e = self._events.get(key)                # (a dict read: safe without the lock; most pages find it here)
         if e is None:

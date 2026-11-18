@@ -173,6 +173,21 @@ def test_an_event_is_never_one_of_another_push_and_only_the_last_two_pushes_are_
         assert {k[0] for k in b._events} <= {seq - 1, seq}
 
 
+def test_pages_at_more_places_than_are_kept_still_decode(monkeypatch):
+    """Past EVENTS_KEPT an event is made for its page alone (not kept); every page still decodes what it had."""
+    monkeypatch.setattr(Broadcaster, "EVENTS_KEPT", 2)
+    b = Broadcaster(lambda: {})
+    snaps = []
+    for t in range(1, 8):
+        b.publish({"time": t, "units": [{"n": i, "s": (i * t) % 5} for i in range(300)]})
+        snaps.append(b.snapshot())
+    for start in range(5):                   # pages joined at five places, each then one push behind
+        steps = [(snaps[start], None)] + [(snaps[k], snaps[k - 1][0]) for k in range(start + 1, 7)]
+        wire, _ = page(b, steps)
+        assert decoded(b, wire) == [json.loads(b.body(snap, since)) for snap, since in steps]
+        assert len(b._events) <= 2
+
+
 def test_pages_at_the_same_place_share_one_compression_even_when_they_ask_at_once(monkeypatch):
     calls = []
     real = server_mod.deflate_segment
