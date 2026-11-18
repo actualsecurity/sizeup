@@ -16,7 +16,7 @@
       "source": "RadioReference (community-maintained)"
     },
     "reception": {
-      "watch": [9211, 9570],
+      "watch": [9211, 9212, 9570],
       "antenna": "a 700/800 MHz antenna on its own feed (no shared UHF splitting): about +20 dB over the floor on the control channel at gain 40 decodes reliably, under about +12 dB it does not; no LNA near the 700 MHz cell bands",
       "caveat": "Some traffic is carried over LTE and never on RF."
     }

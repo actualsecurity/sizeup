@@ -16,7 +16,7 @@ from sizeup.intel import infer as I
 from sizeup.intel.engine import IntelEngine, RecordingSink
 from sizeup.intel.events import MemoryEvents
 from sizeup.intel.model import Place
-from tests.test_intel import Clock, example_locate, row
+from tests.test_intel import Clock, example_locate, row, wide_police
 
 
 class FakeProvider:
@@ -38,7 +38,9 @@ def setup(cfg=None, provider=None, clock=None, locate=example_locate):
     clock = clock or Clock(1050)
     settings = {"intel": {"infer": True, **(cfg or {})}}
     sink = RecordingSink()
-    e = IntelEngine(settings=settings, events=MemoryEvents(), sink=sink, locate=locate, thread=False, clock=clock)
+    # the police pack over every MRRS source key: the tests feed several sources of it ("p25:mrrs:920", ...)
+    e = IntelEngine(settings=settings, events=MemoryEvents(), sink=sink, locate=locate, thread=False, clock=clock,
+                    packs=wide_police())
     p = provider or FakeProvider()
     e.infer = I.Inference(lambda: e.policy.cfg, clock=clock, log=lambda m: None, provider=p)
     return e, sink, p

@@ -67,7 +67,7 @@ def everything_at(mode: str, names=NEW) -> dict:
 
 def test_the_new_packs_the_categories_and_the_rules_are_all_at_log():
     packs = {p.name: p for p in rules_mod.load_packs()}
-    assert list(packs) == ["police", *NEW]
+    assert list(packs) == ["police", *NEW, "neighbor_police"]
     for name in NEW:
         p = packs[name]
         assert p.mode == "log" and p.accept is False and p.norm is not None, name
@@ -609,12 +609,18 @@ def test_a_place_that_reads_as_a_person_or_an_id_is_withheld(pack, source, servi
             assert bad.lower() not in json.dumps(d.message).lower() and "location not heard" in d.message["body"]
 
 
-def test_the_settings_page_lists_four_packs_and_who_may_change_them(live):
+def test_the_settings_page_lists_five_packs_and_who_may_change_them(live):
     cad, _n, api = live
     page = cad.intel_admin.page(gate=False)
-    assert [p["name"] for p in page["packs"]] == ["police", *NEW]
-    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log"]
-    for p in page["packs"][1:]:
+    assert [p["name"] for p in page["packs"]] == ["police", *NEW, "neighbor_police"]
+    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log", "log"]
+    area = page["packs"][-1]                              # the police pack's rules at push, the pack at log (one switch)
+    assert area["label"] == "Area PD" and area["scope"]["exclude"] == page["packs"][0]["scope"]["sources"]
+    assert all(r["id"].startswith("area.pd.") and r["mode"] == "push" for r in area["rules"])
+    raise_area = {"action": "pack", "pack": "neighbor_police", "mode": "push"}
+    assert call(api, "/api/cad/settings/intel", raise_area, CASEY)[0] == 200
+    assert cad.intel.pack("neighbor_police").mode == "push"           # one switch: its categories and rules are at push
+    for p in page["packs"][1:4]:
         assert all(c["mode"] == "log" and not c["edited"] for c in p["categories"]) and all(r["mode"] == "log" for r in p["rules"])
         assert p["scope"]["services"] and all(g.endswith(":*") for g in p["scope"]["sources"])    # never a talkgroup number
     post = lambda b, who: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
@@ -1005,7 +1011,10 @@ HOSTILE_TEXTS = [
     "the dryer in the ' basement is... " * 1500,   # a 50k-character transcript of near misses
     "!?.'-, " * 8000,
 ]
-HARD_STOP_S = 0.5                                    # a match still running then has hung: the test fails, never hangs
+BUDGET_S = 0.25                                      # one match at most: a linear expression takes milliseconds even
+                                                     # on a loaded machine (0.05 failed at load ~100); a backtracking
+                                                     # one takes seconds (over 5 s on 200 apostrophes, measured)
+HARD_STOP_S = 1.0                                    # a match still running then has hung: the test fails, never hangs
 
 
 def found_within(src: str, text: str, limit: float) -> float:
@@ -1050,16 +1059,17 @@ def test_every_re_expression_runs_fast_on_hostile_texts():
     for src in sorted(exprs):
         for text in HOSTILE_TEXTS:
             took = found_within(src, text, HARD_STOP_S)
-            assert took < 0.05, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
+            assert took < BUDGET_S, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
 
 
 def test_a_hung_expression_fails_the_timing_test_instead_of_hanging_it():
-    """The pattern #670's review found: "\\W+" beside "[\\w']+" backtracks without bound on a run of apostrophes."""
+    """The pattern #670's review found: "\\W+" beside "[\\w']+" backtracks without bound on a run of apostrophes. It
+    must still fail the budget: it runs past the hard stop (four times the budget), so the budget stays meaningful."""
     bad = r"re:\b(dryer|stove)(\W+(?!(no|not)\b)[\w']+){0,3}\W+(smoking|sparking)\b"
     t0 = time.perf_counter()
     with pytest.raises(AssertionError, match="still running"):
-        found_within(bad, "dryer" + "'" * 4000 + " x", 0.2)
-    assert time.perf_counter() - t0 < 10
+        found_within(bad, "dryer" + "'" * 4000 + " x", HARD_STOP_S)
+    assert BUDGET_S * 4 <= HARD_STOP_S and time.perf_counter() - t0 < 10
 
 
 def test_an_expression_reads_at_most_re_text_max_characters():
