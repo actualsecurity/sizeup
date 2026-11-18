@@ -1,0 +1,451 @@
+{
+  "x-version": 1,
+  "description": "The cursor rules of POST /api/station/events as golden sequences (contracts/README.md, Events). tests/test_contracts_events_cursor.py replays each against a real hub over HTTP, on a hub that has never had a post. `events`: the made-up events the sequences use, by name ({type, data}; `item`: that JSON value itself in place of an event; `hub_fails`: the test makes the hub fail to apply it for a reason of the hub's own). A step is a post and what must follow: `post.events` is a list of [seq, event name] (seq null: the event is sent without one; an event is sent as {seq, at, type, data, audio: null, audio_dropped: false}), `status` the HTTP status, `answer` the keys of the 200 answer, `cursor` the hub's [epoch, seq] afterwards, `applied_times` how many times each named `activity` event has been applied on the hub so far (an activity adds to its minute's count, so twice shows), `errors` the hub's count of events it failed to apply so far. `{restart: true}`: the hub is stopped and started again on the same database.",
+  "events": {
+    "a": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916501, "calls": 1, "radios": ["880001"]}},
+    "b": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916502, "calls": 1, "radios": ["880001"]}},
+    "c": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916503, "calls": 1, "radios": ["880001"]}},
+    "d": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916504, "calls": 1, "radios": ["880001"]}},
+    "e": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916505, "calls": 1, "radios": ["880001"]}},
+    "bad-id": {"type": "traffic", "data": {"id": "../x", "source": "Fireground 1", "start": 1794990000.0, "end": 1794990002.0, "text": ""}},
+    "unknown-type": {"type": "from_the_future", "data": {"x": 1}},
+    "source-event": {
+      "type": "source_event",
+      "data": {
+        "source": "demo",
+        "label": "Demo feed",
+        "rank": 1,
+        "seen_at": 1794990000.0,
+        "first_seen": 1794990000.0,
+        "event": {
+          "source": "demo",
+          "event_id": "S1",
+          "type": "ALARM",
+          "location": "12 Example Ave",
+          "units": ["E5"],
+          "times": {"dispatched": 1794990000.0},
+          "unit_times": {},
+          "comments": [],
+          "closed": false,
+          "extra": {},
+          "aliases": []
+        }
+      }
+    },
+    "source-event-the-hub-fails": {
+      "type": "source_event",
+      "hub_fails": true,
+      "data": {
+        "source": "demo",
+        "label": "Demo feed",
+        "rank": 1,
+        "seen_at": 1794990000.0,
+        "first_seen": 1794990000.0,
+        "event": {
+          "source": "demo",
+          "event_id": "S2",
+          "type": "ALARM",
+          "location": "12 Example Ave",
+          "units": ["E5"],
+          "times": {"dispatched": 1794990000.0},
+          "unit_times": {},
+          "comments": [],
+          "closed": false,
+          "extra": {},
+          "aliases": []
+        }
+      }
+    },
+    "source-event-malformed": {
+      "type": "source_event",
+      "data": {"source": "demo", "label": "Demo feed", "rank": 1, "seen_at": 1794990000.0, "first_seen": 1794990000.0, "event": {"source": "demo"}}
+    },
+    "not-an-object": {"item": 7}
+  },
+  "sequences": [
+    {
+      "name": "in-order",
+      "rule": "Events are applied in `seq` order and the answer's `acked` is the highest `seq` dealt with.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1, "b": 1, "c": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-retry-is-skipped",
+      "rule": "A post delivered before (the station got no answer and sent it again) is skipped whole: `seq` at or under the cursor is never applied twice.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 0},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1, "b": 1, "c": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "an-overlap-applies-the-new-ones",
+      "rule": "A post that overlaps the cursor: what is at or under it is skipped, the rest applied.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "b"], [3, "c"], [4, "d"], [5, "e"]]},
+          "status": 200,
+          "answer": {"acked": 5, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 5],
+          "applied_times": {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-seq-used-twice-is-lost",
+      "rule": "`seq` is never used twice within an epoch: a second event under a `seq` the hub has dealt with is skipped as delivered before, and acked. The station then deletes it.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "c"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 0},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "applied_times": {"a": 1, "b": 1, "c": 0},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "sorted-within-a-post",
+      "rule": "The hub sorts a post's events by `seq` before it applies them.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[3, "c"], [1, "a"], [2, "b"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1, "b": 1, "c": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-gap-is-not-noticed",
+      "rule": "The hub does not check that `seq` is the cursor plus one: it applies an event past a gap and moves the cursor to it. What comes later with a `seq` inside the gap is skipped, and acked.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[5, "e"]]},
+          "status": 200,
+          "answer": {"acked": 5, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 5],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 5, "applied": 0},
+          "cursor": ["aaaaaaaaaaaaaaaa", 5],
+          "applied_times": {"a": 1, "b": 0, "c": 0, "e": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-new-epoch-restarts",
+      "rule": "A post with another epoch than the last one's sets the cursor to 0: everything in it is applied, from `seq` 1.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "bbbbbbbbbbbbbbbb", "events": [[1, "d"], [2, "e"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["bbbbbbbbbbbbbbbb", 2],
+          "applied_times": {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "the-cursor-survives-a-hub-restart",
+      "rule": "The cursor is kept in the hub's database once per post: a retry after the hub restarted is still skipped.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "errors": 0
+        },
+        {"restart": true},
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1, "b": 1, "c": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "an-empty-post-reads-the-cursor",
+      "rule": "A post with no events answers the cursor of its epoch and applies nothing. (It still switches the epoch: with another epoch it answers 0 and the hub's cursor is then that epoch's.)",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": []},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 0},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "bbbbbbbbbbbbbbbb", "events": []},
+          "status": 200,
+          "answer": {"acked": 0, "applied": 0},
+          "cursor": ["bbbbbbbbbbbbbbbb", 0],
+          "applied_times": {"a": 1, "b": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "one-cursor-for-every-sender",
+      "rule": "KNOWN DEVIATION E3. The hub has one cursor, not one per station or per epoch: a post from another outbox moves it, and a retry from the first outbox is then taken as new and applied a second time.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "bbbbbbbbbbbbbbbb", "events": [[1, "d"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["bbbbbbbbbbbbbbbb", 1],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "b"], [3, "c"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 3},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 2, "b": 2, "c": 2, "d": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-post-without-an-epoch-moves-the-cursor",
+      "rule": "A post without `epoch` is taken as epoch \"\": it moves the cursor like any other epoch.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "errors": 0
+        },
+        {"post": {"events": []}, "status": 200, "answer": {"acked": 0, "applied": 0}, "cursor": ["", 0], "errors": 0},
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "applied_times": {"a": 2},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "an-event-that-fails-is-acked-and-skipped",
+      "rule": "KNOWN DEVIATION E1. An event the hub fails to apply (here: a clip id it refuses) is counted, logged, skipped and ACKED: the answer covers it and has no word about it, so the station deletes it. The events behind it are applied.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "bad-id"], [2, "a"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "applied_times": {"a": 1},
+          "errors": 1
+        }
+      ]
+    },
+    {
+      "name": "an-unknown-type-is-acked",
+      "rule": "An event of a type the hub does not know is logged and acked; nothing is applied, it is no error, and it counts in `applied`.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "unknown-type"], [2, "a"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "applied_times": {"a": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "what-is-skipped-without-a-word",
+      "rule": "An item of `events` that is not an object is skipped. An event without `seq` is taken as `seq` 0: at or under every cursor, so never applied, and no error.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [null, "not-an-object"], [null, "b"], [2, "c"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "applied_times": {"a": 1, "b": 0, "c": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-source-event-the-hub-fails-is-sent-again",
+      "rule": "The one exception to E1: a `source_event` the hub fails to apply for a reason of its own (not a malformed one) is NOT acked, and nothing behind it in the post is looked at: `acked` stays under it and the station sends it again. On its third delivery it is given up like any other event.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "source-event-the-hub-fails"], [3, "b"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "applied_times": {"a": 1, "b": 0},
+          "errors": 1
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "source-event-the-hub-fails"], [3, "b"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 0},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "applied_times": {"a": 1, "b": 0},
+          "errors": 2
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "source-event-the-hub-fails"], [3, "b"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1, "b": 1},
+          "errors": 3
+        }
+      ]
+    },
+    {
+      "name": "a-malformed-source-event-is-acked-and-skipped",
+      "rule": "A `source_event` that is not one (its `event` breaks the interface) is skipped and acked like any other failed event; a good one is applied.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "source-event-malformed"], [2, "source-event"], [3, "a"]]},
+          "status": 200,
+          "answer": {"acked": 3, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 3],
+          "applied_times": {"a": 1},
+          "errors": 1
+        }
+      ]
+    },
+    {
+      "name": "seq-as-a-string-or-a-float",
+      "rule": "The hub reads `seq` with int(): a string of digits and a float are taken (the float cut to its whole part). A writer sends an integer.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [["1", "a"], [2.7, "b"]]},
+          "status": 200,
+          "answer": {"acked": 2, "applied": 2},
+          "cursor": ["aaaaaaaaaaaaaaaa", 2],
+          "applied_times": {"a": 1, "b": 1},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-seq-that-is-no-number-refuses-the-whole-post",
+      "rule": "A `seq` that int() does not take is 400 for the whole post: nothing of it is applied and the cursor stays. The station sends the same post again (KNOWN DEVIATION E2).",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "errors": 0
+        },
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "b"], ["x", "c"]]},
+          "status": 400,
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "applied_times": {"a": 1, "b": 0, "c": 0},
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "name": "a-body-that-is-no-events-post",
+      "rule": "A body that is not an object with an `events` list is 400; a `station` that is another id than the token's is 401 `id_mismatch`. The cursor stays.",
+      "steps": [
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
+          "status": 200,
+          "answer": {"acked": 1, "applied": 1},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "errors": 0
+        },
+        {"post": {"epoch": "aaaaaaaaaaaaaaaa"}, "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
+        {"post": {"epoch": "aaaaaaaaaaaaaaaa", "events": {"1": "a"}}, "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
+        {"post": [], "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
+        {
+          "post": {"epoch": "bbbbbbbbbbbbbbbb", "station": "st-other", "events": [[1, "b"]]},
+          "status": 401,
+          "reason": "id_mismatch",
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "applied_times": {"a": 1, "b": 0},
+          "errors": 0
+        }
+      ]
+    }
+  ]
+}

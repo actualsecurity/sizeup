@@ -1,0 +1,28 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "alarm",
+      "data": {
+        "id": "Fireground1-live-1794990000000",
+        "source": "Fireground 1",
+        "start": 1794990000.0,
+        "end": 1794990001.0,
+        "text": "",
+        "status": "pending",
+        "unit": "7303",
+        "talkgroup": null,
+        "rig": "",
+        "radio_id": "7303",
+        "emergency": true,
+        "emergency_via": "MDC",
+        "pairs": []
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

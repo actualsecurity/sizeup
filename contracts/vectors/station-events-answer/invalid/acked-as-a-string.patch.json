@@ -1,0 +1,10 @@
+{
+  "base": "station-events-answer/valid/answer.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/acked",
+      "value": "1"
+    }
+  ]
+}

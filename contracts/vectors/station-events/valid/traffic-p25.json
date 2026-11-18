@@ -1,0 +1,40 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "traffic",
+      "data": {
+        "id": "4101-1794990000_476075000.0-call_1",
+        "source": "Fire Dispatch 1",
+        "start": 1794990000.0,
+        "end": 1794990002.0,
+        "text": "Engine 5 on location, nothing showing",
+        "status": "done",
+        "unit": "990001",
+        "talkgroup": 4101,
+        "rig": "",
+        "radio_id": "990001",
+        "fm": false,
+        "call_id": "4101-1794990000_476075000.0-call_1",
+        "turn": 0,
+        "stt": "",
+        "vocab_v": "",
+        "stt_prompt_time": false,
+        "stt_wait_s": 0.2,
+        "stt_run_s": 0.4,
+        "stt_class": "live",
+        "raw": "Engine 5 on location, nothing showing",
+        "confidence": 0.9,
+        "ours": true,
+        "model": "m.bin",
+        "attach": true,
+        "pairs": [["990001", "990001"]]
+      },
+      "audio": "UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "audio_dropped": false
+    }
+  ]
+}

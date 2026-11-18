@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/retext-caught-up.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/catchup",
+      "value": false
+    }
+  ]
+}

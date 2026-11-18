@@ -766,6 +766,6 @@ if __name__ == "__main__":
     repo = ROOT.parent
     sys.exit(subprocess.call(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-k", "recorded",
-         "tests/test_contracts_station_state.py", "tests/test_contracts_workers.py"],
+         *sorted(str(f.relative_to(repo)) for f in (repo / "tests").glob("test_contracts_*.py"))],
         cwd=repo, env={**os.environ, RECORD_ENV: "1", "PYTHONPATH": os.pathsep.join(
             [str(repo), *filter(None, [os.environ.get("PYTHONPATH")])])}))

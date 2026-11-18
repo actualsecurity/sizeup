@@ -47,6 +47,11 @@ new key, or a new schema, behind a capability string.
 | `node-state` | designed | 1 | `station-state` plus `capabilities`, `capabilities_rev`, `roles_applied` |
 | `node-state-answer` | designed | 1 | `station-state-answer` plus `capabilities_wanted`, `roles_rev`, `roles`, `leases` |
 | `node-worker-hello` | designed | 1 | `stt-worker-hello` plus `capabilities`, `capabilities_rev` |
+| `station-events` | as built | 1 | the body of `POST /api/station/events`: `{epoch, station, events: [{seq, at, type, data, audio, audio_dropped}]}`, with one sub-schema per event `type` (12) |
+| `station-events-answer` | as built | 1 | the hub's 200 answer: `ok`, `acked` (its cursor), `applied` |
+| `station-jobs` | as built | 1 | the hub's 200 answer to `GET /api/station/jobs?wait=`: `jobs`, each `{id, type, args}`; the arguments of `tts`, `sources_reset` and of each of the 15 functions of `call` |
+| `station-job-result` | as built | 1 | the body of `POST /api/station/jobs/<id>`: `ok`, `error`, `result`, `label`, `audio`; what `result` is per function |
+| `station-job-result-answer` | as built | 1 | the hub's 200 answer to a job's result: `ok` |
 
 **As built** is what the tests prove, no more:
 
@@ -200,6 +205,20 @@ main, its switch goes from `True` to `False` (one line) and its row here is mark
 | D4 | low | `docs/nodes.md:245-254` against `sizeup/cloud/hub.py:574`, `576` | The design's route table has no row for `POST /api/station/stt` (each clip's speech-to-text input) and names only the long poll of the jobs, not `POST /api/station/jobs/<id>`. `routes.json` has `radio-receive` and `always`. Fix in review: #779. Found by reading | main session (the document's owner) |
 | D5 | high | `sizeup/cloud/hub.py:642` (kept), `644`-`645` (raises: `sizeup/cloud/health.py:612`, `hub.py:392`, `1942`, `1976`, `342`); read again at `health.py:673`, `hub.py:411`, `267`, `277` | The hub does not handle a wrong type in a state post. `status.radios` that is no list of objects, a row's `label` that is no string, `status.channels` or `status.outbox` that is no object: the status is kept first, then the handler raises (the connection is dropped with no answer). Until the next good post `GET /api/station/status` and `GET /api/cad/health` (after `radios: 5`) or `GET /api/cad/state` (after `outbox: 5`) drop their connections too. A talker or a page with `ended` and an `until` that is no number is answered 200 and then drops `GET /api/cad/state` the same way. Fix in review: #782 (the normal 200 with `refused: ["status"]` or `["live"]` and a `reason`; the bad part is left out, the rest of the post is taken) | main session |
 | D6 | high | `sizeup/cloud/station.py:222` (called at `582`), `274`-`280` | The station does not handle a wrong type in the state answer. `caps` that is a number or a boolean raises in `_set_caps` outside the thread's error handling: the hub-state thread ends, and with it the heartbeat, talking now, the status and the hub's build, until the station restarts. `caps` as a string becomes one capability per character. A `pool.ready` or `pool.max_s` that is no number makes `pool_has_room` raise in its caller. Fix in review: #782 (the field is ignored, its last good value kept) | main session |
+| E1 | high | `sizeup/cloud/hub.py:834-843`, `849`, `855`; `sizeup/cloud/station.py:494` | An event the hub fails to apply (a bug on the hub, a shape it does not take, base64 it cannot decode) is counted, logged, skipped and **acked**: the answer's `acked` covers it and has no word about it, so the station deletes it. A page, a transmission or new words are gone on both sides, and only the hub's log says so. The one exception is a `source_event` that fails for a reason of the hub's own: left unacked for three deliveries. Fixed: the answer names what failed and the station keeps those rows aside | main session |
+| E2 | high | `sizeup/cloud/station.py:487-493`, `sizeup/cloud/outbox.py:231-244`, `sizeup/cloud/hub.py:806-810` | The station takes a 400 or a 413 on the events post like an outage: the same oldest rows again, for ever. A batch always starts with the oldest row, so one event the hub will never take (one clip over 32 MiB once in base64, a body it cannot read) keeps every later event on the station until someone deletes the outbox. Fixed: after a 400 / 413 the station sets the refused event aside (kept, counted, said in its status) and goes on | main session, with native (the station's forwarder) |
+| E3 | medium | `sizeup/cloud/hub.py:320-321`, `813-818`, `850-851` (one cursor); `550-553` (what keeps a second station out today) | The hub has one `(epoch, seq)` cursor for everything posted to it, not one per station or per outbox. Two outboxes that post to one hub reset it for each other: a retry of a batch the hub had applied is applied a second time (an `activity` is counted twice; new words, radio ids and source events are applied again), and two outbox files with the same epoch (a copied state folder) lose events instead, skipped as delivered before and acked. Today only one station may post events (409 `multi_station_off` for another), so it takes two outboxes of that one station: a move to another machine, or two programs sharing its identity. Fixed: a cursor per (station, epoch) | main session (multi-station, design step A3) |
+| E4 | low | `sizeup/cloud/hub.py:164`, `1204`; `sizeup/incidents.py:58-60` | For `traffic` and `alarm` the hub does not ignore a key it does not know: every key named `[a-z][a-z0-9_]{0,30}` (but `has_audio`) becomes an attribute of its copy of the transmission and a key of the row every console gets. A key a station adds changes what consoles receive without the hub having said it understands it (rule 2), and one named like an attribute the hub's own code sets lands on it. Fixed: the hub takes the keys the schema names | main session |
+| J1 | medium | `sizeup/cloud/hub.py:216`, `426`-`427`, `583`-`584`; `sizeup/cloud/station.py:614`-`615` | A job is delivered at most once, both ways. It is marked taken when a poll's answer is written: if that answer never reaches the station (a dropped connection, a restart just then) no later poll gets it, and the hub's caller waits out its 10 to 30 s and says the station didn't answer. A result that comes after that wait is answered 404 and thrown away although the work was done | main session |
+| J2 | low | `sizeup/cloud/station.py:633`-`640` | The station posts a job's result three times at most (1 s, then 2 s apart), then forgets it: nothing is kept for when the hub is back | main session |
+| J3 | high | `sizeup/cloud/station.py:614` (outside the handling of `605`-`610`), `635` | The station does not handle a wrong type in the poll's answer. `jobs` that is a number or a boolean, or an answer that is no object, raises in the thread that polls: it ends, and the station takes no job (no switch, no dispatch voice, no re-run) until it restarts, while it still looks connected. An entry of `jobs` that is no object ends only its own thread. Fix in review: #782 (the answer is left out, the polling goes on) | main session |
+| J4 | medium | `sizeup/cloud/station.py:672`, `sizeup/cloud/hub.py:465` | The arguments of `call` are positional, so a station cannot ignore one it does not know: one argument too many is answered `ok: false` with Python's TypeError and nothing is done. This is why the hub guesses a station's build from its status before it adds an argument (D2). The schema has the name of every position (`x-names`) for a form with named arguments | main session, with native |
+| J5 | medium | `sizeup/cloud/station.py:669`, `625`; `sizeup/app.py:2322` | A missing key has a meaning of its own: a `call` whose `args` is absent, null or empty runs the function with its defaults, and for `retranscribe` that is every recording on the station's disk; a `sources_reset` whose `args` is no object resets every source | main session |
+| J6 | medium | `sizeup/cloud/hub.py:456`-`458`, `2399` | The hub does not handle a wrong type in a job's result in two callers: `audio` of a `tts` result that is no string raises TypeError out of `Hub.render_voice` and `Cad._render_remote` (their callers expect text only when the voice fails: a person's preview of a dispatch with audio gets no answer, the connection is dropped); `queued` of a `catch_up` result that is no list raises out of the catch-up's hand-over. Not covered by #782 | main session |
+| O1 | high | `sizeup/cloud/outbox.py:86-87`, `54`, `94-98`; `sizeup/cloud/hub.py:822-823`, `sizeup/cloud/station.py:494` | An outbox file set back to an earlier state keeps its epoch and hands out seqs the hub already has: the next events are skipped by the hub (seq at or under its cursor), acked, and deleted on the station, without a word. A power cut sets the file back: in WAL mode with `synchronous = NORMAL` SQLite does not sync a commit, so the last adds and the acks' deletes can be gone after the restart. Restoring a copy of the file does the same. Fixed: a seq once handed out is never handed out again under the same epoch (the commit synced before the row is sent, or a new epoch after a stop that was not in order) | main session |
+| O2 | low | `sizeup/cloud/outbox.py:211`, `132-133`, read back at `241` | D1 again, in the file: a float NaN or infinity in an event's data is stored as the bare token `NaN` / `-Infinity`. A second implementation reading the row with a strict reader fails on it; Python reads it back and the forwarder sends it on as it is. Fixed: stored as null | main session |
+| O3 | medium | `sizeup/cloud/outbox.py:241`, `sizeup/cloud/station.py:479`, `485` | The station does not handle a row of the wrong type in its own file. `data` that is not JSON raises in `Outbox.batch()`; `audio` stored as text raises in the forwarder's base64. Both are outside the forwarder's error handling: the `hub-forward` thread ends and no event goes up until a restart, then again, since the row is still the oldest. Only a second writer of the file or a damaged row can make one. Fixed: the row is set aside, said once in the log, and the events behind it go up | main session |
+| O4 | medium | `sizeup/cloud/outbox.py:85-88`, `sizeup/cloud/stationmode.py:238`, `sizeup/app.py:5803` | The outbox is opened while the station starts, outside any error handling: a file SQLite cannot open (damaged, or using a newer SQLite's features) raises `DatabaseError` there and the station does not start at all, over a file that only queues what goes to the hub. Fixed: the file is moved aside with a line in the log, a new outbox (a new epoch) is made, the station starts | main session |
 
 As built and worth knowing:
 
@@ -224,6 +243,222 @@ What these schemas and tests do not cover yet. Follow-up: #781.
   `health` and `logship` error forms (in vectors only); a job's `hold_until`; rows of `version.adapter.health`.
 - **Routes with no schema**: events, jobs, the speech-to-text input, logs, metrics, aircraft, vessels, status, and
   of the workers' routes everything but hello and state. Wrong types on the workers' routes were not probed.
+
+## The durable lane: events, jobs, the outbox
+
+What must not be lost between a station and the hub goes through three interfaces: the events post
+(`station-events`), the jobs the hub hands a station on its long poll (`station-jobs`, `station-job-result`), and the
+file the events wait in on the station (`contracts/outbox/`). Their deviations are E (events), J (jobs) and O
+(outbox) in the table above: pinned in `tests/test_contracts_events.py`, `tests/test_contracts_events_cursor.py`,
+`tests/test_contracts_jobs.py` and `tests/test_contracts_outbox.py`, each behind a switch at the top of its file
+(`test_each_deviation_of_the_durable_lane_is_pinned_by_a_test_or_says_it_was_read` holds the rows to the tests, as
+`tests/test_contracts_schemas.py` does for D1 to D6). With these, "Routes with no schema" under Known gaps no longer
+lists events and jobs.
+
+```
+contracts/
+  events/cursor.json                 the cursor rules of the events post as golden sequences
+  outbox/ddl.sql, columns.json       the station's outbox file as a new one is made (recorded)
+  outbox/sequences/*.json            operations on the outbox and what the file holds after each
+  outbox/history/<n>-<what>.sql      the file as each older build made it, and every statement that build ran
+tests/contracts_lane.py              the helper: a hub that keeps every events post, the drivers of real transmissions,
+                                     an event's data held to the sub-schema of its type, the recorder's scrub
+tests/test_contracts_events.py       the events post and its answer; which keys the hub reads; E4
+tests/test_contracts_events_cursor.py  the golden sequences against a real hub; the station's side; E1, E2, E3
+tests/test_contracts_jobs.py         the job poll's answer and a job's result; J1-J6
+tests/test_contracts_outbox.py       the outbox file: the recordings, the sequences, an update, a switch back; O1-O4
+```
+
+### Events
+
+`station-events` is the envelope and, under `$defs`, one sub-schema per event `type`. The schema picks the
+sub-schema with `if` / `then` on `type`, so an event of a type it does not know validates (the rule), and a wrong
+`data` is refused for the one rule it breaks. `x-known` of `type` is held to the code both ways: every type some call
+in `sizeup/` queues (`App._emit`, the incident sources' runner) and every type `HubApp.apply` acts on.
+
+| type | keys of `data` (always there / in all) | what | clip |
+|---|---|---|---|
+| `page` | 22 / 27 | a page off a paging channel, once its recording is complete | yes |
+| `page_text` | 22 / 27 | the same document again with its transcript | no |
+| `traffic` | 16 / 49 | a finished transmission: the Traffic object's attributes, with `attach` and `pairs` | yes |
+| `alarm` | 12 / 48 | an emergency button, ahead of the words: the same object as it is then, without `attach` | when there is one |
+| `retext` | 5 / 9 | new words for a clip the hub has | no |
+| `rerun` | 3 / 3 | a re-run ended: `changed`, `same`, `failed: why` | no |
+| `alt_text` | 3 / 3 | the other engine's words, to compare | no |
+| `heard` | 5 / 5 | a radio id heard on the air | no |
+| `activity` | 4 / 4 | a minute of key-ups on an encrypted talkgroup of another P25 system | no |
+| `source_event` | 6 / 6 (its `event`: 11) | an incident source's new or changed event | no |
+| `source_health` | 8 / 8 | an incident source's health | no |
+| `source_seen` | 6 / 6 | the event ids an incident source still lists | no |
+
+**As built** here is one run (`tests/contracts_lane.py` `everything`): the station with everything the fakes can give
+it is put through every path that queues an event, and what went over the wire to a real hub is checked post by
+post. Real: the app's own handlers from the finished segment or call on, speech-to-text's queue, the outbox, the
+link, the hub. Standing in: whisper, the live tap's memory of an alarm raised at a key-up, whisper's queue length (for
+the hand-over to the pool), and the hub's word that Amazon Transcribe is up. That run sends all 12 types and every
+key of every sub-schema but five of a page's (below), which is what `x-complete` on them rests on.
+
+**A transmission's keys.** `traffic` and `alarm` carry "whatever attributes the Traffic object has": ten declared
+fields and 39 that one path or another sets. The schema names all 49 (`$defs/transmission`), with type and unit, and
+the run reaches each: an FM transmission (`low_energy`, the speech-to-text keys), a piece cut at a key-up (`keyup`,
+`id_note`), an MDC emergency packet (`emergency`, `emergency_via`, `alarm_key`), a P25 call (`fm`, `call_id`, `turn`,
+`pairs`, `ours`), a P25 emergency with trunk-recorder's record (`evidence`), a flag found stuck on a talkgroup whose
+Record is off (`kept`, `flag_stuck`), the airband (`mhz`, `carrier_db`, `carrier_dbfs`, `snr_db`, `opened`,
+`notched_hz`, `floor_dbfs`), another P25 system (`system`, `tier`, `source_key`, `group`, `service_auto`, `service`,
+`dept`), and the hub's engines (`stt`, `transcript_pending`, `stt_class`). Under the run there is a wider net: every
+attribute assigned on a transmission anywhere in `sizeup/app.py` and `sizeup/stt.py` must be one the schema names.
+
+`x-hub` on each of the 49 says what the hub does with it, and `test_which_keys_of_a_transmission_the_hub_reads` holds
+it to the hub: each recorded transmission is applied on a real hub as it is, without each key, and with each key
+changed.
+
+| `x-hub` | keys | means |
+|---|---|---|
+| `required` | 5: `id`, `source`, `start`, `end`, `text` | the event fails without it (and is acked: E1) |
+| `read` | 36 | the hub acts on it by name: changing it changes the radio log's row or the speech-to-text run (24), or the code reads it where that comparison cannot show (12, listed in the test with file and line) |
+| `replaced` | 2: `rig`, `ours` | the hub writes its own value over it |
+| `kept` | 6: `low_energy`, `carrier_dbfs`, `snr_db`, `opened`, `notched_hz`, `floor_dbfs` | nothing on the hub reads it; it stays on the row the consoles get |
+
+**The clip.** `audio` is base64 (RFC 4648, the standard alphabet, padded, no line breaks) of a whole RIFF / WAVE
+file: PCM, mono, 16-bit, 8000 frames a second (the station's 16 kHz clip, every other sample), so it always starts
+`UklGR`; null for an event without one. Not gzipped. What is checked: on the station only that a 16 kHz mono 16-bit
+WAV is halved (any other WAV, and bytes that are no WAV, go as they are); on the hub nothing (base64 decoded without
+validation, the bytes stored as they came, no WAV check). Base64 it cannot decode fails the event (E1).
+
+**The cursor.** `contracts/events/cursor.json` has the rules as 19 golden sequences, each replayed against a real hub
+over HTTP on a hub that has never had a post: every answer, the cursor after every post, how many times each event
+was applied, how many failed.
+
+- `seq` starts at 1 and is never used twice within an epoch; the hub applies a post in `seq` order and answers
+  `acked`, the highest `seq` it has dealt with. The station deletes every row up to `acked` and sends what is left;
+  any other answer (not 2xx, no usable `acked`) is the same oldest rows again after the backoff.
+- `seq` at or under the cursor is skipped as delivered before, and acked: a retry is applied once, a `seq` used
+  twice is lost, and so is what arrives late inside a gap (a gap itself is not noticed).
+- Another `epoch` than the last post's sets the cursor to 0. The cursor is kept in the hub's database, once per
+  post, and survives a restart.
+- An event that fails is acked and skipped (E1), but a `source_event` the hub fails for a reason of its own: not
+  acked, nothing behind it looked at, three deliveries at most.
+- A post the hub refuses whole (400, 413) is sent again for ever (E2). One cursor serves every sender (E3).
+- The station's client sends a request once more, silently, when its connection is closed before an answer: every
+  POST of a station can arrive twice. Events are safe by the cursor.
+
+As built and worth knowing (each pinned by a test or a sequence):
+
+- An event's `at` and `audio_dropped` are sent and never read by the hub. A transmission's `text` must be there and
+  is then replaced by `raw`. A page's `departments`, `read_twice` and `rerun_result` are sent and never read.
+- An item of `events` that is not an object is skipped; an event without `seq` is taken as 0 and never applied; an
+  unknown `type` is acked, counted in `applied`, and no error. So a new type needs a capability string first, as
+  `activity` and another P25 system's rows wait for `p25_systems` (held back, not queued, without it).
+- The hub reads `seq` with `int()`: a string of digits and a float pass. A post without `epoch` is epoch `""` and
+  moves the cursor like any other. A post with no events answers the cursor.
+- The hub takes any size of `seq`: `acked` can pass 2^53 if a writer lets it. The schema stops at 2^53 - 1.
+
+Not covered here: the 503 of a hub that is not the leader (`tests/test_fenced_reads.py` has it); a page's `alt_text`,
+`alt_model`, `keyup`, `radio_id`, `unit` (typed from `App._page_doc`, which a test calls with all of them, never on
+the wire in the run); the inside of `evidence` (trunk-recorder's own format) and of a feed event's `extra`.
+
+### Jobs
+
+`station-jobs` is what the long poll answers, `station-job-result` what the station posts back, and
+`station-job-result-answer` the hub's `{ok: true}` to that (a 404 / 400 / 413 there is the `station-error` envelope,
+`error` alone). All are proven on the wire: every job in `tests/test_contracts_jobs.py` is made by the hub's own
+callers and run by a real station over HTTP, and each poll answer and result is compared, value for value, with a
+recorded vector (`station-jobs/valid/<form>.json`, `station-job-result/valid/<form>.json`; 22 forms). Stand-ins: the
+station's voice (a short WAV), its whisper, and one incident-source adapter that reads nothing, in a real
+`SourceRunner`.
+
+Driven through the hub's own code: `tts` (`Cad._render_remote`), `sources_reset` (`Hub.reset_source`), and all 15
+functions of `call`. `catch_up` goes through the catch-up driver's `tick()` on a clip that was really shed;
+`transcribe_now` through `_aws_failed`; `set_channel_prefs` through Settings posts for channels, tones and squelch;
+`set_stt_terms` from a real `TermStore`; `set_stt_alert_keys` from `alert_keys_check`, with the intel engine's source
+set placed in the app's cache. The three-argument `set_channel_prefs` and the three-argument county `set_talkgroup`
+(an older station) are driven against a station that only polls, with a status that lacks `channels.squelch_ok` /
+`p25_systems`.
+
+`call` is positional on the wire. `x-names` gives the App parameter each position lands on (checked against
+`inspect.signature`), `x-forms` the list lengths the hub sends today, `maxItems` the last parameter (one more is a
+TypeError, J4). `fn` x-known is held to `CALLS` in `sizeup/cloud/station.py`.
+
+| fn | parameters (`x-names`) | lengths sent | result |
+|---|---|---|---|
+| `set_mode` | mode, sdr, by, confirm | 2, 4 | null or why not |
+| `set_talkgroup` | tg, record, main, tier, system | 3, 5 | null or why not |
+| `set_talkgroup_group` | group, record, main | 3 | null or why not |
+| `retranscribe` | ids, as_alt | 1, 2 | count |
+| `set_channel_prefs` | prefs, aws, tones, squelch | 3, 4 | the `channels` status object |
+| `emergency_all_clear` | tg, radio_ids | 2 | boolean |
+| `transcribe_now` | ids | 1 | count |
+| `catch_up` | specs | 1 | `{queued, refused, hold}` |
+| `set_adsb_receiver` | serial | 1 | null or why not |
+| `set_antenna_groups` | raw, confirm | 1, 2 | null, why not, or `confirm: <question>` |
+| `sources_poll_now` | reason | 1 | count |
+| `reception_post` | body, by, tid | 3 | null or why not |
+| `reception_sample_b64` | sid | 1 | base64 WAV or "" |
+| `set_stt_alert_keys` | keys, rev | 2 | `{ok, rev}` |
+| `set_stt_terms` | payload | 1 | the `stt_terms` status object |
+
+A `tts` result carries `audio`: standard base64 of the WAV as the station's voice wrote it. The hub decodes it with
+`validate=True` and checks only the first four bytes (RIFF). `wait` is decimal seconds cut to 0..30; missing or not a
+number is 0.
+
+As built and worth knowing: an unknown job `type` is answered `this station doesn't know job '<type>'`, an unknown
+`fn` `not allowed from the hub: '<fn>'` (the hub looks for `not allowed`: D2, shown here in the two fallbacks that
+depend on it). The station ignores a key it does not know in the answer, in a job, in `args` and in each object
+inside; the hub ignores one in a result. A body over 16 MiB is 413, but a client still sending it usually sees the
+connection close first. The hub also sends `set_channel_prefs`, `set_stt_alert_keys` and `set_stt_terms` by itself on
+any state post whose status differs. D3 (a HEAD on the poll takes the jobs) is #774's.
+
+Not typed (open objects): the tone entries in `set_channel_prefs`, the body of `reception_post` beyond `action`, the
+antenna group beyond `name`, `sdrs`, `jobs`.
+
+### The outbox file
+
+`state/outbox.sqlite` is the one file a second implementation of the station must open across an update and a
+switch back, so its contract is the file itself, not a JSON Schema.
+
+- `outbox/ddl.sql` is a new file as the real Outbox makes it: the header pragmas (WAL, UTF-8, no `user_version`,
+  no `application_id`), `synchronous = NORMAL` per connection, and `sqlite_master`. It is a script: run on an empty
+  SQLite file it makes an outbox the station opens as its own (tested). `outbox/columns.json` says the same column
+  by column (name, type, NOT NULL, default, primary key; which tables count with AUTOINCREMENT; the index): a file
+  made another way, an older build's after its ALTERs for one, is held to that, since its `sqlite_master` text
+  differs. Both are recorded by `python -m tests.contracts record`.
+- `outbox/sequences/*.json` are steps (`open`, `close`, `remove`, `add`, `batch`, `ack`, `add_stt`, `stt_batch`,
+  `stt_ack`, `sql`), each with what it `returns` and what can be seen `after` it: the Outbox's totals, and the
+  `outbox` and `stt_inputs` tables whole plus `sqlite_sequence`, read by another connection (written only when
+  the step changed them). Rows are `[seq, at, kind, data as stored, audio, audio_dropped, context]` and
+  `[n, at, data, flac, meta, prio]`; bytes are `{"bytes": n, "fill": "a1"}` (n times one byte) or `{"hex": ...}`;
+  an epoch is `epoch-1`, `epoch-2` in the order first seen. The steps are written by hand, `returns` and `after`
+  are recorded, and a test per file states in words what it shows:
+  `add-batch-ack` (seq from 1, never handed out twice, also after an ack of everything and a reopen; the batch
+  limits; ack is safe to repeat and to overshoot; data as compact ASCII JSON text, audio a BLOB),
+  `epoch-and-reopen` (the epoch is the file's, a removed file starts over at seq 1 with a new one; rows and the
+  `audio_dropped` mark are kept, totals are counted again, the `dropped_*` counters are per run; a lower limit
+  drops nothing until the next add), `drop-order` (speech-to-text inputs first, lowest priority then oldest; then
+  context audio; then the oldest audio; never an event's row or data), `stt-lane` (priority, fresh first within
+  300 s for pre-alert and fire, `stt_ack`).
+- `outbox/history/` is the file as the three earlier builds made it (#3, #419, #671) with every statement each
+  ran. **Update**: a file built from each opens under today's code with its rows, epoch and counters and ends with
+  today's columns. **Switch back**: every statement of each older build runs on a file today's code wrote, and
+  where the checkout has the git history the older `outbox.py` itself is run on it (skipped where it has not). What
+  an older build does not see: before #671 the `stt_inputs` rows stay in the file unsent and uncounted until a newer
+  build is back; before #419 context audio has no budget of its own; before #701 the inputs go oldest first
+  whatever their priority.
+
+The file's own rules, as built (each tested):
+
+- A column a newer build adds must be nullable or have a default; a table, an index, a `meta` row or a
+  `user_version` it adds is left alone by an older build. A `NOT NULL` column without a default makes every older
+  build's `add()` fail.
+- The file has no version (`user_version` 0, no version row): compatibility is by the columns that are there.
+- The next `seq` and `n` come from `sqlite_sequence`, never from `MAX + 1`: a file rebuilt without it would hand
+  out seqs the hub has already had (O1).
+- While open the outbox is three files. A committed row is in `outbox.sqlite-wal`; the main file copied alone
+  from a running or a killed station has none of it.
+- Nothing gives the file one owner: a second program can open it beside the station. SQLite keeps seq unique,
+  but each opener keeps its own totals, so the limit is each one's own. A second implementation takes the file
+  over when the first has stopped.
+- The epoch is the outbox's identity towards the hub: never copied to another file (E3).
+- What `json` cannot write is stored as `str()` of it, with no error; a numpy scalar as its number.
 
 ## Names accepted
 

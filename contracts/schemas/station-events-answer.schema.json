@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-events-answer.schema.json",
+  "title": "Station events answer",
+  "description": "The hub's 200 answer to POST /api/station/events, as it sends it today (Hub._events, sizeup/cloud/hub.py). The station reads `acked` and nothing else: it deletes every row of its outbox up to it and sends what is left. An answer without a usable `acked` (missing, not a number) is taken as a failed post: the same batch goes again after the backoff. Any other status (400, 401, 409, 413, 503) is the `station-error` envelope and the same batch goes again.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok", "acked", "applied"],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "Always true. The station does not read it."},
+    "acked": {"type": "integer", "description": "The hub's cursor after this post: the highest `seq` of this post's epoch it has dealt with (applied, skipped as delivered before, or failed and given up on). 0 when it has none of this epoch. It may be lower than the last `seq` sent (the hub stopped at a `source_event` it will take again) and higher (an earlier post got further). The station takes it with int(): a string of digits or a float would pass, the hub sends an integer.", "minimum": 0, "maximum": 9007199254740991},
+    "applied": {"type": "integer", "description": "How many events of this post were applied now (not skipped, not failed). The station does not read it.", "minimum": 0}
+  }
+}

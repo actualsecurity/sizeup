@@ -1,0 +1,17 @@
+{
+  "base": "station-events/valid/heard.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/type",
+      "value": "from_the_future"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data",
+      "value": {
+        "x": 1
+      }
+    }
+  ]
+}

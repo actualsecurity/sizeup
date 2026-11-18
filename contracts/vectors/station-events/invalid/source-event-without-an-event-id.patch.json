@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/source-event.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/event/event_id",
+      "value": ""
+    }
+  ]
+}

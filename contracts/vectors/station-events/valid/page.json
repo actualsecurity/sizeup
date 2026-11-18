@@ -1,0 +1,46 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "page",
+      "data": {
+        "id": "page-0001",
+        "label": "Paging 1",
+        "mhz": 460.1,
+        "start": 1794990000.0,
+        "end": 1794990010.2,
+        "kind": "page",
+        "status": "pending",
+        "departments": ["Northfield · Fire"],
+        "quieting_db": 25.0,
+        "tones": [
+          {
+            "kind": "two_tone",
+            "a_hz": 716.1,
+            "b_hz": 600.9,
+            "names": ["Northfield · Fire"],
+            "start": 0.0,
+            "end": 4.05
+          }
+        ],
+        "raw": "",
+        "confidence": null,
+        "voice_offset_s": 4.2,
+        "tone_seq": [{"hz": 716.1, "start": 0.0, "dur": 1.0, "role": "A"}, {"hz": 600.9, "start": 1.0, "dur": 3.05, "role": "B"}],
+        "dispatch": null,
+        "history": [],
+        "rerun_at": null,
+        "rerun_result": "",
+        "model": "",
+        "stt": "",
+        "read_twice": null,
+        "vocab_v": ""
+      },
+      "audio": "UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "audio_dropped": false
+    }
+  ]
+}
