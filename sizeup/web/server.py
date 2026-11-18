@@ -282,7 +282,7 @@ class Broadcaster:
     def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
         # reuse: state_fn hands back the same object for a section that hasn't changed and never changes one in place
-        # (Cad.state: its cached sections, rebuilt only on a new store.rev): that section's JSON is kept, not made again
+        # (Cad.state: its cached sections, rebuilt only on a new store.state_rev): that section's JSON is kept, not made again
         # each second (the incidents and units are most of ~400 KB; #446)
         self.reuse = reuse
         self._made: dict[str, tuple[object, bytes]] = {}     # key -> (the object last serialized, its JSON)
