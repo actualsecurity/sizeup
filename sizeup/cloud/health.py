@@ -171,6 +171,7 @@ TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 REFUSED_HINT_S = 600.0           # a part of the station's post left out for its shape (Hub._refused): a hint this long
 LINK_RESTART_HINT_S = 3600.0     # a station link thread that started again: a hint this long (StationLink.restarts)
+OUTBOX_NOTE_HINT_S = 24 * 3600.0  # the station outbox's own note (a file set aside, a new epoch): a hint this long
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
 STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195) ...
@@ -908,6 +909,12 @@ class StationHealth:
                        and not isinstance(v.get("at"), bool) and 0 <= snow - v["at"] < LINK_RESTART_HINT_S)
         if again:                                   # the station link's threads that raised and started again
             out["hints"].append({"channel": "Station link", "level": "warn", "text": "restarted: " + ", ".join(again)})
+        notes = ob.get("notes") if isinstance(ob.get("notes"), list) else []
+        for n in notes[-3:]:                        # the outbox's own trouble (sizeup/cloud/outbox.py notes)
+            if isinstance(n, dict) and isinstance(n.get("text"), str) and isinstance(n.get("at"), (int, float)) \
+                    and not isinstance(n.get("at"), bool) and 0 <= snow - n["at"] < OUTBOX_NOTE_HINT_S:
+                out["hints"].append({"channel": "Station outbox", "level": "warn",
+                                     "text": f"{_hhmm(n['at'] + hub.skew)}: {n['text'][:200]}"})
         reg = getattr(hub, "stations", None)        # another station refused: the hub takes one until multi-station
         others = reg.others() if reg is not None and hasattr(reg, "others") else {}
         if others:

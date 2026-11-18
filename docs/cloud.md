@@ -239,6 +239,16 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**A seq is never handed out twice under one epoch.** The outbox runs WAL with `synchronous = NORMAL`, so a power cut
+can set the file back past seqs the hub already has. Each opener leaves a marker in the file (a synced commit) and
+takes it out when the station stops in order. A marker found at start that is nobody's (another boot, a process that is
+gone, a copy taken while open) gets the file a **new epoch**: the hub counts it from the start, and the few events it
+had but had not acked are applied again (keyed by id), never skipped. One fsync per start, not one per event.
+
+**The outbox's own damage never stops the station.** A row it cannot read back (its data not JSON, its audio stored as
+text) goes to the quarantine as `unreadable` and the rest go on. A file SQLite cannot open is moved aside (kept as
+`outbox.sqlite.unreadable-<time>`, with its `-wal`) and a new outbox starts. Both are in the log and a hint on Health.
+
 **An event the hub refuses never blocks the rest.** The hub skips an event it can't parse or apply and lists it in its
 answer (`rejected: [{i, seq, type, reason, error}]`). `reason` is `malformed` (a bad id, data that isn't an object, a
 source error: it never applies) or `apply_failed` (it may apply once the hub is fixed). It is listed again if the

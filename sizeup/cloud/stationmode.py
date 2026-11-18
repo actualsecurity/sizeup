@@ -36,7 +36,7 @@ from typing import Callable
 from sizeup import tz
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
-from sizeup.cloud.outbox import Outbox
+from sizeup.cloud.outbox import Outbox, open_outbox
 from sizeup.cloud.station import StationLink
 from sizeup.config import hub_url_problem
 
@@ -235,7 +235,8 @@ class StationMode:
             path = self.cfg.cloud_outbox or (str(self.path.parent / "outbox.sqlite") if self.path else "")
             if not self.forward and (not path or not Path(path).is_file()):
                 return None
-            self._outbox = Outbox(path or ":memory:", int(self.cfg.cloud_outbox_max_mb * 1024 * 1024))
+            self._outbox = open_outbox(path or ":memory:", int(self.cfg.cloud_outbox_max_mb * 1024 * 1024),
+                                       log=self.log)
         return self._outbox
 
     def _up(self) -> None:
@@ -271,14 +272,20 @@ class StationMode:
         """With the app (App.start): the link's threads, when forwarding is on and it can run."""
         with self._lock:
             self.started = True
+            if self._outbox is not None:
+                self._outbox.resume()           # (started again after a stop: its batches go out again)
             if self.link is not None and not self.problem:
                 self.link.start()
 
     def stop(self) -> None:
+        """With the app (App.stop): the link's threads end, and the outbox is let go in order (Outbox.release: the next
+        start keeps its epoch; a start after a stop that was not in order gets a new one)."""
         with self._lock:
             self.started = False
             if self.link is not None:
                 self.link.stop()
+            if self._outbox is not None:
+                self._outbox.release()
 
     def set(self, body: dict) -> dict:
         """POST /api/station-mode {forward?, hub_url?, operator?}: ValueError with the reason if not."""

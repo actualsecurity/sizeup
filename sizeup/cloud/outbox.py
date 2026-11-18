@@ -51,16 +51,42 @@ the hub raises "Station event rejected by hub: <type>" (sizeup/cloud/health.py);
     strip_audio(seq)                 an event too large for the hub with its clip: sent without it (the station keeps
                                      the clip in its own store)
     drop(id | None)                  a person's
+
+A row the station cannot read back (its data not JSON, its audio stored as text: only another writer of the file or
+a damaged page makes one) goes to the quarantine too, reason "unreadable", said once in the log: the rows behind it go
+on (batch()).
+
+The epoch after a stop that was not in order (a power cut, a crash, a copy of the file taken while it was open): the
+hub skips an event whose seq is at or under its cursor (epoch, seq) as delivered before. In WAL mode with synchronous
+= NORMAL a commit is not synced to the disk, so a power cut can set the file back past seqs the hub already has; the
+next events would get those seqs again, be skipped there, acked and deleted here. So each opener leaves a marker row in
+meta ("open:<token>": its boot and pid) in a synced commit when it opens, and takes it out when it stops in order
+(release(), close()). A marker found at open that is nobody's now (another boot, a process that is gone, or this
+process's own after it let go) means the last run did not stop in order: the file gets a new epoch (the hub counts a
+new epoch from the start), in the same synced commit, before any seq goes out. The cost is one fsync per open (and per
+batch() after a release), never one per event; the price of a new epoch is that the events the hub had but had not
+acked yet are applied a second time (it keys pages, transmissions and alarms by their ids). Every seq handed out by
+batch() is under an armed marker: a seq a hub can have is never handed out again under the same epoch.
+
+    unclean           why this file got a new epoch at open ("" when it did not)
+
+A file SQLite cannot open (open_outbox(): damaged, or written with a newer SQLite's features) is moved aside, kept
+(<name>.unreadable-<time>, its -wal and -shm with it), said in the log and in the station's status (notes, Health),
+and a new outbox (a new epoch) is made: the station starts.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import sqlite3
+import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 CONTEXT_SHARE = 0.2
 STT_SHARE = 0.3
@@ -79,8 +105,61 @@ QUARANTINE_CLIP = 8 * 1024 * 1024   # a clip over this is not kept in the quaran
 CRITICAL_TRIES = 8                  # a critical one is sent again this many times at most (about 7 h) ...
 CRITICAL_FOR_S = 24 * 3600.0        # ... or for this long: then "stuck", kept for a person (the alert stays)
 LATE_KEEP_S = 24 * 3600.0           # an alarm the hub took too late to raise: on Health this long, then gone
-PERMANENT_REASONS = ("malformed",)  # the hub's reasons that never change with a retry: never critical
+PERMANENT_REASONS = ("malformed", "unreadable")  # reasons that never change with a retry: never critical
 SOURCE_LATEST_S = 7 * 24 * 3600.0   # a feed event's latest snapshot seq is kept this long (source_latest)
+UNREADABLE = "unreadable"           # the quarantine's reason for a row the station cannot read back (batch())
+MARK = "open:"                      # meta: an opener's marker ("open:<token>" -> {"boot", "pid"}), the module doc
+NOTES_KEPT = 10                     # the outbox's own notes (a file set aside, a new epoch, a row unreadable) kept
+
+_open_tokens: set[str] = set()      # this process's openers whose marker is armed (a marker of ours not in it: let go)
+_open_lock = threading.Lock()
+_boot: str | None = None
+
+
+def boot_id() -> str:
+    """This boot of the machine: Linux's boot_id, else the kernel's boot time (macOS); "" when neither is known."""
+    global _boot
+    if _boot is None:
+        try:
+            _boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        except OSError:
+            try:
+                out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                                     timeout=5).stdout
+                m = re.search(r"sec = (\d+)", out)
+                _boot = f"boottime-{m[1]}" if m else ""
+            except (OSError, subprocess.SubprocessError):
+                _boot = ""
+    return _boot
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ValueError):
+        return False
+    return True
+
+
+def _marker_live(token: str, value: str) -> bool:
+    """An opener's marker: is that opener still there? This process's own while it holds it; another process's while it
+    runs in this same boot. Anything else (another boot: a power cut or a reboot; a process that is gone; a marker that
+    does not parse) is a stop that was not in order."""
+    try:
+        m = json.loads(value)
+        boot, pid = str(m["boot"]), int(m["pid"])
+    except (ValueError, TypeError, KeyError):
+        return False
+    if boot != boot_id() or pid <= 0:
+        return False
+    if pid == os.getpid():
+        with _open_lock:
+            return token in _open_tokens
+    return _alive(pid)
 
 
 def _source_key(data: dict) -> str:
@@ -130,19 +209,64 @@ CREATE TABLE IF NOT EXISTS source_latest (key TEXT PRIMARY KEY, seq INTEGER NOT 
 """
 
 
+def _loads(text):
+    """A quarantined row's data, or None where it is not JSON (one set aside as unreadable)."""
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
 def _plain(o):
     """numpy scalars (a confidence, a flag) as plain JSON values."""
     return o.item() if hasattr(o, "item") else str(o)
 
 
 class Outbox:
-    def __init__(self, path: str | Path, max_audio_bytes: int = 300 * 1024 * 1024):
+    def __init__(self, path: str | Path, max_audio_bytes: int = 300 * 1024 * 1024,
+                 log: Callable[[str], None] | None = None, set_aside: bool = False, arm: bool = True):
+        """set_aside (open_outbox, the station): a file SQLite cannot open is moved aside and a new one made (the
+        module doc); otherwise its error is raised. arm=False (the quarantine command, which hands out no seq): no
+        marker, the epoch only read, no other opener's marker touched."""
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.max_audio_bytes = int(max_audio_bytes)
+        self.log = log or (lambda _m: None)
         self._lock = threading.Lock()
+        self.notes: list[dict] = []     # this run's: {at, text} (a file set aside, a new epoch, a row unreadable)
+        self.unreadable = 0             # this run: rows set aside as unreadable (batch())
+        self._unreadable_said: set[str] = set()
+        self.unclean = ""
+        self._token = secrets.token_hex(8)
+        self._armed = False
+        self._arming = arm
+        self._released = False
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        try:
+            self._open()
+        except BaseException as e:
+            with _open_lock:
+                _open_tokens.discard(self._token)
+            if not (set_aside and self.path != ":memory:" and _cannot_open(e)):
+                self.db.close()
+                raise
+            why = f"{type(e).__name__}: {e}"[:160]
+            aside = _move_aside(Path(self.path))
+            self.db.close()
+            self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+            try:
+                self._open()
+            except BaseException:
+                with _open_lock:
+                    _open_tokens.discard(self._token)
+                self.db.close()
+                raise
+            self._note(f"file unreadable: moved aside as {aside.name}, new outbox",
+                       f"the outbox file could not be opened ({why}): moved aside as {aside.name} (kept), a new outbox "
+                       "started (a new epoch); what waited in the old one did not go to the hub")
+
+    def _open(self) -> None:
         self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA synchronous = NORMAL")
         self.db.executescript(SCHEMA)
@@ -155,11 +279,7 @@ class Outbox:
         if "prio" not in {r[1] for r in self.db.execute("PRAGMA table_info(stt_inputs)")}:    # (a lane before #677)
             self.db.execute(f"ALTER TABLE stt_inputs ADD COLUMN prio INTEGER NOT NULL DEFAULT {STT_NORMAL}")
         self.db.execute("CREATE INDEX IF NOT EXISTS stt_inputs_order ON stt_inputs (prio, n, at)")
-        row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
-        if row is None:
-            self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?)", (secrets.token_hex(8),))
-            row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
-        self.epoch: str = row[0]
+        self.epoch: str = self._epoch_and_arm()
         self.audio_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox").fetchone()[0])
         self.dropped_audio = 0          # this run: events whose audio was dropped to stay under the limit
         self.context_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox WHERE context = 1").fetchone()[0])
@@ -169,6 +289,118 @@ class Outbox:
         self.dropped_stt_fire = 0       # ... and fire traffic's
         self.quarantine_evicted = 0     # this run: quarantined (non-critical) events dropped to stay under its bound
         self.too_large_audio = 0        # this run: clips left off an event the hub refused as too large with them
+
+    # -- the epoch and the openers' markers (the module doc) ------------------------------------------------------
+
+    def _note(self, short: str, said: str) -> None:
+        """The outbox's own trouble: said in the log in full, and kept short for the station's status (Health's hint)."""
+        self.log(f"outbox: {said}")
+        self.notes = (self.notes + [{"at": time.time(), "text": short[:120]}])[-NOTES_KEPT:]
+
+    def _durable(self, fn) -> None:
+        """fn's writes in one transaction, synced to the disk (synchronous = FULL for that commit alone: in WAL mode
+        the log is synced, and with it every commit before; fullfsync: on macOS the drive's cache too)."""
+        self.db.execute("PRAGMA synchronous = FULL")
+        self.db.execute("PRAGMA fullfsync = 1")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                fn()
+                self.db.execute("COMMIT")
+            except BaseException:
+                if self.db.in_transaction:      # (a failed COMMIT may have rolled back already: its error, not ours)
+                    self.db.execute("ROLLBACK")
+                raise
+        finally:
+            self.db.execute("PRAGMA fullfsync = 0")
+            self.db.execute("PRAGMA synchronous = NORMAL")
+
+    def _arm(self) -> tuple[str, str | None]:
+        """In one synced commit: the stale markers out, a new epoch if there were any (or none yet), this opener's
+        marker in. (epoch, the epoch it replaced or None)."""
+        out: dict = {}
+
+        def tx() -> None:
+            row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
+            stale = [(k, v) for k, v in self.db.execute("SELECT key, value FROM meta WHERE key LIKE ? || '%'", (MARK,))
+                     if not _marker_live(k[len(MARK):], v)]
+            epoch = row[0] if row is not None else None
+            if row is None or stale:
+                epoch = secrets.token_hex(8)
+                self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE "
+                                "SET value = excluded.value", (epoch,))
+                for k, _v in stale:
+                    self.db.execute("DELETE FROM meta WHERE key = ?", (k,))
+                if row is not None:
+                    out["was"] = row[0]
+            self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            (MARK + self._token, json.dumps({"boot": boot_id(), "pid": os.getpid()})))
+            out["epoch"] = epoch
+        with _open_lock:
+            _open_tokens.add(self._token)
+        try:
+            self._durable(tx)
+        except BaseException:
+            with _open_lock:
+                _open_tokens.discard(self._token)
+            raise
+        self._armed = True
+        if out.get("was"):
+            self.unclean = "the last run did not stop in order (a power cut, a crash, or a copy taken while it was open)"
+            self._note("new epoch: the last run did not stop in order",
+                       f"{self.unclean}: a new epoch, so no event of the old one is skipped by the hub")
+        return out["epoch"], out.get("was")
+
+    def _epoch_and_arm(self) -> str:
+        """The file's epoch (a new file: a new one), a new one after a stop that was not in order, and this opener's
+        marker (_arm). Not armed (the quarantine command, or a write that failed: a full disk) the epoch is only read:
+        batch() arms first, so no seq goes out unmarked."""
+        if self.path == ":memory:" or not self._arming:
+            row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
+            if row is None:
+                self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?)", (secrets.token_hex(8),))
+                return self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()[0]
+            return row[0]
+        try:
+            return self._arm()[0]
+        except sqlite3.Error as e:
+            row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
+            if _cannot_open(e) or row is None:
+                raise
+            self.log(f"outbox: its marker not written at the start ({type(e).__name__}: {str(e)[:120]}): "
+                     "nothing goes to the hub until it is")
+            return row[0]
+
+    def _rearm(self) -> None:
+        """Before a seq goes out unarmed (after resume(), or a start whose marker could not be written): _arm, and the
+        epoch it may have changed."""
+        if self._armed or self.path == ":memory:":
+            return
+        self.epoch = self._arm()[0]
+
+    def release(self) -> None:
+        """The station stops in order (StationMode.stop): this opener's marker goes, in a synced commit (every seq it
+        handed out is then on the disk). The file stays open; batch() hands out nothing more until resume()."""
+        with self._lock:
+            self._released = True
+            self._release()
+
+    def resume(self) -> None:
+        """The station starts again over the same outbox (StationMode.start): batch() arms first, then hands out."""
+        with self._lock:
+            self._released = False
+
+    def _release(self) -> None:
+        if not self._armed or self.path == ":memory:":
+            return
+        try:
+            self._durable(lambda: self.db.execute("DELETE FROM meta WHERE key = ?", (MARK + self._token,)))
+        except sqlite3.Error as e:          # (left in the file: the next start takes it as a stop not in order)
+            self.log(f"outbox: its marker not taken out at the stop ({type(e).__name__}): a new epoch at the next start")
+        finally:
+            with _open_lock:
+                _open_tokens.discard(self._token)
+            self._armed = False
 
     def _drop_stt(self) -> None:
         """STT inputs, the lowest priority first and the oldest first within it, until they are inside their own budget
@@ -212,10 +444,24 @@ class Outbox:
             if row is None:                         # (dropped meanwhile)
                 continue
             at, data, flac, meta, prio = row
+            try:
+                if not isinstance(flac, bytes):
+                    raise TypeError(f"flac stored as {type(flac).__name__}")
+                doc, info = json.loads(data), json.loads(meta)
+            except (ValueError, TypeError, RecursionError) as e:
+                # (an input it cannot read back: not an event, gone; the clip stays in the station's store and the
+                # hub transcribes its listening copy)
+                self.stt_ack([n])
+                self.unreadable += 1
+                if "stt" not in self._unreadable_said:
+                    self._unreadable_said.add("stt")
+                    self._note(f"unreadable STT input #{n} dropped ({type(e).__name__})",
+                              f"a speech-to-text input it cannot read back (#{n}, {type(e).__name__}) dropped; the "
+                              "ones behind it go on")
+                continue
             if out and size + len(flac) > max_bytes:
                 break
-            out.append({"n": n, "at": at, "data": json.loads(data), "flac": bytes(flac), "meta": json.loads(meta),
-                        "prio": prio})
+            out.append({"n": n, "at": at, "data": doc, "flac": bytes(flac), "meta": info, "prio": prio})
             size += len(flac)
         return out
 
@@ -306,19 +552,80 @@ class Outbox:
 
     def batch(self, max_bytes: int = 4 * 1024 * 1024, max_events: int = 200, meta: bool = False) -> list[dict]:
         """The oldest events, at least one, up to max_bytes of data + audio. meta: each also says whether it is
-        context audio ("context") and, a quarantined event sent again, its quarantine row ("qid")."""
-        out, size = [], 0
+        context audio ("context") and, a quarantined event sent again, its quarantine row ("qid"). A row it cannot read
+        back is set aside (_unreadable) and the ones behind it come instead. Every seq returned is under this opener's
+        armed marker (the module doc)."""
+        while True:
+            out, size, aside = [], 0, False
+            with self._lock:
+                if self._released:
+                    return []                   # (stopping: nothing more goes out, no marker written again)
+                self._rearm()
+                rows = self.db.execute("SELECT seq, at, kind, data, audio, audio_dropped, context, qid FROM outbox "
+                                       "ORDER BY seq LIMIT ?", (max(1, int(max_events)),)).fetchall()
+            for seq, at, kind, data, audio, dropped, context, qid in rows:
+                try:
+                    if not isinstance(at, (int, float)) or not isinstance(kind, str):
+                        raise TypeError(f"at / type stored as {type(at).__name__} / {type(kind).__name__}")
+                    if audio is not None and not isinstance(audio, bytes):
+                        raise TypeError(f"audio stored as {type(audio).__name__}")
+                    doc = json.loads(data)
+                except (ValueError, TypeError, RecursionError) as e:
+                    self._unreadable(seq, kind, e)
+                    aside = True
+                    continue
+                n = len(data) + len(audio or b"")
+                if out and size + n > max_bytes:
+                    break
+                out.append({"seq": seq, "at": at, "type": kind, "data": doc, "audio": audio,
+                            "audio_dropped": bool(dropped), **({"context": bool(context), "qid": qid} if meta else {})})
+                size += n
+            if out or not aside:
+                return out
+
+    def _unreadable(self, seq: int, kind, e: BaseException) -> None:
+        """A row the station cannot read back: moved to the quarantine (reason "unreadable", never critical, never sent
+        again), its data kept as {"unreadable": its text} (JSON, so any build reads the quarantine), its audio as it
+        is; a requeued copy (qid) turns its own quarantine row so. Said once per kind of error in the log and in the
+        notes; the rows behind it go on."""
+        now = time.time()
+        error = f"{type(e).__name__}: {e}"[:QUARANTINE_ERROR]
         with self._lock:
-            rows = self.db.execute("SELECT seq, at, kind, data, audio, audio_dropped, context, qid FROM outbox "
-                                   "ORDER BY seq LIMIT ?", (max(1, int(max_events)),)).fetchall()
-        for seq, at, kind, data, audio, dropped, context, qid in rows:
-            n = len(data) + len(audio or b"")
-            if out and size + n > max_bytes:
-                break
-            out.append({"seq": seq, "at": at, "type": kind, "data": json.loads(data), "audio": audio,
-                        "audio_dropped": bool(dropped), **({"context": bool(context), "qid": qid} if meta else {})})
-            size += n
-        return out
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute("SELECT at, kind, data, audio, audio_dropped, context, qid FROM outbox "
+                                      "WHERE seq = ?", (int(seq),)).fetchone()
+                if row is not None:
+                    at, kd, data, audio, dropped, context, qid = row
+                    raw = data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
+                    kept = json.dumps({"unreadable": raw}, separators=(",", ":"))
+                    at = at if isinstance(at, (int, float)) and not isinstance(at, bool) else now
+                    q = qid if isinstance(qid, int) else None
+                    if q is not None and self.db.execute("UPDATE quarantine SET data = ?, reason = ?, error = ?, "
+                                                         "last_at = ?, critical = 0, next_at = NULL, state = 'held' "
+                                                         "WHERE id = ?", (kept, UNREADABLE, error, now, q)).rowcount:
+                        pass
+                    else:
+                        self.db.execute(
+                            "INSERT INTO quarantine (seq, at, kind, data, audio, audio_dropped, context, reason, error, "
+                            "first_at, last_at, tries, critical, next_at, state) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL, 'held')",
+                            (int(seq), float(at), str(kd), kept, audio, int(bool(dropped)), int(bool(context)),
+                             UNREADABLE, error, now, now))
+                    self.db.execute("DELETE FROM outbox WHERE seq = ?", (int(seq),))
+                    self._bound_quarantine()
+                self.db.execute("COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+                raise
+            self._recount()
+            self.unreadable += 1
+        if type(e).__name__ not in self._unreadable_said:
+            self._unreadable_said.add(type(e).__name__)
+            self._note(f"unreadable {str(kind)[:40]} #{seq} set aside ({type(e).__name__})",
+                       f"a {str(kind)[:40]} it cannot read back (#{seq}, {error[:120]}) set aside in the quarantine "
+                       "(unreadable); the events behind it go on")
 
     def _recount(self) -> None:
         self.audio_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox").fetchone()[0])
@@ -384,7 +691,7 @@ class Outbox:
                         # an older quarantined snapshot of the same feed event: this one replaces it
                         for oid, odata in self.db.execute("SELECT id, data FROM quarantine WHERE kind = 'source_event' "
                                                           "AND id != ? AND seq < ?", (qid, int(row["seq"]))).fetchall():
-                            if _source_key(json.loads(odata)) == key:
+                            if _source_key(_loads(odata)) == key:
                                 self.db.execute("DELETE FROM quarantine WHERE id = ?", (oid,))
                 self.db.execute("DELETE FROM outbox WHERE seq = ?", (int(row["seq"]),))
                 self._bound_quarantine()
@@ -424,7 +731,7 @@ class Outbox:
                                   "WHERE critical = 1 AND next_at IS NOT NULL AND next_at <= ? AND id NOT IN "
                                   "(SELECT qid FROM outbox WHERE qid IS NOT NULL) ORDER BY id LIMIT 20", (now,)).fetchall()
             for qid, seq, kind, data, audio, dropped, context, tries in due:
-                if kind == "source_event" and (key := _source_key(json.loads(data))):
+                if kind == "source_event" and (key := _source_key(_loads(data))):
                     latest = self.db.execute("SELECT seq FROM source_latest WHERE key = ?", (key,)).fetchone()
                     if latest is not None and latest[0] > seq:
                         self.db.execute("DELETE FROM quarantine WHERE id = ?", (qid,))
@@ -527,8 +834,42 @@ class Outbox:
         return int(n), oldest
 
     def close(self) -> None:
+        """Stopped in order: this opener's marker out (release), then the file closed."""
         with self._lock:
-            self.db.close()
+            try:
+                self._release()
+            finally:
+                self.db.close()
+
+
+def _cannot_open(e: BaseException) -> bool:
+    """SQLite says the file is no database it can read (damaged, or a newer SQLite's): never a lock, a full disk or a
+    folder it may not write, which moving the file would not mend."""
+    if not isinstance(e, sqlite3.DatabaseError):
+        return False
+    name = getattr(e, "sqlite_errorname", "") or ""
+    if name:
+        return name in ("SQLITE_NOTADB", "SQLITE_CORRUPT") or name.startswith(("SQLITE_NOTADB_", "SQLITE_CORRUPT_"))
+    return type(e) is sqlite3.DatabaseError and ("not a database" in str(e) or "malformed" in str(e))
+
+
+def open_outbox(path: str | Path, max_audio_bytes: int = 300 * 1024 * 1024,
+                log: Callable[[str], None] | None = None) -> Outbox:
+    """The station's outbox. A file SQLite cannot open is moved aside (kept: <name>.unreadable-<time>, with its -wal
+    and -shm), said in the log and in the new outbox's notes, and a new outbox is made (a new epoch): the station
+    starts, over a file that only queues what goes to the hub."""
+    return Outbox(path, max_audio_bytes, log=log, set_aside=True)
+
+
+def _move_aside(src: Path) -> Path:
+    """The file and its -wal and -shm, renamed beside it (kept for a person). Called while the connection that failed
+    still has them open: SQLite deletes the log by its name when that connection closes, which is then no file."""
+    aside = src.with_name(f"{src.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}")
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(f"{src}{suffix}")
+        if p.exists():
+            p.replace(Path(f"{aside}{suffix}"))
+    return aside
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -544,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(a.path).is_file():
         print(f"no outbox at {a.path}")
         return 1
-    ob = Outbox(a.path)
+    ob = Outbox(a.path, arm=False)
     try:
         if a.cmd == "drop":
             if a.what != "all" and not a.what.isdigit():
