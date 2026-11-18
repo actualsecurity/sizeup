@@ -391,12 +391,18 @@ const StationHealth = (() => {
     kids.push(table(["SDR", "Serial", "Plugged in", "Group", "Job", "Running", "Restarts", "Detail"],
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
         x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
-        [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
-        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
+        // (#637) a P25 system held back after dropouts: no fault, until when
+        x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
+          : [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
+        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})`
+          : x.hold_until && !x.running ? `held back until ${fmtTime(x.hold_until)} after dropouts` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));
     if ((h.groups || []).length) {       // antenna groups (sizeup/radio/groups.py): short of dongles, what doesn't run
       kids.push(table(["Antenna group", "SDRs", "Jobs (priority)", "Not running"], h.groups.map((g) => [g.name,
-        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""], g.jobs.join(" › "),
+        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""],
+        // (#637) a parked job: off on purpose, never "not running"
+        [g.jobs.map((j) => ((g.parked || []).includes(j) ? `${j} (parked)` : j)).join(" › "), "",
+         (g.parked || []).length ? `Parked (off on purpose): ${g.parked.join(", ")}` : ""],
         [g.short.join(", ") || "—", g.short.length ? "hl-bad" : "dim"]]), ""));
     }
     if ((h.usb || []).length) {

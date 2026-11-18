@@ -400,6 +400,8 @@ def station_metrics(app, metrics: Metrics) -> dict:
             jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
                          "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
                          "context": True}
+            if job in assigned and isinstance(rs.get("hold_until"), (int, float)):
+                jobs[job]["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: no fault
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
@@ -675,14 +677,20 @@ class StationHealth:
                             "on": str(d.get("on") or "")[:64],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
-                            "detail": str(js.get("detail") or "")[:200]})
+                            "detail": str(js.get("detail") or "")[:200],
+                            # (#637) a P25 system held back after dropouts: until when (the hub's clock)
+                            "hold_until": js["hold_until"] + hub.skew
+                            if job != "Off" and isinstance(js.get("hold_until"), (int, float))
+                            and not isinstance(js.get("hold_until"), bool) else None})
         out["dongles"] = dongles
         names = {d["serial"]: d["name"] for d in dongles}
         out["groups"] = [{"name": str(g.get("name") or "")[:40],
                           "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
                           "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
                           "short": [str(j)[:40] for j in g.get("short") or []][:24],
-                          "unowned": [str(j)[:40] for j in g.get("unowned") or []][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []
+                                      if j not in (g.get("parked") or [])][:24],
+                          "parked": [str(j)[:40] for j in g.get("parked") or []][:24],     # (#637) off on purpose
                           "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
                                         for s, j in list((g.get("conflicts") or {}).items())[:16]}
                           if isinstance(g.get("conflicts"), dict) else {}}
