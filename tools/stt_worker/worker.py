@@ -1522,8 +1522,8 @@ class Worker:
                         and now - self._gaming_since >= self.cfg.gaming_stop_whisper_min * 60):
                     log.info("gaming for %.0f min: stopping whisper-server (its VRAM back to the game)",
                              self.cfg.gaming_stop_whisper_min)
+                    self._whisper_down("stopped while gaming")     # (said first: no check in between sees it gone)
                     self.proc.stop()
-                    self._whisper_down("stopped while gaming")
                 if self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
                     last_proc = now
                     self.proc.ensure(self.whisper.alive())
@@ -1599,8 +1599,8 @@ class Worker:
         if (self.llm_proc is not None and self.llm_proc.running() and self._gaming_since is not None
                 and now - self._gaming_since >= self.llm_stop_after_s()):
             log.info("gaming for %.0f s: stopping llama-server (its VRAM back to the game)", now - self._gaming_since)
+            self._llm_down("stopped while gaming")         # (said first: no job goes to it meanwhile)
             self.llm_proc.stop()
-            self._llm_down("stopped while gaming")
         if held or not self.llm_verified:
             return
         if self.llm_proc is not None and not self.llm_proc.running() and now - self._llm_started_at >= 5:
