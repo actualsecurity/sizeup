@@ -1043,6 +1043,10 @@ class NfmReceiver:
         self.clock: Callable[[], float] = time.time
         self._stuck: float | None = None        # busy_since of the open spell logged as stuck
         self._gone: float | None = None         # when its dongle went absent (logged once; once again when back, #547)
+        # (#703) the app's: a stall with no audio at all since its rtl_fm started (on_stall), and audio (on_audio:
+        # the first of each start). Each called from this receiver's own thread; one that raises is ignored.
+        self.on_stall: Callable[[], None] | None = None
+        self.on_audio: Callable[[], None] | None = None
 
     def _absent(self, detail: str) -> None:
         """Its dongle isn't there (looked for again every 15 s): said once, not at every look (#547)."""
@@ -1052,10 +1056,18 @@ class NfmReceiver:
         self.state, self.detail = "absent", detail
 
     def _present(self) -> None:
-        """Audio again after its dongle was absent: said once (#547)."""
+        """Audio again after its dongle was absent: said once (#547). The first audio of each start (#703: on_audio)."""
+        self._hook(self.on_audio)
         if self._gone is not None:
             self.on_event(f"{self.channel.label}: dongle '{self.device_name}' back after {_mmss(self.clock() - self._gone)}")
             self._gone = None
+
+    def _hook(self, fn) -> None:
+        try:
+            if fn is not None:
+                fn()
+        except Exception as e:  # noqa: BLE001 - the app's hook never stops the receiver
+            self.on_event(f"{self.channel.label}: hook error: {type(e).__name__}: {e}")
 
     def new_squelch(self) -> NoiseSquelch:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
@@ -1206,6 +1218,8 @@ class NfmReceiver:
             else:
                 self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
+            if stalled and not got:      # (#703) opened, then not a byte of audio: the app counts these per dongle
+                self._hook(self.on_stall)
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
 

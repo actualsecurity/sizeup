@@ -356,7 +356,9 @@ const StationHealth = (() => {
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
         x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
         // (#637) a P25 system held back after dropouts: no fault, until when
-        x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
+        // (#703) out: it opens but streams no audio
+        x.noaudio ? ["no audio", "hl-bad", `Opens but streams no audio since ${fmtTime(x.noaudio.since)} (${x.noaudio.job}); replug it, or pick its job once fixed`]
+          : x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
           : [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
         x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));

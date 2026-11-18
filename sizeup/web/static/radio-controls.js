@@ -344,7 +344,9 @@ window.RadioControls = (() => {
         badge.replaceChildren(...(window.Icon ? [Icon("lock", "sm")] : []), grp.name);
       }
       if (grp) badge.title = `Antenna group ${grp.name}: ${grp.jobs.join(" > ")} (highest priority first)`;
+      row.classList.toggle("noaudio", !!x.noaudio);
       setText(row.querySelector(".sdr-name"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+              + (x.noaudio ? " · no audio" : "")                                       // (#703) out until it streams
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
@@ -357,7 +359,9 @@ window.RadioControls = (() => {
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
         + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
-        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "");
+        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "")
+        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried every `
+           + "2, 10, 30 min), it is replugged, or a job is picked for it here" : "");
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
