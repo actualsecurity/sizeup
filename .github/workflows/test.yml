@@ -41,7 +41,16 @@ jobs:
           litestream version
       # Tests marked @pytest.mark.flaky (known flakes, each with its issue) get one retry on failure: "R" in the
       # progress, "N rerun" in the totals and a warning annotation (tests/conftest.py). Any other failure is final.
+      # PYTHONFAULTHANDLER: a crash in C before or after pytest's own faulthandler (on during the session) still dumps.
       - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile
+        env:
+          PYTHONFAULTHANDLER: "1"
+      # A worker that died without a word ("node down", #740): the conftest says its exit status; a SIGKILL there is
+      # most likely the OOM killer, which only the kernel log names.
+      - if: failure()
+        run: |
+          free -m || true
+          sudo dmesg -T 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -20 || true
 
   image:
     # The hub image (docs/cloud.md): build it and check it serves /healthz with no radios, no
