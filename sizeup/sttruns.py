@@ -167,12 +167,16 @@ class Runs:
             if self.path != ":memory:":
                 Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
-            db.execute("PRAGMA journal_mode = WAL")
-            db.execute("PRAGMA synchronous = NORMAL")
-            db.execute("PRAGMA busy_timeout = 5000")
-            db.executescript(SCHEMA)
-            if "vocab_v" not in {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}:   # a file from before it
-                db.execute("ALTER TABLE stt_runs ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")
+            try:
+                db.execute("PRAGMA journal_mode = WAL")
+                db.execute("PRAGMA synchronous = NORMAL")
+                db.execute("PRAGMA busy_timeout = 5000")
+                db.executescript(SCHEMA)
+                if "vocab_v" not in {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}:   # a file from before it
+                    db.execute("ALTER TABLE stt_runs ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                db.close()                        # (never a connection left open: the next write tries again)
+                raise
             self._db = db
             try:
                 have = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}

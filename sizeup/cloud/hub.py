@@ -1640,15 +1640,14 @@ class HubApp(App):
         else:
             self._save_page(item)
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
-        try:
-            prompt = self._prompt(item)
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
-            prompt = ""
+            prompt, vocab_v = "", ""
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          gpu_only=True, extra={"pcm": pcm, "page": page,
-                                                 "vocab_v": str(getattr(item, "vocab_v", "") or "")})
+                          gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
         if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
             self._pool_to_aws(job, "the GPU pool couldn't take it")
         self.sync()
@@ -1702,17 +1701,17 @@ class HubApp(App):
             else:
                 self._save_page(item)
                 self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
-        try:
-            prompt = self._prompt(item)
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
-            prompt = ""
+            prompt, vocab_v = "", ""
         seconds = len(pcm) / 8000.0 if pcm is not None else max(0.0, float(item.end) - float(item.start))
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
                           extra={"pcm": pcm, "page": page, "handed": True,
                                  "origin": str(getattr(item, "origin_station", "") or self.clip_origin),
-                                 "vocab_v": str(getattr(item, "vocab_v", "") or "")})
+                                 "vocab_v": vocab_v})
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "no pool worker could take it now")
         self.sync()
@@ -1855,17 +1854,16 @@ class HubApp(App):
         if pcm is None:
             return False, "no recording"
         item = self._find(cid)[0]
-        try:
-            prompt = self._prompt(item) if item is not None else ""
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item) if item is not None else ("", "")
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
-            prompt = ""
+            prompt, vocab_v = "", ""
         end = row.get("start")
         job = sttpool.Job(cid, CATCHUP, key, "traffic", len(pcm) / 8000.0, audio_wait=True, audio=self._pool_audio_of(cid, None, pcm),
                           on_done=self._pool_done, on_fallback=self._pool_fallback, prompt=prompt,
                           clip_end=self._hub_time(float(end) + float(row.get("seconds") or 0.0))
                           if isinstance(end, (int, float)) else None,
-                          extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin,
-                                 "vocab_v": str(getattr(item, "vocab_v", "") or "")})
+                          extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin, "vocab_v": vocab_v})
         self._rerun_note[cid] = CATCHUP_NOTE
         if not self.sttpool.submit(job):
             self._rerun_note.pop(cid, None)

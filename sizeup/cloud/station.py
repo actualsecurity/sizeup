@@ -305,21 +305,25 @@ class StationLink:
             self.stt_encoder.submit(item, audio, prio)
 
     def _whisper_behind(self) -> bool:
-        """The station's whisper is behind on live traffic: a clip of a live class (URGENT, HIGH, LIVE: never a
-        context talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) has waited stt.BEHIND_S. The STT
-        inputs of NORMAL / LOW priority wait meanwhile (sttinput.Encoder: never PRE / FIRE, at most HOLD_MAX_S).
-        Read from the queue's own list, defensively (anything unexpected: not behind). For the STT session: a public
-        Transcriber.behind_live() would be better than reading SttQueue._items here."""
+        """The station's whisper is behind on live traffic: the oldest clip of a live class (URGENT, HIGH, LIVE: never
+        a context talkgroup's, kept up to 15 or 30 min by design, nor a re-run's or the catch-up's) has waited more
+        than stt.BEHIND_S: Transcriber.behind_live() (thread-safe). The STT inputs of NORMAL / LOW priority wait
+        meanwhile (sttinput.Encoder: never PRE / FIRE, at most HOLD_MAX_S). A whisper without it (an older Transcriber,
+        a test's stand-in): its queue's own list, read by the same rule. Anything unexpected: not behind."""
         try:
+            stt = getattr(self.app, "stt", None)
+            live = getattr(stt, "behind_live", None)
+            if callable(live):
+                return bool(live())
             from sizeup.stt import BEHIND_S, LIVE_CLASSES
-            q = getattr(getattr(self.app, "stt", None), "_q", None)
+            q = getattr(stt, "_q", None)
             if q is None:
                 return False
             now = q.clock()
             with q._cv:
                 ats = [e[5] for e in q._items if e[0] in LIVE_CLASSES]
-            return any(now - float(at) >= BEHIND_S for at in ats)
-        except Exception:  # noqa: BLE001 - a guess at another module's insides: never in the lane's way
+            return any(now - float(at) > BEHIND_S for at in ats)
+        except Exception:  # noqa: BLE001 - never in the lane's way
             return False
 
     def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
