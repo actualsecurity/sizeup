@@ -345,8 +345,14 @@ Consequences:
 
 One rule for every file and message (ADR 0004): a `v` field; unknown keys are ignored by every reader and kept out
 of the way of every writer; a missing optional key has a stated default; no integer above 2^53 (the nanosecond `seq`
-of `p25_recorder.json` is not repeated); times are float seconds; a field's unit is in its name. A change that only
-adds optional keys does not bump `v`. A bump restarts both sides.
+of `p25_recorder.json` is not repeated); times are float seconds. A new field carries its unit in its name (`_s`,
+`_db`, `_hz`, `_bytes`, `_boot`). Fields carried over from today's `Segment`, the call JSON and the state post keep
+today's names, and their unit is in the table that lists them: `start`, `end`, `at`, `since`, `until`, `hold_until`
+and a turn's `time` are Unix seconds, `q_open` and `q_close` dB, `breaks` seconds into the audio. A wall-clock time
+is Unix seconds (under 10^11, never milliseconds); a name ending in `_boot` is seconds since boot (under 10^9). `v`
+is the version of that one file or message; `contract`, in `hello`, the status and a sidecar's `capture`, is the
+major version of the whole contract. They are separate numbers, both 1 today. A change that only adds optional keys
+bumps neither. A bump of `contract` restarts both sides.
 
 Paths (station defaults; every path capture uses is given to it in the wish file):
 
@@ -382,9 +388,9 @@ spool/
 |---|---|
 | Atomic write | every file is written under `tmp/` and renamed into `items/`. Audio first, sidecar last. A reader lists `*.json` only. Audio with no sidecar is debris from a crash; capture removes it at start |
 | `fsync` (decided, Q9) | none per item. Every `spool.sync_s` (default 5 s) in which something was published, and at stop, capture syncs the files published since the last time and then `items/`. A crash or a power cut loses at most the last seconds of spooled audio; the urgent lane is durable on its own. The sidecar carries `audio.bytes`, so a short or empty file after a power cut is detected, logged and skipped, never parsed as audio |
-| Ids | `id` is today's: `<label without spaces>-<int(start * 1000)>` for a transmission (`App._segment`), trunk-recorder's file stem for a P25 call (`Call.id`). It matches `CLIP_ID` in `app.py`. The same transmission never gets two ids |
-| Sequence | `seq` is one counter for the spool, taken under a lock at the sidecar's rename, persisted in `SEQ` (tmp + rename) and recovered as `max(SEQ, highest in items/) + 1` |
-| Ordering | per channel, `seq` rises in the order transmissions ended (the order of #767's worker). Nothing is promised across channels |
+| Ids | `id` is `<slug>-<int(start * 1000)>` for a transmission, where the slug is the channel's label with spaces removed (as `App._segment` does today) and any character outside `[A-Za-z0-9._-]` replaced by `_`. For every label made of those characters and spaces it is exactly today's id; for any other, today's id does not match `CLIP_ID` and its clip cannot be served, so nothing that works changes. Capture refuses a channel set in which two labels give one slug (`refusals`, `what: "channel"`). A transmission on a channel that is not recorded gets its id all the same (today it has none, and no row): the sidecar needs one, and the app still makes no row. A P25 call's `id` is trunk-recorder's file stem (`Call.id`); a metrics item's is `metrics-<int(minute start * 1000)>`. Every `id` matches `CLIP_ID` in `app.py` and is at most 200 characters. The same transmission never gets two ids |
+| Sequence | `seq` is one counter for the spool, from 1, at most 12 digits (the file name's width). It is taken under the publish lock **before the audio is renamed** (the audio's name carries it), and the lock is held until the sidecar's rename. It is persisted in `SEQ` (tmp + rename) and recovered as the highest number in `SEQ` or in any file name in `items/`, debris included, plus 1: a number is never given out twice |
+| Ordering | per channel, `seq` rises in the order transmissions ended (the order of #767's worker). For P25 calls "per channel" is per system and talkgroup, in the order of `end`. Nothing is promised across channels |
 | Delivery | at least once. The reader dedupes on `id` |
 
 Sidecar, `kind: "segment"` (FM, paging, airband):
@@ -434,7 +440,7 @@ rule of #753's mark). "Done" means the row exists and the reader holds its own h
 
 | Topic | Rule |
 |---|---|
-| Who deletes | capture only. It removes items at or below the cursor on its next look (it is told on the socket, and looks every 5 s anyway). The reader never deletes in the spool. This ends today's three-way deleting under the P25 tree |
+| Who deletes | capture only. It removes items at or below the cursor on its next look (it is told on the socket, and looks every 5 s anyway). The reader never deletes in the spool. This ends today's three-way deleting under the P25 tree. The sidecar always goes first, then the audio, when an item is deleted and when its audio is dropped at a bound (the sidecar rewritten with `audio: null, audio_dropped: true`): no sidecar ever names audio that is gone |
 | Bounds | unacknowledged items older than `spool.max_age_h` (default 12, the clips' own `audio_keep_hours`) or beyond `spool.max_bytes` (default 2 GB) lose their audio first, oldest first, never an item with an emergency ID; the sidecar is rewritten with `audio: null, audio_dropped: true`. Sidecars go only past `spool.max_items` (default 50,000). Both are counted in the status |
 | Free-space reserve | the spool shares its filesystem with `urgent.sqlite` and the outbox. When the filesystem's free space falls under `spool.min_free_bytes` (default 256 MB), capture publishes sidecars without audio (`audio: null, audio_dropped: true`) until there is room again, and Health is critical. The spool's own growth can then never be what fills the disk under the urgent file |
 | Disk full all the same (something else filled it) | a failed spool write is counted (`spool.dropped`) and logged once a minute; capture keeps running. The live path needs no disk. The urgent lane needs it only to be durable: it still sends, from memory (§4.3) |
@@ -443,7 +449,7 @@ rule of #753's mark). "Done" means the row exists and the reader holds its own h
 | Capture crashes | the transmission that was open is lost, as today. `tmp/` is wiped, `SEQ` recovered. A clean stop flushes and drains first |
 | The app crashes | at start it reads the cursor and lists `items/` above it. An item handled before the crash but not yet in the cursor comes again and is dropped by `id` (as `App._late_dup` in #753 does for P25) |
 | Both restart | the two rules above, independently |
-| Late (decided, Q4) | by age at the app's read and nothing else. The age is the **larger** of two: the boot-clock age (the reader's `CLOCK_BOOTTIME` minus `closed_boot`, when `boot` is this boot) and the wall-clock age (`now - end`). Either clock can under-count (the boot clock if it stops while a WSL2 host sleeps, the wall clock if it steps back), so the larger is taken: an error makes a row late, never stale traffic live. Across boots only the wall age exists; a negative one counts as old. Under `LIVE_MAX_AGE_S` (60 s) is live, with every live consumer; older is `late`, with #753's rules: the radio log, STT and the hub, but no ATC, intel, hints or incoming (`_atc`, `Comms.on_text`). With a spool, reading a segment a few seconds late is the normal path, so an app restart of 4 s makes nothing late |
+| Late (decided, Q4) | by age at the app's read and nothing else. The age is the **larger** of two: the boot-clock age (the reader's `CLOCK_BOOTTIME` minus `closed_boot`, when `boot` is this boot) and the wall-clock age (`now - end`). Either clock can under-count (the boot clock if it stops while a WSL2 host sleeps, the wall clock if it steps back), so the larger is taken: an error makes a row late, never stale traffic live. Across boots only the wall age exists; a negative one counts as old. Under `LIVE_MAX_AGE_S` (60 s) is live, with every live consumer; exactly 60 s and older is `late`, with #753's rules: the radio log, STT and the hub, but no ATC, intel, hints or incoming (`_atc`, `Comms.on_text`). With a spool, reading a segment a few seconds late is the normal path, so an app restart of 4 s makes nothing late |
 | Emergencies | **never gated by age on the station**, by either clock: not by `late`, not by "negative counts as old", not across a reboot. Capture always sends an alarm (§4.3) and the finished transmission's `_alarm_now` always runs; it attaches the row and its clip to the alarm already there. Whether an old alarm still alarms is decided on the hub alone (`MAX_AGE_S`, A7) |
 | Replay bound | everything unacknowledged is ingested, however old: unlike the P25 directory scan, the cursor says exactly what was done. Whether an old emergency still pushes is the alarm code's own age rule |
 | No reader | items age in the spool and turn late after 60 s. Capture's status shows `reader: {attached, since}` and `spool.oldest_s`; an app that runs and is not attached raises a critical Health item |
@@ -471,45 +477,55 @@ Capture to client (every header has `v`, `t`, `at`):
 | `ids` | `ch`, `since`, `ids` | `LiveTalk.fm_ids` from the tap |
 | `urgent` | `urgent_epoch`, `n`, `key`, `rev`, `kind`, `at`, `event_at`, `event_boot`, `boot`, `data`, `durable` | an urgent item (an alarm from `tap.on_emergency` or the close; a live page), whole: the app takes it over from the frame (§4.3). An item's identity is `(key, rev)`; `n` is only its place in the file. `durable: false`: no row yet, `n` is null. If the row is written later, a second frame for the same `(key, rev)` follows with its `n` and `durable: true` |
 | `reply` | `id`, `ok`, `error`, `confirm`, `result` | the answer to a request, below |
-| `talking` | `entries`: `key`, `system`, `channel` or `tg`, `radio_id`, `alias`, `since`, `talk_since`, `ended`, `until`, `id_on_release` | `LiveTalk.state()` without `rig`, `label`, `main`: the app adds those. The whole list, latest wins |
+| `talking` | `entries`: `key`, `system`, `channel`, `tg` (null for an analog channel), `radio_id`, `alias`, `dispatcher`, `since`, `talk_since`, `ended`, `until`, `id_on_release` | `LiveTalk.state()`, without `rig`, `label`, `main`: the app adds those from the CAD. `dispatcher` stays: `LiveTalk` works it out from the alias alone (false for an analog channel). `channel` and `tg` are both there, as in today's state post. The whole list, latest wins |
 | `paging` | `entries`: `key`, `channel`, `started`, `pairs` (`a_hz`, `b_hz`, `names`, `ours`, `at`), `phase`, `ours`, `ended`, `until`, `page_id` | `LivePaging.state()`. The contract says `a_hz`, `b_hz` everywhere; `LivePaging` and the state post say `a`, `b` today, and the app maps |
-| `ours` | `ch`, `pair` | `LivePaging.on_ours` (the app calls `sources_poll_now`) |
-| `grant` | `system`, `tg`, `src`, `what` | a unit event of another P25 system, for the app's `Activity` |
-| `spool` | `seq`, `id`, `kind`, `ch` | an item is complete |
-| `status` | `at` | the status file changed |
-| `level` | `ch`, `open`, `quieting_db`, `hiss_db` | once a second per channel, only to a client that subscribed |
+| `ours` | `ch`, `pair` (one pair, as in a page) | `LivePaging.on_ours` (the app calls `sources_poll_now`) |
+| `grant` | `system`, `tg`, `src` (string), `what` (an open word) | a unit event of another P25 system, for the app's `Activity` |
+| `spool` | `seq`, `id`, `kind`, `ch` (absent for an item with no channel) | an item is complete |
+| `status` | `at` (the file's own `at`) | the status file changed |
+| `level` | `ch`, `open`, `quieting_db`, `hiss_db` | once a second per channel, only to a client whose `hello` said `subscribe: ["level"]` |
 
-Client to capture, notices (no answer): `hello` (`role`: `reader` or `viewer`, `contract`, `subscribe`), `poke`
-(`what: "wish"`), `cursor` (the spool cursor moved), `urgent_taken` (`n`: the app has taken rows up to it over),
+In a `carrier` frame `holding` is `NoiseSquelch.holding` and `queued` a count. In an `urgent` frame `at` is the
+item's own `at` (§4.3), the only time the frame has. A frame's header is at most 65536 bytes (#709's limit); a
+version 1 writer sends no payload, and a version 1 reader skips one of up to 1 MiB and closes the connection on a
+longer one.
+
+Client to capture, notices (no answer; each one's own fields are required, `at` is optional on a client's frame):
+`hello` (`role`: `reader` or `viewer`, `contract`, `subscribe`), `poke` (`what: "wish"`), `cursor` (the spool cursor
+moved), `urgent_taken` (`urgent_epoch`, `n`: the app has taken that file's rows up to `n` over; both required, and
+capture ignores a notice for another epoch, so an `n` from before a reset can never mark new rows as taken),
 `paging_finished` (`ch`, `page_id`, `end`: today's `LivePaging.finished`; without it the live page ends on its own
 hold timeout, as it does today when nothing finishes it).
 
 Client to capture, requests (decided in review, Q5: what is imperative and needs an answer). A request is
-`{v, t: "request", id, op, args, by, at, expires_boot}`; the answer is `{v, t: "reply", id, ok, error?, confirm?,
-result?, at}` on the same connection. `error` is text for a person. `confirm` is a bool: true means the refusal
-only needs the person's yes (the text of the question is `error`), and the client sends the request again with
-`args.confirm: true`.
+`{v, t: "request", id, op, args, by, at, expires_boot}`; the answer is `{v, t: "reply", id, ok, reason?, error?,
+confirm?, result?, at}` on the same connection. With `ok: false` there are two fields, as the station routes'
+answers have: **`reason`**, one word for the client to act on, and `error`, text for a person, which no client
+parses. The words: `stale`, `expired`, `unsupported`, `forbidden`, `parked`, `taken`, `held`, `busy`, `invalid`,
+`confirm`; a word a client does not know is a plain refusal. `confirm` is a bool: true (with `reason: "confirm"`)
+means the refusal only needs the person's yes, and the question is `error`. The yes is a **new request, under a new
+`id`**, with `args.confirm: true`: the same `id` would only get the first reply again.
 
 | `op` | `args` | Today's call | Answers besides `ok` |
 |---|---|---|---|
-| `pick` | `sdr`, `job` (a channel, the P25 job, a system job, `Off`), `confirm` (bool) | `App.set_mode`, from the web or the hub's job | `error: "refused: parked"`, `"refused: taken"` (another app holds it); `confirm: true` with the question (a fire job, a group rule) |
-| `squelch_apply` | `label`, `open_db`, `close_db`, `min_open_s`, `expect` (`open_db`, `close_db`) | the Apply of a suggestion (#685, #700) | `stale`: what runs now is not `expect`. Without `expect` it is a plain set |
-| `reception_start`, `reception_stop` | the body of `reception_post`; the test's `id` | `App.reception_post` | a test is running; no dongle to lend; unknown test |
+| `pick` | `sdr`, `job` (a channel, the P25 job, a system job, `Off`), `confirm` (bool) | `App.set_mode`, from the web or the hub's job | `parked`; `taken` (another app holds it); `confirm` (a fire job, a group rule) |
+| `squelch_apply` | `label`, `open_db`, `close_db`, `min_open_s` (all four needed), `expect` (`open_db`, `close_db`) | the Apply of a suggestion (#685, #700) | `stale`: what runs now is not `expect`. Without `expect` it is a plain set |
+| `reception_start`, `reception_stop` | the body of `reception_post`, as it is today and not typed by this contract; the test's `id` | `App.reception_post` | a test is running; no dongle to lend; unknown test |
 | `probe` | `sdr` | the no-audio probe, now (`App._probe`) | not idle; held; `result`: audio or none |
 | `airband_ab` | `label`, `minutes`, `phase_s` | `App.airband_ab` | not an airband channel; not running |
-| `check` | `what` (`groups` \| `adsb`), `value`, `confirm` (bool) | the refusals of `App.set_antenna_groups` and `set_adsb_receiver`, asked before the app writes the wish. **Advisory only** (decided): it changes nothing, and capture validates again when it applies the wish (§4.4) | invalid; `confirm: true` with the question; held |
-| `urgent_since` | `urgent_epoch`, `n`, `limit` (default 200, at most 500) | the app's take-over after a reconnect | `result`: `{urgent_epoch, rows, more, memory}`: the rows above that cursor in `n` order, at most `limit`; `more`: ask again from the last `n`; `memory`: the items capture holds that have no row (yet), in full, on the first page |
-| `credentials` | `token`, `access_id`, `access_secret` | the root reload helper (§4.3) | **accepted only from a peer with uid 0**; anyone else: `forbidden` |
-| `snapshot` | - | - | `result`: the snapshot |
+| `check` | `what` (`groups` \| `adsb`), `value`, `confirm` (bool) | the refusals of `App.set_antenna_groups` and `set_adsb_receiver`, asked before the app writes the wish. **Advisory only** (decided): it changes nothing, and capture validates again when it applies the wish (§4.4) | `invalid`; `confirm`; `held` |
+| `urgent_since` | `urgent_epoch`, `n`, `limit` (default 200, at most 500) | the app's take-over after a reconnect (`urgent_epoch` and `n` needed) | `result`: `{urgent_epoch, rows, more, memory}`: the rows above that cursor in `n` order, at most `limit`; `more`: ask again from the last `n`; `memory`: the items capture holds that have no row (yet), in full, on the first page |
+| `credentials` | `token`, `access_id`, `access_secret` (all three, `""` for none) | the root reload helper (§4.3) | **accepted only from a peer with uid 0**; anyone else: `forbidden`. Never kept in the memory of answered requests |
+| `snapshot` | `{}` | - | `result`: the snapshot |
 
 | Rule | |
 |---|---|
-| Ids | chosen by the client, unique. Capture applies each `id` once and remembers the last 256 for 10 min: a repeat gets the first reply again and changes nothing |
-| `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture after it is answered `expired` and not applied: a click answered late is never applied late, and a stepped wall clock cannot expire one early |
+| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each `id` once and remembers the last 256 for 10 min (on the boot clock): a repeat gets the first reply again and changes nothing, even after its deadline |
+| `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture after it is answered `reason: "expired"` and not applied: a click answered late is never applied late, and a stepped wall clock cannot expire one early |
 | No reply within the client's timeout (capture restarting) | the client sends the same `id` again when it reconnects, or gives up and tells the person. Either is safe |
 | After `ok` | capture has applied it. The app then records it in the wish file (§4.4), which is what makes it outlive a restart of capture |
-| An unknown `op` | `ok: false, error: "unsupported"` |
-| Who may ask | a client that said `role: "reader"`; a `viewer` gets `forbidden`. The role is self-declared and both are the same uid: it keeps a status tool from changing anything by mistake, and is no defence against a process of that user (§7.5). `credentials` is the exception: uid 0 only |
+| An unknown `op` | `ok: false, reason: "unsupported"` |
+| Who may ask | a client that said `role: "reader"`; a `viewer` gets `reason: "forbidden"`. The role is self-declared and both are the same uid: it keeps a status tool from changing anything by mistake, and is no defence against a process of that user (§7.5). `credentials` is the exception: uid 0 only |
 
 When the app is down capture keeps decoding, keeps its live state, and drops frames nobody reads. Alarms and live
 pages still reach the hub, by the urgent lane (§4.3). "Talking now" does not: it is display state on the app's state
@@ -562,10 +578,10 @@ the wall clock alone:
 | Not Linux (macOS, development and inline mode) | there is no `CLOCK_BOOTTIME`: `time.monotonic()` stands in, and a random id made at process start stands in for the boot id. Inline mode is one process, so that is enough |
 | Across boots | wall time, the only clock there is. For `late` a negative age counts as old; for an emergency no age counts at all (next row) |
 | Emergencies | no clock on the station ever holds one back or drops it (§4.1). An alarm's `age_s` is its **boot-clock** age within a boot, never the larger of two: a wall clock stepped forward must not make a fresh alarm look old to the hub. If the boot clock under-counts, the alarm looks fresher than it is, which is the safe side |
-| `late`, and a page item's 120 s | the **larger** of the boot-clock age and the wall-clock age (§4.1): for these the safe side is "old" |
+| `late`, and a page item's 120 s | the **larger** of the boot-clock age and the wall-clock age (§4.1): for these the safe side is "old". So a wall clock stepped forward can make a row late or expire a page item early; stepped back it changes nothing; neither ever touches an alarm |
 | Where it applies | `late` (§4.1: `closed_boot` in the sidecar); a page item's 120 s; a request's `expires_boot` (§4.2); the status file's 15 s staleness (`at_boot`, §4.5); the spool's `max_age_h` |
-| Towards the hub | each item is sent with `age_s` and `age_src`. `age_src: "boot"`: the item's age on the boot clock at the moment of sending. The hub places it at its own `now - age_s` and uses `sent_at` only as `hub.skew` uses the state post's `at`: to measure the station's clock, never to trust it |
-| An item sent after a reboot | its `event_boot` belongs to another boot, so the boot clock says nothing about it. It is sent all the same, with `age_src: "wall"` and `age_s` = the wall-clock age (`now - event_at`), clamped at 0. `age_s` is never null and an item is never held back for want of a good clock. The hub corrects a wall-sourced age with its own skew measure for the station, as it does for `event_at` |
+| Towards the hub | each item is sent with `age_s` and `age_src`. `age_src: "boot"`: the item's age on the boot clock at the moment of sending. The hub places the item at its own `now - age_s` and never at the station's `event_at`. `sent_at` only lets the hub note how far the station's clock is from its own (as `hub.skew` does from the state post's `at`), for Health |
+| An item sent after a reboot | its `event_boot` belongs to another boot, so the boot clock says nothing about it. It is sent all the same, with `age_src: "wall"` and `age_s` = the wall-clock age (`now - event_at`), clamped at 0. `age_s` is never null and an item is never held back for want of a good clock. A wall-sourced age cannot be checked or corrected by the hub: it is two readings of the station's one clock, so a constant offset cancels, and a step of that clock across the reboot is invisible. The hub takes it as given, bounded as every `age_s` is (§7.5), and labels the alarm's age as approximate. An `age_src` the hub does not know is taken as `wall` |
 | Not verified | whether `CLOCK_BOOTTIME` keeps counting under WSL2 while the Windows host sleeps. The rules above are chosen so that either answer is safe. The stepped-clock tests of §6 run on fake clocks |
 
 #### The file
@@ -581,7 +597,7 @@ CREATE TABLE IF NOT EXISTS urgent (
   key        TEXT    NOT NULL,        -- the idempotency key, above
   rev        INTEGER NOT NULL DEFAULT 0,
   kind       TEXT    NOT NULL,        -- 'alarm' | 'page'; a reader leaves an unknown kind alone
-  at         REAL    NOT NULL,        -- wall clock at insert, epoch s
+  at         REAL    NOT NULL,        -- wall clock when capture made the item, epoch s
   event_at   REAL    NOT NULL,        -- when it happened on the air, wall clock, epoch s
   event_boot REAL    NOT NULL,        -- the same moment on CLOCK_BOOTTIME, s
   boot       TEXT    NOT NULL,        -- the boot id event_boot belongs to
@@ -606,14 +622,15 @@ CREATE TABLE IF NOT EXISTS p25_bit (             -- #775: when each radio's emer
 | How the app gets the rows | from capture, not from the file: each `urgent` frame carries the item, and after a reconnect the app asks `urgent_since`, page by page (§4.2). It keeps two things, both in `outbox.sqlite` (all-in-one: the CAD's own store) and both moved in the transaction that queues the take-over event: the cursor **`(urgent_epoch, n)`**, which only says where to ask from, and the set of `(key, rev)` it has taken (kept 24 h). A different `urgent_epoch` (the file was reset) starts the cursor at 0; the taken set still holds |
 | Take-over is by `(key, rev)` | an item is taken once, whichever way it arrives: a frame with `n`, a frame without one, `urgent_since`'s `rows` or its `memory`. An item without a row is taken at once and moves no cursor. When its row appears later, the second frame finds `(key, rev)` already taken and only moves the cursor |
 | Insert | `INSERT OR IGNORE` on `(key, rev)`, on the `urgent` thread. The pipe reader only hands the item over, in memory |
+| An item's `at` | set once, when capture makes the item, before any insert. It is the same value in the row, in every frame and in every request, whether or not the row is ever written |
 | The send does not wait for the disk | the sender takes the item **from memory**. It waits for that item's commit for at most 50 ms, then sends whether or not the row exists. A failed insert (a full disk, an I/O error) or a stalled `fsync` therefore delays the send by 50 ms at most and never stops it. Such an item is `durable: false`: it lives in memory (at most 256 items, alarms kept before pages), the frame to the app carries it, and the status counts it. The writer tries the insert again every 5 s while the item is in memory |
 | The hub's answer and the row | the sender keeps each item's answer in memory by `(key, rev)`. If the row exists it is updated; if the commit lands after the answer, the row is written as `sent` with the hub's word, never left `new`. "Unsent" in the status, and so the station's banner, comes from the senders' own view, not from row states |
 | At start | capture loads every `new` row into the senders, oldest alarm first (a page item only if it is under 120 s old), before it starts a receiver's worker. A row marked `sent` is not sent again, except by the `gen` rule |
 | Checkpoints | by capture only, `PASSIVE`, on its prune tick, and only while no item is waiting for its commit; `TRUNCATE` at start. The soak watches the `-wal` file's size |
-| `data`, an alarm | `source` (the channel label), `start`, `end`, `radio_id`, `ids` (as the sidecar's), `unit` (the alias, from the wish's map), `emergency: true`, `emergency_via` (`MDC` \| `FleetSync` \| `P25`); P25 adds `system`, `talkgroup`. No `rig`: the hub derives it (`hub._traffic_of`). These are the fields `_fm_emergency` builds today |
+| `data`, an alarm | `source` (the channel label; for P25 the name the finished call's row will carry, so the same-radio rule sees one channel), `start`, `end` (optional: a key-up alarm has none yet), `radio_id` (several ids joined with `, `, as today), `ids` (as the sidecar's), `unit` (the alias, from the wish's map), `emergency: true`, `emergency_via` (`MDC` \| `FleetSync` \| `P25`); P25 adds `system`, `talkgroup`. No `rig`: the hub derives it (`hub._traffic_of`). These are the fields `_fm_emergency` builds today |
 | `data`, a page | `channel`, `started`, `pairs` (list of `{a_hz, b_hz, names, ours, at}`), `phase` (`tones` \| `voice`), `ours`, `ended`, `until` |
 | Bound | rows are a few hundred bytes. Pruned: `sent` rows the app has taken over, an hour after `sent_at` (never inside the resend window, below); `expired` and `rejected` rows after 24 h; at most 10,000 rows, the oldest `sent` first. **An unsent alarm is never pruned** |
-| Corrupt or unreadable at start | renamed `urgent.sqlite.bad-<epoch s>`, a new file with a new `urgent_epoch`, a CRITICAL log line, `urgent.state = "reset"` in the status |
+| Corrupt or unreadable at start | renamed `urgent.sqlite.bad-<epoch s>`, a new file with a new `urgent_epoch`, a CRITICAL log line, `urgent.resets` and `reset_at` in the status |
 
 #### The sender
 
@@ -628,11 +645,12 @@ whole timeout can therefore never stand in front of an alarm.
 | When | as soon as the item's commit returns, or 50 ms after it was handed over, whichever is first |
 | "Sent" | a 200 whose `results` names the item `(key, rev)` with `applied`, `duplicate` or `stale`. The row becomes `sent`. Nothing else counts: not a 2xx without the item, not a timeout after the body went |
 | `rejected` in a 200 | the hub will never take this item (malformed): the row becomes `rejected`, is never sent again, is counted, and Health shows it |
+| A `status` word capture does not know | the item is kept and tried again; an alarm is never dropped on a word |
 | No answer, a timeout (5 s), 502, 503, 530, 429 | retried: 0.5 s, doubling to 2 s for the first 3 min of a failure, then to 15 s; the hub's `Retry-After` is used when given (`client.Backoff`'s rule). Nothing is dropped |
 | 401, 403, 409 (`token_unknown`, `id_mismatch`, `multi_station_off`, ...) | kept and retried every 30 s; `urgent.state = "refused"` with the hub's `reason`; a critical Health item. Never the token in a log line |
 | 400, 413, 422 for a whole request | the request is cut to single items (the rule of #762); an item refused alone becomes `rejected` |
 | 404, 405 | a hub without the route: `urgent.state = "no_route"`, tried again every 5 min. The app's lane still carries everything |
-| **An alarm never expires here** | capture gives up on an alarm by no clock of its own. It keeps sending until the hub answers for it. The hub decides what an old one is. The recommended rule (the radio maintainers' proposal, the same as #753 and `alarms.MAX_AGE_S`; A7 awaits the admin): up to 30 min old it is still raised **and pushed**, labelled with its real time and its age ("from 12 min ago"), answer `applied`; older, a late notice on Health and the row with no push, answer `stale` |
+| **An alarm never expires here** | capture gives up on an alarm by no clock of its own. It keeps sending until the hub answers for it. The hub decides what an old one is. The recommended rule (the radio maintainers' proposal, the same as #753 and `alarms.MAX_AGE_S`; A7 awaits the admin): up to 30 min old it is still raised **and pushed**, labelled with its real time and its age ("from 12 min ago"), answer `applied` (every push carries the item's age; from what age it is shown as late is the hub's); older, a late notice on Health and the row with no push, answer `stale` |
 | A page item | is live state: unsent 120 s after the event (the larger of its two ages) it becomes `expired`. The finished page comes by the app's lane |
 | The station's own signal | an alarm unsent for 10 s is shown on the station's page by the app, forwarding or not, as "EMERGENCY not delivered to the hub", with its channel, unit and time, until the hub has answered for it. The app learns it from the status (`urgent.unsent`) |
 | Offline | items wait (in the file, or in memory if it could not be written); the retry runs at 15 s; when the hub answers, alarms go first, oldest first, each with its `age_s` |
@@ -643,10 +661,12 @@ whole timeout can therefore never stand in front of an alarm.
 
 #### The two mode files together
 
-`urgent-mode` is `off` (the default), `write` (rows and frames, the app takes over, nothing sent by the urgent
-senders) or `send`. In service mode only capture runs the live tap, so `off` there would leave a key-up alarm with
-nobody to send it. Therefore: **service mode requires `write` or `send`; capture treats `off` as `write` in service
-mode** and says so in the status (`urgent.mode`), and `sizeup-station` refuses to set `capture-mode service` while
+Each file holds one word; surrounding whitespace is dropped, and a missing or empty file or a word a build does not
+know counts as the default (`inline`, `off`). `urgent-mode` is `off` (the default), `write` (rows and frames, the
+app takes over, nothing sent by the urgent senders) or `send`. In service mode only capture runs the live tap, so
+`off` there would leave a key-up alarm with nobody to send it. Therefore: **service mode requires `write` or `send`;
+capture treats `off` as `write` in service mode** and says so in the status (`urgent.mode`), and `sizeup-station`
+refuses to set `capture-mode service` while
 `urgent-mode` is `off`.
 
 | `capture-mode` | `urgent-mode` | Decodes the key-up | Writes the item | Sends a live alarm to the hub | With the app down |
@@ -667,13 +687,15 @@ one key-up, and walks the three `service` combinations with the app down and ass
 #### The route: `POST /api/station/urgent`
 
 Hub work (§11). Opened by an `sz1` credential with the `radio-receive` role (decided, Q-G); a station's `sz1`
-token stands for the role until the nodes registry exists; `sw1` never. Request, `Content-Type: application/json`,
+token stands for the role until the nodes registry exists; `sw1` never. The hub's older shared station token, which
+the other station routes still take, does not open it: a station still on the shared token is given its own `sz1`
+token before `urgent-mode send`, and runs in `write` until then. Request, `Content-Type: application/json`,
 read by `Content-Length`, at most 64 KB:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `v` | int | 1 |
-| `station` | string | the station id capture was told (`hub.station` in the wish: the id the hub assigned, `StationLink.adopt`). Checked against the token (`id_mismatch`), as on every station route |
+| `station` | string | the station id capture was told (`hub.station` in the wish: the id the hub assigned, `StationLink.adopt`). Checked against the token (`id_mismatch`), as on every station route. An item's identity on the hub is `(station, key, rev)`: the station from the token, never from an item. `key` is at most 200 characters |
 | `urgent_epoch` | string | the urgent file's epoch; informative, not a cursor |
 | `sent_at` | float, epoch s | the station's wall clock when this request was made; for the hub's skew measure only |
 | `items` | list, 1 to 32 | `{key, rev, kind, at, event_at, age_s, age_src, data}`: the row's columns, and the item's age at sending: `age_s` (float s, at least 0, never null) and `age_src` (`boot` \| `wall`: which clock it was measured on; `wall` only for an item from before a reboot) (Clocks, above) |
@@ -682,12 +704,16 @@ Answers:
 
 | Status | Body | Meaning for the sender |
 |---|---|---|
-| 200 | `{ok: true, v: 1, station, gen, results: [{key, rev, status, reason?}]}`; `status`: `applied` \| `duplicate` \| `stale` \| `rejected` | per item, above. An item missing from `results` was not taken: sent again. `gen` (int): the hub's fencing generation |
-| 400, 413, 422 | `{error, reason}` (`bad_json`, `bad_batch`, `too_large`) | cut to singles |
+| 200 | `{ok: true, v: 1, station, gen, results: [{key, rev, status, reason?}]}`; `status`: `applied` \| `duplicate` \| `stale` \| `rejected` | per item, above. An item missing from `results` was not taken: sent again. `gen`: the hub's fencing generation, an integer up to 2^53 - 1 or a string of decimal digits; capture compares it for change only |
+| 400 `bad_json`, 413 `too_large`, 422 `bad_batch` | `{error, reason}`. A request that is not well formed is refused whole: nothing of it is applied | cut to singles |
 | 401, 403, 409 | `{error, reason}`, as `Hub._refuse` and `_other_station` answer today | `refused` |
 | 503 + `Retry-After` | the hub is not the leader (a deploy's handoff, `fence.refuse`): **nothing was applied** | retried |
 
-Idempotency, on the hub. The dedupe store is keyed by `(station, key)` and is written by **both** lanes: this route
+Idempotency, on the hub. An item is `(station, key, rev)`, and the route is idempotent by all three. The dedupe
+store is keyed by `(station, key)` and holds the highest `rev` it has taken: for an alarm `rev` is always 0, so the
+key alone is its identity; for a page the key names the page and `rev` orders its changes. The sender never puts an
+alarm and a page in one request (two connections), but the hub takes a request that holds both. The store is
+written by **both** lanes: this route
 records each item's `key`, and `/api/station/events` records the `id` of every `alarm` event and every `alarm_key`
 it sees on an `alarm` or `traffic` event. It is asked before anything is raised.
 
@@ -700,12 +726,12 @@ it sees on an `alarm` or `traffic` event. It is asked before anything is raised.
 | **The app's lane first, T took the alarm over, a person acknowledged it, then capture's item for `key` arrives** (a slow or retried send) | `duplicate`, from the dedupe store. Without the store's entry from the events lane this would raise a second alarm and a second push: the alarm's row no longer carries `key`, and the alarm code's same-radio rule only covers an unacknowledged alarm of the last `REPEAT_S` (120 s) |
 | An alarm raised at close with `key` = T, then the app's event for T | the same `traffic_id` |
 | An alarm item that arrives late but under `MAX_AGE_S` (30 min, by the hub's own clock and `age_s`) | `applied`: raised and pushed, labelled with its real time and age, as #753 labels a late call's alarm. Recommended; A7 awaits the admin |
-| An alarm item older than `MAX_AGE_S` | `stale`: a late notice on Health and on the row, no push. Today's code only logs such a transmission ("too old to raise now"). Recommended; A7 awaits the admin |
-| A P25 live alarm (#775), then the end-of-call alarm from `App._call` | one emergency: matched by system + talkgroup + unit when the live grant's time falls inside the finished call's span, with 10 s of slack at each end (decided, Q-I), the end-of-call row taking the live one over. A live alarm with no matching call within 10 min stands on its own. A later call from a radio whose bit is still set raises nothing new (the transition rule, capture's side) and marks its row "emergency still set". New on the hub, and unused until #775 lands |
-| The same radio pressing again | the alarm code's own same-radio rule, unchanged |
+| An alarm item older than `MAX_AGE_S` | `stale`: a late notice on Health and on the row, no push. Its key is recorded all the same, so a retry is `duplicate` and the app's take-over raises nothing. The limit is a parameter on the hub (30 min recommended), not a constant of this contract. Today's code only logs such a transmission ("too old to raise now"). Recommended; A7 awaits the admin |
+| A P25 live alarm (#775), then the end-of-call alarm from `App._call` | one emergency: matched by system + talkgroup + unit when the live grant's time falls inside the finished call's span, with 10 s of slack at each end (decided, Q-I), the end-of-call row taking the live one over, in whichever order the two arrive. A live alarm with no matching call within 10 min stands on its own. A later call from a radio whose bit is still set raises nothing new (the transition rule, capture's side) and marks its row "emergency still set". New on the hub, and unused until #775 lands |
+| The same radio pressing again | the alarm code's own same-radio rule, unchanged: the item is `applied` (it was taken) and joins the open alarm, with no second alarm and no second push. `duplicate` stays the word for a key already in the store |
 | Two stations hearing one press (`overlap`, `docs/nodes.md` §2.4) | two keys, one per station: `key` is not station-qualified, which is why the store is keyed by `(station, key)`. One alarm comes from that design's rule, not from this lane: an emergency alarms on the first copy that has the flag, and a later copy that repeats it does not. Until multi-station lands the hub takes one station (`multi_station_off`). The alarm row's `traffic_id` must be station-qualified by then: two stations can produce the same `<label>-live-<ms>` |
-| A page item | the hub keeps the highest `rev` per `(station, key)`: a higher one is `applied` (its live paging state for that station is set from it, with `until` as its expiry), an equal one `duplicate`, a lower one `stale` |
-| `/api/station/state` `paging` from the app, for the same page | merged by `key`: the newer of the two wins. With the app up both lanes say the same thing |
+| A page item | the hub keeps the highest `rev` per `(station, key)`: a higher one is `applied` (its live paging state for that station is set from it), an equal one `duplicate`, a lower one `stale`. Its expiry is the hub's own: `until` is the station's wall clock, so the hub uses only its distance from the same request's `sent_at` (its receipt time plus `until - sent_at`, kept within 0 to 300 s); with `until` null, 300 s after the last revision |
+| `/api/station/state` `paging` from the app, for the same page | merged by `key`: the newer of the two, which is the later to arrive at the hub, wins. With the app up both lanes say the same thing |
 | The finished page from the app's `PageHold` | arrives as a `page` event as today; it carries `live_key` so the hub can end the live entry at once (today `LivePaging.finished` does this on the station) |
 | An unknown `kind` | `rejected`, `reason: "kind"`; the rest of the request is still taken |
 
@@ -787,20 +813,20 @@ every 0.5 s.
 |---|---|---|
 | `v`, `seq`, `at`, `pid`, `build` | int, int, float, int, string | `seq` is a counter the app keeps in the file itself (previous + 1), well under 2^53 |
 | `mode` | `service` \| `shadow` | §6 |
-| `paths` | object | data directories only: `spool`, `urgent_db`, `clips`, `captures`, `state`, `recorder_dir`. What capture executes (`rtl_fm`, `rtl_sdr`, the recorder) is not here: it reads those from the root-owned config (§4.3) |
-| `hub` | object | `forward` (bool: the link is on), `station` (the id the hub assigned), `caps` (list; `urgent` among them when the hub has the route). No secret, and no URL: capture reads the hub's URL from the root-owned config (§4.3) |
+| `paths` | object | data directories only, each optional with the station's default: `spool`, `urgent_db`, `clips`, `captures`, `state`, `recorder_dir`. What capture executes (`rtl_fm`, `rtl_sdr`, the recorder) is not here: it reads those from the root-owned config (§4.3) |
+| `hub` | object | `forward` (bool: the link is on), `station` (the id the hub assigned), `caps` (list; `urgent` among them when the hub has the route). No secret, and no URL: capture reads the hub's URL from the root-owned config (§4.3), and ignores a key named `url`, `hub_url`, `token`, `secret`, `access_id` or `access_secret` here, saying so in `wish_problem` |
 | `channels` | list | the channel set. Per `[[radio.channels]]` entry: `label`, `kind`, `mhz`, `gain_db`, `device`, `open_db`, `drop_db`, `hang_s`, `continue_s`, `keyups`, `split_s`, `jump_db`, `schedule`, `also`, `record` (bool) |
-| `airband` | object | `multichannel`; the owner rule for a frequency two dongles hear (`config.airband_owner` today) |
+| `airband` | object | `multichannel`; the owner rule for a frequency two dongles hear (`config.airband_owner` today; its shape, like the `p25` block's apart from `talkgroups`, is fixed when the code that needs it is written, not here) |
 | `squelch` | `{label: {open_db, close_db, min_open_s}}` | the values to run, already fitted by `channels.fit_squelch`. Applied live (`set_squelch`), no restart |
 | `tones` | `{plan: [{a_hz, b_hz, names}], ours: [name]}` | for `LivePaging`: the names a live page shows, and which are ours |
 | `aliases` | `{radio id: name}` | for an alarm's `unit` |
 | `dongles.jobs` | `{serial: {job, by}}` | the job each dongle should run: a channel label, the P25 job, a system job, or `Off`. `by` is `person` here; what auto-assign and the groups decide is capture's own (below) |
 | `dongles.groups` | list of `{name, sdrs, jobs, parked}` | the antenna groups as saved (`groups.parse`'s shape), parks included |
 | `dongles.reserved` | `{adsb, ais}` | the serials set aside for the ADS-B and AIS decoders; never given a job |
-| `dongles` (rest) | | `listed`, `auto`, `auto_assign`, `order`, `ignore`, `start_mode`: the `[radio]` settings of the same names |
-| `p25` | object | the county recorder and each system's directory, name, label, sources and jobs; talkgroup labels and unit aliases for `parse_call`; `talkgroups`: per system and talkgroup `{alert, kept, encrypted}`, the facts the reception test needs, resolved by the app (§3.3) |
+| `dongles` (rest) | | from the `[radio]` settings (`sizeup/config.py`): `listed` (`sdrs` when it is a list, and the single `device` of a one-dongle bench), `auto` (`sdrs = "auto"`), `ignore` (`sdr_ignore`), `auto_assign` (`auto_assign`), `order` (`auto_assign_order`), `start_mode` (`start_mode`) |
+| `p25` | object | the county recorder and each system's directory, name, label, sources and jobs; talkgroup labels and unit aliases for `parse_call`; `talkgroups`: `{system: {talkgroup number as digits: {alert, kept, encrypted}}}`, the facts the reception test needs, resolved by the app (§3.3) |
 | `metrics` | bool | sample `floor` and `cc` records |
-| `spool` | object | `max_age_h`, `max_bytes`, `max_items`, `sync_s` (§4.1) |
+| `spool` | object | `max_age_h` (12), `max_bytes` (2^31), `max_items` (50,000), `min_free_bytes` (2^28), `sync_s` (5): the bounds of §4.1 with their defaults |
 
 | Rule | |
 |---|---|
@@ -824,18 +850,18 @@ what capture **observes**, never a reply (those are on the socket).
 
 | Field | Meaning |
 |---|---|
-| `v`, `at`, `at_boot`, `boot`, `pid`, `impl`, `build`, `contract`, `started` | a reader on the same boot takes capture as down, and adds `stale: true`, when its own `CLOCK_BOOTTIME` is more than 15 s past `at_boot`; `at` (wall) is for people and for a reader on another boot |
-| `wish_seq`, `wish_problem` | the wish it runs; why a newer file could not be read at all |
+| `v`, `at`, `at_boot`, `boot`, `pid`, `impl`, `build`, `contract`, `started` | a reader takes capture as down, and adds `stale: true`, when its own `CLOCK_BOOTTIME` is more than 15 s past `at_boot`, or when `boot` is not its own boot (a file left from before a reboot). `at` (wall) is for people |
+| `wish_seq`, `wish_problem` | the wish it runs (0 while none was accepted); why a newer file could not be read at all |
 | `refusals` | list of `{what, key, reason, wish_seq}`: the parts of the applied wish that failed validation and were not applied (§4.4). Empty when the wish runs as written |
 | `reader` | `{attached, since}`: an app holds the socket as `reader` |
 | `channels` | per channel: `label`, `kind`, `mhz`, `sdr`, `run`, `state`, `detail`, `restarts`, `open`, `open_s`, `stuck`, `last_heard`, `queued`, `quieting_db`, `hiss_db`, `floor_db`, `squelch` (`open_db`, `close_db`, `min_open_s` as running), `short_per_min`, `now` (airband), `ab` |
 | `channels[].run` | `running` \| `waiting` (no dongle, by choice or for lack of one) \| `out` (a dongle streaming nothing, #710) \| `held` (another app) \| `shed` (to a higher job of its group) \| `not_in_set` \| `local`: exactly the words of `docs/nodes.md` (#758), which reports them as a node's capability. `state` beside it keeps today's row word (`ok`, `off`, `down`, `absent`, ...) |
-| `sdrs` | per dongle, the rows of `App.sdr()`: `serial`, `name`, `product`, `present`, `job`, `set_by` (`person` \| `auto`), `held_by` (`app`, `mode`), `noaudio`, `ambiguous`, `lent`, the group fields |
+| `sdrs` | per dongle, the rows of `App.sdr()`: `serial`, `name`, `product`, `present`, `job` (today's `mode`), `set_by` (`person` \| `auto`), `held_by` (`app`, `mode`), `noaudio`, `ambiguous`, `lent`, the group fields |
 | `groups`, `groups_problem`, `no_park`, `duplicates`, `adsb` | as `App.sdr()` |
-| `p25` | per system: `state`, `detail`, `cc` (`ControlChannel.status()`), `last_call`, `mark`, `seen` (the size of the ingest's set, for the soak test) |
+| `p25` | a map by system short name; per system: `state`, `detail`, `cc` (`ControlChannel.status()`), `last_call`, `mark`, `seen` (the size of the ingest's set, for the soak test) |
 | `reception` | `Tests.state()`: the running test and the history. The app shows it; it runs nothing of the test (Q7) |
 | `spool` | `{spool_epoch, seq, pending, oldest_s, bytes, free_bytes, dropped, dropped_audio, quarantined, synced_at}` |
-| `urgent` | `{urgent_epoch, mode, state, reason, pending, pending_alarms, unsent, undurable, oldest_alarm_s, last_sent_at, last_ms, sent, rejected, expired, last_error, hub_gen, creds_at_boot, p25_transitions_1h}`; `state`: `ok` \| `retrying` \| `refused` \| `no_route` \| `no_credentials` \| `off` \| `reset`; `mode`: the `urgent-mode` in effect (`write` when the file says `off` in service mode); `unsent`: the alarms not yet answered for, each `{key, channel, unit, event_at, age_s}`, for the station's page; `expired` counts page items only |
+| `urgent` | `{urgent_epoch, mode, state, reason, pending, pending_alarms, unsent, undurable, oldest_alarm_s, last_sent_at, last_ms, sent, rejected, expired, last_error, hub_gen, creds_at_boot, p25_transitions_1h, resets, reset_at}`. `mode`: the `urgent-mode` in effect, `write` or `send`, never `off` (the file's `off` is `write` in service mode). `state` is the senders' condition, **one word, the first of these that holds**: `off` (the mode is not `send`, `hub.forward` is false, or the hub does not advertise `urgent`), `no_credentials`, `no_route`, `refused`, `retrying`, `ok`. A reset of the file is not a state, since it can hold beside any of them: `resets` counts them since capture started and `reset_at` is the last one's time (null for none); Health shows a reset for 24 h. `unsent`: the alarms not yet answered for, each `{key, channel, unit, event_at, age_s}`, for the station's page; `expired` counts page items only |
 
 `App.radio_status()`, `App.sdr()`, `squelch_state()`, `reception_state()`, `station_metrics()` and the status post
 to the hub are then built from this file plus the app's own rows (STT, voice, hub). Their shapes do not change.
@@ -856,9 +882,13 @@ trunk-recorder and `trunkrecd.py` stay as they are, in their own unit. What chan
 
 Sidecar, `kind: "call"`, beyond the common fields: `system`, `talkgroup` (int), `freq_hz`, `signal_db`, `noise_db`,
 `emergency`, `encrypted`, `turns` (list of `{src, pos_s, len_s, time, tag, emergency, errors, via}` after
-`apply_grants`; `via`: `srclist` \| `grant` \| `freqlist`), `grants_applied`, `tr` (file name of trunk-recorder's own
-JSON, a hard link, kept for `captures/emergency/`), and `audio` with trunk-recorder's own rate (`rate_hz` as written;
-the reader resamples as `read_wav_16k` does).
+`apply_grants`; `time` is Unix seconds; `via` is `Turn.via` of `sizeup/radio/p25.py`: `srclist` \| `grant` (the
+talker named by a live grant) \| `split` (cut at a grant)), `grants_applied` (bool), `tr` (the file name of
+trunk-recorder's own JSON, a hard link, kept for `captures/emergency/`; it is linked as `<seq>-<id>.tr`, **not**
+`.json`, because a reader takes every `*.json` in `items/` for a sidecar), and `audio` with trunk-recorder's own rate
+(`rate_hz` as written; the reader resamples as `read_wav_16k` does). A call has no squelch: its `closed_boot` is the
+moment capture's ingest took the finished call, and the wall age `now - end` covers the wait before that, since
+`late` takes the larger.
 
 The three flaws the evidence named, two more met on the way, and their fix here:
 
@@ -961,7 +991,7 @@ Land first; none is part of this plan:
 | 6 | PCM tee and `radiod.py` in shadow: the in-process receiver copies each chunk it read, with its arrival time, to a socket; `sizeup-radio --shadow` runs the same receivers from that instead of `rtl_fm`, owns no dongle, writes `spool-shadow/`, a status and the live socket, and sends nothing | `capture-mode shadow` | `tools/spool_compare.py`: per channel, the same transmissions (start and end equal, since the tee carries the clock), bit-equal audio, equal IDs, levels and reasons. On the station it logs counts and differences only, never content | R; compare tool N |
 | 7 | `radio/dongles.py`: the dongle half of `App` as a class the `App` delegates to, `reception.py` with it, its `App` reach-ins cut as §3.3 lists (Q7). No behaviour change. Splittable: modes and auto-assign; groups; no-audio, probes, USB reset; the reception test | none | `test_antenna_groups`, `test_sdr_auto_assign`, `test_app`, `test_reception*`, `test_sdr_serial`, `test_claims` unchanged | R |
 | H1 | The hub: `POST /api/station/urgent`, the dedupe store written by both lanes, the `urgent` capability, the allow-list row (§11) | the capability is advertised only when a hub setting says so | §11 | H |
-| 8 | `radio/urgent.py`: the file, the two senders, the app's take-over, the clocks. In-process first: in `inline` mode the `App` hosts the same code with **its own** `HubClient` credentials (it has them in its environment already; the unit's credential handling is step 11's), so both budgets are measured in production while there is still one process | `urgent-mode`: `off`, then `write` (rows and take-over, nothing sent), then `send`. **Exit criteria before `send` is left on:** both budgets measured on the station, and the hub's write-refusal window measured over real deploys and written into §4.3 (#776) | §4.3's idempotency table case by case against a stub hub, the "app's lane first, T took over, acknowledged, then the urgent item" case among them; each failure class (503 with `Retry-After`, a timeout after the body went, 401, 404, a 413 cut to singles); the insert failing and the `fsync` stalled: the item is sent within 50 ms plus the round trip, `durable: false`; an alarm unsent for 29 min is still sent, answered `applied`, and raised and pushed with its age; one unsent for 31 min is still sent, answered `stale`, and becomes a late notice with no push (A7's recommended rule, both sides); the station's page showed each from 10 s on; an alarm reloaded after a reboot is sent with `age_src: "wall"` and a wall-clock age, never held back; a page request hung for its whole timeout does not delay an alarm; `gen` changing resends the last 120 s; the wall clock stepped an hour either way: no page item expires, `age_s` is unchanged; the nine combinations of the two mode files (§4.3), one alarm each; the three things that stop the sending, each alone; an item whose insert failed is taken over once, and once more is not when its row appears; `urgent_since` paged, with the in-memory items; `new` rows loaded at start; a commit landing after the hub's answer leaves no false "not delivered"; the first alarm's time to the hub with keep-warm on and off; `test_radio_emergency`, `test_fg_emergency`, `test_alarms` unchanged | R |
+| 8 | `radio/urgent.py`: the file, the two senders, the app's take-over, the clocks. In-process first: in `inline` mode the `App` hosts the same code with **its own** `HubClient` credentials (it has them in its environment already; the unit's credential handling is step 11's), so both budgets are measured in production while there is still one process | `urgent-mode`: `off`, then `write` (rows and take-over, nothing sent), then `send`. **Exit criteria before `send` is left on:** both budgets measured on the station, and the hub's write-refusal window measured over real deploys and written into §4.3 (#776) | §4.3's idempotency table case by case against a stub hub, the "app's lane first, T took over, acknowledged, then the urgent item" case among them; each failure class (503 with `Retry-After`, a timeout after the body went, 401, 404, a 413 cut to singles); the insert failing and the `fsync` stalled: the item is sent within 50 ms plus the round trip, `durable: false`; an alarm unsent for 29 min is still sent, answered `applied`, and raised and pushed with its age; one unsent for 31 min is still sent, answered `stale`, and becomes a late notice with no push (A7's recommended rule, both sides); the station's page showed each from 10 s on; an alarm reloaded after a reboot is sent with `age_src: "wall"` and a wall-clock age, never held back; a page request hung for its whole timeout does not delay an alarm; `gen` changing resends the last 120 s; the wall clock stepped back an hour: no page item expires; stepped forward an hour: a page item may expire early (the larger of its two ages), an alarm never does, and an alarm's `age_s` is unchanged either way; the nine combinations of the two mode files (§4.3), one alarm each; the three things that stop the sending, each alone; an item whose insert failed is taken over once, and once more is not when its row appears; `urgent_since` paged, with the in-memory items; `new` rows loaded at start; a commit landing after the hub's answer leaves no false "not delivered"; the first alarm's time to the hub with keep-warm on and off; `test_radio_emergency`, `test_fg_emergency`, `test_alarms` unchanged | R |
 | 9 | `radio/control.py`: the wish file (desired state), the socket's requests and replies, the status file (observed state). In `inline` mode the `App` talks to its own `Dongles` through the same code (a loopback), so the request path is exercised before there are two processes | `capture-mode inline` | every refusal of today's `set_mode` comes back as a reply ("parked", "taken", `confirm: true`); `squelch_apply` with a stale `expect` is refused, as #685 and #700 refuse it; a repeated `id` gets the first reply and is applied once; a request past `expires_boot` is not applied, whatever the wall clock did; a broken wish keeps the last good one; a wish that cannot be met shows as `held` or `waiting`; a wish that fails validation after a passing `check` is not applied, shows in `refusals`, and the rest of it is applied; a `credentials` request from a peer that is not uid 0 is refused; unknown keys and ops | R, N for conformance |
 | 10 | The soak (Q12): a week of synthetic traffic, accelerated (the fake `rtl_fm` and fake call files on a fast clock), through `radiod.py` in service mode with a reader attached | - | resident memory flat after warm-up; these stay bounded: `CallIngest._seen` and `_pending`, the tap's per-carrier `last`, the `SegmentWorkers` queues, `LiveTalk`'s grant log, the socket's client queues, `urgent.sqlite`'s rows and its `-wal` file, the spool's items and its quarantine; no growth in open file descriptors or threads. It must pass before step 11 | R, N for the harness |
 | 11 | The switch: the unit with `LoadCredential=` and the root reload helper, `start-radio`, `radio.lock`, `radio_sig`, the build directory, `health-check`, `sdr-serial`; in `service` mode the app starts no receivers and runs `spool-reader` into its own worker sets (§3.6). One station, by hand, with the admin's go | `capture-mode service` | the end-to-end harness below; the secrets never in `os.environ`, in a child's environment or command line, the status, the file or the log; `systemctl reload` swaps the token with every `rtl_fm` pid unchanged and no frame late; a SIGHUP is ignored; the reload helper hands nothing to a listener that is not the unit's main pid; the unit starts with `station.env` empty and runs in `no_credentials`; a second capture exits 78 after its wait; capture started with the mode file saying `inline` exits 78; the switch to service in order and in the wrong order; left half-switched, Health is critical and the health check starts capture; the switch back drains the spool (§4.7); both drains of §3.6; `station-install` CI with the new unit; `.github/scripts/station-update.sh` extended: an app-only update leaves capture's pid, a capture change restarts it, a rollback stops it | R, U |
@@ -1080,10 +1110,10 @@ Still open:
 
 | Item | Entry |
 |---|---|
-| **The new hub route**, `POST /api/station/urgent` | bearer resolved before the body is read (`Hub._principal`); the payload's `station` must be the token's (`id_mismatch`); the leader only (503 otherwise); a body of at most 64 KB and 32 items, read by `Content-Length`; every string field length-capped before use; the rig derived on the hub, never taken from the station; `age_s` is used (the hub places an item at its own `now - age_s`; one with `age_src: "wall"` is corrected by the hub's skew measure first) but bounded: a value that is not a number, negative, or over 24 h is clamped into [0, 24 h], and one that disagrees with `sent_at - event_at` by more than the measured skew is logged. `sent_at` only feeds the skew measure. A station that lies about an age can only make its own alarm look fresher or older, and it can raise alarms anyway |
+| **The new hub route**, `POST /api/station/urgent` | bearer resolved before the body is read (`Hub._principal`); the payload's `station` must be the token's (`id_mismatch`); the leader only (503 otherwise); a body of at most 64 KB and 32 items, read by `Content-Length`; every string field length-capped before use; the rig derived on the hub, never taken from the station; `age_s` is used (the hub places an item at its own `now - age_s`; one with `age_src: "wall"` cannot be checked and is labelled approximate) but bounded: a value that is not a number, negative, or over 24 h is clamped into [0, 24 h], and a boot-sourced one that differs from `sent_at - event_at` by more than a few seconds is logged (the station's wall clock stepped). `sent_at` only feeds the skew measure. A station that lies about an age can only make its own alarm look fresher or older, and it can raise alarms anyway |
 | What the route adds for someone holding the station's token | nothing new: the same token can already raise an alarm with an `alarm` event and set the live page with `/api/station/state`. It adds a second door to the same room, so it gets the same lock: the allow-list |
 | The allow-list (`docs/nodes.md` §3, #758) | decided: the route is opened by an `sz1` credential **with the `radio-receive` role**, as `/api/station/events` is; never by `sz1` alone once roles exist, never by `sw1`. A node that loses the role loses the route at its next request, like every role. That table gets the row: `/api/station/urgent` (alarms and live pages ahead of the app's lane). Its own invariant applies: a test lists every `/api/station/*` route and fails when one has no row. `Hub.STATION_ROUTES` gains the route. Until the nodes registry gives stations roles, a station's `sz1` token stands for the role, as on every station route today |
-| `contracts/routes.json` | the route is added there with its credential (`sz1`), role, body cap, "not seen" and "idempotent by `key`, `rev`". The file arrives with #774 |
+| `contracts/routes.json` | the route is added there with its credential (`sz1`), role, body cap, "not seen" and "idempotent by `station`, `key`, `rev`". The file arrives with #774 |
 | Cloudflare Access | no change: the existing `/api/station/*` application and the station's own service token. No new Access token, no wider policy |
 | **The urgent sender's credentials** | the station's `sz1` token and its Access service token, from the same store as the app: `/etc/sizeup/station.env`, root 0600, unchanged. systemd hands the file to the unit (`LoadCredential=`, the #301 pattern); capture reads three names from it into memory. Never in its environment, so in no child's environment or command line; never in the wish, the status, the spool, `urgent.sqlite` or a log line (§4.3) |
 | What that does not cover (accepted, Q-J) | capture's children are started without `CREDENTIALS_DIRECTORY` or any token variable, and the token is never in a command line; but they run as the same user and could still read the unit's credentials directory if they looked. They are sizeup's own fixed, pinned builds (`rtl_fm`, `rtl_sdr`, the channelizer). No other unit can read it. A residual risk, stated and accepted |
@@ -1146,33 +1176,49 @@ file, and switched back the same way.
 
 ## 10. Contract artifacts
 
-What the native session writes from this document (ADR 0004), in `contracts/capture/`. Every schema allows
-additional properties (unknown keys are ignored); "required" is what a reader may rely on. Types and units are in
-the section named.
+What the native session writes from this document (ADR 0004); its first version is #783. The schemas are
+`contracts/schemas/capture-<name>.schema.json` and their vectors `contracts/vectors/capture-<name>/`, where #774's
+harness finds them; what a schema cannot say (`spool.md`, `socket.md`, `urgent.md`, `urgent.sql`, the mode table)
+is in `contracts/capture/`. The file names below are the `<name>`s. Every schema allows additional properties
+(unknown keys are ignored), and every list of words (a `kind`, a frame's `t`, an `op`, a state, a `reason`) is open:
+the fields of each known word are required when that word is there, and a word a reader does not know validates and
+is skipped or refused as §4 says, never an error. "Required" is what a reader may rely on. Types and units are in
+the section named. Where this document and #783's "Choices" table differ, the sentence here was changed to agree,
+except the five points listed under the table.
 
 | Artifact | File | Fields from | Required |
 |---|---|---|---|
-| Spool sidecar, `kind: "segment"` | `spool-sidecar.schema.json` (`oneOf` by `kind`) | §4.1 | `v`, `kind`, `id`, `seq`, `spool_epoch`, `channel.label`, `channel.kind`, `start`, `end`, `closed_boot`, `boot`, `published`, `reason`, `levels`, `ids`, `alarm_key`, `audio` (object or null); with `audio`: `file`, `format`, `encoding`, `rate_hz`, `channels`, `samples`, `bytes` |
-| Spool sidecar, `kind: "call"` | the same file | §4.1, §4.6 | the common ones, and `system`, `talkgroup`, `turns`, `emergency`, `encrypted`, `tr` |
+| Spool sidecar, `kind: "segment"` | `spool-sidecar.schema.json` (by `kind`) | §4.1 | `v`, `kind`, `id`, `seq`, `spool_epoch`, `channel.label`, `channel.kind`, `start`, `end`, `closed_boot`, `boot`, `published`, `reason`, `levels`, `ids`, `alarm_key`, `audio` (object or null); with `audio`: `file`, `format`, `encoding`, `rate_hz`, `channels`, `samples`, `bytes` |
+| Spool sidecar, `kind: "call"` | the same file | §4.1, §4.6 | the common ones (`v`, `kind`, `id`, `seq`, `spool_epoch`, `published`), `start`, `end`, `closed_boot`, `boot`, `audio`, and `system`, `talkgroup`, `turns`, `emergency`, `encrypted`, `tr`. Inside: an `ids` entry needs `id`, `system`, `emergency`, `from`; `keyup` needs `split`, `parent`, `prev`; a turn needs `src`, `pos_s`, `emergency`, `via` |
 | Spool sidecar, `kind: "metrics"` | the same file | §4.1 | `v`, `kind`, `id`, `seq`, `spool_epoch`, `published`, `records` |
 | Spool cursor | `spool-cursor.schema.json` | §4.1 | `v`, `spool_epoch`, `seq` |
 | Spool layout and behaviour | `spool.md` with vectors: the names, audio before sidecar, `EPOCH`, `SEQ` recovery, who deletes, the sync, the reserve, the quarantine | §4.1 | - |
 | Urgent file | `urgent.sql` (the DDL of §4.3, byte for byte) | §4.3 | - |
-| Urgent item (a row's `data`, and an item of the request) | `urgent-item.schema.json` (`oneOf` by `kind`) | §4.3 | the item, all required, none nullable: `key`, `rev`, `kind`, `at`, `event_at`, `age_s` (number, at least 0), `age_src` (`boot` \| `wall`), `data`. `data` of an alarm: `source`, `start`, `radio_id`, `emergency`, `emergency_via`. `data` of a page: `channel`, `started`, `pairs`, `phase`, `ended` |
+| Urgent item (a row's `data`, and an item of the request) | `urgent-item.schema.json` (by `kind`) | §4.3 | the item, all required, none nullable: `key`, `rev`, `kind`, `at`, `event_at`, `age_s` (number, at least 0), `age_src` (`boot` \| `wall`), `data`. `data` of an alarm: `source`, `start`, `radio_id`, `emergency`, `emergency_via`. `data` of a page: `channel`, `started`, `pairs`, `phase`, `ended` |
 | `POST /api/station/urgent`, request | `urgent-request.schema.json` | §4.3 | `v`, `station`, `items` (1 to 32) |
 | `POST /api/station/urgent`, answers | `urgent-response.schema.json` | §4.3 | 200: `ok`, `gen`, `results` (each `key`, `rev`, `status`); 4xx: `error`, `reason` |
-| Socket, capture to client | `socket-event.schema.json` (`oneOf` by `t`) | §4.2 | `v`, `t`, `at`, and per `t` the fields of its row |
-| Socket, client to capture | `socket-request.schema.json` (`oneOf` by `t` / `op`) | §4.2 | notices: `v`, `t`; requests: `v`, `t: "request"`, `id`, `op`, `args`, `expires_boot` |
-| Socket, replies | `socket-reply.schema.json` | §4.2 | `v`, `t: "reply"`, `id`, `ok`; with `ok: false`: `error` (string), `confirm` (bool) |
+| Socket, capture to client | `socket-event.schema.json` (by `t`) | §4.2 | `v`, `t`, `at`, and per `t` the fields of its row |
+| Socket, client to capture | `socket-request.schema.json` (by `t` and `op`) | §4.2 | notices: `v`, `t` and each one's own fields (`urgent_taken`: `urgent_epoch` and `n`, both); requests: `v`, `t: "request"`, `id`, `op`, `args`, `expires_boot` |
+| Socket, replies | `socket-reply.schema.json` | §4.2 | `v`, `t: "reply"`, `id`, `ok`; with `ok: false`: `reason` (a word), `error` (text), `confirm` (bool) |
 | Socket framing | `socket.md` with byte vectors: `>II`, the header and payload limits | §4.2, `sizeup/cloud/sttencode.py` | - |
 | Wish file | `wish.schema.json` | §4.4 | `v`, `seq`, `mode`, `paths`, `channels`, `dongles` |
-| Status file | `status.schema.json` | §4.5 | `v`, `at`, `at_boot`, `boot`, `pid`, `contract`, `wish_seq`, `channels`, `sdrs`, `refusals`, `spool`, `urgent` |
+| Status file | `status.schema.json` | §4.5 | `v`, `at`, `at_boot`, `boot`, `pid`, `contract`, `wish_seq`, `channels`, `sdrs`, `refusals`, `spool`, `urgent`; a channel row's `label`, `kind`, `run`, `state`; in `spool` and `urgent` the counters a Health row reads |
+
+Where this document differs from #783 as first written, so that #783 follows:
+
+| # | #783's choice | This document |
+|---|---|---|
+| C24 / X6 | `urgent_taken` may carry `urgent_epoch` | it must: `urgent_epoch` and `n` are both required (§4.2) |
+| C26 / X7 | one string, `error`, holding either text or a word | two fields: `reason` (the word) and `error` (the text) (§4.2) |
+| X10 | a turn's `via` knows four words | three, the code's: `srclist`, `grant`, `split`. Nothing produces `freqlist` (§4.6) |
+| X16 / C31 | `urgent.state` has seven words, `reset` among them | six, with a stated precedence; a reset is `resets` and `reset_at` beside it (§4.5) |
+| `urgent.sql` | the DDL byte for byte | one comment changed: `at` is "when capture made the item" (X3) |
 
 Outside `contracts/capture/`:
 
 | Where | Change |
 |---|---|
-| `contracts/routes.json` | add `POST /api/station/urgent`: credential `sz1`, role `radio-receive`, body cap 64 KB, 32 items, not "seen", idempotent by (`key`, `rev`), 503 on a non-leader. The file arrives with #774 (open when this was written) |
+| `contracts/routes.json` | add `POST /api/station/urgent`: credential `sz1`, role `radio-receive`, body cap 64 KB, 32 items, not "seen", idempotent by (`station`, `key`, `rev`), 503 on a non-leader. It is listed as designed and not served until the hub has it. The file arrives with #774 (open when this was written) |
 | `docs/nodes.md` §3, the route allow-list | a row for the route: `sz1` + role `radio-receive` (decided); `sw1` never. Its "every `/api/station/*` route has a row" test then covers it |
 
 Vectors to start from (all invented):
@@ -1199,10 +1245,16 @@ Vectors to start from (all invented):
 {"v": 1, "station": "st-north", "urgent_epoch": "9c2d7e10a4b35f68", "sent_at": 1900000000.41,
  "items": [{"key": "CHA-live-1900000000123", "rev": 0, "kind": "alarm", "at": 1900000000.39,
             "event_at": 1900000000.123, "age_s": 0.29, "age_src": "boot",
-            "data": {"source": "CH A", "start": 1900000000.123, "end": 1900000000.39, "radio_id": "7001",
+            "data": {"source": "CH A", "start": 1900000000.123, "radio_id": "7001",
                      "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
-                     "unit": "UNIT A", "emergency": true, "emergency_via": "MDC"}},
-           {"key": "page:PAGE 1:1900000100.25", "rev": 2, "kind": "page", "at": 1900000104.9,
+                     "unit": "UNIT A", "emergency": true, "emergency_via": "MDC"}}]}
+```
+
+The alarm connection's request, above; a page goes in a request of its own, on the other connection:
+
+```json
+{"v": 1, "station": "st-north", "urgent_epoch": "9c2d7e10a4b35f68", "sent_at": 1900000104.91,
+ "items": [{"key": "page:PAGE 1:1900000100.25", "rev": 2, "kind": "page", "at": 1900000104.9,
             "event_at": 1900000100.25, "age_s": 4.66, "age_src": "boot",
             "data": {"channel": "PAGE 1", "started": 1900000100.25, "phase": "voice", "ours": true, "ended": false,
                      "until": null,
@@ -1212,8 +1264,7 @@ Vectors to start from (all invented):
 
 ```json
 {"ok": true, "v": 1, "station": "st-north", "gen": 412,
- "results": [{"key": "CHA-live-1900000000123", "rev": 0, "status": "applied"},
-             {"key": "page:PAGE 1:1900000100.25", "rev": 2, "status": "applied"}]}
+ "results": [{"key": "CHA-live-1900000000123", "rev": 0, "status": "applied"}]}
 ```
 
 ```json
@@ -1222,7 +1273,7 @@ Vectors to start from (all invented):
 ```
 
 ```json
-{"v": 1, "t": "reply", "id": "r-5f3a9c12", "ok": false, "error": "refused: parked", "confirm": false,
+{"v": 1, "t": "reply", "id": "r-5f3a9c12", "ok": false, "reason": "parked", "error": "refused: parked", "confirm": false,
  "at": 1900000200.02}
 ```
 
@@ -1239,7 +1290,7 @@ capture's senders idle and the app's lane carries everything, as today.
 | H1d | P25 live against end of call (#775) | one emergency per press: the end-of-call row takes the live alarm over, matched by system + talkgroup + unit when the live grant's time falls inside the finished call's span, with 10 s of slack at each end (decided, Q-I); a live alarm with no matching call within 10 min stands on its own; a later call from a radio whose bit is still set raises nothing and marks the row "emergency still set"; the transitions-per-hour counter on Health. Unused until #775 lands |
 | H1e | Live pages | a page item sets the station's live paging state by `key` and `rev`, with `until` as its expiry; `/api/station/state`'s `paging` merges by `key`, newer wins; a `page` event carrying `live_key` ends the live entry. Capture sends every page, ours or not (decided): the hub filters. Pair fields arrive as `a_hz`, `b_hz` (the state post's are `a`, `b`). What a live page of ours triggers on the hub (a push, a pre-alert row) is the hub's to decide: today it is display only |
 | H1f | The capability | `urgent` in the state answer's `caps`, behind a hub setting, so the app can tell capture (the wish's `hub.caps`) and the lane can be turned off from the hub's side |
-| H1g | The allow-list | decided: `sz1` with the `radio-receive` role. The row in `docs/nodes.md` §3 and in `contracts/routes.json` (§10); the route-table test; a test that a station without the role gets 403. Until the nodes registry exists a station's `sz1` token stands for the role |
+| H1g | The allow-list | decided: `sz1` with the `radio-receive` role. The row in `docs/nodes.md` §3 and in `contracts/routes.json` (§10); the route-table test; a test that a station without the role gets 403, and that the shared station token does not open the route. Until the nodes registry exists a station's own `sz1` token stands for the role |
 | H1h | Health | the station's `urgent` block from its status (the senders' state, the oldest unsent alarm, items not durable, `rejected`); the hub's own count of items by status; an alert when the sender is `refused` or an alarm arrived more than a few seconds after it was pressed |
 | H1i | A late emergency (A7, awaiting the admin) | the recommended rule: an alarm item up to `MAX_AGE_S` (30 min) old is raised and pushed, labelled with its real time and age, answer `applied`; an older one is a late notice on Health and on the row with no push, answer `stale`, in place of today's log line. Built so the admin's answer can change it in one place |
 | H1j | Multi-station | the dedupe store is keyed by station from the start. The alarm row's `traffic_id` must be station-qualified before a second station is taken: two stations can produce the same `<label>-live-<ms>`. One alarm for one press heard twice is `docs/nodes.md` §2.4's rule (the first copy with the flag alarms) |
