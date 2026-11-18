@@ -64,7 +64,8 @@ TOP_N = 40
 # topic, an incident source or a channel says none of them here. tests/test_profiler.py reads the source's syntax tree
 # for every thread name that is not a plain string (keyword or positional, through a spawn helper too) and fails on one
 # that is not listed.
-DYNAMIC = ("ntfy-", "stream-", "aws-stt-", "source-", "datasource-", "nfm-", "http-", "updating-", "aircraft-feed-")
+DYNAMIC = ("ntfy-", "stream-", "aws-stt-", "source-", "datasource-", "nfm-", "segment-", "http-", "updating-",
+           "aircraft-feed-")
 _UNNAMED = re.compile(r"Thread-\d+(?: \((.+)\))?")
 _COUNTER = re.compile(r"(?:[-_ ]\d+)+$")
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.()<>-]")

@@ -148,15 +148,30 @@ def encode(fleet: int, unit: int, kind: str = "pre-id", baud: int = 1200, rate: 
     return (level * np.sin(2 * np.pi * np.cumsum(f) / rate)).astype(np.float32)
 
 
+_SYNC_BYTES = bytes(SYNC)                                            # the same bits, one byte each (decode)
+_MIX: dict[tuple[int, float], np.ndarray] = {}                       # (rate, tone) -> its mixer, kept (_mixer)
+MIX_KEEP_S = 6.0                                                     # ... up to this long (App._mdc: 2 x 3 s at most)
+
+
+def _mixer(rate: int, f: float, n: int) -> np.ndarray:
+    """exp(-2j pi f t) for n samples: the same values as computed afresh (elementwise), kept for buffers up to
+    MIX_KEEP_S (the live tap decodes every 0.2 s), computed afresh for a longer one."""
+    if n > MIX_KEEP_S * rate:
+        return np.exp(-2j * np.pi * f * np.arange(n) / rate)
+    t = _MIX.get((rate, f))
+    if t is None:
+        t = _MIX[(rate, f)] = np.exp(-2j * np.pi * f * np.arange(int(MIX_KEEP_S * rate)) / rate)
+    return t[:n]
+
+
 def _energy(x: np.ndarray, rate: int, f: float, n: int) -> np.ndarray:
-    z = x * np.exp(-2j * np.pi * f * np.arange(len(x)) / rate)
+    z = x * _mixer(rate, f, len(x))
     c = np.concatenate([[0], np.cumsum(z)])
-    out = np.zeros(len(x))
     h = n // 2
-    lo = np.clip(np.arange(len(x)) - h, 0, len(x))
-    hi = np.clip(np.arange(len(x)) - h + n, 0, len(x))
-    out[:] = np.abs(c[hi] - c[lo])
-    return out
+    ar = np.arange(len(x))
+    lo = np.clip(ar - h, 0, len(x))
+    hi = np.clip(ar - h + n, 0, len(x))
+    return np.abs(c[hi] - c[lo])
 
 
 def decode(audio: np.ndarray, rate: int = 16000) -> list[FleetSyncPacket]:
@@ -170,24 +185,23 @@ def decode(audio: np.ndarray, rate: int = 16000) -> list[FleetSyncPacket]:
     spec[(fr < 700) | (fr > 3200)] = 0
     x = np.fft.irfft(spec, len(x))
     out: list[FleetSyncPacket] = []
-    sync = "".join(map(str, SYNC))
+    ns = len(SYNC)
     for baud, one, zero in SPEEDS:
         spb = rate / baud
         n = max(2, int(round(spb)))
-        d = _energy(x, rate, one, n) - _energy(x, rate, zero, n)
+        on = (_energy(x, rate, one, n) - _energy(x, rate, zero, n) > 0).view(np.uint8)
         for ph in range(GRID):
-            pos = ph * spb / GRID + np.arange(int((len(d) - ph * spb / GRID) / spb)) * spb
+            pos = ph * spb / GRID + np.arange(int((len(on) - ph * spb / GRID) / spb)) * spb
             idx = pos.astype(int)
-            idx = idx[idx < len(d)]
-            bits = (d[idx] > 0).astype(np.int8)
-            s = "".join("1" if b else "0" for b in bits)
-            k = s.find(sync)
+            idx = idx[idx < len(on)]
+            s = on[idx].tobytes()               # the bits, one byte each (b"\x00\x01..."): searched as bytes
+            k = s.find(_SYNC_BYTES)
             while k >= 0:
-                blk = [int(c) for c in s[k + len(SYNC):k + len(SYNC) + BLOCK]]
+                blk = list(s[k + ns:k + ns + BLOCK])
                 if check_ok(blk):
                     p = FleetSyncPacket(_num(blk[:16]), _num(blk[16:24]) + 99, _num(blk[24:36]) + 999, _num(blk[16:24]) + 99,
-                                        _num(blk[36:48]) + 999, baud, float(idx[k + len(SYNC)] / rate))
+                                        _num(blk[36:48]) + 999, baud, float(idx[k + ns] / rate))
                     if not any(q.id == p.id and q.flags == p.flags and abs(q.start_s - p.start_s) < 0.03 for q in out):
                         out.append(p)
-                k = s.find(sync, k + 1)
+                k = s.find(_SYNC_BYTES, k + 1)
     return sorted(out, key=lambda p: p.start_s)
