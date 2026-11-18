@@ -401,7 +401,12 @@ def overlay(d: dict, ov: dict) -> dict:
                 units.pop(code, None)
                 off.add(code)
                 continue
+            was = units.get(code)
             units[code] = {k: x for k, x in v.items() if k != "board"}
+            # A unit's statuses from the data file (status_set: the Other board's fire and EMS codes keep the agency set)
+            # stay when a saved edit doesn't say: one saved before the key existed, or an older export imported.
+            if "status_set" not in v and isinstance(was, dict) and was.get("status_set"):
+                units[code]["status_set"] = was["status_set"]
             if v.get("retired"):
                 off.add(code)
         for b in boards:

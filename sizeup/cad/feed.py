@@ -297,7 +297,8 @@ def load_cfg(lists: Lists) -> FeedCfg:
     units = {c: str(u.get("spoken") or "") for c, u in lists.units.items()
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
              and (not u.get("department") or u.get("department") in joint)
-             and lists.response(c) == "fire"}           # an apparatus kind marked another agency's (third party): not ours
+             and lists.response(c) == "fire"}           # answers as fire: an apparatus kind Settings marks mutual aid or
+                                                         # another agency's (response) is not ours
     kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
     towns, ours = qualifiers(lists)
     return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds,

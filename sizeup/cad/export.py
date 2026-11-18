@@ -75,17 +75,9 @@ def _incidents(store: Store, closed_only: bool) -> list[dict]:
                    + " ORDER BY created_at, id")
     if not rows:
         return rows
-    # Dispatch / First Enroute / First On Scene are the fire response's: another agency's unit (EMS, PD, a utility, a
-    # keyholder: Dispatched or Dispatch other when we requested it) is in Assigned Units with its own times, not in these.
-    times: dict[int, dict] = {}
-    for a in store.q("SELECT a.incident_id, u.name, a.dispatched_at, a.enroute_at, a.onscene_at FROM assignments a "
-                     "JOIN units u ON u.id = a.unit_id"):
-        if store.lists.response(a["name"]) == "agency":
-            continue
-        t = times.setdefault(a["incident_id"], {})
-        for col, k in (("dispatched_at", "dispatched"), ("enroute_at", "enroute"), ("onscene_at", "onscene")):
-            if a[col] is not None and (t.get(k) is None or a[col] < t[k]):
-                t[k] = a[col]
+    times = {r["incident_id"]: r for r in store.q(
+        "SELECT incident_id, MIN(dispatched_at) AS dispatched, MIN(enroute_at) AS enroute, MIN(onscene_at) AS onscene "
+        "FROM assignments GROUP BY incident_id")}
     units: dict[int, list[str]] = {}
     for a in store.q("SELECT a.incident_id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id ORDER BY a.id"):
         lst = units.setdefault(a["incident_id"], [])

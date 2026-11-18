@@ -548,12 +548,15 @@ def _on_incident(m, b, o, c):
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
     if act == "attach" and isinstance(o.get("as"), dict) and o["as"] and set(o["as"].values()) != {b.get("status")}:
-        # each unit as it went on, when not all as asked (a third party: Dispatched)
+        # each unit as it went on, when not all as asked (a third party: Dispatched); a plain attach's own units: attached
         groups: dict[str, list[str]] = {}
+        for name in [x for x in _units(c, b.get("unit_ids")).split(", ") if x and x not in o["as"]]:
+            groups.setdefault("", []).append(name)
         for name, st in o["as"].items():
             groups.setdefault(str(st), []).append(str(name))
-        said = "; ".join(f"{', '.join(us)} {c.lists.status_phrase(st)}"
-                         + (" (not dispatched)" if c.lists.role(st) in ("enroute", "onscene") else "") for st, us in groups.items())
+        said = "; ".join(f"{', '.join(us)} " + ("attached" if not st else c.lists.status_phrase(st)
+                                               + (" (not dispatched)" if c.lists.role(st) in ("enroute", "onscene") else ""))
+                         for st, us in groups.items())
         return f"Added to {ev}: {said}" + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else ""), n
     if act == "attach" and b.get("status"):
         return (f"Added {_units(c, b.get('unit_ids'))} to {ev} {c.lists.status_phrase(str(b['status']))} (not dispatched)"

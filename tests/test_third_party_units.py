@@ -13,14 +13,12 @@ party units", and "like NR & FR we want to make those available for keyholder un
                or on EMS; on the timeline with its code
     automation the county feed, the pages and the radio follow the fire response only: never a third party
     class      the status set is the class: by board, or per unit in Settings > Units (admins, audited)
-    reports    incidents.csv's Dispatch / First Enroute / First On Scene are the fire response's; the unit history
-               keeps DO
+    reports    the unit history and the event log keep DO (incidents.csv as before)
 """
 import csv
 import io
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -192,6 +190,52 @@ def test_settings_sets_a_units_class_audited(api):  # noqa: F811
     assert c.lists.agency_set("E63") == ""
 
 
+OTHER_BOARD_OURS = ("GREENWICH-F", "GREENWICH-E", "EMS10", "EMS11", "EMS12", "FC1", "FC2", "FM1", "FM42", "FM43", "FM44",
+                    "FIRE_INSP", "SPCON", "SPTAR")
+
+
+def test_a_saved_edit_from_before_keeps_the_data_files_statuses():
+    """An edit saved before units had a status_set (or an older export imported) is the whole unit, without the key: the
+    Other board's fire and EMS codes keep the data file's agency set, never the board's third party."""
+    from sizeup.cad import lists as lists_mod
+    from sizeup.cad.settings import overlay
+    d = lists_mod.read()
+    assert all(d["units"][u]["status_set"] == "responder" for u in OTHER_BOARD_OURS)
+    old = {u: {"kind": "agency", "title": f"Invented title {i}"} for i, u in enumerate(OTHER_BOARD_OURS)}
+    L = lists_mod.build(overlay(json.loads(json.dumps(d)), {"units": old}), "test")
+    assert {L.agency_set(u) for u in OTHER_BOARD_OURS} == {"responder"} and not any(map(L.third_party, OTHER_BOARD_OURS))
+    assert L.units["FC1"]["title"] == "Invented title 5"
+    # a saved edit that says: as it says
+    L = lists_mod.build(overlay(json.loads(json.dumps(d)), {"units": {"FC1": {"kind": "agency", "status_set": "third_party"}}}),
+                        "test")
+    assert L.third_party("FC1")
+    # an older export imported: the same
+    c = make_cad()
+    data = c.settings_export()
+    data["overrides"] = {"units": {"FM42": {"kind": "agency", "title": "Invented marshal"}, "PCPD": {"kind": "pd", "title": "x"}}}
+    post(c, "import", action="apply", settings=data)
+    assert c.lists.units["FM42"]["title"] == "Invented marshal" and c.lists.agency_set("FM42") == "responder"
+    assert c.lists.third_party("PCPD")                                     # its board's, as before
+    # and an edit made now keeps it too
+    post(c, "units", action="edit", code="SPTAR", unit={"title": "Invented"})
+    assert c.lists.agency_set("SPTAR") == "responder"
+
+
+def test_the_activity_says_each_unit_as_it_went_on(api):  # noqa: F811
+    c = api.cad
+    code, inc = call(api, "/api/cad/incident", {"type": "SERVICE", "address": ADDR, "emergency": False}, JORDAN)
+    assert code == 200
+    iid = inc["id"]
+    code, _ = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [uid(c, "E64"), uid(c, "PCPD")]}, JORDAN)
+    assert code == 200
+    acts = c.activity.rows(JORDAN, "action")
+    assert acts[0]["summary"] == f"Added to {inc['number']}: E64 attached; PCPD dispatched"
+    code, _ = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [uid(c, "E62"), uid(c, "CONED-E2")], "status": "RS"},
+                   JORDAN)
+    assert c.activity.rows(JORDAN, "action")[0]["summary"] == (
+        f"Added to {inc['number']}: E62 responding (not dispatched); CONED-E2 dispatched")
+
+
 def test_a_status_set_whose_dispatch_other_is_retired_or_misplaced():
     from sizeup.cad import lists as lists_mod
     d = lists_mod.read()
@@ -210,17 +254,13 @@ def test_a_status_set_whose_dispatch_other_is_retired_or_misplaced():
 
 # -- reports ------------------------------------------------------------------------------------------------------------
 
-def test_reports_keep_do_and_the_first_times_are_the_fire_responses(ev):
+def test_reports_keep_do(ev):
     c, iid = ev, ev.iid
     c.attach(iid, {"unit_ids": [uid(c, "PCPD2")], "status": "DO", "operator": "JD"})
-    c.unit_status(uid(c, "PCPD2"), {"status": "OL", "operator": "JD"})   # PD there first
-    c.unit_status(uid(c, "E61"), {"status": "OL", "operator": "JD"})
+    c.unit_status(uid(c, "PCPD2"), {"status": "OL", "operator": "JD"})
     rows = list(csv.DictReader(io.StringIO(c.export("incidents.csv").decode("utf-8-sig"))))
     r = next(x for x in rows if x["Incident #"] == c.store.incident(iid)["number"])
     assert "PCPD2" in r["Assigned Units"]
-    e61 = row(c, iid, "E61")
-    from sizeup.cad.export import ts
-    assert r["Dispatch"] == ts(e61["dispatched_at"]) and r["First On Scene"] == ts(e61["onscene_at"])
     hist = list(csv.DictReader(io.StringIO(c.export("unit-history.csv").decode("utf-8-sig"))))
     assert [h["New Status"] for h in hist if h["Unit"] == "PCPD2"] == ["DO", "OL"]
     log = c.export("event-log.csv").decode("utf-8-sig")

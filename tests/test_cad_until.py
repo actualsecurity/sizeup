@@ -189,6 +189,7 @@ def test_reopening_an_expired_event_clears_its_passed_until():
 def test_a_held_or_idle_sweep_commits_nothing():
     clock = Clock(local(2026, 10, 7, 12, 0))
     cad = make_cad(clock=clock)
+    cad.radiolog.inline = True                                 # its units backfill here, not on a thread committing later
     held = notif(cad, local(2026, 10, 7, 13, 0))
     notif(cad, local(2026, 10, 7, 20, 0))                      # not yet
     cad.attach(held, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
