@@ -276,7 +276,12 @@ def test_health_links_a_shift_hint_to_its_chart_and_draws_the_sparks(tmp_path):
                                                  "trunk": {"last_call": NOW - 60, "quiet_s": 60, "window_s": 900, "gaps": 3},
                                                  "hints": [{"channel": "FG1", "level": "warn", "kind": "metrics_shift",
                                                             "text": "idle quieting +4.2 dB since 14:05 (SDR change)",
-                                                            "link": "#settings/radios/signal?s=FG1&at=1799989200"}]},
+                                                            "link": "#settings/radios/signal?s=FG1&at=1799989200"},
+                                                           {"channel": "FG2", "level": "info", "kind": "metrics_shift",
+                                                            "text": "level not checked: too little traffic since 14:05 "
+                                                                    "(station restart)",
+                                                            "title": "kept voice in 4 half hours before, 2 after",
+                                                            "link": "#settings/radios/signal?s=FG2&at=1799989200"}]},
                                       "alerts": [], "notify": {}, "thresholds": {}, "history": []}},
                                   "/api/cad/perf": {"status": 403, "body": {}}}}
     out = run(tmp_path, r"""
@@ -290,10 +295,14 @@ for (let i = 0; i < 20; i++) await flush();
 const hints = cls(box, "hl-hints")[0];
 const links = all(hints, (n) => n.tag === "a").map((a) => [a.textContent, a.href]);
 const sparks = cls(box, "hl-spark").map((a) => [a.href, cls(a, "sg-spark").map((s) => s.attrs["aria-label"])]);
-console.log(JSON.stringify({ hint: text(hints), links, sparks }));
+const notes = hints.children.map((p) => [p.className, p.title]);
+console.log(JSON.stringify({ hint: text(hints), links, sparks, notes }));
 """, data)
     assert out["hint"].startswith("FG1: idle quieting +4.2 dB since 14:05 (SDR change)")
-    assert out["links"] == [["Chart", "#settings/radios/signal?s=FG1&at=1799989200"]]
+    assert out["links"] == [["Chart", "#settings/radios/signal?s=FG1&at=1799989200"],
+                            ["Chart", "#settings/radios/signal?s=FG2&at=1799989200"]]
+    # #686: a level that wasn't checked is an info line, why on hover
+    assert out["notes"] == [["notice", ""], ["notice info", "kept voice in 4 half hours before, 2 after"]]
     assert out["sparks"] == [["#settings/radios/signal?s=p25", ["p25 decode rate 24 h · now 40 msg/s"]],
                              ["#settings/radios/signal?s=FG1", ["Idle q90 24 h · now 9 dB", "Noise opens/min 24 h · now 0.1"]]]
 
