@@ -14,7 +14,7 @@
   "sdrs": [
     {
       "serial": "00000101",
-      "state": "busy"
+      "state": 1
     }
   ],
   "groups": [

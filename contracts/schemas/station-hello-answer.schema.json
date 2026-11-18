@@ -12,6 +12,10 @@
   "properties": {
     "ok": {"const": true, "description": "Always true."},
     "station": {"type": "string", "description": "The station id the token proves; \"\" for a shared token that has not been given an id yet."},
-    "token": {"enum": ["own", "shared"], "description": "The kind of token: the station's own (sz1.<id>.<secret>) or the hub's shared station token."}
+    "token": {
+      "type": "string",
+      "description": "The kind of token: `own`, the station's own (sz1.<id>.<secret>), or `shared`, the hub's shared station token.",
+      "x-known": ["own", "shared"]
+    }
   }
 }

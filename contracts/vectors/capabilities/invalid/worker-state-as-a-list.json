@@ -25,7 +25,9 @@
     "model": "example-llm-8b",
     "version": "1.4.2"
   },
-  "state": "busy",
+  "state": [
+    "online"
+  ],
   "net": {
     "hub_rtt_ms": 21.5,
     "up_kbps": 18000

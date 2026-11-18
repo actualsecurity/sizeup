@@ -1,0 +1,4 @@
+{
+  "error": "this station's whisper isn't in the pool (Settings > Station > Stations)",
+  "reason": "stations_off"
+}

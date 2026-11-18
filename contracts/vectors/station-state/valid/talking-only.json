@@ -1,5 +1,5 @@
 {
-  "at": 1794990004.0,
+  "at": 1794984107.998973,
   "talking": [
     {
       "key": "p25:countynet:grant:4101:990001",
@@ -10,32 +10,15 @@
       "alias": "",
       "rig": "",
       "label": "",
-      "since": 1794990001.25,
-      "talk_since": 1794990001.25,
+      "since": 1794984107.946744,
+      "talk_since": 1794984107.946744,
       "ended": false,
       "until": null,
       "dispatcher": false,
       "main": true
     },
     {
-      "key": "fm:Fireground 1:1794990002.50:990002",
-      "system": "fm",
-      "channel": "Fireground 1",
-      "tg": null,
-      "radio_id": "990002",
-      "alias": "",
-      "rig": "E1",
-      "label": "Portable 2",
-      "since": 1794990002.5,
-      "talk_since": 1794990002.75,
-      "ended": false,
-      "until": null,
-      "dispatcher": false,
-      "main": true,
-      "id_on_release": false
-    },
-    {
-      "key": "fm:Fireground 1:1794990002.50:",
+      "key": "fm:Fireground 1:1794984107.95:",
       "system": "fm",
       "channel": "Fireground 1",
       "tg": null,
@@ -43,8 +26,8 @@
       "alias": "",
       "rig": "",
       "label": "",
-      "since": 1794990002.5,
-      "talk_since": 1794990002.75,
+      "since": 1794984107.946723,
+      "talk_since": 1794984107.946723,
       "ended": false,
       "until": null,
       "dispatcher": false,
@@ -60,19 +43,19 @@
       "alias": "Northfield Ctrl 2",
       "rig": "",
       "label": "",
-      "since": 1794990001.25,
-      "talk_since": 1794990001.25,
+      "since": 1794984107.946744,
+      "talk_since": 1794984107.946744,
       "ended": true,
-      "until": 1794990009.0,
+      "until": 1794984111.946744,
       "dispatcher": true,
       "main": true
     }
   ],
   "paging": [
     {
-      "key": "page:Paging 1:1794990003.00",
+      "key": "page:Paging 1:1794984107.95",
       "channel": "Paging 1",
-      "started": 1794990003.0,
+      "started": 1794984107.946723,
       "pairs": [
         {
           "a": 716.1,
@@ -81,12 +64,6 @@
             "Northfield · Fire"
           ],
           "ours": true
-        },
-        {
-          "a": 1082.1,
-          "b": 1232.0,
-          "names": [],
-          "ours": false
         }
       ],
       "phase": "tones",

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-state-answer.schema.json",
+  "title": "Worker state answer",
+  "description": "The hub's 200 answer to POST /api/station/stt/state (WorkerApi.handle, sizeup/cloud/sttworkers.py). The worker client reads `pool_on` and ignores the rest.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok", "pool_on"],
+  "additionalProperties": true,
+  "properties": {"ok": {"const": true, "description": "Always true."}, "pool_on": {"type": "boolean", "description": "The pool is on and has a worker in it."}}
+}

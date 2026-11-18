@@ -69,7 +69,7 @@
   "channels": [
     {
       "job": "Paging 1",
-      "state": "ok"
+      "state": null
     }
   ],
   "whisper": {

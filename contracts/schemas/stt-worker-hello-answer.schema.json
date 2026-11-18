@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-hello-answer.schema.json",
+  "title": "Worker hello answer",
+  "description": "The hub's 200 answer to POST /api/station/stt/hello (WorkerApi.handle, sizeup/cloud/sttworkers.py). The worker client reads `worker`, `poll_s`, `pool_on` and `classes` and ignores the rest.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok", "worker", "poll_s", "pool_on", "classes"],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "Always true."},
+    "worker": {"type": "string", "description": "The id the hub knows this token as: a GPU worker's id, or `station:<id>` for a station's whisper."},
+    "poll_s": {"type": "number", "description": "How long a claim's long poll may wait, seconds. The worker never waits longer.", "exclusiveMinimum": 0},
+    "pool_on": {"type": "boolean", "description": "The pool is on and has a worker in it."},
+    "classes": {
+      "type": "array",
+      "description": "The pool classes that are switched on now.",
+      "items": {
+        "type": "string",
+        "description": "A pool class (sizeup/sttpool.py).",
+        "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "state": "online",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "gpu": {
+    "util_pct": 3,
+    "mem_used_mb": 1210,
+    "mem_total_mb": 12282,
+    "others": 0
+  },
+  "worker": "gpu-1",
+  "models": {
+    "stt": "large-v3-turbo-q5_0",
+    "llm": "example-llm-8b",
+    "llm_version": "1.4.2"
+  }
+}

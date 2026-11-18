@@ -16,7 +16,7 @@ from sizeup.cloud import stations, sttworkers
 from tests import contracts as c
 
 DOC = (Path(__file__).resolve().parent.parent / "docs" / "nodes.md").read_text(encoding="utf-8")
-DESIGNED = ("node", "roles", "capabilities", "lease", "node-state", "node-state-answer")
+DESIGNED = ("node", "roles", "capabilities", "lease", "node-state", "node-state-answer", "node-worker-hello")
 
 
 def table_names(heading: str) -> list[str]:
@@ -68,17 +68,52 @@ def test_the_node_id_and_name_are_todays_station_and_worker_ids():
         assert stations.ID.fullmatch(wid) and c.errors("node", {"id": wid}) == []
     for bad in ("St-North", "-north", "st.north", "", "a" * 41):
         assert not stations.ID.fullmatch(bad) and c.errors("node", {"id": bad})
-    assert node["kind"]["enum"] == ["station", "worker", "station+worker"] and node["kind"]["readOnly"] is True
+    assert node["kind"]["x-known"] == ["station", "worker", "station+worker"] and node["kind"]["readOnly"] is True
 
 
 def test_the_pool_classes_and_worker_states_are_todays():
     roles, classes = c.load("roles")["properties"], [sttpool.class_key(x) for x in sttpool.CLASSES]
-    assert sorted(roles["stt-heavy"]["properties"]["classes"]["items"]["enum"]) == sorted(classes)
+    assert sorted(roles["stt-heavy"]["properties"]["classes"]["items"]["x-known"]) == sorted(classes)
     fast = {sttpool.class_key(x) for x in sttpool.FAST_CLASSES}        # the pre-alert classes: never a station's
-    assert set(roles["stt-light"]["properties"]["classes"]["items"]["enum"]) == set(classes) - fast
+    light = roles["stt-light"]["properties"]["classes"]["items"]
+    assert set(light["x-known"]) == set(classes) - fast and set(light["not"]["enum"]) == fast
+    for cls in classes:
+        assert (c.errors("roles", {"stt-light": {"classes": [cls]}}) == []) == (cls not in fast), cls
     assert roles["stt-light"]["properties"]["pool"]["default"] is False
     assert roles["infer"]["properties"]["llm_jobs"]["default"] is True
-    assert c.load("capabilities")["properties"]["state"]["enum"] == list(sttpool.STATES)
+    assert c.load("capabilities")["properties"]["state"]["x-known"] == list(sttpool.STATES)
+
+
+def test_a_word_from_a_newer_build_is_valid_and_a_wrong_type_is_not():
+    """docs/nodes.md's closed lists (a dongle's state, a channel's running state, coverage, the pool classes, a
+    worker's state, a node's kind) are open strings here: a reader must take a word it does not know."""
+    caps, roles = c.load("capabilities")["properties"], c.load("roles")["properties"]
+    assert caps["sdrs"]["items"]["properties"]["state"]["x-known"] == ["ok", "out", "held", "off"]
+    assert caps["channels"]["items"]["properties"]["state"]["x-known"] == ["running", "waiting", "out", "held", "shed",
+                                                                           "not_in_set", "local"]
+    cover = roles["radio-receive"]["properties"]["channels"]["items"]["properties"]["coverage"]
+    assert cover["x-known"] == ["exclusive", "overlap", "failover"]
+    for name, make in (("capabilities", lambda v: {"sdrs": [{"serial": "00000101", "state": v}]}),
+                       ("capabilities", lambda v: {"channels": [{"job": "Paging 1", "state": v}]}),
+                       ("capabilities", lambda v: {"state": v}),
+                       ("roles", lambda v: {"radio-receive": {"channels": [{"job": "Paging 1", "coverage": v}]}}),
+                       ("roles", lambda v: {"stt-heavy": {"classes": [v]}}),
+                       ("roles", lambda v: {"stt-light": {"classes": [v]}}),
+                       ("node", lambda v: {"id": c.STATION, "kind": v})):
+        assert c.errors(name, make("from_the_future")) == [], name
+        for bad in (1, None, True, ["ok"], {"x": 1}):
+            assert c.errors(name, make(bad)) != [], (name, bad)
+
+
+def test_a_worker_sends_its_capabilities_in_its_hello():
+    """docs/nodes.md 1 and 5 step 1: the worker's capabilities go in its hello. Every hello valid today stays valid."""
+    doc = c.load("node-worker-hello")
+    assert doc["allOf"] == [{"$ref": "stt-worker-hello.schema.json"}] and "required" not in doc
+    assert set(doc["properties"]) == {"capabilities", "capabilities_rev"}
+    for file, inst in c.vectors("stt-worker-hello", "valid"):
+        assert c.errors("node-worker-hello", inst) == [], file
+    for file, inst in c.vectors("stt-worker-hello", "invalid"):
+        assert c.errors("node-worker-hello", inst), file
 
 
 def test_every_post_and_answer_of_today_is_valid_with_the_node_fields_absent():

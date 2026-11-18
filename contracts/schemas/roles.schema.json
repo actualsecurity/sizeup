@@ -29,8 +29,9 @@
             "properties": {
               "job": {"type": "string", "minLength": 1, "description": "The job's name."},
               "coverage": {
-                "enum": ["exclusive", "overlap", "failover"],
-                "description": "`exclusive` runs on this node only; `overlap` on every listed node, copies deduplicated on the hub; `failover` on the first healthy node of a ranked list."
+                "type": "string",
+                "description": "`exclusive` runs on this node only; `overlap` on every listed node, copies deduplicated on the hub; `failover` on the first healthy node of a ranked list. A node that does not know the value does not run that job and reports it as not running.",
+                "x-known": ["exclusive", "overlap", "failover"]
               }
             }
           }
@@ -59,9 +60,18 @@
           "type": "array",
           "uniqueItems": true,
           "description": "The pool classes it may take: never a pre-alert class.",
-          "items": {"enum": ["live", "rerun", "low", "catchup"], "description": "A pool class that is not a pre-alert class (sizeup/sttpool.py)."}
+          "items": {
+            "type": "string",
+            "description": "A pool class that is not a pre-alert class (sizeup/sttpool.py). A class a reader does not know is left out, never an error.",
+            "x-known": ["live", "rerun", "low", "catchup"],
+            "not": {"enum": ["urgent", "high", "context-fallback", "context"]}
+          }
         },
-        "max_s": {"type": "number", "exclusiveMinimum": 0, "description": "The longest clip it is offered, seconds of audio. An upper bound only: the station's own measured pace can lower it, never raise it."}
+        "max_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The longest clip it is offered, seconds of audio. An upper bound only: the station's own measured pace can lower it, never raise it."
+        }
       }
     },
     "stt-heavy": {
@@ -75,7 +85,11 @@
           "type": "array",
           "uniqueItems": true,
           "description": "The pool classes it may take.",
-          "items": {"enum": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"], "description": "A pool class (sizeup/sttpool.py CLASSES)."}
+          "items": {
+            "type": "string",
+            "description": "A pool class (sizeup/sttpool.py CLASSES). A class a reader does not know is left out, never an error.",
+            "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]
+          }
         },
         "fast": {"type": "boolean", "description": "It may take the pre-alert classes. This can only narrow the hub's measured speed gate, never bypass it."},
         "max_s": {"type": "number", "exclusiveMinimum": 0, "description": "The longest clip it is offered, seconds of audio."}
@@ -89,7 +103,12 @@
       "additionalProperties": true,
       "properties": {
         "llm_jobs": {"type": "boolean", "default": true, "description": "It takes language-model jobs."},
-        "models": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 80}, "description": "The models it may be asked for. Absent: any model the node serves."}
+        "models": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 80},
+          "description": "The models it may be asked for. Absent: any model the node serves."
+        }
       }
     },
     "adsb": {
@@ -98,9 +117,7 @@
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
-      "properties": {
-        "dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}
-      }
+      "properties": {"dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}}
     },
     "ais": {
       "title": "ais",
@@ -108,9 +125,7 @@
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
-      "properties": {
-        "dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}
-      }
+      "properties": {"dongle": {"type": "string", "maxLength": 64, "description": "The serial of the dongle reserved for it."}}
     },
     "training": {
       "title": "training",

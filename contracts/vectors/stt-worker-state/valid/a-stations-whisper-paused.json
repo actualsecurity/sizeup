@@ -1,0 +1,12 @@
+{
+  "state": "paused",
+  "model": "small.en-q5_1",
+  "load": {
+    "own": 0,
+    "queue": 0,
+    "rtf": 1.0,
+    "max_s": 8.0,
+    "cpu_pct": 27.9,
+    "why": "whisper not ready"
+  }
+}

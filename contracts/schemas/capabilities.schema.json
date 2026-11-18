@@ -38,9 +38,7 @@
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
-      "properties": {
-        "clips_free_gb": {"type": "number", "minimum": 0, "description": "Free space on the volume that holds the clips, GiB."}
-      }
+      "properties": {"clips_free_gb": {"type": "number", "minimum": 0, "description": "Free space on the volume that holds the clips, GiB."}}
     },
     "gpu": {
       "title": "GPU",
@@ -67,7 +65,11 @@
         "properties": {
           "serial": {"type": "string", "maxLength": 64, "description": "The dongle's serial as its EEPROM gives it."},
           "tuner": {"type": "string", "maxLength": 64, "description": "The tuner chip or product name; \"\" when not read."},
-          "state": {"enum": ["ok", "out", "held", "off"], "description": "`ok` running its job; `out` opens but streams nothing; `held` by another program; `off` no job."},
+          "state": {
+            "type": "string",
+            "description": "`ok` running its job; `out` opens but streams nothing; `held` by another program; `off` no job. A reader takes a value it does not know as unknown and never refuses the body for it.",
+            "x-known": ["ok", "out", "held", "off"]
+          },
           "job": {"type": "string", "description": "The job it is set to (a channel's label or a P25 system's job); \"\" for none."},
           "group": {"type": "string", "description": "The antenna group it belongs to; \"\" for none."},
           "held_by_other_app": {"type": "boolean", "description": "Another application on the machine holds this dongle through the shared claim files."}
@@ -92,8 +94,9 @@
         "properties": {
           "job": {"type": "string", "minLength": 1, "description": "The job's name, as in the role's channel set."},
           "state": {
-            "enum": ["running", "waiting", "out", "held", "shed", "not_in_set", "local"],
-            "description": "`running`; `waiting` no dongle for it; `out` a dongle that streams nothing or decodes nothing; `held` by another program; `shed` to a higher job of its antenna group; `not_in_set` runs here but is not in the node's set; `local` a person's override on the node. Anything but `running` counts as not covered."
+            "type": "string",
+            "description": "`running`; `waiting` no dongle for it; `out` a dongle that streams nothing or decodes nothing; `held` by another program; `shed` to a higher job of its antenna group; `not_in_set` runs here but is not in the node's set; `local` a person's override on the node. Anything but `running` counts as not covered, a value the hub does not know too.",
+            "x-known": ["running", "waiting", "out", "held", "shed", "not_in_set", "local"]
           }
         }
       }
@@ -136,13 +139,18 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "installed": {"type": "array", "items": {"type": "string", "maxLength": 120}, "description": "The ids of the sources the installed adapter provides; [] when none is installed."},
+        "installed": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 120},
+          "description": "The ids of the sources the installed adapter provides; [] when none is installed."
+        },
         "configured": {"type": "boolean", "description": "Its credentials are in place on this node."}
       }
     },
     "state": {
-      "enum": ["online", "gaming", "paused"],
-      "description": "From workers: `online`, `gaming` (the machine is in use: no jobs) or `paused` (today's sttpool.STATES)."
+      "type": "string",
+      "description": "From workers: `online`, `gaming` (the machine is in use: no jobs) or `paused` (today's sttpool.STATES). A hub keeps the state it had when it does not know the value.",
+      "x-known": ["online", "gaming", "paused"]
     },
     "net": {
       "title": "Network",

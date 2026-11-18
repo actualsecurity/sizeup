@@ -33,7 +33,12 @@
         "on": {"type": "boolean", "description": "The pool takes the lowest class of clips: the station may hand clips over."},
         "worker": {"type": "boolean", "description": "This station's whisper is in the pool: it may claim jobs."},
         "ready": {"type": "integer", "minimum": 0, "description": "How many workers other than this station's whisper could take a context clip now."},
-        "max_s": {"type": "number", "minimum": 0, "maximum": 3600, "description": "The longest clip one of them would take, seconds of audio (0 when none is ready; 3600 stands for no limit)."},
+        "max_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "The longest clip one of them would take, seconds of audio (0 when none is ready; 3600 stands for no limit)."
+        },
         "gpu_idle": {"type": "boolean", "description": "A GPU worker is idle and quick on pre-alert clips now."},
         "gpu_idle_n": {"type": "integer", "minimum": 0, "description": "How many are."}
       }

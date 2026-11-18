@@ -29,7 +29,7 @@ def walk(node, path="$"):
 
 
 def test_there_are_schemas_and_each_has_vectors_both_ways():
-    assert len(NAMES) >= 10
+    assert len(NAMES) >= 15
     for name in NAMES:
         assert c.vectors(name, "valid") and c.vectors(name, "invalid"), f"{name}: valid/ and invalid/ vectors"
     assert {p.name for p in c.VECTORS.iterdir()} == set(NAMES), "a vectors folder without its schema (or the reverse)"
@@ -130,12 +130,51 @@ def test_undeclared_finds_a_key_the_schema_does_not_name():
     assert c.undeclared("station-state", post) == []
     post["status"]["outbox"]["new_counter"] = 1
     post["talking"] = [dict(dict(c.vectors("station-state", "valid"))["talking-only.json"]["talking"][0], new_flag=True)]
-    post["status"]["health"]["new_gauge"] = 1                          # (health is not listed completely)
-    post["status"]["stt_input"]["dropped"]["new_reason"] = 0           # (a map of counts by reason)
+    post["status"]["health"]["new_gauge"] = 1
+    post["status"]["radios"][2]["freqs"][0]["new_flag"] = True
+    post["status"]["stt_input"]["dropped"]["new_reason"] = 0           # (a map of counts by reason: a key is data)
+    post["status"]["health"]["jobs"]["A new job"] = dict(post["status"]["health"]["jobs"]["Tower"])   # (a map by job)
+    post["status"]["health"]["stt_queue"]["new_gauge"] = 1             # (an object the schema leaves open: a known gap)
     post["new_top"] = 1
-    assert sorted(c.undeclared("station-state", post)) == ["$.new_top", "$.status.outbox.new_counter",
-                                                           "$.talking[0].new_flag"]
+    assert sorted(c.undeclared("station-state", post)) == [
+        "$.new_top", "$.status.health.new_gauge", "$.status.outbox.new_counter", "$.status.radios[2].freqs[0].new_flag",
+        "$.talking[0].new_flag"]
     assert c.errors("station-state", post) == []                       # ... while it still validates: keys are open
+
+
+def test_with_unknown_keys_reaches_every_object_the_schema_describes():
+    """The other check on itself: the key from a newer build goes into every object with listed fields, at every
+    depth, and nowhere else; the result is still valid, and what `undeclared` then finds is exactly those."""
+    post = dict(c.vectors("station-state", "valid"))["with-status.json"]
+    out, n = c.with_unknown_keys("station-state", post)
+    assert c.undeclared("station-state", post) == [] and c.errors("station-state", out) == []
+    found = c.undeclared("station-state", out)
+    assert len(found) == n > 50 and all(p.endswith(".from_the_future") for p in found)
+    objects = lambda node: (1 + sum(objects(v) for v in node.values()) if isinstance(node, dict)      # noqa: E731
+                            else sum(objects(v) for v in node) if isinstance(node, list) else 0)
+    # every object of the post but the maps' own level and the few the schema leaves open (contracts/README.md, gaps)
+    assert objects(post) - n < 45
+    jobs = out["status"]["health"]["jobs"]
+    assert "from_the_future" not in jobs and "from_the_future" in jobs["Tower"]
+    assert post == dict(c.vectors("station-state", "valid"))["with-status.json"]         # (a copy: nothing changed)
+
+
+def test_words_are_open_strings_with_the_values_known_today():
+    """The rule for a value, as for a key: a reader takes a word it does not know as unknown and never refuses the
+    body for it. So no schema closes a set of words (`enum`): a word is a string, with the values the code knows
+    today under `x-known`. The one exception narrows a role on purpose (`not`: stt-light never takes a pre-alert
+    class)."""
+    known = 0
+    for name in NAMES:
+        for path, node in walk(c.load(name)):
+            if "/not" in path:
+                continue
+            assert not any(isinstance(v, str) for v in node.get("enum", [])), f"{name} {path}: a closed set of words"
+            if "x-known" in node:
+                known += 1
+                assert node.get("type") in ("string", "array"), (name, path)
+                assert all(isinstance(v, str) for v in node["x-known"]), (name, path)
+    assert known >= 15
 
 
 def test_the_readme_lists_every_schema_with_its_status_and_version():

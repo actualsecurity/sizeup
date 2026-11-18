@@ -96,7 +96,7 @@
   },
   "adapter": {
     "installed": "example",
-    "configured": "yes"
+    "configured": true
   },
   "net": {
     "hub_rtt_ms": 38,

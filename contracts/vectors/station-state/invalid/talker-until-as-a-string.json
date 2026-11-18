@@ -1,0 +1,22 @@
+{
+  "at": 1794990000.0,
+  "talking": [
+    {
+      "key": "p25:countynet:grant:4101:990003",
+      "system": "p25",
+      "channel": "Fire Dispatch 1",
+      "tg": 4101,
+      "radio_id": "990003",
+      "alias": "Northfield Ctrl 2",
+      "rig": "",
+      "label": "",
+      "since": 1794984107.946744,
+      "talk_since": 1794984107.946744,
+      "ended": true,
+      "until": "2026-11-18T05:00:04Z",
+      "dispatcher": true,
+      "main": true
+    }
+  ],
+  "paging": []
+}

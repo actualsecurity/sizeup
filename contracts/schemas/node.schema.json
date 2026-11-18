@@ -17,9 +17,10 @@
     },
     "name": {"type": "string", "maxLength": 60, "description": "Free text for people, at most 60 characters."},
     "kind": {
-      "enum": ["station", "worker", "station+worker"],
-      "readOnly": true,
-      "description": "Derived by the hub from the credentials the node has, never set: `station` (a station token), `worker` (a worker token), `station+worker` (both)."
+      "type": "string",
+      "description": "Derived by the hub from the credentials the node has, never set: `station` (a station token), `worker` (a worker token), `station+worker` (both). A reader takes a value it does not know as unknown and never refuses the body for it.",
+      "x-known": ["station", "worker", "station+worker"],
+      "readOnly": true
     },
     "roles": {"$ref": "roles.schema.json"},
     "capabilities": {"$ref": "capabilities.schema.json"}

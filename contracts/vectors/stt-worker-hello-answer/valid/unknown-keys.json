@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "worker": "gpu-1",
+  "poll_s": 25.0,
+  "pool_on": true,
+  "classes": [
+    "urgent",
+    "high",
+    "context-fallback",
+    "context",
+    "live",
+    "rerun",
+    "low",
+    "catchup",
+    "from_the_future"
+  ],
+  "from_the_future": {
+    "x": [
+      1,
+      {
+        "y": null
+      }
+    ]
+  }
+}

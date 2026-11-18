@@ -214,8 +214,8 @@ skip without it. One focus-order test in `tests/test_new_call.py` also wants `js
 ### Contract tests
 
 `contracts/` holds a JSON Schema for each interface between a station (or any node) and the hub, with bodies that
-must and must not validate. `tests/test_contracts_*.py` check that today's hub and station send exactly that and
-ignore keys they don't know, and that every `/api/station/` route has its row in `contracts/routes.json`. A new key on
+must and must not validate. `tests/test_contracts_*.py` check that today's hub, station and worker client send
+exactly that and ignore keys they don't know, and that every `/api/station/` route has its row in `contracts/routes.json`. A new key on
 the wire or a new route fails there until its schema or its row is brought up to date:
 [`contracts/README.md`](../contracts/README.md).
 

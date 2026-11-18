@@ -1,0 +1,189 @@
+{
+  "at": 1794990005.0,
+  "talking": [],
+  "paging": [],
+  "status": {
+    "id": "st-north",
+    "config_id": "st-north",
+    "name": "North firehouse",
+    "radios": [
+      {
+        "label": "Paging 1",
+        "mhz": 460.1,
+        "state": "down",
+        "detail": "cannot start rtl_fm: not installed",
+        "restarts": 0,
+        "open": false,
+        "last_heard": null,
+        "quieting_db": null,
+        "open_s": null,
+        "stuck": false,
+        "open_db": 10.0,
+        "close_db": 6.0,
+        "hiss_db": null,
+        "floor_db": null,
+        "min_open_s": 0.3,
+        "short_per_min": 0.0,
+        "squelch_default": {
+          "open_db": 10.0,
+          "close_db": 6.0,
+          "min_open_s": 0.3
+        },
+        "channel_kind": "paging"
+      },
+      {
+        "label": "Fireground 1",
+        "mhz": 453.1,
+        "state": "down",
+        "detail": "cannot start rtl_fm: not installed",
+        "restarts": 0,
+        "open": false,
+        "last_heard": null,
+        "quieting_db": null,
+        "open_s": null,
+        "stuck": false,
+        "open_db": 10.0,
+        "close_db": 6.0,
+        "hiss_db": null,
+        "floor_db": null,
+        "min_open_s": 0.3,
+        "short_per_min": 0.0,
+        "squelch_default": {
+          "open_db": 10.0,
+          "close_db": 6.0,
+          "min_open_s": 0.3
+        },
+        "channel_kind": "traffic",
+        "keyups": {
+          "n": 0,
+          "no_speech": 0,
+          "tones": {},
+          "bare_s": [],
+          "bare_q": [],
+          "recent": []
+        }
+      },
+      {
+        "label": "STT",
+        "mhz": null,
+        "state": "starting",
+        "detail": "",
+        "open": false,
+        "quieting_db": null,
+        "restarts": 0,
+        "last_heard": null
+      },
+      {
+        "label": "Voice",
+        "mhz": null,
+        "state": "off",
+        "detail": "no voice on this machine",
+        "open": false,
+        "quieting_db": null,
+        "restarts": 0,
+        "last_heard": null
+      }
+    ],
+    "sdr": null,
+    "rerun": {
+      "total": 0,
+      "done": 0,
+      "changed": 0,
+      "failed": 0,
+      "pending": 0
+    },
+    "channels": {
+      "prefs": {},
+      "aws": {
+        "ok": false,
+        "why": "the hub hasn't said whether it can use AWS yet",
+        "reserve": []
+      },
+      "tones": 0,
+      "squelch": {},
+      "squelch_ok": true,
+      "deny_ok": true,
+      "sig": "0b022a41e225"
+    },
+    "p25_systems": [],
+    "reception": null,
+    "stt_terms": {
+      "v": "",
+      "sets": {}
+    },
+    "outbox": {
+      "pending": 0,
+      "oldest": null,
+      "dropped_audio": 0
+    },
+    "stt_input": {
+      "queued": 0,
+      "waiting": 0,
+      "bytes": 0,
+      "made": 0,
+      "sent": 0,
+      "dropped": {
+        "queue": 0,
+        "too_big": 0,
+        "failed": 0,
+        "outbox": 0,
+        "refused": 0
+      },
+      "hub_takes": true,
+      "dropped_pre": 0,
+      "dropped_fire": 0,
+      "encoder": "",
+      "held": false,
+      "worker": {
+        "where": "",
+        "state": "",
+        "detail": "",
+        "unhealthy": false,
+        "in_flight": false
+      }
+    },
+    "pool_worker": {
+      "claimed": 0,
+      "done": 0,
+      "released": 0,
+      "preempted": 0,
+      "lost": 0,
+      "error": "",
+      "state": "paused",
+      "why": "whisper not ready"
+    },
+    "stt_alert_rev": 0,
+    "version": {
+      "build": "",
+      "hub": "",
+      "update": {
+        "failed": {}
+      },
+      "adapter": {
+        "state": "off",
+        "repo": "",
+        "commit": "",
+        "text": "",
+        "health": []
+      },
+      "state": "unknown",
+      "text": "version ? (the hub's build isn't known: not updating)"
+    },
+    "logship": {
+      "state": "error",
+      "reason": "OSError"
+    },
+    "metrics": {
+      "pending": 1,
+      "dropped": 0,
+      "sent": 1,
+      "rejected": 0,
+      "last_ok": 1794984107.92642,
+      "error": ""
+    },
+    "health": {
+      "error": "OSError: [Errno 5] Input/output error"
+    },
+    "talkgroups": []
+  }
+}

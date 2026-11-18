@@ -4,6 +4,7 @@ asked of a real hub with each kind of token. A route added to the code without a
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KINDS = ("sz1", "shared", "status", "sw1")
 TABLE = c.routes()
 ROWS = TABLE["routes"]
+REASONS = c.load("station-error")["properties"]["reason"]["x-known"]
 
 
 def row_id(row) -> str:
@@ -123,11 +125,13 @@ def test_a_stations_token_opens_the_workers_routes_only_while_its_whisper_is_in_
             for kind in ("sz1", "shared"):
                 code, body = ask(live, row["method"], row, kind)
                 assert code == 403 and body["reason"] == "stations_off", (row_id(row), kind, code, body)
+                assert c.errors("station-error", body) == [] and body["reason"] in REASONS
     live.hub.app.hub.workers.set_pool(stations={c.STATION: True})
     for row in ROWS:
         if "/infer/" in row["path"]:
             code, body = ask(live, row["method"], row, "sz1")
             assert code == 403 and body["reason"] == "gpu_only", (row_id(row), code, body)
+            assert c.errors("station-error", body) == [] and body["reason"] in REASONS
 
 
 def test_a_path_that_is_no_route_is_not_served(live):
@@ -138,6 +142,44 @@ def test_a_path_that_is_no_route_is_not_served(live):
         for kind in ("sz1", "sw1"):
             code, body = live.call(method, path, {} if method == "POST" else None, token=kind)
             assert code in (401, 403) or unserved(code, body), (method, path, kind, code, body)
+
+
+def test_the_enumeration_fails_on_a_way_to_route_it_cannot_read():
+    """The check on itself. Two ways a route could be added that the reading of `path == ...` would never see, each put
+    into the real handler's source: a part of the path cut off and compared, and a table of handlers keyed by the last
+    segment. Both must fail, and say what to do; so must a path copied to another name, and a comparison with
+    something that is no constant of the module."""
+    from sizeup.cloud import sttworkers
+    worker = inspect.getsource(sttworkers.WorkerApi.handle)
+    hub = inspect.getsource(hub_mod.Hub.handle)
+    anchor_w = "            m = LEASE_PATH.fullmatch(path)\n            if m is None or m.group(2) == \"audio\":"
+    anchor_h = "        try:\n            if method == \"GET\" and path == \"/api/station/jobs\":"
+    assert worker.count(anchor_w) == 1 and hub.count(anchor_h) == 1
+    assert c.source_paths(worker, "handle", vars(sttworkers)) == c.handler_paths(sttworkers.WorkerApi.handle)
+    cut = worker.replace(anchor_w, "            tail = path[len(API):]\n            if tail == \"models\":\n"
+                                   "                return _json(200, {\"models\": []})\n" + anchor_w)
+    table = hub.replace(anchor_h, "        extra = {\"probe\": self._jobs}.get(path.rsplit(\"/\", 1)[-1])\n"
+                                  "        if extra is not None:\n            return extra(query)\n" + anchor_h)
+    alias = hub.replace(anchor_h, "        where = path\n        if where == \"/api/station/probe\":\n"
+                                  "            return self._jobs(query)\n" + anchor_h)
+    local = hub.replace(anchor_h, "        if path == self.probe_path:\n            return self._jobs(query)\n" + anchor_h)
+    for src, module, line in ((cut, sttworkers, "tail = path[len(API):]"), (table, hub_mod, "path.rsplit"),
+                              (alias, hub_mod, "where = path"), (local, hub_mod, "self.probe_path")):
+        with pytest.raises(AssertionError) as e:
+            c.source_paths(src, "handle", vars(module), "the changed handler")
+        assert line in str(e.value) and "contracts/routes.json" in str(e.value), str(e.value)
+    # ... and a route added in the form it reads is seen (and then has no row: the test above fails)
+    plain = hub.replace(anchor_h, "        if method == \"GET\" and path == \"/api/station/probe\":\n"
+                                  "            return self._jobs(query)\n" + anchor_h)
+    paths, _ = c.source_paths(plain, "handle", vars(hub_mod))
+    assert paths - {c.example(r["path"]) for r in ROWS} == {"/api/station/probe"}
+
+
+def test_every_use_of_path_in_the_dispatchers_is_one_the_enumeration_reads():
+    for fn in c.dispatchers():
+        uses = c.path_uses(inspect.getsource(fn), fn.__name__, fn.__qualname__)
+        assert len(uses) >= 2, fn.__qualname__
+        assert {k for k, _ in uses} <= {"eq", "re", "prefix", "hand"}
 
 
 def test_the_path_templates_expand_as_the_codes_patterns_do():

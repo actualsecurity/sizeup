@@ -3,7 +3,7 @@
     "channels": [
       {
         "job": "Paging 1",
-        "coverage": "shared"
+        "coverage": 1
       }
     ]
   }

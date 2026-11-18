@@ -1,0 +1,6 @@
+{
+  "state": "paused",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "worker": "gpu-1"
+}
