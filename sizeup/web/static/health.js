@@ -59,9 +59,11 @@ const StationHealth = (() => {
 
   function dl(pairs) {
     const d = el("dl", "admin");
-    for (const [k, v, cls] of pairs) {
+    for (const [k, v, cls, hover] of pairs) {
       const w = el("div");
-      w.append(el("dt", "", k), el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v)));
+      const dd = el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v));
+      if (hover) dd.title = hover;
+      w.append(el("dt", "", k), dd);
       d.append(w);
     }
     return d;
@@ -243,7 +245,14 @@ const StationHealth = (() => {
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
-      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")],
+      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")
+        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : "") + (ob.dropped_stt_fire ? ` · ${ob.dropped_stt_fire} fire` : ""),
+        ob.dropped_stt_pre || ob.dropped_stt_fire ? "hl-warn" : ""],
+      // (#677) where the station's STT inputs are made, and the encoder service's state (a wedged one is seen here)
+      ...(ob.stt_worker ? [["STT encoder", [ob.stt_worker.where.split(" (")[0], ob.stt_worker.state,
+        ob.stt_worker.held ? "held" : ""].filter((x, i, a) => x && a.indexOf(x) === i).join(" · "),
+        ["unhealthy", "slow", "dead"].includes(ob.stt_worker.state) ? "hl-warn" : "",
+        [ob.stt_worker.where, ob.stt_worker.detail].filter(Boolean).join("\n")]] : []),
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],
@@ -310,6 +319,18 @@ const StationHealth = (() => {
       ]));
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
+    }
+    const sa = h.stt_arrival;
+    if (sa) {             // #677: each STT input's arrival on the hub after its event (sizeup/cloud/sttarrival.py)
+      const q = (w) => (w ? `${w.p50} / ${w.p95} s` : "");
+      const n = (w) => [String(w ? w.n : 0), "", w && w.early ? `${w.early} before their event` : ""];
+      const hd = el("h3", "hl-sub", "STT input arrival (hub)");
+      hd.title = "Event applied → its STT input stored, p50 / p95. Negative: the STT input came first";
+      kids.push(hd, table(["Channel", "Kind", "1 h", "24 h", "n 24 h"], [
+        ...Object.entries(sa.kinds || {}).map(([k, w]) => [["All", "dim"], k, q(w.h1), q(w.d1), n(w.d1)]),
+        ...(sa.channels || []).map((c) => [c.channel, c.kind, q(c.h1), q(c.d1), n(c.d1)]),
+      ], ""));
+      if (sa.more) kids.push(el("p", "dim small", `+${sa.more} more channels`));
     }
     const sp = h.stt_pool;
     if (sp && !sp.error) {  // the GPU worker pool (#639, sizeup/sttpool.py): workers, queue, fallbacks, latency by channel

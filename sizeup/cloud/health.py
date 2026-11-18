@@ -546,6 +546,8 @@ class StationHealth:
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
         self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
+        # each STT input's arrival after its event, p50 / p95 (#677, sizeup/cloud/sttarrival.py stats; HubApp sets it)
+        self.stt_arrival: Callable[[float], dict | None] | None = None
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -658,6 +660,14 @@ class StationHealth:
         why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
         out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
         out["outbox"]["dropped_stt_why"] = why
+        pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
+        out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        wk = si.get("worker") if isinstance(si.get("worker"), dict) else {}     # (#677) where NORMAL / LOW are made
+        out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
+                                       "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
+                                       "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        fire = si.get("dropped_fire")                               # ... and fire traffic's
+        out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -802,6 +812,10 @@ class StationHealth:
         except Exception:  # noqa: BLE001 - never in the way of the rest
             shifts = []
         out["hints"] += shifts
+        try:                                        # #677: the STT inputs' arrival on the hub after their events
+            out["stt_arrival"] = self.stt_arrival(now) if self.stt_arrival is not None else None
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            out["stt_arrival"] = None
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

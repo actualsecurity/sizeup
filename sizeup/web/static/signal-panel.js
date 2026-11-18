@@ -5,7 +5,8 @@
 // paging channel's pages at open and close); the noise opens a minute; the transmissions by kind; the distribution the
 // suggestion comes from. AM: the floor and each transmission's carrier. P25: the decode rate, control channel lost, the
 // grants on frequencies no dongle covers. Every event (dongle, gain, squelch, unplug / back, stall, restart, a Settings
-// change) a tick on top. A Health hint links here: #settings/radios/signal?s=FG1&at=<epoch>.
+// change) a tick on top. Each channel's STT input arrival on the hub after its event (#677: p50 / p95; a talkgroup with
+// no signal metrics of its own shows only that). A Health hint links here: #settings/radios/signal?s=FG1&at=<epoch>.
 //   SignalPanel.mount(box)   when its tab opens (settings.js)
 "use strict";
 
@@ -13,8 +14,9 @@ window.SignalPanel = (() => {
   const RANGES = [["6h", "6 h", 6 * 3600], ["24h", "24 h", 86400], ["7d", "7 d", 7 * 86400], ["30d", "30 d", 30 * 86400]];
   const RAW_MAX_S = 7 * 86400;            // the API's raw span (metricstore RAW_SPAN_S)
   const KINDS = [["voice", "Voice", "sg-voice"], ["page", "Page", "sg-page"], ["burst", "ID burst", "sg-burst"], ["noise", "Noise", "sg-noise"]];
-  const HOUR_FM = "idle_q50,idle_q90,idle_qmax,noise_opens,sq_open,sq_close,tx_q,tx_q_open,tx_q_close,noise_q,floor,tx_dbfs,tx_snr";
-  const HOUR_CC = "cc_rate,cc_lo,cc_uncovered";
+  const HOUR_FM = "idle_q50,idle_q90,idle_qmax,noise_opens,sq_open,sq_close,tx_q,tx_q_open,tx_q_close,noise_q,floor,tx_dbfs,tx_snr,stt_delay";
+  const HOUR_CC = "cc_rate,cc_lo,cc_uncovered,stt_delay";
+  const HOUR_STT = "stt_delay";
   const st = { box: null, range: "24h", res: "", subject: "", at: null, index: null, sugg: {}, data: {}, error: "", gen: 0,
                loading: false, ro: null, focused: "", loadedAt: 0 };
 
@@ -73,13 +75,14 @@ window.SignalPanel = (() => {
   function subjects() {
     const by = new Map();
     for (const s of (st.index && st.index.series) || []) {
-      if (s.subject === "station") continue;
+      // (the station's own row; and a subject of none of these, e.g. the whisper queue's "stt" records, #639)
+      if (s.subject === "station" || !["floor", "tx", "cc", "stt_in"].includes(s.kind)) continue;
       const k = `${s.station}\u0000${s.subject}`;
       if (!by.has(k)) by.set(k, { station: s.station, subject: s.subject, kinds: new Set() });
       by.get(k).kinds.add(s.kind);
     }
     const all = [...by.values()];
-    const order = (x) => (x.kinds.has("cc") ? 1 : 0);
+    const order = (x) => (x.kinds.has("cc") ? 1 : sttOnly(x) ? 2 : 0);
     return all.sort((a, b) => order(a) - order(b) || a.subject.localeCompare(b.subject));
   }
 
@@ -98,7 +101,7 @@ window.SignalPanel = (() => {
       const out = {};
       await Promise.all(subjects().filter((x) => !st.subject || x.subject === st.subject).map(async (x) => {
         const q = new URLSearchParams({ subject: x.subject, station: x.station, from: t0, to: t1, res: r });
-        if (r === "hour") q.set("metric", x.kinds.has("cc") ? HOUR_CC : HOUR_FM);
+        if (r === "hour") q.set("metric", x.kinds.has("cc") ? HOUR_CC : sttOnly(x) ? HOUR_STT : HOUR_FM);
         try { out[x.subject] = await get(`/api/cad/metrics?${q}`); } catch (e) { out[x.subject] = { error: e.message }; }
       }));
       if (gen !== st.gen) return;
@@ -328,6 +331,34 @@ window.SignalPanel = (() => {
                empty: "No uncovered grants" })];
   }
 
+  // each STT input's arrival on the hub after its event (#677): raw, a dot each (negative: it came first); hourly,
+  // the p50-p95 band and the p50. null without any
+  const sttOnly = (x) => x.kinds.has("stt_in") && !x.kinds.has("floor") && !x.kinds.has("cc");
+  function sttChart(x, d, t0, t1, box) {
+    const rows = d.rows || [], raw = d.res === "raw", ev = events(d);
+    const L = [];
+    let legend;
+    if (raw) {
+      const got = rows.filter((r) => r.k === "stt_in" && num(r.delay) !== null);
+      if (!got.length) return null;
+      for (const [k, name, cls] of [["page", "Page", "sg-page"], ["traffic", "Traffic", "sg-voice"]]) {
+        const of = got.filter((r) => (r.kind === "page" ? "page" : "traffic") === k);
+        if (of.length) L.push({ type: "dots", name, cls, pts: of.map((r) => [r.at, r.delay, `${r1(r.delay)} s`]) });
+      }
+      legend = L.map((l) => [l.name, l.cls, "dot"]);
+    } else {
+      const m = rows.filter((r) => r.metric === "stt_delay");
+      if (!m.length) return null;
+      L.push({ type: "band", name: "p50–p95", cls: "sg-idle", gap: 7200, pts: m.map((r) => [r.at, r.p50, num(r.p95) ?? r.p90]) });
+      L.push({ type: "line", name: "p50", cls: "sg-c1", gap: 7200, pts: m.map((r) => [r.at, r.p50]) });
+      legend = [["p50", "sg-c1", "line"], ["p50–p95", "sg-idle", "fill"]];
+    }
+    const f = window.SignalChart.plot({ box, x0: t0, x1: t1, time: true, h: 70, unit: "s", zero: true, ymin_span: 1,
+      layers: L, events: ev, legend, label: `${x.subject}: STT input arrival after its event`, empty: "No STT inputs" });
+    f.title = "Event applied → its STT input stored on the hub. Negative: the STT input came first";
+    return f;
+  }
+
   // ---- the page --------------------------------------------------------------------------------------------------
   function suggLine(sug) {
     if (!sug) return null;
@@ -348,15 +379,19 @@ window.SignalPanel = (() => {
     const head = el("div", "card-head");
     const cc = x.kinds.has("cc");
     const fl = (d.rows || []).find((r) => r.k === "floor" && (r.kind || r.mhz));
-    const kind = cc ? "P25" : [sug && sug.am ? "AM" : "FM", (sug && sug.kind) || (fl && fl.kind) || ""].filter(Boolean).join(" · ");
+    const only = sttOnly(x);
+    const kind = cc ? "P25" : only ? "STT input arrival" : [sug && sug.am ? "AM" : "FM", (sug && sug.kind) || (fl && fl.kind) || ""].filter(Boolean).join(" · ");
     head.append(el("h2", "", x.subject), el("span", "dim small", kind + (fl && fl.mhz ? ` · ${fl.mhz} MHz` : "")));
     head.append(el("span", "spacer"));
-    const sl = !cc && suggLine(sug);
+    const sl = !cc && !only && suggLine(sug);
     if (sl) head.append(sl);
     c.append(head);
     if (d.error) { c.append(el("p", "error small", d.error)); return c; }
     const [t0, t1] = [d.from ?? window_()[0], d.to ?? window_()[1]];
-    const charts = cc ? ccCharts(x, d, t0, t1, st.box) : fmCharts(x, d, sug, t0, t1, st.box);
+    const charts = only ? [] : cc ? ccCharts(x, d, t0, t1, st.box) : fmCharts(x, d, sug, t0, t1, st.box);
+    const stt = x.kinds.has("stt_in") ? sttChart(x, d, t0, t1, st.box) : null;
+    if (stt) charts.push(stt);
+    else if (only) charts.push(el("p", "dim small", "No STT inputs in this range"));
     c.append(...charts);
     if (d.truncated) c.append(el("p", "dim small", "Cut at 20,000 rows: pick a shorter range or Hourly"));
     return c;
@@ -376,5 +411,5 @@ window.SignalPanel = (() => {
     st.box.replaceChildren(...kids);
   }
 
-  return { mount, _st: st, _fmCharts: fmCharts, _ccCharts: ccCharts, _distribution: distribution, _render: render };
+  return { mount, _st: st, _fmCharts: fmCharts, _ccCharts: ccCharts, _distribution: distribution, _sttChart: sttChart, _render: render };
 })();
