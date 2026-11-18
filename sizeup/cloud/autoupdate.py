@@ -722,12 +722,23 @@ class Updater:
 
     # -- the outside world (tests replace these) ---------------------------------------------------------
 
-    def git(self, *args: str, check: bool = True) -> str:
-        """git in /opt/sizeup/repo.git, as root (root's clone, root's copy of the deploy key)."""
+    def git(self, *args: str, check: bool = True, timeout: float = 600) -> str:
+        """git in /opt/sizeup/repo.git, as root (root's clone, root's copy of the deploy key). A run past timeout (or
+        one that can't start) is a StepError like any failure ("" with check=False): never an exception that would
+        leave a run half-way (the network down while an update waits)."""
         ssh = (f"ssh -i {self.p.deploy_key} -o IdentitiesOnly=yes -o UserKnownHostsFile={self.p.known_hosts} "
-               "-o StrictHostKeyChecking=yes -o BatchMode=yes")
-        r = subprocess.run(["git", "--no-replace-objects", f"--git-dir={self.p.repo}", *args], capture_output=True,
-                           text=True, timeout=600, env=dict(os.environ, GIT_SSH_COMMAND=ssh))
+               "-o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15")
+        try:
+            r = subprocess.run(["git", "--no-replace-objects", f"--git-dir={self.p.repo}", *args], capture_output=True,
+                               text=True, timeout=timeout, env=dict(os.environ, GIT_SSH_COMMAND=ssh))
+        except subprocess.TimeoutExpired:
+            if check:
+                raise StepError(f"git {args[0]}: timed out after {timeout:g} s") from None
+            return ""
+        except OSError as e:
+            if check:
+                raise StepError(f"git {args[0]}: {e}") from None
+            return ""
         if check and r.returncode != 0:
             lines = (r.stderr or r.stdout).strip().splitlines()
             raise StepError(f"git {args[0]}: {lines[-1] if lines else 'failed'}")
@@ -1860,12 +1871,15 @@ class Updater:
                       "stt": hold.get("stt", 0), "skipped": skipped}
 
     def descends(self, w: str, sha: str) -> bool:
-        """The hub's build w comes after sha on main (fetched first when this clone doesn't have it yet)."""
+        """The hub's build w comes after sha on main (fetched first, briefly, when this clone doesn't have it yet). A
+        fetch that fails (the network down): taken as after it, so the staged build, checked already, still goes; the
+        newer one is just not chased."""
         if not self.git("rev-parse", "--verify", "--quiet", f"{w}^{{commit}}", check=False):
             try:
-                self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
-            except StepError:
-                return False
+                self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}", timeout=60)
+            except (StepError, subprocess.TimeoutExpired, OSError) as e:
+                self.note(f"auto-update: can't look up the hub's {short(w)} ({e}): switching to the staged build")
+                return True
         full = self.git("rev-parse", "--verify", "--quiet", f"{w}^{{commit}}", check=False)
         return bool(full) and self.is_ancestor(sha, full)
 
@@ -1944,7 +1958,7 @@ class Updater:
             self.save(st, state="updating", to=want, hub=want, paused="", adapter_to="", **{"from": name})
             try:
                 self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
-            except StepError as e:
+            except (StepError, subprocess.TimeoutExpired, OSError) as e:     # (git() makes the last two StepErrors)
                 self.result(f"{tag}: can't fetch ({e}): staying on {short(build)}; trying again at the next check")
                 self.save(st, state="behind", current=build, last=dict(last, result="no fetch", why=str(e)[:300]))
                 return 1

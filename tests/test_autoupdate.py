@@ -1120,3 +1120,38 @@ def test_the_off_command_only_says_it_stopped_the_switch_when_it_did():
     off = text[text.index("      on|off)"):text.index("      now)")]
     assert 'if [ -n "$stopped" ] || [ "$(updater_state)" = paused ]; then' in off
     assert off.index('systemctl stop sizeup-update.service && stopped=1') < off.index("the waiting update won't switch")
+
+
+def test_a_fetch_that_hangs_while_late_still_switches_to_the_staged_build(station, monkeypatch):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new = repo.commit("two")
+    t0 = _late(u, new)
+    u.busy_for = 10 ** 6                                     # a carrier on: the 5 min grace, then anyway
+    unseen = []                                              # the hub's next build: made after the station fetched
+    real = au.subprocess.run
+    tried = []
+
+    def run(argv, *a, **k):
+        if "fetch" in argv and tried is not None and u.calls:          # the network goes once it has staged
+            tried.append(k.get("timeout"))
+            raise subprocess.TimeoutExpired(argv, k.get("timeout") or 0)
+        return real(argv, *a, **k)
+    monkeypatch.setattr(au.subprocess, "run", run)
+
+    def deploy(now):
+        if now - t0 >= 5 and not unseen:
+            unseen.append(repo.commit("three"))
+            u.want(unseen[0])
+    u.on_sleep = deploy
+    u.want(new)
+    assert u.run() == 1                                      # the switch, then the newer one can't be fetched
+    unseen = unseen[0]
+    assert u.calls[:2] == [("stage", new), ("activate", new)] and u.current()[1] == new
+    log = u.p.log.read_text().splitlines()
+    assert f"-> {new[:7]}: ok in " in log[0] and "went: still carrier open on FG1 after 5 min: switching anyway" in log[0]
+    said = "\n".join(u.lines)
+    assert f"can't look up the hub's {unseen[:7]} (git fetch: timed out after 60 s): switching to the staged build" in said
+    assert tried[0] == 60
+    st = u.load()
+    assert st["state"] == "behind" and st["last"]["result"] == "no fetch" and "timed out after 600 s" in st["last"]["why"]
