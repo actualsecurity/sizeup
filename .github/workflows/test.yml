@@ -57,7 +57,37 @@ jobs:
           echo "shard $SHARD of ${{ strategy.job-total }}: $(wc -l < /tmp/shard-files.txt) test files"
       # Tests marked @pytest.mark.flaky (known flakes, each with its issue) get one retry on failure: "R" in the
       # progress, "N rerun" in the totals and a warning annotation (tests/conftest.py). Any other failure is final.
-      - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile $(cat /tmp/shard-files.txt)
+      # PYTHONFAULTHANDLER: a crash in C before or after pytest's own faulthandler (on during the session) still dumps.
+      # A shard still going after 21 min (the whole unsharded suite took 10-19) has stalled (#740: twice at 98%,
+      # silent until the job timeout): its processes are listed and SIGUSR1 makes the controller and every worker
+      # print every thread's stack and go on (tests/conftest.py). The step's own timeout leaves the job time for the
+      # step below.
+      - name: pytest
+        timeout-minutes: 27
+        env:
+          PYTHONFAULTHANDLER: "1"
+        # pytest in the foreground: a background job starts with SIGINT ignored, and then Python never turns SIGINT
+        # into KeyboardInterrupt (_thread.interrupt_main does nothing; test_stt_worker's long-poll stop hung).
+        run: |
+          ( sleep 1260
+            pid=$(ps -A -o pid=,ppid=,comm= | awk -v p="$$" '$2 == p && $3 ~ /[Pp]ython[0-9.]*$/ {print $1; exit}')
+            echo "::warning::pytest (this shard) still running after 21 min (#740): its processes and every thread's stack follow"
+            ps -o pid,ppid,etime,rss,args -p "$pid" --ppid "$pid" || true
+            kill -USR1 "$pid" 2>/dev/null || true
+            pkill -USR1 -P "$pid" || true ) &
+          watchdog=$!
+          rc=0
+          python -m pytest -q -p no:cacheprovider -n auto --dist loadfile $(cat /tmp/shard-files.txt) || rc=$?
+          pkill -P "$watchdog" 2>/dev/null || true
+          kill "$watchdog" 2>/dev/null || true
+          exit "$rc"
+      # A worker that died without a word ("node down", #740): the conftest says its exit status; a SIGKILL there is
+      # most likely the OOM killer, which only the kernel log names. Also after a timeout (cancelled).
+      - if: failure() || cancelled()
+        run: |
+          free -m || true
+          sudo dmesg -T 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -20 || true
+          ps -eo pid,ppid,etime,rss,args | grep -E "[p]ython" || true
 
   pytest:
     # One check named `pytest`, as before: green only when every shard is.
