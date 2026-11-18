@@ -1042,7 +1042,8 @@ class LlmCall:
         text = re.sub(r"^\s*<think>.*?</think>", "", str(content or ""), flags=re.S).strip()
         try:
             out = json.loads(text)
-        except ValueError:
+            json.dumps(out, allow_nan=False)   # (a NaN / Infinity / 1e999 in the answer: invalid, as on the hub
+        except ValueError:                     # (sizeup/cloud/infer.py Lane._answer), never nulled by dumps on the wire)
             out = None
         return (out if isinstance(out, dict) else None, int(_num(usage.get("prompt_tokens")) or 0),
                 int(_num(usage.get("completion_tokens")) or 0))
