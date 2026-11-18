@@ -101,3 +101,12 @@ def test_refresh_refuses_a_report_with_no_durations(tmp_path):
     with pytest.raises(SystemExit):
         ci.refresh(report, tmp_path / "out.json")
     assert not (tmp_path / "out.json").exists()
+
+
+def test_the_workflow_hands_the_tool_a_one_based_shard_number():
+    """GitHub's strategy.job-index counts from 0 and the tool's INDEX from 1: passing the raw index sent shard 0 to a
+    refusal and left the last shard untested (the first run of this workflow)."""
+    wf = (ROOT / ".github" / "workflows" / "test.yml").read_text()
+    assert "tools/ci_shard.py" in wf and "strategy.job-total" in wf          # the count is the matrix's own size
+    assert "$(( ${{ strategy.job-index }} + 1 ))" in wf                       # one-based
+    assert 'ci_shard.py "${{ strategy.job-index }}"' not in wf                # never the raw zero-based index
