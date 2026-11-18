@@ -1147,6 +1147,7 @@ class Worker:
         self._llm_claiming = False
         self._preempt = threading.Event()  # a pre-alert clip came: the generation in flight steps aside
         self.llm_job: dict | None = None
+        self.llm_on: bool | None = None    # the hub's switches for this worker's LLM jobs (None: not said yet)
         self.llm_counts = {"done": 0, "invalid": 0, "released": 0, "lost": 0, "failed": 0}
         self.backoff = Backoff()
         self.connected = False             # hello answered; the heartbeat runs only then
@@ -1743,6 +1744,14 @@ class Worker:
                                        timeout=self.claim_wait + 15)
         finally:
             self._llm_claiming = False
+        if ans.get("llm_on") is False:         # the pool or this worker's "LLM jobs" switched off on the hub
+            if self.llm_on is not False:
+                log.info("hub: LLM jobs are off for this worker (Settings > Station > STT workers)")
+            self.llm_on = False
+            self._llm_until = self.clock() + 60
+        elif "llm_on" in ans and self.llm_on is False:
+            log.info("hub: LLM jobs are on again")
+            self.llm_on = True
         job = ans.get("job")
         if isinstance(job, dict):
             self.do_infer(job)

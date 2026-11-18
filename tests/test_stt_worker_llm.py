@@ -48,6 +48,7 @@ class InferHub(FakeHub):
 
     def __init__(self):
         self.infer = True
+        self.llm_on = True
         self.infer_pending: list[dict] = []
         self.infer_leases: dict[str, dict] = {}
         super().__init__()
@@ -69,6 +70,8 @@ class InferHub(FakeHub):
         if not self.infer:
             return self.send(req, 404, {"error": "not found"})
         if req.path == f"{API}/infer/claim":
+            if not self.llm_on:
+                return self.send(req, 200, {"job": None, "llm_on": False})
             with self.cv:
                 self.cv.wait_for(lambda: self.infer_pending or self.gen != gen,
                                  timeout=min(float(body.get("wait", 0)), self.claim_max_wait))
@@ -445,3 +448,15 @@ def test_check_tries_a_constrained_answer(tmp_path, ihub, whisper, llama, capsys
     assert llama.requests[-1]["body"]["response_format"]["json_schema"]["schema"]["required"] == ["ok"]
     llama.answer = {"ok": "yes"}
     assert W._check(cfg) == 1 and "didn't follow the schema" in capsys.readouterr().out
+
+
+def test_llm_jobs_switched_off_on_the_hub_the_worker_asks_again_a_minute_later(tmp_path, ihub, whisper, llama):
+    ihub.llm_on = False
+    w = W.Worker(llm_cfg(tmp_path, ihub, whisper, llama), run=no_smi)
+    with running(w):
+        wait_for(lambda: ihub.calls("/infer/claim"), what="an infer claim")
+        time.sleep(0.3)
+        assert len(ihub.calls("/infer/claim")) == 1 and w.llm_on is False
+        ihub.add_job("FG1-4", tone_wav(1.0))
+        wait_for(lambda: ihub.accepted(), what="the clip's text")       # clips as ever
+    assert 55 < w._llm_until - w.clock() <= 60
