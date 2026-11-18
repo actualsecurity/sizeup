@@ -1020,13 +1020,25 @@ def test_stop_interrupts_a_long_poll_at_once(tmp_path, hub, whisper):
 
 def test_ctrl_c_stops_the_worker(tmp_path, hub, whisper):
     import _thread
+    import signal
     hub.claim_max_wait = 10.0
     w = W.Worker(make_cfg(tmp_path, hub, whisper, claim_wait_s=25), run=no_smi)
+    # interrupt_main() raises KeyboardInterrupt only through Python's own SIGINT handler: pytest started in the
+    # background from a non-interactive shell has SIGINT ignored, and run() would wait forever. So the handler is put
+    # in for the test (and put back), and a deadline stops the worker its own way: never a hang, a failure instead.
+    old = signal.signal(signal.SIGINT, signal.default_int_handler)
     timer = threading.Timer(0.5, _thread.interrupt_main)
+    deadline = threading.Timer(10.0, w.stop)
     timer.start()
+    deadline.start()
     t0 = time.monotonic()
-    w.run()                                                  # in this (the main) thread, as `worker.py run` does
-    assert time.monotonic() - t0 < 2.0
+    try:
+        w.run()                                              # in this (the main) thread, as `worker.py run` does
+    finally:
+        timer.cancel()
+        deadline.cancel()
+        signal.signal(signal.SIGINT, old)
+    assert time.monotonic() - t0 < 2.0, "not stopped by Ctrl-C: the deadline did it"
     assert hub.calls("/state")[-1][3]["reason"] == "shutdown"
     assert W.read_json(w.cfg.status_path)["state"] == "stopped"
 
