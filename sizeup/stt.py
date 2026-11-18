@@ -22,6 +22,8 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup import stt_time
+
 NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not speech
 # What whisper says about a short burst of noise (a mic click, a squelch tail).
 # What whisper says for dead air / a mic click (FG1 bench: "Thank you." or "Yes." on 6 of 6
@@ -505,6 +507,25 @@ class Transcriber:
             item.stt_wait_s, item.stt_run_s, item.stt_class = wait, run, CLASS_NAMES.get(prio, str(prio))
         except AttributeError:      # (an item that takes no attributes: the numbers are in `timed` all the same)
             pass
+
+    @property
+    def prompt(self) -> Callable[[object], str]:
+        """whisper's prompt for an item (the function given), which also marks on the item whether it carried the
+        clip's own time (stt_prompt_time: sent with a transmission; the hub's trailing-time check never counts such a
+        run, sizeup/stt_time.py)."""
+        return self._prompt_of
+
+    @prompt.setter
+    def prompt(self, fn: Callable[[object], str]) -> None:
+        self._prompt_fn = fn
+
+    def _prompt_of(self, item) -> str:
+        prompt = self._prompt_fn(item)
+        try:
+            item.stt_prompt_time = stt_time.prompted(prompt, getattr(item, "end", None) or getattr(item, "start", None))
+        except AttributeError:      # (an item that takes no attributes)
+            pass
+        return prompt
 
     def _drop_loop(self) -> None:
         while True:

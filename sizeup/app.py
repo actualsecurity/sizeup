@@ -2560,7 +2560,8 @@ class App:
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
             # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
-            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup)
+            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup,
+                                   prompted=bool(getattr(job, "stt_prompt_time", False)))
             # (a restarted station no longer has the transmission to compare: a skipped clip with words now has changed)
             changed = changed or (job.catchup and bool(text))
         with self._lock:
@@ -2620,7 +2621,7 @@ class App:
         self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
-                alt: dict | None = None, why: str = "re-run", quiet: bool = False) -> bool:
+                alt: dict | None = None, why: str = "re-run", quiet: bool = False, prompted: bool = False) -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
@@ -2661,6 +2662,7 @@ class App:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
+                              **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {})})
         return changed
 

@@ -352,9 +352,10 @@ const StationHealth = (() => {
       const voc = tt.rows.some((r) => r.vocab_v);
       const th = el("h3", "hl-sub", "Trailing time");
       th.title = `The dispatcher's closing HHMM against the clip's air time (${tt.window_min[0]}…+${tt.window_min[1]} min), `
-        + `per run. Match: matched / time said; a clip with no time is not a failure. Rule ${tt.rule}`;
+        + `first passes only. Match: matched / time said; a clip with no time is not a failure; a run whose prompt `
+        + `carried the time is not counted. Rule ${tt.rule}`;
       kids.push(th, table(["Channel", "Engine", "Model", ...(voc ? ["Vocab"] : []), "Clips 24 h", "Said", "Match 24 h", `Match ${tt.days} d`, `${tt.days} d`],
-        tt.rows.map((r) => [r.channel, r.engine, r.model, ...(voc ? [r.vocab_v] : []), r.n_24h,
+        tt.rows.map((r) => [[r.name || r.channel, "", r.channel], r.engine, r.model, ...(voc ? [r.vocab_v] : []), r.n_24h,
           [r.n_24h ? `${Math.round((100 * r.said_24h) / r.n_24h)}%` : "—", "", `${r.said_24h} of ${r.n_24h} ended with a time`],
           [rate(r.rate_24h), "", `${r.match_24h} of ${r.said_24h}`], [rate(r.rate), "", `${r.match} of ${r.said} · ${r.n} clips`],
           window.SignalChart ? SignalChart.spark(r.daily, { w: 60, lo: 0, hi: 100, title: `Match by day, ${tt.days} d: ${r.daily.map(rate).join(" · ")}` }) : ""]), ""));

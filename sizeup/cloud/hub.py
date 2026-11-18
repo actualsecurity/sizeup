@@ -1077,6 +1077,7 @@ class HubApp(App):
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             # (standing in for AWS: the text of record; else a person's re-run, or the catch-up's)
             role = "catchup" if d.get("catchup") else "text" if pid in self._aws_asked else "rerun"
+            self._prompt_time(pid, d)               # (#727: whisper's prompt had the clip's own time)
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
                          quiet=bool(d.get("catchup")))      # (a shed clip caught up: old words, nothing alerts)
@@ -1560,6 +1561,7 @@ class HubApp(App):
         self._stt_ran(job.id, "gpu-worker", str(res.get("model") or ""), raw, status, conf, key=job.channel,   # (after
                       item=job.extra.get("page"), role="catchup" if catchup else "text", words=res.get("words"),  # the text)
                       queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker,
+                      prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
                       prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end)
@@ -1635,6 +1637,7 @@ class HubApp(App):
         return True, ""
 
     def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
+                 prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
                  cls=None, clip_end=None, wait_s=None, run_s=None) -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
@@ -1648,7 +1651,7 @@ class HubApp(App):
                 clip_end = self._hub_time(getattr(item, "end", None))
             if cls is None and item is not None:
                 cls = self._pool_class(item, key)
-            check = self._time_check(key, item, text, clip_end)
+            check = self._time_check(key, item, text, clip_end, engine, prompted)
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
@@ -1665,12 +1668,33 @@ class HubApp(App):
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
 
-    def _time_check(self, key: str, item, text: str, clip_end) -> stt_time.Check | None:
-        """The dispatcher's trailing time (#727, sizeup/stt_time.py) on a configured channel, the dispatcher's (or an
-        unknown talker's) clip only: kept with the run, the raw text never changed. None: not checked."""
-        if not text or not stt_time.applies(key, str(getattr(item, "unit", "") or ""), self.cfg.stt_time_channels):
+    def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
+                    prompted: bool | None = None) -> stt_time.Check | None:
+        """The dispatcher's trailing time (#727, sizeup/stt_time.py) on a configured channel, the dispatcher's (or a
+        talker-less) transmission only: kept with the run, the raw text never changed. None: not checked (no clip
+        found here, no end). prompted: the engine's prompt carried the clip's time (a GPU worker's: from its job's
+        prompt); None: the station's whisper says so on the clip (stt_prompt_time), any other engine had none. Never in
+        the way of the run: a failure is no check."""
+        try:
+            if item is None or not text or not stt_time.applies(key, str(getattr(item, "unit", "") or ""),
+                                                                 self.cfg.stt_time_channels):
+                return None
+            if prompted is None:
+                prompted = engine == "station-whisper" and bool(getattr(item, "stt_prompt_time", False))
+            return stt_time.check(text, clip_end, prompted=bool(prompted))
+        except Exception as e:  # noqa: BLE001 - bookkeeping
+            self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
             return None
-        return stt_time.check(text, clip_end, self._hub_time(getattr(item, "start", None)))
+
+    def _prompt_time(self, cid: str, d: dict) -> None:
+        """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission
+        for its run's trailing-time check (_time_check)."""
+        item = self._find(cid)[0]
+        if item is not None:
+            try:
+                item.stt_prompt_time = bool(d.get("stt_prompt_time"))
+            except AttributeError:
+                pass
 
     def stt_time_health(self) -> dict | None:
         """Settings > Station > Health: the trailing-time match rate per channel, engine, model (and vocab_v), 24 h and
@@ -1678,6 +1702,11 @@ class HubApp(App):
         rows = self.stt_runs.time_rates()
         if not rows:
             return None
+        info, names = self.cfg.p25_tg_info or {}, self.cfg.p25_talkgroups or {}
+        for r in rows:                         # (a county talkgroup's name: "Fire/EMS 15")
+            ch = str(r.get("channel") or "")
+            n = int(ch[3:]) if ch.startswith("tg:") and ch[3:].isdigit() else None
+            r["name"] = ((info.get(n) or {}).get("name") or names.get(n) or ch) if n is not None else ch
         return {"rows": rows, "rule": stt_time.RULE, "window_min": list(stt_time.WINDOW_MIN), "days": sttruns.TIME_DAYS}
 
     def _clips_logged(self, ids: list[str]) -> set:
