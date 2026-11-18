@@ -4,6 +4,7 @@ transmissions to CAD events while a unit is on them, persistence, and the /comms
 
 import json
 import sqlite3
+import threading
 import time
 import wave
 from dataclasses import replace
@@ -399,11 +400,15 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
     assert c2.state()["incidents"][0]["radio"] or any(i["radio"] for i in c2.state()["incidents"])
 
 
-def test_comms_api_filters(tmp_path):
+def test_comms_api_filters(tmp_path, monkeypatch):
     clock = Clock()
     c = cad(tmp_path, clock)
     c.radiolog.inline = True             # (the units backfill on this thread: its write never lands between two asks)
+    # nor the dispatch's voice: its worker writes the row after the answer, and that moves the rev too (the test
+    # below). No real voice rendered (seconds under load): the row written at once, and waited for here.
+    monkeypatch.setattr(c, "_render", lambda *a, **k: (None, "Voice: invented"))
     a = _event_with(c, ["E63"], clock)
+    assert c.voice.wait(10)
     clock.t += 5
     c.record_traffic(tx("FG1-1", clock.t, rig="E63", radio_id="6301"))
     c.record_traffic(tx("307-1-call_1", clock.t + 1, "Fire/EMS 15", "77A4", "77A4", 307, radio_id="41228"))
@@ -423,6 +428,26 @@ def test_comms_api_filters(tmp_path):
     assert get(f"rev={all_['rev']}")["unchanged"] is True
     code, body, _ = api.get("/api/cad/comms", "since=yesterday")
     assert code == 400
+
+
+def test_a_dispatch_voice_written_between_two_asks_is_a_new_answer(tmp_path, monkeypatch):
+    """Why test_comms_api_filters waits for the dispatch's voice: its worker writes the row after the answer (#426), and
+    that commit moves every reader's comms rev. Landing between two asks, the second is the whole answer, not
+    {unchanged}: a reader asking with the old rev is given the new one (the pages test d.unchanged, never need it)."""
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    c.radiolog.inline = True
+    gate = threading.Event()
+    monkeypatch.setattr(c, "_render", lambda *a, **k: (gate.wait(10), (None, "Voice: invented"))[1])
+    _event_with(c, ["E63"], clock)
+    c.record_traffic(tx("FG1-1", clock.t + 1, rig="E63"))
+    get = lambda q: json.loads(CadApi(c).get("/api/cad/comms", q)[1])     # noqa: E731
+    first = get("")
+    gate.set()                                                          # the voice lands now: between the two asks
+    assert c.voice.wait(10)
+    again = get(f"rev={first['rev']}")
+    assert "unchanged" not in again and again["rev"] != first["rev"] and [r["id"] for r in again["rows"]] == ["FG1-1"]
+    assert get(f"rev={again['rev']}")["unchanged"] is True             # settled: the cheap answer again
 
 
 def test_comms_text_search_and_main_flag_for_the_radio_view(tmp_path):
