@@ -1,5 +1,8 @@
 {
   "ver": 2,
+  "sizeup": {
+    "split": "log"
+  },
   "sources": [
     {
       "center": 477193750,

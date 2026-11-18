@@ -2887,11 +2887,29 @@ class Sources:
                 return db.execute("UPDATE incoming SET status = 'expired' WHERE status = 'open' AND until < ?", (now,)).rowcount
 
     def run(self) -> None:
+        self._expire()                                   # at the start: an Until that passed while it was down
         while not self._stop.wait(TICK_S):
             try:
                 self.tick()
             except Exception as e:  # noqa: BLE001 - the ticker never dies
                 self.log(f"incident sources: {type(e).__name__}")
+            self._expire()
+
+    def _expire(self) -> None:
+        """Non-emergency events past their Until closed (Cad.expire_until, from the stored until_at: nothing in memory)."""
+        fn = getattr(self.cad, "expire_until", None)
+        if fn is None:
+            return
+        err = ""
+        try:
+            fn()
+        except FencedWrite:                              # not the leader (any more): the leader's ticker does it
+            pass
+        except Exception as e:  # noqa: BLE001 - the ticker never dies
+            err = f"{type(e).__name__}: {e}"[:200]
+        if err != getattr(self, "_expire_err", ""):      # once per new error (and once when it works again)
+            self.log(f"CAD: until expiry: {err or 'working again'}")
+        self._expire_err = err
 
     def start(self, backfill_delay_s: float | None = BACKFILL_DELAY_S) -> Sources:
         """The ticker, and the old addresses' backfill on a thread of its own, backfill_delay_s after this (None: no

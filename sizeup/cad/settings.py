@@ -2268,8 +2268,9 @@ class Editor:
 
     def _squelch_op(self, action: str, body: dict, op: str) -> dict:
         """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
-        refused unless that is what runs now: a suggestion applied from Settings > Radios > Squelch, #606) | reset {key}.
-        Audited."""
+        the squelch the suggestion was worked out for: refused unless that is what runs now and, on the hub, the
+        channel's suggestion still offers Apply for it: a suggestion applied from Settings > Radios > Squelch, #606,
+        #686) | reset {key}. Audited."""
         ctx = self.cad.radio_ctx
         locked = ctx.channels_locked() if ctx is not None else ""
         if locked:
@@ -2288,6 +2289,11 @@ class Editor:
                                                     for f in ("open_db", "close_db")):
                     raise CadError(f"{key} now runs Open {run.get('open_db')} / Close {run.get('close_db')}: "
                                    "not what the suggestion was for, look again")
+                # ... and the suggestion itself still offers it, for that squelch (#686: the hub's own check)
+                check = getattr(getattr(self.cad, "station_metrics_insight", None), "applicable", None)
+                why = check(key, exp, {f: body.get(f) for f in ("open_db", "close_db")}) if callable(check) else ""
+                if why:
+                    raise CadError(why)
             try:
                 vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
             except ValueError as e:
