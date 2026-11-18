@@ -74,6 +74,7 @@ from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
                               pl_text, speech_seconds, voice_floor_db)
+from sizeup.radio.fm import SegmentWorkers
 from sizeup.radio.fm import _mmss as fm_mmss
 from sizeup.radio import fm as fm_mod
 from sizeup.radio.am import AmReceiver
@@ -655,8 +656,11 @@ class App:
         self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc_at(a),
                            log=log)
         self.tap.on_emergency = self._fm_emergency      # the emergency button at the key-up (#128)
+        # each channel's finished transmissions, off its reader (radio/fm.py SegmentWorkers): one per channel, kept for
+        # every receiver made of it (a dongle move), so they are handled in order and never two at once
+        self._seg_workers: dict[str, SegmentWorkers] = {}
         for r in self.receivers:
-            self.tap.attach(r)
+            self._wire_receiver(r)
         self.cad.paging = lambda: self.paging_state()
         self.cad.has_clip = self.has_clip
         # A page that isn't ours naming our units is flagged (#115's safety net): the feed's unit matcher, for the
@@ -4764,10 +4768,18 @@ class App:
         r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         r.on_stall = lambda r=r: self._on_stall(r)        # (#703) a dongle that opens but streams no audio
         r.on_audio = lambda r=r: self._on_audio(r)
-        self.tap.attach(r)
+        self._wire_receiver(r)
         self.receivers[self.receivers.index(old)] = r
         self._apply_squelch()
         return r
+
+    def _wire_receiver(self, r: NfmReceiver) -> None:
+        """The live tap on a receiver, and its channel's workers (the same for the receiver it replaces)."""
+        self.tap.attach(r)
+        label = r.channel.label
+        if label not in self._seg_workers:
+            self._seg_workers[label] = SegmentWorkers(label, lambda ch, seg: self._segment(ch, seg), log)
+        r.workers = self._seg_workers[label]
 
     def _running(self, r) -> bool:
         """A receiver with its program up on a dongle (its job assigned, when the dongles are switchable)."""
@@ -5445,6 +5457,10 @@ class App:
         for r in self.receivers:
             if not r.drain(max(0.0, drain_until - time.monotonic())):
                 log(f"{r.channel.label}: stopped with transmissions still being handled")
+        for label, w in self._seg_workers.items():   # (a receiver replaced at a dongle move: its queue is in these)
+            if not w.drain(max(0.0, drain_until - time.monotonic())):
+                log(f"{label}: stopped with transmissions still being handled")
+            w.close()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are
             try:
                 self._page_done(page)

@@ -191,8 +191,10 @@ class SegmentWorkers:
     """A receiver's finished transmissions, off its reader thread (module doc): one worker thread per channel (an
     airband dongle hears several: radio/am.py), each running handler(channel, segment) for its channel's segments in
     the order they were put. Bounded: SEG_BEHIND waiting is logged (and when it has caught up), and at SEG_QUEUE_MAX
-    the reader waits for the worker (logged): a transmission is never dropped. close() lets the workers finish what
-    is queued and end; drain() waits for that."""
+    the reader waits for the worker (logged): a transmission is never dropped. A reader that is stopping (put's
+    stopping) stops waiting and queues it over the limit (logged). close() lets the workers finish what is queued and
+    end; drain() waits for that. The App keeps one per channel for every receiver it makes of it (a dongle move makes
+    a new receiver: its transmissions queue behind the old one's, in order, never two at once)."""
 
     def __init__(self, name: str, handler: Callable[[Channel, Segment], None], on_event: Callable[[str], None]):
         self.name, self.handler, self.on_event = name, handler, on_event
@@ -202,14 +204,17 @@ class SegmentWorkers:
         self._behind: set[str] = set()
         self._closed = False
 
-    def put(self, channel: Channel, seg: Segment) -> None:
+    def put(self, channel: Channel, seg: Segment, stopping: Callable[[], bool] | None = None) -> None:
         label = channel.label
         with self._cv:
             q = self._q.setdefault(label, deque())
             if len(q) >= SEG_QUEUE_MAX:
                 self.on_event(f"{label}: {len(q)} transmissions waiting to be handled: the receiver waits for them")
                 while len(q) >= SEG_QUEUE_MAX and not self._closed:
-                    self._cv.wait(1.0)
+                    if stopping is not None and stopping():
+                        self.on_event(f"{label}: stopping with {len(q)} waiting: this one queued after them")
+                        break
+                    self._cv.wait(0.25)
             q.append((channel, seg))
             if len(q) >= SEG_BEHIND and label not in self._behind:
                 self._behind.add(label)
@@ -1143,8 +1148,10 @@ class NfmReceiver:
         # the first of each start). Each called from this receiver's own thread; one that raises is ignored.
         self.on_stall: Callable[[], None] | None = None
         self.on_audio: Callable[[], None] | None = None
-        # Its finished transmissions, off the reader (SegmentWorkers, module doc): from start(). One never started (the
-        # tests' receivers, fed by hand) hands each to on_segment at once, as before.
+        # Its finished transmissions, off the reader (SegmentWorkers, module doc): from start(), its owner's (workers:
+        # the App's, the same for every receiver of the channel) or its own. One never started (the tests' receivers,
+        # fed by hand) hands each to on_segment at once, as before.
+        self.workers: SegmentWorkers | None = None
         self.segments: SegmentWorkers | None = None
         self._thread: threading.Thread | None = None
 
@@ -1200,11 +1207,14 @@ class NfmReceiver:
                 or (self.device if isinstance(self.device, str) else "") or "any")
 
     def start(self) -> NfmReceiver:
-        self.segments = SegmentWorkers(self.channel.label, lambda ch, seg: self.on_segment(ch, seg),
-                                       lambda m: self.on_event(m))
+        self._open_segments()
         self._thread = threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True)
         self._thread.start()
         return self
+
+    def _open_segments(self) -> None:
+        self.segments = self.workers or SegmentWorkers(self.channel.label, lambda ch, seg: self.on_segment(ch, seg),
+                                                       lambda m: self.on_event(m))
 
     def pending(self, label: str | None = None) -> bool:
         """A finished transmission of this channel (label: of that one of its channels) not yet handled."""
@@ -1339,8 +1349,8 @@ class NfmReceiver:
                 self._hook(self.on_stall)
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
-        if self.segments is not None:
-            self.segments.close()       # its workers finish what is queued, then end (drain() waits for them)
+        if self.segments is not None and self.segments is not self.workers:
+            self.segments.close()       # its own workers finish what is queued, then end (drain() waits for them)
 
     def _program(self) -> str:
         """What this receiver runs, for its messages (radio/am.py: rtl_sdr and the channelizer for several)."""
@@ -1404,7 +1414,7 @@ class NfmReceiver:
             return
         self.last_heard = seg.end
         if self.segments is not None:   # its channel's worker (module doc): the reader goes straight back to the pipe
-            self.segments.put(channel or self.channel, seg)
+            self.segments.put(channel or self.channel, seg, self._stop.is_set)
             return
         try:
             self.on_segment(channel or self.channel, finish(seg))

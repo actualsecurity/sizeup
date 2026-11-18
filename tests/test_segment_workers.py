@@ -386,3 +386,109 @@ def test_a_station_switches_threads_every_millisecond(monkeypatch):
         got.clear()
         assert app_mod.start_app(SimpleNamespace(cloud_role=role)) == "started"
         assert got == [app_mod.STATION_SWITCH_S] == [0.001]
+
+
+def test_a_full_queue_stops_holding_the_reader_once_it_is_stopping(monkeypatch):
+    monkeypatch.setattr(fm, "SEG_QUEUE_MAX", 2)
+    events, gate, stopping = [], threading.Event(), threading.Event()
+    w = SegmentWorkers("FG1", lambda ch, seg: gate.wait(30), events.append)       # a hung worker
+    ch = Channel(453.0375, "FG1")
+    for k in range(2):
+        w.put(ch, Segment(float(k), k + 0.5, np.zeros(10, np.float32)))
+    third = threading.Thread(target=w.put, args=(ch, Segment(2.0, 2.5, np.zeros(10, np.float32)), stopping.is_set),
+                             daemon=True)
+    third.start()
+    third.join(0.5)
+    assert third.is_alive()                         # running: the reader waits (never drops)
+    stopping.set()
+    third.join(5)
+    assert not third.is_alive() and w.pending("FG1") == 3        # stopping: queued over the limit, logged
+    assert any("stopping with 2 waiting" in e for e in events)
+    gate.set()
+    assert w.drain(10) and w.pending() == 0
+
+
+# -- a dongle move: the App's workers, one per channel, for every receiver made of it ---------------------------------
+
+def moved_app(tmp_path):
+    """An App with South 2's receiver, its first transmission held in its handler, then replaced (a dongle move) by a
+    new one, as _fresh_receiver wires it. -> (app, old, new, handled, gate, active-at-once max)."""
+    from sizeup.app import App
+    from tests.appcfg import cfg
+    app = App(cfg(tmp_path))
+    app._kind = {"South 2": "paging"}
+    done, gate, busy = [], threading.Event(), {"now": 0, "max": 0}
+    real = app._segment
+
+    def handler(ch, seg):
+        busy["now"] += 1
+        busy["max"] = max(busy["max"], busy["now"])
+        if getattr(seg, "hold", False):
+            gate.wait(30)
+        time.sleep(0.02)
+        real(ch, seg)
+        done.append(seg.start)
+        busy["now"] -= 1
+    app._segment = handler
+    old = NfmReceiver("rtl_fm", "", None, Channel(470.2, "South 2"), app._segment, lambda m: None, **PAGING)
+    app._wire_receiver(old)
+    old._open_segments()                            # (as start() does)
+    new = NfmReceiver("rtl_fm", "", None, Channel(470.2, "South 2"), app._segment, lambda m: None, **PAGING)
+    app._wire_receiver(new)
+    new._open_segments()
+    app.receivers = [new]
+    return app, old, new, done, gate, busy
+
+
+def page_parts():
+    from tests.test_app import tone, voice
+    head = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(4.0)]).astype(np.float32)
+    now = time.time()
+    first = Segment(now, now + len(head) / RATE, head, 25.0, reason="quiet", hold_until=now + len(head) / RATE + 4.5)
+    tail = voice(4.0, seed=1).astype(np.float32)
+    cont = Segment(first.end + 2.0, first.end + 6.0, tail, 9.0, reason="quiet", cont=True, hold_until=first.end + 10.5)
+    return first, cont
+
+
+def test_a_dongle_move_mid_backlog_keeps_the_channels_order_and_one_at_a_time(tmp_path):
+    app, old, new, done, gate, busy = moved_app(tmp_path)
+    segs = [Segment(1000.0 + k, 1000.5 + k, np.zeros(RATE, np.float32), 9.0, reason="quiet") for k in range(6)]
+    segs[0].hold = True                             # the old receiver's first: held in its handler
+    for s in segs[:3]:
+        old._deliver(s)
+    for s in segs[3:]:                              # the new receiver's, while the old one's still wait
+        new._deliver(s)
+    assert new.pending("South 2") and new.segments is old.segments
+    gate.set()
+    assert new.segments.drain(30)
+    assert done == [s.start for s in segs] and busy["max"] == 1
+
+
+def test_a_page_continuation_queued_on_the_moved_receiver_holds_the_page(tmp_path):
+    app, old, new, done, gate, busy = moved_app(tmp_path)
+    sent = []
+    app.events = lambda kind, data, clip: sent.append(kind)
+    first, cont = page_parts()
+    old._deliver(first)
+    assert wait(lambda: len(done) == 1)
+    cont.hold = True                                # the continuation, still in the old receiver's queue at the move
+    old._deliver(cont)
+    app._release_pages(now=first.hold_until + 1.0)  # asks the new receiver: the channel's queue is the same
+    assert "page" not in sent
+    gate.set()
+    assert new.segments.drain(30)
+    app._release_pages(now=cont.hold_until + 1.0)
+    assert sent.count("page") == 1
+    (page,) = [p for p in app.pages]
+    assert len(page.parts) == 2                     # one page, its continuation joined
+
+
+def test_the_apps_stop_waits_for_a_replaced_receivers_queue(tmp_path):
+    app, old, new, done, gate, busy = moved_app(tmp_path)
+    segs = [Segment(1000.0 + k, 1000.5 + k, np.zeros(RATE, np.float32), 9.0, reason="quiet") for k in range(3)]
+    segs[0].hold = True
+    for s in segs:
+        old._deliver(s)
+    threading.Timer(0.3, gate.set).start()
+    app.stop()
+    assert done == [s.start for s in segs]
