@@ -26,7 +26,8 @@
                        on), so an admin's rename on the hub (Settings > Station > Stations) never locks
                        it out. Its config's [station] id goes up too ("config_id")
                        Beside `at` on every post: this boot's id and the wall clock's steps over 5 s
-                       ("boot_id", "wall_steps": sizeup/cloud/wallclock.py), for the hub to judge its clock skew
+                       ("boot_id", "wall_steps": sizeup/cloud/wallclock.py; the count kept across a restart in
+                       wall_clock.json beside the outbox), for the hub to judge its clock skew
                        ... and the admins' service per source ("services": sizeup/sourcekeys.py), kept beside the
                        outbox (hub_services.json) so a station starting while the hub is away tags as it did
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
@@ -87,7 +88,7 @@ from sizeup.cloud.metrics import MetricsLink
 from sizeup.cloud import sttinput
 from sizeup.cloud.outbox import Outbox, open_outbox
 from sizeup.cloud.vessellink import VesselForwarder
-from sizeup.cloud.wallclock import WallSteps
+from sizeup.cloud.wallclock import FILE as WALL_FILE, WallSteps
 from sizeup.tts import VoiceCfg
 
 LIVE_REFRESH_S = 2.0     # while someone is talking the snapshot is re-sent this often (the hub drops one older than 8 s)
@@ -269,9 +270,9 @@ class StationLink:
         # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
         self.logs = LogShipper(cfg, self._client, log, app=app)
         # the wall clock's steps and this boot (sizeup/cloud/wallclock.py; every state post, #773 / #788): sampled on the
-        # metrics sampler's 1 s tick; kept on the app, so the count goes on across the link going off and on
+        # metrics sampler's 1 s tick; kept on the app (the link going off and on) and beside the outbox (a restart)
         if not isinstance(getattr(app, "wall_clock", None), WallSteps):
-            app.wall_clock = WallSteps(log)
+            app.wall_clock = WallSteps(log, path=self._caps_file.with_name(WALL_FILE) if self._caps_file else None)
         self.wall: WallSteps = app.wall_clock
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
         self.metrics_link = MetricsLink(app, cfg, self._client, log, tick=self.wall.sample)
@@ -614,6 +615,7 @@ class StationLink:
         self.logs.stop()
         self.metrics_link.stop()
         self.pool_worker.stop()
+        self.wall.stop()                      # (the step count saved: a restart carries it on)
 
     # -- health -------------------------------------------------------------------------------------
 

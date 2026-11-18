@@ -386,8 +386,9 @@ size and its version (also the heartbeat). The talkgroup list goes every 30 s or
 changes. The hub answers `{ok, build}`: its own build, which the station follows
 ([Station updates](#station-updates-it-follows-the-hubs-build)). Beside `at`, every post carries `boot_id` (Linux's
 boot id, null elsewhere) and `wall_steps`: how often the wall clock stepped by more than 5 s against the boot clock
-(sampled every second; not kept, so it starts from 0 at a reboot or a station restart; #788's 2-5 % drift and ~2 s
-corrections never count). For judging the clock skew (#773, #776); the hub does not read them yet
+in this boot (sampled every second; #788's 2-5 % drift and ~2 s corrections never count). It is kept across a restart
+of sizeup (`wall_clock.json` beside the outbox, with the clocks' offset: a step while sizeup was stopped counts too),
+so it never goes down within one `boot_id`; a reboot starts it from 0. For judging the clock skew (#773, #776); the hub does not read them yet
 (sizeup/cloud/wallclock.py).
 
 **Hub → station, jobs** (`GET /api/station/jobs?wait=25`, the station's long poll; the answer comes

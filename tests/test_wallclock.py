@@ -2,6 +2,7 @@
 only: a station's boot clock that runs fast, its wall clock corrected in small steps, and real steps of either sign."""
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -154,6 +155,128 @@ def test_the_boot_clock_is_boottime_where_there_is_one():
         assert abs(wallclock.boot_clock() - time.monotonic()) < 1.0
 
 
+# -- across a restart (the count kept beside the outbox) ----------------------------------------------------------------
+
+BOOT_A = "5f0c9a3e-7b1d-4e2a-9c6f-0d8b2a4e1c37"
+BOOT_B = "0b7d1e4a-3c2f-4a9e-8d6b-1f5c0e7a9b24"
+
+
+def boot_file(tmp_path, boot: str) -> Path:
+    f = tmp_path / "boot_id"
+    f.write_text(boot + "\n")
+    return f
+
+
+def kept(clk: Clocks, said: list, tmp_path, boot: str = BOOT_A) -> WallSteps:
+    """A start of sizeup on these clocks, its count kept in tmp_path/wall_clock.json."""
+    return WallSteps(said.append, wall=clk.wall, boot=clk.boot, boot_id_path=boot_file(tmp_path, boot),
+                     path=tmp_path / "state" / wallclock.FILE)
+
+
+def one_step_then_stop(clk: Clocks, said: list, tmp_path) -> WallSteps:
+    w = kept(clk, said, tmp_path)
+    run(clk, w, 100, at=lambda t: setattr(clk, "adj", clk.adj + 60.0) if t == 50 else None)
+    w.stop()
+    assert w.steps == 1
+    return w
+
+
+def test_a_restart_with_no_step_keeps_the_count(tmp_path):
+    clk, said = Clocks(1.05), []
+    one_step_then_stop(clk, said, tmp_path)
+    clk.t += 120.0                         # sizeup stopped 2 min: the boot clock drifted 6 s (5 %) meanwhile
+    clk.adj -= 2.0                         # ... and one small correction
+    w = kept(clk, said, tmp_path)
+    assert w.steps == 1 and said == ["wall clock stepped +60 s"]
+    run(clk, w, 30)
+    assert w.steps == 1
+    d = json.loads((tmp_path / "state" / wallclock.FILE).read_text())
+    assert d["boot_id"] == BOOT_A and d["wall_steps"] == 1 and {"offset", "boot_at"} <= set(d)
+
+
+@pytest.mark.parametrize("step", [60.0, -15.0])
+def test_a_restart_across_a_step_adds_one(tmp_path, step):
+    clk, said = Clocks(1.05), []
+    one_step_then_stop(clk, said, tmp_path)
+    clk.t += 30.0
+    clk.adj += step                        # the wall clock stepped while sizeup was stopped
+    w = kept(clk, said, tmp_path)
+    assert w.steps == 2
+    assert said[-1] == f"wall clock stepped {step - 1.5:+.0f} s while sizeup was stopped"
+    run(clk, w, 10)                        # (the first sample compares with the start: no second count)
+    assert w.steps == 2 and len(said) == 2
+    w.stop()
+    assert kept(clk, said, tmp_path).steps == 2
+
+
+def test_a_reboot_starts_from_0(tmp_path):
+    clk, said = Clocks(1.05), []
+    one_step_then_stop(clk, said, tmp_path)
+    clk.t, clk.adj = 0.0, 999.0            # a new boot: its boot clock from the start again, the wall clock anywhere
+    w = kept(clk, said, tmp_path, boot=BOOT_B)
+    assert w.steps == 0 and len(said) == 1
+    run(clk, w, 5)
+    assert json.loads((tmp_path / "state" / wallclock.FILE).read_text())["boot_id"] == BOOT_B
+
+
+def test_no_boot_id_keeps_nothing(tmp_path):
+    """macOS: a reboot can't be told, so the count is never carried over (and never written)."""
+    clk, said = Clocks(1.0), []
+    w = WallSteps(said.append, wall=clk.wall, boot=clk.boot, boot_id_path=tmp_path / "none",
+                  path=tmp_path / wallclock.FILE)
+    run(clk, w, 5)
+    w.stop()
+    assert not (tmp_path / wallclock.FILE).exists()
+
+
+@pytest.mark.parametrize("bad", ["", "{", "[]", "null", '{"boot_id": "%s"}' % BOOT_A,
+                                 '{"boot_id": "%s", "wall_steps": "3", "offset": 1.0, "boot_at": 1.0}' % BOOT_A,
+                                 '{"boot_id": "%s", "wall_steps": -1, "offset": 1.0, "boot_at": 1.0}' % BOOT_A,
+                                 '{"boot_id": "%s", "wall_steps": true, "offset": 1.0, "boot_at": 1.0}' % BOOT_A,
+                                 '{"boot_id": "%s", "wall_steps": 3, "offset": NaN, "boot_at": 1.0}' % BOOT_A,
+                                 '{"boot_id": "%s", "wall_steps": 3, "offset": 1.0, "boot_at": 1e12}' % BOOT_A])
+def test_a_corrupt_file_starts_from_0(tmp_path, bad):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / wallclock.FILE).write_text(bad)
+    clk, said = Clocks(1.0), []
+    w = kept(clk, said, tmp_path)
+    assert w.steps == 0 and said == []
+    run(clk, w, 2)
+    assert json.loads((tmp_path / "state" / wallclock.FILE).read_text())["wall_steps"] == 0
+
+
+def test_the_count_is_written_when_it_changes_and_at_most_every_60_s_otherwise(tmp_path, monkeypatch):
+    clk, said = Clocks(1.0), []
+    w = kept(clk, said, tmp_path)
+    writes = []
+    real = w.save
+    monkeypatch.setattr(w, "save", lambda: (writes.append((clk.t, w.steps)), real())[1])
+    run(clk, w, 1)                                   # the first sample: written
+    run(clk, w, 150)
+    assert [t for t, _ in writes] == [1.0, 61.0, 121.0]
+    clk.t += 1.0
+    clk.adj += 30.0
+    w.sample()                                       # a step: written at once
+    assert writes[-1] == (152.0, 1)
+    run(clk, w, 10)
+    assert len(writes) == 4
+    w.stop()                                         # and at stop
+    assert len(writes) == 5 and json.loads((tmp_path / "state" / wallclock.FILE).read_text())["wall_steps"] == 1
+
+
+def test_a_write_that_fails_is_said_once_and_never_raises(tmp_path):
+    clk, said = Clocks(1.0), []
+    (tmp_path / "state").write_text("a file where the folder should be")
+    w = kept(clk, said, tmp_path)
+    run(clk, w, 3)
+    clk.t += 1.0
+    clk.adj += 30.0
+    w.sample()
+    w.stop()
+    assert w.steps == 1
+    assert [s for s in said if "can't keep" in s] == [said[0]] and said[1] == "wall clock stepped +30 s"
+
+
 # -- on the state post -------------------------------------------------------------------------------------------------
 
 
@@ -193,6 +316,7 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
     counter is the app's, so the link going off and on keeps it."""
     monkeypatch.setattr("sizeup.cloud.station.STATUS_S", 0.2)
     monkeypatch.setattr("sizeup.cloud.metrics.TICK_S", 0.05)
+    monkeypatch.setattr(wallclock, "read_boot_id", lambda path=None: BOOT_A)       # (a Linux station's, anywhere)
     app = make_app(station_cfg(tmp_path, f"http://127.0.0.1:{free_port()}"))
     fake, said = Capture(), []
     link = app.link
@@ -203,7 +327,7 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
     try:
         assert wait(lambda: fake.last() is not None, 5)
         post = fake.last()
-        assert post["boot_id"] == read_boot_id() and post["wall_steps"] == 0
+        assert post["boot_id"] == BOOT_A and post["wall_steps"] == 0
         assert {"at", "boot_id", "wall_steps", "talking", "paging"} <= set(post)
         assert wait(lambda: link.wall._last is not None, 5)                 # (sampled once before the step)
         real = link.wall._wall
@@ -216,3 +340,7 @@ def test_every_state_post_carries_the_boot_id_and_the_step_count(tmp_path, monke
     from sizeup.cloud.station import StationLink
     again = StationLink(app, app.cfg, log=said.append, client=fake.client, outbox=link.outbox)
     assert again.wall is link.wall and again.wall.steps == 1
+    saved = Path(app.cfg.cloud_outbox).with_name(wallclock.FILE)       # the stop saved it beside the outbox ...
+    assert json.loads(saved.read_text())["wall_steps"] == 1 and json.loads(saved.read_text())["boot_id"] == BOOT_A
+    after = WallSteps(said.append, wall=lambda: real() + 60.0, path=saved)   # ... and the next start carries it on
+    assert after.steps == 1 and said == ["wall clock stepped +60 s"]
