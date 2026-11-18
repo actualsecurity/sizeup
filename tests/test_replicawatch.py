@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -802,18 +803,27 @@ def test_a_push_is_recorded_only_once_ntfy_took_it_with_one_retry(tmp_path):
 
 
 def test_the_failure_report_never_outlasts_its_deadline(tmp_path, ntfy):
-    s3 = FakeS3()
+    """The report thread left behind is let go and finished here: left hanging, it pushed "Hub takeover failed" ~6 s
+    later to this test's ntfy port, by then a later test's fake ntfy in the same xdist worker (main, 2026-11-18)."""
+    s3, release = FakeS3(), threading.Event()
     slow = s3.sender("A")
 
     def hang(*a, **kw):
-        time.sleep(3)
+        release.wait(3)
         return slow(*a, **kw)
     store = WatchStore(S3Object("bucket", KEY, "us-east-1", endpoint="https://s3.test", send=hang, creds=lambda: CREDS))
     w = ReplicaWatch(store, Pusher(store, ntfy.url, TOPIC, log=lambda m: None), "A", tmp_path / "run", tmp_path / "w",
                      log=lambda m: None)
-    t0 = time.monotonic()
-    assert w.report("takeover_failed", "RuntimeError: x", 1, deadline_s=0.5) is False
-    assert time.monotonic() - t0 < 1.5
+    before = set(threading.enumerate())
+    try:
+        t0 = time.monotonic()
+        assert w.report("takeover_failed", "RuntimeError: x", 1, deadline_s=0.5) is False
+        assert time.monotonic() - t0 < 1.5
+    finally:
+        release.set()
+        for t in set(threading.enumerate()) - before:
+            t.join(10)
+    assert [m["title"] for m in ntfy.got] == ["Hub takeover failed"]       # (late, but to this test's ntfy)
 
 
 def test_s3_unreachable_still_pushes_and_no_topic_never_does(tmp_path, ntfy):
