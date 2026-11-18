@@ -693,3 +693,60 @@ def test_rows_from_before_the_service_column_are_scoped_as_live_rows_are(tmp_pat
     assert groups[("westchester", 383)] == ("County Police", "police") and groups[("mrrs", 9570)][1] == "ems"
     run = rp.replay(sorted(rows.values(), key=lambda r: r["start"]))
     assert {(e["pack"], e["category"]) for e in run.rec.events.values()} >= {("county_police", "hazmat"), ("fire", "mayday")}
+
+
+def test_an_admins_service_choice_in_the_copy_scopes_rows_stored_without_a_service(tmp_path):
+    """#689's per-source service choice, read from the copy's own Settings: a row stored with no service on a talkgroup
+    whose file says transit is scoped as the admins chose (fire); the county's keyed as the hub keys it (tg:<n> is
+    p25:westchester:<n>); a row's stored service is kept; the process's own choices are back after."""
+    from sizeup import sourcekeys
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True                 # as on the hub behind Access: every reader is signed in (#419)
+    cad.settings_post("radio_services", {"operator": "Lt. Test", "action": "set_many",
+                                         "services": {"p25:mrrs:9121": "fire", "tg:383": "ems"}})
+    row(cad, "old-1", 1000.0, "smoke showing", service="", system="mrrs", tg=9121)          # its file: transit
+    row(cad, "kept-1", 1010.0, "copy", service="transit", system="mrrs", tg=9121)           # stored: never changed
+    row(cad, "old-2", 1020.0, "copy", service="", system="westchester", tg=383)             # its file: police
+    cad.store.db.commit()
+    assert rp.talkgroup_groups()[("mrrs", 9121)][1] == "fire"          # (the copy's cad set the process's here)
+    sourcekeys.set_service_overrides({"p25:mrrs:9122": "police"}, hub=True)      # the process's own: a station's
+    con = rp.open_ro(tmp_path / "cad.sqlite")
+    try:
+        assert rp.read_service_overrides(con) == {"p25:mrrs:9121": "fire", "p25:westchester:383": "ems"}
+        rows = {r["id"]: r for r in rp.load_rows(con)}
+        fire = {r["id"] for r in rp.load_rows(con, services=["fire"])}
+    finally:
+        con.close()
+    assert rows["old-1"]["service"] == "fire" and rows["old-2"]["service"] == "ems"
+    assert rows["kept-1"]["service"] == "transit" and fire == {"old-1"}
+    assert sourcekeys.service_overrides() == {"p25:mrrs:9122": "police"} and sourcekeys._service_from_hub
+    cad.store.db.close()
+
+
+def test_without_a_choice_in_the_copy_the_file_says_and_the_process_choices_stay_out(tmp_path):
+    from sizeup import sourcekeys
+    cad = make_cad(tmp_path)
+    row(cad, "old-1", 1000.0, "smoke showing", service="", system="mrrs", tg=9121)
+    cad.store.db.commit()
+    sourcekeys.set_service_overrides({"p25:mrrs:9121": "fire"})        # this process's: not the copy's
+    con = rp.open_ro(tmp_path / "cad.sqlite")
+    try:
+        assert rp.read_service_overrides(con) == {}
+        (r,) = rp.load_rows(con)
+    finally:
+        con.close()
+    assert r["service"] == "transit"
+    assert sourcekeys.service_overrides() == {"p25:mrrs:9121": "fire"}
+    cad.store.db.close()
+
+
+def test_service_choices_for_a_block_are_put_back_even_when_it_fails():
+    from sizeup import sourcekeys
+    sourcekeys.set_service_overrides({"fm:FG1": "other"}, hub=True)
+    with pytest.raises(RuntimeError):
+        with sourcekeys.service_overrides_as({"p25:mrrs:9121": "fire", "tg:383": "nonsense"}):
+            assert sourcekeys.service_overrides() == {"p25:mrrs:9121": "fire"}
+            assert sourcekeys.service("MNR Fire Brigade", "transit", key="p25:mrrs:9121") == "fire"
+            raise RuntimeError("boom")
+    assert sourcekeys.service_overrides() == {"fm:FG1": "other"} and sourcekeys._service_from_hub
+    assert sourcekeys.service("MNR Fire Brigade", "transit", key="p25:mrrs:9121") == "transit"
