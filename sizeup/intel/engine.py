@@ -138,6 +138,7 @@ MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|contin
 DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
+DEESCALATED = "de-escalated"           # the note a category's "deescalate" phrase leaves on its open event
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
@@ -687,6 +688,11 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if not suppressed and pack.calm:
+            for x in (self._uncalm(pack, key, at, ws, win.entries[tid], event_of)
+                      + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
+                if not any(x is c for c in changed):
+                    changed.append(x)
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -1093,6 +1099,10 @@ class IntelEngine:
         if ev is not None and ev.note == "possibly cancelled" and speaks:
             reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
             ev.note = "re-opened"
+        elif ev is not None and ev.note == DEESCALATED and speaks:
+            ev.note = ""                      # the weapon is back in it: the note goes; a safety category this row alone
+            if cd.get("safety") and self._alone(pack, entry, cat) >= self._thr(pack, cat):   # carries over its threshold
+                reopened, ev.note = True, "re-opened"                                         # ("he grabbed a gun") pushes again
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
@@ -1298,6 +1308,65 @@ class IntelEngine:
             out.append(ev)
         self._consume(pack.name, key)
         return out
+
+    def _deescalate(self, pack, row: dict, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
+        """A category's "deescalate" phrase (rules.py; the weapons category: "took the knife away", "the gun is
+        secured", "wasn't using it to threaten"): its open event on this source within merge_min (the span an open
+        event takes a new mention: the follow-up often comes once units are there) is noted DEESCALATED, with this row
+        in its traffic. Only an event this row ties to (_same_job: the category's own words, a unit, the talker, the
+        place), and with more than one such event open, only the one at the place this row says (none said or none
+        there: nothing is marked). Never a row that itself says the category ("took the knife away, now he has a
+        gun"), never over a "possibly cancelled" note, never a push, an end or a new event. A later row that says the
+        category again clears the note (_raise), and pushes again when it alone is over the threshold."""
+        out = []
+        for cat in pack.deescalated(text, ws):
+            if any(r.category == cat and w > 0 for r, w in entry.hits):
+                continue
+            open_ = [e for e in self._open_for(pack, cat, key, at, self._merge_span(pack))
+                     if self._same_job(pack, e, entry, ws, {r.category for r, w in entry.hits if w > 0})]
+            if len(open_) > 1:
+                if entry.place is None and self.locate is not None:
+                    entry.place = self._where(pack, row, key, [text], list(entry.who))
+                open_ = [e for e in open_ if entry.place is not None and e.precision != "none"
+                         and same_place(entry.place, e.place())]
+                if len(open_) != 1:
+                    continue
+            if not open_ or open_[0].note in (DEESCALATED, "possibly cancelled"):
+                continue
+            ev = open_[0]
+            ev.note, ev.updated_at = DEESCALATED, self.clock()
+            ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
+        return out
+
+    def _uncalm(self, pack, key: str, at: float, ws: list[str], entry, event_of: dict) -> list[Event]:
+        """A row that says a category again, under the threshold by itself and not raised (the call-out's rows have
+        left the window): the note DEESCALATED on its open event comes off (never a push: under the threshold)."""
+        out = []
+        mine = {r.category for r, w in entry.hits if w > 0}
+        for cat in mine & set(pack.calm) - set(event_of):
+            for ev in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+                if ev.note == DEESCALATED and self._same_job(pack, ev, entry, ws, mine):
+                    ev.note, ev.updated_at = "", self.clock()
+                    self.events.save(ev)
+                    self.sink.event(ev, "updated")
+                    out.append(ev)
+        return out
+
+    def _thr(self, pack, cat: str) -> float:
+        cd = pack.category(cat)
+        return cd["threshold"] if cd.get("threshold") is not None else pack.threshold
+
+    @staticmethod
+    def _alone(pack, entry, cat: str) -> float:
+        """The category's score from this one row's hits (its rules and cues, noisy-OR; dampers aside)."""
+        miss = 1.0
+        for r, w in entry.hits:
+            if w > 0 and r.category in (cat, rules_mod.WILD) and r.mode != "shadow":
+                miss *= 1.0 - min(1.0, w)
+        return round(1.0 - miss, 4)
 
     def _consume(self, pack_name: str, key: str) -> None:
         """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""

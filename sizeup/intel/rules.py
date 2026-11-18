@@ -47,7 +47,10 @@ drive to (an address, intersection, block or landmark) in the source's towns ("t
 burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
 words, or a read-back by the call's talker or units within minutes). "words": the words that tie a later transmission
 to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
-category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
+category of the pack that wins when both would raise for one call (fire_call defers to fire_report). "deescalate":
+phrases (the grammar above) that mark the category's open event on the same source as "de-escalated" (the weapons
+category: "got the knife away", "wasn't using it to threaten"): a note on the event, never a push and never an end
+(engine.py _deescalate).
 
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
@@ -291,6 +294,7 @@ class Pack:
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None
     area: tuple = ()                  # the towns its events belong to (empty: anywhere)
+    calm: dict = field(default_factory=dict)    # category -> its "deescalate" phrases, compiled
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -320,6 +324,10 @@ class Pack:
 
     def suppressed(self, text: str, ws: list[str]) -> bool:
         return any(_found(p, text, ws, self.norm) for p in self.suppress)
+
+    def deescalated(self, text: str, ws: list[str]) -> list[str]:
+        """The categories one of whose "deescalate" phrases the text says (either reading)."""
+        return [c for c, ps in self.calm.items() if any(_found(p, text, ws, self.norm) for p in ps)]
 
 
 def town_names() -> dict[str, str]:
@@ -404,6 +412,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
                    "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
                    "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
+                   "deescalate": [p.src for p in _phrases(cd.get("deescalate") or [], f"{name}.{c}.deescalate")],
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
     for c, cd in cats.items():
         if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
@@ -446,7 +455,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 mode=_mode(po.get("mode", d.get("mode", "push")), f"{name}.mode"),
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
                 suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
-                area=area(po.get("area") or d.get("area"), f"{name}.area"))
+                area=area(po.get("area") or d.get("area"), f"{name}.area"),
+                calm={c: [Phrase(x) for x in cd["deescalate"]] for c, cd in cats.items() if cd["deescalate"]})
 
 
 def read_files(paths=None) -> list[dict]:
