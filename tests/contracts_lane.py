@@ -45,15 +45,21 @@ class Whisper:
 class Lane(c.Live):
     """tests/contracts.py Live, with every events post the hub handled kept as it came and as it was answered:
     `events_seen` = [(request bytes, status, answer bytes)]. events_answer_with: keys added to every 200 answer (what a
-    newer hub would send)."""
+    newer hub would send). SIZEUP_CONTRACTS_EVENTS_DELAY_S=0.3 in the environment: every events post is handled that
+    much later (a slow hub: the station's rows pile up and go in fewer, larger posts; how the tests' own assumptions
+    about that are looked for, as SIZEUP_CONTRACTS_STATE_DELAY_S does for the state post)."""
 
     def __init__(self, tmp_path, events_answer_with: dict | None = None, **kw):
+        import os
         super().__init__(tmp_path, **kw)
         self.events_seen: list[tuple[bytes, int, bytes]] = []
         h = self.hub.app.hub
         real = h._events
+        delay = float(os.environ.get("SIZEUP_CONTRACTS_EVENTS_DELAY_S") or 0.0)
 
         def events(raw, p=None):
+            if delay:
+                time.sleep(delay)
             try:
                 code, body, ctype = real(raw, p)
             except ValueError as e:                  # (Hub.handle answers it 400: kept here as that)

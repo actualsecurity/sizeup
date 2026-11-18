@@ -112,7 +112,7 @@ def picked(ran, name: str) -> dict:
 def test_every_post_of_a_station_with_everything_is_what_the_schema_says(ran):
     """Every events post on the wire is strict JSON, valid, and names no key the schema does not, in the envelope, in
     each event and in each event's data by its type; every answer is what its schema says; the hub applied them all."""
-    assert ran.errors == (0, "") and len(ran.seen) >= 20
+    assert ran.errors == (0, "") and len(ran.events) >= 40     # (in however many posts: a slower machine batches more)
     for raw, code, answer in ran.seen:
         post = lane.conforms(raw)
         assert code == 200 and post["epoch"] == ran.epoch and re.fullmatch(r"[0-9a-f]{16}", post["epoch"])
@@ -313,9 +313,9 @@ def test_the_recorded_event_vectors_are_what_the_station_sends_now(ran):
         lane.conforms(committed)
         assert lane.shape(now) == lane.shape(committed), name
         assert committed["epoch"] == lane.EPOCH and committed["events"][0]["at"] == c.T0 + 1.0
-    raw, _, answer = ran.seen[0]
-    ans = c.recorded(f"{lane.ANSWER}/valid/answer.json", json.loads(answer))
-    assert set(ans) == set(json.loads(answer)) and c.errors(lane.ANSWER, ans) == []
+    answer = json.loads(ran.seen[0][2])                         # (its counts fixed: how many events the first post
+    ans = c.recorded(f"{lane.ANSWER}/valid/answer.json", dict(answer, acked=1, applied=1))   # had depends on the machine)
+    assert set(ans) == set(answer) and c.errors(lane.ANSWER, ans) == []
     # together the recorded transmissions carry every key of the transmission: the vectors are complete too
     keys = set()
     for name, (kind, _) in RECORDED.items():
