@@ -127,11 +127,13 @@ def notch_lines(X: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, list[float]]:
     cand = (f >= LINE_BAND[0]) & (f <= LINE_BAND[1]) & (mag_db - baseline > LINE_OVER_DB)
     lines: list[float] = []
     gain = np.ones(len(f))
+    h = int(LINE_HALF_HZ / df) + 2         # (the bins are evenly spaced: none further out can be within LINE_HALF_HZ)
     for i in np.where(cand)[0]:
         if mag_db[i] < mag_db[max(0, i - 2):i + 3].max():
             continue                       # only the peak bin of each line
         lines.append(float(f[i]))
-        gain[np.abs(f - f[i]) <= LINE_HALF_HZ] = 0.0
+        a, b = max(0, i - h), min(len(f), i + h + 1)
+        gain[a:b][np.abs(f[a:b] - f[i]) <= LINE_HALF_HZ] = 0.0   # the same test, on the bins round the line only
     return X * gain, lines
 
 
