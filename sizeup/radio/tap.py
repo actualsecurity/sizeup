@@ -31,10 +31,10 @@ decoded" check (#163) are as they were: only the decode looks further back.
 Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 1.7 s of audio and
 runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found. Each step decodes only
 what came since the step before, with ID_OVERLAP_FRAMES before it (a burst that ran across the last step's end is whole
-in it), not the whole buffer again (#706). The look-back is decoded only when its frames, or the first two of the
-pre-roll, show a carrier (quieting the hiss RISE_DB or more, the squelch's own measure) or an ID burst: a burst that
-began before the pre-roll rode on a carrier already partly up, and a carrier that comes up at once (most do) has only
-hiss there. Then its first two steps are one decode of the look-back and the buffer together, each ID placed by where
+in it), not the whole buffer again (#706). The look-back is decoded only when a frame of it, or of the pre-roll
+before its last, shows a carrier (quieting the hiss RISE_DB or more, the squelch's own measure) or an ID burst: a burst
+that began before the pre-roll rode on a carrier already partly up, or a weak radio's that never opened the squelch.
+RISE_DB is low (safety over CPU: a weak radio's emergency on ~1 dB still alarms), so most key-ups still decode it. Then its first two steps are one decode of the look-back and the buffer together, each ID placed by where
 its sync begins (mdc() gives that: App._mdc_at). Tones
 are one FFT per frame, on the paging channel only, while it is open. The IDs found live are handed to
 the finished transmission (ids()), so the row is named even when the burst is cut off its segment;
@@ -71,7 +71,8 @@ from sizeup.radio.fm import FRAME, RATE, id_burst_frames
 PREROLL_FRAMES = 4      # 0.2 s read before the squelch opened (the start of a key-up burst)
 ID_LOOKBACK_FRAMES = 8  # 0.4 s more before a carrier's buffer, for the ID decode only (a slowly rising carrier, #694)
 LOOKBACK_STEPS = 2      # ... in its first two decode steps (a burst that ran into the pre-roll is whole by then)
-RISE_DB = 2.0           # ... and only when a frame there quieted the hiss this much (a carrier partly up), or held a burst
+RISE_DB = 0.5           # ... and only when a frame there quieted the hiss this much (a carrier partly up, or a weak radio
+                        # that never opened the squelch: a burst on 0.5-1 dB still decodes), or held a burst
 ID_OVERLAP_FRAMES = 8   # each decode step re-reads this much (0.4 s) before what is new: a whole burst (MDC: 0.18 s,
                         # a double packet 0.27 s; FleetSync 0.05-0.09 s) that ran across the last step's end
 HIST_FRAMES = 64        # a traffic channel's latest frames, open or not: where the look-back comes from
@@ -337,11 +338,15 @@ class LiveTap:
             c.weak += 1
         if c.back and len(qd) == len(h):
             # (#706) a burst that began before the pre-roll rode on a carrier already up there: its quieting shows in
-            # the look-back or the pre-roll's first two frames (never its last: a carrier that came up at once is
-            # partly in that one), else a burst does. Neither (hiss only, most key-ups): the look-back isn't decoded.
-            qs = qd[b0:b0 + c.old + 2]
+            # some frame before the carrier came up (never the last before it: a carrier that came up at once is
+            # partly in that one; on a cut, every frame of the drop and the carrier before), else a burst does.
+            # Neither: the look-back isn't decoded. RISE_DB is low on purpose (safety over CPU): a weak radio's
+            # emergency on a carrier ~1 dB over the hiss still decodes, and hiss frames vary about 0.5 dB, so most
+            # key-ups still decode it (the PR's numbers).
+            end = max(c.old + 2, at - 1)
+            qs = qd[b0:b0 + end]
             c.rising = (any(x is None or x >= RISE_DB for x in qs)
-                        or any(id_burst_frames(np.concatenate((c.back + c.buf)[:c.old + 2]))))
+                        or any(id_burst_frames(np.concatenate((c.back + c.buf)[:end]))))
 
     def _decode(self, c: _Chan, frames: list, audio: np.ndarray, back: bool = True) -> list:
         """The IDs in these frames of the carrier (from buf[0]; audio: them joined), and with back, the IDs of a burst

@@ -962,3 +962,52 @@ def test_a_second_press_right_after_is_its_own_alarm(gap):
     rows, alarms = tap_run(np.concatenate([idle(3.0), unit(0.6), idle(0.1, 1), ramped(mdc(B_ID, EMERGENCY), 0.35),
                                            idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
     assert len(alarms) == 1 and rows[-1][1] == [f"{B_ID:04X}"] and rows[-1][3] == "alarm-1"
+
+
+def rising(burst, rise_s, seed):
+    """ramped() with its own noise: the carrier rising out of the hiss over rise_s, the burst sent at once."""
+    n = int(RATE * rise_s)
+    burst = np.concatenate([burst, np.zeros(max(0, n - len(burst)))])
+    env = np.full(len(burst), 0.4 * 10 ** (-45 / 20))
+    env[:n] = 0.4 * np.linspace(1.0, 10 ** (-45 / 20), n)
+    x = burst + env * np.random.default_rng(100 + seed).standard_normal(len(burst))
+    return np.concatenate([x, quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
+
+
+@pytest.mark.parametrize("op", [PRE, EMERGENCY], ids=["pre-id", "emergency"])
+@pytest.mark.parametrize("gap", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("rise", [0.10, 0.15, 0.20, 0.25])
+def test_a_reply_on_a_rising_carrier_after_the_squelch_closed_is_named_and_alarmed_as_main(rise, gap, op):
+    # A unkeys; B replies gap s later, its carrier rising over 0.1-0.25 s with its pre-ID / emergency at once. #706's
+    # look-back gate first looked only at the frames up to the pre-roll's second: on a cut (0.3 s, inside the hang)
+    # the rising frames fell outside it and 8-9 of 10 presses had no alarm. Main: every one, as here.
+    for seed in range(10):
+        audio = np.concatenate([idle(3.0, seed), unit(1.0), idle(gap, seed + 20), rising(mdc(B_ID, op), rise, seed),
+                                idle(2.0, seed + 40)])
+        rows, alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+        *a_rows, (_b, idb, _bb, key_b, em_b) = rows
+        assert a_rows and all(i == [] and k == "" for _s, i, _b, k, _e in a_rows), seed
+        assert idb == [f"{B_ID:04X}"], seed
+        if op == PRE:
+            assert alarms == [] and key_b == "" and not em_b, seed
+        else:
+            assert len(alarms) == 1 and alarms[0][1] == [(f"{B_ID:04X}", True)] and key_b == "alarm-1" and em_b, seed
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("c_id", [C_ID, None, B_ID])
+def test_a_downed_firefighters_button_on_a_carrier_1_db_over_the_hiss_is_alarmed_as_main(c_id, kw):
+    # As above with B's carrier only ~1 dB over the hiss (the squelch shut throughout): #706's look-back gate must still
+    # decode it. Main alarms every one, once, as B's, on the right row; the gate at 2 dB missed 3 of these 5.
+    for seed in range(5):
+        b = mdc(B_ID, EMERGENCY)
+        weak = b + 0.4 * 10 ** (-1 / 20) * np.random.default_rng(5 + seed).standard_normal(len(b))
+        rows, alarms = tap_run(np.concatenate([idle(3.0, seed), weak, idle(0.3, 1 + seed), unit(1.5, pre=c_id),
+                                               idle(2.0, 2)]), mdc=both_ids, **kw)
+        (_s, ids_, _b, key, em), = rows
+        assert [a[1] for a in alarms] == [[(f"{B_ID:04X}", True)]], seed
+        assert alarms[0][0] < _s.start - 0.2, seed
+        if c_id == C_ID:
+            assert ids_ == [f"{C_ID:04X}"] and key == "" and not em, seed
+        else:
+            assert f"{B_ID:04X}" in ids_ and key == "alarm-1" and em, seed
