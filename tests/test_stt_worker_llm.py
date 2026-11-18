@@ -553,21 +553,74 @@ def test_the_claim_says_the_workers_real_state(tmp_path, ihub, whisper, llama):
     assert [r[3]["state"] for r in ihub.calls("/infer/claim")] == ["online", "paused"]
 
 
-def test_a_leftover_llama_server_with_another_key_is_not_used_and_is_stopped(tmp_path, ihub, whisper, llama,
-                                                                           monkeypatch):
+def test_a_leftover_llama_server_with_another_key_is_not_used_and_only_the_ports_owner_is_stopped(
+        tmp_path, ihub, whisper, llama, monkeypatch):
     """A worker that died left its llama-server running (its key gone with it): every job would be 401. The worker
-    says so, never claims, and stops the leftover by name (its own isn't running)."""
+    says so, never claims, and stops the program on llm_url's port only if it is a llama-server: never another
+    llama-server the user runs elsewhere, and nothing when the port's owner can't be told or isn't one."""
     llama.key = "a key nobody knows any more"
     killed = []
+    owner = {"pid": 4242, "name": "llama-server"}
     monkeypatch.setattr(W, "kill_pid", lambda pid, run=None: killed.append(pid))
-    monkeypatch.setattr(W, "find_pids", lambda name, run=None: {4242} if name == "llama-server" else set())
+    monkeypatch.setattr(W, "find_pids", lambda name, run=None: {4242, 5151})      # (two by name: never used)
+    monkeypatch.setattr(W, "port_owner", lambda port, run=None: owner["pid"] if port == llama.port else 0)
+    monkeypatch.setattr(W, "process_name", lambda pid, run=None: owner["name"] if pid == owner["pid"] else "")
     procs = []
     cfg = llm_cfg(tmp_path, ihub, whisper, llama, llm_server=["llama-server", "-m", "m.gguf", "--port", str(llama.port)])
     w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
     with running(w):
         wait_for(lambda: killed, what="the leftover stopped")
-        assert not w.llm_ok and "isn't this worker's" in w.llm_err and not ihub.calls("/infer/claim")
-    assert killed[0] == 4242
+        assert not w.llm_ok and w.llm_err == f"port {llama.port} answered 401: not this worker's llama-server"
+        assert not ihub.calls("/infer/claim")
+        owner["name"] = "some-other-server"                  # the port's owner isn't a llama-server: only said
+        killed.clear()
+        time.sleep(0.3)
+        assert killed == [] and not w.llm_ok
+        owner["pid"] = 0                                     # can't tell who owns it: only said
+        time.sleep(0.3)
+        assert killed == []
+    assert 5151 not in killed
+
+
+def test_the_ports_owner_from_netstat_or_lsof():
+    netstat = ("Active Connections\n  Proto  Local Address  Foreign Address  State  PID\n"
+               "  TCP    0.0.0.0:135     0.0.0.0:0   LISTENING   1000\n"
+               "  TCP    127.0.0.1:8180  0.0.0.0:0   LISTENING   4242\n"
+               "  TCP    127.0.0.1:8180  127.0.0.1:50000  ESTABLISHED  77\n")
+    lsof = "4243\n"
+
+    def run(argv):
+        return netstat if argv[0] == "netstat" else lsof if argv[0] == "lsof" else ""
+
+    import os as _os
+    if _os.name == "nt":
+        assert W.port_owner(8180, run) == 4242 and W.port_owner(9999, run) == 0
+    else:
+        assert W.port_owner(8180, run) == 4243
+    assert W.port_owner(8180, lambda argv: (_ for _ in ()).throw(FileNotFoundError(argv[0]))) == 0
+
+
+def test_the_kill_on_close_job_is_its_own_attribute_never_the_clip_slot(tmp_path, ihub, whisper, llama):
+    procs = []
+    cfg = llm_cfg(tmp_path, ihub, whisper, llama, llm_server=["llama-server", "-m", "m.gguf", "--port", str(llama.port)],
+                  whisper_server=["whisper-server", "-m", "w.bin"])
+    w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
+    assert isinstance(w.kill_job, W.KillOnClose) and w.job is None
+    assert w.proc.job is w.kill_job and w.llm_proc.job is w.kill_job
+
+
+def test_a_server_that_cannot_join_the_job_is_said_once_started(tmp_path, caplog):
+    class Job:
+        handle = 1
+
+        def add(self, proc):
+            return False                                     # (Windows said no)
+
+    procs = []
+    wp = W.WhisperProcess(["llama-server", "-m", "m.gguf"], tmp_path / "l.log", clock=lambda: 1e6, name="llama-server",
+                          popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1], job=Job())
+    wp.ensure(port_alive=False)
+    assert "couldn't join the kill-on-close job" in caplog.text
 
 
 def test_the_children_a_dead_worker_left_are_ended_at_the_next_start(tmp_path):

@@ -838,6 +838,23 @@ def kill_pid(pid: int, run: Callable[[list], str] = None) -> None:
         pass
 
 
+def port_owner(port: int, run: Callable[[list], str] = None) -> int:
+    """The pid listening on 127.0.0.1:port (netstat -ano on Windows, lsof elsewhere), 0 when it can't be told."""
+    run = run or run_cmd
+    try:
+        if os.name == "nt":
+            for line in run(["netstat", "-ano", "-p", "TCP"]).splitlines():
+                cols = line.split()
+                if len(cols) >= 5 and cols[0] == "TCP" and cols[3] == "LISTENING" \
+                        and cols[1].rsplit(":", 1)[-1] == str(int(port)) and cols[4].isdigit():
+                    return int(cols[4])
+            return 0
+        out = run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"]).split()
+        return int(out[0]) if out and out[0].isdigit() else 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+
+
 class Children:
     """state_dir/children.json: {name: pid} of the servers this worker started, so the next start can end one a
     worker that died left running (reap_leftovers): only a pid that is still that program."""
@@ -938,8 +955,9 @@ class WhisperProcess:
                                    stdin=subprocess.DEVNULL, env=self.env(), cwd=self.base_dir or None,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             log.info("started %s (pid %s)", self.name, self.proc.pid)
-            if self.job is not None:
-                self.job.add(self.proc)
+            if self.job is not None and not self.job.add(self.proc) and self.job.handle is not None:
+                log.warning("%s (pid %s) couldn't join the kill-on-close job: it may outlive the worker (the next "
+                            "start ends it)", self.name, self.proc.pid)
             if self.children is not None:
                 self.children.set(self.name, self.proc.pid)
         except OSError as e:
@@ -1307,12 +1325,12 @@ class Worker:
         self.hb_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
         # the local LLM (the hub's infer lane), when llm_url is set: its own thread, hub connection and counts
         self.llm = Llm(cfg.llm_url, cfg.llm_timeout_s, cfg.llm_no_think) if cfg.llm_url else None
-        self.job = KillOnClose()
+        self.kill_job = KillOnClose()           # (self.job is the clip in hand: not this)
         self.children = Children(Path(cfg.state_dir) / "children.json", run)
         if self.proc is not None:
-            self.proc.job, self.proc.children = self.job, self.children
+            self.proc.job, self.proc.children = self.kill_job, self.children
         self.llm_proc = WhisperProcess(cfg.llm_server, Path(cfg.state_dir) / "llama-server.log", popen, clock,
-                                       cfg.base_dir, name="llama-server", env=self._llm_start_env, job=self.job,
+                                       cfg.base_dir, name="llama-server", env=self._llm_start_env, job=self.kill_job,
                                        children=self.children, command=llm_command) \
             if self.llm is not None and cfg.llm_server else None
         self._llm_sig: tuple | None = None   # the checked GGUF's (size, mtime): looked at again before each start
@@ -1619,10 +1637,16 @@ class Worker:
                 log.info("llama-server: ok (%s)", self.cfg.llm_model)
             self.llm_ok, self.llm_err, self.llm_fails = True, "", 0
         elif code == 401:
-            self._llm_down("a llama-server that isn't this worker's holds the port (401)")
+            self._llm_down(f"port {self.llm.port} answered 401: not this worker's llama-server")
             if self.llm_proc is not None and not self.llm_proc.running():
-                for pid in find_pids(self.cfg.llm_process, self.run_cmd):   # a leftover of a worker that died
-                    log.warning("stopping a leftover %s (pid %s) on llm_url's port", self.cfg.llm_process, pid)
+                # only the program that holds llm_url's port, and only if it is a llama-server (a leftover of a worker
+                # that died): never another llama-server the user runs elsewhere
+                pid = port_owner(self.llm.port, self.run_cmd)
+                name = process_name(pid, self.run_cmd) if pid else ""
+                prog = Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else self.cfg.llm_process
+                if pid and name and name.lower().removesuffix(".exe") in {
+                        prog.lower().removesuffix(".exe"), self.cfg.llm_process.lower().removesuffix(".exe")}:
+                    log.warning("stopping a leftover %s (pid %s) that holds port %s", name, pid, self.llm.port)
                     kill_pid(pid, self.run_cmd)
         else:
             self._llm_down("loading" if code == 503 else "not answering")

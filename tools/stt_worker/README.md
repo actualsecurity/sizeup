@@ -446,7 +446,7 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `llm: ..., model hash mismatch` | The GGUF isn't the pinned one: download it again (step 4b) and check its hash. |
 | `llm: ..., loading` for minutes | Read `llama-server.log`. `CUDA error: out of memory`: something else holds VRAM; lower `-c` or use the fallback model. |
 | `llm: ..., not answering` | llama-server exited or never started: `llama-server.log`; `check` tries a constrained answer. |
-| `llm: ..., a llama-server that isn't this worker's holds the port (401)` | A leftover from a worker that ended (its key is gone). The worker stops it by name and starts its own. On Windows the worker's servers end with it (a kill-on-close job), so this is rare. |
+| `llm: ..., port 8180 answered 401: not this worker's llama-server` | A leftover from a worker that ended (its key is gone). The worker stops the program that holds the port when it is a llama-server (never another one you run), then starts its own; anything else on the port is only reported (no LLM jobs until it's gone). On Windows the worker's servers end with it (a kill-on-close job), so this is rare. |
 | `check` says `llama-server said 401` | `check` uses the running worker's key (`state\llm-key`); a llama-server you started by hand for step 4b has none: run `check` against that one before the worker starts its own. |
 | `the hub has no LLM lane (an older hub)` | The hub predates the infer lane. Clips work as before; the worker asks again every 10 min. |
 | `infer ... not valid under its schema` often, with Qwen3 | Check `--reasoning off` is in `llm_server` (thinking eats the answer). |
