@@ -171,7 +171,12 @@ def test_a_page_document_has_the_schemas_keys_and_no_other():
 def literals_emitted() -> set[str]:
     """Every event type the code queues, read from its source: the first argument of each App._emit(...) call in
     sizeup/ (a name there fails: it could not be read), and the incident sources' three, which reach _emit as a
-    variable (App._source_out) from the runner's sink(...) calls."""
+    variable (App._source_out) from the runner's sink(...) calls. App._emit is the one place that queues an event:
+    a second call of the queue itself (`self.events(...)` in sizeup/app.py) would be a type this cannot read."""
+    queued = [fn.name for fn in ast.walk(ast.parse((ROOT / "sizeup/app.py").read_text(encoding="utf-8")))
+              if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and ast.unparse(n.func) == "self.events"]
+    assert queued == ["_emit"], f"sizeup/app.py queues an event outside _emit: {queued}"
     out: set[str] = set()
     for f in sorted((ROOT / "sizeup").rglob("*.py")):
         tree = ast.parse(f.read_text(encoding="utf-8"))
@@ -206,8 +211,12 @@ def test_no_attribute_is_set_on_a_transmission_that_the_schema_does_not_name():
     """The wider net under the run above: Traffic.as_dict sends every attribute, so an attribute a later change sets
     on a path the run does not reach would be on the wire unnamed. Every attribute assigned on a transmission or an
     item of speech-to-text anywhere in sizeup/app.py and sizeup/stt.py (`t.x = ...`, `item.x = ...`, `mark.x = ...`,
-    setattr with the names spelled out) is one the schema names, or one of the few that never reach a transmission's
-    event (a page's or a re-run's own, and the two that are taken off before it is sent)."""
+    setattr with the name spelled out, there or in the tuple a loop goes over) is one the schema names, or one of the
+    few that never reach a transmission's event (a page's or a re-run's own, and the two that are taken off before it
+    is sent). A setattr whose name cannot be read, and a write into `__dict__`, fail here: spell the name out. What
+    this cannot see is the same object under another name (`tr = t; tr.x = ...`): the run above is the check for
+    that, on the paths it drives."""
+    held = ("t", "item", "mark")
     never = {"raw_audio": "taken off before it is sent (Traffic.as_dict)",
              "catchup": "a re-run's own (Rerun)", "history": "a page's", "dispatch": "a page's", "shown": "a page's",
              "rerun_at": "a page's", "rerun_result": "a page's", "alt_text": "a page's", "alt_model": "a page's",
@@ -215,18 +224,35 @@ def test_no_attribute_is_set_on_a_transmission_that_the_schema_does_not_name():
     found: dict[str, str] = {}
     for rel in ("sizeup/app.py", "sizeup/stt.py"):
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        looped: set[int] = set()
         for n in ast.walk(tree):
             targets = []
             if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 raw = n.targets if isinstance(n, ast.Assign) else [n.target]
                 targets = [x for t in raw for x in (t.elts if isinstance(t, ast.Tuple) else [t])]
             for t in targets:
-                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id in ("t", "item", "mark"):
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id in held:
                     found[t.attr] = f"{rel}:{t.lineno}"
             if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple) and any(
                     isinstance(x, ast.Call) and getattr(x.func, "id", "") == "setattr" and isinstance(x.args[0], ast.Name)
-                    and x.args[0].id in ("t", "item") for x in ast.walk(n)):
+                    and x.args[0].id in held for x in ast.walk(n)):
                 found.update({e.value: f"{rel}:{n.lineno}" for e in n.iter.elts if isinstance(e, ast.Constant)})
+                looped |= {id(x) for x in ast.walk(n)}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "setattr" and len(n.args) >= 2 \
+                    and isinstance(n.args[0], ast.Name) and n.args[0].id in held:
+                if isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
+                    found[n.args[1].value] = f"{rel}:{n.lineno}"
+                else:
+                    assert id(n) in looped, f"{rel}:{n.lineno}: {ast.unparse(n)}: a name the contract tests cannot read"
+            own = lambda x: (isinstance(x, ast.Attribute) and x.attr == "__dict__"            # noqa: E731
+                             and isinstance(x.value, ast.Name) and x.value.id in held)
+            wrote = (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and own(n.func.value)
+                     and n.func.attr in ("update", "setdefault", "__setitem__")) \
+                or (isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                    and any(isinstance(x, ast.Subscript) and own(x.value)
+                            for x in (n.targets if isinstance(n, ast.Assign) else [n.target])))
+            assert not wrote, f"{rel}:{n.lineno}: {ast.unparse(n)}: a write into __dict__ the contract tests cannot read"
     assert len(found) >= 40, found
     unnamed = {k: v for k, v in found.items() if k not in TX and k not in never}
     assert unnamed == {}, f"set on a transmission and not in station-events' transmission: {unnamed}"
