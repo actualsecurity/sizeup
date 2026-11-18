@@ -54,6 +54,7 @@ import io
 import json
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +68,7 @@ from sizeup.cad.store import AUTO, TZ, CadError
 
 EXPIRE_S = 300
 SAID_MAX = 120
+REPAIRED_MAX = 4096          # Phrases.repair results kept (a rebuild repairs every radio row of every open event again)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS status_hints (
@@ -236,10 +238,38 @@ class Phrases:
         self.spoken = dict(units)
         # every unit number any board knows (ours, Rye Brook's, mutual aid's): a heard one is never someone else's
         self.known_numbers = set(known_numbers) | {re.sub(r"\D", "", c) for c in units if c.isdigit()}
+        # (text, talker, dispatcher, fine_ok given) -> (fixed, fixes, the fine_ok answers it was made with); one
+        # Phrases per lists (StatusHints._refresh), so a change of units makes a new, empty cache
+        self._repaired: OrderedDict[tuple, tuple[str, list[dict], tuple[tuple[str, bool], ...]]] = OrderedDict()
+        self._repaired_lock = threading.Lock()
 
     def repair(self, text: str, talker: str = "", fine_ok=None, dispatcher: bool = False) -> tuple[str, list[dict]]:
-        """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py)."""
-        return repair(text, self.named, self.spoken, talker, fine_ok, dispatcher)
+        """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py).
+
+        Memoised: every CAD rebuild repairs every radio row of every open event again. The result depends on the
+        text, the talker, dispatcher and, for "is fine", the fine_ok answers (live dispatch state): an entry keeps
+        the answers it was made with, in the order asked, and is used only while fine_ok still gives them all (the
+        repair is deterministic, so the same answers replay the same path); otherwise it is made again."""
+        key = (text, talker, bool(dispatcher), fine_ok is None)
+        with self._repaired_lock:
+            hit = self._repaired.get(key)
+            if hit is not None:
+                self._repaired.move_to_end(key)
+        if hit is not None and all(bool(fine_ok(code)) == said for code, said in hit[2]):
+            return hit[0], [dict(x) for x in hit[1]]
+        asked: list[tuple[str, bool]] = []
+
+        def ask(code: str) -> bool:
+            said = bool(fine_ok(code))
+            asked.append((code, said))
+            return said
+        fixed, fixes = repair(text, self.named, self.spoken, talker, None if fine_ok is None else ask, dispatcher)
+        with self._repaired_lock:
+            self._repaired[key] = (fixed, [dict(x) for x in fixes], tuple(asked))
+            self._repaired.move_to_end(key)
+            while len(self._repaired) > REPAIRED_MAX:
+                self._repaired.popitem(last=False)
+        return fixed, fixes
 
     def own_number(self, talker: str, heard: str) -> bool:
         """A bare number heard before a status is the talker's own: its number, or (a chief, 4 digits) the same

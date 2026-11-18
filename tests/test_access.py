@@ -360,3 +360,143 @@ def test_access_config(tmp_path, monkeypatch):
         load(p)
     hub_toml = load(access_mod.__file__.replace("sizeup/cloud/access.py", "deploy/hub/config.hub.toml"))
     assert hub_toml.cloud_access_team == "yoda.cloudflareaccess.com"
+
+
+# -- a verified token kept (the RSA check once per token, not per request) -----------------------------------------
+
+@pytest.fixture
+def rsa_calls(monkeypatch):
+    calls = []
+    real = access_mod.rsa_pkcs1_sha256_verify
+    monkeypatch.setattr(access_mod, "rsa_pkcs1_sha256_verify", lambda *a: calls.append(1) or real(*a))
+    return calls
+
+
+def tok(key, clock, life=600, **over):
+    t = int(clock.t)
+    return jwt(key, **{"iat": t, "nbf": t - 5, "exp": t + life, **over})
+
+
+def test_a_kept_token_skips_the_signature_and_hands_out_its_own_claims(keys, jwks, rsa_calls):
+    clock = Clock()
+    v = verifier(jwks, clock)
+    t = tok(keys[0], clock)
+    first = v.verify(t)
+    first["email"] = "boss@example.org"                       # a caller changing what it got changes nothing kept
+    first["aud"].append("x")
+    again = v.verify(t)
+    assert again["email"] == "Casey@Example.org" and again["aud"] == [AUD] and len(rsa_calls) == 1
+    assert v.identify({access_mod.HEADER: t}).email == "casey@example.org" and len(rsa_calls) == 1
+    assert v.identify({"Cookie": f"CF_Authorization={t}"}).email == "casey@example.org" and len(rsa_calls) == 1
+    other = tok(keys[0], clock, email="dana@example.org")      # another token: checked
+    assert v.identity(other).email == "dana@example.org" and len(rsa_calls) == 2
+
+
+def test_a_kept_token_still_expires_with_the_same_leeway(keys, jwks, rsa_calls):
+    clock = Clock()
+    clock.t = float(int(clock.t))
+    v = verifier(jwks, clock)
+    t = tok(keys[0], clock, life=600)
+    v.verify(t)
+    clock.t += 600 + access_mod.LEEWAY_S                       # the last second verify itself takes
+    assert v.verify(t) and len(rsa_calls) == 1
+    clock.t += 1
+    with pytest.raises(AccessError, match="expired"):
+        v.verify(t)
+    with pytest.raises(AccessError, match="expired"):
+        v.verify(t)
+    assert v.identify({access_mod.HEADER: t}) is None
+
+
+def test_a_kept_token_is_checked_for_not_before(keys, jwks, rsa_calls):
+    clock = Clock()
+    v = verifier(jwks, clock)
+    t = tok(keys[0], clock, nbf=int(clock.t) + 30)             # inside the leeway: taken
+    v.verify(t)
+    clock.t -= 100                                             # the clock steps back: not valid yet, kept or not
+    with pytest.raises(AccessError, match="not valid yet"):
+        v.verify(t)
+
+
+def test_a_refused_token_is_never_kept(keys, jwks, rsa_calls):
+    clock = Clock()
+    v = verifier(jwks, clock)
+    bad_sig = (lambda x: x[:-6] + ("AAAAAA" if not x.endswith("AAAAAA") else "BBBBBB"))(tok(keys[0], clock))
+    wrong_aud = tok(keys[0], clock, aud=["b" * 64])
+    early = tok(keys[0], clock, nbf=int(clock.t) + 600)
+    for t in (bad_sig, wrong_aud, early):
+        for _ in range(2):
+            with pytest.raises(AccessError):
+                v.verify(t)
+    assert len(rsa_calls) == 6 and not v._verified
+    clock.t += 600                                             # now valid: checked in full, then kept
+    assert v.verify(early) and len(rsa_calls) == 7 and len(v._verified) == 1
+
+
+def test_a_key_rotated_out_ends_its_kept_tokens(keys, jwks, rsa_calls):
+    clock = Clock()
+    jwks.keys = [keys[0], keys[1]]
+    v = verifier(jwks, clock)
+    t0, t1 = tok(keys[0], clock, life=4 * 3600), tok(keys[1], clock, life=4 * 3600)
+    assert v.verify(t0) and v.verify(t1) and len(rsa_calls) == 2 and jwks.hits == 1
+    jwks.keys = [keys[0]]                                      # Cloudflare drops k2
+    clock.t += access_mod.KEYS_TTL_S + 1                       # the keys are fetched again on the next request
+    assert v.verify(t0) and len(rsa_calls) == 2 and jwks.hits == 2
+    with pytest.raises(AccessError, match="unknown key"):
+        v.verify(t1)
+    assert v.identify({access_mod.HEADER: t1}) is None
+
+
+def test_a_key_id_given_another_key_ends_its_kept_tokens(keys, jwks, rsa_calls):
+    import copy
+    clock = Clock()
+    v = verifier(jwks, clock)
+    t = tok(keys[0], clock, life=4 * 3600)
+    v.verify(t)
+    swapped = copy.copy(keys[1])
+    swapped.kid = keys[0].kid                                  # "k1" now names another key
+    jwks.keys = [swapped]
+    clock.t += access_mod.KEYS_TTL_S + 1
+    with pytest.raises(AccessError, match="bad signature"):
+        v.verify(t)
+    assert len(rsa_calls) == 2
+
+
+def test_the_kept_tokens_are_bounded(keys, jwks, rsa_calls, monkeypatch):
+    monkeypatch.setattr(access_mod, "VERIFIED_MAX", 3)
+    clock = Clock()
+    v = verifier(jwks, clock)
+    ts = [tok(keys[0], clock, email=f"p{i}@example.org") for i in range(5)]
+    for t in ts:
+        v.verify(t)
+    assert len(v._verified) == 3 and len(rsa_calls) == 5
+    v.verify(ts[-1])                                           # kept
+    assert len(rsa_calls) == 5
+    v.verify(ts[0])                                            # the oldest went: checked again
+    assert len(rsa_calls) == 6 and len(v._verified) == 3
+
+
+def test_kept_tokens_across_threads(keys, jwks, monkeypatch):
+    monkeypatch.setattr(access_mod, "VERIFIED_MAX", 4)
+    clock = Clock()
+    v = verifier(jwks, clock)
+    ts = [tok(keys[0], clock, email=f"p{i}@example.org") for i in range(6)]
+    bad = (lambda x: x[:-6] + ("AAAAAA" if not x.endswith("AAAAAA") else "BBBBBB"))(ts[0])
+    wrong = []
+
+    def run(k):
+        for i in range(30):
+            t = ts[(i + k) % len(ts)]
+            if v.identity(t).email != f"p{(i + k) % len(ts)}@example.org":
+                wrong.append(t)
+            try:
+                v.verify(bad)
+                wrong.append(bad)
+            except AccessError:
+                pass
+    threads = [threading.Thread(target=run, args=(k,)) for k in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not wrong and len(v._verified) <= 4
