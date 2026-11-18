@@ -5,7 +5,7 @@
   "params": {
     "t0": 1900000000.0,
     "max_age_s": 1800,
-    "max_age_s_decided": false,
+    "max_age_s_decided": false, "age_margin": 1.1,
     "repeat_s": 120,
     "stuck_within_s": 600,
     "p25_slack_s": 10,
@@ -34,7 +34,7 @@
       }
     },
     "p25": {
-      "key": "p25-examplesys-4101-7001-1900000300020",
+      "key": "p25-examplesys-4101-7001-1900000300000",
       "rev": 0,
       "kind": "alarm",
       "at": 1900000300.02,
@@ -50,7 +50,8 @@
         "emergency": true,
         "emergency_via": "P25",
         "system": "examplesys",
-        "talkgroup": 4101
+        "talkgroup": 4101,
+        "key_time": "grant"
       }
     },
     "page": {
@@ -297,16 +298,17 @@
       "then": {"alarms": 1, "pushes": 1, "notices": 0, "push_age_s": 1740.0}
     },
     {
-      "name": "exactly the age limit is outside it: stale",
-      "design": "4 (every limit is exclusive on the inside); 11 H1k",
+      "name": "exactly the age limit is outside it: 1979 s is applied, 1980 s (30 min x 1.1) is stale",
+      "design": "4 (every limit is exclusive on the inside); 4.3 the age cutoff with its 10 % margin; 11 H1i, H1k",
       "depends_on": "max_age_s",
       "steps": [
         {
-          "at": 1799.5,
-          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 1799.999}],
-          "expect": ["applied"]
+          "at": 1979.0,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 1979.0}],
+          "expect": ["applied"],
+          "note": "an alarm 31.5 real min old, its boot-clock age 4.7 % over: still raised and pushed"
         },
-        {"at": 1800.0, "urgent": [{"item": "alarm", "age_s": 1800.0}], "expect": ["stale"]}
+        {"at": 1980.0, "urgent": [{"item": "alarm", "age_s": 1980.0}], "expect": ["stale"]}
       ],
       "then": {
         "alarms": 1,
@@ -320,15 +322,16 @@
       "design": "4.3 idempotency row 10, the three states; 11 H1k; A7 (recommended)",
       "depends_on": "max_age_s",
       "steps": [
-        {"at": 1860.0, "urgent": [{"item": "alarm", "age_s": 1860.0}], "expect": ["stale"]},
+        {"at": 2040.0, "urgent": [{"item": "alarm", "age_s": 2040.0}], "expect": ["stale"]},
+        {"at": 2041.0, "holds": {"stale_src": {"CHA-live-1900000000123": "boot"}}},
         {
-          "at": 1875.0,
-          "urgent": [{"item": "alarm", "age_s": 1875.0}],
+          "at": 2055.0,
+          "urgent": [{"item": "alarm", "age_s": 2055.0}],
           "expect": ["duplicate"],
           "note": "the key is recorded as stale"
         },
         {
-          "at": 1880.0,
+          "at": 2060.0,
           "event": {
             "type": "alarm",
             "id": "CHA-live-1900000000123",
@@ -339,14 +342,14 @@
           }
         },
         {
-          "at": 1881.0,
+          "at": 2061.0,
           "event": {
             "type": "alarm",
             "id": "CHA-live-1900000000123",
             "radio_id": "7001",
             "source": "CH A",
-            "start": 1900001880.0,
-            "end": 1900001880.5
+            "start": 1900002060.0,
+            "end": 1900002060.5
           },
           "note": "an event whose wall time looks fresh: the item was stale on a boot-clock age, and that wins"
         }
@@ -458,7 +461,7 @@
           "at": 304.0,
           "event": {
             "type": "alarm",
-            "id": "p25-examplesys-4101-7001-1900000300020",
+            "id": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -471,7 +474,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -492,7 +495,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -507,7 +510,7 @@
         "alarms": 1,
         "pushes": 1,
         "traffic_ids": ["4101-1900000300_851012500.0-call_17"],
-        "states": {"p25-examplesys-4101-7001-1900000300020": "raised"}
+        "states": {"p25-examplesys-4101-7001-1900000300000": "raised"}
       }
     },
     {
@@ -525,7 +528,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -547,7 +550,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -614,10 +617,10 @@
           }
         }
       ],
-      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["p25-examplesys-4101-7001-1900000300020"], "still_set": 1}
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["p25-examplesys-4101-7001-1900000300000"], "still_set": 1}
     },
     {
-      "name": "the same radio's next call 300 s later with the bit still set: nothing is raised",
+      "name": "the same radio's next call 300 s later with the bit still set: it joins the open alarm, nothing new is raised",
       "design": "4.3 idempotency row 12; 11 H1d, H1k",
       "steps": [
         {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
@@ -626,7 +629,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -647,14 +650,14 @@
             "start": 1900000612.0,
             "end": 1900000624.0
           },
-          "note": "no flag-free 10 min before it: the row says \"emergency still set\""
+          "note": "312 s after the radio's last flag by the hub's clock, its alarm open: it joins as \"emergency still set\""
         }
       ],
       "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"], "still_set": 1}
     },
     {
-      "name": "an All clear does not clear \"still set\"",
-      "design": "4.3 idempotency row 12",
+      "name": "an All clear ends the press window: the bit still set after it raises an alarm labelled emergency still set after All clear",
+      "design": "4.3 idempotency row 12 (the radio maintainers' wording); 6 end-to-end",
       "steps": [
         {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
         {
@@ -662,7 +665,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -686,10 +689,10 @@
           }
         }
       ],
-      "then": {"alarms": 1, "pushes": 1, "still_set": 1}
+      "then": {"alarms": 2, "pushes": 2, "still_set": 0, "labels": ["", "emergency still set after All clear"]}
     },
     {
-      "name": "599 s without a flag is still set; exactly 600 s is a new press",
+      "name": "599.75 s after the last flag by the hub's clock is still set; exactly 600 s is a new press",
       "design": "4.3 idempotency row 12; 4 (every limit is exclusive on the inside); 11 H1k",
       "steps": [
         {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
@@ -698,7 +701,7 @@
           "event": {
             "type": "alarm",
             "id": "4101-1900000300_851012500.0-call_17",
-            "alarm_key": "p25-examplesys-4101-7001-1900000300020",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
             "radio_id": "7001",
             "source": "Fire Dispatch 1",
             "system": "examplesys",
@@ -708,7 +711,7 @@
           }
         },
         {
-          "at": 925.0,
+          "at": 913.75,
           "event": {
             "type": "alarm",
             "id": "4101-1900000612_851012500.0-call_31",
@@ -720,9 +723,9 @@
             "end": 1900000923.0
           }
         },
-        {"at": 926.0, "holds": {"alarms": 1, "pushes": 1, "still_set": 1}},
+        {"at": 914.0, "holds": {"alarms": 1, "pushes": 1, "still_set": 1}},
         {
-          "at": 1537.0,
+          "at": 1513.75,
           "event": {
             "type": "alarm",
             "id": "4101-1900001523_851012500.0-call_58",
@@ -743,7 +746,7 @@
       }
     },
     {
-      "name": "the same radio pressing again while its alarm is open",
+      "name": "the same radio pressing again while its alarm is open, acknowledged or not: it joins",
       "design": "4.3 idempotency row 13",
       "steps": [
         {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
@@ -760,7 +763,7 @@
           "expect": ["applied"]
         }
       ],
-      "then": {"alarms": 2, "pushes": 2, "states": {"CHA-live-1900000030000": "raised"}}
+      "then": {"alarms": 1, "pushes": 1, "states": {"CHA-live-1900000030000": "raised", "CHA-live-1900000060000": "raised"}}
     },
     {
       "name": "another station while the hub takes one",
@@ -952,6 +955,14 @@
         {"at": 0.6, "urgent": [{"item": "alarm", "age_s": 0.5}], "expect": ["applied"]}
       ],
       "then": {"alarms": 1, "pushes": 1}
-    }
+    },
+    {"name": "a P25 radio in emergency for 35 min with the app down: its calls arrive in a burst, ending 35, 28, 21, 14, 7, 1 min ago", "design": "4.3 the press window (second review); 6 end-to-end; 11 H1d, H1k", "depends_on": "max_age_s", "steps": [{"at": 7200.0, "event": {"type": "alarm", "id": "4101-1900005088_851012500.0-call_1", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005088.0, "end": 1900005100.0}}, {"at": 7200.5, "event": {"type": "alarm", "id": "4101-1900005508_851012500.0-call_2", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005508.5, "end": 1900005520.5}}, {"at": 7201.0, "event": {"type": "alarm", "id": "4101-1900005929_851012500.0-call_3", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005929.0, "end": 1900005941.0}}, {"at": 7201.5, "event": {"type": "alarm", "id": "4101-1900006349_851012500.0-call_4", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900006349.5, "end": 1900006361.5}}, {"at": 7202.0, "event": {"type": "alarm", "id": "4101-1900006770_851012500.0-call_5", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900006770.0, "end": 1900006782.0}}, {"at": 7202.5, "event": {"type": "alarm", "id": "4101-1900007130_851012500.0-call_6", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900007130.5, "end": 1900007142.5}}, {"at": 7203.0, "holds": {"alarms": 1, "pushes": 1, "still_set": 4}}], "then": {"alarms": 1, "pushes": 1, "still_set": 4, "traffic_ids": ["4101-1900005508_851012500.0-call_2"], "push_age_s": 1680.0}},
+    {"name": "a flag on a talkgroup whose notices are off arms nothing: the same radio on a dispatch talkgroup 5 min later is an alarm", "design": "4.3 the press window, step 3 (second review); 6 end-to-end; 11 H1k", "hub": {"off_channels": ["Fire Tac 9"]}, "steps": [{"at": 10.0, "event": {"type": "alarm", "id": "4109-1899999998_851062500.0-call_3", "radio_id": "7001", "source": "Fire Tac 9", "system": "examplesys", "talkgroup": 4109, "start": 1899999998.0, "end": 1900000008.0}}, {"at": 10.5, "holds": {"alarms": 0}}, {"at": 310.0, "event": {"type": "alarm", "id": "4101-1900000298_851012500.0-call_9", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000298.0, "end": 1900000308.0}}], "then": {"alarms": 1, "pushes": 1, "still_set": 0}},
+    {"name": "All clear, then 20 real min later a new press with the station's clock stepped 15 min behind: an alarm", "design": "4.3 the press window (second review): the hub's receive time, never two station wall times; 6 end-to-end; 11 H1k", "steps": [{"at": 12.0, "event": {"type": "alarm", "id": "4101-1900000000_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000000.0, "end": 1900000012.0}}, {"at": 30.0, "all_clear": "4101-1900000000_851012500.0-call_17"}, {"at": 1212.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_40", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0}, "note": "the calls' own times 5 min apart; the hub received them 20 min apart"}], "then": {"alarms": 2, "pushes": 2, "labels": ["", "emergency still set after All clear"]}},
+    {"name": "the same 20 min later without the All clear: a new press, by the hub's clock", "design": "4.3 the press window (second review); 11 H1k", "steps": [{"at": 12.0, "event": {"type": "alarm", "id": "4101-1900000000_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000000.0, "end": 1900000012.0}}, {"at": 1212.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_40", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0}}], "then": {"alarms": 2, "pushes": 2, "still_set": 0, "labels": ["", ""]}},
+    {"name": "a reboot with the wall clock 1 h fast: the reloaded alarm is stale on a wall-sourced age, then the app's take-over raises it", "design": "4.3 the three states, stale_src (second review); 6 end-to-end; 11 H1k", "depends_on": "max_age_s", "steps": [{"at": 5.0, "urgent": [{"item": "alarm", "age_s": 3700.0, "age_src": "wall"}], "expect": ["stale"]}, {"at": 5.5, "holds": {"stale_src": {"CHA-live-1900000000123": "wall"}}}, {"at": 6.0, "urgent": [{"item": "alarm", "age_s": 3701.0, "age_src": "wall"}], "expect": ["duplicate"], "note": "a retry of the item is still a duplicate"}, {"at": 7.0, "event": {"type": "alarm", "id": "CHA-live-1900000000123", "radio_id": "7001", "source": "CH A", "start": 1899999885.0, "end": 1899999885.4}, "note": "its true times, 2 min old: judged on its own"}, {"at": 12.0, "event": {"type": "traffic", "id": "CHA-1899999885000", "alarm_key": "CHA-live-1900000000123", "emergency": true, "radio_id": "7001", "source": "CH A", "start": 1899999885.0, "end": 1899999892.0}}], "then": {"alarms": 1, "pushes": 1, "notices": 1, "traffic_ids": ["CHA-1899999885000"], "states": {"CHA-live-1900000000123": "raised"}}},
+    {"name": "a hub restored to after the events lane's seen and before its upgrade to raised takes the resend: applied", "design": "6 the stub's restore puts back the whole state (second review); 11 H1k", "steps": [{"at": 1.0, "event": {"type": "traffic", "id": "CHA-1900000000123", "alarm_key": "CHA-live-1900000000123", "emergency": false, "radio_id": "7001", "source": "CH A", "start": 1900000000.123, "end": 1900000006.473}}, {"at": 40.0, "urgent": [{"item": "alarm", "age_s": 1.2}], "expect": ["applied"]}, {"at": 50.0, "hub": {"restore_s": 30}}, {"at": 50.5, "holds": {"alarms": 0, "states": {"CHA-live-1900000000123": "seen"}}}, {"at": 60.0, "urgent": [{"item": "alarm", "age_s": 21.2}], "expect": ["applied"], "gen_changed": true, "note": "a store kept by first sighting said raised here: the alarm was lost"}], "then": {"alarms": 1, "pushes": 2, "states": {"CHA-live-1900000000123": "raised"}}},
+    {"name": "two stations, the first alarm acknowledged at 4 s, the second station's item at 9 s: one push", "design": "4.3 idempotency row 14, open = not ended or cleared (second review); 6 end-to-end; 11 H1j, H1k", "hub": {"multi_station": true}, "steps": [{"at": 1.0, "urgent": [{"item": "alarm", "age_s": 0.5}], "expect": ["applied"]}, {"at": 4.0, "ack": "CHA-live-1900000000123"}, {"at": 9.0, "urgent": [{"item": "alarm", "key": "CHA-live-1900000000124", "age_s": 7.6}], "expect": ["applied"], "station": "st-south"}], "then": {"alarms": 1, "pushes": 1, "sources": ["st-north", "st-south"]}},
+    {"name": "an ended page stays ended: a later state post that still lists it does not make it live", "design": "4.3 idempotency row 16, ended is final (second review); 11 H1e, H1k", "steps": [{"at": 1.0, "urgent": [{"item": "page", "data": {"ended": true}}], "expect": ["applied"]}, {"at": 2.0, "state_paging": [{"key": "page:PAGE 1:1900000100.25", "channel": "PAGE 1", "phase": "voice", "ended": false}]}], "then": {"pages": 1, "page": {"key": "page:PAGE 1:1900000100.25", "ended": true, "live": false}}}
   ]
 }

@@ -128,7 +128,8 @@
     "dropped": 0,
     "dropped_audio": 0,
     "quarantined": 0,
-    "synced_at": 1899999996.0
+    "synced_at": 1899999996.0,
+    "seq_behind": 0
   },
   "urgent": {
     "urgent_epoch": "9c2d7e10a4b35f68",

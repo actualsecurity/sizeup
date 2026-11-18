@@ -75,7 +75,7 @@ def test_the_schemas_the_harness_skips_for_unknown_keys_are_covered_here():
 
 
 # What docs/native/capture-split.md 10 "Contract artifacts" says a reader may rely on, row by row (copied from the
-# design at 6a777c98; test_the_design_documents_table_is_this_one compares it with the document once that is here).
+# design at 225b06ff; test_the_design_documents_table_is_this_one compares it with the document once that is here).
 REQUIRED = {
     "Spool sidecar, `kind: \"segment\"`": [
         "v", "kind", "id", "seq", "spool_epoch", "channel.label", "channel.kind", "start", "end", "closed_boot", "boot",
@@ -89,7 +89,7 @@ REQUIRED = {
     "Spool cursor": ["v", "spool_epoch", "seq"],
     "Urgent item (a row's `data`, and an item of the request)": [
         "key", "rev", "kind", "at", "event_at", "age_s", "age_src", "boot", "wall", "data", "data", "source", "start",
-        "radio_id", "emergency", "emergency_via", "data", "channel", "started", "pairs", "phase", "ended"],
+        "radio_id", "emergency", "emergency_via", "data", "channel", "started", "pairs", "phase", "ended", "trimmed"],
     "`POST /api/station/urgent`, request": ["v", "station", "items"],
     "`POST /api/station/urgent`, answers": ["ok", "gen", "results", "key", "rev", "status", "error", "reason"],
     "Socket, capture to client": ["v", "t", "at", "t"],
@@ -370,7 +370,7 @@ def test_a_segments_id_file_names_and_audio_size_follow_from_its_fields():
             assert side["tr"] == cc.item_name(side["seq"], side["id"], ".tr") and not side["tr"].endswith(".json")
         if side.get("audio_dropped"):                          # never at a bound for an item with an emergency id:
             assert side["audio"] is None, file                 # only a write that failed outright leaves it without
-            assert cc._has_emergency(side) == (side.get("audio_lost") == "write"), file
+            assert cc.is_emergency(side) == (side.get("audio_lost") == "write"), file
         if side.get("published_boot") is not None and "closed_boot" in side:
             assert side["published_boot"] >= side["closed_boot"]
     assert cc.segment_id("CH A", 1900000000.123) == "CHA-1900000000123"
@@ -449,11 +449,13 @@ def test_a_spool_written_in_order_keeps_every_rule(spool):
     assert len(list((spool.root / "items").glob("*.json"))) == 6
 
 
-@pytest.mark.parametrize("stop,live,settled", [("tmp", [], ["tmp"]), ("audio", [], ["debris"]), ("sidecar", [], [])])
+@pytest.mark.parametrize("stop,live,settled", [("tmp", [], ["tmp"]), ("audio", [], ["debris", "seq-behind"]),
+                                                ("sidecar", [], ["seq-behind"])])
 def test_a_writer_killed_at_any_point_leaves_no_half_item_a_reader_would_take(spool, stop, live, settled):
     """Atomicity (tmp + rename, audio first, the sidecar last): wherever the writer dies, a reader that lists `*.json`
     sees only complete items. What a crash leaves (a write under tmp/, audio with no sidecar) is debris that capture
-    removes at its next start; the sequence number it used is never given out again."""
+    removes at its next start; the sequence number it used is never given out again. (`SEQ` not yet rewritten is
+    behind a file name: the check says so, and capture's start takes the next number above it.)"""
     before = sorted(p.name for p in (spool.root / "items").glob("*.json"))
     with pytest.raises(cc.Crash):
         spool.publish(seg("CH A", 1900000020.0), cc.wav_s16(800), stop=stop)
@@ -474,7 +476,7 @@ def test_a_writer_killed_at_any_point_leaves_no_half_item_a_reader_would_take(sp
 def test_seq_is_recovered_from_the_file_and_from_the_items(spool):
     assert cc.recover_seq(spool.root) == 4
     (spool.root / "SEQ").write_text("1\n")                                     # an old SEQ (a crash before its rewrite)
-    assert cc.recover_seq(spool.root) == 4 and cc.check_spool(spool.root) == []
+    assert cc.recover_seq(spool.root) == 4 and rules(cc.check_spool(spool.root)) == ["seq-behind"]
     (spool.root / "SEQ").write_text("41\n")                                    # items pruned behind the cursor
     assert cc.recover_seq(spool.root) == 42
     # a SEQ that is missing or not a number counts as 0, is reported, and the reader's cursor is read too
@@ -491,6 +493,27 @@ def test_seq_is_recovered_from_the_file_and_from_the_items(spool):
         assert again.next == 61 and (spool.root / "SEQ").read_text() == "60\n" and cc.check_spool(spool.root) == []
         (spool.root / "cursor.app.json").unlink()
         (spool.root / "SEQ").write_text("3\n")
+
+
+def test_seq_rolled_back_by_a_power_cut_is_never_taken_at_or_under_the_cursor(tmp_path):
+    """The second review's sequence: SEQ is not fsynced at each publish, so a power cut rolls it back to 4 after items
+    up to 10 were handled and pruned (items/ empty, the cursor at 10). The next number is ALWAYS the largest of SEQ,
+    the file names (items/ and quarantine/) and the cursor, plus 1: 11, above the cursor, so the next item is
+    handled. `SEQ` behind the cursor is reported. Before: 5, at or under the cursor, counted as done and never
+    handled."""
+    spool = cc.Spool(tmp_path / "spool")
+    (spool.root / "SEQ").write_text("4\n")
+    (spool.root / "cursor.app.json").write_text(json.dumps({"v": 1, "spool_epoch": spool.epoch, "seq": 10, "done": []}))
+    assert cc.recover_seq(spool.root) == 11
+    assert rules(cc.check_spool(spool.root)) == ["seq-behind"]
+    again = cc.Spool(spool.root)
+    side = again.publish(dict(seg("CH A", 1900000040.0), ids=[{"id": "7001", "system": "mdc", "emergency": True,
+                                                               "from": "live"}]), cc.wav_s16(800))
+    assert side["seq"] == 11 and cc.check_spool(spool.root) == []
+    # quarantine/ counts too: a poison item set aside under a higher number
+    (spool.root / "SEQ").write_text("2\n")
+    (spool.root / "quarantine" / "000000000019-CHA-1900000050000.json").write_text("{}")
+    assert cc.recover_seq(spool.root) == 20
 
 
 def break_spool(root: Path, how: str) -> None:
@@ -716,7 +739,10 @@ def test_the_keys_of_the_vectors_are_the_designs_forms():
         == valid("capture-spool-sidecar")["segment-with-an-emergency-id.json"]["id"]
     p25 = items["alarm-p25-live.json"]
     d = p25["data"]
-    assert p25["key"] == f"p25-{d['system']}-{d['talkgroup']}-{d['radio_id']}-{int(p25['at'] * 1000)}"     # `at`, as written
+    assert (p25["key"], d["key_time"]) == cc.p25_key(d["system"], d["talkgroup"], d["radio_id"], event_at=p25["event_at"],
+                                                     at=p25["at"]) == (f"p25-examplesys-4101-7001-{int(p25['event_at'] * 1000)}", "grant")
+    other = items["alarm-p25-live-keyed-on-captures-time.json"]           # the grant carried no time: capture's `at`
+    assert (other["key"], other["data"]["key_time"]) == cc.p25_key("examplesys", 4101, "7001", event_at=None, at=other["at"])
     page = items["page-voice.json"]
     assert page["key"] == f"page:{page['data']['channel']}:{page['data']['started']:.2f}" and page["rev"] == 2
     assert items["page-first-pair.json"]["rev"] == 0 and items["page-first-pair.json"]["key"] == page["key"]
@@ -814,7 +840,8 @@ def holds(hub: cc.Hub, then: dict) -> None:
     got = {"alarms": len(hub.alarms), "pushes": len(hub.pushes), "notices": len(hub.notices), "pages": len(hub.pages),
            "traffic_ids": [a["traffic_id"] for a in hub.alarms],
            "push_age_s": hub.pushes[0]["age_s"] if hub.pushes else None,
-           "still_set": sum(a["still_set"] for a in hub.alarms), "sources": hub.alarms[0]["sources"] if hub.alarms else []}
+           "still_set": sum(a["still_set"] for a in hub.alarms), "sources": hub.alarms[0]["sources"] if hub.alarms else [],
+           "labels": [a["label"] for a in hub.alarms]}
     for key, want in then.items():
         if key == "page":
             page = hub.pages[("st-north", want["key"])]
@@ -823,6 +850,8 @@ def holds(hub: cc.Hub, then: dict) -> None:
             assert {k: flat[k] for k in want} == want, flat
         elif key == "states":
             assert {k: hub.store[("st-north", k)]["state"] for k in want} == want
+        elif key == "stale_src":
+            assert {k: hub.store[("st-north", k)]["stale_src"] for k in want} == want
         else:
             assert got[key] == want, (key, got)
 
@@ -839,6 +868,7 @@ def test_the_table_covers_the_designs_rows_and_says_what_is_not_decided():
     for word in ("H1a", "H1d", "H1e", "H1j", "H1k", "handoff", "the three states", "6 end-to-end"):
         assert word in names, word
     assert SCENARIOS["params"]["max_age_s"] == 1800 and SCENARIOS["params"]["max_age_s_decided"] is False
+    assert SCENARIOS["params"]["age_margin"] == cc.AGE_MARGIN == 1.1
     assert "NOT DECIDED" in SCENARIOS["description"] and "A7" in README
     kinds = {"urgent", "event", "hello", "ack", "all_clear", "state_paging", "hub", "holds"}
     for sc in SCENARIOS["scenarios"]:
@@ -851,7 +881,11 @@ def test_the_table_covers_the_designs_rows_and_says_what_is_not_decided():
     # the sequences that lost or doubled an alarm before the design's rules: each is here, by name
     for needle in ("stepped back 40 min", "carries the alarm_key and no emergency", "60 s ahead", "300 s later",
                    "two stations hear one press", "ends on the hub by itself", "says so in its hello",
-                   "exactly the age limit", "exactly 600 s", "exactly 120 s apart", "exactly 10 s before"):
+                   "exactly the age limit", "exactly 600 s", "exactly 120 s apart", "exactly 10 s before",
+                   # ... and the second review's (docs/native/capture-split.md 4.3 "What can go wrong", 6)
+                   "ending 35, 28, 21, 14, 7, 1 min ago", "notices are off", "15 min behind", "1 h fast",
+                   "before its upgrade to raised", "acknowledged at 4 s", "an ended page stays ended",
+                   "emergency still set after All clear"):
         assert any(needle in sc["name"] for sc in SCENARIOS["scenarios"]), needle
 
 
@@ -860,7 +894,7 @@ def test_the_age_limit_is_a_parameter_until_the_admin_decides():
     limit is a parameter of the model and of the table. The scenarios that depend on it say so, and no other
     scenario changes with it."""
     depends = [sc for sc in SCENARIOS["scenarios"] if sc.get("depends_on") == "max_age_s"]
-    assert len(depends) == 6
+    assert len(depends) == 8
     late = next(sc for sc in depends if sc["name"].startswith("late, under"))
     older = next(sc for sc in depends if sc["name"].startswith("older than"))
     holds(run(late), late["then"])
@@ -1054,7 +1088,8 @@ def test_lane_capture_restarts_after_an_answer_and_then_the_hub_comes_back_from_
     assert lane.meta == {"gen": "1", "gen_seen_at": W0 + 40.44, "gen_seen_boot": B0 + 40.44, "gen_seen_boot_id": "boot-1"}
     lane.crash()                                               # capture restarts: its memory is gone
     lane.start(wall=W0 + 45.0, boottime=B0 + 45.0)
-    assert lane.answered == {(KEY, 0)} and lane.memory == {} and send(lane, hub, t=45.0) is None
+    assert lane._since_sighting(lane.rows[(KEY, 0)], W0 + 45.0)                  # in the resend window, from the file
+    assert lane.memory == {} and send(lane, hub, t=45.0) is None
     hub.now = W0 + 60.0
     hub.restore(30.0)                                          # the hub is back from a replica 30 s behind
     assert hub.alarms == []
@@ -1128,18 +1163,18 @@ def test_lane_generations_are_compared_by_value_and_the_resend_is_bounded():
     lane.answer(200, dict(ok, gen=5, results=[{"key": KEY, "rev": 0, "status": "applied"}]), wall=W0 + 0.5, boottime=B0 + 0.5)
     lane.crash()
     lane.start(wall=W0 - 7000.0, boottime=30.0, boot="boot-2")                 # a reboot, the clock two hours back
-    assert lane.answered == {(KEY, 0)}
+    assert lane._since_sighting(lane.rows[(KEY, 0)], W0 - 7000.0)                # in doubt: in the window
     lane.rows[(KEY, 0)]["sent_boot_id"] = "boot-0"             # (a row from yet another boot than the sighting)
     lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 - 6990.0, boottime=40.0)
     assert lane.unsent() == [KEY] and body["items"][0]["key"] == KEY
 
 
 @pytest.mark.parametrize("seconds,status,alarms,pushes,notices", [
-    (29 * 60, "applied", 1, 1, 0), (30 * 60 - 1, "applied", 1, 1, 0), (30 * 60, "stale", 0, 0, 1), (31 * 60, "stale", 0, 0, 1)])
+    (29 * 60, "applied", 1, 1, 0), (1979, "applied", 1, 1, 0), (1980, "stale", 0, 0, 1), (34 * 60, "stale", 0, 0, 1)])
 def test_lane_the_uplink_is_down_for_hours(seconds, status, alarms, pushes, notices):
     """Row 7. The alarm is not given up: it stays `new`, is retried, and shows as not delivered. When the hub
-    answers, A7's recommended rule (a parameter, not decided): under 30 min an alarm and a push with its age, at 30
-    min and older a late notice and no push. Either answer makes it sent."""
+    answers, A7's recommended rule (a parameter, not decided) with its 10 % margin: under 30 min x 1.1 (1980 s) an
+    alarm and a push with its age, at it and older a late notice and no push. Either answer makes it sent."""
     lane, hub = cc.Lane(), cc.Hub(max_age_s=SCENARIOS["params"]["max_age_s"])
     press(lane, t=0.0)
     for t in range(15, seconds, 15):                           # every 15 s: no answer
@@ -1161,7 +1196,7 @@ def test_lane_the_stations_wall_clock_steps(step):
     press(lane, t=0.0)
     got = send(lane, hub, t=0.5, step=step)
     assert statuses(got) == ["applied"] and hub.alarms[0]["at"] == W0
-    assert hub.pushes[0] == {"alarm": 1, "at": W0, "age_s": 0.5, "approximate": False}
+    assert hub.pushes[0] == {"alarm": 1, "at": W0, "age_s": 0.5, "approximate": False, "label": ""}
 
 
 def test_lane_an_alarm_from_before_a_reboot_is_sent_with_its_wall_clock_age():
@@ -1311,19 +1346,19 @@ def test_an_answer_makes_an_item_sent_only_when_it_names_it():
     assert len(body["items"]) == 32 and body["items"][0]["key"] == A
 
 
-@pytest.mark.parametrize("word", ["from_the_future", None])
-def test_an_answer_capture_cannot_read_gets_five_tries_after_the_healthy_items_and_then_the_apps_lane(word):
-    """A status word capture does not know, or no word at all for an item in a 200: the item is kept and tried again,
-    at most 5 times, after the items that are healthy and in a request of its own, so it never stands in front of
-    another alarm. Then it is `rejected` on this lane, and never only that: a critical Health item names its key, the
-    station's page shows it as not delivered, and the app's lane carries it."""
+def test_an_answer_capture_cannot_read_gets_five_tries_after_the_healthy_items_and_then_the_apps_lane():
+    """A status word capture does not know, for an item in a 200 in the hub's shape: the item is kept and tried
+    again, at most 5 times, after the items that are healthy and in a request of its own, so it never stands in front
+    of another alarm. Only this, of all answers, counts toward the 5. Then it is `rejected` on this lane, and never
+    only that: a critical Health item names its key, the station's page shows it as not delivered, and the app's lane
+    carries it."""
     lane = lane_with(3)
     C_ = "CHA-live-1900000000125"
 
     def round_(t, expect):
         body = lane.request("alarm", wall=W0 + t, boottime=B0 + t)
         assert [i["key"] for i in body["items"]] == expect, t
-        lane.answer(200, named(*[(k, "applied") for k in expect if k != A], *([(A, word)] if word and A in expect else [])),
+        lane.answer(200, named(*[(k, "applied") for k in expect if k != A], *([(A, "from_the_future")] if A in expect else [])),
                     wall=W0 + t, boottime=B0 + t)
     round_(3.0, [A, B_, C_])                                   # try 1, with the others: they are answered for
     assert lane.unsent() == [A] and lane.rows[(A, 0)]["tries"] == 1
@@ -1343,19 +1378,55 @@ def test_an_answer_capture_cannot_read_gets_five_tries_after_the_healthy_items_a
     assert lane.not_delivered() == [] and lane.health() == []
 
 
-def test_a_lone_422_is_final_and_a_refused_batch_is_cut_to_single_items():
-    """400, 413, 422 for a whole request: the request is cut to single items. An item refused alone is `rejected`,
-    finally: it is not retried, and it still rides the app's lane with a critical Health item."""
-    bad = {"error": "not a list of 1 to 32 items", "reason": "bad_batch"}
+def test_what_is_not_the_hubs_answer_is_no_answer_and_no_try():
+    """A 200, 400, 413 or 422 counts only with a body in the hub's shape. `200 {}` five times with three alarms
+    pending, a 200 that fails the response schema, a bare 422 from an edge, a 422 with another `reason`: each is no
+    answer. All stay `new`, nothing is `sent`, no try is counted, nothing is ever rejected for it. And an item missing
+    from a good 200 is sent again, no try counted."""
+    lane = lane_with(3)
+    for t in range(5):
+        body = lane.request("alarm", wall=W0 + 3.0 + t, boottime=B0 + 3.0 + t)
+        assert len(body["items"]) == 3                         # never split, never in doubt
+        lane.answer(200, {}, wall=W0 + 3.0 + t, boottime=B0 + 3.0 + t)
+    assert len(lane.unsent()) == 3 and not lane.tries and not lane.alone
+    for bad in (dict(named((A, "applied")), gen=-1), dict(named((A, "applied")), results=[{"key": A}]),
+                dict(named((A, "applied")), ok=False)):
+        assert c.errors("capture-urgent-response", bad) != [] or bad["ok"] is not True
+        lane.request("alarm", wall=W0 + 9.0, boottime=B0 + 9.0)
+        lane.answer(200, bad, wall=W0 + 9.0, boottime=B0 + 9.0)
+        assert len(lane.unsent()) == 3, bad                    # a 200 that fails the schema: nothing marked sent
+    for t in range(6):                                         # a lone pending alarm, an edge's 422s
+        one = lane_with(1)
+        for k in range(t + 1):
+            one.request("alarm", wall=W0 + 10.0 + k, boottime=B0 + 10.0 + k)
+            one.answer(422, [None, {}, {"error": "x"}, {"error": "x", "reason": "nope"}, "Unprocessable", None][t],
+                       wall=W0 + 10.0 + k, boottime=B0 + 10.0 + k)
+        assert one.unsent() == [A] and not one.alone and not one.tries and one.health() == []
+    lane = lane_with(2)
+    lane.request("alarm", wall=W0 + 3.0, boottime=B0 + 3.0)
+    lane.answer(200, named((B_, "applied")), wall=W0 + 3.0, boottime=B0 + 3.0)
+    assert lane.unsent() == [A] and not lane.tries                                  # missing from the results: no try
+    assert [i["key"] for i in lane.request("alarm", wall=W0 + 4.0, boottime=B0 + 4.0)["items"]] == [A]
+
+
+def test_a_hub_refusal_splits_the_request_and_only_a_second_refusal_alone_is_final():
+    """The hub's own 400, 413 or 422 (its shape, `reason` bad_json, too_large or bad_batch) refused the request whole
+    and applied nothing. The first refusal of any request, of one item or many, marks each of its items to go
+    alone; only the refusal of a request of one item that was already alone makes it `rejected`. So a lone pending
+    alarm needs two such refusals of itself to be final; then it rides the app's lane with a critical Health item."""
+    bad = {"error": "not a version 1 request of 1 to 32 whole items", "reason": "bad_batch"}
     lane = lane_with(1)
     lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0)
     lane.answer(422, bad, wall=W0 + 1.1, boottime=B0 + 1.1)
-    assert lane.rows[(A, 0)]["state"] == "rejected" and lane.request("alarm", wall=W0 + 2.0, boottime=B0 + 2.0) is None
+    assert lane.rows[(A, 0)]["state"] == "new" and lane.alone == {(A, 0)} and lane.health() == []
+    assert [i["key"] for i in lane.request("alarm", wall=W0 + 2.0, boottime=B0 + 2.0)["items"]] == [A]
+    lane.answer(422, bad, wall=W0 + 2.1, boottime=B0 + 2.1)
+    assert lane.rows[(A, 0)]["state"] == "rejected" and lane.request("alarm", wall=W0 + 3.0, boottime=B0 + 3.0) is None
     assert lane.not_delivered() == [A] and len(lane.health()) == 1
-    for code in (400, 413, 422):
+    for code, reason in ((400, "bad_json"), (413, "too_large"), (422, "bad_batch")):
         lane, hub = lane_with(3), cc.Hub()
         assert len(lane.request("alarm", wall=W0 + 3.0, boottime=B0 + 3.0)["items"]) == 3
-        lane.answer(code, bad, wall=W0 + 3.1, boottime=B0 + 3.1)
+        lane.answer(code, dict(bad, reason=reason), wall=W0 + 3.1, boottime=B0 + 3.1)
         assert len(lane.unsent()) == 3 and lane.health() == []                 # nothing was applied, nothing given up
         sizes = []
         while (got := send(lane, hub, t=4.0 + len(sizes))) is not None:
@@ -1413,7 +1484,7 @@ def test_new_rows_are_loaded_at_start_oldest_alarm_first_and_a_page_only_if_stil
     assert list(lane.memory) == [("CHA-live-1900000001000", 0), ("CHA-live-1900000002000", 0),
                                  ("page:PAGE 1:1900000090.00", 0), ("page:PAGE 1:1900000005.00", 0)]
     assert lane.rows[(PAGE_ITEM["key"], 0)]["state"] == "expired"              # 130 s old: live state, not sent
-    assert [f["durable"] for f in lane.frames()] == [True] * 4 and lane.answered == set()
+    assert [f["durable"] for f in lane.frames()] == [True] * 4
 
 
 def test_a_p25_emergency_bit_alarms_on_a_transition_only_on_the_boot_clock():
@@ -1434,9 +1505,17 @@ def test_a_p25_emergency_bit_alarms_on_a_transition_only_on_the_boot_clock():
     # the wall clock stepped back an hour, then a real new press 30 min later: the boot clock shows 30 min
     bits = cc.P25Bits()
     assert seen(bits, 0.0) is True and seen(bits, 1800.0, step=-3600.0) is True
-    # the wall clock stepped forward an hour, a stuck bit 2 s later: the boot clock shows 2 s
+    # the wall clock stepped forward an hour, a stuck bit 2 s later: the wall clock outran the boot clock by an hour,
+    # which is what a frozen boot clock looks like: counted as not set, ONE repeated alarm; the next sighting nothing
     bits = cc.P25Bits()
-    assert seen(bits, 0.0) is True and seen(bits, 2.0, step=3600.0) is False
+    assert seen(bits, 0.0) is True and seen(bits, 2.0, step=3600.0) is True and seen(bits, 4.0, step=3600.0) is False
+    # the host slept 20 min with the boot clock frozen (same boot), then a real new press: the wall clock shows 20 min
+    bits = cc.P25Bits()
+    assert seen(bits, 0.0) is True
+    assert bits.seen("examplesys", "7001", wall=W0 + 1205.0, boottime=B0 + 5.0, boot="boot-1") is True
+    # the edge: the wall clock ahead of the boot clock by exactly 60 s more is not over 60 s
+    bits = cc.P25Bits()
+    assert seen(bits, 0.0) is True and seen(bits, 30.0, step=60.0) is False and seen(bits, 60.0, step=120.5) is True
     # across a reboot the boot clock says nothing: the row counts as not set lately. One repeated alarm, never a miss
     assert bits.seen("examplesys", "7001", wall=W0 + 60.0, boottime=12.0, boot="boot-2") is True
     assert bits.seen("examplesys", "7001", wall=W0 + 62.0, boottime=14.0, boot="boot-2") is False
@@ -1446,8 +1525,8 @@ def test_a_p25_emergency_bit_alarms_on_a_transition_only_on_the_boot_clock():
 def test_capture_matches_a_finished_call_to_its_live_alarm_on_the_station():
     """#775 (Q-I): the match of a live P25 alarm and its call is made by capture's ingest, on the station, where both
     times are on one clock: system + talkgroup + unit, the grant inside the call's span, 10 s either side, the edges
-    included. The call's sidecar then carries the alarm's key, and the hub compares no clocks. Through a step of the
-    wall clock the boot clock decides."""
+    included. The call's sidecar then carries the alarm's key, and the hub compares no clocks. When that fails and
+    capture saw a wall step (over 5 s, `WallSteps`) since the grant, the boot clock decides."""
     p25 = SCENARIOS["items"]["p25"]
     lane = cc.Lane()
     lane.press(p25["key"], "alarm", p25["data"], wall=W0 + 300.02, boottime=B0 + 300.02, event_at=W0 + 300.0,
@@ -1456,9 +1535,13 @@ def test_capture_matches_a_finished_call_to_its_live_alarm_on_the_station():
     rows = list(lane.rows.values())
 
     def match(start, end, taken=314.0, step=0.0, boot="boot-1", **other):
+        """The wall clock stepped by `step` just after the grant; capture's tick saw it if it is over 5 s."""
+        steps = cc.WallSteps()
+        steps.sample(wall=W0 + 300.5, boottime=B0 + 300.5)
+        steps.sample(wall=W0 + 301.5 + step, boottime=B0 + 301.5)
         call = {"system": "examplesys", "talkgroup": 4101, "unit": "7001", "start": W0 + start + step,
                 "end": W0 + end + step, **other}
-        return cc.match_call(rows, call, wall=W0 + taken + step, boottime=B0 + taken, boot=boot)
+        return cc.match_call(rows, call, wall=W0 + taken + step, boottime=B0 + taken, boot=boot, steps=steps)
     assert match(300.0, 312.0) == p25["key"]
     assert match(310.0, 322.0, taken=324.0) == p25["key"] and match(310.5, 322.5, taken=324.5) == ""      # +-10 s,
     assert match(278.0, 290.0) == p25["key"] and match(277.5, 289.5) == ""                               # inclusive
@@ -1470,8 +1553,10 @@ def test_capture_matches_a_finished_call_to_its_live_alarm_on_the_station():
     assert match(600.0, 612.0, taken=614.0, step=-3600.0) == ""                # another call, 5 min later: not this alarm's
     assert match(300.0, 312.0, taken=300.0 + 12.0 + 69.9, step=-3600.0) == p25["key"]     # the call's length plus 70 s:
     assert match(300.0, 312.0, taken=300.0 + 12.0 + 70.0, step=-3600.0) == ""             # exactly that is outside
-    # a small step and a slow ingest: the wall test still holds, and it is tried first (the boot rule would miss it)
-    assert match(310.0, 322.0, taken=391.0, step=-3.0) == p25["key"]
+    # a step of 6 s and a slow ingest: the wall test still holds, and it is tried first (the boot rule would miss it)
+    assert match(310.0, 322.0, taken=391.0, step=-6.0) == p25["key"]
+    # 3 s is no step: only the wall test, so a grant 13 s before the call (by the wall) is not this call's
+    assert match(313.0, 325.0, taken=327.0) == "" and match(316.0, 328.0, taken=330.0, step=-3.0) == ""
     # ... and what it gives is what the sidecar and the hub's take-over need
     side = valid("capture-spool-sidecar")["call-matched-to-its-live-alarm.json"]
     assert side["alarm_key"] == p25["key"] == valid("capture-urgent-item")["alarm-p25-live.json"]["key"]
@@ -1942,9 +2027,208 @@ def test_the_readme_maps_every_schema_to_its_design_section_and_says_what_is_sti
     assert still == [f"S{i}" for i in range(1, len(still) + 1)] and 5 <= len(still) <= 15
     found = re.findall(r"^\| (Y\d+) \|", section, re.M)                        # where the design is still ambiguous
     assert found == [f"Y{i}" for i in range(1, len(found) + 1)] and len(found) >= 5
-    assert "Still to confirm" in section and "radio maintainers" in section and "6a777c98" in section
+    assert "Still to confirm" in section and "radio maintainers" in section and "225b06ff" in section
     assert "A7" in section and "not decided" in section
     for word in ("specification aid", "not production code"):
         assert word in section or word in (ROOT / "tests" / "contracts_capture.py").read_text(encoding="utf-8").lower()
     for doc in ("spool.md", "socket.md", "urgent.md"):         # no page points at a choice that is no longer listed
         assert not re.search(r"\(C\*?\d|C\*n\*", (cc.CAPTURE / doc).read_text(encoding="utf-8")), doc
+
+
+# -- the second adversarial review (docs/native/capture-split.md at 225b06ff) ---------------------------------------------
+
+def test_the_hub_refuses_a_request_that_is_not_well_formed_and_applies_nothing():
+    """A request of another version, of none, or with an item without its age is refused whole (422 `bad_batch`):
+    the hub never applies it with a made-up age."""
+    for file in ("version-2.json", "no-version.json", "an-item-without-its-age.json", "items-empty.json",
+                 "items-as-an-object.json", "no-items.json"):
+        body = dict(c.vectors("capture-urgent-request", "invalid"))[file]
+        hub = cc.Hub()
+        code, answer = hub.urgent(body)
+        assert (code, answer["reason"]) == (422, "bad_batch") and hub.alarms == [] and hub.store == {}, file
+        assert cc.hub_shaped(code, answer)                     # the sender reads it as the hub's refusal
+
+
+def test_the_press_window_is_on_the_hubs_receive_time_and_a_negative_gap_is_a_new_press():
+    """Two station wall times are never compared: the window is timed on when the hub received each flag. A flag
+    whose gap is negative (the hub's own clock stepped back) is not "within": it is judged on its own."""
+    p25 = SCENARIOS["items"]["p25"]
+    ev = {"type": "alarm", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101}
+    hub = cc.Hub()
+    hub.now = T0 + 300.1
+    assert statuses(hub.urgent({"v": 1, "station": "st-north", "items": [p25]})) == ["applied"]
+    assert hub.windows[("examplesys", "7001")] == {"alarm": 1, "last": T0 + 300.1, "cleared": False}
+    hub.now = T0 + 400.0                                       # the station's times say an hour later: they do not count
+    hub.event("st-north", dict(ev, id="call_2", start=T0 + 3900.0, end=T0 + 3912.0))
+    assert len(hub.alarms) == 1 and hub.alarms[0]["still_set"] == 1
+    hub.now = T0 + 350.0                                       # the hub's clock stepped back 50 s: a negative gap
+    hub.event("st-north", dict(ev, id="call_3", start=T0 + 340.0, end=T0 + 349.0))
+    assert len(hub.alarms) == 1 and len(hub.pushes) == 1       # judged on its own: the same-radio rule joins it
+    assert hub.alarms[0]["still_set"] == 1
+    hub = cc.Hub(repeat_s=0.0)                                 # (without the same-radio join it is a new alarm)
+    hub.now = T0 + 400.0
+    hub.event("st-north", dict(ev, id="call_2", start=T0 + 388.0, end=T0 + 399.0))
+    hub.now = T0 + 350.0
+    hub.event("st-north", dict(ev, id="call_3", start=T0 + 340.0, end=T0 + 349.0))
+    assert len(hub.alarms) == 2 and hub.alarms[1]["label"] == ""
+
+
+def test_an_alarm_over_the_byte_limit_alone_is_sent_trimmed_and_never_dropped():
+    """The 65,536 bytes are enforced before sending: items are added while the body fits; one over the limit on its
+    own goes with its `data` cut to the essentials and `trimmed: true` (no `ids`, each string at most 200
+    characters; a page: as many pairs as fit). The row keeps the full `data`."""
+    lane, hub = cc.Lane(), cc.Hub()
+    garbled = [{"id": str(10000 + i), "system": "mdc", "emergency": True, "from": "live"} for i in range(1500)]
+    press(lane, t=0.0, data=dict(ALARM_DATA, ids=garbled, unit="U" * 900))
+    press(lane, "CHA-live-1900000000500", t=0.5)
+    body = lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0)
+    assert [i["key"] for i in body["items"]] == [KEY, "CHA-live-1900000000500"] and cc.encoded(body) <= cc.REQUEST_MAX_BYTES
+    assert "trimmed" not in body["items"][1]["data"]          # (the next item still fits beside the trimmed one)
+    d = body["items"][0]["data"]
+    assert d["trimmed"] is True and "ids" not in d and len(d["unit"]) == 200 and d["radio_id"] == "7001"
+    assert c.errors("capture-urgent-request", body) == []
+    assert len(lane.rows[(KEY, 0)]["data"]["ids"]) == 1500     # the row keeps it whole
+    hub.now = W0 + 1.0
+    lane.answer(*hub.urgent(body), wall=W0 + 1.0, boottime=B0 + 1.0)
+    assert lane.unsent() == [] and len(hub.alarms) == len(hub.pushes) == 1     # (one radio: the second joins)
+    # items are added while the body fits: 32 alarms of 3 KB each go as two requests, never one over the limit
+    lane = cc.Lane()
+    for i in range(32):
+        press(lane, f"CHA-live-{1900000001000 + i}", t=float(i), data=dict(ALARM_DATA, unit="U" * 3000))
+    first = lane.request("alarm", wall=W0 + 40.0, boottime=B0 + 40.0)
+    assert 1 < len(first["items"]) < 32 and cc.encoded(first) <= cc.REQUEST_MAX_BYTES
+    assert not any(i["data"].get("trimmed") for i in first["items"])
+    # a page over the limit keeps as many pairs as fit
+    lane = cc.Lane()
+    pairs = [dict(PAGE_ITEM["data"]["pairs"][0], names=["Example Co " + "x" * 300]) for _ in range(400)]
+    lane.press(PAGE_ITEM["key"], "page", dict(PAGE_ITEM["data"], pairs=pairs), wall=W0, boottime=B0)
+    body = lane.request("page", wall=W0 + 1.0, boottime=B0 + 1.0)
+    got = body["items"][0]["data"]
+    assert got["trimmed"] is True and 0 < len(got["pairs"]) < 400 and cc.encoded(body) <= cc.REQUEST_MAX_BYTES
+    assert c.errors("capture-urgent-request", body) == []
+
+
+def test_the_resend_cap_keeps_the_newest_32_by_answer_time_then_n_and_names_the_rest():
+    """More than 32 alarms in the resend window: the newest 32 by when the hub answered for them (the boot clock
+    within one boot), and between equal times the higher `n` is the newer. The rest are named in a critical Health
+    item."""
+    lane = cc.Lane()
+    for i in range(40):
+        press(lane, f"CHA-live-{1900000000000 + i}", t=float(i) / 100)
+    for t in (41.0, 41.0):                                     # two requests answered at the very same moment
+        body = lane.request("alarm", wall=W0 + t, boottime=B0 + t)
+        lane.answer(200, dict(OK, results=[{"key": i["key"], "rev": 0, "status": "applied"} for i in body["items"]]),
+                    wall=W0 + t, boottime=B0 + t)
+    assert lane.unsent() == [] and len({r["sent_boot"] for r in lane.rows.values()}) == 1      # ties, all of them
+    lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 60.0, boottime=B0 + 60.0)
+    again = lane.unsent()
+    assert len(again) == 32 and set(again) == {f"CHA-live-{1900000000000 + i}" for i in range(8, 40)}  # the higher n
+    assert sorted(lane.beyond) == [f"CHA-live-{1900000000000 + i}" for i in range(8)]
+    health = lane.health()
+    assert len(health) == 1 and health[0].startswith("critical") and "CHA-live-1900000000000" in health[0]
+
+
+def test_an_emergency_item_has_four_signs_and_never_loses_its_audio_to_a_bound(tmp_path):
+    """An `ids` entry with `emergency: true`; a turn with `emergency: true`; the call-level `emergency: true`; a
+    non-empty `alarm_key`. Any one makes the item an emergency: its audio is never dropped at a bound, its sidecar
+    never pruned past `max_items`, and the schema refuses `audio_dropped` without `audio_lost` for it."""
+    base = valid("capture-spool-sidecar")["call.json"]
+    signs = {"call-level flag": dict(base, emergency=True), "alarm_key": dict(base, alarm_key="p25-x-1-2-3"),
+             "turn": dict(base, turns=[dict(base["turns"][0], emergency=True), *base["turns"][1:]]),
+             "ids": dict(base, ids=[{"id": "7001", "system": "p25", "emergency": True, "from": "close"}])}
+    assert not cc.is_emergency(base) and not cc.is_emergency(dict(base, alarm_key=""))
+    for name, side in signs.items():
+        assert cc.is_emergency(side), name
+        dropped = dict(side, audio=None, audio_dropped=True)
+        assert c.errors("capture-spool-sidecar", dropped) != [], name
+        assert c.errors("capture-spool-sidecar", dict(dropped, audio_lost="write")) == [], name
+    spool = cc.Spool(tmp_path / "spool")
+    plain = spool.publish(seg("CH A", 1900000000.0), cc.wav_s16(800))
+    flagged = spool.publish(dict(seg("CH A", 1900000001.0), alarm_key="CHA-live-1900000001000", ids=[]), cc.wav_s16(800))
+    with pytest.raises(ValueError):
+        spool.drop_audio(flagged["seq"])
+    spool.drop_audio(plain["seq"])
+    assert spool.bound(0) == [plain["seq"]]                    # past max_items: never the emergency item's sidecar
+    assert (spool.root / "items" / flagged["audio"]["file"]).exists() and cc.check_spool(spool.root) == []
+
+
+def test_a_wall_step_is_over_5_s_between_samples_at_most_5_s_apart():
+    """capture samples wall - boot clock on its tick. The station's routine backward corrections (about 2 s every
+    30 s) are not steps; 5.1 s within 5 s is one step, logged once with its size; drift is never one."""
+    steps = cc.WallSteps()
+    wall = W0
+    for t in range(0, 600):                                    # a 1 s tick for 10 min
+        if t and t % 30 == 0:
+            wall -= 2.0                                        # a routine correction
+        assert steps.sample(wall=wall + t * 1.05, boottime=B0 + t) is None    # (and the wall clock 5 % fast between)
+    assert steps.at == [] and steps.log == []
+    assert steps.sample(wall=wall + 600 * 1.05 + 5.1, boottime=B0 + 600) == pytest.approx(5.15, abs=1e-5)
+    assert steps.sample(wall=wall + 601 * 1.05 + 5.1, boottime=B0 + 601) is None
+    assert len(steps.log) == 1 and "stepped +5." in steps.log[0]
+    gap = cc.WallSteps()                                       # samples more than 5 s apart: not a step, whatever moved
+    gap.sample(wall=W0, boottime=B0)
+    assert gap.sample(wall=W0 + 106.0, boottime=B0 + 6.0) is None and gap.at == []
+    edge = cc.WallSteps()                                      # exactly 5 s is not over 5 s
+    edge.sample(wall=W0, boottime=B0)
+    assert edge.sample(wall=W0 + 6.0, boottime=B0 + 1.0) is None and edge.sample(wall=W0 + 12.5, boottime=B0 + 2.0) == 5.5
+
+
+@pytest.mark.parametrize("rate", [0.05, -0.05])
+def test_a_boot_clock_5_percent_fast_or_slow_with_routine_corrections_loses_and_doubles_nothing(rate):
+    """#788: the production station's boot clock runs fast by 2 to 5 % and its wall clock is kept near true time by
+    small backward corrections (about 1.5 s every 30 s). Every station-side window is designed to be safe with a boot
+    clock off by +-10 %. Here: 5 % fast and 5 % slow, a correction every 30 s. No step is ever detected, no alarm is
+    lost or doubled, and each window ends within its stated real-time effect (its nominal length / (1 +- 10 %))."""
+    def clocks(r: float) -> tuple[float, float]:               # (wall, boot) at real second r
+        return W0 + r + 0.05 * (r % 30.0), B0 + r * (1 + rate)
+
+    def window(test, limit: float) -> float:
+        """The first real second at which `test(r)` is true, for a window of nominal length `limit`."""
+        r = 0.0
+        while not test(r):
+            r += 0.25
+        assert limit / (1 + cc.RATE_BOUND) <= r <= limit / (1 - cc.RATE_BOUND) + 0.25, (limit, r)
+        return r
+    steps = cc.WallSteps()
+    for r in range(0, 3600):
+        w, b = clocks(float(r))
+        assert steps.sample(wall=w, boottime=b) is None, r
+    # `late`: 60 s, the larger of the two ages
+    w0, b0 = clocks(0.0)
+    side = {"end": w0, "closed_boot": b0, "boot": "boot-1"}
+    window(lambda r: cc.is_late(side, wall=clocks(r)[0], boottime=clocks(r)[1], boot_now="boot-1"), 60.0)
+    # the P25 bit's 10 min: a stuck bit every 30 s for an hour alarms once; after a quiet window, a press alarms
+    bits = cc.P25Bits()
+    seen = [bits.seen("examplesys", "7001", wall=clocks(r)[0], boottime=clocks(r)[1], boot="boot-1")
+            for r in range(0, 3600, 30)]
+    assert seen == [True] + [False] * (len(seen) - 1)
+    last = 3570.0
+
+    def press_after(r):
+        trial = cc.P25Bits()
+        trial.rows = copy.deepcopy(bits.rows)
+        return trial.seen("examplesys", "7001", wall=clocks(last + r)[0], boottime=clocks(last + r)[1], boot="boot-1")
+    window(press_after, 600.0)
+    # a page revision's 120 s
+    lane = cc.Lane()
+    w, b = clocks(0.0)
+    lane.press(PAGE_ITEM["key"], "page", PAGE_ITEM["data"], wall=w, boottime=b)
+    window(lambda r: cc.outside(cc.larger_age(w, b, "boot-1", wall=clocks(r)[0], boottime=clocks(r)[1],
+                                              boot_now="boot-1"), cc.PAGE_ITEM_MAX_AGE_S), 120.0)
+    # the P25 match: no step is seen, the wall test holds through the corrections
+    rows = [{"kind": "alarm", "key": "k", "boot": "boot-1", "event_at": clocks(300.0)[0], "event_boot": clocks(300.0)[1],
+             "data": {"emergency_via": "P25", "system": "examplesys", "talkgroup": 4101, "radio_id": "7001"}}]
+    call = {"system": "examplesys", "talkgroup": 4101, "unit": "7001", "start": clocks(300.0)[0] - 0.2,
+            "end": clocks(312.0)[0]}
+    w, b = clocks(380.0)
+    assert cc.match_call(rows, call, wall=w, boottime=b, boot="boot-1", steps=steps) == "k"
+    # an alarm through the lane: sent once, raised once, its age within 5 % of the truth, under the cutoff
+    lane, hub = cc.Lane(), cc.Hub()
+    w, b = clocks(0.0)
+    lane.press(KEY, "alarm", ALARM_DATA, wall=w, boottime=b)
+    w, b = clocks(1885.0)                                      # the uplink was down 31.4 real min
+    body = lane.request("alarm", wall=w, boottime=b)
+    assert body["items"][0]["age_s"] == pytest.approx(1885.0 * (1 + rate))
+    hub.now = T0 + 1885.0
+    lane.answer(*hub.urgent(body), wall=w, boottime=b)
+    assert len(hub.alarms) == len(hub.pushes) == 1 and lane.unsent() == [] and lane.request("alarm", wall=w, boottime=b) is None

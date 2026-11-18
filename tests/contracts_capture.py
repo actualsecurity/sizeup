@@ -2,11 +2,13 @@
 docs/native/capture-split.md, #773). Nothing of the split is implemented yet, so what the schemas cannot say is written
 here as small pure functions and models that the tests run:
 
-    check_spool, Spool        the spool directory's rules (contracts/capture/spool.md) and a writer that keeps them
+    check_spool, Spool,       the spool directory's rules (contracts/capture/spool.md), a writer that keeps them, the
+    recover_seq, is_emergency next sequence number at a start, and what an emergency item is
     frame, unframe            the live socket's framing (contracts/capture/socket.md)
-    age, is_late, ...         which clock an age is taken from
+    age, is_late, WallSteps   which clock an age is taken from, and what a wall step is
     Hub, Lane, P25Bits,       the urgent lane's idempotency, as a model of the hub's dedupe and of capture's sender,
-    match_call                and capture's match of a P25 call to its live alarm
+    match_call, p25_key,      capture's match of a P25 call to its live alarm and the alarm's key, what counts as the
+    hub_shaped, trimmed       hub's answer, and an item cut to fit the request's bytes
     Requests                  the socket's request rules (an id applied once, a deadline on the boot clock)
     combination, read_mode    the two mode files
 
@@ -73,6 +75,10 @@ LIVE_MAX_AGE_S = 60.0        # a spool item read at this age or older is `late`
 PAGE_ITEM_MAX_AGE_S = 120.0  # a page revision unsent this long after capture made it is not sent ...
 PAGE_ENDED_MAX_AGE_S = 600.0  # ... but an `ended` one stays sendable this long
 STATUS_STALE_S = 15.0        # a status file this old, on the reader's boot, is a capture that is down
+CLOCK_STEP_S = 5.0           # a change of wall - boot clock by more than this, between samples ...
+STEP_SAMPLE_S = 5.0          # ... at most this far apart, is a wall step
+FROZEN_S = 60.0              # the wall clock outran the boot clock by more than this: the boot clock froze (or a step)
+RATE_BOUND = 0.10            # every window on the station is safe with a boot clock off by +-10 %
 
 
 def outside(value: float, limit: float) -> bool:
@@ -230,8 +236,12 @@ def _order_key(side: dict) -> str | None:
     return None
 
 
-def _has_emergency(side: dict) -> bool:
-    return any(isinstance(x, dict) and x.get("emergency") is True for x in [*side.get("ids", []), *side.get("turns", [])])
+def is_emergency(side: dict) -> bool:
+    """An emergency item, for the spool's bounds (4.1): any of four signs. An `ids` entry with `emergency: true`; a
+    call's turn with `emergency: true`; the call-level `emergency: true`; a non-empty `alarm_key`. One test, the same
+    in capture and in check_spool."""
+    return side.get("emergency") is True or bool(side.get("alarm_key")) or any(
+        isinstance(x, dict) and x.get("emergency") is True for x in [*(side.get("ids") or []), *(side.get("turns") or [])])
 
 
 def _read(path: Path):
@@ -258,19 +268,28 @@ def read_seq(root: Path) -> int | None:
     return int(text) if re.fullmatch(r"[0-9]{1,12}", text) else None
 
 
+def _cursor_top(root: Path) -> int:
+    """The reader's cursor's highest number, `seq` or any of `done`, when it is of this spool; 0 otherwise."""
+    cursor = _read(root / "cursor.app.json")
+    if isinstance(cursor, dict) and cursor.get("spool_epoch") == _epoch(root) and not c.errors("capture-spool-cursor", cursor):
+        return max([cursor["seq"], *cursor.get("done", [])])
+    return 0
+
+
+def _names_top(root: Path) -> int:
+    """The highest number in any file name in items/ (debris included) and in quarantine/."""
+    names = [ANY_NAME.fullmatch(p.name) for d in ("items", "quarantine") if (root / d).is_dir()
+             for p in (root / d).iterdir()]
+    return max([int(m[1]) for m in names if m], default=0)
+
+
 def recover_seq(root: Path) -> int:
-    """The next sequence number after a start: the highest number in SEQ or in any file name in items/, debris
-    included, plus 1, so a number that was ever on disk is never given out again. A SEQ that is missing or not a
-    number counts as 0, and then the reader's cursor is read too (read-only): the next number is above its `seq`."""
-    names = [ANY_NAME.fullmatch(p.name) for p in (root / "items").iterdir()] if (root / "items").is_dir() else []
-    numbers = [int(m[1]) for m in names if m]
-    last = read_seq(root)
-    if last is None:
-        last = 0
-        cursor = _read(root / "cursor.app.json")
-        if isinstance(cursor, dict) and cursor.get("spool_epoch") == _epoch(root) and not c.errors("capture-spool-cursor", cursor):
-            numbers += [cursor["seq"], *cursor.get("done", [])]
-    return max([last, *numbers]) + 1
+    """The next sequence number after a start, ALWAYS from all of them: the largest of SEQ (0 when missing or not a
+    number), the highest number in a file name in items/ (debris included) and in quarantine/, and the reader's
+    cursor (read-only: its `seq` and its highest `done`, when it is of this spool); plus 1. SEQ is not fsynced at
+    each publish, so a power cut can roll it back behind items already handled and pruned: a number at or under
+    the cursor would count as done and never be handled."""
+    return max(read_seq(root) or 0, _names_top(root), _cursor_top(root)) + 1
 
 
 def check_spool(root: Path, settled: bool = True) -> list[str]:
@@ -290,9 +309,13 @@ def check_spool(root: Path, settled: bool = True) -> list[str]:
         out.append("epoch: EPOCH is not 16 hex characters")
     if out:
         return out
-    if read_seq(root) is None:
+    seq_file = read_seq(root)
+    if seq_file is None:
         out.append("seq: SEQ is missing or not a number (it counts as 0: the next number is taken above every file "
-                   "name in items/ and above the reader's cursor)")
+                   "name in items/ and quarantine/ and above the reader's cursor)")
+    elif seq_file < _cursor_top(root) or seq_file < _names_top(root) - (0 if settled else 1):
+        out.append(f"seq-behind: SEQ is {seq_file}, below the reader's cursor or a file name (a power cut rolled it "
+                   f"back: capture logs and counts it, `spool.seq_behind`, and starts above all of them)")
     if settled and any((root / "tmp").iterdir()):
         out.append("tmp: writes in progress left in tmp/")
     items = root / "items"
@@ -500,7 +523,7 @@ class Spool:
         items = self.root / "items"
         path = next(p for p in items.iterdir() if (m := ITEM_NAME.fullmatch(p.name)) and int(m[1]) == seq)
         side = json.loads(path.read_text(encoding="utf-8"))
-        if _has_emergency(side):
+        if is_emergency(side):
             raise ValueError(f"{side['id']} has an emergency id: its audio is never dropped at a bound")
         gone = [side["audio"]["file"], side.get("bursts_audio")]
         side.update(audio=None, bursts_audio=None, audio_dropped=True)
@@ -510,6 +533,23 @@ class Spool:
             raise Crash(stop)
         for name in filter(None, gone):
             (items / name).unlink()
+
+    def bound(self, max_items: int) -> list[int]:
+        """Past `spool.max_items` the oldest sidecars go too (sidecar first), never an emergency item's."""
+        items = self.root / "items"
+        sides = sorted((int(m[1]), p) for p in items.glob("*.json") if (m := ITEM_NAME.fullmatch(p.name)))
+        gone = []
+        for seq, p in sides:
+            if len(sides) - len(gone) <= max_items:
+                break
+            if is_emergency(json.loads(p.read_text(encoding="utf-8"))):
+                continue
+            stem = p.name[:-len(".json")]
+            p.unlink()
+            for other in items.glob(f"{stem}.*"):
+                other.unlink()
+            gone.append(seq)
+        return gone
 
     def prune(self, cursor: dict, stop: str = "") -> list[int]:
         """Capture deletes what the reader's cursor says is done (the reader never deletes): the sidecar first, so
@@ -584,6 +624,46 @@ def gen_value(gen) -> int | None:
         return None
 
 
+def encoded(body: dict) -> int:
+    """The bytes of a request body as sent."""
+    return len(json.dumps(body, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode())
+
+
+TRIM_STRING = 200
+TRIM_ALARM = ("source", "start", "end", "radio_id", "unit", "emergency", "emergency_via", "system", "talkgroup",
+              "key_time")
+TRIM_PAGE = ("channel", "started", "phase", "ours", "ended", "until")
+
+
+def trimmed(item: dict, body: dict) -> dict:
+    """An item over the byte limit on its own, as it is sent: its `data` cut to the essentials, `trimmed: true`
+    beside them. An alarm: its fields with each string cut to 200 characters, no `ids`. A page: its fields and as
+    many `pairs` as fit. The row keeps the full `data`; the app's lane carries it whole."""
+    d = item["data"]
+    keep = TRIM_ALARM if item["kind"] == "alarm" else TRIM_PAGE
+    cut = {k: (v[:TRIM_STRING] if isinstance(v, str) else v) for k, v in d.items() if k in keep}
+    out = dict(item, data=dict(cut, trimmed=True))
+    if item["kind"] == "page":
+        out["data"]["pairs"] = []
+        for pair in d.get("pairs", []):
+            more = dict(out, data=dict(out["data"], pairs=[*out["data"]["pairs"], pair]))
+            if encoded(dict(body, items=[more])) > REQUEST_MAX_BYTES:
+                break
+            out = more
+    return out
+
+
+def hub_shaped(code: int, body) -> bool:
+    """Is this an answer at all: a 200 whose body passes capture-urgent-response with `ok: true`; a 400, 413 or 422
+    with an object holding `error` and a `reason` of the hub's refusals. Anything else of those four statuses (an
+    edge's page, `200 {}`, a 422 with no body) is no answer. Every other status counts by the status alone."""
+    if code == 200:
+        return isinstance(body, dict) and body.get("ok") is True and not c.errors("capture-urgent-response", body)
+    if code in (400, 413, 422):
+        return isinstance(body, dict) and isinstance(body.get("error"), str) and body.get("reason") in REFUSALS
+    return True
+
+
 class Lane:
     """REFERENCE MODEL of capture's half of the urgent lane: the urgent file (`rows`, `meta`: what survives the
     process), the senders' memory, and what the senders do with the hub's answers. Time is passed in (wall,
@@ -606,7 +686,7 @@ class Lane:
         self.alone: set = set()                            # items of a refused batch: each goes in a request of its own
         self.tries: dict[tuple[str, int], int] = {}        # answers that could not be read, per item
         self.delivered: set[str] = set()                   # alarm keys the app's lane says the hub has
-        self.answered: set = set()                         # alarms loaded at start as "answered under hub_gen"
+        self.beyond: list[str] = []                        # alarms the resend cap left out: named on Health
         self.order = 0
 
     # .. the writer .........................................................................................................
@@ -687,9 +767,14 @@ class Lane:
         return self.unsent() + [i[0] for i in self._idents("alarm", "rejected") if i[0] not in self.delivered]
 
     def health(self) -> list[str]:
-        """The critical Health items: an alarm that ended `rejected` names its key."""
-        return [f"critical: the hub will not take alarm {i[0]} on the urgent lane ({self._rec(i).get('hub')}): it rides "
-                f"the app's lane" for i in self._idents("alarm", "rejected") if i[0] not in self.delivered]
+        """The critical Health items: an alarm that ended `rejected` names its key; so do the alarms the resend cap
+        left out after a restore of the hub."""
+        out = [f"critical: the hub will not take alarm {i[0]} on the urgent lane ({self._rec(i).get('hub')}): it rides "
+               f"the app's lane" for i in self._idents("alarm", "rejected") if i[0] not in self.delivered]
+        if self.beyond:
+            out.append(f"critical: {len(self.beyond)} alarms the hub may have lost were not sent again (over the "
+                       f"{RESEND_MAX} newest): {', '.join(self.beyond)}")
+        return out
 
     def app_delivered(self, key: str) -> None:
         """The app's lane has handed the hub this alarm (its take-over does not depend on the sender)."""
@@ -700,8 +785,9 @@ class Lane:
         """The next request of one connection (`alarm` or `page`: never both in one); None when it has nothing to
         send. Alarms in the order they were made, never expired by any clock. A page's clock runs per revision: one
         unsent 120 s after capture made it (the larger of its two ages) is `expired`, an `ended` one after 10 min;
-        and only the highest unsent revision of a key goes. An item whose answer could not be read goes after the
-        healthy ones and alone; so does each item of a batch the hub refused whole."""
+        and only the highest unsent revision of a key goes. An item whose answer could not be read, or that the hub
+        refused in a batch, goes after the healthy ones and alone. The body never encodes over 65,536 bytes: items are
+        added while it fits, and an item over the limit on its own is sent trimmed (`data.trimmed`), never dropped."""
         todo = self._idents(kind, "new")
         if kind == "page":
             keep = []
@@ -719,14 +805,21 @@ class Lane:
         batch = healthy[:REQUEST_MAX_ITEMS] or [i for i in todo if not self.tries.get(i)][:1] or todo[:1]
         if not batch:
             return None
-        items = []
+        body = {"v": 1, "station": self.station, "urgent_epoch": self.epoch, "sent_at": wall, "items": []}
+        sent = []
         for ident in batch:
             it = self._item(ident)
             age_s, src = age(it["event_at"], it["event_boot"], it["boot"], wall=wall, boottime=boottime, boot_now=self.boot)
-            items.append({"key": it["key"], "rev": it["rev"], "kind": it["kind"], "at": it["at"],
-                          "event_at": it["event_at"], "age_s": round(age_s, 3), "age_src": src, "data": it["data"]})
-        self.flight[kind] = batch
-        return {"v": 1, "station": self.station, "urgent_epoch": self.epoch, "sent_at": wall, "items": items}
+            item = {"key": it["key"], "rev": it["rev"], "kind": it["kind"], "at": it["at"],
+                    "event_at": it["event_at"], "age_s": round(age_s, 3), "age_src": src, "data": it["data"]}
+            if encoded(dict(body, items=[*body["items"], item])) > REQUEST_MAX_BYTES:
+                if body["items"]:
+                    break                                      # the next request takes it
+                item = trimmed(item, body)
+            body["items"].append(item)
+            sent.append(ident)
+        self.flight[kind] = sent
+        return body
 
     def _mark(self, ident, state: str, hub: str | None, wall: float, boottime: float) -> None:
         got = {"state": state, "hub": hub, "hub_gen": self.meta.get("gen"), "sent_at": wall, "sent_boot": boottime,
@@ -740,18 +833,23 @@ class Lane:
 
     def answer(self, code: int, body: dict | None, *, wall: float, boottime: float, kind: str = "alarm") -> None:
         """The hub's answer to the request in flight on one connection, or none at all (code 0: a timeout, the
-        connection gone). Only a 200 that names an item `applied`, `duplicate` or `stale` makes it sent. `rejected`
-        ends it. No word for it in a 200, or a word this build does not know: tried again, at most 5 times, then
-        given up as rejected. A 400, 413 or 422: the batch is cut to single items, and an item refused alone is
-        rejected, finally. Anything else leaves everything to be sent again."""
+        connection gone). A 200, 400, 413 or 422 counts only with a body in the hub's shape (`hub_shaped`); without
+        it, as with no answer, everything stays `new` and no try is counted. Only a 200 that names an item `applied`,
+        `duplicate` or `stale` makes it sent; `rejected` ends it; an item the 200 does not name is sent again, no try
+        counted; a word this build does not know is a try, and the 5th is given up as rejected. The hub's 400, 413 or
+        422 refused the request whole: the first refusal marks each of its items to go alone, and only the refusal of
+        a request of one item that was already alone makes that item rejected. Any other status leaves everything to
+        be sent again."""
         flight = self.flight.pop(kind, [])
-        if code == 200 and isinstance(body, dict):
+        if not hub_shaped(code, body):
+            return
+        if code == 200:
             self._gen(body.get("gen"), wall=wall, boottime=boottime)
-            words = {(r.get("key"), r.get("rev")): r.get("status") for r in body.get("results") or [] if isinstance(r, dict)}
+            words = {(r.get("key"), r.get("rev")): r.get("status") for r in body["results"]}
             for ident in flight:
-                if self._rec(ident)["state"] != "new":
+                if self._rec(ident)["state"] != "new" or ident not in words:
                     continue
-                word = words.get(ident)
+                word = words[ident]
                 if word in SENT:
                     self._mark(ident, "sent", word, wall, boottime)
                 elif word == "rejected":
@@ -763,8 +861,8 @@ class Lane:
                     if self.tries[ident] >= UNKNOWN_TRIES:
                         self._mark(ident, "rejected", f"{UNKNOWN_TRIES} answers it could not read", wall, boottime)
         elif code in (400, 413, 422):
-            if len(flight) == 1:
-                self._mark(flight[0], "rejected", f"{code} for the item alone", wall, boottime)
+            if len(flight) == 1 and flight[0] in self.alone:
+                self._mark(flight[0], "rejected", f"{code} {body['reason']} for the item alone, twice", wall, boottime)
             else:
                 self.alone.update(flight)
 
@@ -799,7 +897,10 @@ class Lane:
         if old is not None and value != old:
             hits = [i for i in self._idents("alarm", "sent")
                     if gen_value(self._rec(i).get("hub_gen")) != value and self._since_sighting(self._rec(i), wall)]
-            hits.sort(key=lambda i: (self._rec(i).get("sent_at") or 0.0), reverse=True)
+            one_boot = len({self._rec(i).get("sent_boot_id") for i in hits}) == 1
+            hits.sort(key=lambda i: (self._rec(i)["sent_boot" if one_boot else "sent_at"] or 0.0,
+                                     self.rows[i]["n"] if i in self.rows else -1), reverse=True)
+            self.beyond = [i[0] for i in hits[RESEND_MAX:]]          # newest by answer time, then by n
             for ident in hits[:RESEND_MAX]:
                 self._rec(ident)["state"] = "new"          # in the file: a restart before the resend does not lose it
                 self.memory.setdefault(ident, dict(self._item(ident), order=self.order))
@@ -814,12 +915,10 @@ class Lane:
         """Capture starts (after a reboot: another boot id). Into the senders go every `new` row, the oldest alarm
         first (a page revision only if it is still sendable), and, for the resend rule, every alarm row answered at
         or after the last sighting of the hub's generation minus 120 s, as "answered under `hub_gen`". A row marked
-        sent is sent again only by that rule."""
+        sent is sent again only by that rule. (In the model every row is in `rows`, and the rule reads them there.)"""
         self.boot = boot or self.boot
         self._fresh()
         for ident, row in sorted(self.rows.items(), key=lambda x: (x[1]["kind"] != "alarm", x[1]["n"])):
-            if row["state"] == "sent" and row["kind"] == "alarm" and self._since_sighting(row, wall):
-                self.answered.add(ident)
             if row["state"] != "new":
                 continue
             limit = PAGE_ENDED_MAX_AGE_S if row["data"].get("ended") else PAGE_ITEM_MAX_AGE_S
@@ -841,7 +940,10 @@ class P25Bits:
     The 10 min are on the BOOT clock, so a wall clock stepped back cannot hide a real new press and one stepped
     forward cannot re-alarm a stuck bit. Every sighting moves the last-set time on, so a stuck bit never re-alarms.
     The row is in the urgent file, so capture's own restart does not re-alarm; across a reboot the boot clock says
-    nothing, the row counts as "not set lately" and the next set bit alarms, once."""
+    nothing, the row counts as "not set lately" and the next set bit alarms, once. And a boot clock that froze (a
+    host asleep) would hide a real press, so on the same boot the row also counts as not set lately when the wall
+    clock advanced by more than 60 s more than the boot clock since the last set bit (a wall step forward of over
+    60 s looks the same: one repeated alarm, the safe side)."""
 
     def __init__(self, quiet_s: float = 600.0):
         self.quiet_s = quiet_s
@@ -851,7 +953,8 @@ class P25Bits:
     def seen(self, system: str, radio: str, *, wall: float, boottime: float, boot: str) -> bool:
         """The bit is set on a grant now: is this a new press (an alarm), or the same one still set."""
         row = self.rows.get((system, radio))
-        press = row is None or row["boot"] != boot or outside(boottime - row["last_set_boot"], self.quiet_s)
+        press = row is None or row["boot"] != boot or outside(boottime - row["last_set_boot"], self.quiet_s) \
+            or (wall - row["last_set"]) - (boottime - row["last_set_boot"]) > FROZEN_S
         self.rows[(system, radio)] = {"last_set": wall, "last_set_boot": boottime, "boot": boot}
         if press:
             self.transitions.append((boot, boottime))
@@ -864,19 +967,53 @@ class P25Bits:
 
 P25_SLACK_S = 10.0           # a live grant belongs to a call when it is inside the call's span, this much either side
 P25_SETTLE_S = 60.0          # the ingest's wait for a finished call's files
-CLOCK_STEP_S = 2.0           # the wall clock and the boot clock drifting apart by more than this is a step
 
 
-def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str) -> str:
+def p25_key(system: str, talkgroup: int, radio: str, *, event_at: float | None, at: float) -> tuple[str, str]:
+    """(key, key_time) of a live P25 alarm: from the grant's own time as trunk-recorder stamps it, so the same grant
+    on one station always gives one key (a restart or a replay is a `duplicate`); only when the grant carries no
+    time, capture's `at`. `data.key_time` says which: `grant` | `capture`."""
+    when, src = (event_at, "grant") if event_at is not None else (at, "capture")
+    return f"p25-{system}-{talkgroup}-{radio}-{int(when * 1000)}", src
+
+
+class WallSteps:
+    """What a wall step is (docs/native/capture-split.md 4.3 "Clocks"): capture samples the offset wall - boot clock
+    on its tick; a step is a change of that offset by MORE than 5 s between two samples at most 5 s apart, and only
+    that. Each is logged once, with its size. The routine backward corrections of about 2 s are not steps, and drift
+    (the offset moving minutes over hours) never is one."""
+
+    def __init__(self):
+        self.last: tuple[float, float] | None = None       # (boottime, offset) of the last sample
+        self.at: list[float] = []                          # the boot-clock times steps were seen at
+        self.log: list[str] = []
+
+    def sample(self, *, wall: float, boottime: float) -> float | None:
+        offset = wall - boottime
+        step = None
+        if self.last is not None and boottime - self.last[0] <= STEP_SAMPLE_S \
+                and abs(offset - self.last[1]) > CLOCK_STEP_S:
+            step = offset - self.last[1]
+            self.at.append(boottime)
+            self.log.append(f"the wall clock stepped {step:+.1f} s")
+        self.last = (boottime, offset)
+        return step
+
+    def between(self, a: float, b: float) -> bool:
+        """Was a step seen after boot-clock time a and up to b."""
+        return any(a < t <= b for t in self.at)
+
+
+def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str, steps: WallSteps | None = None) -> str:
     """REFERENCE of the match capture's ingest makes when it takes a finished P25 call (at wall / boottime): the `key`
     of the live P25 alarm in the urgent file the call belongs to, or "" (the call's sidecar carries it as
     `alarm_key`, and the app's end-of-call alarm rides the hub's take-over by it: the hub compares no clocks).
 
     The same system + talkgroup + unit, and the grant's time (`event_at`) inside the call's span (`start` to `end`),
-    10 s either side, the edges included: both are the station's wall clock. If that test fails because the wall
-    clock stepped between the grant and now (its distance from the boot clock changed, in this boot), the boot clock
-    decides: the grant under the call's length plus 70 s (the slack and the ingest's settle wait) before this moment.
-    Without a step the wall test alone decides, so a grant of an earlier call is never taken for this one's."""
+    10 s either side, the edges included: both are the station's wall clock. If that test fails and capture saw a
+    wall step (`WallSteps`) between the grant and now, in this boot, the boot clock decides: the grant under the
+    call's length plus 70 s (the slack and the ingest's settle wait) before this moment. Without a step the wall test
+    alone decides, so a grant of an earlier call is never taken for this one's. Drift is not a step."""
     for row in rows:
         d = row["data"]
         if row["kind"] != "alarm" or d.get("emergency_via") != "P25" \
@@ -885,7 +1022,7 @@ def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str) -> 
             continue
         if within(row["event_at"], call["start"] - P25_SLACK_S, call["end"] + P25_SLACK_S):
             return row["key"]
-        stepped = row["boot"] == boot and abs((wall - boottime) - (row["event_at"] - row["event_boot"])) > CLOCK_STEP_S
+        stepped = row["boot"] == boot and steps is not None and steps.between(row["event_boot"], boottime)
         back = boottime - row["event_boot"]
         if stepped and 0 <= back and not outside(back, (call["end"] - call["start"]) + P25_SLACK_S + P25_SETTLE_S):
             return row["key"]
@@ -897,6 +1034,9 @@ def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str) -> 
 RAISED, STALE, SEEN = "raised", "stale", "seen"       # an alarm key's state in the dedupe store; raised > stale > seen
 _RANK = {SEEN: 0, STALE: 1, RAISED: 2}
 PAGE_LIVE_MAX_S = 300.0      # the hub ends a live page entry itself this long after its last revision
+AGE_MARGIN = 1.1             # every age cutoff on an emergency: MAX_AGE_S x 1.1 (a boot clock over-counts by up to 5 %)
+REFUSALS = ("bad_json", "too_large", "bad_batch")     # the `reason`s of the hub's 400, 413, 422: a request refused whole
+AFTER_CLEAR = "emergency still set after All clear"
 
 
 class Hub:
@@ -906,19 +1046,24 @@ class Hub:
 
     - `store`, keyed by (station, key), written by BOTH lanes after each lane's own decision. An alarm key is in one
       of three states. `raised`: an alarm exists for it, raised by either lane. `stale`: the urgent lane judged the
-      item too old and made the late notice. `seen`: the events lane met the key and raised nothing (its own age
-      gate, an event that did not carry the emergency, notices off). An urgent item is `duplicate` only for raised
-      and stale; for `seen` it is judged on its own `age_s`, as if the key were new. The events lane raises nothing
-      for a key that is stale. For a page the store holds the highest rev taken.
-    - the alarms, each with the `traffic_id` it hangs on, which the finished transmission takes over by `alarm_key`;
-    - per (system, radio), when a P25 emergency flag was last seen: a flagged call is a new press only when none was
-      seen in the 10 min before it; otherwise nothing is raised and the alarm says "emergency still set";
-    - the live pages, by (station, key), each with the hub's own expiry.
+      item too old and made the late notice; `stale_src` says which clock that age was on. `seen`: the events lane
+      met the key and raised nothing (its own age gate, an event that did not carry the emergency, notices off). An
+      urgent item is `duplicate` only for raised and stale; for `seen` it is judged on its own `age_s`. The events
+      lane raises nothing for a key that is stale with `stale_src` `boot`, and judges an event on its own when it is
+      `wall`. For a page the store holds the highest rev taken.
+    - the alarms, each with the `traffic_id` it hangs on, which the finished transmission takes over by `alarm_key`.
+      "Open" is not cleared, acknowledged or not.
+    - per (system, radio), the P25 press window {alarm, last}: `last` is the HUB's receive time of the radio's last
+      flag. Armed only by a flag that raised or joined an alarm; a later flag joins as "still set" only while that
+      alarm is open and 0 <= t - last < 600 s; an All clear ends it, and the next flag's alarm says "emergency still
+      set after All clear". Two station wall times are never compared for it.
+    - the live pages, by (station, key), each with the hub's own expiry. Ended is final.
 
     max_age_s is A7: the admin has NOT decided what a late emergency becomes. 1800 (30 min, `alarms.MAX_AGE_S`) is
-    the recommended rule and only a default here: under it an item is `applied` (an alarm and a push that says its
-    age), at it or past it `stale` (a late notice, no push). The clock is `now`, the hub's own, set by the caller;
-    an item is placed at `now - age_s`, never at a station's time."""
+    the recommended rule and only a default here. The cutoff on either lane is max_age_s x 1.1: under it an alarm and
+    a push that says its age, at it or past it `stale` (a late notice, no push). The clock is `now`, the hub's own,
+    set by the caller; an item is placed at `now - age_s`, never at a station's time. `restore` puts back the whole
+    state as of `now - lost_s`; pushes already made stay made."""
 
     def __init__(self, max_age_s: float = 1800.0, repeat_s: float = 120.0, stuck_within_s: float = 600.0,
                  p25_slack_s: float = P25_SLACK_S, station: str = "st-north", multi_station: bool = False,
@@ -928,21 +1073,35 @@ class Hub:
         self.now, self.leader, self.gen = 0.0, True, 1
         self.store: dict[tuple[str, str], dict] = {}
         self.alarms: list[dict] = []
-        self.pushes: list[dict] = []
-        self.notices: list[dict] = []
         self.pages: dict[tuple[str, str], dict] = {}
-        self.flagged: dict[tuple[str, str], float] = {}       # (system, radio) -> the last flag's time, the station's
+        self.windows: dict[tuple[str, str], dict] = {}       # (system, radio) -> {alarm, last, cleared}
+        self.pushes: list[dict] = []                          # what left the hub: never undone by a restore
+        self.notices: list[dict] = []
         self.log: list[str] = []
+        self._ids = 0
+        self.history: list[tuple[float, dict]] = [(float("-inf"), self._state())]
 
-    def _set(self, station: str, key: str, state: str, alarm: int | None = None) -> None:
+    @property
+    def cutoff(self) -> float:
+        return round(self.max_age_s * AGE_MARGIN, 6)          # (1980.0, not 1980.0000000000002)
+
+    def _state(self) -> dict:
+        return copy.deepcopy({"store": self.store, "alarms": self.alarms, "pages": self.pages, "windows": self.windows})
+
+    def _keep(self) -> None:
+        """The state after a write, for `restore`."""
+        self.history.append((self.now, self._state()))
+
+    def _set(self, station: str, key: str, state: str, alarm: int | None = None, src: str | None = None) -> None:
         """Write a key's state: raised over stale over seen, never the other way."""
         have = self.store.get((station, key))
         if have is None or _RANK[state] >= _RANK.get(have.get("state"), -1):
             self.store[(station, key)] = {"kind": "alarm", "state": state, "rev": 0, "alarm": alarm,
+                                          "stale_src": src if state == STALE else None,
                                           "first": have["first"] if have else self.now}
 
     def _alarm(self, **where) -> dict | None:
-        return next((a for a in self.alarms if all(a[k] == v for k, v in where.items())), None)
+        return next((a for a in self.alarms if all(a.get(k) == v for k, v in where.items())), None)
 
     # .. the routes .........................................................................................................
     def hello(self) -> tuple[int, dict]:
@@ -951,19 +1110,23 @@ class Hub:
 
     def urgent(self, body: dict) -> tuple[int, dict]:
         """(status, answer) for one request. A hub that is not the leader applies nothing. A request that is not
-        well formed is refused whole, and nothing of it is applied (the sender cuts it to single items)."""
+        well formed (not version 1, not 1 to 32 items each with its key, rev, kind, data and age) is refused whole,
+        and nothing of it is applied."""
         if not self.leader:
             return 503, {"error": "the hub is updating: back in a few seconds", "updating": True}
         raw = json.dumps(body, separators=(",", ":")).encode()
         if len(raw) > REQUEST_MAX_BYTES:
             return 413, {"error": "body over 65536 bytes", "reason": "too_large"}
         items = body.get("items") if isinstance(body, dict) else None
-        ok = isinstance(items, list) and 1 <= len(items) <= REQUEST_MAX_ITEMS and all(
-            isinstance(i, dict) and isinstance(i.get("key"), str) and 0 < len(i["key"]) <= 200
-            and isinstance(i.get("rev"), int) and not isinstance(i["rev"], bool) and i["rev"] >= 0
-            and isinstance(i.get("kind"), str) and isinstance(i.get("data"), dict) for i in items)
-        if not ok or not isinstance(body.get("station"), str):
-            return 422, {"error": "not a list of 1 to 32 items", "reason": "bad_batch"}
+        ok = isinstance(body, dict) and body.get("v") == 1 and not isinstance(body.get("v"), bool) \
+            and isinstance(body.get("station"), str) and isinstance(items, list) \
+            and 1 <= len(items) <= REQUEST_MAX_ITEMS and all(
+                isinstance(i, dict) and isinstance(i.get("key"), str) and 0 < len(i["key"]) <= 200
+                and isinstance(i.get("rev"), int) and not isinstance(i["rev"], bool) and i["rev"] >= 0
+                and isinstance(i.get("kind"), str) and isinstance(i.get("data"), dict)
+                and isinstance(i.get("age_s"), (int, float)) and not isinstance(i["age_s"], bool) for i in items)
+        if not ok:
+            return 422, {"error": "not a version 1 request of 1 to 32 whole items", "reason": "bad_batch"}
         station = body["station"]                             # (the real route takes it from the token, never from here)
         if station != self.station and not self.multi_station:
             return 409, {"error": "this hub takes one station", "reason": "multi_station_off"}
@@ -971,6 +1134,7 @@ class Hub:
         for item in items:
             status, reason = self._item(station, item, body.get("sent_at"))
             results.append({"key": item["key"], "rev": item["rev"], "status": status, **({"reason": reason} if reason else {})})
+        self._keep()
         return 200, {"ok": True, "v": 1, "station": station, "gen": self.gen, "results": results}
 
     def _item(self, station: str, item: dict, sent_at) -> tuple[str, str]:
@@ -979,32 +1143,57 @@ class Hub:
         if item["kind"] != "alarm":
             return "rejected", "kind"
         key, d = item["key"], item["data"]
+        radio = self._radio(d.get("system") if d.get("emergency_via") == "P25" else None, d.get("radio_id"))
         have = self.store.get((station, key))
         if have is not None and have["state"] in (RAISED, STALE):     # this lane again, or the app's lane raised it
+            if have["state"] == RAISED and radio:
+                self._arm(radio, self._alarm(id=have["alarm"]))
             return "duplicate", ""
         cur = self._alarm(station=station, traffic_id=key)            # today's rule: one traffic_id, one alarm
-        if cur is None and d.get("emergency_via") == "P25":           # an end-of-call event with no alarm_key came first
+        if cur is None and radio:                                     # an end-of-call event with no alarm_key came first
             cur = self._p25_call(station, d)                          # (an older capture): station time against station time
         if cur is not None:
             self._set(station, key, RAISED, cur["id"])
+            self._arm(radio, cur)
             return "duplicate", ""
         age_s = item.get("age_s")                             # judged on its own age: the key is new, or only `seen`
-        age_s = min(max(float(age_s), 0.0), 86400.0) if isinstance(age_s, (int, float)) and not isinstance(age_s, bool) \
-            and age_s == age_s else 0.0                       # not a number, negative or over 24 h: clamped
-        if outside(age_s, self.max_age_s):                    # A7, recommended: a late notice, no alarm, no push
-            self._set(station, key, STALE)
+        age_s = min(max(float(age_s), 0.0), 86400.0) if age_s == age_s else 0.0     # clamped into [0, 24 h]
+        if outside(age_s, self.cutoff):                       # A7, recommended: a late notice, no alarm, no push
+            self._set(station, key, STALE, src="boot" if item.get("age_src") == "boot" else "wall")
             self.notices.append({"station": station, "key": key, "age_s": age_s})
-            return "stale", ""
+            return "stale", ""                                # (and the press window is not armed)
         at = self.now - age_s
-        system = d.get("system") if d.get("emergency_via") == "P25" else None
-        if system:
-            self._flag(system, str(d.get("radio_id") or ""), float(d.get("start", at)))
         cur = self._open(d, at) or self._raise(station, key, d, at=at, age_s=age_s,
-                                               approx=item.get("age_src") != "boot", live_p25=bool(system))
+                                               approx=item.get("age_src") != "boot", live_p25=bool(radio),
+                                               label=self._label(radio))
         if station not in cur["sources"]:
             cur["sources"].append(station)                    # the second station is a second source, not a second alarm
         self._set(station, key, RAISED, cur["id"])
+        self._arm(radio, cur)                                 # a live P25 item: the station judged it a new press
         return "applied", ""
+
+    @staticmethod
+    def _radio(system, radio_id) -> tuple[str, str] | None:
+        return (str(system), str(radio_id or "")) if system else None
+
+    def _arm(self, radio, alarm: dict | None) -> None:
+        """The press window of a radio, after a flag that raised or joined `alarm`: {that alarm, the hub's now}."""
+        if radio and alarm is not None:
+            self.windows[radio] = {"alarm": alarm["id"], "last": self.now, "cleared": bool(alarm.get("cleared"))}
+
+    def _label(self, radio) -> str:
+        """The label of a new alarm raised by a radio's flag: after an All clear ended its window, the bit is still
+        set (the radio maintainers' wording), not presented as a new press."""
+        w = self.windows.get(radio) if radio else None
+        return AFTER_CLEAR if w is not None and w["cleared"] else ""
+
+    def _still_set(self, radio) -> dict | None:
+        """Step 2 of the press window: the open alarm a flag received now joins as "still set", if any."""
+        w = self.windows.get(radio) if radio else None
+        a = self._alarm(id=w["alarm"]) if w else None
+        if a is None or w["cleared"] or a.get("cleared") or not (0 <= self.now - w["last"] < self.stuck_within_s):
+            return None
+        return a
 
     def _channel(self, d: dict) -> tuple:
         """What "the same channel" is: the channel's label; for P25 the system and the talkgroup."""
@@ -1012,23 +1201,24 @@ class Hub:
 
     def _open(self, d: dict, at: float) -> dict | None:
         """The alarm code's same-radio rule, which has no station in it: the same radio's button on the same channel
-        while its alarm is open (unacknowledged) and was raised under REPEAT_S before, from ANY station, joins that
-        alarm. Both are placed on the hub's clock, so no station's clock is compared."""
+        while its alarm is open (not cleared; acknowledged or not) and was raised under REPEAT_S before, from ANY
+        station, joins that alarm. Both are placed on the hub's clock, so no station's clock is compared."""
         rid = str(d.get("radio_id") or "")
         for a in reversed(self.alarms):
-            if rid and a["radio_id"] == rid and a["channel"] == self._channel(d) and not a["acked"] \
+            if rid and a["radio_id"] == rid and a["channel"] == self._channel(d) and not a.get("cleared") \
                     and not outside(abs(at - a["at"]), self.repeat_s):
                 return a
         return None
 
     def _raise(self, station: str, tid: str, d: dict, *, at: float, age_s: float, approx: bool = False,
-               live_p25: bool = False, span: tuple[float, float] | None = None) -> dict:
-        a = {"id": len(self.alarms) + 1, "station": station, "sources": [station], "traffic_id": tid, "at": at,
+               live_p25: bool = False, span: tuple[float, float] | None = None, label: str = "") -> dict:
+        self._ids += 1
+        a = {"id": self._ids, "station": station, "sources": [station], "traffic_id": tid, "at": at,
              "created": self.now, "radio_id": str(d.get("radio_id") or ""), "channel": self._channel(d), "acked": False,
-             "system": d.get("system"), "talkgroup": d.get("talkgroup"), "live_p25": live_p25,
-             "start": d.get("start"), "span": span, "still_set": 0}
+             "cleared": False, "system": d.get("system"), "talkgroup": d.get("talkgroup"), "live_p25": live_p25,
+             "start": d.get("start"), "span": span, "still_set": 0, "label": label}
         self.alarms.append(a)
-        self.pushes.append({"alarm": a["id"], "at": at, "age_s": age_s, "approximate": approx})
+        self.pushes.append({"alarm": a["id"], "at": at, "age_s": age_s, "approximate": approx, "label": label})
         return a
 
     def _p25_call(self, station: str, d: dict) -> dict | None:
@@ -1042,13 +1232,6 @@ class Hub:
                 return a
         return None
 
-    def _flag(self, system: str, radio: str, at: float) -> bool:
-        """A P25 emergency flag of a radio at `at` (the station's time: a call's, or a live grant's): is it a new press.
-        It is when no flag of that radio was seen in the 10 min before it. Every flag moves the last-seen time on."""
-        last = self.flagged.get((system, radio))
-        self.flagged[(system, radio)] = max(at, last) if last is not None else at
-        return last is None or outside(at - last, self.stuck_within_s)
-
     def _page(self, station: str, item: dict, sent_at) -> str:
         k = (station, item["key"])
         have = self.store.get(k)
@@ -1060,8 +1243,10 @@ class Hub:
         # `sent_at` is used, kept within 0 to 300 s; with none, 300 s after this revision
         left = PAGE_LIVE_MAX_S if until is None or not isinstance(sent_at, (int, float)) \
             else min(max(float(until) - float(sent_at), 0.0), PAGE_LIVE_MAX_S)
+        old = self.pages.get(k)
         self.pages[k] = {"rev": item["rev"], "data": copy.deepcopy(item["data"]), "from": "urgent",
-                         "ended": bool(item["data"].get("ended")), "expires": self.now + left}
+                         "ended": bool(item["data"].get("ended")) or bool(old and old["ended"]),     # ended is final
+                         "expires": self.now + left}
         return "applied"
 
     def page_live(self, station: str, key: str) -> bool:
@@ -1071,11 +1256,18 @@ class Hub:
 
     # .. the app's lane: /api/station/events and /api/station/state ........................................................
     def event(self, station: str, ev: dict) -> int:
+        out = self._event(station, ev)
+        self._keep()
+        return out
+
+    def _event(self, station: str, ev: dict) -> int:
         """One event of the app's lane: `alarm` (the take-over, `id` = the urgent key; or a finished P25 call's alarm,
         with `alarm_key` when capture matched the call to its live alarm), `traffic` (a finished transmission) or `page`
         (a finished page). Its times (`start`, `end`) are the station's wall clock. The lane asks the store before it
         raises, and writes it AFTER its own decision: `raised` for the `id` of an alarm event and for an `alarm_key`
-        when an alarm exists for it, `seen` when it met the key and raised nothing."""
+        when an alarm exists for it, `seen` when it met the key and raised nothing. A P25 flag goes through the press
+        window: tied to an alarm, it updates it; else it joins the radio's open alarm under 600 s of the hub's clock
+        after its last flag; else it is judged on its own."""
         if not self.leader:
             return 503
         tid, key = str(ev.get("id") or ""), str(ev.get("alarm_key") or "")
@@ -1088,13 +1280,16 @@ class Hub:
         emergency = ev.get("type") == "alarm" or bool(ev.get("emergency"))
         p25 = bool(ev.get("system")) and "start" in ev and "end" in ev
         span = (float(ev["start"]), float(ev["end"])) if p25 else None
+        radio = self._radio(ev.get("system"), ev.get("radio_id")) if p25 and emergency else None
 
         def done(state: str, alarm: dict | None = None, taken: bool = True) -> int:
             for k in mine:
                 self._set(station, k, state, alarm["id"] if alarm else None)
             if alarm is not None and span is not None and taken:          # the call's row is the alarm's now
                 alarm.update(span=span, live_p25=False)
+            self._arm(radio, alarm)                                       # (nothing raised or joined: left as it was)
             return 200
+        # 1. the existing rules: the alarm this event belongs to
         cur = self._alarm(station=station, traffic_id=tid)
         if cur is None and key and key != tid:                # raised at the key-up (or live, for P25): the finished
             cur = self._alarm(station=station, traffic_id=key)   # transmission takes the alarm over by its alarm_key
@@ -1104,11 +1299,8 @@ class Hub:
             known = [self.store[(station, k)] for k in mine if (station, k) in self.store]
             hit = next((h for h in known if h["state"] == RAISED and h["alarm"]), None)
             cur = self._alarm(id=hit["alarm"]) if hit else None
-            if cur is None and any(h["state"] == STALE for h in known):
-                return 200                                    # the urgent lane judged it too old: its row joins the late notice
-        if p25 and emergency:
-            new_press = self._flag(str(ev["system"]), str(ev.get("radio_id") or ""), span[0])
-            self._flag(str(ev["system"]), str(ev.get("radio_id") or ""), span[1])
+            if cur is None and any(h["state"] == STALE and h.get("stale_src") == "boot" for h in known):
+                return 200                                    # too old on a boot-clock age: the row joins the late notice
         if cur is not None:
             return done(RAISED, cur)
         if not emergency:
@@ -1121,35 +1313,47 @@ class Hub:
             if live is not None:
                 live["traffic_id"] = tid
                 return done(RAISED, live)
-        if p25 and not new_press:                             # the bit is still set: nothing is raised
-            last = next((a for a in reversed(self.alarms) if (a["system"], a["radio_id"]) ==
-                         (ev.get("system"), str(ev.get("radio_id") or ""))), None)
-            if last is not None:
-                last["still_set"] += 1
-            return done(RAISED if last else SEEN, last, taken=False)
+        # 2. the press window: the radio's open alarm, under 600 s of the hub's clock since its last flag
+        joined = self._still_set(radio)
+        if joined is not None:
+            joined["still_set"] += 1                          # the row says "emergency still set"; no alarm, no push
+            return done(RAISED, joined, taken=False)
+        # 3. judged on its own
         end = float(ev.get("end", ev.get("start", self.now)))
-        if outside(self.now - end, self.max_age_s):           # the alarm code's own age gate: the station's wall time
-            self.log.append(f"{tid}: too old to raise now (logged only)")       # against the hub's clock
+        if outside(self.now - end, self.cutoff):              # the alarm code's own age gate, with the same margin:
+            self.log.append(f"{tid}: too old to raise now (logged only)")       # the station's wall time, the hub's clock
             return done(SEEN)
         if str(ev.get("source") or "") in self.off_channels:  # notices are off for it
             return done(SEEN)
-        cur = self._open(ev, self.now) or self._raise(station, tid, ev, at=self.now, age_s=max(0.0, self.now - end), span=span)
+        cur = self._open(ev, self.now) or self._raise(station, tid, ev, at=self.now, age_s=max(0.0, self.now - end),
+                                                      span=span, label=self._label(radio))
         return done(RAISED, cur)
 
     def state(self, station: str, paging: list[dict]) -> None:
         """The app's state post, its `paging` list: merged with the urgent lane's entries by `key`; the newer of the
-        two, which is the later to arrive, wins."""
+        two, which is the later to arrive, wins. Ended is final: no state post makes an ended page live again."""
         for entry in paging:
-            self.pages[(station, entry["key"])] = {"rev": self.store.get((station, entry["key"]), {}).get("rev"),
-                                                   "data": copy.deepcopy(entry), "from": "state",
-                                                   "ended": bool(entry.get("ended")), "expires": self.now + PAGE_LIVE_MAX_S}
+            k = (station, entry["key"])
+            old = self.pages.get(k)
+            self.pages[k] = {"rev": self.store.get(k, {}).get("rev"), "data": copy.deepcopy(entry), "from": "state",
+                             "ended": bool(entry.get("ended")) or bool(old and old["ended"]),
+                             "expires": self.now + PAGE_LIVE_MAX_S}
+        self._keep()
 
     def ack(self, traffic_id: str) -> None:
+        """A person acknowledged the alarm. It stays open: a second station's item, or the same radio, still joins it."""
         self._alarm(traffic_id=traffic_id)["acked"] = True
+        self._keep()
 
     def all_clear(self, traffic_id: str) -> None:
-        """An All clear closes the alarm. It does NOT clear "still set": a bit still set after it does not alarm again."""
-        self._alarm(traffic_id=traffic_id).update(acked=True, cleared=True)
+        """An All clear closes the alarm and ends its press window: a bit still set after it raises an alarm again on
+        its next flag, labelled "emergency still set after All clear"."""
+        a = self._alarm(traffic_id=traffic_id)
+        a.update(acked=True, cleared=True)
+        for w in self.windows.values():
+            if w["alarm"] == a["id"]:
+                w["cleared"] = True
+        self._keep()
 
     # .. the hub itself .....................................................................................................
     def handoff(self) -> None:
@@ -1160,11 +1364,14 @@ class Hub:
         self.leader, self.gen = True, self.gen + 1
 
     def restore(self, lost_s: float) -> None:
-        """A crash, and back from a replica `lost_s` old: the newest writes are gone, and the generation is new."""
+        """A crash, and back from a replica `lost_s` old: the WHOLE state as it was at now - lost_s (each dedupe entry
+        whole, so a `seen` later upgraded to `raised` comes back as `seen`; the alarms, the live pages, the press
+        windows). Pushes already made stay made, and the generation is new."""
         cut = self.now - lost_s
-        self.store = {k: v for k, v in self.store.items() if v["first"] <= cut}
-        self.alarms = [a for a in self.alarms if a["created"] <= cut]
-        self.pages = {k: v for k, v in self.pages.items() if k in self.store or v["from"] == "state"}
+        snap = [s for t, s in self.history if t <= cut][-1]
+        snap = copy.deepcopy(snap)
+        self.store, self.alarms, self.pages, self.windows = snap["store"], snap["alarms"], snap["pages"], snap["windows"]
+        self.history.append((self.now, self._state()))
         self.gen += 1
 
 

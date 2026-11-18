@@ -91,7 +91,7 @@
       }
     },
     "audio": {"$ref": "#/$defs/audio"},
-    "audio_dropped": {"type": "boolean", "default": false, "description": "The audio is not there and `audio` is null for that reason: removed at a bound (age, size), not written under the free-space reserve, or lost to a failed write (`audio_lost`). An item with an emergency id is never dropped at a bound or for the reserve: with one, `audio_dropped` needs `audio_lost`."},
+    "audio_dropped": {"type": "boolean", "default": false, "description": "The audio is not there and `audio` is null for that reason: removed at a bound (age, size), not written under the free-space reserve, or lost to a failed write (`audio_lost`). An emergency item is never dropped at a bound or for the reserve: with any of its four signs (an `ids` entry or a turn with `emergency: true`, the call-level `emergency: true`, a non-empty `alarm_key`), `audio_dropped` needs `audio_lost`."},
     "audio_lost": {"type": "string", "description": "Why an item that keeps its audio whatever the bounds has none: `write`, the write failed outright. Only beside `audio: null` and `audio_dropped: true`.", "x-known": ["write"]},
     "bursts_audio": {"type": ["string", "null"], "pattern": "^[0-9]{12}-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.mdc\\.wav$", "description": "The file name in items/ of the cut-off id bursts, `<seq, 12 digits>-<id>.mdc.wav`; null for none."},
     "system": {"type": "string", "minLength": 1, "description": "A call: trunk-recorder's short name of the P25 system."},
@@ -181,6 +181,14 @@
               }
             },
             "required": ["turns"]
+          },
+          {
+            "properties": {"emergency": {"const": true, "description": "A call with the call-level emergency flag."}},
+            "required": ["emergency"]
+          },
+          {
+            "properties": {"alarm_key": {"type": "string", "minLength": 1, "description": "A non-empty `alarm_key`: the item belongs to an alarm."}},
+            "required": ["alarm_key"]
           }
         ]
       },
