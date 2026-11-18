@@ -571,6 +571,7 @@ class App:
         self._watching = False                # the sdr-watch thread runs
         self._lock_saved()
         self._load_standins()
+        self._load_noaudio()                  # (#703) the dongles out for no audio when sizeup stopped stay out
         # Each serial's product while it was the only dongle with it (#242): {serial: product}. When a second dongle
         # turns up with the same serial (a factory 00000001), the one whose product differs is the newcomer: the
         # alert suggests renaming that one, and sizeup-station sdr-serial knows which physical dongle a job meant.
@@ -3777,8 +3778,9 @@ class App:
     def _on_stall(self, r) -> None:
         """(the receiver's thread) Its rtl_fm opened the dongle and not a byte of audio came (fm.py, on_stall).
         NOAUDIO_STALLS of them within NOAUDIO_WINDOW_S: one USB reset (usbreset.py; none under WSL), then, at the next
-        NOAUDIO_STALLS, the dongle is out ("no audio"): its antenna group runs its job elsewhere, as for a dongle
-        unplugged (_group_usable_now). Said once; Health alerts once (noaudio:<serial>)."""
+        NOAUDIO_STALLS, the dongle is out ("no audio"): its antenna group runs its job on a healthy dongle if one can
+        take it (_groups_reconcile; an out dongle is a last resort, never left idle with a job nowhere). Said once;
+        Health alerts once (noaudio:<serial>). The reset runs outside the lock (it can take a second or two)."""
         sd = getattr(r.device, "serial", None)
         if not sd or not self.shared:
             return
@@ -3794,23 +3796,27 @@ class App:
             if len(q) < NOAUDIO_STALLS:
                 return
             self._stalls.pop(sd, None)
-            head = (f"sdr: SDR {self.sdr_name(sd)} ({r.channel.label}): {len(q)} stalls with no audio in "
-                    f"{now - q[0]:.0f} s")
-            if sd not in self._reset_tried:
-                self._reset_tried.add(sd)
-                why = usbreset.reset(sd)
-                if not why:
-                    log(f"{head}: USB reset; it is out at the next {NOAUDIO_STALLS} like these")
-                    return
-                log(f"{head}: no USB reset ({why})")
-            self._noaudio[sd] = {"since": time.time(), "job": r.channel.label, "tries": 0, "next": now + NOAUDIO_PROBE_S[0],
-                                 "usb": usbreset.ident(sd), "gone": False}
+            reset = sd not in self._reset_tried
+            self._reset_tried.add(sd)
+        head = f"sdr: SDR {self.sdr_name(sd)} ({r.channel.label}): {len(q)} stalls with no audio in {now - q[0]:.0f} s"
+        if reset:
+            why = usbreset.reset(sd)
+            if not why:
+                log(f"{head}: USB reset; it is out at the next {NOAUDIO_STALLS} like these")
+                return
+            log(f"{head}: no USB reset ({why})")
+        with self._noaudio_lock:
+            if sd in self._noaudio:
+                return
+            self._noaudio[sd] = {"since": time.time(), "job": r.channel.label, "tries": 0,
+                                 "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usbreset.ident(sd), "gone": 0}
+        self._save_noaudio()
         g = antenna.of_sdr(self.groups, sd)
         log(f"sdr: CRITICAL SDR {self.sdr_name(sd)} streams no audio ({r.channel.label}): out "
-            + (f"of antenna group {g.name}, its job runs on another of its dongles if one can take it; "
-               if g else "(no antenna group: nothing to move to); ")
-            + "back when it streams again (tried in "
-            + f"{NOAUDIO_PROBE_S[0] / 60:.0f} min), a person picks its job, or it is plugged in again")
+            + (f"of antenna group {g.name}: its job runs on a healthy dongle of it if one can take it, else stays and "
+               "retries here; " if g else "(no antenna group: nothing to move to); ")
+            + f"back when it streams again (tried in {NOAUDIO_PROBE_S[0] / 60:.0f} min), a person picks its job, or it "
+            "is plugged in again")
 
     def _on_audio(self, r) -> None:
         """(the receiver's thread) Audio from the dongle: its stalls forgotten, and a dongle out for no audio is back."""
@@ -3828,29 +3834,83 @@ class App:
             self._reset_tried.discard(sd)
         if st is not None:
             log(f"sdr: SDR {self.sdr_name(sd)} {why}: back after {fm_mmss(time.time() - st['since'])} of no audio")
+            self._save_noaudio()
         return st is not None
 
-    def _watch_noaudio(self, gone: set[str]) -> None:
-        """(the sdr-watch thread) Each dongle out for no audio: plugged in again (gone from the list since, or a new
-        USB device number) ends it; an idle one (its job runs elsewhere, or none) is tried again with rtl_fm at
-        NOAUDIO_PROBE_S (_probe), never while another app holds it."""
-        now = time.monotonic()
-        for sd, st in list(self._noaudio.items()):
-            if sd in gone or sd not in self._seen:
-                st["gone"] = True
+    NOAUDIO_FILE = "antenna_noaudio.json"   # the dongles out for no audio ({serial: {since, job, usb}}): kept over a restart
+
+    def _noaudio_path(self) -> Path | None:
+        return self._mode_file.with_name(self.NOAUDIO_FILE) if self._mode_file else None
+
+    def _save_noaudio(self) -> None:
+        p = self._noaudio_path()
+        if p is None:
+            return
+        with self._noaudio_lock:
+            cur = {sd: {"since": st["since"], "job": st["job"], "usb": list(st["usb"]) if st["usb"] else None}
+                   for sd, st in self._noaudio.items()}
+        try:
+            if cur:
+                tmp = p.with_name(f".{p.name}.{os.getpid()}")
+                tmp.write_text(json.dumps(cur))
+                os.replace(tmp, p)
+            else:
+                p.unlink(missing_ok=True)
+        except OSError as e:
+            log(f"sdr: couldn't keep the no-audio dongles ({p.name}): {e}")
+
+    def _load_noaudio(self) -> None:
+        """At startup: the dongles that were out for no audio when sizeup stopped stay out (a restart or an update
+        never hands a job back to a dead dongle for another round of stalls), each only if it is plugged in at the
+        same USB address (none to compare: kept); a replug since, or one not there, starts fresh."""
+        p = self._noaudio_path()
+        try:
+            d = json.loads(p.read_text()) if p and p.is_file() else {}
+        except (OSError, ValueError):
+            d = {}
+        here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s} if d else set()
+        for sd, st in (d.items() if isinstance(d, dict) else ()):
+            if sd not in here or not isinstance(st, dict) or not isinstance(st.get("since"), (int, float)):
                 continue
-            if st["gone"]:
+            usb = tuple(st["usb"]) if isinstance(st.get("usb"), list) and len(st["usb"]) == 2 else None
+            now_at = usbreset.ident(sd)
+            if usb is not None and now_at is not None and now_at != usb:
+                log(f"sdr: SDR {self.sdr_name(sd)} was out for no audio; on a new USB address now: tried again")
+                continue
+            self._noaudio[sd] = {"since": float(st["since"]), "job": str(st.get("job") or ""), "tries": 0,
+                                 "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usb, "gone": 0}
+            self._gusable[sd], self._gseen[sd] = False, (False, time.monotonic())
+            log(f"sdr: SDR {self.sdr_name(sd)} still out for no audio (since {time.strftime('%H:%M', time.localtime(st['since']))}, "
+                "as when sizeup stopped)")
+        if d and not self._noaudio:
+            self._save_noaudio()
+
+    def _watch_noaudio(self, gone: set[str], here: list[str] | None = None) -> None:
+        """(the sdr-watch thread) Each dongle out for no audio: plugged in again ends it (missing from two looks in a
+        row that listed other dongles, then back; or a new USB device number); an idle one (its job runs on a healthy
+        dongle, or none) is tried again with rtl_fm at NOAUDIO_PROBE_S (_probe), never while another app or a
+        reception test has it."""
+        now = time.monotonic()
+        trusted = bool(self._seen)              # (an empty look, librtlsdr failing: never "unplugged")
+        for sd, st in list(self._noaudio.items()):
+            if sd not in self._seen:
+                if trusted:
+                    st["gone"] = st.get("gone", 0) + 1
+                continue
+            if st.get("gone", 0) >= 2:
                 self._noaudio_clear(sd, "plugged in again")
                 continue
+            st["gone"] = 0
             if st["usb"] is not None and (u := usbreset.ident(sd)) is not None and u != st["usb"]:
                 self._noaudio_clear(sd, "on a new USB address (replugged)")
                 continue
             if sd in self._probing or now < st["next"]:
                 continue
             if any(m != OFF_MODE and self._program_on(m) == sd for m in self.modes):
-                continue                    # its own receiver is the test: the first audio ends it (_on_audio)
-            if claims.other(sd):
-                st["next"] = now + NOAUDIO_PROBE_S[0]
+                continue                    # it runs a job (a last resort): its first audio ends it (_on_audio)
+            lent = self.reception.lent()
+            if claims.other(sd) or self.reception.holds(sd) or (lent and lent[0] == sd):
+                st["next"] = now + NOAUDIO_PROBE_S[0]       # (not a try)
                 continue
             self._probing.add(sd)
             threading.Thread(target=self._probe_noaudio, args=(sd,), name="sdr-probe", daemon=True).start()
@@ -3868,31 +3928,48 @@ class App:
             return
         with self._noaudio_lock:
             st = self._noaudio.get(sd)
-            if st is not None:
-                st["tries"] += 1
-                st["next"] = time.monotonic() + NOAUDIO_PROBE_S[min(st["tries"], len(NOAUDIO_PROBE_S) - 1)]
-                if st["tries"] == 1:
-                    log(f"sdr: SDR {self.sdr_name(sd)} still streams no audio: tried again every "
-                        f"{', '.join(f'{x / 60:.0f}' for x in NOAUDIO_PROBE_S[1:])} min")
+            if st is None:
+                return
+            if ok is None:                                  # couldn't try (another app's claim): not a try
+                st["next"] = time.monotonic() + NOAUDIO_PROBE_S[0]
+                return
+            st["tries"] += 1
+            st["next"] = time.monotonic() + NOAUDIO_PROBE_S[min(st["tries"], len(NOAUDIO_PROBE_S) - 1)]
+            first = st["tries"] == 1
+        if first:
+            log(f"sdr: SDR {self.sdr_name(sd)} still streams no audio: tried again every "
+                f"{', '.join(f'{x / 60:.0f}' for x in NOAUDIO_PROBE_S[1:])} min")
 
-    def _probe(self, sd: str) -> bool:
-        """rtl_fm on this idle dongle for NOAUDIO_PROBE_LEN_S at most, on its job's frequency: any audio at all.
-        sizeup's claim is held meanwhile (none taken over: another app's means no try)."""
+    def _probe(self, sd: str) -> bool | None:
+        """rtl_fm on this idle dongle for NOAUDIO_PROBE_LEN_S, on its job's frequency: True when audio came the whole
+        time (no gap over a second, about half the bytes at least), False when not, None when it couldn't be tried
+        (not found, another app's claim). sizeup's claim is held meanwhile and let go after, only if it took it."""
         idx = sdr_lookup.resolve(sd, self.cfg.rtl_fm)
-        if idx is None or not claims.claim(sd, "no-audio test"):
-            return False
+        if idx is None:
+            return None
+        if claims.other(sd):
+            return None
+        took = claims.holder(sd) is None                    # (a claim of ours already there: left as it is)
+        if took and not claims.claim(sd, "no-audio test"):
+            return None
         job = (self._noaudio.get(sd) or {}).get("job", "")
         mhz = next((c.mhz for c in self.cfg.channels if c.label == job and c.mhz), 460.0)
         p = None
         try:
-            p = subprocess.Popen([self.cfg.rtl_fm or "rtl_fm", "-d", str(idx), "-f", f"{mhz * 1e6:.0f}", "-s", "24000",
-                                  "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-            end = time.monotonic() + NOAUDIO_PROBE_LEN_S
+            p = subprocess.Popen(self._probe_argv(idx, mhz), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 start_new_session=True, env=child_env())
+            start = last = time.monotonic()
+            end, got = start + NOAUDIO_PROBE_LEN_S, 0
             while time.monotonic() < end and p.poll() is None:
-                r, _w, _x = select_mod.select([p.stdout], [], [], 0.5)
-                if r and os.read(p.stdout.fileno(), 4096):
-                    return True
-            return False
+                r, _w, _x = select_mod.select([p.stdout], [], [], 0.25)
+                if r:
+                    chunk = os.read(p.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    got, last = got + len(chunk), time.monotonic()
+                elif time.monotonic() - last > 1.0:
+                    return False                            # a gap: not streaming
+            return time.monotonic() >= end and got >= 24000 * NOAUDIO_PROBE_LEN_S   # (half its 2 bytes a sample)
         except OSError:
             return False
         finally:
@@ -3905,12 +3982,16 @@ class App:
                         os.killpg(p.pid, signal.SIGKILL)
                     except Exception:  # noqa: BLE001
                         pass
-            if not any(m != OFF_MODE and self._program_on(m) == sd for m in self.modes):
+            if took and not any(m != OFF_MODE and self._program_on(m) == sd for m in self.modes):
                 claims.release(sd)
+
+    def _probe_argv(self, idx, mhz: float) -> list[str]:
+        return [self.cfg.rtl_fm or "rtl_fm", "-d", str(idx), "-f", f"{mhz * 1e6:.0f}", "-s", "24000", "-"]
 
     def noaudio_row(self, sd: str) -> dict | None:
         st = self._noaudio.get(sd)
-        return {"since": st["since"], "job": st["job"]} if st else None
+        return ({"since": st["since"], "job": st["job"], "retry_min": [round(x / 60) for x in NOAUDIO_PROBE_S]}
+                if st else None)
 
     # -- antenna groups (sizeup/radio/groups.py) ---------------------------------------------------------------------
 
@@ -4027,11 +4108,12 @@ class App:
             return bool(rt.system.covered([k for j, (r, k) in self._sys_jobs.items() if r is rt and j in on]))
         return job in self.modes
 
-    def _group_usable_now(self, sd: str, here: set[str], devs) -> bool:
+    def _group_usable_now(self, sd: str, here: set[str], devs, last_resort: bool = False) -> bool:
         """A grouped dongle can run a job now: plugged in, not reserved, not lent to a reception test, not another
-        app's, its serial on one dongle, and no stand-in failed to start on it lately."""
-        if sd not in here or self._sdr_ignored(sd) or self.reception.holds(sd) or sd in self._noaudio:
-            return False                    # (#703: a dongle that streams no audio is out, as one unplugged)
+        app's, its serial on one dongle, and no stand-in failed to start on it lately; and streaming audio (#703:
+        one out for no audio is out, as one unplugged, unless last_resort: then only that is overlooked)."""
+        if sd not in here or self._sdr_ignored(sd) or self.reception.holds(sd) or (sd in self._noaudio and not last_resort):
+            return False
         lent = self.reception.lent()
         if lent is not None and lent[0] == sd:
             return False
@@ -4100,7 +4182,12 @@ class App:
                 usable = [s for s in g.sdrs if self._group_view(s, self._group_usable_now(s, here, devs))]
                 if settling:
                     continue
-                for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
+                # (#703) out for no audio, but there and otherwise fine: a last resort for a job no healthy dongle can
+                # take (it keeps retrying there), never left idle with its job nowhere
+                spare_out = [s for s in g.sdrs if s not in usable and s in self._noaudio
+                             and self._group_usable_now(s, here, devs, last_resort=True)]
+                for s in [s for s in g.sdrs if s not in usable and s not in spare_out and s in self._own
+                          and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
                 # a dongle on a job outside its group or parked there (kept at startup, _lock_saved): left as it is,
@@ -4113,6 +4200,13 @@ class App:
                           and s not in self._auto_skip]
                 plan, short = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job,
                                            self._group_runnable)
+                for job in list(short):             # (#703) the last resort, highest job first: the out dongle that
+                    # runs it now, else its own, else any out one free in the plan
+                    free = sorted([s for s in spare_out if s not in plan],
+                                  key=lambda s: (self.assign.get(s) != job, own.get(s) != job))
+                    if free and self._group_runnable(job, (set(plan.values()) - {OFF_MODE}) | {job}):
+                        plan[free[0]] = job
+                        short.remove(job)
                 if short != self._gshort.get(g.name, []):
                     gone = [self.sdr_name(s) for s in g.sdrs if s not in usable and own.get(s, OFF_MODE) != OFF_MODE]
                     log(f"sdr: group {g.name}: " + (f"short of dongles (SDR {', '.join(gone) or '?'}): "

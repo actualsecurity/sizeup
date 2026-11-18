@@ -361,8 +361,8 @@ window.RadioControls = (() => {
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
         + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
         + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "")
-        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried every `
-           + "2, 10, 30 min), it is replugged, or a job is picked for it here" : "");
+        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried after `
+           + `${(x.noaudio.retry_min || []).join(", ")} min), it is replugged, or a job is picked for it here` : "");
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;

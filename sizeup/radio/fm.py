@@ -1218,7 +1218,9 @@ class NfmReceiver:
             else:
                 self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
-            if stalled and not got:      # (#703) opened, then not a byte of audio: the app counts these per dongle
+            if stalled == "rtl_fm stalled" and not got:
+                # (#703) opened, then not a byte of audio: the app counts these per dongle. Never the airband
+                # channelizer's ("rtl_sdr stalled"): radio/am.py falls back to rtl_fm by itself first
                 self._hook(self.on_stall)
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)

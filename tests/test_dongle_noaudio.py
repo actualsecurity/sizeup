@@ -57,12 +57,12 @@ def test_a_stalling_paging_dongle_moves_paging_and_the_lower_job_loses_its_dongl
     assert set(app._noaudio) == {"uhf-b"} and resets == ["uhf-b"]           # out: never a second reset
     assert sum("CRITICAL SDR V4 streams no audio (South 2)" in x for x in logs) == 1
     app._sdr_arrivals()
-    # the paging job moves to the lowest job's dongle; the county's (higher) is never taken
-    assert (on(app, P25), on(app, "South 2"), on(app, "FG1")) == ("uhf-a", "uhf-c", None)
-    assert app._own == {"uhf-c": "FG1"} and app.sdr()["groups"][0]["short"] == ["FG1"]
+    # the paging job moves to the lowest job's dongle; the county's (higher) is never taken. FG1, with no healthy
+    # dongle left, goes to the out one as a last resort and keeps retrying there (never nowhere)
+    assert (on(app, P25), on(app, "South 2"), on(app, "FG1")) == ("uhf-a", "uhf-c", "uhf-b")
+    assert app._own == {"uhf-c": "FG1", "uhf-b": "South 2"} and app.sdr()["groups"][0]["short"] == []
     row = {r["serial"]: r for r in app.sdr()["sdrs"]}["uhf-b"]
-    assert row["noaudio"]["job"] == "South 2" and row["on"] == "uhf-c"
-    stall(app, "South 2", 5)                                                # (its old receiver, stopped: nothing more)
+    assert row["noaudio"]["job"] == "South 2" and row["noaudio"]["retry_min"] == [2, 10, 30]
     assert sum("streams no audio" in x for x in logs) == 1
 
 
@@ -74,7 +74,7 @@ def test_the_lowest_jobs_dongle_out_takes_no_higher_ones_and_keeps_trying_on_its
     # nothing lower to take: the higher jobs keep their dongles; FG1's rtl_fm keeps retrying where it is (its own
     # receiver is the test: its first audio ends the "no audio")
     assert (on(app, P25), on(app, "South 2"), on(app, "FG1")) == ("uhf-a", "uhf-b", "uhf-c")
-    assert app.sdr()["groups"][0]["short"] == ["FG1"] and not app._own
+    assert app.sdr()["groups"][0]["short"] == [] and not app._own
     app._on_audio(r)
     app._sdr_arrivals()
     assert not app._noaudio and app.sdr()["groups"][0]["short"] == []
@@ -108,12 +108,23 @@ def test_stalls_spread_out_or_broken_by_audio_never_add_up(st):
     assert resets == ["uhf-b"]                                               # (the third in the window counts)
 
 
+def spared(make):
+    """UHF with a spare (spare-1, Off by nobody): an out dongle's job goes there and the out dongle is idle."""
+    from tests.test_antenna_groups import mapped
+    app = make().start()
+    mapped(app)
+    assert app.set_mode("Off", "spare-1") is None
+    assert app.set_antenna_groups(uhf4()) is None
+    app.set_by.pop("spare-1")
+    return app
+
+
 def test_it_comes_back_when_it_streams_again_and_waits_longer_each_try_it_doesnt(st, monkeypatch):
     plugged, logs, make, resets = st
-    app = grouped(make)
+    app = spared(make)
     out(app, "South 2")
     app._sdr_arrivals()
-    assert on(app, "South 2") == "uhf-c"
+    assert (on(app, "South 2"), on(app, "FG1")) == ("spare-1", "uhf-c")
     tries: list[str] = []
     monkeypatch.setattr(app, "_probe", lambda sd: tries.append(sd) or False)
     app._sdr_arrivals()
@@ -128,6 +139,7 @@ def test_it_comes_back_when_it_streams_again_and_waits_longer_each_try_it_doesnt
     assert _until(lambda: not app._noaudio)
     app._sdr_arrivals()
     assert (on(app, "South 2"), on(app, "FG1")) == ("uhf-b", "uhf-c") and not app._own
+    assert app.assign.get("spare-1", "Off") == "Off"
     assert any("SDR V4 streams again (tried with rtl_fm): back after" in x for x in logs)
 
 
@@ -138,6 +150,7 @@ def test_a_replug_ends_it(st):
     app._sdr_arrivals()
     plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
     app._sdr_arrivals()
+    app._sdr_arrivals()                                                     # (missing from two looks in a row)
     assert "uhf-b" in app._noaudio
     plugged.insert(1, DONGLES[1])
     app._sdr_arrivals()
@@ -332,3 +345,127 @@ def test_usb_reset_finds_the_one_dongle_and_never_under_wsl(tmp_path):
 def test_the_constants_are_as_documented():
     assert (appmod.NOAUDIO_STALLS, appmod.NOAUDIO_WINDOW_S) == (3, 120.0)
     assert appmod.NOAUDIO_PROBE_S == (120.0, 600.0, 1800.0) and GROUPS
+
+
+# -- the review of #710 -------------------------------------------------------------------------------------------------
+
+def test_a_stand_in_that_goes_out_keeps_the_job(st):
+    plugged, logs, make, resets = st
+    app = grouped(make)
+    out(app, "South 2")
+    app._sdr_arrivals()
+    assert (on(app, "South 2"), on(app, "FG1")) == ("uhf-c", "uhf-b")
+    out(app, "South 2")                                                     # its stand-in (uhf-c) stalls too
+    assert set(app._noaudio) == {"uhf-b", "uhf-c"}
+    app._sdr_arrivals()
+    # no healthy dongle for South 2 or FG1: each stays on an out one, retrying; neither stops
+    assert (on(app, P25), on(app, "South 2"), on(app, "FG1")) == ("uhf-a", "uhf-c", "uhf-b")
+    app._on_audio(app._receiver("South 2"))                                 # the hiccup is over on uhf-c
+    app._on_audio(app._receiver("FG1"))                                     # ... and on uhf-b
+    app._sdr_arrivals()
+    assert not app._noaudio and (on(app, "South 2"), on(app, "FG1")) == ("uhf-b", "uhf-c") and not app._own
+
+
+def test_out_survives_a_restart_at_the_same_usb_address_only(st, monkeypatch, tmp_path):
+    plugged, logs, make, resets = st
+    monkeypatch.setattr(appmod.usbreset, "ident", lambda sd: (1, 7) if sd == "uhf-b" else None)
+    app = spared(make)
+    out(app, "South 2")
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "spare-1"
+    saved = json.loads((tmp_path / "antenna_noaudio.json").read_text())
+    assert saved["uhf-b"]["job"] == "South 2" and saved["uhf-b"]["usb"] == [1, 7]
+    app.stop()
+    again = make().start()                                                  # a restart or an update
+    again._sdr_arrivals()
+    assert "uhf-b" in again._noaudio and on(again, "South 2") == "spare-1" and on(again, "FG1") == "uhf-c"
+    assert any("SDR V4 still out for no audio" in x for x in logs)
+    again.stop()
+    monkeypatch.setattr(appmod.usbreset, "ident", lambda sd: (1, 9) if sd == "uhf-b" else None)   # replugged meanwhile
+    third = make().start()
+    third._sdr_arrivals()
+    assert not third._noaudio and on(third, "South 2") == "uhf-b"
+    assert not (tmp_path / "antenna_noaudio.json").exists()
+
+
+def test_a_failed_usb_look_is_never_a_replug(st, monkeypatch):
+    plugged, logs, make, resets = st
+    app = grouped(make)
+    out(app, "South 2")
+    app._sdr_arrivals()
+    keep = list(plugged)
+    for _ in range(3):
+        plugged[:] = []                                                     # sdr.devices() failing: []
+        app._sdr_arrivals()
+    plugged[:] = keep
+    app._sdr_arrivals()
+    assert "uhf-b" in app._noaudio
+    plugged[:] = [d for d in keep if d[2] != "uhf-b"]                       # missing once only: no replug either
+    app._sdr_arrivals()
+    plugged[:] = keep
+    app._sdr_arrivals()
+    assert "uhf-b" in app._noaudio
+
+
+def test_the_airband_channelizers_stalls_never_count(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    class Multi(NfmReceiver):
+        def _pump(self, proc):                                              # as radio/am.py's channelizer says it
+            self.detail = "rtl_sdr stalled"
+            return False
+    monkeypatch.setattr(fm, "STALL_S", 0.3)
+    r = Multi(_exe(tmp_path, "exec sleep 30\n"), "", None, Channel(470.2, "x"), lambda c, s: None, lambda m: None)
+    r.on_stall = lambda: calls.append("stall")
+    r.start()
+    try:
+        assert _until(lambda: r.restarts >= 1) and calls == []
+    finally:
+        r.stop()
+
+
+def test_the_probe_skips_a_lent_or_held_dongle_and_a_refused_claim_is_no_try(st, monkeypatch):
+    plugged, logs, make, resets = st
+    app = spared(make)
+    out(app, "South 2")
+    app._sdr_arrivals()
+    tried: list[str] = []
+    monkeypatch.setattr(app, "_probe", lambda sd: tried.append(sd) or None)
+    monkeypatch.setattr(app.reception, "holds", lambda sd: sd == "uhf-b")
+    app._noaudio["uhf-b"]["next"] = 0.0
+    app._sdr_arrivals()
+    assert tried == [] and app._noaudio["uhf-b"]["next"] > 0                # a reception test has it: not tried
+    monkeypatch.setattr(app.reception, "holds", lambda sd: False)
+    app._noaudio["uhf-b"]["next"] = 0.0
+    app._sdr_arrivals()
+    assert _until(lambda: tried == ["uhf-b"] and "uhf-b" not in app._probing)
+    assert app._noaudio["uhf-b"]["tries"] == 0                              # couldn't try (None): no try counted
+
+
+@pytest.mark.parametrize("body, ok", [("exec cat /dev/zero\n", True), ("head -c 4096 /dev/zero\nexec sleep 30\n", False)])
+def test_the_probe_wants_audio_the_whole_time_and_lets_go_only_its_own_claim(st, monkeypatch, tmp_path, body, ok):
+    plugged, logs, make, resets = st
+    monkeypatch.setattr(appmod, "NOAUDIO_PROBE_LEN_S", 1.5)
+    app = spared(make)
+    out(app, "South 2")
+    app._sdr_arrivals()
+    exe = _exe(tmp_path, body)
+    monkeypatch.setattr(app, "_probe_argv", lambda idx, mhz: [exe])
+    assert app._probe("uhf-b") is ok
+    assert claims.holder("uhf-b") is None                                    # its own claim, let go
+    claims.claim("uhf-b", "reception test")                                 # a claim of ours already there: kept
+    app._probe("uhf-b")
+    assert (claims.holder("uhf-b") or {}).get("mode") == "reception test"
+    claims.release("uhf-b")
+    (claims.DIR / "uhf-b.json").write_text(json.dumps({"app": "shortfinal", "pid": 1, "mode": "scan", "since": 0}))
+    assert app._probe("uhf-b") is None                                       # another app's: not tried at all
+    (claims.DIR / "uhf-b.json").unlink()
+
+
+def test_the_usb_reset_runs_outside_the_lock(st, monkeypatch):
+    plugged, logs, make, resets = st
+    app = grouped(make)
+    seen: list[bool] = []
+    monkeypatch.setattr(appmod.usbreset, "reset", lambda sd: seen.append(app._noaudio_lock.locked()) or "")
+    stall(app, "South 2")
+    assert seen == [False]
