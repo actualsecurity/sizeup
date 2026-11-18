@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import fence as fence_mod
+from sizeup.cloud.metricsbackup import (attached, common_columns as _common_columns, copy_file,   # (shared, #639)
+                                        merge_copies)
 
 RAW_DAYS = 30
 HOURLY_DAYS = 365
@@ -68,7 +70,7 @@ RENAME_CHUNK = 20000            # a station renamed: its rows moved this many a 
 UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
 COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
-KINDS = ("floor", "tx", "cc")
+KINDS = ("floor", "tx", "cc", "stt")
 MAX_RECORDS = 5000              # a post
 MAX_DOC = 2048                  # one record's numbers, as JSON
 MAX_FUTURE_S = 86400.0          # a station clock this far ahead: refused
@@ -111,6 +113,14 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "noise_q":      ("tx", lambda d: d.get("kind") == "noise", lambda d: d.get("q")),
     "cc_rate":      ("cc", lambda d: True, lambda d: d.get("rate")),
     "cc_lo":        ("cc", lambda d: True, lambda d: d.get("lo")),
+    # the station's whisper queue, each minute (#639, sizeup/cloud/metrics.py "stt")
+    "stt_queued":   ("stt", lambda d: True, lambda d: d.get("queued")),
+    "stt_oldest_s": ("stt", lambda d: True, lambda d: d.get("oldest")),
+    "stt_shed":     ("stt", lambda d: True, lambda d: d.get("shed")),
+    "stt_done":     ("stt", lambda d: True, lambda d: d.get("done")),
+    "stt_wait_p50": ("stt", lambda d: True, lambda d: d.get("wait50")),
+    "stt_wait_p95": ("stt", lambda d: True, lambda d: d.get("wait95")),
+    "stt_run_p50":  ("stt", lambda d: True, lambda d: d.get("run50")),
     "cc_uncovered": ("cc", lambda d: True, lambda d: sum((d.get("unc") or {}).values()) if d.get("n") or d.get("unc")
                      else None),
 }
@@ -159,20 +169,6 @@ def _clean_doc(rec: dict) -> dict:
             out[k] = {_text(f, 14): int(c) for f, c in list(v.items())[:21]
                       if isinstance(c, int) and not isinstance(c, bool) and 0 <= c < 2 ** 31}
     return out
-
-
-def _common_columns(db: sqlite3.Connection, table: str) -> list[str] | None:
-    """The columns of `table` both this store (main) and an attached copy (snap) have, in this store's order; None when
-    the copy hasn't the table, or lacks a key column or one here that must have a value (NOT NULL, no default)."""
-    def info(schema: str) -> list[tuple]:
-        return db.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
-    mine, theirs = info("main"), {r[1] for r in info("snap")}
-    if not theirs:
-        return None
-    for _cid, name, _type, notnull, default, pk in mine:
-        if name not in theirs and (pk or (notnull and default is None)):
-            return None
-    return [r[1] for r in mine if r[1] in theirs]
 
 
 class MetricStore:
@@ -554,21 +550,9 @@ class MetricStore:
             self._copy_at = now                    # (none to have: the clock for "no copy since" starts here)
             self.log("metrics: no copies in the bucket: starting from what comes in")
             return "none"
-        pick = [copies[0]] + ([c] if (c := max(copies, key=lambda c: c["size"])) is not copies[0] else [])
-        merged, snap_at, last_err = 0, None, None
-        for c in pick + [c for c in copies if c not in pick]:
-            if merged and c not in pick:
-                break                              # the newest (and largest) are in: enough
-            try:
-                n, at = self.merge(self.backup.get(c["slot"]))
-            except Exception as e:  # noqa: BLE001 - a torn copy (zlib.error, a bad file, ...): the next one is tried
-                last_err = e
-                self.log(f"metrics: copy {c['slot']} not read ({type(e).__name__}: {e})")
-                continue
-            merged += 1
+        snap_at = None
+        for _n, at in merge_copies(copies, self.backup.get, self.merge, self.log, "metrics"):   # (raises: none read)
             snap_at = at if snap_at is None else max(snap_at, at or 0.0)
-        if not merged:
-            raise RuntimeError(f"no copy could be read ({type(last_err).__name__ if last_err else 'none'})")
         self._fails = 0
         self._rolled_once, self._reroll_all = False, True    # its hours (all raw has) rolled at the janitor's next turn
         with self._lock:
@@ -581,19 +565,11 @@ class MetricStore:
         """A copy (an SQLite file's bytes) merged in: INSERT OR IGNORE (what is here stays), the series by min / max.
         Column by column (the columns both have): a copy from a release with a column more or less still merges, as
         long as it has every key column and every column here that must have a value. (rows added, its snapshot_at)."""
-        if data[:16] != b"SQLite format 3\x00":
-            raise ValueError("not an SQLite file")
-        with self._lock:
-            self._open()                           # (its folder made: the copy is written beside it)
-        fd, tmp = tempfile.mkstemp(prefix=".metrics-copy.", suffix=".sqlite",
-                                   dir=None if self.path == ":memory:" else str(Path(self.path).parent))
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            n = 0
-            with self._lock:
-                db = self._open()
-                db.execute("ATTACH DATABASE ? AS snap", (tmp,))
+        n = 0
+        with copy_file(data, None if self.path == ":memory:" else str(Path(self.path).parent), ".metrics-copy.") as tmp, \
+                self._lock:                        # (the file written first: ingest never waits on the disk)
+            db = self._open()
+            with attached(db, tmp):
                 try:
                     try:
                         v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()
@@ -619,10 +595,6 @@ class MetricStore:
                     if db.in_transaction:
                         db.execute("ROLLBACK")
                     raise
-                finally:
-                    db.execute("DETACH DATABASE snap")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
         self.log(f"metrics: {n} row(s) merged in from a copy")
         try:
             return n, float(v[0]) if v else None

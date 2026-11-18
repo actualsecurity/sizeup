@@ -1,0 +1,16 @@
+id: "7"
+name: E60
+kind: engine
+title: ""
+station: Station 1
+department: ""
+board: main
+response: fire
+status: OS
+status_at: 1767225640.0
+out_of_service: ""
+spare: false
+mutual_aid: false
+incident_ids: ["1042"]
+incident_number: "26-000123"
+rev: 1f2e3d4c5b6a7988

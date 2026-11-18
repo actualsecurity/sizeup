@@ -1359,9 +1359,16 @@ window.RadioControls = (() => {
     setText(n.systems, sys.map((x) => `${x.label}: ${x.state !== "ok" && x.hold_until ? `held to ${fmtTime(x.hold_until)}` : x.state}`
       + (x.cc && x.cc.rate != null ? ` · control ${x.cc.rate}/s` : "")
       + (x.unknown && x.unknown.length ? ` · ${x.unknown.length} unknown TG${x.unknown.length === 1 ? "" : "s"}` : "")
-      + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")).join(" · "));
+      + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")
+      + (x.watched || []).filter((w) => w.encrypted).map((w) => ` · TG ${w.tg} encrypted ×${w.encrypted}`).join("")).join(" · "));
+    // a watched talkgroup's grants by what became of them (systems.Activity): no traffic told from traffic not recorded
+    const watched = (x) => (x.watched && x.watched.length ? `\nWatched since ${fmtTime(x.watched[0].since)}: ` + x.watched.map((w) => {
+      const rest = w.grants - w.recording - w.encrypted;
+      return `${w.tg} ${w.name}: ${w.grants} grants, ${w.recording} recorded, ${w.encrypted} encrypted${rest > 0 ? `, ${rest} not recorded` : ""}`;
+    }).join("; ") : "");
     n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
-      + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")).join("\n\n");
+      + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")
+      + watched(x)).join("\n\n");
     show(n.systems, sys.length > 0);
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
     const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);

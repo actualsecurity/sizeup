@@ -64,6 +64,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
@@ -98,8 +99,8 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT,
-                        Transcriber, WhisperClient, radio_voice, wav_bytes)
+from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
+                        RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -167,6 +168,8 @@ STT_FIRST = ("tg:307", "FG1", "FG2")
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
+STOP_URGENT_S = 8.0        # stopping: pages and Fire/EMS clips still waiting get this long with whisper (App._stt_handoff)
+STOP_MARK_S = 10.0         # ... and the clips still waiting then are marked within this long (TimeoutStopSec is 45 s)
 CATCHUP_QUEUED_S = 1800.0  # a page queued (nobody took it yet) this recently is an open event: the catch-up waits
 CATCHUP_PAUSE_MAX_S = 12 * 3600.0   # an open event or alarm created or updated longer ago than this no longer pauses it
 CATCHUP_AWS_PCT = 80.0     # the catch-up stops using the police AWS budget at this much of its month
@@ -740,7 +743,7 @@ class App:
         self.roads.gis = self.gis
         self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
-        self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
+        self.roads.wall_settings = lambda: self.cad.settings.section("camera_wall")
         self.cad.camera_area = self.roads.settings_rows
         self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
@@ -878,6 +881,13 @@ class App:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
+        # speech-to-text's priority hook (sizeup.intel.push_sources()): the sources intel could push from, over every
+        # source known here: the talkgroups as the CAD lists them (the hub: its station's), then this process's own
+        # talkgroups files, and the configured channels
+        from sizeup.intel import engine as intel_engine
+        intel.sources = lambda: intel_engine.source_rows([*self.cad.source_rows(), *self.tg.state()], self.cfg.channels,
+                                                         self.tg.county)
+        intel_engine.set_live(intel)
         if cfg.alerts_config_note:
             log(f"notify: config: {cfg.alerts_config_note}")
         log(self.pushes.line())
@@ -938,7 +948,7 @@ class App:
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
         # for the slow ones, the schedule the registry keeps (the admins' choices in the CAD settings).
         from sizeup import datasources
-        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.overrides().get(datasources.SECTION) or {})
+        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.section(datasources.SECTION))
         self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()
@@ -2419,7 +2429,12 @@ class App:
                                   caught=lambda since: comms.caught_up(since, since - oldest),
                                   route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
                                   aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
-                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log,
+                                  to_pool=self._catchup_pool)
+
+    def _catchup_pool(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to the GPU worker pool (the hub's, sizeup/sttpool.py): none here."""
+        return False, ""
 
     def _catchup_may_run(self) -> bool:
         """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call). Under a lease
@@ -5175,6 +5190,7 @@ class App:
         self.tg.save_unknown()
         for sd in list(self.assign):
             claims.release(sd)
+        self._stt_handoff()                    # (before the outbox closes: what whisper didn't get to goes up marked)
         self.whisper.stop()
         if self.aws is not None:
             self.aws.stop()
@@ -5192,6 +5208,60 @@ class App:
         self.cad.radiolog.stop()
         self.cad.addrs.stop()
         self.stop_layers()
+
+    def _stt_handoff(self, wait_s: float = STOP_URGENT_S, mark_s: float = STOP_MARK_S) -> dict:
+        """Stopping (an update's restart, a reboot): the whisper queue (sizeup/stt.py) lives in memory only, so a clip
+        still in it would be lost without a trace: no row here, nothing on the hub (a transmission's event goes up only
+        once it is transcribed), its recording orphaned on disk. The radios are stopped by now, so nothing new comes:
+        every clip waiting is taken out; pages and Fire/EMS clips (URGENT) first get wait_s with whisper (when it is
+        up), with the one in flight; then each transmission still waiting is marked "skipped: busy" (stt.SHED) like a
+        shed clip: its row and recording go up through the outbox, which outlives the restart, and the CAD of record's
+        catch-up (sizeup/sttcatchup.py) transcribes it later (or Re-transcribe can). A page is marked the same way
+        ("skipped", re-runnable: the catch-up takes traffic only, so Re-transcribe or the hub's own engine; the STT
+        session's persisted queue replaces all of this), a person's re-run failed, a catch-up clip forgotten. Marking stops after mark_s
+        (the rest counted as lost), and the one in flight is lost unless whisper finishes it before the exit: both said
+        in the log.
+        -> the counts."""
+        q = getattr(self.stt, "_q", None)      # (stt.Transcriber has no public withdraw for every class yet)
+        if q is None or not hasattr(q, "withdraw"):
+            return {}
+        t0 = time.monotonic()
+        items = [it for p in CLASS_NAMES if p != URGENT for it in q.withdraw(p)]
+        if getattr(self.whisper, "state", "") == "ok":
+            while self.stt.busy() and time.monotonic() - t0 < wait_s:
+                time.sleep(0.1)
+        items += q.withdraw(URGENT)
+        n = {"waiting": len(items), "skipped": 0, "pages": 0, "reruns": 0, "catchup": 0, "unmarked": 0,
+             "in_flight": int(self.stt.busy())}
+        if not items and not n["in_flight"]:
+            return n
+        why = (f"{SHED}: the station stopped (an update or a restart) with {len(items)} clip(s) waiting "
+               "(Re-transcribe it if it matters)")
+        end = time.monotonic() + mark_s
+        for i, item in enumerate(items):
+            if time.monotonic() > end:
+                n["unmarked"] = len(items) - i
+                break
+            try:
+                if isinstance(item, Rerun) and item.catchup:
+                    self._catchup_forget(item.id)
+                    n["catchup"] += 1
+                elif isinstance(item, Rerun):
+                    self._stt_dropped(item, "the station stopped before it ran")
+                    n["reruns"] += 1
+                elif isinstance(item, Traffic):
+                    self._stt_dropped(item, why)
+                    n["skipped"] += 1
+                else:                          # a page: "skipped", re-runnable, never "failed" (see the docstring)
+                    self._stt_dropped(item, why)
+                    n["pages"] += 1
+            except Exception as e:  # noqa: BLE001 - one clip's trouble never keeps the others from going up
+                log(f"speech-to-text: {getattr(item, 'id', '?')} not handed over: {type(e).__name__}: {e}")
+        log(f"speech-to-text: stopping with {n['waiting']} clip(s) waiting: {n['skipped']} marked skipped (caught up "
+            f"later), {n['pages']} page(s) marked skipped, {n['reruns']} re-run(s) failed, {n['catchup']} catch-up "
+            f"clip(s) given back" + (f", {n['unmarked']} not marked in time (lost)" if n["unmarked"] else "")
+            + (f"; {n['in_flight']} in flight (lost unless whisper finishes it before the exit)" if n["in_flight"] else ""))
+        return n
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
         """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its
@@ -5278,7 +5348,9 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
-                       adapter_password=adapter_password(cfg))
+                       adapter_password=adapter_password(cfg),
+                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                                       max_streams=cfg.mobile_max_streams))
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 

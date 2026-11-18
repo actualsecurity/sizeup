@@ -224,7 +224,7 @@ const StationHealth = (() => {
     ]));
     kids.push(el("h3", "hl-sub", "Version"), dl([
       ["Station build", short(b.station)], ["Hub build", short(b.hub)],
-      ["State", b.text, stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
+      ["State", b.text, b.state === "deferred" ? "hl-warn" : stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
       ["Behind since", b.behind_since ? when(b.behind_since) : ""],
       ["Last update", last ? `${when(last.at)} ${short(last.from)} → ${short(last.to)}: ${last.result || "?"}${last.why ? ` (${last.why})` : ""}` : ""],
       ["Timings", last && last.seconds !== undefined && last.seconds !== null ? [`${last.seconds} s total`,
@@ -310,6 +310,41 @@ const StationHealth = (() => {
       ]));
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
+    }
+    const sp = h.stt_pool;
+    if (sp && !sp.error) {  // the GPU worker pool (#639, sizeup/sttpool.py): workers, queue, fallbacks, latency by channel
+      const fb = sp.fallbacks || {}, fbn = Object.values(fb).reduce((a, b) => a + (b || 0), 0);
+      const sec = (v) => (v === null || v === undefined ? "—" : `${v} s`);
+      const hd = el("h3", "hl-sub", "GPU workers (hub)");
+      hd.title = "Clips go to a ready worker first, else AWS, else the station's whisper. A worker offline is never an alert";
+      kids.push(hd, dl([
+        ["Pool", !sp.active ? "No worker" : sp.settings && !sp.settings.on ? "Off" : `On · ${sp.ready || 0} ready`,
+          sp.active && sp.settings && sp.settings.on && !sp.ready ? "hl-warn" : ""],
+        ["Queue", `${sp.queued || 0} waiting · ${sp.leased || 0} out`
+          + Object.entries(sp.queued_by_class || {}).map(([k, n]) => ` · ${n} ${k}`).join("")],
+        ["Done (queued → text)", `${sp.done_h || 0}/h · p50 ${sec(sp.p50_s)} · p90 ${sec(sp.p90_s)}`],
+        ["Transcript copies", !sp.copies ? "" : sp.copies.settled
+          ? (sp.copies.copy_at ? `${when(sp.copies.copy_at)} · ${longDur(serverNow() - sp.copies.copy_at)} ago` : "none yet")
+          : `unsettled since ${when(sp.copies.unsettled_since)}`, sp.copies && sp.copies.warn ? "hl-warn" : ""],
+        ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
+          + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
+      ]));
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "GPU", "Jobs/h", "Lost", "Last seen"],
+        sp.workers.map((w) => {
+          const g = w.gpu || {};
+          return [w.id, [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim"],
+            w.model, g.util_pct !== undefined ? `${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "",
+            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
+        }), ""));
+      const lat = sp.latency || [];
+      if (lat.length) {
+        const lh = el("h3", "hl-sub", "Speech-to-text latency");
+        lh.title = `Transmission end → text on the hub, last 2 h. Pre-alert channels' target: p50 ≤ ${sp.target.p50_s} s, p95 ≤ ${sp.target.p95_s} s`;
+        kids.push(lh, table(["Channel", "Clips", "p50", "p95", "Engines"], lat.map((r) => [
+          [r.channel, r.target ? "" : "dim", r.target ? "Pre-alert channel" : ""], r.n,
+          [sec(r.p50_s), r.over ? "hl-bad" : ""], [sec(r.p95_s), r.over ? "hl-bad" : ""],
+          Object.entries(r.engines || {}).map(([k, n]) => `${k} ${n}`).join(" · ")]), ""));
+      }
     }
     const er = d.errors;
     if (er) {             // the hub's own error lines (#285, sizeup/errwatch.py): the rate and the top errors

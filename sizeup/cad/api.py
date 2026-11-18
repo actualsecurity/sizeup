@@ -282,6 +282,13 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           409 {error: the question, confirm: true} until sent with confirm. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
+GET  /api/cad/stt-workers                 Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): each GPU worker
+                                          (id, name, created, rotated, revoked, last used, its live state) and the pool's
+                                          switches; never a hash. The hub's only; a signed-in admin only
+POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
+                                          pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
+                                          (no-store), the one time it is shown. In the Settings audit (System) and the
+                                          person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
                                           the station's signal metrics (sizeup/cloud/metricstore.py): a channel's ("FG1")
                                           or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
@@ -430,6 +437,7 @@ ADMIN_READS = {
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/stations": "stations and their tokens are for admins (Settings > Station > Stations)",
+    "/api/cad/stt-workers": "speech-to-text workers and their tokens are for admins (Settings > Station > STT workers)",
     "/api/cad/metrics": "the station's signal metrics are for admins (Settings > Radios)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
@@ -467,6 +475,7 @@ WRITES = (
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (re.compile(r"/api/cad/stations"), "admin"),                            # stations' tokens (sizeup/cloud/stations.py)
+    (re.compile(r"/api/cad/stt-workers"), "admin"),                         # GPU workers' tokens (sizeup/cloud/sttworkers.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -732,6 +741,9 @@ DOES = (
     # the action and the id, never the answer (it holds the new token)
     (re.compile(r"/api/cad/stations"), lambda m, b, o, c: (
         f"Stations: {_clip(str(b.get('action') or '').replace('_', ' '), 20)}"
+        + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
+    (re.compile(r"/api/cad/stt-workers"), lambda m, b, o, c: (
+        f"STT workers: {_clip(str(b.get('action') or ''), 20)}"
         + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
@@ -1128,6 +1140,16 @@ class CadApi:
             return _json(403, {"error": why})
         return _json(200, reg.panel())
 
+    def _stt_workers(self, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/stt-workers: Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639). The hub's only,
+        and only for an admin with a verified sign-in. Never a hash."""
+        reg = getattr(self.cad, "stt_workers", None)
+        if reg is None:
+            return _json(404, {"error": "speech-to-text workers are the hub's"})
+        if (why := self._signed_admin(who)) is not None:
+            return _json(403, {"error": why})
+        return _json(200, reg.panel(getattr(self.cad, "stt_workers_live", None)))
+
     def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
         """GET /api/cad/metrics: the station's signal metrics (sizeup/cloud/metricstore.py). The hub's only, and only for
         an admin with a verified sign-in, like Settings > Station > Stations: closed without one."""
@@ -1163,6 +1185,8 @@ class CadApi:
                 return self._logs(path, query, who)
             if path == "/api/cad/stations":
                 return self._stations(who)
+            if path == "/api/cad/stt-workers":
+                return self._stt_workers(who)
             if path == "/api/cad/metrics":
                 return self._metrics(query, who)
             if path == "/api/cad/datasources":
@@ -1289,7 +1313,7 @@ class CadApi:
         c = self.cad
         signed = who is not None and bool(who.email)
         body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
-        if path == "/api/cad/stations" and not signed:
+        if path in ("/api/cad/stations", "/api/cad/stt-workers") and not signed:
             return _json(403, {"error": "Admins only: sign in"})     # a station's keys: never without a verified admin
         try:
             if signed:                             # signed in: that's the operator, not what the page typed
@@ -1332,6 +1356,15 @@ class CadApi:
             except ConfirmNeeded as e:
                 raise NeedsConfirm(str(e)) from None
             except StationError as e:
+                raise CadError(str(e)) from None
+        if path == "/api/cad/stt-workers" and getattr(c, "stt_workers", None) is not None:
+            from sizeup.cloud.sttworkers import WorkerError
+            op = str(body.get("operator") or "")
+            pool = getattr(c, "stt_pool_forget", None)
+            try:     # in the Settings audit (System): what was done to which worker, never a token
+                return c.stt_workers.act(body, op, lambda k, old, new: c.settings.note(op, "system", k, old, new),
+                                         on_revoke=pool)
+            except WorkerError as e:
                 raise CadError(str(e)) from None
         if path == "/api/cad/incident":
             return c.create(body)

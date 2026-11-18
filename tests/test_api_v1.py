@@ -16,10 +16,13 @@ from openapi_spec_validator import validate
 from sizeup.api.v1 import API_VERSION
 from sizeup.api.v1.handler import V1
 from sizeup.api.v1.routes import ROUTES
+from sizeup.api.v1.switches import Switches
 from sizeup.cloud.access import Identity
 from sizeup.web.server import WebServer
 from tests import openapi_spec as oas
 
+# [mobile] enabled: the master switch on (the safeguards' tests are in test_api_v1_safeguards.py)
+ON = Switches(lambda: True)
 DOC = oas.spec()
 PKG = Path(__file__).resolve().parent.parent / "sizeup" / "api"
 
@@ -40,7 +43,7 @@ def serve(**kw):
 
 @pytest.fixture
 def hub():
-    srv, url = serve(access=Access(), role="hub")
+    srv, url = serve(access=Access(), role="hub", mobile=ON)
     yield url
     srv.shutdown()
 
@@ -94,10 +97,20 @@ def test_meta_answers_and_validates_against_the_spec(hub):
     assert "no-store" in headers["Cache-Control"]
 
 
+def test_head_is_a_get_without_its_body(hub):
+    g_status, g_headers, g_body = call(hub, "/api/v1/meta")
+    h_status, h_headers, h_body = call(hub, "/api/v1/meta", "HEAD")
+    assert (g_status, h_status) == (200, 200) and g_body and h_body == b""
+    volatile = {"Date", "Server-Timing", "Content-Length"}               # the clock moves; the body is not sent
+    assert {k: v for k, v in h_headers.items() if k not in volatile} == \
+        {k: v for k, v in g_headers.items() if k not in volatile}
+    assert h_headers["Content-Type"].startswith("application/json") and "no-store" in h_headers["Cache-Control"]
+
+
 def test_every_error_is_the_one_envelope(hub):
     for method, path, who, want in [("GET", "/api/v1/nope", "person@example.org", 404),
                                     ("POST", "/api/v1/meta", "person@example.org", 405),
-                                    ("GET", "/api/v1/meta", None, 401),
+                                    ("GET", "/api/v1/", None, 404),
                                     ("GET", "/api/v1/" + "x" * 600, "person@example.org", 414)]:
         status, headers, body = call(hub, path, method, who, data=b"{}" if method == "POST" else None)
         assert status == want, (method, path)
@@ -115,11 +128,14 @@ def test_retry_after_is_in_the_header_and_the_envelope():
     assert headers["Retry-After"] == "5" and json.loads(body)["error"]["retry_after_s"] == 5
 
 
-def test_no_token_and_no_access_cookie_reach_nothing_under_access(hub):
-    """Until #558 the app's API is only the hub's Access in front of it: a request with no signed-in person is a 401,
-    never a handler."""
-    assert call(hub, "/api/v1/meta", who=None)[0] == 401
-    assert call(hub, "/api/v1/", who=None)[0] == 401
+def test_access_is_not_v1s_door(hub):
+    """/api/v1 is its own door (a device's token, #619): no Access person is asked for, so a request with none gets
+    meta (public) and the envelope's 404 elsewhere, never the console's 401 page; a handler is reached by a token
+    only."""
+    status, _, body = call(hub, "/api/v1/meta", who=None)
+    assert status == 200
+    conforms(status, body, "GET", "/api/v1/meta")
+    assert call(hub, "/api/v1/", who=None)[0] == 404
 
 
 def test_the_station_has_no_app_api():
@@ -150,7 +166,8 @@ def test_path_templates_match_one_segment():
         return 200, {}
 
     from sizeup.api.v1.routes import Route
-    v1 = V1([Route("GET", "/api/v1/incidents/{id}", h, "device")])
+    v1 = V1([Route("GET", "/api/v1/incidents/{id}", h, "public", "reads")],
+            switches=Switches(lambda: True, lambda: {"reads": True}))
     assert v1.respond("GET", "/api/v1/incidents/E99-1", "", {})[0] == 200 and seen == [{"id": "E99-1"}]
     assert v1.respond("GET", "/api/v1/incidents/a/b", "", {})[0] == 404
     assert v1.respond("DELETE", "/api/v1/incidents/E99-1", "", {})[0] == 405
@@ -160,7 +177,10 @@ def test_path_templates_match_one_segment():
 def test_the_package_never_touches_a_database():
     """No startup database writes: nothing in sizeup/api reads or writes a store."""
     for f in PKG.rglob("*.py"):
+        # (the one import of the CAD's own exception class, CadError, is allowed: reads.py answers a missing row)
         src = f.read_text()
+        if f.name == "reads.py":      # only reads.py, and only that whole line
+            src = re.sub(r"^from sizeup\.cad\.store import CadError\s*(#.*)?$", "", src, flags=re.M)
         assert not re.search(r"^\s*(import|from)\s+\S*(sqlite3|store|sizeup\.cad)", src, re.M), f
 
 
@@ -191,7 +211,7 @@ def test_every_route_declares_who_may_call_it_and_public_ones_are_few():
 
 @pytest.fixture
 def hub_srv():
-    srv, url = serve(access=Access(), role="hub")
+    srv, url = serve(access=Access(), role="hub", mobile=ON)
     yield srv, url
     srv.shutdown()
 
@@ -214,6 +234,6 @@ def test_other_methods_answer_in_the_envelope_only_under_v1(hub_srv):
     assert status == 405 and headers["Allow"] == "GET"
     conforms(status, body, "GET", "/api/v1/meta")
     assert call(url, "/api/v1/nope", "DELETE")[0] == 404
-    assert call(url, "/api/v1/meta", "PATCH", who=None, data=b"{}")[0] == 401
+    assert call(url, "/api/v1/meta", "PATCH", who=None, data=b"{}")[0] == 405
     status, _, body = call(url, "/api/cad/state", "PUT", data=b"{}")
     assert status == 501 and b"Unsupported method" in body       # http.server's answer, as before

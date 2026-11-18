@@ -46,7 +46,7 @@ For the app developer.
 - **Public repo:** this repo is public ([CLAUDE.md](../CLAUDE.md), "Public repo rules"). Specs, fixtures, issues and
   PRs here use synthetic data only: `example.org` hosts, made-up units and addresses. No hostnames, account IDs, keys
   or real incident data.
-- **Never point a prototype at production.** Use a local hub, then staging once it exists (PR 3).
+- **Never point a prototype at production.** Use a local hub (staging is deferred, D8; the production hub is shared only behind [the safeguards](#sharing-the-production-hub)).
 
 ---
 
@@ -547,10 +547,34 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Audit | `activity.py` gains `device_id`, `app_version` and `via` (web, ios, android). Every v1 write goes through `CadApi.did` as today |
 | Observability | `perf.py` path families gain a client dimension `(via, app_version)`. Health tile: active devices, versions in the wild, push success and failure (SNS delivery logs), stream count |
 | Backward compatibility | v1 additive only; `min_app` forces upgrades; the last two app releases keep working. App store review and rollout take 1-7 days and users update late |
-| Feature flags | Server-side in `meta.features` (from Settings), so a feature can be turned off without an app release. No third-party flag service |
-| Staging | **Needed before the first external build** (D8). A second small hub task (0.25-0.5 vCPU, about $11-21 a month) on its own hostname and Access app, synthetic data only, outbound guard on except SNS to a sandbox app. App review needs a working demo login: give Apple and Google a **review account on staging**, never production |
+| Feature flags | Server-side in `meta.features` (today code-driven behind `[mobile] enabled`; a source such as Settings or `[mobile] features` comes with the first feature), so a feature can be turned off without an app release. No third-party flag service |
+| Staging | **Deferred** (D8, 2026-11-16): mobile is built on the production hub behind [the safeguards](#sharing-the-production-hub). Still needed before the first external build: a second small hub task (0.25-0.5 vCPU, about $11-21 a month) on its own hostname and Access app, synthetic data only, outbound guard on except SNS to a sandbox app. App review needs a working demo login: give Apple and Google a **review account on staging**, never production |
 | Distribution | TestFlight (internal: up to 100 team members without review; external: beta review) and Play internal testing (up to 100 testers). Then a public listing, or Apple Business Manager custom apps for a private listing (**unverified** fit for volunteers' own phones) (D10) |
 | Repos | The hub, the spec and the contract tests stay in this **public** repo. The app goes in a **private** repo (proposed, D10). The app binary holds no secrets: only the hub URL; everything else comes from enrollment |
+
+---
+
+## Sharing the production hub
+
+Plan change 2026-11-16 (#619): no staging for now (D8 deferred), so the mobile code is merged and deployed to the hub
+the dispatchers use. Every change stays inert or harmless to the browser console until it is switched on. What exists:
+
+| Safeguard | Where |
+|---|---|
+| Master switch, off by default | `[mobile] enabled = false` ([cloud.md](cloud.md#the-apps-api-switches-mobile-619)). Off: every `/api/v1/*` path but `GET /api/v1/meta` is a 404 in v1's envelope; no database, token key or push is touched. Read once at start from the config: a change needs a restart (a Settings-backed switch, like intel's policy, is the planned follow-up) |
+| Per-feature flags | `meta.features`: auth, reads, stream, writes, push, media, responders, each off until proven, and code-driven until a feature's pull request wires a source (for example `[mobile] features = [...]` or a settings policy). A route names its flag (`routes.py`); flag off = as if absent. A test enforces that every route declares its flag and who may call it |
+| A v1 failure stays in v1 | `handler.respond` runs every route inside one try/except: the exception class is logged (never a token, header or body) and the answer is a 500 in v1's envelope |
+| Caps | v1's share of concurrent requests (503 busy), per-principal token buckets (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`; no principal: per address), 2 streams per device and a cap on all (enforced when streaming lands; none yet); in memory, no thread, no database work |
+| Console unchanged | `tests/test_console_pin.py` pins the `/api/cad`, `/api/station` and `/healthz` route tables and sample responses |
+| Fail closed | `principal.py` is the resolver seam (section 1.4): a route that needs a `device` is a 401 until #558; v1 never hands a handler a `CadApi`; a bearer is refused on `/api/cad/*`; Access is not v1's door (a cookie never makes a principal) |
+
+Rollback: an older release refuses a config file that has `[mobile]`, so a rollback reverts the code and the config together. Turn it off: `[mobile] enabled = false` and a restart (`meta.features` then reads all false: no app release). Undo: revert
+the pull request; a table a feature created lazily may stay, nothing reads it once the flag is off. The Cloudflare Bypass
+for `/api/v1/` is added by a person only after these tests are merged, and checked with `curl` (no cookie on
+`/api/cad/state` still gets Access's login; none on `/api/v1/meta` reaches the hub).
+
+For the sign-in PR (#558): when the first device route lands, add a test that a principal below the route's `role` is
+refused, and run the route-table assertions (flag, role, need) over every route it adds.
 
 ---
 
@@ -609,6 +633,61 @@ native client (private repo). **Both** = needs work or inputs from each side.
 | — | In parallel: #446 item 1 (no-op rev bumps) before a mobile beta; then measure, then DVR out (E) or 1 vCPU (F) (D9) | Platform | headroom | #446 |
 
 The app consumes each platform PR as it lands: regenerate the client from the merged spec, then build the screen.
+
+### 10.1 Read resources as built (#560)
+
+`GET /api/v1/{snapshot, incidents, incidents/{id}, units, alarms}` (`sizeup/api/v1/reads.py`, `serialize.py`,
+`paging.py`, `rev.py`; the spec is `api/openapi/v1/`). Each needs a device, the `reads` flag and the `read` role; none
+writes. `/me` is PR 2's.
+
+- **rev and ETag, no schema change.** `rev = sha256(json(obj without rev, sorted keys, compact, ensure_ascii=False))[:16]`
+  (`rev_of`), per object; the ETag is that rev (a list's: a hash of its item revs and `next`; the snapshot's: of the
+  three lists' revs). `If-None-Match` (weak, quoted, a list or `*`) answers 304 with no body. A role's detail has its own
+  rev, because what a role may not see is not in what is hashed.
+- **Cursor.** `?after=<next>&limit=`, response `{items, next}`. The cursor is opaque (a version, the list's name and the
+  last row's sort key: `(created_at, id)` newest first for incidents, `(sort, id)` for units), a keyset and not an
+  offset, so rows added or changed between pages move nothing already sent. A cursor of another list, or a malformed
+  one, is 400 `bad_cursor`; a bad `limit` is 400 `bad_request`. Caps: incidents 50 by default and at most 200, units 100
+  and 500; the snapshot has at most 200 open incidents; alarms are at most 40 and have no paging.
+- **Who sees what.** The console's rules, for `Settings.standing(email)["may"]`: premise notes and pre-plan points by
+  category and kind (`for_incident(inc, may)`), another P25 system's radio rows only through `sourcekeys.may_see_context`
+  (a device is a signed-in person). **Never sent:** the caller's name, address and phone as fields, nor in the
+  chronology (the "Caller info: ..." line is dropped; an "Edited ..." line that names a caller field is dropped whole,
+  and the match is deliberately broad: any edit line containing "caller" or "phone" becomes "Edited caller details",
+  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (any `<...>` part is dropped, anywhere in a free text, so a "<5 min>" in a note loses
+  it: deliberate, fail-safe; any other whitespace-delimited token holding an "@", in any email form, becomes "an
+  operator"; a standalone " @ " in a named place's address stays); a talker's radio ID: the mask ("radio 41228", "rid
+  41228", "ID 41228" ...) applies to the alarm fields, the `alarm`-kind chronology lines and the identity fields (an
+  alarm's `who`, a radio row's `unit`, which also lose any standalone number of 4+ digits) ONLY: a "radio 41228" in
+  `status`/`tones` events, radio-row transcripts, notes, addresses and remarks is not masked (sent as written, below).
+  `scrub` reads at most 20000 characters of a text (`SCRUB_MAX_CHARS`; the rest is cut and the output ends with an
+  ellipsis), first normalises compatibility forms of "@" and "<" (NFKC; zero-width and direction marks dropped), and is
+  one linear pass per step (no backtracking regex), so a long note cannot stall a cache rebuild. Residual, not
+  addresses a client would link: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org"), and a
+  radio ID written with letters or split into digit groups the mask does not read.
+  **Chronology text is an allow-list:** only the kinds in
+  `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
+  kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,
+  `place` and address; the dispatches' text; operators' notes; `status` events (a unit's radio transcript, "E60 on
+  scene: <said>"); `tones` events (paging-feed lines up to 2000 characters from outside the CAD); an alarm's `text`,
+  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`; a pre-plan point's `note`. ANY of these
+  can contain a name, address or phone number that a human or a transcript put there, and the server does not filter
+  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Unit names, the pre-plan `label`, `geo_label` and `town` are not scrubbed. Site
+  documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
+  premise, pre-plan and radio are only in an incident's detail.
+- **Chronology moves the rev.** The incident summary carries `last_event_id` (the largest chronology event id, an
+  integer, null only for an incident with no events), so a note or any other event changes the incident's `rev` in
+  lists, the snapshot and the detail, though the summary shows no event text.
+- **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
+  the `rev` key itself excluded; `with_rev` adds it). The stream's `(kind, id, rev)` (PR 5) and the write answers and
+  `If-Match` (PR 6) must reuse `rev_of` and `with_rev` on these same shapes. `epoch` stays null until PR 5.
+- **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
+  read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
+  incident read is uncached.
+- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
+  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
+  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+  only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---
 

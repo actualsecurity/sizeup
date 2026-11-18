@@ -266,6 +266,13 @@ def _read(path: str) -> str:
         return ""
 
 
+def _hold_until(upd: dict) -> dict:
+    """A deferred switch's deadline (autoupdate.py "hold".until, the station's clock): {"hold_until": t} or {}."""
+    h = upd.get("hold") if isinstance(upd.get("hold"), dict) else {}
+    t = h.get("until")
+    return {"hold_until": float(t)} if isinstance(t, (int, float)) and not isinstance(t, bool) else {}
+
+
 def station_adapter(a) -> dict | None:
     """The station's incident-source adapter as it reported it (#301): state, short repo name, commit, text, and each
     source's health. Only these keys pass (the station sends no URL or credential; nothing else is shown either)."""
@@ -638,7 +645,8 @@ class StationHealth:
         desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
-                        "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                        "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                                       **_hold_until(upd)),
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
                         "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
@@ -759,6 +767,7 @@ class StationHealth:
                                                    "shed_context", "shed_context_h", "catchup",
                                                    "last_drop", "last_error", "max", "working")} if sq else None
         out["stt_catchup"] = self._catchup()
+        out["stt_pool"] = self._stt_pool()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -791,6 +800,9 @@ class StationHealth:
         out["metrics_backup"] = mb
         if mb and mb.get("warn"):
             out["hints"].append({"channel": "Metrics", "level": "warn", "text": mb["warn"]})
+        sc = (out.get("stt_pool") or {}).get("copies") if isinstance(out.get("stt_pool"), dict) else None
+        if sc and sc.get("warn"):                   # the transcripts-as-written copies (#639): a warning, never an alert
+            out["hints"].append({"channel": "Transcripts", "level": "warn", "text": sc["warn"]})
         try:                                        # #606: a channel's signal shifted after an event (a warning, no push)
             shifts = self.shifts() if self.shifts is not None and "metrics_shift" not in self._mutes(now) else []
         except Exception:  # noqa: BLE001 - never in the way of the rest
@@ -848,6 +860,17 @@ class StationHealth:
             return None
         try:
             return cu.stats()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _stt_pool(self) -> dict | None:
+        """The GPU worker pool (#639, HubApp.pool_health()): its workers, queue, fallbacks, and every channel's latency
+        (transmission end -> text). None when there is nothing to show. A worker offline is never an alert."""
+        fn = getattr(getattr(self.hub, "app", None), "pool_health", None)
+        if fn is None:
+            return None
+        try:
+            return fn()
         except Exception as e:  # never in the way of the rest
             return {"error": f"{type(e).__name__}: {e}"}
 
@@ -950,8 +973,17 @@ class StationHealth:
                                                   and b["last"].get("line") else ""),
                              "since": float((b["last"] or {}).get("at") or now) if isinstance(b["last"], dict) else now}
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
-            held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
-                                           "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
+            # a deferred switch past its "by HH:MM" (autoupdate.py describe() says "behind" then): the updater died or
+            # hangs, so at once, not behind_s later
+            # (only its own deferral, to the hub's build, past "by HH:MM" + 2 min: a burst moving the hub on while it
+            # waits, or a late station switching to the build it staged, is the usual behind_s)
+            u = b["update"] if isinstance(b["update"], dict) else {}
+            overdue = (u.get("state") == "deferred" and same_build(u.get("to"), b["hub"])
+                       and isinstance(u.get("hold_until"), (int, float)) and self._station_now(now) > u["hold_until"] + 120)
+            held("behind", 0 if overdue else self.behind_s,
+                 {"severity": "warning", "title": "Station behind the hub",
+                  "text": f"{b['text']} (the hub runs {short(b['hub'])})"
+                          + (": its switch is overdue (sizeup-update on the station)" if overdue else "")})
         for x in m.get("duplicates") or []:
             on = f" {x['name']}'s job {x['job']} won't start until fixed." if x["job"] != "Off" else ""
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",
