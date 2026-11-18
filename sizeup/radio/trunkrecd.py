@@ -69,7 +69,9 @@ the last one (watchdog). [p25] watchdog_* in /etc/sizeup/config.toml change the 
 
 Its output into the journal (#547, Shipper): the control channel's decode rate (when trunk-recorder first logs it, when
 it is lost or back, and a summary every RATE_LOG_S), and its error / warning / control channel lines, radio IDs masked,
-at most SHIP_BURST different lines per SHIP_WINDOW_S (then a count): the station's logs go to the hub."""
+at most SHIP_BURST different lines per SHIP_WINDOW_S (then a count): the station's logs go to the hub. A watched
+talkgroup's grants (its config.json's "sizeup" "reception" "watch" list) are said as what became of each, recorded,
+encrypted or not recorded, at most one line per talkgroup a minute (then a count)."""
 
 from __future__ import annotations
 
@@ -145,6 +147,22 @@ SHIP_LEVELS = re.compile(r"\((?:warning|error|fatal)\)", re.I)
 SHIP_SKIP = ("SIZEUP-UNIT", "Unit ID set via Control Channel")     # per transmission, and they name radios
 TR_STAMP = re.compile(r"^\[\d{4}-\d\d-\d\d [\d:.]+\]\s*")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# A watched talkgroup's call lines (the "watch" list of the "sizeup" "reception" block of a system's config.json): what
+# trunk-recorder did with each grant, one line per talkgroup per WATCHED_EVERY_S at most, the rest counted. Its 5.2.0
+# log_header, "[<sys>]\t<n>C\tTG: <tg>\tFreq: <f> MHz\t", then (monitor_systems.cc, source.cc, p25_recorder_impl.cc):
+CALL_LINE = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+\d+C\s+TG:\s*(?P<tg>\d+)\b.*?\sFreq:\s*(?P<mhz>[\d.]+)\s*MHz\s+(?P<msg>.*)$")
+CALL_KINDS = (     # (its words, the kind counted, what the journal says)
+    ("Starting P25 Recorder", "recording", "grant, recording"),
+    ("Not Recording: ENCRYPTED", "encrypted", "grant (encrypted, not recorded)"),     # "- src: <radio>": never said
+    ("Not recording talkgroup - Priority is -1", "off", "not recorded, priority -1 (off)"),
+    ("Not recording talkgroup. Priority is", "no_recorder", "not recorded, no recorder"),
+    ("No Digital Recorders Available", "no_recorder", "not recorded, no recorder"),
+    ("Not Recording: no source covering Freq", "no_source", "not recorded, no source covers"),
+)
+CALL_SHORT = {"recording": "recording", "encrypted": "encrypted", "off": "off", "no_recorder": "no recorder",
+              "no_source": "no source"}
+NO_RECORDER = re.compile(r"Priority is (?P<p>\d+) but only (?P<n>\d+) recorders")
+WATCHED_EVERY_S = 60.0
 
 
 # -- what to run ----------------------------------------------------------------------------------------------------------
@@ -327,6 +345,52 @@ def no_ids(detail) -> str:
             return m.group(0)                       # a frequency or a rate, by what is written around it
         return "#"
     return LONG_NUMBER.sub(one, text)[:200]
+
+
+def call_line(line: str) -> tuple[int, str, str] | None:
+    """(talkgroup, kind, what) of one of trunk-recorder's call lines that says what it did with a grant (CALL_KINDS),
+    else None. Nothing of the line but its talkgroup, its frequency and the recorder counts is kept (no radio ID)."""
+    if "TG:" not in line:
+        return None
+    m = CALL_LINE.search(ANSI.sub("", line))
+    if not m:
+        return None
+    msg = m["msg"]
+    for words, kind, what in CALL_KINDS:
+        if words in msg:
+            if kind == "no_source":
+                what = f"{what} {float(m['mhz']):.4f} MHz"
+            elif kind == "no_recorder":
+                n = NO_RECORDER.search(msg)
+                what = f"{what} (priority {n['p']}, {n['n']} free)" if n else f"{what} (none free)"
+            return int(m["tg"]), kind, what
+    return None
+
+
+def watched_talkgroups(workdir: str | Path) -> dict[int, str]:
+    """{talkgroup: its name} of the "watch" list in <workdir>/config.json's "sizeup" "reception" block (a system's,
+    #410), named from its talkgroups file's Alpha Tag; {} when there is none or it can't be read."""
+    import csv
+    base = Path(workdir)
+    try:
+        conf = json.loads((base / "config.json").read_text())
+        watch = ((conf.get("sizeup") or {}).get("reception") or {}).get("watch") or []
+        tgs = [int(t) for t in watch if not isinstance(t, bool) and str(t).isdigit()]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    names: dict[int, str] = {}
+    for s in conf.get("systems") or []:
+        tg_file = s.get("talkgroupsFile") if isinstance(s, dict) else None
+        if not tg_file:
+            continue
+        try:
+            with open(base / tg_file, newline="") as f:
+                for row in csv.DictReader(f):
+                    if str(row.get("Decimal") or "").strip().isdigit():
+                        names.setdefault(int(row["Decimal"]), str(row.get("Alpha Tag") or "").strip()[:40])
+        except (OSError, ValueError, TypeError):
+            pass
+    return {t: names.get(t, "") for t in tgs}
 
 
 class Watchdog:
@@ -527,10 +591,15 @@ class Watchdog:
 
 class Shipper:
     """trunk-recorder's own lines worth seeing, into the journal (#547), filtered and rate-limited: line() each line of
-    its output, tick() now and then (the count of lines held back)."""
+    its output, tick() now and then (the count of lines held back). A watched talkgroup's call lines (watch(): its
+    config's reception "watch" list) are said as what became of the grant, "<tag>: TG 9212 PD Tac: grant (encrypted,
+    not recorded)", at most one per talkgroup per WATCHED_EVERY_S, then "(+N more: ...)": no traffic is then told
+    from traffic it can't record."""
 
     def __init__(self, log, tag: str = "p25"):
         self.log, self.tag = log, tag
+        self.watched: dict[int, str] = {}           # talkgroup -> its name
+        self.calls: dict[int, dict] = {}            # talkgroup -> {"at": its last line, "held": {kind: n}}
         self.win: float | None = None
         self.keys: set[str] = set()
         self.held = 0
@@ -539,9 +608,17 @@ class Shipper:
         self.rates: list[float] = []
         self._lock = threading.Lock()
 
+    def watch(self, watched: dict[int, str]) -> None:
+        with self._lock:
+            self.watched = dict(watched)
+
     def line(self, line: str, now: float) -> None:
         if not line or any(s in line for s in SHIP_SKIP):
             return
+        if self.watched and "TG:" in line:
+            c = call_line(line)
+            if c is not None and c[0] in self.watched:
+                return self._call(*c, now)
         m = CC_RATE.search(line) if "ontrol" in line else None
         if m:
             try:
@@ -562,9 +639,37 @@ class Shipper:
             self.keys.add(key)
         self.log(f"{self.tag}: trunk-recorder: {text}")
 
+    def _call(self, tg: int, kind: str, what: str, now: float) -> None:
+        with self._lock:
+            c = self.calls.setdefault(tg, {"at": None, "held": {}})
+            if c["at"] is not None and now - c["at"] < WATCHED_EVERY_S:
+                c["held"][kind] = c["held"].get(kind, 0) + 1
+                return
+            more = self._more(c["held"])
+            c["at"], c["held"] = now, {}
+        self.log(f"{self._tg(tg)}: {what}" + (f" (+{more})" if more else ""))
+
+    def _tg(self, tg: int) -> str:
+        name = self.watched.get(tg)
+        return f"{self.tag}: TG {tg}" + (f" {name}" if name else "")
+
+    @staticmethod
+    def _more(held: dict[str, int]) -> str:
+        """"3 more: 2 encrypted, 1 recording" ("" for none)."""
+        n = sum(held.values())
+        return f"{n} more: " + ", ".join(f"{v} {CALL_SHORT.get(k, k)}" for k, v in
+                                         sorted(held.items(), key=lambda kv: -kv[1])) if n else ""
+
     def tick(self, now: float) -> None:
+        said = []
         with self._lock:
             self._roll(now)
+            for tg, c in self.calls.items():            # a burst that went quiet: its count, once its minute is over
+                if c["held"] and c["at"] is not None and now - c["at"] >= WATCHED_EVERY_S:
+                    said.append(f"{self._tg(tg)}: +{self._more(c['held'])}")
+                    c["at"], c["held"] = now, {}
+        for x in said:
+            self.log(x)
 
     def _roll(self, now: float) -> None:
         if self.win is not None and now - self.win < SHIP_WINDOW_S:
@@ -904,7 +1009,7 @@ class Supervisor:
         if code is None:
             if self.started_at is not None and now - self.started_at > 60:
                 self.backoff = BACKOFF_S[0]
-            self.shipper.tick(now)
+            self.shipper.tick(self._m)                  # (the drain's clock: time.monotonic, not the wall's)
             if self._watchdog(now, base):
                 return
             self._set(now, "ok", self.said or "trunk-recorder starting", **keep, **base)
@@ -954,6 +1059,7 @@ class Supervisor:
     def _drain(self, p, workdir: str) -> None:
         """Everything it says, into trunk-recorder.log (capped: LOG_MAX_BYTES, one previous file kept), which sizeup reads
         as it grows; the unit script's grant lines come the same way (its stdout is trunk-recorder's)."""
+        self.shipper.watch(watched_talkgroups(workdir))     # its config's reception "watch" list, as it starts
         path = Path(workdir) / LOG
         log = None
         try:
