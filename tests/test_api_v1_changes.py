@@ -74,6 +74,13 @@ class Rig:
         """What the recorder does after a burst of commits, now."""
         return self.feed.recorder.flush()
 
+    def touch(self):
+        """A commit that really writes a row (the CAD counts a transaction that wrote nothing as no change, so the
+        recorder would not look): what any real CAD action does."""
+        self.touched = getattr(self, "touched", 0) + 1
+        with self.store.tx():
+            self.store.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('test_touch', ?)", (str(self.touched),))
+
     def incident(self, units=("E63",), address="209 Westchester Ave"):
         inc = self.cad.create({"type": "STRU", "address": address, "operator": "Lt. Ruiz"})
         self.cad.dispatch(inc["id"], {"unit_ids": [uid(self.cad, u) for u in units], "operator": "Lt. Ruiz"})
@@ -178,16 +185,14 @@ def test_a_closed_call_is_logged_once_more_and_then_left_alone(rig):
     # closed, still in the reads' list: kept as a head, no further entry
     assert key in rig.log.heads() and rig.settle() == []
     rig.clock.t += 2 * 86400                                                  # it leaves the list (closed long ago)
-    with rig.store.tx():
-        pass
+    rig.touch()                                                               # (the next real write: the recorder looks)
     head = rig.log.head()
     assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head   # dropped: not a deletion
 
 
 def test_a_deleted_object_is_a_row_with_no_rev(rig):
     rig.log.append([("unit", "999", "aaaaaaaaaaaaaaaa")])
-    with rig.store.tx():                                                     # (a commit, so the recorder looks)
-        pass
+    rig.touch()                                                              # (a commit, so the recorder looks)
     out = rig.settle()                                                       # the scan does not find unit 999
     assert [(c.kind, c.id, c.rev) for c in out] == [("unit", "999", "")]
 
