@@ -1082,7 +1082,9 @@ Access sends every request it lets through to the origin with a signed JWT
   `https://<access_team>/cdn-cgi/access/certs` (cached an hour; fetched again for an unknown key id,
   at most every 30 s; the cached keys are kept if a fetch fails), `aud` contains the AUD tag, `iss`
   is `https://<access_team>`, `exp` / `nbf` with 60 s leeway. Any other algorithm (`none`, `HS256`)
-  is refused. The `Cf-Access-Authenticated-User-Email` header is never trusted on its own.
+  is refused. The `Cf-Access-Authenticated-User-Email` header is never trusted on its own. A token
+  that passed is kept (its SHA-256, the last 1,024) so later requests skip the RSA check: `exp` /
+  `nbf` are still checked on every request, and a key the refresh no longer has ends its tokens.
 * **requires it** on every page and API except `/healthz` (the health check) and `/api/station/*`
   (the station's bearer token): 401 otherwise. A service token's JWT (no email, `common_name` =
   client id: the station) is a machine and never an operator.
