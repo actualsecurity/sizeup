@@ -244,10 +244,62 @@ also keyed by their ids.
 its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
 
 - `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
-  thread never waits. Its queue is bounded (200 items, 600 s of audio); when it is full the input is dropped and
-  counted.
+  thread never waits. Its queue is bounded (200 items, 600 s of audio, about 77 MB: the frames are float64 and are kept
+  as they are, since the FLAC must be whisper's input bit for bit); when it is full the input is dropped and counted.
+- **Where it is made** (#677, `sizeup/cloud/sttencode.py`): about 40 ms of CPU an audio-second on the station's i5,
+  so never at the station's own weight. A thread (or child) of sizeup-station competes at its `CPUWeight=500`, above
+  whisper's 100, whatever its niceness. So by default (`SIZEUP_STT_ENCODER=auto`) the station hands each clip to the
+  `sizeup-stt-encode` service (`python -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock`: same
+  user, no privilege, its own cgroup at `CPUWeight=10`, `Nice=19`: `deploy/station/systemd/sizeup-stt-encode.service`,
+  installed and started by `install-linux.sh`, `PartOf=sizeup-station.service` so both always run the same release,
+  #709; `MemoryMax=1G`: a 300 s clip peaks at ~420 MB while it is made, plus 4 connections' 40 MB frames;
+  `OOMScoreAdjust=500`, `ProtectSystem=strict`, `PrivateDevices=yes`, `RestrictAddressFamilies=AF_UNIX`). Where that
+  socket isn't there (a station not updated yet, the service restarting, macOS, the tests) the station's own thread
+  makes them, as before, and looks for it again every 10 s for 5 min after the station starts or the worker dies, then
+  every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or `thread (<why>)`), and
+  the worker's state (`stt_input.worker`: `ok`, `slow`, `unhealthy`, `dead` or `thread`, with what was said of it):
+  Health's "STT encoder" row (Outbox and system: terse, the detail on hover), so a wedged but alive service is seen.
+  The bytes are the same either way.
+  - The socket is 0600 in a 0700 directory, and each side checks the other's uid (`SO_PEERCRED`; elsewhere the
+    socket file's owner). No pickle: fixed frames, a JSON header (`proto`, `op`, `rate`, `samples`, `dtype`) and the
+    raw float64 (or float32) samples one way, the FLAC the other, a frame at most 40 MB, refused from its 8-byte
+    lengths and its header before the samples are read.
+  - A hello carries a hash, made at import, of the code that makes the bytes (`sttencode`, `sttinput`, `flac`,
+    `stt`), numpy's version and Python's: a worker of another release refuses, and the station's helper thread makes
+    them until the service restarts with it (it is `PartOf=sizeup-station.service`), said once. The service takes at
+    most 4 connections, each closed after 5 min of silence.
+  - **PRE and FIRE never go to the worker**: the encoder thread makes them at once, on the station (small and cheap).
+    NORMAL and LOW go to a helper thread, one in flight on one connection, so nothing the worker does can delay a
+    page or fire traffic.
+  - **Slow** (no answer in 30 s + 4 s an audio-second, at most 120 s): the helper goes on waiting on the same
+    connection; the clip is never sent again, so never encoded twice. After 3 such waits in a row, or 10 min without
+    an answer, the worker is **unhealthy**: NORMAL and LOW wait queued, subject to the priority eviction, never made
+    on the station for it, until it answers again. A **dead** worker (not there, refused, reset): the helper makes that
+    clip; 3 in a row, the helper makes them for 5 min. Each change of state is logged once. `stop()` shuts the socket,
+    so it returns at once.
+- **Held while whisper is behind on live traffic**: a clip of a live class (`URGENT`, `HIGH`, `LIVE`; never a context
+  talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) waiting `stt.BEHIND_S` (120 s). `PRE` and `FIRE`
+  are never held. `NORMAL` and `LOW` wait, bounded and with their priorities, and drain highest first once whisper has
+  caught up, or after 5 min of one hold (`stt_input.held`). It reads the whisper queue's own list
+  (`StationLink._whisper_behind`): a public `Transcriber.behind_live()` would be better, for the STT session.
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
-  before any clip.
+  before any clip. Its order is an index (`stt_inputs_order`): a batch picks its rows from the index and reads each
+  FLAC on its own, so an event's `add()` (the emergency button's too) never waits on the lane.
+- **Priority** (#677, `App._stt_lane`, from whisper's own classes in `_stt_priority`):
+
+  | | what | whisper's class |
+  |---|---|---|
+  | `PRE` | pages; another system's talkgroups of the `alert` tier (PD dispatch) | a page; `CONTEXT` / `CONTEXT_FALLBACK` |
+  | `FIRE` | our fire traffic: Fire/EMS 15 (`tg:307`), the firegrounds | `URGENT` |
+  | `NORMAL` | the airband and other live traffic | `HIGH`, `LIVE` |
+  | `LOW` | a context talkgroup of another tier, one not on Main | `LOW` |
+
+  The encoder makes the highest first. The lane sends the highest first; within `PRE` and `FIRE` the fresh ones
+  (queued within 5 min) go before the stale, so a fresh page isn't behind an outage's backlog; otherwise oldest first.
+  Under pressure (a full encoder queue, the lane over its budget) the lowest goes first, the oldest within it: the
+  airband never costs a fireground clip. A pre-alert one goes only when nothing lower is left, counted as
+  `dropped_pre` ("· N pre-alert" on Health; a too long or failed one isn't counted there), and fire traffic's as
+  `dropped_fire` ("· N fire"). The wire is unchanged.
 - The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
   event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
   `stt_input` in its caps; an older hub never gets them.
@@ -271,6 +323,13 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   only the listening clip is there.
 - Drops are counted by reason (`queue`, `too_big`, `failed`, `outbox`, `refused`). Health shows them under Outbox:
   "STT inputs dropped".
+- **Arrival delay** (#677, `sizeup/cloud/sttarrival.py`). The hub measures each STT input against its event, on its own
+  clock: stored minus applied, in seconds. It is negative when the STT input came first. Each clip counts once; one
+  whose other half never comes within an hour gives no sample. The samples go into the station metrics as kind `stt_in`
+  (the subject is the channel, with `delay` and `kind`), rolled up hourly as `stt_delay`, with p95. They are written
+  on the metrics-backup thread every 30 s, never in a station's request; a standby drops them. Health has "STT input
+  arrival (hub)": p50 / p95 over 1 h and 24 h per kind and per channel. The Signal tab graphs it under each channel.
+  A talkgroup with no signal metrics of its own gets a card with that chart only.
 
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
@@ -1332,6 +1391,7 @@ clip waits for one only as long as its class allows. After that the clip goes th
 | `sizeup/cloud/sttworkers.py` | the workers' tokens (`sw1.<id>.<secret>`, hash only, made on first use); the pool's switches; the API under `/api/station/stt/` |
 | `sizeup/cloud/hub.py` | the routing (`_pool_first`, `_pool_done`, `_pool_fallback`, the catch-up's `pool` route) |
 | `sizeup/sttruns.py` | every transcript as written, plus the latency per channel |
+| `sizeup/cloud/infer.py` | the LLM lane: a worker's local model for the intel engine's JSON classifications (`submit`, `available`) |
 
 - **Which clips:**
   - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
@@ -1366,6 +1426,14 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - `offline`: no word for 30 s.
   - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
 - **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
+- **The LLM lane** (`sizeup/cloud/infer.py`): a worker that also serves a local LLM (llama.cpp's `llama-server`, next to its whisper; no cloud model) answers the intel engine's short JSON classifications.
+  - `submit(task, messages, schema, deadline_s=20, priority=0, meta=False)` returns a Future: a dict that validates against the schema, or `None` (no worker, gaming, the deadline, an invalid answer). `meta=True` adds `{model, model_version, worker, latency_ms, tokens_in, tokens_out, why}`. It never raises and never blocks. `available()`: a worker advertising an LLM is ready.
+  - Off unless a worker advertises one: every request may carry `models: {stt, llm, llm_version}`; `llm` empty means none now (a gaming worker stops its `llama-server`).
+  - Its own queue (priority, then the oldest) and leases, at `/api/station/stt/infer/*` with the same token. A worker takes an infer job only while it holds no pre-alert lease, one at a time; infer leases never count in the STT pool's limits or estimates. A pre-alert clip that comes mid-generation makes the worker abort and hand the job back; it is leased again while 1 s of its deadline is left.
+  - The lease is the job's own deadline. A worker gone gaming or paused, its LLM stopped, unheard for 12 s or revoked: the job goes back to the queue. Three invalid answers or lost leases in a row: no infer jobs for 2 min.
+  - Switches: the pool's On (Settings > Station > STT workers) turns the lane off too (`available()` false, no claims). Each GPU worker has an "LLM jobs" switch there, on by default and audited; off, it gets no prompts (a job it holds goes back to the queue). Only a GPU worker's own token (`sw1`) reaches `/api/station/stt/infer/*`: anything else (a station's whisper in the pool) gets 403 and never sees a prompt.
+  - Futures are resolved on the lane's own result thread, never on a worker's request thread or under a lock; a job is answered at its deadline (the lane wakes for the earliest one). A done-callback must not log the answer.
+  - Privacy: prompts and answers exist only in memory on their way to the worker and back. They are never logged, never in Health, `stt_runs` or a database. Health ("GPU workers: LLM") shows each worker's STT and LLM models, and per task the jobs an hour, p50 / p95, token counts and the failures by why.
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
   - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
@@ -3548,8 +3616,10 @@ never included, nor a row whose audio is gone.
 
 | | |
 |---|---|
-| Where | the audio bucket (`SIZEUP_AUDIO_BUCKET`), prefix `listen/`, key `listen/<32 random characters>.<ext>`, no metadata. The task role needs Put / Get on `listen/*`; a one-day lifecycle rule removes the objects (`sizeup-aws/27-listen-links.sh`, run by a person) |
-| Link | a presigned GET, valid `listen_expiry_min` (20), **with no sign-in**: the key is unguessable and short-lived. Signed with credentials that outlive it |
+| Where | the audio bucket (`SIZEUP_AUDIO_BUCKET`), prefix `listen/`, key `listen/<32 random characters>.<ext>`, no metadata. The task role needs Put / Get on `listen/*` (and Delete on `listen/*`, List on the `listen/` prefix for the cleanup); a one-day lifecycle rule is the backstop (`sizeup-aws/27-listen-links.sh`, run by a person) |
+| Link | a presigned GET, valid `listen_expiry_min` (60), **with no sign-in**: a bearer URL for that window (whoever holds the push can play it); the key is unguessable. Signed with credentials that outlive it. A push that goes out late (slow speech-to-text) leaves less of the window |
+| Self-test | after the first upload in a process (and, while not ok, after a later upload at most every 15 min) the link a push carries is fetched as a phone would (GET, `Range: bytes=0-0`, 5 s, its own thread): ok, refused (the HTTP status and S3's code, e.g. SignatureDoesNotMatch) or unchecked. One log line on the first result and each change (`intel: listen links ok` / `refused (…)`), never the URL; Settings > Station > Health, Intel: "Listen links" |
+| Cleanup | each file is deleted 2 min after the last link to it expired (a refreshed key is signed again: only its last expiry counts), on the `listen` thread, in DeleteObjects batches of up to 1000, only while this hub leads. A key that keeps failing goes to the back and is left to the lifecycle rule after 5 tries. Nothing is stored: after a restart or a takeover, once no link the last leader signed could still play (judged by the longest `listen_expiry_min` allows, 720 min, since it may have signed with a longer one than is set now), `listen/` is listed and what was written before is deleted. Until the grant is there, an AccessDenied logs `intel: listen cleanup not permitted, relying on the 1-day lifecycle` once, shows on the Health row and rests an hour. Never run an all-in-one with outbound on (`SIZEUP_ALLOW_OUTBOUND=1`) against the production audio bucket: it would lead its own engine and sweep production's `listen/` files |
 | Updates | while the after-window is open (and 3 min more, transcripts come late) the file is stitched again under the same key whenever the set of transmissions changes, so the link already on a phone plays the newest |
 | Failure | never delays the push (stitching and upload are on the `listen` thread). A 403 (the grant isn't there) shows "not configured" and is retried after an hour; anything else after a minute. No bucket: off |
 | Settings | System > Intel: Listen on / off, minutes, seconds before and after, kbps (`listen`, `listen_expiry_min`, `listen_before_s`, `listen_after_s`, `listen_kbps`) |
@@ -3635,7 +3705,7 @@ stay exactly as they were (they still go to CloudWatch); this adds numbers besid
 | Station | `sizeup/cloud/metrics.py`. A thread looks at each running channel's squelch once a second (attributes the receivers keep anyway: never a dongle) and at what changed every 5 s; each transmission's numbers are handed over as its squelch closes it (`App._segment`: a dict queued, no I/O) |
 | Records | `floor` a channel a minute: idle quieting p50 / p90 / max, the FM hiss (relative dB) or the AM floor (dBFS), seconds open, noise opens, and its squelch, dongle, gain (sent when they change and every 15 min). `tx` each transmission: kind (voice, page, burst, noise), length, quieting / carrier, at open and close, the hiss or floor, carrier dBFS and voice SNR (airband), why it ended. `cc` each P25 system a minute: decode rate (avg, low, high), retunes, grants on uncovered frequencies. `ev` what explains a shift: start, sdr, squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped |
 | Path | `POST /api/station/metrics` (gzipped, every minute, at most 2,000 records, at most 4 MB unpacked), on its own thread and connection: never the outbox, so pages and transmissions never queue behind it. Never counted as the station being seen (a second station's, or a wedged primary's, metrics don't keep "connected" up). A malformed batch is a 400, which the station drops; a hub that isn't the leader answers 503 and the batch is sent again. While the hub is away records wait in memory, at most 20,000 (about a day and a half): past that the oldest go, counted, and one `dropped` event says so when the hub is back. Taken from any authenticated station, under its own id |
-| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, max per metric) and events a year. Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
+| Hub | `sizeup/cloud/metricstore.py`: `metrics.sqlite`, its own file, so it can't bloat or slow cad.sqlite / hub.sqlite. Raw records 30 days; hourly rollups (n, min, median, p90, p95, max per metric; p95 since #677) and events a year. The hub adds its own `stt_in` records, each STT input's arrival delay (#677; `stt` is the whisper queue's, #639). Rollups and retention run from the hub's janitor; an hour is rolled again when late records for it arrive |
 | Durability | Not in Litestream (nothing added to a drain or a takeover). Copies in the backups bucket (`sizeup/cloud/metricsbackup.py`): `metrics/copy-0..7.sqlite.gz`, round-robin over the oldest, so the last 8 are always there and one bad copy can't take the history with it. A new leader first *settles*: it lists the copies and merges the newest (and the largest) in, or sees, from a listing that succeeded, that there are none; a failed listing or download is retried (30 s doubling to 30 min) and nothing is uploaded until it settles. Then a copy 15 min later and every 3 h (SQLite's backup API: the ingest isn't held up). Once settled its answer to each station carries `resend_from` (when the merged copy was made) and the station sends again what was acked since (kept 6 h; duplicates are ignored). Lost at worst: what the old task took after its last copy, when the station was away for that whole time or settling took longer than 6 h; never what a copy already holds. A copy that can't be read (torn, another release's schema without a key column) is skipped for the next older one; one with a column more or less merges column by column. Settings > Station > Health shows a Metrics warning when it hasn't settled in 6 h or kept no copy in 12 h. Each copy is made in memory (~80 MB at steady state, briefly) |
 | Size | Measured (tests/test_station_metrics.py): a day of 6 channels, 2 P25 systems and 2,000 transmissions is ~13,500 records, ~1.7 MB; ~50 MB at 30 days of raw and ~30 MB for a year of rollups |
 | Reading | `GET /api/cad/metrics?subject=FG1&from=&to=&res=raw\|hour\|auto&station=&kind=&metric=`: raw (a week at most) or hourly, with the events, the station's and the Settings audit's changes to that channel; no subject: the series there are. A signed-in admin only, on the hub only: closed without a verified sign-in |

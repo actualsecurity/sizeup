@@ -19,6 +19,8 @@ notice when it clears:
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
     sdr:<serial>  a dongle the station had is gone (unplugged)                             critical
+    noaudio:<serial> a dongle that opens but streams no audio (#703: out until it streams     critical
+                  again, a person picks its job, or a replug); once, never per stall
     dup:<serial>  two or more dongles on the station share one serial (#242): nothing of  critical
                   ours opens that serial until one is renamed (sizeup-station sdr-serial)
     job:<job>     a dongle's job (a channel) not running for JOB_GRACE_S                   critical
@@ -184,7 +186,7 @@ def hub_own(key: str) -> bool:
 MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
 # The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
-              "job": "Channel not running", "sdr": "SDR gone", "group": "Antenna group short", "dup": "Duplicate dongle serial",
+              "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
@@ -546,6 +548,8 @@ class StationHealth:
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
         self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
+        # each STT input's arrival after its event, p50 / p95 (#677, sizeup/cloud/sttarrival.py stats; HubApp sets it)
+        self.stt_arrival: Callable[[float], dict | None] | None = None
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -658,6 +662,14 @@ class StationHealth:
         why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
         out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
         out["outbox"]["dropped_stt_why"] = why
+        pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
+        out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        wk = si.get("worker") if isinstance(si.get("worker"), dict) else {}     # (#677) where NORMAL / LOW are made
+        out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
+                                       "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
+                                       "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        fire = si.get("dropped_fire")                               # ... and fire traffic's
+        out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -681,7 +693,11 @@ class StationHealth:
                             # (#637) a P25 system held back after dropouts: until when (the hub's clock)
                             "hold_until": js["hold_until"] + hub.skew
                             if job != "Off" and isinstance(js.get("hold_until"), (int, float))
-                            and not isinstance(js.get("hold_until"), bool) else None})
+                            and not isinstance(js.get("hold_until"), bool) else None,
+                            # (#703) out: it opens but streams no audio ({since: the hub's clock, job})
+                            "noaudio": {"since": na["since"] + hub.skew, "job": str(na.get("job") or "")[:40]}
+                            if isinstance(na := d.get("noaudio"), dict) and isinstance(na.get("since"), (int, float))
+                            else None})
         out["dongles"] = dongles
         names = {d["serial"]: d["name"] for d in dongles}
         out["groups"] = [{"name": str(g.get("name") or "")[:40],
@@ -802,6 +818,10 @@ class StationHealth:
         except Exception:  # noqa: BLE001 - never in the way of the rest
             shifts = []
         out["hints"] += shifts
+        try:                                        # #677: the STT inputs' arrival on the hub after their events
+            out["stt_arrival"] = self.stt_arrival(now) if self.stt_arrival is not None else None
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            out["stt_arrival"] = None
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
@@ -990,6 +1010,16 @@ class StationHealth:
             out["reception"] = {"severity": "critical" if rx["push"] else "warning", "title": "Reception test: job not restored",
                                 "text": rx["text"], "since": rx["since"] or now, "quiet": not rx["push"]}
         for d in m["dongles"]:
+            if d.get("noaudio") and d["present"]:
+                # (#703) one alert while it is out, never one per stall; where its job runs now, if anywhere
+                na = d["noaudio"]
+                on = next((x for x in m["dongles"] if x["serial"] != d["serial"] and x["job"] == na["job"]
+                           and x["running"]), None)
+                held(f"noaudio:{d['serial']}", 0, {
+                    "severity": "critical", "title": f"SDR {d['name']} no audio",
+                    "text": f"dongle {d['name']} ({d['serial']}) opens but streams no audio since {_hhmm(na['since'])}"
+                            + (f" · {na['job']} on SDR {on['name']}" if on else f" · {na['job']} not running")
+                            + " · replug it, or pick its job once it is fixed"})
             if d.get("context"):
                 continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
@@ -1263,7 +1293,7 @@ class StationHealth:
         if kind == "silent":
             last = self.hub.last_state
             w["detail"] = f"last heard {_hhmm(last)}" if last else "never reported"
-        elif kind == "sdr":
+        elif kind in ("sdr", "noaudio"):
             d = next((d for d in m["dongles"] if d["serial"] == arg), None)
             w["dongle"] = f"SDR {d['name'] if d else arg}"
             if d and d["job"] != "Off":
