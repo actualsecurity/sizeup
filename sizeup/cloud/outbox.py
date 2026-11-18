@@ -102,6 +102,7 @@ class Outbox:
         self.stt_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()[0])
         self.dropped_stt = 0            # this run: STT inputs dropped to stay under the limit (their clips kept)
         self.dropped_stt_pre = 0        # ... of them, the pre-alert channels' (only once nothing lower was left)
+        self.dropped_stt_fire = 0       # ... and fire traffic's
 
     def _drop_stt(self) -> None:
         """STT inputs, the lowest priority first and the oldest first within it, until they are inside their own budget
@@ -119,6 +120,7 @@ class Outbox:
                 self.stt_bytes -= size
                 self.dropped_stt += 1
                 self.dropped_stt_pre += int(prio >= STT_PRE)
+                self.dropped_stt_fire += int(prio == STT_FIRE)
                 if self.stt_bytes <= limit and self.audio_bytes + self.stt_bytes <= self.max_audio_bytes:
                     return
 

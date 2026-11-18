@@ -3,17 +3,14 @@ hub after its event (p50 / p95 per channel and kind, on Health and as a station-
 
 from __future__ import annotations
 
-import base64
-import json
 import sqlite3
-import sys
 import threading
 import time
 
 import numpy as np
 import pytest
 
-from sizeup.cloud import flac, sttarrival, sttinput
+from sizeup.cloud import sttarrival, sttinput
 from sizeup.cloud.metricstore import MetricStore
 from sizeup.cloud.outbox import Outbox
 from sizeup.incidents import Traffic
@@ -171,6 +168,7 @@ def test_the_airband_never_costs_a_fireground_clip(tmp_path):
         ob.add_stt({"id": f"ATC-{k}"}, b"a" * 500, {}, prio=NORMAL)
     kept = [r["data"]["id"] for r in ob.stt_batch(max_bytes=1 << 30)]
     assert kept == [f"FG1-{k}" for k in range(24, 30)] and ob.dropped_stt == 54 and ob.dropped_stt_pre == 0
+    assert ob.dropped_stt_fire == 24                                    # (the oldest FG1 ones, the budget being 6)
     # the encoder: an airband clip never takes a fireground clip's place in a full queue
     gate = threading.Event()
     enc = sttinput.Encoder(lambda *a, **k: gate.wait(10), log=lambda m: None, max_items=2, max_s=100.0)
@@ -285,154 +283,6 @@ def test_a_renamed_station_keeps_its_hourly_p95(tmp_path):
     assert before and before[0]["p95"] is not None
     assert store.rename_station("st-old", "st-new") > 0
     assert store.hours("st-new", "FG1", "stt_delay", now - 86400, now) == before
-
-
-# -- where the FLAC is made, and held while whisper is behind -------------------------------------------------------
-
-
-def _made_by(mode, items, monkeypatch=None, **kw):
-    out, done = [], threading.Event()
-
-    def sink(d, data, meta, prio):
-        out.append((d["id"], data, meta, prio))
-        if len(out) == len(items):
-            done.set()
-    enc = sttinput.Encoder(sink, log=lambda m: None, mode=mode, **kw)
-    try:
-        for tid, a, fm, prio in items:
-            t = Traffic(tid, "FG1", 0.0, len(a) / RATE, "")
-            t.fm = fm                                                       # type: ignore[attr-defined]
-            assert enc.submit(t, a, prio)
-        assert done.wait(60), (enc.where, enc.dropped)
-        return out, enc.where, enc
-    finally:
-        enc.stop()
-
-
-def _items():
-    return [(f"FG1-{k}", voice(1.0 + k / 2, seed=40 + k), k % 2 == 0, FIRE) for k in range(4)]
-
-
-def test_the_worker_process_makes_the_very_same_flac_as_the_thread():
-    items = _items()
-    by_thread, where_t, _ = _made_by("thread", items)
-    by_worker, where_w, enc = _made_by("process", items)
-    assert (where_t, where_w) == ("thread", "process")
-    assert by_worker == by_thread                                           # every byte, the metadata, the order
-    assert enc._worker is None                                              # (stopped with the encoder)
-    assert np.array_equal(flac.decode(by_worker[0][1])[0], sttinput.stt_pcm(items[0][1], True))
-
-
-@pytest.fixture
-def encode_service(monkeypatch):
-    """The sizeup-stt-encode service (its ExecStart's `--serve <socket>`), as a child of this test's own."""
-    import os
-    import subprocess
-    import tempfile
-    d = tempfile.mkdtemp(dir="/tmp", prefix="sz-enc-")                 # (a Unix socket's path: short)
-    path = f"{d}/encode.sock"
-    proc = subprocess.Popen([sys.executable, "-m", "sizeup.cloud.sttinput", "--serve", path])
-    try:
-        assert wait(lambda: os.path.exists(path), 20)
-        monkeypatch.setenv(sttinput.SOCKET_ENV, path)
-        yield proc, path
-    finally:
-        proc.kill()                                                         # (our own child)
-        proc.wait(5)
-        if os.path.exists(path):
-            os.unlink(path)
-        os.rmdir(d)
-
-
-def test_auto_sends_them_to_the_encode_service_and_gets_the_very_same_flac(encode_service):
-    items = _items()
-    out, where, _ = _made_by("auto", items)
-    assert where == "service" and out == _made_by("thread", items)[0]
-
-
-def test_without_the_encode_service_the_thread_makes_them_and_says_why(monkeypatch, tmp_path):
-    monkeypatch.setenv(sttinput.SOCKET_ENV, str(tmp_path / "none.sock"))
-    items = _items()[:2]
-    out, where, _ = _made_by("auto", items)
-    assert where == "thread (no sizeup-stt-encode service)" and out == _made_by("thread", items)[0]
-
-
-def test_a_worker_that_cannot_start_or_dies_falls_back_to_the_thread(monkeypatch):
-    items = _items()
-    want = _made_by("thread", items)[0]
-    # a worker that can't start (its program gone): three tries, then the thread; nothing lost
-    monkeypatch.setattr(sttinput.sys, "executable", "/nonexistent/python")
-    logs = []
-    out, done = [], threading.Event()
-    enc = sttinput.Encoder(lambda d, data, meta, prio: (out.append((d["id"], data, meta, prio)),
-                                                        len(out) == len(items) and done.set()),
-                           log=logs.append, mode="process")
-    try:
-        for tid, a, fm, prio in items:
-            t = Traffic(tid, "FG1", 0.0, 1.0, "")
-            t.fm = fm                                                       # type: ignore[attr-defined]
-            enc.submit(t, a, prio)
-        assert done.wait(60)
-    finally:
-        enc.stop()
-    assert out == want and enc.where.startswith("thread (the worker failed 3 times") and enc.dropped["failed"] == 0
-    assert any("made on the thread for 300 s" in m for m in logs)
-    monkeypatch.undo()                                                      # (the worker's program back)
-    # a worker killed between two clips: started again, the clip made all the same
-    out, done = [], threading.Event()
-    enc = sttinput.Encoder(lambda d, data, meta, prio: (out.append((d["id"], data, meta, prio)),
-                                                        len(out) == 2 and done.set()), log=lambda m: None, mode="process")
-    try:
-        t = Traffic(items[0][0], "FG1", 0.0, 1.0, "")
-        t.fm = items[0][2]                                                  # type: ignore[attr-defined]
-        enc.submit(t, items[0][1], FIRE)
-        assert wait(lambda: len(out) == 1, 30)
-        enc._worker.proc.kill()                                             # (our own child)
-        enc._worker.proc.wait(5)
-        t = Traffic(items[1][0], "FG1", 0.0, 1.0, "")
-        t.fm = items[1][2]                                                  # type: ignore[attr-defined]
-        enc.submit(t, items[1][1], FIRE)
-        assert done.wait(30)
-        assert out == want[:2] and enc.where == "process" and enc._worker is None and enc._fails == 1   # (the thread)
-        t = Traffic(items[2][0], "FG1", 0.0, 1.0, "")
-        t.fm = items[2][2]                                                  # type: ignore[attr-defined]
-        enc.submit(t, items[2][1], FIRE)
-        assert wait(lambda: len(out) == 3, 30)
-        assert out == want[:3] and enc._worker is not None and enc._fails == 0       # a new worker took it
-    finally:
-        enc.stop()
-
-
-def test_nothing_is_made_while_whisper_is_behind_and_the_queue_drains_highest_first():
-    behind = threading.Event()
-    behind.set()
-    made = []
-    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], prio)), log=lambda m: None,
-                           max_items=4, max_s=100.0, held=behind.is_set, mode="thread")
-    try:
-        a = voice(0.5)
-        for tid, prio in (("ctx-1", LOW), ("Ops-1", NORMAL), ("FG1-1", FIRE), ("South2-1", PRE), ("South2-2", PRE)):
-            assert enc.submit(Traffic(tid, "FG1", 0, 0.5, ""), a, prio)        # (full at 4: ctx-1 gave its place)
-        time.sleep(1.5)
-        assert made == [] and enc.holding and enc.stats()["queued"] == 4 and enc.dropped["queue"] == 1
-        behind.clear()                                                         # whisper caught up
-        assert wait(lambda: len(made) == 4, 10)
-        assert made == [("South2-1", PRE), ("South2-2", PRE), ("FG1-1", FIRE), ("Ops-1", NORMAL)]
-        assert not enc.holding and enc.held_s >= 1.0
-    finally:
-        enc.stop()
-
-
-def test_the_station_holds_its_stt_inputs_while_its_whisper_is_behind(station, monkeypatch):
-    st = station
-    behind = [True]
-    monkeypatch.setattr(st.stt._q, "behind", lambda: behind[0])
-    t = _transmission(st, "FG1-1790000000300", "FG1", voice(1.0, seed=5), True, eng="aws")   # (no whisper run here)
-    time.sleep(1.5)
-    assert stt_rows(st, t.id) == [] and st.link.stt_stats()["held"] is True
-    behind[0] = False
-    assert wait(lambda: stt_rows(st, t.id), 10)
-    assert st.link.stt_stats()["held"] is False and st.link.stt_stats()["encoder"]
 
 
 # -- the hub: the arrival delay -------------------------------------------------------------------------------------
@@ -602,7 +452,8 @@ def test_health_shows_the_arrival_table_and_the_pre_alert_drops(tmp_path):
         "/api/cad/metrics?view=spark": {"status": 200, "body": {"subjects": []}},
         "/api/cad/health": {"status": 200, "body": {
             "health": {"reported": True, "health_reported": True, "channels": [], "stt_arrival": sa,
-                       "outbox": {"pending": 0, "dropped_stt": 4, "dropped_stt_why": {"outbox": 4}, "dropped_stt_pre": 1}},
+                       "outbox": {"pending": 0, "dropped_stt": 4, "dropped_stt_why": {"outbox": 4}, "dropped_stt_pre": 1,
+                                  "dropped_stt_fire": 2}},
             "alerts": [], "notify": {}, "thresholds": {}, "history": []}},
         "/api/cad/perf": {"status": 403, "body": {}}}}
     out = run(tmp_path, r"""
@@ -628,7 +479,7 @@ console.log(JSON.stringify({ title: subs[i].title, rows, dropped: dd.textContent
                            ["All", "traffic", "—", "1.1 / 3 s", "9"],
                            ["South 2", "page", "0.4 / 0.9 s", "0.5 / 1.2 s", "40"],
                            ["FG1", "traffic", "—", "1.1 / 3 s", "9"]]
-    assert out["dropped"] == "4 (outbox 4) · 1 pre-alert" and out["cls"] == "hl-warn"
+    assert out["dropped"] == "4 (outbox 4) · 1 pre-alert · 2 fire" and out["cls"] == "hl-warn"
 
 
 def test_the_signal_tab_graphs_the_arrival_and_a_talkgroup_with_only_that(tmp_path):

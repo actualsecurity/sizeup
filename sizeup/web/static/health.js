@@ -243,7 +243,8 @@ const StationHealth = (() => {
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
       ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")
-        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : ""), ob.dropped_stt_pre ? "hl-warn" : ""],
+        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : "") + (ob.dropped_stt_fire ? ` · ${ob.dropped_stt_fire} fire` : ""),
+        ob.dropped_stt_pre || ob.dropped_stt_fire ? "hl-warn" : ""],
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],

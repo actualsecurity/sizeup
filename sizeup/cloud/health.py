@@ -652,6 +652,8 @@ class StationHealth:
         out["outbox"]["dropped_stt_why"] = why
         pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
         out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        fire = si.get("dropped_fire")                               # ... and fire traffic's
+        out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None

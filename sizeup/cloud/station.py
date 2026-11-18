@@ -257,10 +257,22 @@ class StationLink:
             self.stt_encoder.submit(item, audio, prio)
 
     def _whisper_behind(self) -> bool:
-        """The station's whisper is behind (its oldest live clip waiting stt.BEHIND_S): the STT inputs wait. (Its
-        queue's own behind(): Transcriber has no public one.)"""
-        q = getattr(getattr(self.app, "stt", None), "_q", None)
-        return bool(q is not None and hasattr(q, "behind") and q.behind())
+        """The station's whisper is behind on live traffic: a clip of a live class (URGENT, HIGH, LIVE: never a
+        context talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) has waited stt.BEHIND_S. The STT
+        inputs of NORMAL / LOW priority wait meanwhile (sttinput.Encoder: never PRE / FIRE, at most HOLD_MAX_S).
+        Read from the queue's own list, defensively (anything unexpected: not behind). For the STT session: a public
+        Transcriber.behind_live() would be better than reading SttQueue._items here."""
+        try:
+            from sizeup.stt import BEHIND_S, LIVE_CLASSES
+            q = getattr(getattr(self.app, "stt", None), "_q", None)
+            if q is None:
+                return False
+            now = q.clock()
+            with q._cv:
+                ats = [e[5] for e in q._items if e[0] in LIVE_CLASSES]
+            return any(now - float(at) >= BEHIND_S for at in ats)
+        except Exception:  # noqa: BLE001 - a guess at another module's insides: never in the lane's way
+            return False
 
     def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
         self.outbox.add_stt(data, flac, meta, prio=prio)
@@ -275,6 +287,7 @@ class StationLink:
                 "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps,
                 # (#677) of the dropped, the pre-alert channels' (only once nothing of a lower priority was left)
                 "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre,
+                "dropped_fire": self.stt_encoder.dropped_fire + self.outbox.dropped_stt_fire,
                 # (#677) where the FLAC is made (scope | process | thread (why)), and held now for whisper
                 "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding}
 

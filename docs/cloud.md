@@ -246,19 +246,30 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
 - `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
   thread never waits. Its queue is bounded (200 items, 600 s of audio, about 77 MB: the frames are float64 and are kept
   as they are, since the FLAC must be whisper's input bit for bit); when it is full the input is dropped and counted.
-- **Where it is made** (#677): about 40 ms of CPU an audio-second on the station's i5, so never at the station's own
-  weight. A thread (or child) of sizeup-station competes at its `CPUWeight=500`, above whisper's 100, whatever its
-  niceness. So by default (`SIZEUP_STT_ENCODER=auto`) the station hands each clip to the `sizeup-stt-encode` service
-  (`python -m sizeup.cloud.sttinput --serve /run/sizeup-stt-encode/encode.sock`: same user, no privilege, its own
-  cgroup at `CPUWeight=1`, `Nice=19`, `SCHED_IDLE`) over that socket. Where that socket isn't there (the service not
-  installed yet, restarting, macOS, the tests) the station's own thread makes them, as before, and looks for it again
-  every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or `thread (<why>)`). The
-  bytes are the same either way. A worker that fails 3 times in a row leaves it to the thread for 5 min; a clip it
-  failed is made on the thread. **The unit isn't in the release yet**: the installer installs exactly the units in
-  `deploy/station/systemd/` and is under #647, so the unit and its line there come in a follow-up (#709).
-- **Held while whisper is behind** (its oldest live clip waiting `stt.BEHIND_S`, 120 s): nothing is encoded. The
-  queue waits, bounded and with its priorities (a full queue still drops the lowest first), and drains highest
-  first once whisper has caught up (`stt_input.held`).
+- **Where it is made** (#677, `sizeup/cloud/sttencode.py`): about 40 ms of CPU an audio-second on the station's i5,
+  so never at the station's own weight. A thread (or child) of sizeup-station competes at its `CPUWeight=500`, above
+  whisper's 100, whatever its niceness. So by default (`SIZEUP_STT_ENCODER=auto`) the station hands each clip to the
+  `sizeup-stt-encode` service (`python -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock`: same
+  user, no privilege, its own cgroup at `CPUWeight=10`, `Nice=19`; the unit is #709). Where that socket isn't there
+  (the service not installed yet, restarting, macOS, the tests) the station's own thread makes them, as before, and
+  looks for it again every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or
+  `thread (<why>)`). The bytes are the same either way.
+  - The socket is 0600 in a 0700 directory, and each side checks the other's uid (`SO_PEERCRED`; elsewhere the
+    socket file's owner). No pickle: fixed frames, a JSON header (`proto`, `op`, `rate`, `samples`, `dtype`) and the
+    raw float64 (or float32) samples one way, the FLAC the other, a frame at most 40 MB, refused from its 8-byte
+    lengths and its header before the samples are read.
+  - A hello carries a hash of the code that makes the bytes (`sttencode`, `sttinput`, `flac`, `stt`): a worker of
+    another release refuses, and the station's thread makes them until the service restarts with it (it is
+    `PartOf=sizeup-station.service`), said once.
+  - A **dead** worker (not there, refused, reset): the station's thread makes that clip; 3 in a row, the thread for
+    5 min. A **slow** one (no answer in 30 s + 4 s per audio-second): the clip stays queued, subject to the priority
+    eviction, and is tried again 30 s later; it is never made on the station's thread for being slow. Each change of
+    state is logged once. `stop()` shuts the socket, so it returns at once.
+- **Held while whisper is behind on live traffic**: a clip of a live class (`URGENT`, `HIGH`, `LIVE`; never a context
+  talkgroup's, kept up to 15 or 30 min by design, nor a re-run's) waiting `stt.BEHIND_S` (120 s). `PRE` and `FIRE`
+  are never held. `NORMAL` and `LOW` wait, bounded and with their priorities, and drain highest first once whisper has
+  caught up, or after 5 min of one hold (`stt_input.held`). It reads the whisper queue's own list
+  (`StationLink._whisper_behind`): a public `Transcriber.behind_live()` would be better, for the STT session.
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
   before any clip. Its order is an index (`stt_inputs_order`): a batch picks its rows from the index and reads each
   FLAC on its own, so an event's `add()` (the emergency button's too) never waits on the lane.
@@ -275,7 +286,8 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   (queued within 5 min) go before the stale, so a fresh page isn't behind an outage's backlog; otherwise oldest first.
   Under pressure (a full encoder queue, the lane over its budget) the lowest goes first, the oldest within it: the
   airband never costs a fireground clip. A pre-alert one goes only when nothing lower is left, counted as
-  `dropped_pre` ("· N pre-alert" on Health; a too long or failed one isn't counted there). The wire is unchanged.
+  `dropped_pre` ("· N pre-alert" on Health; a too long or failed one isn't counted there), and fire traffic's as
+  `dropped_fire` ("· N fire"). The wire is unchanged.
 - The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
   event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
   `stt_input` in its caps; an older hub never gets them.
