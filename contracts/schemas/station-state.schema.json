@@ -16,6 +16,17 @@
       "exclusiveMaximum": 100000000000,
       "description": "The station's clock when it built this post, Unix seconds with a fraction (never milliseconds: the hub would take them as a clock 50,000 years ahead). The hub keeps (its own clock - at) as this station's clock skew, in seconds; it stamps the snapshot with its own clock."
     },
+    "boot_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "This boot of the station's machine: Linux's /proc/sys/kernel/random/boot_id, null where there is none (macOS). On every post since #773's clock fields (sizeup/cloud/wallclock.py); a station from before sends none. A new one means the station rebooted and `wall_steps` started again from 0. The hub reads neither yet."
+    },
+    "wall_steps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many times the station's wall clock stepped by more than 5 s since the station started counting (its process's start: nothing is kept, so a reboot or a restart of the station starts it from 0 again). A step: (wall clock - CLOCK_BOOTTIME) changed by more than 5 s between two samples at most 5 s apart; samples once a second. The boot clock's drift (2-5 %) and the wall clock's small corrections (about 2 s, #788) are never a step. Skew samples of one `boot_id` with the same count are comparable (#773, #776)."
+    },
     "talking": {
       "type": "array",
       "description": "Everyone transmitting now, and whoever just finished and was not shown live. The whole list every time ([] when nobody talks). The hub keeps the first 50 entries and drops the snapshot when it is older than 8 s. The hub reads `paging` only when `talking` is present.",

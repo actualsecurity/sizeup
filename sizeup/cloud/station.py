@@ -25,6 +25,8 @@
                        which it adopts (adopt(): its events, status, logs and metrics say it from then
                        on), so an admin's rename on the hub (Settings > Station > Stations) never locks
                        it out. Its config's [station] id goes up too ("config_id")
+                       Beside `at` on every post: this boot's id and the wall clock's steps over 5 s
+                       ("boot_id", "wall_steps": sizeup/cloud/wallclock.py), for the hub to judge its clock skew
                        ... and the admins' service per source ("services": sizeup/sourcekeys.py), kept beside the
                        outbox (hub_services.json) so a station starting while the hub is away tags as it did
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
@@ -85,6 +87,7 @@ from sizeup.cloud.metrics import MetricsLink
 from sizeup.cloud import sttinput
 from sizeup.cloud.outbox import Outbox, open_outbox
 from sizeup.cloud.vessellink import VesselForwarder
+from sizeup.cloud.wallclock import WallSteps
 from sizeup.tts import VoiceCfg
 
 LIVE_REFRESH_S = 2.0     # while someone is talking the snapshot is re-sent this often (the hub drops one older than 8 s)
@@ -265,8 +268,13 @@ class StationLink:
         # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
         # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
         self.logs = LogShipper(cfg, self._client, log, app=app)
+        # the wall clock's steps and this boot (sizeup/cloud/wallclock.py; every state post, #773 / #788): sampled on the
+        # metrics sampler's 1 s tick; kept on the app, so the count goes on across the link going off and on
+        if not isinstance(getattr(app, "wall_clock", None), WallSteps):
+            app.wall_clock = WallSteps(log)
+        self.wall: WallSteps = app.wall_clock
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
-        self.metrics_link = MetricsLink(app, cfg, self._client, log)
+        self.metrics_link = MetricsLink(app, cfg, self._client, log, tick=self.wall.sample)
         # each transmission's / page's speech-to-text input: made off the radio path, into the outbox's own lane
         # (held while whisper is behind: the FLAC is made once it caught up, #677)
         self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
@@ -940,7 +948,8 @@ class StationLink:
             now = time.time()
             talking = self.app.live.state()
             paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
-            body: dict = {"at": now, "talking": talking, "paging": paging}
+            body: dict = {"at": now, "boot_id": self.wall.boot_id, "wall_steps": self.wall.steps,   # (wallclock.py)
+                          "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
                 sig = [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier")) for r in tgs]

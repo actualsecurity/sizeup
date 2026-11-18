@@ -384,7 +384,11 @@ someone talks or a page goes out; the hub drops a snapshot older than 8 s; a hub
 and every 5 s the station's radio / SDR / STT / voice rows, SDR switches, re-run progress, outbox
 size and its version (also the heartbeat). The talkgroup list goes every 30 s or when a switch
 changes. The hub answers `{ok, build}`: its own build, which the station follows
-([Station updates](#station-updates-it-follows-the-hubs-build)).
+([Station updates](#station-updates-it-follows-the-hubs-build)). Beside `at`, every post carries `boot_id` (Linux's
+boot id, null elsewhere) and `wall_steps`: how often the wall clock stepped by more than 5 s against the boot clock
+(sampled every second; not kept, so it starts from 0 at a reboot or a station restart; #788's 2-5 % drift and ~2 s
+corrections never count). For judging the clock skew (#773, #776); the hub does not read them yet
+(sizeup/cloud/wallclock.py).
 
 **Hub → station, jobs** (`GET /api/station/jobs?wait=25`, the station's long poll; the answer comes
 back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked up in time:

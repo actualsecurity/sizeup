@@ -14,8 +14,8 @@ runs on a bare Linux box with Python + numpy.
                                   items: [{n, id, kind, ..., stt}]} -> {ok, stored: [n], refused: [n]}: kept as clip
                                   "<id>.src" beside the clip (before or after its event); read_stt_audio reads it.
                                   Its own lane: never through the events' cursor
-    POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
-                                  out now (latest wins; paging: sizeup/radio/livepage.py) and the
+    POST /api/station/state       {at, boot_id?, wall_steps?, talking?, paging?, status?}: who is talking
+                                  now and a page going out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
                                   progress, outbox size, its version -> {ok, build, caps, station, services}:
                                   the hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
