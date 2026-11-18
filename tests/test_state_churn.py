@@ -4,7 +4,8 @@ re-serializes only the sections that are new objects."""
 import json
 import sqlite3
 
-from sizeup.cad.service import Cad, Settings
+from sizeup.cad.service import STATE_CLOCK_S, Cad, Settings
+from tests.test_cad import Clock, local, make_cad
 from sizeup.cad import settings as settings_mod
 from sizeup.web import server as server_mod
 from sizeup.web.server import Broadcaster
@@ -81,12 +82,13 @@ def test_the_state_push_never_reads_every_override(tmp_path, monkeypatch):
     cad = make(tmp_path)
     add_places(cad, 50)
 
-    def every(self):
-        raise AssertionError("overrides() read on a state push")
-    monkeypatch.setattr(settings_mod.Editor, "overrides", every)
+    read = []                             # (recorded, not raised: Cad.alarms_state swallows an error)
+    real = settings_mod.Editor.overrides
+    monkeypatch.setattr(settings_mod.Editor, "overrides", lambda self, *a, **kw: read.append(1) or real(self, *a, **kw))
     cad.store.rev += 1                    # a rebuild, and the per-second part
+    st = cad.state()
     cad.state()
-    cad.state()
+    assert read == [] and st["alarms"] is not None
 
 
 def test_a_section_is_read_again_after_any_write(tmp_path):
@@ -169,3 +171,55 @@ def test_cad_state_sections_are_the_same_objects_while_nothing_changed(tmp_path)
     assert a["incidents"] is b["incidents"] and a["lists"] is b["lists"] and a["run_cards"] is b["run_cards"]
     cad.create({"type": "ALARM", "location": "2 Example St", "operator": "op"})
     assert cad.state()["incidents"] is not a["incidents"]
+
+
+# -- what ages with the clock, with no write to move the rev ---------------------------------------------------------------
+
+def test_a_closed_call_leaves_the_queue_after_its_hours_with_no_write(tmp_path):
+    clock = Clock(local(2026, 10, 7, 14, 0))
+    cad = make_cad(tmp_path, clock=clock)
+    iid = cad.create({"type": "MVA", "address": "Example Rd"})["id"]
+    cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
+    assert iid in [i["id"] for i in cad.state()["incidents"]]
+    clock.t += 3 * 86400
+    with cad.store.tx() as db:            # what used to move the rev all day: a write of nothing
+        db.execute("SELECT 1").fetchone()
+    assert iid not in [i["id"] for i in cad.state()["incidents"]]
+
+
+def test_the_state_is_rebuilt_each_minute_and_kept_within_one(tmp_path):
+    clock = Clock(local(2026, 10, 7, 14, 0))
+    cad = make_cad(tmp_path, clock=clock)
+    a = cad.state()
+    clock.t += 1
+    assert cad.state()["incidents"] is a["incidents"]               # the same minute: kept
+    clock.t += STATE_CLOCK_S
+    assert cad.state()["incidents"] is not a["incidents"]           # the next: built again
+    built = []
+    real = cad.store.recent_clears
+    cad.store.recent_clears = lambda since: built.append(since) or real(since)
+    cad.clears(clock.t)                    # (the state's build read them this minute)
+    cad.clears(clock.t + 1)
+    assert built == []
+    cad.clears(clock.t + STATE_CLOCK_S)
+    assert len(built) == 1
+
+
+def test_a_preplan_write_moves_the_rev_after_its_gen(tmp_path):
+    """A state built between the write's commit and the gen's move holds the old gen: a rev after the gen builds it
+    again."""
+    cad = make(tmp_path)
+    seen = []
+    real = cad.preplan._bump
+
+    def bump():                           # a broadcaster's build right in the gap
+        seen.append(cad.state()["preplan"]["gen"])
+        real()
+    cad.preplan._bump = bump
+    g0 = cad.preplan.gen
+    cad.preplan.create({"kind": "knox_box", "lat": 41.0, "lon": -73.66, "label": "Front door"})
+    assert seen == [g0]
+    assert cad.state()["preplan"]["gen"] == cad.preplan.gen != g0
+    r0 = cad.store.rev
+    cad.preplan_docs._bump()
+    assert cad.store.rev == r0 + 1 and cad.state()["preplan_docs"]["gen"] == cad.preplan_docs.gen

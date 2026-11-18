@@ -187,6 +187,10 @@ def services_rev(m: dict | None) -> str:
     return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:10] if m else ""
 
 
+
+STATE_CLOCK_S = 60.0   # Cad.state / clears: rebuilt at least this often, a write or not (what ages with the clock)
+
+
 class Cad:
     @property
     def may_write(self) -> Callable[[], bool]:
@@ -437,7 +441,10 @@ class Cad:
     def state(self) -> dict:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
-        if self._state is None or self._state[0] != rev:
+        # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one)
+        key = (rev, int(self.clock() // STATE_CLOCK_S))
+        if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
@@ -448,7 +455,7 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
-            self._state = (rev, {
+            self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
@@ -779,9 +786,9 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        rev = self.store.rev
-        if self._clears is None or self._clears[0] != rev:
-            self._clears = (rev, self.store.recent_clears(now - mapview.RECENT_S))
+        key = (self.store.rev, int(now // STATE_CLOCK_S))      # (and the minute: a clear ages out with no write)
+        if self._clears is None or self._clears[0] != key:
+            self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
 
     def locations(self, units: list[dict] | None = None, now: float | None = None) -> dict[str, dict | None]:
