@@ -25,6 +25,10 @@ test pre-alert topic from day one, caps generous for testing):
     max_age_min        15       a transmission older than this (a startup backfill, a late re-record) is never a
                                 pre-alert: a restart doesn't replay old pushes
     quiet_from / quiet_to  ""   "HH:MM" local: no pushes in between (log and map go on); "" = none
+    fd_window_min      60       a fire-related event (rules.py "fire_related") is checked against our open fire
+                                incidents and those closed this long before it (engine.py _fire) ...
+    fd_radius_m        150      ... at the same address or block, or (a confirmed address or intersection) within
+                                this far
     listen             True     a "Listen" link on each push (sizeup/intel/listen.py), playable listen_expiry_min (60),
                                 listen_before_s (45) before the first transmission to listen_after_s (60) after the
                                 last, at listen_kbps (24)
@@ -44,12 +48,13 @@ DEFAULTS = {"enabled": True, "push": True, "per_hour": 30, "per_day": 200, "per_
             "merge_min": 20, "mute_min": 15, "place_repush_min": 5, "move_min": 5,
             # the push's "Listen" link (sizeup/intel/listen.py): on, minutes it plays, seconds around the alert, bitrate
             "listen": True, "listen_expiry_min": 60, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24,
-            "push_pii": True}
+            "push_pii": True, "fd_window_min": 60, "fd_radius_m": 150}
 BOOLS = ("enabled", "push", "listen", "push_pii")
 LIMITS = {"per_hour": (1, 1000), "per_day": (1, 10000), "per_category_hour": (1, 1000), "repush_min": (0, 1440),
           "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440),
           "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60), "move_min": (1, 120), "listen_expiry_min": (1, 720),
-          "listen_before_s": (0, 600), "listen_after_s": (0, 600), "listen_kbps": (16, 64)}
+          "listen_before_s": (0, 600), "listen_after_s": (0, 600), "listen_kbps": (16, 64),
+          "fd_window_min": (5, 720), "fd_radius_m": (25, 2000)}
 LEVELS = ((0.8, "high"), (0.6, "medium"), (0.0, "low"))
 
 
