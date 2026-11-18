@@ -657,6 +657,22 @@
                   "text": {"type": "string", "maxLength": 120, "description": "What, terse, for people."}
                 }
               }
+            },
+            "quarantine": {
+              "title": "Quarantine",
+              "x-complete": true,
+              "type": "object",
+              "description": "The events the hub refused and the station set aside (Outbox.summary, sizeup/cloud/outbox.py; #762): counts, per kind, and the newest rows, the critical first. Kinds, states, reasons and the hub's error only, never an event's data. Optional: a station from before #762 sends none.",
+              "required": ["n", "critical", "evicted", "too_large_audio", "kinds", "rows"],
+              "additionalProperties": true,
+              "properties": {
+                "n": {"type": "integer", "minimum": 0, "description": "Events in the quarantine."},
+                "critical": {"type": "integer", "minimum": 0, "description": "Of them, critical ones (sent again, slowly)."},
+                "evicted": {"type": "integer", "minimum": 0, "description": "Non-critical ones dropped this run to keep the quarantine under its bound."},
+                "too_large_audio": {"type": "integer", "minimum": 0, "description": "Quarantined events whose clip was too large to keep (the event was kept)."},
+                "kinds": {"type": "object", "description": "Per event type: {n, critical, stuck, late, critical_first, minor_first, minor_last}: the counts, and when the critical and the other ones were first and last refused (Unix seconds or null). Health's alerts are decided from these.", "additionalProperties": {"type": "object"}},
+                "rows": {"type": "array", "description": "The newest quarantined events (at most 10), the critical first: {id, kind, reason, error, first_at, last_at, tries, critical, next_at, state}. `reason` is the hub's (malformed | apply_failed) or the station's own; `error` is empty for an incident source's event (it may quote the county's data).", "items": {"type": "object"}}
+              }
             }
           }
         },
