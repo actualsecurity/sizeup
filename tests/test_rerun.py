@@ -44,7 +44,9 @@ def test_an_aws_channel_runs_again_on_aws_and_the_same_text_still_ends(tmp_path)
     app = local_app(tmp_path, fake)
     try:
         tid = fm_segment(app)
-        assert wait(lambda: text(app, tid) == AWS_TEXT + ".", 10)
+        # the row's text, not the memory's: _retext writes memory first, the row after, and a re-run started between
+        # the two had its text overwritten by the late row write (the CI flake on #659)
+        assert wait(lambda: (comms_row(app, tid) or {}).get("text") == AWS_TEXT + ".", 10)
         n, row = rerun(app, tid)
         assert n == 1 and row["rerun_result"] == "same" and row["text"] == AWS_TEXT + "."
         assert app.stt.client.calls == 0                                   # not the local model
@@ -70,7 +72,9 @@ def test_the_monthly_limit_reruns_on_the_local_model_and_says_so(tmp_path):
     app = local_app(tmp_path, fake)
     try:
         tid = fm_segment(app)
-        assert wait(lambda: text(app, tid) == AWS_TEXT + ".", 10)
+        # the row's text, not the memory's: _retext writes memory first, the row after, and a re-run started between
+        # the two had its text overwritten by the late row write (the CI flake on #659)
+        assert wait(lambda: (comms_row(app, tid) or {}).get("text") == AWS_TEXT + ".", 10)
         conns = len(fake.conns)
         app.cad.settings.post("stt", {"action": "set", "key": "aws_monthly_limit_usd", "value": 0})
         n, row = rerun(app, tid)

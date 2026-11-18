@@ -1129,9 +1129,18 @@ class App:
                 pass
 
     def _prompt(self, item) -> str:
-        """whisper's prompt for one recording: the source's own (_base_prompt), with the top of its private term list
-        ahead of it in what that leaves of the budget (sizeup/stt_terms.py; [stt] terms_whisper, the station's from
-        the hub). item.vocab_v: which list went in ("" none)."""
+        """whisper's prompt for one recording (_prompt_v); item.vocab_v: which list went in ("" none)."""
+        text, vocab_v = self._prompt_v(item)
+        try:
+            item.vocab_v = vocab_v
+        except AttributeError:
+            pass
+        return text
+
+    def _prompt_v(self, item) -> tuple[str, str]:
+        """(whisper's prompt, its vocab_v) for one recording: the source's own (_base_prompt), with the top of its
+        private term list ahead of it in what that leaves of the budget (sizeup/stt_terms.py; [stt] terms_whisper, the
+        station's from the hub). The pair from one return, never through the item (another thread may prompt it)."""
         try:
             ts = self._terms_for_item(item)
         except Exception as e:  # noqa: BLE001 - the source's own prompt then
@@ -1143,11 +1152,7 @@ class App:
         except Exception as e:  # noqa: BLE001 - the source's own prompt then
             log(f"speech-to-text terms: {type(e).__name__}: {e}")
             text, vocab_v = base, ""
-        try:
-            item.vocab_v = vocab_v
-        except AttributeError:
-            pass
-        return text
+        return text, vocab_v
 
     def _base_prompt(self, item, short: bool = False) -> str:
         """The source's own prompt: the configured text, plus (stt.talker_prompt) the talkers on this call as they're
