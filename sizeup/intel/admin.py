@@ -33,6 +33,7 @@ from sizeup.intel import policy as policy_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.events import VERDICTS
 from sizeup.intel.model import MODES
+from sizeup.intel.push import category_label
 
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 LIST_S = 24 * 3600
@@ -187,8 +188,9 @@ class IntelAdmin:
         """An event as the console and the map read it (no transcript text: the rows play from their ids)."""
         p = self.engine.pack(e["pack"])
         cat = p.category(e["category"]) if p else {}
+        label = category_label(cat, p.label if p else "", e["category"])     # beside its pack's label: never twice
         return {"id": e["id"], "domain": e["domain"], "pack": e["pack"], "pack_label": p.label if p else e["pack"],
-                "category": e["category"], "label": cat.get("label") or e["category"], "tag": cat.get("tag") or "",
+                "category": e["category"], "label": label, "tag": cat.get("tag") or "",
                 "safety": bool(cat.get("safety")), "subject": e["subject"], "source_key": e["source_key"],
                 "first_at": e["first_at"], "last_at": e["last_at"], "until": e["until"], "status": e["status"],
                 "what": e["what_score"], "level": e["level"], "where": e["where_score"], "precision": e["precision"],
@@ -199,7 +201,7 @@ class IntelAdmin:
                 "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
                 "near_incident": e.get("near_incident"),
                 # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
-                "suggested": (cat.get("label") or e["category"]) if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
+                "suggested": label if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
                 and e["mode"] != "push" else ""}
 
     def state(self, now: float | None = None) -> dict | None:

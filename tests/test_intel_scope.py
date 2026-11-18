@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from sizeup.intel import push as push_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.engine import RELEASE_S, IntelEngine, RecordingSink
 from sizeup.intel.events import MemoryEvents
@@ -120,6 +121,8 @@ def test_the_area_pack_has_the_police_packs_rules_read_from_its_file():
     ({"rules_from": "x"}, "another pack's name"),                             # itself
     ({"rules_from": "police", "rules": []}, "not both"),
     ({"rules_from": "police", "rule_prefix": "Bad"}, "rule_prefix"),
+    ({"rules_from": ["police"]}, "a pack's name"),                          # never a TypeError (reload catches ValueError)
+    ({"rules_from": 7}, "a pack's name"),
 ])
 def test_rules_from_says_what_is_wrong(pack, why):
     with pytest.raises(ValueError, match=why):
@@ -148,7 +151,16 @@ def test_one_switch_raises_the_area_pack():
     [ev] = e.feed(row("n1", "Respond to 12 Example Road, shots fired.", e.clock(), **at(NEIGHBOR)))
     assert ev.mode == "push"
     [(ev, d)] = pushed(sink)
-    assert d.message["title"].startswith("Area PD · Area PD: Weapon / shots")
+    assert d.message["title"] == "Area PD · Weapon / shots"                # the category's label without the pack's
+
+
+def test_a_category_label_beside_its_packs_never_says_the_pack_twice():
+    area = {p.name: p for p in rules_mod.load_packs()}["neighbor_police"]
+    assert area.categories["weapons"]["label"] == "Area PD: Weapon / shots"            # unique in Settings
+    assert push_mod.category_label(area.categories["weapons"], "Area PD", "weapons") == "Weapon / shots"
+    assert push_mod.category_label({"label": "Barricade"}, "PD", "barricade") == "Barricade"
+    assert push_mod.category_label({"label": "PD: smoke / fire"}, "County PD", "fire_report") == "PD: smoke / fire"
+    assert push_mod.category_label({}, "Area PD", "edp") == "edp"
 
 
 def test_the_counters_have_a_line_for_the_area_pack():
@@ -182,7 +194,9 @@ def test_a_lone_hostage_or_barricade_word_is_under_the_threshold(text):
     "Caller states her husband is holding the kids hostage.",
     "We have a hostage situation at 12 Example Road.",
     "Male barricaded inside 12 Example Road, ESU is en route.",
-    "Hostage, Example Road, male is armed.",
+    "Hostage, subject armed with a knife.",
+    "Barricade, ESU requested.",
+    "Male barricaded in the apartment at 12 Example Road.",              # no dispatch cue: "barricaded in"
     "Barricade on Example Road, we're in a standoff.",
     "Hostage, get the negotiator started.",
     "Barricade at 12 Example Road, SWAT requested.",
@@ -199,13 +213,33 @@ def test_a_barricade_with_a_second_cue_pushes_at_once_with_no_place(text):
     assert "location not heard" in d.message["body"]
 
 
-def test_a_lone_word_and_a_cue_in_the_next_transmission_of_the_call_add_up():
+@pytest.mark.parametrize("first, second", [
+    ("The system is armed.", "Hostage."),
+    ("ESU is setting up on Example Road.", "Barricade on Example Road."),
+    ("Car 6, subject armed with a knife, last seen on Sample Street.", "Hostage."),
+    ("Car 6 respond to Sample Street, the standoff with the landlord is over.", "Barricade."),
+])
+def test_a_lone_word_never_takes_a_cue_from_another_transmission(first, second):
+    """A cue counts only in the transmission that says the barricade itself: two talkers' words, a minute apart in the
+    same window, are no barricade (and a cue alone is no rule of the barricade's at all)."""
     clock = Clock()
     e, sink = engine(clock=clock)
-    assert e.feed(row("t1", "Car 6, Example Road, hostage.", clock(), talker="CAR 6")) == []
+    e.feed(row("t1", first, clock(), talker="CAR 6"))
     clock.t += 20
-    out = e.feed(row("t2", "Car 6, ESU and a negotiator to Example Road, barricade.", clock(), talker="CAR 6"))
-    assert [x.category for x in out] == ["barricade"] and pushed(sink)
+    e.feed(row("t2", second, clock(), talker="DISP"))
+    assert not [ev for ev in e.events.all() if ev.category == "barricade"]
+    assert not [ev for ev, _d in pushed(sink) if ev.category == "barricade"]
+
+
+@pytest.mark.parametrize("text", [
+    "Alarm is armed, barricade on Example Road.",                         # a road closure beside an alarm system
+    "The barricade on Example Road, the alarm system is armed.",
+    "Hostage, no one with a weapon.",                                     # a negation inside the gap
+])
+def test_a_cue_word_that_is_no_cue_in_the_same_transmission_stays_under(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert not [ev for ev in e.events.all() if ev.category == "barricade"] and pushed(sink) == []
 
 
 def test_the_safety_categories_are_never_held_for_a_place():

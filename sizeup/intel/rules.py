@@ -471,12 +471,15 @@ def rules_from(d: dict, others: dict) -> dict:
     kept in one file, for two scopes (the police pack and neighbor_police: the same rules, another mode). Its rules'
     ids are "rule_prefix" (default "<its name>.") + theirs ("area.pd.barricade"), so Settings tune each pack's rules on
     their own (intel_rules is keyed by rule id) and the counts per rule stay apart; its categories' labels are
-    "<its label>: <theirs>" (the Settings card names each category's control by its label). The other pack's Settings
+    "<its label>: <theirs>" (the Settings card names each category's control by its label; a push and the card show
+    them without the prefix, push.category_label). The other pack's Settings
     and its admin's local.* rules are not taken. ValueError with the reason."""
     src = d.get("rules_from")
     if not src:
         return d
     name = str(d.get("name") or "")
+    if not isinstance(src, str):
+        raise ValueError(f"{name}.rules_from: a pack's name")
     base = others.get(src)
     if base is None and re.fullmatch(r"[a-z][a-z0-9_]{0,23}", str(src)) and (DATA / f"{src}.json").is_file():
         base = json.loads((DATA / f"{src}.json").read_text())
