@@ -267,6 +267,18 @@ def plan_text(c) -> str:
     return " + ".join([head, *(AmExtra(f, label, a, b).describe() for f, a, b, label in getattr(c, "also", ()))])
 
 
+def keyup_link(label: str, seg) -> dict | None:
+    """A piece of a recording cut at key-ups (radio/fm.py, am.py): {parent: the clip id of the recording's first piece
+    (the first piece: its own), prev: the piece before's ("" for the first), split: why it was cut (gap | id | level; ""
+    for the first)}. None for a transmission that wasn't cut."""
+    first = getattr(seg, "first_start", None)
+    if first is None:
+        return None
+    cid = lambda t: f"{label.replace(' ', '')}-{int(t * 1000)}"     # noqa: E731  (as the transmission's own id)
+    prev = getattr(seg, "prev_start", None)
+    return {"parent": cid(first), "prev": cid(prev) if prev is not None else "", "split": getattr(seg, "split", "")}
+
+
 def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
@@ -276,9 +288,11 @@ def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiv
                           schedule=getattr(c, "schedule", ()) or None,
                           also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
                           owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered,
-                          multichannel=getattr(cfg, "airband_multichannel", False))
+                          multichannel=getattr(cfg, "airband_multichannel", False),
+                          split_s=getattr(c, "split_s", 0.0) or 0.0, jump_db=getattr(c, "jump_db", None) or None)
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
-                       drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
+                       drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s, keyups=getattr(c, "keyups", ""),
+                       split_s=getattr(c, "split_s", 0.0) or 0.0, jump_db=getattr(c, "jump_db", None) or None)
 
 
 def whisper_threads() -> int:
@@ -461,6 +475,10 @@ class App:
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
+        # (after the seed: a county talkgroup heard in the history is the county's, whatever another system lists)
+        for tg, owner, was in self.tg.drop_orphans(cfg.p25_tg_file_rows > 0):   # the old page's, by number alone (once)
+            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}; "
+                f"kept in talkgroups_migrated.json): {tg} is {owner}'s talkgroup, never heard on the county")
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -702,15 +720,17 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
         # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
         # deploy: the response area's cameras 24/7, a 12 h window, and only the lease holder writes (self.fence). This
         # is the leader's app: the standby's warm app (prewarm) never gets here.
-        if cfg.roads_dvr and cfg.roads_enabled:
+        # Only with a folder for it (#661): the state folder's dvr/ (cad_db) or dvr_dir; an in-memory app (cad_db "",
+        # the tests) has none, and never records into the working directory.
+        if cfg.roads_dvr and cfg.roads_enabled and (cfg.roads_dvr_dir or cfg.cad_db):
             from sizeup.dvr import WORKERS, MAX_WORKERS, Dvr, shared_mount
-            state = Path(cfg.cad_db).parent if cfg.cad_db else Path(".")
-            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else state / "dvr"
+            root = Path(cfg.roads_dvr_dir) if cfg.roads_dvr_dir else Path(cfg.cad_db).parent / "dvr"
             fs = shared_mount(root) if cfg.roads_dvr_shared == "auto" else ""
             shared = cfg.roads_dvr_shared == "on" or bool(fs)
             if shared:
@@ -827,7 +847,7 @@ class App:
                       "status": (cfg.prealert_status_topic, cfg.prealert_status_source)}, log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
-        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the
+        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (its own topic only: none, no push), by the
         # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
         intel = self.cad.intel
         intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
@@ -836,6 +856,8 @@ class App:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
+        if cfg.alerts_config_note:
+            log(f"notify: config: {cfg.alerts_config_note}")
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
@@ -1010,6 +1032,9 @@ class App:
                  read_twice=page.read_twice, vocab_v=getattr(page, "vocab_v", "") or "")
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
+        for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
+            if getattr(page, k, None):
+                d[k] = getattr(page, k)
         return d
 
     def _save_page(self, page: Page) -> None:
@@ -1363,6 +1388,8 @@ class App:
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                     "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
         t.low_energy = low_energy  # type: ignore[attr-defined]
+        if (link := keyup_link(ch.label, seg)) is not None:
+            t.keyup = link         # type: ignore[attr-defined]  (a piece of a recording cut at key-ups, radio/fm.py)
         if id_note:
             t.id_note = id_note    # type: ignore[attr-defined]
         self._keep_bursts(t.id, seg)
@@ -1389,6 +1416,8 @@ class App:
         t.fm = False                                      # type: ignore[attr-defined]
         t.mhz = round(float(ch.mhz), 4)                   # type: ignore[attr-defined]  (the frequency it was heard on: #260)
         t.carrier_db = round(float(seg.quieting_db), 1)   # type: ignore[attr-defined]  (the tower's is steady: #252)
+        if (link := keyup_link(ch.label, seg)) is not None:
+            t.keyup = link                                # type: ignore[attr-defined]  (cut at a key-up, radio/am.py)
         # #270: the level, the floor and the voice's SNR of each transmission, sent to the hub with it (its traffic doc),
         # so a weak transmitter can be told from a missing one there; and one line here
         for k in ("carrier_dbfs", "snr_db", "opened"):
@@ -1426,6 +1455,17 @@ class App:
                 "(Record is off in Settings > Radios)")
             return
         done, touched = self.pagehold.add(ch.label, ch.mhz, seg)
+        if seg.split and touched and not touched[0][1]:
+            # a unit's key-up cut from a page (radio/fm.py keyups): who keyed it, as on a traffic channel
+            found = self.tap.ids(ch.label, seg.start, seg.end)
+            found += [x for x in self._mdc(*seg.bursts) if x not in found]
+            ids = list(dict.fromkeys(h for h, _e in found))
+            if ids:
+                page = touched[0][0]
+                page.radio_id = ", ".join(ids)          # type: ignore[attr-defined]
+                page.unit = ", ".join(self._units(seg, found))   # type: ignore[attr-defined]
+                for h in ids:
+                    self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         finished = {id(p) for p in done}
         for page, joined in touched:
             self._keep_clip(page.id, page.audio)        # joined: the clip grows with the page
@@ -1512,7 +1552,8 @@ class App:
         own = page.message_tones
         try:
             self.cad.record_traffic({"id": page.id, "start": page.start, "end": page.end, "source": page.label,
-                                     "talkgroup": None, "unit": "60 Control" if page.tones else "", "rig": "", "radio_id": "",
+                                     "talkgroup": None, "unit": getattr(page, "unit", "") or ("60 Control" if page.tones else ""),
+                                     "rig": "", "radio_id": getattr(page, "radio_id", ""),
                                      "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
@@ -1636,7 +1677,12 @@ class App:
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
-                t.group, t.service = info.get("group") or "", info.get("service") or "other"  # type: ignore[attr-defined]
+                # its service: the admins' for this source (Settings > Radios > Channels; its speech-to-text profile
+                # and this station's page), else its file's (#409); service_auto, the file's, goes to the hub with it
+                # (the hub applies the choice it has then: one put back to automatic meanwhile is not the row's)
+                t.group = info.get("group") or ""  # type: ignore[attr-defined]
+                t.service_auto = info.get("service") or "other"  # type: ignore[attr-defined]
+                t.service = sources.overridden(t.source_key, t.service_auto)  # type: ignore[attr-defined]
                 t.dept = info.get("department") or ""  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -2090,18 +2136,26 @@ class App:
         service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
         talkgroups and the analog channels are worked out here."""
         if getattr(t, "system", ""):
+            # its service with no choice (service_auto; a station before that: its service, which never had one) and
+            # the admins' choice of now over it (Comms.record applies it)
+            auto = getattr(t, "service_auto", "") or getattr(t, "service", "")
             return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
-                    "service": getattr(t, "service", ""), "ours": False, "dept": getattr(t, "dept", ""),
+                    "service": sources.overridden(getattr(t, "source_key", ""), auto), "service_auto": auto,
+                    "ours": False, "dept": getattr(t, "dept", ""),
                     "tier": getattr(t, "tier", "")}
         if t.talkgroup is None:
             kind = next((c.kind for c in self.cfg.channels if c.label == t.source), "")
             air = kind == "airband"
             return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
-                    "group": "Airband" if air else "Analog", "service": sources.service(kind=kind or "traffic"),
+                    "group": "Airband" if air else "Analog",
+                    "service": sources.service(kind=kind or "traffic", key=sources.fm(t.source, kind)),
+                    "service_auto": sources.service(kind=kind or "traffic"),
                     "ours": not air, "dept": "", "tier": ""}
         info = self.tg.info.get(t.talkgroup, {})
         return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
-                "group": info.get("group") or "", "service": sources.service(info.get("group") or ""),
+                "group": info.get("group") or "",
+                "service": sources.service(info.get("group") or "", key=sources.p25(self.tg.county, t.talkgroup)),
+                "service_auto": sources.service(info.get("group") or ""),
                 "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
 
     def _backfill(self) -> None:
@@ -2675,6 +2729,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
+        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2689,6 +2744,18 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
+
+    def _stt_input(self, item, audio: np.ndarray | None) -> None:
+        """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
+        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
+        link = self.link
+        if link is None or audio is None or not hasattr(link, "stt_input"):
+            return
+        try:
+            link.stt_input(item, audio)
+        except Exception as e:  # never in the radio path's way (the hub falls back to the clip)
+            log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_priority(self, item, key: str) -> int:
         """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first
@@ -4528,11 +4595,16 @@ class App:
         talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
+        qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
+            # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
+            # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
+            return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"
         self.tg.set(int(tg), record, main, system)
         if system:
             log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
@@ -4546,7 +4618,8 @@ class App:
         return "; ".join(on) if on else ("SDRs released (Off)" if many else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup-group: a whole section on/off in one go."""
+        """POST /api/talkgroup-group: a whole section of the county's on/off in one go (never another system's section
+        of the same name: those have a tier each)."""
         if not self.p25:
             return "no P25 configured"
         n = self.tg.set_group(str(group), record, main)
@@ -5097,6 +5170,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     app.cad.on_dispatch = server.poke                    # and a dispatch, then its voice once rendered (#426)
     app.cad.resume_voice()                               # ... and the voices a restart cut short, now that all is wired
+    app.cad.retag_resume()                               # ... and a source's rows a restart left to re-tag (its service)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server

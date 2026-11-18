@@ -27,6 +27,10 @@ goes to its default folder: there if that folder is listed, else that folder mad
 folder. Nothing ever disappears from the rail. A key no source has now is kept and simply not shown (a talkgroup
 not heard lately comes back where it was). Folded / unfolded is each viewer's own (the browser's), never here.
 
+One name alone (Settings > Radios > Channels, {"action": "name", key, name}; named()): the same store, the folders as
+they are (none set: {"folders": []}, which is the automatic grouping), blank: its own name again. Whichever page set
+it, both show it.
+
 Admins (POST /api/cad/settings/radio_folders), audited as Radios, exported with the rest. Everyone signed in sees it;
 a viewer who may not see another system's traffic gets none of its keys, and no folder holding only those.
 """
@@ -113,6 +117,26 @@ def clean(v) -> dict:
         if is_key(k) and n:                      # not a source key: dropped; blank: its own name
             names[k] = n
     return {"folders": out, **({"names": dict(sorted(names.items()))} if names else {})}
+
+
+def name_key(k) -> str:
+    """A source key as names are kept: the qualified one ("tg:307" is the county's p25:westchester:307)."""
+    if not is_key(k):
+        raise CadError("key: a source key (fm:<label>, air:<label>, p25:<system>:<talkgroup>)")
+    got = sourcekeys.parse(k)
+    return sourcekeys.p25(*got) if got else k
+
+
+def named(layout: dict | None, key: str, name) -> dict | None:
+    """The layout with one channel's name set (blank: its own again), the folders untouched. None: nothing is left
+    to keep (no folders, no names: the automatic grouping)."""
+    key, name = name_key(key), _name(name, "name", False)
+    cur = layout or {"folders": []}
+    names = {k: n for k, n in (cur.get("names") or {}).items() if (name_key(k) if is_key(k) else k) != key}
+    if name:
+        names[key] = name
+    out = clean({"folders": cur["folders"], "names": names})
+    return None if not out["folders"] and not out.get("names") else out
 
 
 def rev(layout: dict | None) -> str:

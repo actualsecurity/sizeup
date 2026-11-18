@@ -300,11 +300,18 @@ def _callers() -> str:
     return _alts([n.lower() for n in names if n])
 
 
+_UNIT_NEXT = re.compile(r"\s+(?:miles?|nm|knots?|kts|feet|foot|thousand|hundred|degrees|o'?clock)\b", re.I)
+
+
 def _groups(t: str) -> str:
     """A callsign's number said in groups and written apart ("JetBlue 12 34", "Cessna 4 5 6PR"), joined after a
-    telephony or a type word: up to 4 digits for a flight number, 5 for a tail."""
+    telephony or a type word: up to 4 digits for a flight number, 5 for a tail. Not before a unit ("miles", "knots"):
+    its number may be among the groups."""
     def one(m: re.Match) -> str:
         parts = m.group("num").split()
+        if _UNIT_NEXT.match(m.string, m.end()):
+            return m.group(0)           # the last groups may be a distance or speed ("JetBlue 12 4 mile final"): the
+                                        # matcher reads them apart (sizeup/atc.py find_mentions), never one number
         digits = "".join(re.sub(r"\D", "", p) for p in parts)
         if len(digits) > 5 or any(re.search(r"[A-Z]", p) for p in parts[:-1]):
             return m.group(0)

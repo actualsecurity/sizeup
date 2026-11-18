@@ -1,0 +1,7 @@
+{"do": "scenario", "t0": "day", "why": "60 Control's alert level 2 for the aircraft of an open tower pre-alert: attached to it (its title the alert's), pushed again at priority 5, the county feed polled now and a QUEUED Airport incident (never dispatched); the readback adds nothing; an upgrade to 3 escalates (push, poll, subtype); the cancel ends it and is a line on the incident, which stays open."}
+{"do": "picture", "t": 0, "planes": [{"hex": "a0b1c2", "flight": "N123AB", "type": "C68A", "lat": 41.04, "lon": -73.69, "alt": 1400, "gs": 130, "trk": 340, "vr": -700, "phase": "arriving", "rwy": "34", "dist": 3.1, "age": 1.0}]}
+{"do": "air", "t": 10, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "Westchester tower, November one two three alfa bravo, declaring an emergency, unsafe gear indication"}
+{"do": "radio", "t": 60, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34"}
+{"do": "radio", "t": 120, "id": "fire-2", "tg": 307, "text": "60 Control copies, alert level two for the Citation, runway 34"}
+{"do": "radio", "t": 200, "id": "fire-3", "tg": 307, "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke"}
+{"do": "radio", "t": 900, "id": "fire-4", "tg": 307, "text": "60 Control, car 9901, cancel the alert, aircraft landed without incident"}

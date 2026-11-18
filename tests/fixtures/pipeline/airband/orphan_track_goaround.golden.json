@@ -1,0 +1,231 @@
+{
+ "why": "A go-around heard with no callsign waits (an orphan, ORPHAN_S); the track of one aircraft goes around on ADS-B; another aircraft named first never takes the orphan, the one whose track went around does.",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "a0b1c2",
+      "flight": "N123AB",
+      "type": "C68A",
+      "lat": 41.04,
+      "lon": -73.69,
+      "alt": 1400,
+      "gs": 130,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 3.1,
+      "age": 1.0
+     },
+     {
+      "hex": "c1c1c1",
+      "flight": "N789EF",
+      "type": "A320",
+      "lat": 41.12,
+      "lon": -73.73,
+      "alt": 2400,
+      "gs": 150,
+      "trk": 160,
+      "vr": -600,
+      "phase": "arriving",
+      "rwy": "16",
+      "dist": 4.0,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 10,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, we're going around, we have a flat"
+   }
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 20,
+    "planes": [
+     {
+      "hex": "a0b1c2",
+      "flight": "N123AB",
+      "type": "C68A",
+      "lat": 41.04,
+      "lon": -73.69,
+      "alt": 1900,
+      "gs": 130,
+      "trk": 340,
+      "vr": 1800,
+      "phase": "near",
+      "rwy": "34",
+      "dist": 3.1,
+      "age": 1.0
+     },
+     {
+      "hex": "c1c1c1",
+      "flight": "N789EF",
+      "type": "A320",
+      "lat": 41.12,
+      "lon": -73.73,
+      "alt": 2400,
+      "gs": 150,
+      "trk": 160,
+      "vr": -600,
+      "phase": "arriving",
+      "rwy": "16",
+      "dist": 4.0,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 30,
+    "id": "twr-2",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November seven eight niner echo foxtrot, continue, number two"
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 40,
+    "id": "twr-3",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "November one two three alpha bravo, roger, climb and maintain three thousand"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "abnormal",
+     "subject": "acft:N123AB",
+     "group": "",
+     "at": 40.0,
+     "updated_at": 40.0,
+     "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
+     "detail": "go-around and abnormal phrases · HPN Tower",
+     "confidence": 0.85,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, we're going around, we have a flat",
+        "hits": [
+         "flap problem",
+         "going around"
+        ],
+        "context": false
+       },
+       {
+        "id": "twr-3",
+        "at": 40.0,
+        "channel": "HPN Tower",
+        "text": "N123AB, roger, climb and maintain three thousand",
+        "hits": [],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1900,
+        "gs": 130,
+        "trk": 340,
+        "phase": "near",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": 19.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 2,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "go-around · flaps"
+       ],
+       [
+        "ADS-B",
+        "go-around (climb after approach)"
+       ],
+       [
+        "Track",
+        "1,900 ft · 3.1 NM · near"
+       ]
+      ],
+      "pushed": 0.85
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 40.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: go-around · flaps · N123AB (C68A) (alert high 85%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
+     "message": "“Westchester Tower, we're going around, we have a flat” · “N123AB, roger, climb and maintain three thousand” · N123AB (C68A) · 3.1 NM from HPN · 1,900 ft · near HPN 34 · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport pre-alert (ATC)"
+   ]
+  }
+ ]
+}

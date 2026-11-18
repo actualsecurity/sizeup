@@ -39,7 +39,10 @@ A train record (what we read; anything else is ignored, a record missing a requi
         are the line's.
 
 Which trains: Metro-North's New Haven Line (branch_id NH) and any other train inside the map's area (a New Canaan
-or Danbury train on the main line). Matched to a GTFS-realtime train by train number and run date.
+or Danbury train on the main line, an Amtrak train: branch_id AM). Matched to a GTFS-realtime train by train number and
+run date. Amtrak's trains are not in Metro-North's GTFS-realtime: they are drawn from this source alone ("agency" Amtrak),
+and their location is usually SIGNAL (where Metro-North's signal system has them: the block they entered, its time when
+they entered it), not GPS: kept SIGNAL_MAX_AGE_S, not POS_MAX_AGE_S (sizeup/trains.py takes such a position block to block).
 
 Schedule (adaptive, like the aircraft layer): FAST_S (5 s; [trains] traintime_every_s, 5 to 60) while a page has
 the Trains layer on (it asked within VIEW_S) or an emergency incident (active or pending, changed within HOT_AGE_S)
@@ -88,6 +91,11 @@ FALLBACK_AFTER = 3              # bad polls in a row (failed, or the shape chang
 MAX_AGE_S = 90.0                # a good read older than this is not merged
 POS_MAX_AGE_S = 40.0            # a train's location older than this: its GTFS-realtime position instead
 POS_SOURCES = ("GPS", "SIGNAL") # locations good enough to draw (OPER, SCHED: an operator's or the timetable's)
+SIGNAL_MAX_AGE_S = 600.0        # a SIGNAL location of a train only TrainTime has (an Amtrak train on the New Haven Line): kept
+                                # this long. Its time is when the train reached that signal's block and stays so until the
+                                # next one, 1 to 3 km on (a minute or more; minutes at a red signal); with no GTFS-realtime
+                                # position to fall back on, POS_MAX_AGE_S dropped it from the map 40 s after each signal
+AMTRAK = ("AM",)                # TrainTime's branch_id for Amtrak's trains over Metro-North (the card said "AM west")
 BACKOFF_S = (20.0, 600.0)
 RATE_LIMITED_S = 300.0
 REFUSED_S = 1800.0
@@ -622,11 +630,16 @@ def passengers(rec: dict) -> int | None:
     return sum(n) if n else None
 
 
+def agency(rec: dict) -> str:
+    """Whose train: "Amtrak" (TrainTime's branch AM, or a branch named so), else "Metro-North"."""
+    return "Amtrak" if rec.get("branch_id") in AMTRAK or "AMTRAK" in (rec.get("branch") or "").upper() else "Metro-North"
+
+
 def facts(rec: dict, stations: dict[str, str] | None = None) -> dict:
     """What the popup shows of a train from this source (the hub adds these to the train as "tt")."""
     nx, pv = next_stop(rec), prev_stop(rec)
     names = stations or {}
-    return {"src": SOURCE, "loc_src": rec["loc_src"], "loc_at": rec["loc_at"], "speed_mph": rec["speed_mph"],
+    return {"src": SOURCE, "agency": agency(rec), "loc_src": rec["loc_src"], "loc_at": rec["loc_at"], "speed_mph": rec["speed_mph"],
             "heading": rec["heading"], "mp": milepost(rec), "route_mp": rec["route_mp"], "branch": rec["branch_id"],
             "fleet": rec["fleet"], "cars": rec["cars_actual"] or (len(rec["cars"]) or None), "cars_sched": rec["cars_sched"],
             "occupancy": rec["occupancy"], "pax": passengers(rec),
@@ -681,7 +694,11 @@ def match(t: dict, by_num: dict[str, list[dict]], misses: list | None = None) ->
     return max(cands, key=lambda r: r["run_date"])
 
 
-def usable_position(rec: dict, now: float) -> bool:
+def usable_position(rec: dict, now: float, alone: bool = False) -> bool:
+    """A location good enough to draw now: GPS or SIGNAL, under POS_MAX_AGE_S old; for a train only this source has
+    (alone: nothing else to place it by) a SIGNAL one under SIGNAL_MAX_AGE_S (it is as old as the block it entered)."""
+    if alone and rec["loc_src"] == "SIGNAL":            # (from when it got to that signal: TrainTime._sig_since)
+        return now - min(rec["loc_at"], rec.get("loc_since") or rec["loc_at"]) <= SIGNAL_MAX_AGE_S
     return rec["loc_src"] in POS_SOURCES and now - rec["loc_at"] <= POS_MAX_AGE_S
 
 
@@ -704,20 +721,20 @@ def merge(feed: dict, records: list[dict], now: float, at: float | None = None, 
         used.add(id(r))
         trains[k] = _with(t, r, now, stations, (gtfs_seen or {}).get(k))
     for r in records:
-        if id(r) in used or not usable_position(r, now):
+        if id(r) in used or not usable_position(r, now, alone=True):
             continue
         key = f"tt:{r['train']}:{r['run_date']}"
         trains[key] = _with({"id": key, "train": r["train"], "trip_id": "", "route_id": "", "start_date": r["run_date"].replace("-", ""),
-                             "stops": [], "delay": None, "pos": None, "vstatus": "", "vstop": ""}, r, now, stations)
+                             "stops": [], "delay": None, "pos": None, "vstatus": "", "vstop": ""}, r, now, stations, alone=True)
     return {"timestamp": feed.get("timestamp"), "tt_at": at, "trains": trains, "tt_misses": misses}
 
 
-def _with(t: dict, r: dict, now: float, stations, gtfs_at: float | None = None) -> dict:
+def _with(t: dict, r: dict, now: float, stations, gtfs_at: float | None = None, alone: bool = False) -> dict:
     t = dict(t)
     t["tt"] = facts(r, stations)
     t["dir_hint"] = 1 if r["dir"] == "E" else -1
     gtfs_ts = (gtfs_at if gtfs_at is not None else (t.get("pos") or {}).get("ts") or 0) if t.get("pos") else 0
-    if usable_position(r, now) and r["loc_at"] >= gtfs_ts:          # only a position at least as new as GTFS-realtime's
+    if usable_position(r, now, alone) and r["loc_at"] >= gtfs_ts:          # only a position at least as new as GTFS-realtime's
         t["pos"] = {"lat": r["lat"], "lon": r["lon"], "bearing": r["heading"], "ts": r["loc_at"], "src": "traintime",
                     "loc": r["loc_src"],                          # GPS | SIGNAL: a SIGNAL location is a fixed point (#379)
                     "speed": r["speed_mph"] * 1609.344 / 3600 if r["speed_mph"] is not None else None}
@@ -831,6 +848,7 @@ class TrainTime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.records: list[dict] = []
+        self._sig_seen: dict[tuple, tuple] = {}         # (train, run date) -> (its SIGNAL location, when we first saw it there)
         self.alerts: list[dict] = []
         self.branch_alerts: dict[str, list[dict]] = {}   # each branch's, for a train's box: its own branch's (#385)
         self.st = {"at": None, "error": "", "next": 0.0, "last": None, "fails": 0, "bad": 0, "n": 0, "total": 0, "dropped": 0,
@@ -990,6 +1008,7 @@ class TrainTime:
             self.st["last"] = self.clock()
         now = self.clock()
         keep = [r for r in doc["records"] if ours(r, self.bbox)]
+        self._sig_since(keep)
         with self.lock:
             self.records = keep
             self.alerts = branch_alerts(doc["records"])
@@ -1003,6 +1022,21 @@ class TrainTime:
             self.log(f"trains: TrainTime: {doc['dropped']} of {doc['total']} records not in the known shape, dropped")
         self._changed()
         return True
+
+    def _sig_since(self, recs: list[dict]) -> None:
+        """Each SIGNAL location's "loc_since": when the train first had it (its own time then), so a record re-stamped
+        at the same signal (a train that never moves on, or a dead record) ages from when it got there (merge's
+        SIGNAL_MAX_AGE_S), not from its newest time."""
+        seen = {}
+        for r in recs:
+            if r["loc_src"] != "SIGNAL":
+                continue
+            k, where = (r["train"], r["run_date"]), (r["lat"], r["lon"])
+            old = self._sig_seen.get(k)
+            since = min(old[1], r["loc_at"]) if old is not None and old[0] == where else r["loc_at"]
+            r["loc_since"] = since
+            seen[k] = (where, since)
+        self._sig_seen = seen
 
     def _bad(self, code: int, why: str, was: bool) -> bool:
         self.st["bad"] += 1

@@ -13,8 +13,9 @@ talkgroup has none, and is only ever written qualified.
 Each row of the radio log carries its source (sizeup/cad/comms.py: `source`, `system`, `group`, `service`, `ours`,
 `dept`, `tier`, `safety`), so nothing downstream has to read a talkgroup number alone.
 
-    service    fire | police | ems | transit | air | other: the talkgroups file's "Service" column, else from its
-               group ("Tag") by the words below
+    service    fire | police | ems | transit | air | other: an admin's choice for that source first (Settings > Radios
+               > Channels or the rail's Edit: the settings section radio_services, set_service_overrides()), else the
+               talkgroups file's "Service" column, else from its group ("Tag") by the words below
     ours       in "Our calls": our fire channels (the analog ones, and the talkgroups marked Main). Never another
                system's talkgroup
 """
@@ -154,8 +155,54 @@ def of_row(channel: str, talkgroup, system: str = "", air: bool = False, county:
     return p25(system or county, int(talkgroup))
 
 
-def service(group: str = "", listed: str = "", kind: str = "") -> str:
-    """fire | police | ems | transit | air | other for a source: as listed, else by its kind and its group's words."""
+# -- an admin's service per source (the settings section radio_services, sizeup/cad/settings.py) ------------------
+#
+# {qualified source key: service}: wins over the talkgroups file's column and the words. The CAD of record sets it from
+# its settings (the hub, all-in-one); a station takes the hub's (its answer to POST /api/station/state, kept beside the
+# outbox) and from then on never its own CAD's, so the station and the hub tag a source alike.
+AUTOMATIC = "automatic"            # no choice: the file's column, else the words
+_service_over: dict[str, str] = {}
+_service_from_hub = False
+
+
+def service_key(key) -> str:
+    """A source key as a service choice is kept: qualified ("tg:307" is the county's p25:westchester:307)."""
+    got = parse(str(key))
+    return p25(*got) if got else str(key)
+
+
+def clean_services(m) -> dict[str, str]:
+    """{key: service} as kept: qualified keys, known services only (anything else dropped, never raised)."""
+    out: dict[str, str] = {}
+    for k, v in (m.items() if isinstance(m, dict) else ()):
+        if isinstance(k, str) and k and v in SERVICES:
+            out[service_key(k)] = v
+    return dict(sorted(out.items()))
+
+
+def set_service_overrides(m, hub: bool = False) -> None:
+    """The admins' choices (hub: what the hub sent a station; from then on the station's own CAD never sets them)."""
+    global _service_over, _service_from_hub
+    if _service_from_hub and not hub:
+        return
+    _service_over = clean_services(m)
+    _service_from_hub = _service_from_hub or hub
+
+
+def service_overrides() -> dict[str, str]:
+    return dict(_service_over)
+
+
+def overridden(key, computed: str = "") -> str:
+    """The admins' service for a source when they chose one, else `computed`."""
+    return (_service_over.get(service_key(key)) or computed) if key else computed
+
+
+def service(group: str = "", listed: str = "", kind: str = "", key: str = "") -> str:
+    """fire | police | ems | transit | air | other for a source: the admins' choice for its key, else as listed, else
+    by its kind and its group's words."""
+    if key and (got := _service_over.get(service_key(key))):
+        return got
     v = str(listed or "").strip().lower()
     if v in SERVICES:
         return v
