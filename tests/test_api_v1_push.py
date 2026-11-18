@@ -25,6 +25,16 @@ PATH = "/api/v1/devices/dev-0001/push"
 GOOD = {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN}
 
 
+class Fence:
+    """The hub's single-writer lease as far as the Gate asks: ok() (a test turns it off to fence the task)."""
+
+    def __init__(self):
+        self.up = True
+
+    def ok(self):
+        return self.up
+
+
 @pytest.fixture
 def rig(tmp_path):
     fake = FakeSns()
@@ -35,8 +45,10 @@ def rig(tmp_path):
     svc.install(service)
     switches = Switches(lambda: True, lambda: flags, max_requests=2)       # v1 may serve two at once
     who = lambda h: ME if h.get("Authorization") == BEARER["Authorization"] else None      # noqa: E731
-    srv, url = serve(role="hub", mobile=switches, mobile_resolver=who)
-    yield type("Rig", (), {"url": url, "fake": fake, "service": service, "flags": flags, "db": tmp_path / "hub.sqlite"})
+    fence = Fence()
+    srv, url = serve(role="hub", mobile=switches, mobile_resolver=who, fence=fence)
+    yield type("Rig", (), {"url": url, "fake": fake, "service": service, "flags": flags, "db": tmp_path / "hub.sqlite",
+                           "fence": fence, "srv": srv})
     srv.shutdown()
     svc.install(None)
     fake.close()
@@ -239,6 +251,87 @@ def test_a_body_that_stops_short_and_closes_is_a_400_and_frees_the_slot(rig):
         assert out.startswith(b"HTTP/1.1 400") and b"bad_body" in out
     assert rig.fake.calls == [] and not rig.db.exists()
     assert call(rig, "DELETE")[0] == 200                         # the next request is served: no 503 busy
+
+
+# -- the same gate as POST: a fenced hub writes nothing, the gate counts it ----------------------------------------------
+
+def test_a_fenced_hub_answers_503_to_a_put_and_a_delete_and_writes_nothing(rig):
+    rig.fence.up = False                                    # this task is not the leader any more
+    for method, body in (("PUT", GOOD), ("DELETE", None)):
+        status, raw = call(rig, method, body=body)
+        assert status == 503 and json.loads(raw)["error"]["code"] == "updating", method
+    assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_a_write_refused_in_the_middle_of_a_put_is_a_503_too(rig):
+    rig.service.devices._may_write = lambda: False         # the lease went between the gate's check and the write
+    status, raw = call(rig, body=GOOD)
+    assert status == 503 and json.loads(raw)["error"]["code"] == "updating"
+    assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_the_gate_counts_a_v1_put_and_delete_in_and_out(rig):
+    seen = []
+    gate = rig.srv.gate
+    enter, leave = gate.enter, gate.leave
+    gate.enter = lambda: (seen.append("enter"), enter())[1]
+    gate.leave = lambda: (seen.append("leave"), leave())[1]
+    assert call(rig, body=GOOD)[0] == 200 and call(rig, "DELETE")[0] == 200
+    assert call(rig, "PATCH", body=GOOD)[0] == 405
+    assert seen == ["enter", "leave"] * 3 and gate.inflight == 0
+
+
+def test_a_v1_patch_and_options_are_405s_in_v1s_envelope_and_the_console_keeps_its_501(rig):
+    for method in ("PATCH", "OPTIONS"):
+        status, raw = call(rig, method, body=GOOD if method == "PATCH" else None)
+        err = json.loads(raw)["error"]
+        assert status == 405 and err["code"] == "method_not_allowed", method
+    status, _ = call(rig, "PATCH", "/api/cad/state")
+    assert status == 501                                     # http.server's own answer, as before
+
+
+# -- the connection: a refusal closes it, a client that asked for keep-alive keeps it --------------------------------------
+
+def one_exchange(rig, request: bytes, version: str = "1.1"):
+    """(the answer's status line, whether the server closed the connection after it, the socket's other bytes)."""
+    import socket
+    host, port = rig.url.rsplit("//", 1)[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=5)
+    s.sendall(request)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += s.recv(4096)
+    head, _, rest = data.partition(b"\r\n\r\n")
+    n = int(re.search(rb"Content-Length: (\d+)", head, re.I).group(1))
+    while len(rest) < n:
+        rest += s.recv(4096)
+    s.settimeout(1.0)
+    try:
+        closed = s.recv(1) == b""                          # EOF: the server closed it; a timeout: it is being kept
+    except socket.timeout:
+        closed = False
+    s.close()
+    return head.split(b"\r\n")[0].decode(), closed
+
+
+def put_request(body: bytes, path: str = PATH, version: str = "1.1", extra: str = "") -> bytes:
+    return (f"PUT {path} HTTP/{version}\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n{extra}"
+            f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+
+
+def test_a_refused_request_closes_the_connection_without_the_client_asking(rig):
+    line, closed = one_exchange(rig, put_request(json.dumps(GOOD).encode(), "/api/v1/devices/dev-0002/push"))
+    assert line.startswith("HTTP/1.1 403") and closed          # refused before its body was read: not reusable
+
+
+def test_a_served_put_keeps_a_keep_alive_connection_and_an_http_1_0_one_is_closed(rig):
+    body = json.dumps(GOOD).encode()
+    line, closed = one_exchange(rig, put_request(body))
+    assert line.startswith("HTTP/1.1 200") and closed is False
+    line, closed = one_exchange(rig, put_request(body, version="1.0"))
+    assert line.endswith("200 OK") and closed is True          # an HTTP/1.0 client did not ask to keep it
+    line, closed = one_exchange(rig, put_request(body, extra="Connection: close\r\n"))
+    assert line.startswith("HTTP/1.1 200") and closed is True
 
 
 def test_a_put_without_a_length_or_chunked_is_a_411(rig):

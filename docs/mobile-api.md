@@ -468,6 +468,22 @@ gets nothing. The role comes from the `operators` table, read only (`push/wire.p
 status reaches nobody). The app's sign-in refuses anyone without an `operators` row (#558 / PR 2), so every signed-in person
 has one; `role_for` is read-only on purpose.
 
+**The app is read-only; push registration is its own bookkeeping.** The app never changes CAD or incident data. The one
+allowed write is the app's own device bookkeeping in `hub.sqlite`: sign-in sessions and this PR's `push_devices` (the
+`PUT` / `DELETE /api/v1/devices/{id}/push` routes). Nothing in push writes `cad.sqlite`: `role_for`, `unit_for` and
+`intel_labels` are SELECTs, `fan_out` only reads, and `tests/test_push_readonly.py` fingerprints every table of the real
+`cad.sqlite` and the store's revision around a whole push life (register, replace, real alerts into a fake SNS, the lookups,
+unregister, the revoke hook): unchanged. A device may register or remove only ITS OWN id (the `{id}` must be the token's
+device: 403 otherwise). `PUT` / `DELETE` (and a v1 `PATCH` / `OPTIONS`) go through the same wrapper as `POST` in
+`sizeup/web/server.py`: the drain / fence gate (`refuse`, then `enter` / `leave`), a fenced hub answers 503 and writes
+nothing, and perf accounting applies.
+
+**The request-body hook comes with this PR** (it was hardened on the closed writes branch and is copied from there, without
+the writes code): `sizeup/web/server.py _v1_body` reads exactly `Content-Length` bytes within one 8 s monotonic deadline
+(408), `Content-Length` must be plain ASCII digits, at most 6, once (400 `bad_body`), none or chunked is a 411 (a DELETE may
+have no body), over 16 KB a 413, a short body a 400; a refused request closes the connection, a served one keeps it only if
+the client asked (not HTTP/1.0, not `Connection: close`).
+
 **Wiring with sign-in (#558 / PR 2).** PR 2 exposes `AuthService.device_active(device_id)` (revoked device or inactive
 person) and `AuthService.add_revoke_hook(fn(device))`. At integration, one line each: `device_active=auth.device_active`
 in `push/wire.py wire()` and `auth.add_revoke_hook(drop_device)`. **Until then push stays off**: the `push` flag has no
