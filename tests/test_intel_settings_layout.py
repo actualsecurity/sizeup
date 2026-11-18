@@ -191,7 +191,8 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
     packs = len(site.j("GET", "/api/cad/intel")[1]["packs"])
     assert packs == 5                                                        # the first pack and the four log-only ones
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
-                                         "model", "/day", "$/month", "sample %", "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
+                                         "model", "/day", "$/month", "sample %", "min conf", "/h", "/day", "wait s",
+                                         "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
     for text, title, field_title in labels:
         assert len(title) > len(text) and title == field_title, (text, title)
     hovers = {t: h for t, h, _ in labels}
@@ -249,6 +250,10 @@ def test_every_control_posts_what_it_did(site, browser):
         (at("Calls a day at most"), "50", {"action": "set", "key": "infer_daily_cap", "value": 50}),
         (f"{CARD} [aria-label^='Budget a month']", "7", {"action": "set", "key": "infer_budget_usd", "value": 7}),
         (f"{CARD} [aria-label^='Of rows with a hit']", "5", {"action": "set", "key": "infer_sample_pct", "value": 5}),
+        (at("Confidence at least this makes an event"), "0.8", {"action": "set", "key": "infer_pd_threshold", "value": 0.8}),
+        (at("Questions an hour at most"), "20", {"action": "set", "key": "infer_pd_hour_cap", "value": 20}),
+        (at("Questions a day at most"), "300", {"action": "set", "key": "infer_pd_day_cap", "value": 300}),
+        (f"{CARD} [aria-label^='Seconds to wait']", "10", {"action": "set", "key": "infer_pd_after_s", "value": 10}),
         (f"{CARD} [aria-label^='Quiet from']", "22:30", {"action": "set", "key": "quiet_from", "value": "22:30"}),
         (at("Quiet until"), "06:15", {"action": "set", "key": "quiet_to", "value": "06:15"}),
         (at(f"{pack['label']} pack mode"), "map", {"action": "pack", "pack": pack["name"], "mode": "map"}),
@@ -260,6 +265,7 @@ def test_every_control_posts_what_it_did(site, browser):
         (at(f"{rule['id']} weight"), "0.35", {"action": "rule", "rule": rule["id"], "w": 0.35}),
         (check("Listen link"), None, {"action": "set", "key": "listen", "value": not d["settings"]["listen"]}),
         (check("Inference"), None, {"action": "set", "key": "infer", "value": not d["settings"].get("infer")}),
+        (check("Local model"), None, {"action": "set", "key": "infer_pd", "value": False}),
         (check("PII"), None, {"action": "set", "key": "push_pii", "value": not d["settings"]["push_pii"]}),
         (check("Push"), None, {"action": "set", "key": "push", "value": not d["settings"]["push"]}),
         (check("Detection"), None, {"action": "set", "key": "enabled", "value": not d["settings"]["enabled"]}),
@@ -276,7 +282,7 @@ def test_every_control_posts_what_it_did(site, browser):
     if kinds:
         ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
         assert len(d["packs"]) == 5 and nrule > 80                           # every pack's rows, each with its own controls
-        assert kinds[:5] == [5, 15 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        assert kinds[:5] == [6, 19 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
         names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
         assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved

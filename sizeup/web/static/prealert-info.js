@@ -119,6 +119,11 @@ window.PrealertInfo = (() => {
   // ---- the sections ------------------------------------------------------------------------------------------------
   const SECTIONS = ["pi-why", "pi-trigger", "pi-around", "pi-site", "pi-place", "pi-now", "pi-outcome"];
 
+  // the local model's answer (sizeup/intel/backing.py) when it raised or noted this event: what, how sure, why
+  function localModel(m) {
+    if (!m) return "";
+    return [m.category, pct(m.confidence), m.used === "evidence" ? "evidence only" : "", m.reason].filter((x) => x).join(" · ");
+  }
   function why(d) {
     const w = d.why, s = d.summary;
     const rules = (w.rules || []).map((r) => {
@@ -139,6 +144,8 @@ window.PrealertInfo = (() => {
       ["Score", score, d.event.kind === "intel" ? "WHAT: how sure it is this kind of call; WHERE: how sure the place is" : "The pre-alert's own confidence (not the aircraft match's)"],
       ["Mode", s.mode || "", "off · shadow (counted only) · log · map · push"],
       ["Model", s.suggested ? `${s.suggested}?` : "", "The model's reading, not the rules': never pushed"],
+      ["Local model", localModel(w.model), w.model ? `${w.model.backend}: ${w.model.model || "?"} ${w.model.model_version || ""}`.trim()
+        + (w.model.weapon && w.model.weapon !== "none" ? ` · weapon ${w.model.weapon}` : "") + (w.model.in_progress ? " · in progress" : "") : ""],
     ])];
     if (!rules.length && !(w.matched || []).length && w.empty) kids.push(none(w.empty));
     if ((s.lines || []).length) kids.push(dl(s.lines.map(([k, v]) => [k, v])));

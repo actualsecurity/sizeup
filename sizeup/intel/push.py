@@ -1,6 +1,7 @@
 """The push for an intel event: composed from an allow-list of fields, then (push_pii off) scrubbed, failing closed.
 
-    Title  "PD · Smoke / fire reported · Port Chester"         the pack's label, the category's, the town
+    Title  "PD · Smoke / fire reported · Port Chester"         the pack's label, the category's, the town; " ·m" at
+                                                               the end when the local model raised it (backing.py)
     Body   "100 Example Ave · 14:32 · high"                    the gazetteer's address when the words confirm it
                                                                (user, 2026-11-12), the time, the level; unconfirmed: only
                                                                the street and block ("Example Ave, 100 blk") and
@@ -86,6 +87,8 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
     """{title, body, tags, priority, click} for the event (never the transcript)."""
     town = ev.town or ""
     title = " · ".join(x for x in (pack_label, category_label(cat, pack_label, ev.category), town) if x)
+    if any(str(r[0]).startswith("model.") for r in ev.rules or [] if r):
+        title += " ·m"                        # the local model raised it, not the rules alone (backing.py)
     where = where_text(ev, doubtful)
     when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
     body = " · ".join(x for x in (where or "location not heard", when, ev.level) if x)
