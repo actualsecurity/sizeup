@@ -68,7 +68,8 @@ from sizeup.cad.store import AUTO, TZ, CadError
 
 EXPIRE_S = 300
 SAID_MAX = 120
-REPAIRED_MAX = 4096          # Phrases.repair results kept (a rebuild repairs every radio row of every open event again)
+REPAIRED_MAX = 8192          # Phrases.repair results kept (a rebuild repairs every radio row of every open event again;
+                             # an LRU walked in the same order each rebuild: more rows than this and every one misses)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS status_hints (
@@ -453,15 +454,16 @@ class StatusHints:
             if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
                 rigs = [x.strip() for x in (r.get("rig") or "").split(",") if x.strip()]
                 talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
-                heard_fine: set[str] = set()
-                if FINE_WORD.search(r["text"]):  # "is fine" shown as en route when it was taken so when heard, or now
-                    heard_fine = {h["unit"] for h in self.store.q("SELECT unit, phrase FROM status_hints WHERE traffic_id = ?",
-                                                                  (r.get("id"),)) if FINE_WORD.search(h["phrase"])}
+                heard_fine: list[set[str]] = []  # looked up only when the repair asks (a "fine" after our callsign)
 
-                def ok(code, heard_fine=heard_fine):
+                def ok(code, heard_fine=heard_fine, tid=r.get("id")):
+                    if not heard_fine:           # "is fine" shown as en route when it was taken so when heard, or now
+                        heard_fine.append({h["unit"] for h in self.store.q("SELECT unit, phrase FROM status_hints WHERE "
+                                                                           "traffic_id = ?", (tid,))
+                                           if FINE_WORD.search(h["phrase"])})
                     if code not in dispatched:
                         dispatched[code] = self.fine_ok(code)
-                    return code in heard_fine or dispatched[code]
+                    return code in heard_fine[0] or dispatched[code]
                 fixed, fixes = self.phrases.repair(r["text"], talker, ok, bool(r.get("dispatcher")))
                 if fixes:
                     r["fixed_text"], r["fixes"] = fixed, fixes

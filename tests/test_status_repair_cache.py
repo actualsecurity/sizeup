@@ -182,3 +182,16 @@ def test_a_change_of_units_starts_again(tmp_path):
     assert h.phrases is not before                                      # new lists, new phrases: nothing kept
     now[0] = LISTS
     assert shown(h, r) == [None]
+
+
+def test_the_taken_lookup_runs_only_when_the_repair_asks(tmp_path, monkeypatch):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    _event_with(c, ["E61"], clock)
+    looked = []
+    real = c.store.q
+    monkeypatch.setattr(c.store, "q", lambda sql, *a: (looked.append(sql) if "status_hints" in sql else None) or real(sql, *a))
+    assert shown(c.hints, row("FG1-cache-5", "The patient is fine.")) == [None]    # "fine", no callsign before it
+    assert looked == []
+    assert shown(c.hints, row("FG1-cache-6", "Engine 61 is fine.")) == ["Engine 61 en route."]
+    assert len(looked) == 1

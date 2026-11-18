@@ -413,7 +413,8 @@ def test_a_kept_token_is_checked_for_not_before(keys, jwks, rsa_calls):
     v = verifier(jwks, clock)
     t = tok(keys[0], clock, nbf=int(clock.t) + 30)             # inside the leeway: taken
     v.verify(t)
-    clock.t -= 100                                             # the clock steps back: not valid yet, kept or not
+    assert v.verify(t) and len(rsa_calls) == 1                 # kept
+    clock.t -= 100                                            # the clock steps back: not valid yet, kept or not
     with pytest.raises(AccessError, match="not valid yet"):
         v.verify(t)
 
