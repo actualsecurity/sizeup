@@ -162,8 +162,9 @@ dongles plugged in:
   files, so `--dist loadfile` behaves as before, dealt out longest first by the durations in
   `tools/ci_shard_durations.json`. The files are the ones pytest's own collection finds with the repo's config
   (subdirectories and `*_test.py` included). A new file with no recorded duration is still run (it counts as 2 s),
-  and `tests/test_ci_shard.py` fails if any split drops or repeats a file or misses one `pytest --collect-only` finds. The `pytest` check is green only when all three
-  shards are. To run one shard locally: `.venv/bin/python -m pytest -n auto -q $(python tools/ci_shard.py 2 3)`.
+  and `tests/test_ci_shard.py` fails if any split drops or repeats a file or misses one `pytest --collect-only`
+  finds. The `pytest` check is green only when all three shards are. To run one shard locally:
+  `.venv/bin/python -m pytest -n auto -q $(python tools/ci_shard.py 2 3)`.
   Refresh the durations when the suite has changed a lot: run it once with `--durations=0 > /tmp/d.txt`, then
   `python tools/ci_shard.py --refresh /tmp/d.txt` (the shards only get uneven, never wrong, as it ages).
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
