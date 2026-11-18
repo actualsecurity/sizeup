@@ -2291,7 +2291,7 @@ class Editor:
                                    "not what the suggestion was for, look again")
                 # ... and the suggestion itself still offers it, for that squelch (#686: the hub's own check)
                 check = getattr(getattr(self.cad, "station_metrics_insight", None), "applicable", None)
-                why = check(key, exp) if callable(check) else ""
+                why = check(key, exp, {f: body.get(f) for f in ("open_db", "close_db")}) if callable(check) else ""
                 if why:
                     raise CadError(why)
             try:

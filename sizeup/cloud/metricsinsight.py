@@ -46,15 +46,16 @@ never a push; mutable like the alerts, Settings > System > Push notifications):
                  at least OPENS_MIN (neither after a squelch change alone: the Open itself moves both; with an SDR
                  change minutes before or after it, they are checked); a traffic channel's kept voice quieting (the
                  median of half-hour medians, TXQ_MIN each side, over OPENS_BINS half hours: a fire's hour of portables
-                 never moves it) down more than shift_db (a cable's or a splitter's loss; not after a restart alone)
+                 never moves it) down more than shift_db (a cable's or a splitter's loss; a restart too: what was
+                 changed while the station was down shows only as its restart); too few half hours with traffic: an
+                 info hint "level not checked" instead
         AM       the floor (dBFS) median up more than shift_db
         traffic  the transmissions an hour (the median of half-hour counts: a fire's hour of traffic moves it
                  little) against the same clock hours the day before (a quiet night after a busy evening is no shift):
                  rate_x times fewer, from at least RATE_MIN; or the kept noise key-ups rate_x times more, to at least
                  RATE_MIN (what a gain, a squelch or interference brings)
         paging   the pages' quieting at open, median down more than shift_db over at least PAGES_MIN pages after
-                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few; never from before the event before; not after
-                 a restart alone)
+                 (windows PAGE_BEFORE_S / PAGE_AFTER_S: pages are few; never from before the event before)
         P25      the control channel's decode rate median down more than cc_drop_pct %
     with no event, a drift check once a day: the last DRIFT_S's hourly medians against the DRIFT_BEFORE_S before, the
     same thresholds (FM idle q90, AM floor, P25 decode rate). A step a day old moves neither median: no warning
@@ -318,28 +319,45 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
 
 # -- the shifts -------------------------------------------------------------------------------------------------------
 
+def _serial(v) -> str | None:
+    """A dongle's serial as an event or a floor record names it; None when it names none that tells dongles apart
+    (none, "", a device index "0".."99": the station's _serial() gives the configured string when it looked up no
+    serial; an RTL-SDR's serial is 8 characters, often all digits: "00000102")."""
+    v = str(v or "").strip()
+    return None if not v or v == "none" or (v.isdigit() and len(v) <= 3) else v
+
+
 def _sdr_of(ev: dict) -> str | None:
     """The dongle an event names: "sdr" (SDR a -> b): b; "on" / "back" (SDR x): x; None when it names none."""
     d = str(ev.get("detail") or "")
     if not d.startswith("SDR "):
         return None
-    s = d.rsplit("->", 1)[-1].strip() if ev.get("ev") == "sdr" else d[4:].strip()
-    return s if s and s != "none" else None
+    return _serial(d.rsplit("->", 1)[-1] if ev.get("ev") == "sdr" else d[4:])
 
 
-def rf_events(evs: list[dict]) -> list[dict]:
-    """Of a channel's events (oldest first), those that change what it hears: an SDR change, a gain change; "on" (back
-    from Off: a shared dongle handed over, every few hours) and "back" (plugged in again) only on another dongle than
-    the one before (the station sends "sdr" for that too: this is the hub's own check). "unplug" never on its own: the
-    dongle that comes back says whether anything changed (#686: a channel handed over every day still gets one)."""
-    out, cur = [], None
+def rf_events(evs: list[dict], before: Callable[[float], str | None] | None = None) -> list[dict]:
+    """Of a channel's events (oldest first), those that change what it hears: an SDR change, a gain change, a station
+    restart marked "rf" (Insight._restarts(): its dongle or gain differs from before it; the station's first look
+    after a restart is never an event, so that is the only trace of a change made while it was down); "on" (back from
+    Off: a shared dongle handed over, every few hours) and "back" (plugged in again) only on another dongle than the
+    one before, or when either is unknown (no serial: a device index) (#686: a channel handed over every day on the
+    same dongle still gets one). before(t): the dongle the floor records name before t, for the first of them in the
+    window. "unplug" never on its own: the dongle that comes back says whether anything changed."""
+    out: list[dict] = []
+    cur: str | None = None
     for e in evs:
         ev = e.get("ev")
         if ev in ("on", "back"):
             s = _sdr_of(e)
-            if s and cur is not None and s != cur:
+            if cur is None and before is not None and isinstance(e.get("at"), (int, float)):
+                cur = _serial(before(e["at"]))
+            if s is None or cur is None or s != cur:
                 out.append(e)
-            cur = s or cur
+            cur = s
+        elif ev == "start":
+            if e.get("rf"):
+                out.append(e)
+            cur = _serial(e.get("sdr")) or cur
         elif ev in RF_EVENTS:
             out.append(e)
             if ev == "sdr":
@@ -485,6 +503,11 @@ def check_levels(btx: list[dict], atx: list[dict], cfg: dict, paging: bool) -> l
     kinds, key, n_min = (("page",), "qo", PAGES_MIN) if paging else (("voice", "burst"), "q", TXQ_MIN)
     b, nb, hb = _level(btx, kinds, key, not paging)
     a, na, ha = _level(atx, kinds, key, not paging)
+    if not paging and nb >= n_min and na >= n_min and (hb < OPENS_BINS or ha < OPENS_BINS):
+        # traffic on both sides, but bunched (one fire's portables): its level says nothing either way; said, not silent
+        return [{"metric": "tx_q_unchecked", "level": "info", "before": None, "after": None,
+                 "text": "level not checked: too little traffic",
+                 "title": f"kept voice in {hb} half hours before, {ha} after ({nb} / {na} tx): needs {OPENS_BINS} each"}]
     if nb >= n_min and na >= n_min and (paging or (hb >= OPENS_BINS and ha >= OPENS_BINS)):
         if b - a > cfg["shift_db"]:
             if paging:
@@ -543,9 +566,10 @@ class Insight:
         worked out again at once when a newer event arrives (the key has the newest event's time)."""
         now = self.clock() if now is None else now
         t0 = now - SUGGEST_DAYS * 86400.0
-        evs = self._events(station, subject, t0, now + 60)
-        evs = [e for e in evs if e.get("subject") == subject or e.get("source") == "audit"]
-        rf = rf_events(evs)
+        evs = self._restarts(station, subject, self._events(station, subject, t0, now + 60))
+        evs = [e for e in evs if e.get("subject") == subject or e.get("source") == "audit" or e.get("rf")]
+        sb = getattr(self.store, "settings_before", None)
+        rf = rf_events(evs, (lambda t: sb(station, subject, t).get("sdr")) if sb is not None else None)
         sq = [e["at"] for e in evs if _is_squelch(e)]
         newest = max((e["at"] or 0 for e in evs), default=0.0)
         key = (station, subject)
@@ -571,6 +595,23 @@ class Insight:
             return evs
         return restart_echoes(evs, lambda t: before(station, subject, t))
 
+    def _restarts(self, station: str, subject: str, evs: list[dict]) -> list[dict]:
+        """evs with each station restart marked "rf" when the channel's dongle or gain after it (its first floor
+        settings, within the hour) differs from before it (settings_before): a dongle swapped, a gain changed in the
+        config or a splitter added while the station was down never sends "sdr" or "gain" (#686). "sdr": the dongle
+        after it."""
+        sb = getattr(self.store, "settings_before", None)
+        out = []
+        for e in evs:
+            if e.get("ev") == "start" and sb is not None and isinstance(e.get("at"), (int, float)):
+                was = sb(station, subject, e["at"])
+                now = next((d for d in self.store.docs(station, subject, "floor", e["at"], e["at"] + 3600.0, 60)
+                            if "sdr" in d or "gain" in d), {})
+                moved = [k for k in ("sdr", "gain") if k in was and k in now and was[k] != now[k]]
+                e = dict(e, rf=bool(moved), sdr=now.get("sdr"))
+            out.append(e)
+        return out
+
     def _live(self, now: float) -> list[tuple[str, str]]:
         """(station, subject) of each series with floor records in the suggestion's window (SUGGEST_DAYS): an old or
         renamed station id still in the 30 days kept never stands beside the one that reports the channel now (#686)."""
@@ -578,10 +619,11 @@ class Insight:
         return sorted({(s["station"], s["subject"]) for s in self.store.index()["series"] if s["kind"] == "floor"
                        and s["subject"] != "station" and (s.get("last") is None or s["last"] >= t0)})
 
-    def applicable(self, subject: str, expect: dict, now: float | None = None) -> str:
+    def applicable(self, subject: str, expect: dict, target: dict | None = None, now: float | None = None) -> str:
         """An Apply from the Squelch card, checked again here (#686): "" when the channel's suggestion still offers
-        Apply and was worked out for the Open / Close in `expect` (the suggestion's own cur_open / cur_close), else
-        why not."""
+        Apply, was worked out for the Open / Close in `expect` (the suggestion's own cur_open / cur_close) and still
+        suggests the Open / Close in `target` (what the Apply sets: a confirm left open while the noise rose would
+        otherwise set an Open the suggestion has moved past), else why not."""
         now = self.clock() if now is None else now
         rows = [self.suggestion(st, s, now) for st, s in self._live(now) if s == subject]
         rows = [r for r in rows if r.get("minutes")]
@@ -596,6 +638,10 @@ class Insight:
             if e is None or c is None or abs(e - c) > 0.01:
                 return (f"{subject}: the suggestion was worked out for Open {s.get('cur_open')} / Close "
                         f"{s.get('cur_close')}, look again")
+        for f, k in (("open_db", "open"), ("close_db", "close")):
+            e, c = _num((target or {}).get(f)), _num(s.get(k))
+            if e is None or c is None or abs(e - c) > 0.01:
+                return f"{subject}: the suggestion is now Open {s.get('open')} / Close {s.get('close')}, look again"
         return ""
 
     def forget(self, subject: str) -> None:
@@ -659,10 +705,9 @@ class Insight:
         out: dict[str, dict] = {}
         meta = self._meta(station, subject, now) if "floor" in kinds else {}
         def run(b0: float, b1: float, a0: float, a1: float, p1: float, squelch: bool, prev: list[float],
-                avoid: list[float], levels: bool = True) -> list[dict]:
+                avoid: list[float]) -> list[dict]:
             """prev: the events before b1 (the windows start after them); avoid: every event time (the rates'
-            same-hours-yesterday window must hold none); levels: the transmissions' own level checked (not after a
-            restart alone: it changes nothing on the air, and the traffic after it is whatever happens then)."""
+            same-hours-yesterday window must hold none)."""
             hits = []
             if "cc" in kinds:
                 hits += check_cc(self.store.docs(station, subject, "cc", b0, b1),
@@ -677,7 +722,7 @@ class Insight:
                 tb = self.store.docs(station, subject, "tx", y0, y1) if same else None
                 ta = self.store.docs(station, subject, "tx", a0, a1)
                 hits += check_channel(fb, fa, tb, ta, (y0, y1), (a0, a1), meta, cfg, squelch)
-                if levels and not meta.get("am"):   # the level: from the event before at most (never another's)
+                if not meta.get("am"):              # the level: from the event before at most (never another's)
                     l0 = max(b1 - PAGE_BEFORE_S, prev[-1] + SETTLE_S if prev else 0.0)
                     hits += check_levels(self.store.docs(station, subject, "tx", l0, b1),
                                          self.store.docs(station, subject, "tx", a0, p1), cfg, meta.get("kind") == "paging")
@@ -693,15 +738,14 @@ class Insight:
                 continue
             p1 = min(now, c["at"] + PAGE_AFTER_S, later[0]["at"] if later else now)      # (pages: a longer after)
             alls = [p["at"] for p in evs]
-            levels = c["names"] != [EVENTS["start"]]
-            hits = run(b0, c["at"], a0, a1, p1, c["squelch"] and not c["rf"], prev, alls, levels)
+            hits = run(b0, c["at"], a0, a1, p1, c["squelch"] and not c["rf"], prev, alls)
             if hits and later:
                 # still so now? from the newest event on (a dongle moved back: no); a squelch change since: the idle
                 # can't tell any more, so only what it still shows stays
                 s0 = later[-1]["at"] + SETTLE_S
                 if now - s0 >= MIN_AFTER_S:
                     still = {h["metric"] for h in run(b0, c["at"], s0, now, now, (c["squelch"] and not c["rf"])
-                                                      or any(p["squelch"] for p in later), prev, alls, levels)}
+                                                      or any(p["squelch"] for p in later), prev, alls)}
                     hits = [h for h in hits if h["metric"] in still]
             for h in hits:
                 if h["metric"] in out:
@@ -742,7 +786,8 @@ class Insight:
 
     def hints(self) -> list[dict]:
         """Health's hints (kind "metrics_shift"): one a subject and metric, the newest first."""
-        return [{"channel": f["subject"], "level": "warn", "kind": "metrics_shift", "text": f["text"], "at": f["at"],
+        return [{"channel": f["subject"], "level": f.get("level") or "warn", "kind": "metrics_shift", "text": f["text"],
+                 "at": f["at"], **({"title": f["title"]} if f.get("title") else {}),
                  "link": f"#settings/radios/signal?s={quote(f['subject'], safe='')}&at={int(f['at'])}"}
                 for f in sorted(self.found, key=lambda f: -f["at"])]
 

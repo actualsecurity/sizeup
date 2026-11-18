@@ -342,7 +342,7 @@ console.log(JSON.stringify(data.spans.map(([a, b, n]) => window.SignalChart.time
 
 
 def test_ticks_stay_on_local_midnights_and_hours_across_a_dst_change(tmp_path):
-    fall, spring = 1793509200, 1772953200        # 2026-11-01 05:00 UTC (01:00 EST again), 2026-03-08 07:00 UTC (03:00 EDT)
+    fall, spring = 1793509200, 1772953200        # 2026-11-01 05:00 UTC (01:00 EDT, the first 01:00), 2026-03-08 07:00 UTC (03:00 EDT)
     spans = [[fall - 4 * DAY, fall + 3 * DAY, 7], [spring - 3 * DAY, spring + 4 * DAY, 7],
              [fall - 12 * 3600, fall + 12 * 3600, 8], [spring - 12 * 3600, spring + 12 * 3600, 8]]
     week_f, week_s, day_f, day_s = run(tmp_path, TICKS, {"now": NOW, "fetch": {}, "spans": spans})

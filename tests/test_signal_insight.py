@@ -631,32 +631,57 @@ def test_a_burst_of_portables_after_an_event_is_not_a_weaker_level(tmp_path):
     assert [h["metric"] for h in mi.check_levels(before, weaker, CFG, False)] == ["tx_q"]
 
 
-def test_no_level_check_after_a_restart_alone(tmp_path):
+def test_a_restart_alone_with_every_carrier_weaker_is_warned_on_traffic_and_paging(tmp_path):
+    # powered down, a splitter added (every carrier ~7 dB weaker), booted: the station's first look after a restart is
+    # never an event, so the restart is all there is to blame, and the level check runs after it
+    t = NOW - 30 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60)))
+    put(s, "FG1", transmissions(t - DAY, DAY, [22.0 + (k % 5) * 0.4 for k in range(40)])
+        + transmissions(t + 600, NOW - t - 600, [15.0 + (k % 5) * 0.4 for k in range(40)], seed=7))
+    put(s, "South 2", floor_minutes(t - 7 * DAY, int((NOW - t + 7 * DAY) // 60), kind="paging"))
+    put(s, "South 2", transmissions(t - 5 * DAY, 4 * DAY, [24.0, 23.5, 25.1, 24.4, 23.9, 24.2], kind="page")
+        + transmissions(t + 600, NOW - t - 600, [17.0, 16.5, 16.8, 17.2], kind="page", seed=8))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    found = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()
+    got = {(f["subject"], f["metric"], f["event"]) for f in found}
+    assert ("FG1", "tx_q", "start") in got and ("South 2", "tx_q_open", "start") in got
+    assert next(f for f in found if f["metric"] == "tx_q")["text"].endswith("(station restart)")
+
+
+def test_too_little_traffic_after_an_event_says_the_level_was_not_checked(tmp_path):
+    # a restart, then only one fire's hour of portables (100 tx, but in two half hours, never 3): neither
+    # a warning nor silence, an info hint with why on hover
     t = NOW - 6 * 3600
-    before, after = _portables(t, quiet_after=True)       # a deploy restart, then only the fire's hour: 2 half hours
-    after += transmissions(t + 5400, 1800, [12.5] * 30, seed=11)      # ... and a third, still on the fireground
-    assert [h["metric"] for h in mi.check_levels(before, after, CFG, False)] == ["tx_q"]   # (what it would say)
+    before, _ = _portables(t)
+    after = transmissions(t + 1800, 3500, [12.0 + (k % 5) * 0.4 for k in range(100)], seed=4)   # two half hours
+    assert mi.median([d["q"] for d in after]) < 14.0                     # the plain median would have warned
     s, _ = store(tmp_path)
     put(s, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60)))
     put(s, "FG1", before + after)
     put(s, "station", [ev("station", t, "start", "sizeup started")])
-    assert "tx_q" not in [f["metric"] for f in mi.Insight(s, clock=lambda: NOW, log=lambda m: None).turn()]
-    s2, _ = store(tmp_path / "rf")                        # the same after a dongle change: checked
-    put(s2, "FG1", floor_minutes(t - DAY, int((NOW - t + DAY) // 60)))
-    put(s2, "FG1", before + after)
-    put(s2, "FG1", [ev("FG1", t, "sdr", "SDR 00000102 -> 00000105")])
-    assert "tx_q" in [f["metric"] for f in mi.Insight(s2, clock=lambda: NOW, log=lambda m: None).turn()]
+    ins = mi.Insight(s, clock=lambda: NOW, log=lambda m: None)
+    found = ins.turn()
+    assert [f["metric"] for f in found] == ["tx_q_unchecked"]
+    h = ins.hints()[0]
+    assert h["level"] == "info" and h["text"].startswith("level not checked: too little traffic since ")
+    assert h["title"].startswith("kept voice in ") and "needs 3 each" in h["title"]
 
 
 def test_apply_is_checked_against_the_suggestion_itself_on_the_hub(tmp_path):
     s, ins = _handed_over(tmp_path, [])
     assert ins.suggestion("pcfd-hq", "FG1")["apply"]
-    assert ins.applicable("FG1", {"open_db": 10.0, "close_db": 6.0}) == ""
-    assert ins.applicable("FG1", {"open_db": 11.0, "close_db": 7.0}).startswith(
+    was, to = {"open_db": 10.0, "close_db": 6.0}, {"open_db": 13.0, "close_db": 9.0}
+    assert ins.applicable("FG1", was, to) == ""
+    assert ins.applicable("FG1", {"open_db": 11.0, "close_db": 7.0}, to).startswith(
         "FG1: the suggestion was worked out for Open 10.0 / Close 6.0")
-    assert ins.applicable("FG9", {"open_db": 10.0, "close_db": 6.0}) == "FG9: no suggestion now, look again"
+    # a stale target: the confirm left open while the suggestion moved (here: 13 now, the dialog still says 12)
+    assert ins.applicable("FG1", was, {"open_db": 12.0, "close_db": 8.0}) == \
+        "FG1: the suggestion is now Open 13.0 / Close 9.0, look again"
+    assert ins.applicable("FG1", was, None).startswith("FG1: the suggestion is now Open 13.0")
+    assert ins.applicable("FG9", was, to) == "FG9: no suggestion now, look again"
     put(s, "FG1", [ev("FG1", NOW - 3600, "squelch", "open 13 close 9 min 0.3 (was open 10 close 6 min 0.3)")])
-    assert ins.applicable("FG1", {"open_db": 10.0, "close_db": 6.0}).startswith(
+    assert ins.applicable("FG1", was, to).startswith(
         "FG1: the suggestion isn't offered now (settling: squelch changed ")
 
 
@@ -668,12 +693,13 @@ def test_the_settings_edit_is_refused_when_the_hub_says_the_suggestion_no_longer
     asked = []
     app.cad.station_metrics_insight = type("I", (), {
         "forget": lambda self, k: None,
-        "applicable": lambda self, k, exp: asked.append((k, exp)) or "FG1: the suggestion isn't offered now (settling)"})()
+        "applicable": lambda self, k, exp, to: asked.append((k, exp, to)) or "FG1: the suggestion isn't offered now"})()
     body = {"action": "set", "key": "FG1", "open_db": 13, "close_db": 9, "operator": "admin@example.org",
             "expect": {"open_db": 10, "close_db": 6}}
     with pytest.raises(CadError, match="the suggestion isn't offered now"):
         app.cad.settings.post("squelch", body)
-    assert app._receiver("FG1").open_db == 10.0 and asked == [("FG1", {"open_db": 10, "close_db": 6})]
+    assert app._receiver("FG1").open_db == 10.0
+    assert asked == [("FG1", {"open_db": 10, "close_db": 6}, {"open_db": 13, "close_db": 9})]
     app.cad.settings.post("squelch", {k: v for k, v in body.items() if k != "expect"})   # a typed edit: never asked
     assert app._receiver("FG1").open_db == 13.0 and len(asked) == 1
 
@@ -720,3 +746,68 @@ def test_the_station_logs_no_squelch_change_at_a_restart_when_it_runs_the_hubs_f
     smp._changed("FG1", dict(cur), NOW)                 # the first look after the start: 13 / 9 already
     smp._changed("FG1", dict(cur), NOW + 5)             # the hub's push of the same 13 / 9: nothing moved
     assert [r["ev"] for _s, r in c._q if r["k"] == "ev"] == ["start"]
+
+
+def test_a_dongle_or_gain_changed_while_the_station_was_down_starts_the_window_at_its_restart(tmp_path):
+    t = NOW - 20 * 3600
+    for k, (key, after) in enumerate((("sdr", "00000105"), ("gain", 42.1))):
+        s, _ = store(tmp_path / str(k))
+        base = {"kind": "traffic", "open": 10.0, "close": 6.0, "min": 0.3, "sdr": "00000102", "gain": 36.4, "state": "ok"}
+        put(s, "FG1", floor_minutes(NOW - 7 * DAY, int((t - 1800 - NOW + 7 * DAY) // 60), settings=base))
+        put(s, "FG1", floor_minutes(t + 60, int((NOW - t - 60) // 60), settings=dict(base, **{key: after}), seed=4))
+        put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212))
+        put(s, "station", [ev("station", t, "start", "sizeup started")])
+        out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+        assert out["state"] == "short" and out["since"] == {"at": t, "ev": "start"}, key
+        assert out["why"].startswith("not enough data since station restart ")
+    # a restart that changed neither (a deploy): the whole week
+    s, _ = store(tmp_path / "same")
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, 7 * 1440))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+    assert out["state"] == "ok" and out["since"] is None
+
+
+def test_on_or_back_with_no_serial_to_tell_dongles_apart_still_starts_the_window(tmp_path):
+    t = NOW - 20 * 3600
+    for detail in ("", "SDR 0"):                       # (no serial: the station names the configured "" or index)
+        _s, ins = _handed_over(tmp_path / (detail or "none"), [[t, "on", detail]])
+        out = ins.suggestion("pcfd-hq", "FG1")
+        assert out["state"] == "short" and out["since"] == {"at": t, "ev": "on"}, detail
+    # the first "on" in the window: compared with the dongle the floor records name before it (00000102)
+    _s, ins = _handed_over(tmp_path / "first", [[t, "on", "SDR 00000105"]])
+    assert ins.suggestion("pcfd-hq", "FG1")["since"] == {"at": t, "ev": "on"}
+    _s, ins = _handed_over(tmp_path / "same", [[t, "on", "SDR 00000102"]])
+    assert ins.suggestion("pcfd-hq", "FG1")["since"] is None
+    # with nothing to compare it with (no floor records name one): counted
+    assert [e["at"] for e in mi.rf_events([{"ev": "on", "detail": "SDR 00000105", "at": 2.0}])] == [2.0]
+
+
+def test_a_hub_edit_made_while_the_station_was_down_still_settles(tmp_path):
+    # the Settings audit's squelch edit at 13 / 9 during the downtime, the station's echo of it after the restart: an
+    # edit (the audit row is never an echo), so 6 h of settling
+    t = NOW - 2 * 3600
+    audit = lambda subject, a, b: [{"at": t - 1200, "operator": "Casey", "key": f"squelch/{subject}", "old": "{}",
+                                    "new": "{'open_db': 13}"}] if a <= t - 1200 < b else []
+    s, _ = store(tmp_path, audit=audit)
+    run = {"kind": "traffic", "open": 10.0, "close": 6.0, "min": 0.3, "sdr": "00000102", "gain": 36.4, "state": "ok"}
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, 7 * 1440, settings=run))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [24.0] * 212))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    put(s, "FG1", [ev("FG1", t + 20, "squelch", "open 13 close 9 min 0.3 (was open 10 close 6 min 0.3)")])
+    out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+    assert out["warn"].startswith("settling: squelch changed")
+
+
+def test_a_squelch_event_more_than_five_minutes_after_the_restart_is_kept(tmp_path):
+    t = NOW - 2 * 3600
+    s, _ = store(tmp_path)
+    run = {"kind": "traffic", "open": 13.0, "close": 9.0, "min": 0.3, "sdr": "00000102", "gain": 36.4, "state": "ok"}
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, 7 * 1440, settings=run))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [24.0] * 212))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    put(s, "FG1", [ev("FG1", t + mi.SETTLE_S + 60, "squelch", "open 13 close 9 min 0.3 (was open 10 close 6 min 0.3)")])
+    ins = mi.Insight(s, clock=lambda: NOW, log=lambda m: None)
+    assert [e["ev"] for e in ins._events("pcfd-hq", "FG1", t - 60, NOW)] == ["start", "squelch"]
+    assert ins.suggestion("pcfd-hq", "FG1")["warn"].startswith("settling: squelch changed")
