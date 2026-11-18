@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-socket-reply.schema.json",
   "title": "Live socket reply",
-  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. Capture's answer to one request (capture-socket-request.schema.json), on the same connection, as a frame with `t` `reply` and the request's `id`. `ok` true: capture has applied it (the app then records it in the wish, which is what makes it outlive a restart of capture). `ok` false: nothing was changed; `error` says why and `confirm` whether the refusal only needs the person's yes (then `error` is the question, and the client asks again with `args.confirm` true under a new id). A repeated id gets this same reply again. No reply ever carries a secret.",
+  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. Capture's answer to one request (capture-socket-request.schema.json), on the same connection, as a frame with `t` `reply` and the request's `id`. `ok` true: capture has applied it (the app then records it in the wish, which is what makes it outlive a restart of capture). `ok` false: nothing was changed, and there are two fields, as the station routes' answers have: `reason`, one word for the client to act on, and `error`, text for a person, which no client parses. `confirm` true (with `reason` `confirm`) means the refusal only needs the person's yes: `error` is the question, and the yes is a new request under a new id with `args.confirm` true. A repeated id gets this same reply again. No reply ever carries a secret.",
   "x-status": "designed",
   "x-version": 1,
   "x-complete": true,
@@ -14,8 +14,9 @@
     "t": {"const": "reply", "description": "Always `reply`."},
     "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The request's `id`."},
     "ok": {"type": "boolean", "description": "true: applied (or answered, for an op that changes nothing). false: refused, nothing changed."},
-    "error": {"type": "string", "description": "With `ok` false: why. Text for a person (`refused: parked`, `refused: taken`, a question when `confirm` is true), or one of the words a client acts on: `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0)."},
-    "confirm": {"type": "boolean", "description": "With `ok` false: true when the refusal only needs the person's yes."},
+    "reason": {"type": "string", "description": "With `ok` false: why, as one word for the client to act on. `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived at or after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0), `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm` (it needs the person's yes). A client takes a word it does not know as a plain refusal.", "x-known": ["stale", "expired", "unsupported", "forbidden", "parked", "taken", "held", "busy", "invalid", "confirm"]},
+    "error": {"type": "string", "description": "With `ok` false: why, as text for a person (`refused: parked`; with `confirm`, the question). No client parses it."},
+    "confirm": {"type": "boolean", "description": "With `ok` false: true (with `reason` `confirm`) when the refusal only needs the person's yes."},
     "result": {"description": "With `ok` true, for an op that returns something: `urgent_since` (`$defs/urgent-since-result`), `snapshot` (capture-socket-event.schema.json `$defs/snapshot`), `probe` (`audio` or `none`). The reply does not name its op: the client knows it by `id`."},
     "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture answered, Unix seconds."}
   },
@@ -24,7 +25,7 @@
     "properties": {"ok": {"const": false, "description": "`ok` is false."}},
     "required": ["ok"]
   },
-  "then": {"required": ["error", "confirm"]},
+  "then": {"required": ["reason", "error", "confirm"]},
   "$defs": {
     "urgent-since-result": {
       "title": "The result of urgent_since",

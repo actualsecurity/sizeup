@@ -168,8 +168,8 @@
       "required": ["role", "contract"],
       "additionalProperties": true,
       "properties": {
-        "role": {"type": "string", "description": "`reader`: the app; it may make requests, and its connection is what the status reports as `reader.attached`. `viewer`: a status tool; its requests are answered `forbidden`. Self-declared: it keeps a tool from changing anything by mistake and is no defence.", "x-known": ["reader", "viewer"]},
-        "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version the client speaks, 1."},
+        "role": {"type": "string", "description": "`reader`: the app; it may make requests, and its connection is what the status reports as `reader.attached`. `viewer`: a status tool; its requests are answered `reason` `forbidden`. Self-declared: it keeps a tool from changing anything by mistake and is no defence.", "x-known": ["reader", "viewer"]},
+        "contract": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "The capture contract's major version the client speaks, 1."},
         "subscribe": {"type": "array", "description": "The optional frames the client wants; [] or absent for none.", "uniqueItems": true, "items": {"type": "string", "description": "An optional frame's `t`. Capture ignores one it does not know.", "x-known": ["level"]}}
       }
     },
@@ -191,12 +191,12 @@
     },
     "urgent_taken": {
       "title": "urgent_taken",
-      "description": "The app has taken the urgent rows up to `n` over into its own lane.",
+      "description": "The app has taken that urgent file's rows up to `n` over into its own lane. Capture ignores a notice for another epoch than its file's, so an `n` from before a reset never marks new rows as taken.",
       "x-complete": true,
       "type": "object",
-      "required": ["n"],
+      "required": ["urgent_epoch", "n"],
       "additionalProperties": true,
-      "properties": {"n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "Every row at or below this is taken."}, "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch `n` counts in, 16 hex characters. Capture ignores a notice for another epoch than the file's."}}
+      "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch `n` counts in, 16 hex characters."}, "n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "Every row at or below this is taken."}}
     },
     "paging_finished": {
       "title": "paging_finished",
@@ -215,11 +215,11 @@
       "required": ["id", "op", "args", "expires_boot"],
       "additionalProperties": true,
       "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Chosen by the client, unique, 1 to 64 characters. Capture applies each id once and remembers the last 256 for 10 min: a repeat gets the first reply again and changes nothing. A request sent again with `args.confirm` true is a new request with a new id."},
-        "op": {"type": "string", "description": "What is asked. An op capture does not know is answered `ok` false, `error` `unsupported`.", "x-known": ["pick", "squelch_apply", "reception_start", "reception_stop", "probe", "airband_ab", "check", "urgent_since", "credentials", "snapshot"]},
+        "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Chosen by the client, unique, 1 to 64 characters. Capture applies each id once and remembers the last 256 for 10 min (on the boot clock): a repeat gets the first reply again and changes nothing, even after its deadline. The person's yes to a refusal with `confirm` is a new request, under a new id, with `args.confirm` true."},
+        "op": {"type": "string", "description": "What is asked. An op capture does not know is answered `ok` false, `reason` `unsupported`.", "x-known": ["pick", "squelch_apply", "reception_start", "reception_stop", "probe", "airband_ab", "check", "urgent_since", "credentials", "snapshot"]},
         "args": {"type": "object", "description": "The op's arguments (`$defs/<op>`); {} for an op that has none."},
         "by": {"type": "string", "description": "Who asked: `person` (a click, on the station or through the hub).", "x-known": ["person"]},
-        "expires_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The deadline, on CLOCK_BOOTTIME, seconds since boot (both ends are on one host). A request that reaches capture after it is answered `expired` and not applied."}
+        "expires_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The deadline, on CLOCK_BOOTTIME, seconds since boot (both ends are on one host). A request that reaches capture at or after it is answered `reason` `expired` and not applied; a stepped wall clock expires nothing."}
       }
     },
     "args-pick": {
@@ -233,7 +233,7 @@
     },
     "args-squelch_apply": {
       "title": "squelch_apply",
-      "description": "Apply squelch values to a running channel (#685, #700). With `expect` it is refused (`stale`) when what runs now is not what the suggestion was made for; without it, a plain set.",
+      "description": "Apply squelch values to a running channel (#685, #700); all four values are needed. With `expect` it is refused (`reason` `stale`) when what runs now is not what the suggestion was made for; without it, a plain set.",
       "x-complete": true,
       "type": "object",
       "required": ["label", "open_db", "close_db", "min_open_s"],
@@ -308,7 +308,7 @@
     },
     "args-credentials": {
       "title": "credentials",
-      "description": "The rotated credentials, handed over by the root reload helper (`systemctl reload sizeup-radio`). ACCEPTED ONLY FROM A PEER WHOSE UID IS 0 (SO_PEERCRED); anyone else is answered `forbidden`. The only frame of the contract that carries a secret; never logged, never replayed from the id memory with its arguments.",
+      "description": "The rotated credentials, handed over by the root reload helper (`systemctl reload sizeup-radio`). ACCEPTED ONLY FROM A PEER WHOSE UID IS 0 (SO_PEERCRED); anyone else is answered `forbidden`. All three are sent, \"\" for none. The only frame of the contract that carries a secret: never logged, and never kept in the memory of answered requests.",
       "x-complete": true,
       "type": "object",
       "required": ["token", "access_id", "access_secret"],

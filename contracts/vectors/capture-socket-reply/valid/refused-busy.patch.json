@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-22bb33cc"},
+    {"op": "replace", "path": "/reason", "value": "busy"},
+    {"op": "replace", "path": "/error", "value": "a reception test is running"}
+  ]
+}

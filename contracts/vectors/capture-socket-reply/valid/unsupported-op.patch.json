@@ -2,6 +2,7 @@
   "base": "capture-socket-reply/valid/refused-parked.json",
   "patch": [
     {"op": "replace", "path": "/id", "value": "r-99223344"},
-    {"op": "replace", "path": "/error", "value": "unsupported"}
+    {"op": "replace", "path": "/reason", "value": "unsupported"},
+    {"op": "replace", "path": "/error", "value": "this capture does not know that request"}
   ]
 }

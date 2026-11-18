@@ -1,4 +1,4 @@
 {
-  "base": "capture-urgent-response/valid/both-applied.json",
-  "patch": [{"op": "remove", "path": "/results/1/rev"}]
+  "base": "capture-urgent-response/valid/the-alarm-applied.json",
+  "patch": [{"op": "remove", "path": "/results/0/rev"}]
 }

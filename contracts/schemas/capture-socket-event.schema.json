@@ -128,10 +128,10 @@
       "required": ["contract", "impl", "build", "pid", "started", "spool_epoch", "urgent_epoch", "boot"],
       "additionalProperties": true,
       "properties": {
-        "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version this capture speaks, 1. Another major version: the app raises Health and does not read the spool."},
+        "contract": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "The capture contract's major version this capture speaks, 1. Another major version: the app raises Health and does not read the spool."},
         "impl": {"type": "string", "description": "The implementation: `python`, or a native daemon's name.", "x-known": ["python"]},
         "build": {"type": "string", "description": "Capture's build."},
-        "pid": {"type": "integer", "minimum": 1, "description": "Capture's process id."},
+        "pid": {"type": "integer", "minimum": 1, "maximum": 4194304, "description": "Capture's process id."},
         "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this capture process started, Unix seconds."},
         "spool_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The spool's epoch (its EPOCH file), 16 hex characters. A new one resets the reader's cursor."},
         "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch, 16 hex characters. A new one (the file was reset) starts the app's urgent cursor at 0; the set of (key, rev) it has taken still holds."},
@@ -163,7 +163,7 @@
               "continuing": {"type": "boolean", "description": "Paging: this carrier continues the transmission before it (the continuation window)."},
               "holding": {"type": "boolean", "description": "Closed, but the squelch still watches for the last transmission to come back (`NoiseSquelch.holding`)."},
               "quieting_db": {"type": ["number", "null"], "description": "How far the carrier quiets the hiss now, dB; null when not measured."},
-              "queued": {"type": "integer", "minimum": 0, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
+              "queued": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
             }
           }
         },
@@ -187,7 +187,7 @@
         "continuing": {"type": "boolean", "description": "Paging: this carrier continues the transmission before it (the continuation window)."},
         "holding": {"type": "boolean", "description": "Closed, but the squelch still watches for the last transmission to come back (`NoiseSquelch.holding`)."},
         "quieting_db": {"type": ["number", "null"], "description": "How far the carrier quiets the hiss now, dB; null when not measured."},
-        "queued": {"type": "integer", "minimum": 0, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
+        "queued": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
       }
     },
     "ids": {
@@ -242,7 +242,7 @@
       "type": "object",
       "required": ["system", "tg", "src", "what"],
       "additionalProperties": true,
-      "properties": {"system": {"type": "string", "minLength": 1, "description": "The system's short name."}, "tg": {"type": "integer", "minimum": 0, "description": "The talkgroup number."}, "src": {"type": "string", "description": "The radio id, digits as a string; \"\" when the line has none."}, "what": {"type": "string", "description": "The event, as trunk-recorder's unit event names it.", "x-known": ["call"]}}
+      "properties": {"system": {"type": "string", "minLength": 1, "description": "The system's short name."}, "tg": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "The talkgroup number."}, "src": {"type": "string", "description": "The radio id, digits as a string; \"\" when the line has none."}, "what": {"type": "string", "description": "The event, as trunk-recorder's unit event names it.", "x-known": ["call"]}}
     },
     "spool": {
       "title": "spool",
@@ -268,9 +268,9 @@
       "description": "One radio transmitting now, as `LiveTalk.state()` gives it, without `rig`, `label` and `main`: the app adds those from the CAD (station-state.schema.json `talker` is the decorated entry).",
       "x-complete": true,
       "type": "object",
-      "required": ["key", "system", "channel", "tg", "radio_id", "alias", "since", "talk_since", "ended", "until"],
+      "required": ["key", "system", "channel", "tg", "radio_id", "alias", "dispatcher", "since", "talk_since", "ended", "until"],
       "additionalProperties": true,
-      "properties": {"key": {"type": "string", "description": "Stable id of this entry while it lasts: `p25:<system name>:<call key>:<radio id>` or `fm:<channel>:<since, 2 decimals>:<radio id>`."}, "system": {"type": "string", "description": "The kind of radio system.", "x-known": ["p25", "fm"]}, "channel": {"type": "string", "description": "The talkgroup's name (P25) or the channel's label (FM)."}, "tg": {"type": ["integer", "null"], "minimum": 0, "description": "The P25 talkgroup number; null on an FM channel."}, "radio_id": {"type": "string", "description": "The transmitting radio's id as decoded, digits as a string; \"\" when not known yet."}, "alias": {"type": "string", "description": "The radio's over-the-air alias (P25); \"\" when none."}, "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the call or the carrier started, Unix seconds."}, "talk_since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this radio started talking within the call, Unix seconds."}, "ended": {"type": "boolean", "description": "True for a talker who just finished and is flashed until `until`."}, "until": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Unix seconds until which an ended entry is still shown; null while talking."}, "dispatcher": {"type": "boolean", "description": "The alias looks like a dispatch console (`LiveTalk.state()` works it out from the alias alone)."}, "id_on_release": {"type": "boolean", "description": "FM entries only: the carrier is open and no id was decoded yet."}}
+      "properties": {"key": {"type": "string", "description": "Stable id of this entry while it lasts: `p25:<system name>:<call key>:<radio id>` or `fm:<channel>:<since, 2 decimals>:<radio id>`."}, "system": {"type": "string", "description": "The kind of radio system.", "x-known": ["p25", "fm"]}, "channel": {"type": "string", "description": "The talkgroup's name (P25) or the channel's label (FM)."}, "tg": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535, "description": "The P25 talkgroup number; null on an FM channel."}, "radio_id": {"type": "string", "description": "The transmitting radio's id as decoded, digits as a string; \"\" when not known yet."}, "alias": {"type": "string", "description": "The radio's over-the-air alias (P25); \"\" when none."}, "dispatcher": {"type": "boolean", "description": "The alias looks like a dispatch console: `LiveTalk` works it out from the alias alone (false for an analog channel)."}, "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the call or the carrier started, Unix seconds."}, "talk_since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this radio started talking within the call, Unix seconds."}, "ended": {"type": "boolean", "description": "True for a talker who just finished and is flashed until `until`."}, "until": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Unix seconds until which an ended entry is still shown; null while talking."}, "id_on_release": {"type": "boolean", "description": "FM entries only: the carrier is open and no id was decoded yet."}}
     },
     "page": {
       "title": "One page going out, raw",

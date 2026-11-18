@@ -1,0 +1,4 @@
+{
+  "base": "capture-hello-answer/valid/todays-answer.json",
+  "patch": [{"op": "add", "path": "/gen", "value": 412}]
+}

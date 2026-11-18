@@ -1,4 +1,8 @@
 {
   "base": "capture-socket-reply/valid/refused-parked.json",
-  "patch": [{"op": "replace", "path": "/error", "value": "expired"}]
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-5f3a9c12"},
+    {"op": "replace", "path": "/reason", "value": "expired"},
+    {"op": "replace", "path": "/error", "value": "answered too late: not applied"}
+  ]
 }

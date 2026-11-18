@@ -1,9 +1,9 @@
 {
-  "base": "capture-urgent-request/valid/an-alarm-and-a-page.json",
+  "base": "capture-urgent-request/valid/an-alarm.json",
   "patch": [
     {
-      "op": "replace",
-      "path": "/items/1",
+      "op": "add",
+      "path": "/items/-",
       "value": {
         "key": "x:1",
         "rev": 0,

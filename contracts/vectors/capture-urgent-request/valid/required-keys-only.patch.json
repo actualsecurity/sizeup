@@ -1,8 +1,4 @@
 {
-  "base": "capture-urgent-request/valid/an-alarm-and-a-page.json",
-  "patch": [
-    {"op": "remove", "path": "/items/1"},
-    {"op": "remove", "path": "/urgent_epoch"},
-    {"op": "remove", "path": "/sent_at"}
-  ]
+  "base": "capture-urgent-request/valid/an-alarm.json",
+  "patch": [{"op": "remove", "path": "/urgent_epoch"}, {"op": "remove", "path": "/sent_at"}]
 }

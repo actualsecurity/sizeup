@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-urgent-item.schema.json",
   "title": "Urgent item",
-  "description": "Designed (docs/native/capture-split.md 4.3, #773; P25 live alarms: #775), not implemented. One item of the urgent lane as capture sends it to the hub in `POST /api/station/urgent` (capture-urgent-request.schema.json): an emergency alarm or a change of a live page, with its age at the moment of sending. Every key is required and none is null. Identity is (key, rev). `age_s` is measured on CLOCK_BOOTTIME (`age_src` `boot`); an item from before a reboot has no boot-clock age and is sent with the wall-clock age `now - event_at`, clamped at 0 (`age_src` `wall`): it is never held back and `age_s` is never null. An alarm's age is never the larger of two clocks, and capture never expires an alarm; a page item unsent 120 s after its event (the larger of its two ages) is not sent. `$defs/held` is the same item as capture holds it and hands it to the app; `$defs/data` is the `data` column of the urgent file's row (contracts/capture/urgent.sql).",
+  "description": "Designed (docs/native/capture-split.md 4.3, #773; P25 live alarms: #775), not implemented. One item of the urgent lane as capture sends it to the hub in `POST /api/station/urgent` (capture-urgent-request.schema.json): an emergency alarm or a change of a live page, with its age at the moment of sending. Every key is required and none is null. On the hub its identity is (station, key, rev). `age_s` is measured on CLOCK_BOOTTIME (`age_src` `boot`); an item from before a reboot has no boot-clock age and is sent with the wall-clock age `now - event_at`, clamped at 0 (`age_src` `wall`): it is never held back and `age_s` is never null. An alarm's age is never the larger of two clocks, and capture never expires an alarm. A page's clock runs per revision: a revision unsent 120 s after capture made it (the larger of its two ages; exactly 120 s is expired) is not sent, except an `ended` one, which stays sendable for 10 min. `$defs/held` is the same item as capture holds it and hands it to the app; `$defs/data` is the `data` column of the urgent file's row (contracts/capture/urgent.sql).",
   "x-status": "designed",
   "x-version": 1,
   "x-complete": true,
@@ -10,34 +10,34 @@
   "required": ["key", "rev", "kind", "at", "event_at", "age_s", "age_src", "data"],
   "additionalProperties": true,
   "properties": {
-    "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`. A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: the hub's store is keyed by (station, key)."},
-    "rev": {"type": "integer", "minimum": 0, "description": "The revision of the item under its key: 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. An item's identity is (key, rev)."},
+    "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(at * 1000)>`. A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
+    "rev": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "The revision of the item under its key: always 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. On the station an item's identity is (key, rev)."},
     "kind": {"type": "string", "description": "What the item is. The hub answers an unknown kind `rejected` (reason `kind`) and takes the rest of the request.", "x-known": ["alarm", "page"]},
     "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture made the item, Unix seconds (the station's wall clock). Set once: the same value in the row, in every frame and in every request that carries the item."},
     "event_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it happened on the air, Unix seconds (the station's wall clock): the carrier's start for an alarm raised live, the grant's time for a P25 alarm, the first tone's start for a page. The hub never places the item by this: it uses its own clock minus `age_s`."},
     "age_s": {"type": "number", "minimum": 0, "description": "The item's age when this request was made, seconds, at least 0, never null: the sender's CLOCK_BOOTTIME minus the item's `event_boot` when both are of one boot, else its wall clock minus `event_at`, clamped at 0. The hub places the item at its own now minus this; it clamps a value over 24 h."},
-    "age_src": {"type": "string", "description": "The clock `age_s` was measured on: `boot`, or `wall` for an item from before a reboot (the hub corrects a wall-sourced age by its skew measure for the station). A hub takes a word it does not know as `wall`.", "x-known": ["boot", "wall"]},
+    "age_src": {"type": "string", "description": "The clock `age_s` was measured on: `boot`, or `wall` for an item from before a reboot. The hub cannot check or correct a wall-sourced age (two readings of the station's one clock): it takes it as given, bounded, and labels the alarm's age as approximate. A hub takes a word it does not know as `wall`.", "x-known": ["boot", "wall"]},
     "data": {"$ref": "#/$defs/data"}
   },
   "allOf": [{"$ref": "#/$defs/by-kind"}],
   "$defs": {
     "data": {
       "title": "The item's data",
-      "description": "What the item says: the `data` column of the urgent file's row, as an object. An alarm carries the alarm keys, a page the page keys; which are required follows `kind` (`$defs/by-kind`). No rig (the hub derives it), no audio, no transcript, no secret.",
+      "description": "What the item says: the `data` column of the urgent file's row, as an object. An alarm carries the alarm keys, a page the page keys; which are required follows `kind` (`$defs/by-kind`). The keys of every kind are typed here in one object, so a kind added later must not reuse one of these names with another type. No rig (the hub derives it), no audio, no transcript, no secret.",
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
       "properties": {
         "source": {"type": "string", "minLength": 1, "description": "An alarm: the channel's label. A P25 alarm: the name the finished call's row will carry as its source, so the hub's same-radio rule sees one channel."},
         "start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "An alarm: the carrier's (or the grant's) start, Unix seconds."},
-        "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "An alarm: the latest moment known when the item was made, Unix seconds (a live alarm: when it was decoded)."},
+        "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "An alarm: when the transmission ended, Unix seconds. Optional: an alarm raised at the key-up has none yet."},
         "radio_id": {"type": "string", "description": "An alarm: the id of the radio whose button it was, digits as a string (several: joined with `, `, as today)."},
         "ids": {"type": "array", "description": "An alarm: the radio ids decoded so far, as the sidecar's `ids`.", "items": {"$ref": "capture-spool-sidecar.schema.json#/$defs/radio-id"}},
         "unit": {"type": "string", "description": "An alarm: the radio's alias from the wish's `aliases` map; \"\" when it has none."},
-        "emergency": {"type": "boolean", "description": "An alarm: always true."},
+        "emergency": {"type": "boolean", "description": "An alarm: always true (`$defs/by-kind`)."},
         "emergency_via": {"type": "string", "description": "An alarm: the signalling the button came in.", "x-known": ["MDC", "FleetSync", "P25"]},
         "system": {"type": "string", "minLength": 1, "description": "A P25 alarm (#775): the system's short name."},
-        "talkgroup": {"type": "integer", "minimum": 0, "description": "A P25 alarm (#775): the talkgroup number."},
+        "talkgroup": {"type": "integer", "minimum": 0, "maximum": 65535, "description": "A P25 alarm (#775): the talkgroup number."},
         "channel": {"type": "string", "minLength": 1, "description": "A page: the paging channel's label."},
         "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "A page: when the first tone started, Unix seconds."},
         "pairs": {"type": "array", "description": "A page: the tone pairs decoded so far, in order.", "items": {"$ref": "#/$defs/pair"}},
@@ -67,7 +67,14 @@
             "required": ["kind"]
           },
           "then": {
-            "properties": {"data": {"description": "An alarm's data: what a reader may rely on.", "required": ["source", "start", "radio_id", "emergency", "emergency_via"]}}
+            "properties": {
+              "rev": {"const": 0, "description": "An alarm has one revision, 0: its key alone is its identity."},
+              "data": {
+                "description": "An alarm's data: what a reader may rely on.",
+                "required": ["source", "start", "radio_id", "emergency", "emergency_via"],
+                "properties": {"emergency": {"const": true, "description": "An alarm: always true."}}
+              }
+            }
           }
         },
         {
@@ -90,9 +97,9 @@
       "required": ["n", "key", "rev", "kind", "at", "event_at", "event_boot", "boot", "data", "durable"],
       "additionalProperties": true,
       "properties": {
-        "n": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991, "description": "The item's row number in the urgent file: its place there and nothing else; the app's cursor is (urgent_epoch, n). null while the item has no row (`durable` false)."},
-        "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`. A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: the hub's store is keyed by (station, key)."},
-        "rev": {"type": "integer", "minimum": 0, "description": "The revision of the item under its key: 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. An item's identity is (key, rev)."},
+        "n": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991, "description": "The item's row number in the urgent file: its place there and nothing else; the app's cursor is (urgent_epoch, n). null exactly while the item has no row (`durable` false)."},
+        "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's idempotency key, 1 to 200 characters. An analog alarm raised live: `<channel label without spaces>-live-<int(carrier start * 1000)>`. An analog alarm found at the close: the transmission's own item id. A P25 live alarm (#775): `p25-<system>-<talkgroup>-<radio id>-<int(at * 1000)>`. A page: `page:<channel>:<started, 2 decimals>`. Not station-qualified: on the hub an item is (station, key, rev), the station from the token."},
+        "rev": {"type": "integer", "minimum": 0, "maximum": 2147483647, "description": "The revision of the item under its key: always 0 for an alarm; for a page 0, 1, 2, ... one per change of the page. On the station an item's identity is (key, rev)."},
         "kind": {"type": "string", "description": "What the item is. A reader leaves an unknown kind alone.", "x-known": ["alarm", "page"]},
         "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture made the item, Unix seconds (the station's wall clock). Set once: the same value in the row, in every frame and in every request that carries the item."},
         "event_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it happened on the air, Unix seconds (the station's wall clock): the carrier's start for an alarm raised live, the grant's time for a P25 alarm, the first tone's start for a page. The hub never places the item by this: it uses its own clock minus `age_s`."},
@@ -101,7 +108,29 @@
         "data": {"$ref": "#/$defs/data"},
         "durable": {"type": "boolean", "description": "The item has a row, committed and fsync'd. false: it lives in capture's memory only (a failed insert, a stalled disk) and `n` is null; when its row is written a second frame for the same (key, rev) follows with its `n` and `durable` true."}
       },
-      "allOf": [{"$ref": "#/$defs/by-kind"}]
+      "allOf": [
+        {"$ref": "#/$defs/by-kind"},
+        {
+          "if": {
+            "type": "object",
+            "properties": {"durable": {"const": true, "description": "`durable` is `true`."}},
+            "required": ["durable"]
+          },
+          "then": {
+            "properties": {"n": {"type": "integer", "maximum": 9007199254740991, "description": "With a row: its number."}}
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {"durable": {"const": false, "description": "`durable` is `false`."}},
+            "required": ["durable"]
+          },
+          "then": {
+            "properties": {"n": {"type": "null", "description": "Without a row: null."}}
+          }
+        }
+      ]
     }
   }
 }

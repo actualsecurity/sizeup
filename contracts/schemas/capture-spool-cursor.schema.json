@@ -14,7 +14,7 @@
     "spool_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The spool the cursor belongs to (the EPOCH file). Against another spool it counts for nothing: the reader starts from 0."},
     "seq": {"type": "integer", "maximum": 999999999999, "minimum": 0, "description": "Every item with a `seq` at or below this is done. 0: none yet."},
     "done": {"type": "array", "description": "Up to 256 `seq` values above `seq` that finished out of order (channels are handled in parallel), each once.", "maxItems": 256, "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 999999999999}},
-    "tries": {"type": "object", "description": "How often an item not yet done has been handed to its handler: {seq as decimal digits: tries}. After 3 the reader quarantines the item and moves past it.", "propertyNames": {"pattern": "^[1-9][0-9]{0,11}$"}, "additionalProperties": {"type": "integer", "minimum": 1, "description": "Tries so far, a count."}},
+    "tries": {"type": "object", "description": "How often an item not yet done has been handed to its handler: {seq as decimal digits: tries}. After 3 the reader quarantines the item and moves past it.", "propertyNames": {"pattern": "^[1-9][0-9]{0,11}$"}, "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Tries so far, a count."}},
     "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the cursor was written, Unix seconds."}
   }
 }

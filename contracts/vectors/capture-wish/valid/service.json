@@ -78,5 +78,5 @@
   },
   "p25": {"talkgroups": {"examplesys": {"4101": {"alert": true, "kept": true, "encrypted": false}}}},
   "metrics": true,
-  "spool": {"max_age_h": 12, "max_bytes": 2147483648, "max_items": 50000, "sync_s": 5, "min_free_bytes": 268435456}
+  "spool": {"max_age_h": 12, "max_bytes": 2147483648, "max_items": 50000, "min_free_bytes": 268435456, "sync_s": 5}
 }

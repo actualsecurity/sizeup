@@ -6,8 +6,8 @@ peer's uid checked on every connection (`SO_PEERCRED`: the `sizeup` user or root
 [`capture-socket-event`](../schemas/capture-socket-event.schema.json), frames in are
 [`capture-socket-request`](../schemas/capture-socket-request.schema.json), and a request's answer is
 [`capture-socket-reply`](../schemas/capture-socket-reply.schema.json). Byte vectors are in
-[`socket-frames.json`](socket-frames.json). Choices are marked **(C*n*)** and listed in
-[`../README.md`](../README.md) "Capture split (designed)".
+[`socket-frames.json`](socket-frames.json). What is still to confirm is listed in [`../README.md`](../README.md)
+"Capture split (designed)".
 
 ## Framing
 
@@ -22,7 +22,7 @@ payload  raw bytes                          unused in version 1 (there for audio
 | Rule | |
 |---|---|
 | Header | one JSON object (RFC 8259: no `NaN`, no `Infinity`), at most 65536 bytes (#709's `MAX_HEADER`). A reader refuses a longer one from the lengths alone, before it reads or allocates anything |
-| Payload | a version 1 writer sends none (length 0). A version 1 reader skips a payload of up to 1 MiB and closes the connection on a longer one **(C22)** |
+| Payload | a version 1 writer sends none (length 0). A version 1 reader skips a payload of up to 1 MiB and closes the connection on a longer one |
 | A bad frame | a length over its limit, a header that is not JSON or not an object: the reader closes the connection. A client comes back and gets a snapshot |
 | A stream | frames follow each other with nothing between them, and a read may end anywhere inside one |
 | Unknown | a reader ignores a header key it does not know and skips a frame whose `t` it does not know |
@@ -51,37 +51,40 @@ The hello of a client is 56 bytes on the wire:
 
 ## Notices (no answer)
 
-`hello`, `poke` (`what: "wish"`), `cursor` (the spool cursor moved), `urgent_taken` (`n`, and the `urgent_epoch` it
-counts in **(C24)**), `paging_finished` (`ch`, `page_id`, `end`).
+Each one's own fields are required; `at` is optional on a client's frame. `hello` (`role`, `contract`, `subscribe`),
+`poke` (`what: "wish"`), `cursor` (the spool cursor moved), `urgent_taken` (`urgent_epoch` and `n`, both: capture
+ignores a notice for another epoch, so an `n` from before a reset can never mark new rows as taken),
+`paging_finished` (`ch`, `page_id`, `end`).
 
 ## Requests and replies
 
 A request is `{v, t: "request", id, op, args, by, at, expires_boot}`; the answer is one `reply` frame with the same
-`id`, on the same connection: `{v, t: "reply", id, ok, error?, confirm?, result?, at}`.
+`id`, on the same connection: `{v, t: "reply", id, ok, reason?, error?, confirm?, result?, at}`. With `ok: false`
+there are two fields, as the station routes' answers have: **`reason`**, one word for the client to act on, and
+`error`, text for a person, which no client parses.
 
 | Rule | |
 |---|---|
-| Ids | chosen by the client, unique, 1 to 64 characters **(C23)**. Capture applies each id once and remembers the last 256 for 10 min: a repeat gets the first reply again and changes nothing |
-| `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture after it is answered `expired` and not applied. A stepped wall clock expires nothing |
-| A repeat and the deadline | the id memory is asked first: a repeat of an id that was applied gets its first reply even after the deadline **(C23)** |
+| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each id once and remembers the last 256 for 10 min (on the boot clock): a repeat gets the first reply again and changes nothing, even after its deadline |
+| `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture at or after it is answered `reason: "expired"` and not applied. A stepped wall clock expires nothing |
 | No reply in time | the client sends the same id again when it reconnects, or gives up and tells the person. Either is safe |
 | `ok: true` | capture has applied it. The app then records it in the wish file, which is what makes it outlive a restart of capture |
-| `ok: false` | nothing was changed. `error` says why; `confirm: true` means the refusal only needs the person's yes, and `error` is the question |
-| The person's yes | the client asks again with `args.confirm: true` **under a new id** **(C23)**: under the old id it would get the refusal again |
-| Words in `error` a client acts on | `stale` (a `squelch_apply` whose `expect` is not what runs), `expired`, `unsupported` (an op capture does not know), `forbidden`. Anything else is text for a person **(C26)** |
-| Who may ask | a client that said `role: "reader"`; a `viewer` gets `forbidden`. The role is self-declared and both are the same uid: it keeps a status tool from changing anything by mistake, and is no defence against a process of that user |
+| `ok: false` | nothing was changed. `reason` says why in a word, `error` in text; `confirm: true` (with `reason: "confirm"`) means the refusal only needs the person's yes, and `error` is the question |
+| The person's yes | a new request, **under a new id**, with `args.confirm: true`: the same id would only get the first reply again |
+| The `reason` words | `stale` (a `squelch_apply` whose `expect` is not what runs), `expired`, `unsupported` (an op capture does not know), `forbidden`, `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm`. A word a client does not know is a plain refusal |
+| Who may ask | a client that said `role: "reader"`; a `viewer` gets `reason: "forbidden"`. The role is self-declared and both are the same uid: it keeps a status tool from changing anything by mistake, and is no defence against a process of that user |
 | What no request can do | return a secret, take a path, take a command line |
 
 | `op` | `args` | Answers besides `ok` |
 |---|---|---|
-| `pick` | `sdr`, `job`, `confirm` | `refused: parked`, `refused: taken`; `confirm: true` with the question |
-| `squelch_apply` | `label`, `open_db`, `close_db`, `min_open_s`, `expect` | `stale`. Without `expect` it is a plain set |
-| `reception_start`, `reception_stop` | the body of today's `reception_post`; the test's `id` | a test is running; no dongle to lend; unknown test |
+| `pick` | `sdr`, `job`, `confirm` | `parked`; `taken`; `confirm` with the question |
+| `squelch_apply` | `label`, `open_db`, `close_db`, `min_open_s` (all four), `expect` | `stale`. Without `expect` it is a plain set |
+| `reception_start`, `reception_stop` | the body of today's `reception_post`, not typed by this contract; the test's `id` | a test is running; no dongle to lend; unknown test |
 | `probe` | `sdr` | not idle; held; `result`: `audio` or `none` |
 | `airband_ab` | `label`, `minutes`, `phase_s` | not an airband channel; not running |
-| `check` | `what` (`groups`, `adsb`), `value`, `confirm` | advisory only: it changes nothing, and capture validates again when it applies the wish |
-| `urgent_since` | `urgent_epoch`, `n`, `limit` (200, at most 500) | `result`: `{urgent_epoch, rows, more, memory}`: the rows above the cursor in `n` order; `more`: ask again from the last `n`; `memory`: on the first page, the items that have no row (yet), in full |
-| `credentials` | `token`, `access_id`, `access_secret` | **uid 0 only**, below |
+| `check` | `what` (`groups`, `adsb`), `value`, `confirm` | `invalid`; `confirm`; `held`. Advisory only: it changes nothing, and capture validates again when it applies the wish |
+| `urgent_since` | `urgent_epoch`, `n` (both needed), `limit` (200, at most 500) | `result`: `{urgent_epoch, rows, more, memory}`: the rows above the cursor in `n` order; `more`: ask again from the last `n`; `memory`: on the first page, the items that have no row (yet), in full |
+| `credentials` | `token`, `access_id`, `access_secret` (all three, `""` for none) | **uid 0 only**, below |
 | `snapshot` | none (`{}`) | `result`: the snapshot |
 
 ## The `credentials` request and SO_PEERCRED
@@ -92,10 +95,11 @@ request on this socket. Two checks of the peer, one on each side, both from `SO_
 
 | Side | Check |
 |---|---|
-| Capture | accepts `credentials` **only from a peer whose uid is 0**, whatever role the peer declared. Anyone else: `ok: false`, `error: "forbidden"`, and nothing is changed |
+| Capture | accepts `credentials` **only from a peer whose uid is 0**, whatever role the peer declared. Anyone else: `ok: false`, `reason: "forbidden"`, and nothing is changed |
 | The helper | before it writes anything, reads the listener's credentials and goes on only if the pid is the unit's main pid (`$MAINPID`) and the uid is the unit's user. A socket put at `live.sock` by another process of that user gets nothing; the helper exits non-zero |
 
 On an accepted request capture swaps its two senders' headers, closes their connections so the next request uses
 the new values, sets `urgent.creds_at_boot` in the status and logs that it did, never a value. No receiver, squelch
-or queue is touched. The request is the only frame of the contract that carries a secret: it is not kept in the id
-memory **(C23)**, never logged with its arguments, and no reply repeats it. `SIGHUP` is ignored.
+or queue is touched. The request is the only frame of the contract that carries a secret: it is never kept in the
+memory of answered requests, never logged with its arguments, and no reply repeats it. It has a deadline
+(`expires_boot`) like every request. `SIGHUP` is ignored.

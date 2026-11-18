@@ -110,14 +110,30 @@ def vector(path: Path):
     assert set(doc) == {"base", "patch"} and isinstance(doc["patch"], list) and doc["patch"], f"{path.name}: base, patch"
     base = VECTORS / doc["base"]
     assert base.is_file() and not base.name.endswith(PATCH), f"{path.name}: its base is a plain vector, {doc['base']}"
-    return patched(vector(base), doc["patch"])
+    try:
+        return patched(vector(base), doc["patch"])
+    except (AssertionError, LookupError, TypeError, ValueError) as e:      # (said with the file's name: one clear failure)
+        raise AssertionError(f"{path.relative_to(VECTORS).as_posix()} no longer fits its base {doc['base']}: {e}") from None
+
+
+UNFIT: list[str] = []            # the patched vectors vectors() left out because they no longer fit their base
 
 
 def vectors(name: str, kind: str) -> list[tuple[str, object]]:
     """[(name.json, the body)] of contracts/vectors/<name>/<kind>/ (kind: valid | invalid), plain and patched alike:
     `x.patch.json` is listed as `x.json`."""
-    out = [(p.name.removesuffix(PATCH) + ".json" if p.name.endswith(PATCH) else p.name, vector(p))
-           for p in (VECTORS / name / kind).glob("*.json")]
+    out = []
+    for p in (VECTORS / name / kind).glob("*.json"):
+        try:
+            out.append((p.name.removesuffix(PATCH) + ".json" if p.name.endswith(PATCH) else p.name, vector(p)))
+        except AssertionError as e:
+            # A patch that no longer fits its base is left out here and noted, so that collecting the tests does not
+            # fail on it: test_patched_vectors_are_a_base_and_a_json_patch reads every patch itself and fails, once
+            # and by the file's name.
+            if not p.name.endswith(PATCH):
+                raise
+            if str(e) not in UNFIT:
+                UNFIT.append(str(e))
     assert len({n for n, _ in out}) == len(out), f"{name}/{kind}: a vector both plain and patched"
     return sorted(out, key=lambda x: x[0])
 

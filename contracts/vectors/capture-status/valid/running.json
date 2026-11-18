@@ -148,6 +148,8 @@
     "last_error": "",
     "hub_gen": 412,
     "creds_at_boot": 4.2,
-    "p25_transitions_1h": 0
+    "p25_transitions_1h": 0,
+    "resets": 0,
+    "reset_at": null
   }
 }

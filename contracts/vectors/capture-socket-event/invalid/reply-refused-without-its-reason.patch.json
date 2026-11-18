@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/reply.json",
+  "patch": [{"op": "remove", "path": "/reason"}]
+}

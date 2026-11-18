@@ -1,7 +1,7 @@
 {
   "base": "capture-urgent-item/valid/alarm-raised-live.json",
   "patch": [
-    {"op": "replace", "path": "/key", "value": "p25-examplesys-4101-7001-1900000300000"},
+    {"op": "replace", "path": "/key", "value": "p25-examplesys-4101-7001-1900000300020"},
     {"op": "replace", "path": "/at", "value": 1900000300.02},
     {"op": "replace", "path": "/event_at", "value": 1900000300.0},
     {"op": "replace", "path": "/age_s", "value": 0.03},

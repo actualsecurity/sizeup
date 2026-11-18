@@ -1,4 +1,8 @@
 {
   "base": "capture-socket-reply/valid/refused-parked.json",
-  "patch": [{"op": "replace", "path": "/id", "value": "r-11aa22bb"}, {"op": "replace", "path": "/error", "value": "stale"}]
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-11aa22bb"},
+    {"op": "replace", "path": "/reason", "value": "stale"},
+    {"op": "replace", "path": "/error", "value": "the squelch changed since this suggestion was made"}
+  ]
 }

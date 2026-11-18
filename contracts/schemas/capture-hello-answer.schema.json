@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-hello-answer.schema.json",
+  "title": "Station hello answer with the hub's generation",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"The sender\", 11 H1a, #773), not implemented. Today's answer to `GET /api/station/hello` (station-hello-answer.schema.json) plus `gen`, the hub's fencing generation. Capture's alarm connection asks it every 50 s, always in `urgent-mode send`: it keeps the connection warm, and it is how an idle sender learns that the hub came back from an older replica (another `gen`) without waiting for its next alarm. The key is optional, so every answer a hub sends today is valid here; a sender that gets none learns nothing from that answer.",
+  "x-status": "designed",
+  "x-version": 1,
+  "allOf": [{"$ref": "station-hello-answer.schema.json"}],
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "gen": {"$ref": "lease.schema.json#/$defs/counter", "description": "The hub's fencing generation, as in the urgent route's answer (capture-urgent-response.schema.json): an integer up to 2^53 - 1 or a string of decimal digits, compared by value, for change only."}
+  }
+}

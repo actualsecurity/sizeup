@@ -1,4 +1,4 @@
 {
-  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "base": "capture-urgent-item/valid/page-voice.json",
   "patch": [{"op": "replace", "path": "/rev", "value": "0"}]
 }

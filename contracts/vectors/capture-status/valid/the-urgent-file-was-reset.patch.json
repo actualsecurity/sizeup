@@ -1,7 +1,12 @@
 {
   "base": "capture-status/valid/running.json",
   "patch": [
-    {"op": "replace", "path": "/urgent/state", "value": "reset"},
-    {"op": "replace", "path": "/urgent/urgent_epoch", "value": "0a1b2c3d4e5f6071"}
+    {"op": "replace", "path": "/urgent/resets", "value": 1},
+    {"op": "replace", "path": "/urgent/reset_at", "value": 1899990000.2},
+    {"op": "replace", "path": "/urgent/urgent_epoch", "value": "0a1b2c3d4e5f6071"},
+    {"op": "replace", "path": "/urgent/sent", "value": 0},
+    {"op": "replace", "path": "/urgent/last_sent_at", "value": null},
+    {"op": "replace", "path": "/urgent/last_ms", "value": null},
+    {"op": "replace", "path": "/urgent/hub_gen", "value": null}
   ]
 }
