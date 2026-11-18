@@ -131,17 +131,21 @@ def held_first(got):
 # -- the reader is never held up --------------------------------------------------------------------------------------
 
 def test_a_long_transmissions_handling_never_holds_up_the_reader():
-    got = []
+    got, box = [], {}
     on_segment, held, release = held_first(got)
-    r, _tap, fed, _events, _alarms = receiver("FG1", "traffic", on_segment, **TRAFFIC)
+
+    def handler(ch, seg):
+        box.setdefault("n0", len(box["fed"]))       # frames read when the first went into its handler (not when the
+        on_segment(ch, seg)                         # test thread got to look: under load the reader may be done by then)
+    r, _tap, fed, _events, _alarms = receiver("FG1", "traffic", handler, **TRAFFIC)
+    box["fed"] = fed
     audio = np.concatenate([idle(3.0), unit(4.0), idle(1.5, 1), unit(2.0), idle(1.5, 2), unit(1.0), idle(2.0, 3)])
     t = pump(r, audio)
     try:
         assert held.wait(30)
-        n0 = len(fed)
         # the first is still being handled, and the reader reads on to the end of the audio (3 s of it and more)
         t.join(30)
-        assert not t.is_alive() and len(fed) - n0 >= 60 and len(got) == 1
+        assert not t.is_alive() and len(fed) - box["n0"] >= 60 and len(got) == 1
         assert r.pending("FG1") and r.segments.pending("FG1") == 3      # (the one being handled, and two waiting)
     finally:
         release.set()
@@ -261,23 +265,41 @@ def test_a_page_shows_live_while_the_transmission_before_it_is_being_handled():
 # -- a stop flushes ---------------------------------------------------------------------------------------------------
 
 def test_a_stop_hands_on_what_the_squelch_held_and_everything_waiting(tmp_path, monkeypatch):
-    got = []
+    # No wall-time waits: it waits for the reader to have read every frame. (It used to stop once the squelch was open
+    # with pending() + len(got) == 3: on a loaded runner the reader was slow, the stop came 1-2 frames into the fourth
+    # key-up, under min_open_s, and the squelch rightly kept nothing of it; and a transmission appended to got but not
+    # yet off the worker's queue counted twice.)
+    monkeypatch.setattr(fm, "STALL_S", 60.0)        # (the fake rtl_fm goes quiet at the end: never a stall and restart)
+    got, gate, fed = [], threading.Event(), []
 
     def on_segment(ch, seg):
-        time.sleep(0.3)                     # slow: several wait for the worker when it stops
+        if not got:
+            gate.wait(30)                   # the first held in its handler: the rest wait for the worker at the stop
         got.append(seg)
     # four key-ups, the audio ending inside the last one (the squelch still open when it stops)
     audio = np.concatenate([idle(3.0)] + [x for k in range(3) for x in (unit(1.0), idle(1.5, k + 1))] + [unit(3.0)])
-    r = NfmReceiver(fake_rtl_fm(tmp_path, audio[:-RATE]), "", None, Channel(453.0375, "FG1"), on_segment,
-                    lambda m: None, **TRAFFIC)
+    audio = audio[:-RATE]
+    r = NfmReceiver(fake_rtl_fm(tmp_path, audio), "", None, Channel(453.0375, "FG1"), on_segment, lambda m: None,
+                    **TRAFFIC)
+    make = r.new_squelch
+
+    def counted():
+        sq = make()
+        feed = sq.feed
+        sq.feed = lambda frame: (fed.append(1), feed(frame))[1]
+        return sq
+    r.new_squelch = counted
     r.start()
     try:
-        assert wait(lambda: r.squelch.open and r.segments.pending() + len(got) == 3)
-        left = r.segments.pending()
+        assert wait(lambda: len(fed) == len(audio) // FRAME)       # every frame read: the fourth key-up open 2 s
+        left, handled, open_ = r.segments.pending(), len(got), r.squelch.open
     finally:
         r.stop()
-    assert left >= 1 and r.drain(30)
-    assert len(got) == 4 and got[-1].reason == "stopped" and [s.start for s in got] == sorted(s.start for s in got)
+        gate.set()
+    assert (left, handled, open_) == (3, 0, True)   # the first in its handler, two waiting, the fourth still open
+    assert r.drain(30)
+    assert [s.reason for s in got] == ["quiet", "quiet", "quiet", "stopped"]
+    assert [s.start for s in got] == sorted(s.start for s in got) and got[-1].end - got[-1].start > 1.5
 
 
 def test_the_app_lets_every_receiver_finish_before_it_finalises_the_held_pages(tmp_path):

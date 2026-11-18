@@ -2,11 +2,14 @@
 trunk-recorder, no whisper, no voice server: nothing here opens an SDR or starts a program, so it
 runs on a bare Linux box with Python + numpy.
 
-    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?}]} -> {acked}
+    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?}]} -> {acked, rejected?}
                                   applied in order through the same App code as on the station
                                   (_page_heard, _transcribed, _retext, the radio registry); each
                                   event once: the hub remembers the last seq per outbox epoch
-                                  (hub.sqlite), and pages / transmissions are keyed by their ids
+                                  (hub.sqlite), and pages / transmissions are keyed by their ids.
+                                  An event it can't parse or apply is skipped and listed in "rejected"
+                                  ({i, seq, type, reason, error}); a batch it can't read at all is 413 / 400
+                                  {error, reason}: the station splits it and quarantines the event (_events)
     POST /api/station/stt         each clip's speech-to-text input, gzipped (sizeup/cloud/sttinput.py): {v, station,
                                   items: [{n, id, kind, ..., stt}]} -> {ok, stored: [n], refused: [n]}: kept as clip
                                   "<id>.src" beside the clip (before or after its event); read_stt_audio reads it.
@@ -336,6 +339,8 @@ class Hub:
         self.epoch = app.mdb.get("station_epoch")
         self.seq = int(app.mdb.get("station_seq", "0") or 0)
         self._failed: tuple[str, int, int] = ("", 0, 0)   # (epoch, seq, tries) of a source_event that failed to apply
+        # the events it couldn't apply lately, {(epoch, seq): {seq, type, reason, error}}: listed again on a retry
+        self._rejections: OrderedDict[tuple[str, int], dict] = OrderedDict()
 
     # -- health --------------------------------------------------------------------------------------
 
@@ -481,6 +486,23 @@ class Hub:
         if wav[:4] != b"RIFF":
             raise AudioUnavailable("Voice unavailable — the station sent no audio: text only")
         return wav, str(res.get("label") or "Voice: rendered by the station")
+
+    def dismiss_rejected(self, kind: str, by: str = "") -> dict:
+        """POST /api/cad/health/dismiss (an admin, Settings > Station > Health): the station drops its stuck and late
+        quarantined events of this type (sizeup/cloud/outbox.py dismiss, by a quarantine_dismiss call), so their alert
+        clears. Logged and audited (settings_audit, System) with who asked. ValueError for a bad type, StationOffline /
+        RuntimeError from the station."""
+        kind = str(kind or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", kind):
+            raise ValueError("kind: an event type")
+        n = int(self.remote("quarantine_dismiss", kind) or 0)
+        who = by or "someone (no sign-in)"
+        self.log(f"hub: the station's refused {kind} event(s) dismissed by {who}: {n}")
+        from sizeup.cad.radios import audit
+        store = self.app.cad.store
+        with store.tx() as db:
+            audit(db, time.time(), by, "system", f"health_dismiss:{kind}", "stuck / late on the station", f"dismissed ({n})")
+        return {"ok": True, "dismissed": n}
 
     def remote(self, fn: str, *args, timeout: float = CALL_WAIT_S):
         """One of the station's switches (StationOffline / RuntimeError with the reason)."""
@@ -861,29 +883,65 @@ class Hub:
         self._failed = (self.epoch, seq, n)
         return n < SOURCE_RETRIES
 
+    def _refused_batch(self, code: int, reason: str, error: str, **extra) -> tuple[int, bytes, str]:
+        """A batch of events refused as a whole: {error, reason, ...} (the station splits it to find the event:
+        sizeup/cloud/station.py _rejected), in the log once per reason every REFUSAL_LOG_S."""
+        now = time.time()
+        if now - self._refused_said.get(("events", reason), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[("events", reason)] = now
+            self.log(f"hub: refused a batch of the station's events: {code} {reason}")
+        return _json(code, {"error": error, "reason": reason, **extra})
+
     def _events(self, raw: bytes | None, p: Principal | None = None) -> tuple[int, bytes, str]:
-        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
+        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test).
+
+        -> 200 {ok, acked, applied, rejected?: [{i, seq, type, reason, error}]}: each event it couldn't parse
+        ("malformed") or apply ("apply_failed") is skipped, never blocking the ones behind it, and listed (by its index
+        in the batch and its seq), so the station keeps it (sizeup/cloud/outbox.py quarantine). A batch it can't read
+        at all: 413 {reason: too_large, max_bytes} / 400 {reason: bad_json | bad_batch}. A station from before this
+        ignores "rejected"; a hub from before this sends none (and a 400 without a reason: the station splits it)."""
         if raw is None:
-            return _json(413, {"error": f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): send smaller batches"})
-        d = wire.loads(raw or b"{}")
+            return self._refused_batch(413, "too_large", f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): "
+                                                         "send smaller batches", max_bytes=MAX_EVENTS_BODY)
+        try:
+            d = wire.loads(raw or b"{}")
+        except (ValueError, RecursionError) as e:
+            return self._refused_batch(400, "bad_json", f"bad request: not JSON ({type(e).__name__})")
         if not isinstance(d, dict) or not isinstance(d.get("events"), list):
-            raise ValueError("{epoch, events: [...]}")
+            return self._refused_batch(400, "bad_batch", "bad request: {epoch, events: [...]}")
         if p is not None:
-            self._claim(p, d.get("station"))     # (one outbox cursor still: a cursor per station is design step A3)
+            # (one outbox cursor still: a cursor per node is step 3 of the nodes design, docs/nodes.md)
+            self._claim(p, d.get("station"))
         epoch = str(d.get("epoch") or "")[:40]
+        rejected: list[dict] = []
+        events: list[tuple[int, int, dict]] = []
+        for i, ev in enumerate(d["events"]):
+            seq = ev.get("seq") if isinstance(ev, dict) else None
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                # can't be acked or skipped by its seq: listed by its index, never moving the cursor
+                rejected.append({"i": i, "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+                                 "type": str(ev.get("type"))[:40] if isinstance(ev, dict) else "",
+                                 "reason": "malformed", "error": "an event needs a seq (an integer from 1)"})
+                continue
+            events.append((seq, i, ev))
         with self._ingest:
             if epoch != self.epoch:
                 if self.epoch:
                     self.log(f"hub: the station's outbox is new (epoch {epoch}): counting its events from the start")
                 self.epoch, self.seq = epoch, 0
             n = 0
-            for ev in sorted((e for e in d["events"] if isinstance(e, dict)), key=lambda e: int(e.get("seq") or 0)):
-                seq = int(ev.get("seq") or 0)
+            for seq, i, ev in sorted(events, key=lambda x: (x[0], x[1])):
                 if seq <= self.seq:
-                    continue                   # delivered before (the station retried): already applied
+                    # delivered before (the station retried): already applied. One it couldn't apply is listed again
+                    # (the post that said so may have ended in a 503 later on, never reaching the station)
+                    if (self.epoch, seq) in self._rejections:
+                        rejected.append(dict(self._rejections[(self.epoch, seq)], i=i))
+                    continue
                 kind = str(ev.get("type"))
                 refused = fence_mod.refused()
                 try:
+                    if not isinstance(ev.get("data") or {}, dict):
+                        raise BadEvent("data: a JSON object")
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
                     data = ev.get("data") or {}
                     if p is not None and p.id and isinstance(data, dict) and kind in ("traffic", "page_text"):
@@ -901,6 +959,15 @@ class Hub:
                     self.log(f"hub: could not apply {kind} #{seq}: {type(e).__name__}")
                     if kind == "source_event" and not isinstance(e, SourceError) and self._retry(seq):
                         break                  # not acked: the station sends it again (a malformed one is skipped)
+                    # malformed: never applies, whenever it is sent (the station doesn't keep sending it); else it may
+                    # once the hub is fixed
+                    bad = {"seq": seq, "type": kind[:40],
+                           "reason": "malformed" if isinstance(e, (BadEvent, SourceError)) else "apply_failed",
+                           "error": f"{type(e).__name__}{said}"[:200]}
+                    rejected.append(dict(bad, i=i))
+                    self._rejections[(self.epoch, seq)] = bad
+                    while len(self._rejections) > REJECTIONS_KEPT:
+                        self._rejections.popitem(last=False)
                 if fence_mod.refused() != refused or not self.app._may_write_audio():
                     # a write of this event was refused (the lease went, #501), even if something on the way caught
                     # it, or the lease is gone now: neither it nor anything after it is acked (seq stays), the
@@ -912,11 +979,16 @@ class Hub:
             if n:
                 self.app.sync()
                 self.live.on_change()       # push the display now, not on its next second
-            return _json(200, {"ok": True, "acked": self.seq, "applied": n})
+            return _json(200, {"ok": True, "acked": self.seq, "applied": n, **({"rejected": rejected} if rejected else {})})
 
 
 SOURCE_KINDS = ("source_event", "source_health", "source_seen")   # an external incident source's (#297)
 SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malformed one) is retried this often, then skipped
+REJECTIONS_KEPT = 200       # the events it couldn't apply, remembered to say so again on a retried post (Hub._events)
+
+
+class BadEvent(ValueError):
+    """A station event that can never apply (a bad id, data that isn't an object): "malformed" in the answer."""
 AUDIO_UPLOAD_S = 5.0        # the audio uploader's round (#414): the clips the ingest couldn't store, then the migration
 AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
@@ -1223,14 +1295,20 @@ class HubApp(App):
     def _id(d: dict) -> str:
         cid = str(d.get("id") or "")
         if not CLIP_ID.fullmatch(cid) or ".." in cid:
-            raise ValueError(f"bad id {cid[:40]!r}")
+            raise BadEvent(f"bad id {cid[:40]!r}")
         return cid
 
     def _apply_page(self, d: dict, audio: bytes | None) -> None:
         pid = self._id(d)
         with self._lock:
-            if any(p.id == pid for p in self.pages):
-                return
+            have = next((p for p in self.pages if p.id == pid), None)
+        if have is not None:
+            # here before (its page_text came first: the page event was late, or sent again from the station's
+            # quarantine): its clip, if it has none yet, and its row in Radio again (with play)
+            if audio and not self.audio.has(pid):
+                self.audio.put(pid, audio, "clip", at=have.end, channel=have.label)
+                self._page_to_cad(have)
+            return
         page = page_from_dict(d)
         if audio:
             self.audio.put(pid, audio, "clip", at=page.end, channel=page.label)
