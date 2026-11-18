@@ -408,7 +408,10 @@ class WorkerRegistry:
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
-    return code, json.dumps(obj, separators=(",", ":")).encode(), "application/json"
+    """An answer to a worker: strict JSON (sizeup/cloud/client.py dumps: a number that isn't finite goes as null, never
+    the bare NaN; an object it can't write stays a TypeError, as the hub's own answers)."""
+    from sizeup.cloud.client import dumps
+    return code, dumps(obj, default=None), "application/json"
 
 
 def _num(v) -> float | None:
@@ -502,7 +505,13 @@ class WorkerApi:
             raw = body(MAX_BODY) if body is not None else b""
             if raw is None:
                 return _json(413, {"error": "too large"})
-            d = json.loads(raw or b"{}")
+            if path.startswith(API + "infer/"):
+                # (the LLM lane reads its answers strictly itself: a NaN in a model's output must make the answer
+                # invalid there, never pass as null: sizeup/cloud/infer.py Lane._answer)
+                d = json.loads(raw or b"{}")
+            else:
+                from sizeup.cloud.client import loads
+                d = loads(raw or b"{}")             # (NaN / Infinity / 1e999 from a worker: None, never a float)
             if not isinstance(d, dict):
                 return _json(400, {"error": "a JSON object"})
             # the LLM lane (sizeup/cloud/infer.py): a GPU worker's own token (sw1) only, never a station's whisper

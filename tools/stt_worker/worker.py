@@ -21,6 +21,7 @@ import dataclasses
 import http.client
 import io
 import json
+import math
 import logging
 import logging.handlers
 import os
@@ -371,6 +372,20 @@ class InstanceLock:
 
 # --- the hub -----------------------------------------------------------------------------------------------------
 
+def finite(v):
+    """v with every NaN / Infinity as None, through dicts, lists and tuples (the hub's wire is strict JSON: RFC 8259)."""
+    if isinstance(v, dict):
+        return {k: finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [finite(x) for x in v]
+    return None if isinstance(v, float) and not math.isfinite(v) else v
+
+
+def dumps(obj) -> bytes:
+    """A request body as strict JSON, compact: a number that isn't finite goes as null, never the bare token NaN."""
+    return json.dumps(finite(obj), separators=(",", ":"), allow_nan=False).encode()
+
+
 class HubError(Exception):
     def __init__(self, msg: str, status: int = 0, retry_after: float | None = None, reason: str = ""):
         super().__init__(msg)
@@ -455,7 +470,7 @@ class Hub:
     def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
                 raw: bool = False):
         """A JSON object in and out (raw: the body's bytes). HubError on anything but a 2xx JSON object."""
-        data = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
+        data = dumps(body) if body is not None else None
         headers = dict(self._headers, **({"Content-Type": "application/json"} if data is not None else {}))
         full = path if path.startswith(self.prefix + "/") and self.prefix else self.prefix + path
         for attempt in (0, 1):             # a kept-alive connection the far end closed: one quiet retry
