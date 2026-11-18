@@ -224,20 +224,49 @@ class Lane:
         self.workers: dict[str, Worker] = {}
         self._done: deque = deque()          # (at, task, worker, why, latency_ms, tokens_in, tokens_out)
         self._said: list[str] = []           # log lines made under the lock, written after it
-        self._switch: dict = {}              # (the switches, read at most once a second: asked under the lock)
+        self._switch: dict = {}              # the switches as last read ("": the pool's; a worker id: its LLM jobs)
+        self._switch_at = -1e9               # (read outside the lock, at most once a second: the lock never waits on
+                                             # hub.sqlite)
+        self._switch_gen = 0                 # bumped by switched(): a read begun before it is never written back
+        self._switcher: threading.Thread | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # what available() and submit() read without any lock: set under the lock (never any I/O there) whenever a
+        # worker, a switch or a lease changes, and by the tick (time: READY_S, cooldowns; the leader, read outside it)
+        self._avail = False
+        self._nobody = "no_worker"
+        self._leader = True
         self._results = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer-results")
 
     def start(self) -> Lane:
+        self._refresh()
+        self._leader = self._may_write()
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="infer-lane", daemon=True)
             self._thread.start()
+            self._switcher = threading.Thread(target=self._switch_loop, name="infer-switches", daemon=True)
+            self._switcher.start()
+        with self._cv:
+            self._recompute(self.clock())
         return self
+
+    def _may_write(self) -> bool:
+        try:
+            return bool(self.may_write())
+        except Exception:  # noqa: BLE001 - can't tell: not the leader
+            return False
+
+    def _recompute(self, now: float) -> None:
+        """Called with the lock held (no I/O): what available() and submit() read lock-free."""
+        self._avail = (self._thread is not None and not self._stop.is_set() and self._leader
+                       and any(self._ready(w, now) for w in self.workers.values()))
+        self._nobody = "gaming" if any(w.had_llm and w.state == "gaming" and now - w.seen < OFFLINE_S
+                                       for w in self.workers.values()) else "no_worker"
 
     def stop(self) -> int:
         """Every job open now: None at once (no_worker). How many."""
         self._stop.set()
+        self._avail = False
         with self._cv:
             jobs = self._queue + list(self._leases.values())
             self._queue, self._leases = [], {}
@@ -270,31 +299,57 @@ class Lane:
         for line in said:
             self.log(line)
 
-    def _on(self, wid: str | None = None) -> bool:
-        """The admin's switches (the pool on; this worker's LLM jobs on), each read at most once a second."""
-        now = time.monotonic()
-        key = wid or ""
-        at, val = self._switch.get(key, (-1e9, False))
-        if now - at >= 1.0:
+    def _switch_loop(self) -> None:
+        """The switches and the leader, read again every second on a thread of their own: hub.sqlite being slow never
+        holds the lane's thread (its deadlines) nor a request."""
+        while not self._stop.wait(1.0):
             try:
-                val = bool(self.enabled()) and (wid is None or bool(self.llm_on(wid)))
-            except Exception:  # noqa: BLE001 - a switch that can't be read: off
-                val = False
-            self._switch[key] = (now, val)
-        return val
+                self._refresh()
+                self._leader = self._may_write()
+                with self._cv:
+                    self._recompute(self.clock())
+            except Exception as e:  # noqa: BLE001 - never ends
+                self.log(f"infer: switches: {type(e).__name__}")
+
+    def _refresh(self, wids=None) -> None:
+        """The switches read again (the pool's, and each worker's or just `wids`'): never with the lane's lock held, so
+        hub.sqlite being slow never holds a submit() or a claim. A switch that can't be read: off. A read that began
+        before an admin's change (switched()) is dropped, never written over it."""
+        def read(fn, *a):
+            try:
+                return bool(fn(*a))
+            except Exception:  # noqa: BLE001 - can't be read: off
+                return False
+        full = wids is None
+        with self._cv:
+            gen = self._switch_gen
+            if full:
+                wids = list(self.workers)
+        vals = {"": read(self.enabled), **{w: read(self.llm_on, w) for w in wids}}
+        with self._cv:
+            if gen != self._switch_gen:
+                return                                 # (an admin's change came meanwhile: its own read is newer)
+            self._switch.update(vals)
+            if full:
+                self._switch_at = time.monotonic()
+            self._recompute(self.clock())
+            self._cv.notify_all()
+
+    def _on(self, wid: str | None = None) -> bool:
+        """The admin's switches as last read (the pool on; this worker's LLM jobs on): only cached values, never
+        hub.sqlite (asked under the lock). A worker not read yet: off."""
+        return bool(self._switch.get("", False)) and (wid is None or bool(self._switch.get(wid, False)))
 
     def _worker_on(self, wid: str) -> bool:
-        """This worker's own "LLM jobs" switch (whatever the pool's)."""
-        try:
-            return bool(self.llm_on(wid))
-        except Exception:  # noqa: BLE001 - can't be read: off
-            return False
+        """This worker's own "LLM jobs" switch as last read (whatever the pool's)."""
+        return bool(self._switch.get(wid, False))
 
     def switched(self) -> None:
-        """An admin changed a switch: read them again now."""
-        self._switch.clear()
+        """An admin changed a switch (WorkerRegistry's listeners): read them again now, so it holds at once (and any
+        read begun before is dropped)."""
         with self._cv:
-            self._cv.notify_all()
+            self._switch_gen += 1
+        self._refresh()
 
     # -- workers ---------------------------------------------------------------------------------------------------
 
@@ -303,6 +358,8 @@ class Lane:
         (a key it doesn't send is unchanged; llm "" says it has none now). No longer online, or its LLM gone: the job
         it holds back to the queue at once."""
         back = []
+        if wid not in self.workers:
+            self._refresh([wid])                       # (a worker new here: its switch read before it can claim)
         with self._cv:
             w = self.workers.get(wid)
             if w is None:
@@ -323,6 +380,7 @@ class Lane:
                 job = self._leases.get(w.lease)
                 if job is not None:
                     back.append(self._unlease(job, "gaming" if w.state == "gaming" else "no_worker"))
+            self._recompute(w.seen)
             self._cv.notify_all()
         self._finish(back)
         return w
@@ -333,6 +391,7 @@ class Lane:
             w = self.workers.pop(wid, None)
             job = self._leases.get(w.lease) if w is not None and w.lease else None
             back = [self._unlease(job, "no_worker")] if job is not None else []
+            self._recompute(self.clock())
             self._cv.notify_all()
         self._finish(back)
 
@@ -346,24 +405,14 @@ class Lane:
                 and now >= w.cool_until and self._on(w.id))
 
     def available(self) -> bool:
-        """A worker advertising an LLM is ready now (the pool and its LLM jobs on, this task the leader)."""
-        if self._stop.is_set() or self._thread is None:
-            return False
-        try:
-            if not self.may_write():
-                return False
-        except Exception:  # noqa: BLE001 - can't tell: not
-            return False
-        now = self.clock()
-        with self._cv:
-            return any(self._ready(w, now) for w in self.workers.values())
+        """A worker advertising an LLM is ready now (the pool and its LLM jobs on, this task the leader). Lock-free: what
+        the lane last worked out (a worker's request, a switch, the tick at least every TICK_S), never a lock or the
+        database."""
+        return self._avail and not self._stop.is_set()
 
     def _nobody_why(self) -> str:
-        """Why no worker can answer: gaming when the LLM's worker games, else no_worker."""
-        now = self.clock()
-        with self._cv:
-            return "gaming" if any(w.had_llm and w.state == "gaming" and now - w.seen < OFFLINE_S
-                                   for w in self.workers.values()) else "no_worker"
+        """Why no worker can answer: gaming when the LLM's worker games, else no_worker (lock-free, as available())."""
+        return self._nobody
 
     # -- jobs ------------------------------------------------------------------------------------------------------
 
@@ -422,13 +471,15 @@ class Lane:
         w = self.seen(wid, state, models)
         with self._cv:
             w.polling += 1
-            try:
-                while not self._stop.is_set():
+        try:
+            while not self._stop.is_set():
+                busy = self._busy(wid)                 # (the STT pool's lock: asked before the lane's, never under it)
+                with self._cv:
                     now = self.clock()
                     w.seen = now
                     if self.workers.get(wid) is not w:     # revoked meanwhile
                         return None
-                    if self._ready(w, now) and not w.lease and self._queue and not self._busy(wid):
+                    if self._ready(w, now) and not w.lease and self._queue and not busy:
                         job = self._best(now)
                         if job is not None:
                             self._queue.remove(job)
@@ -440,8 +491,9 @@ class Lane:
                     if left <= 0:
                         return None
                     self._cv.wait(min(left, 0.5))   # (the STT side doesn't notify here: a pre-alert lease ending)
-                return None
-            finally:
+            return None
+        finally:
+            with self._cv:
                 w.polling -= 1
 
     def _busy(self, wid: str) -> bool:
@@ -486,10 +538,13 @@ class Lane:
                                   f"{COOLDOWN_S:.0f} s")
 
     @staticmethod
-    def _answer(body: dict, schema: dict):
+    def _answer(body: dict, schema: dict, size: int | None = None):
         """The worker's output, if it is a JSON object of at most OUTPUT_MAX that validates; else None. Never raises
-        (a string that isn't JSON, NaN / Infinity, nested too deep, too big: None)."""
+        (a string that isn't JSON, NaN / Infinity, nested too deep, too big: None). size: the request's bytes (the
+        output is in them): over OUTPUT_MAX + the rest of a complete's body, too big without a look inside."""
         try:
+            if size is not None and size > OUTPUT_MAX + 1024:
+                return None
             out = body.get("output")
             if isinstance(out, str):
                 if len(out) > OUTPUT_MAX:
@@ -501,23 +556,28 @@ class Lane:
         except Exception:  # noqa: BLE001 - whatever a worker sends: invalid, never a stuck future
             return None
 
-    def complete(self, wid: str, lease: str, body: dict) -> bool:
+    def complete(self, wid: str, lease: str, body: dict, size: int | None = None) -> bool:
         """The worker's answer for a live lease it holds: the future resolved, with the answer if it validates, else
-        None (invalid) (True); a lease gone: False."""
+        None (invalid) (True); a lease gone: False. The answer is parsed and checked outside the lock."""
         with self._cv:
             job = self._held(wid, lease)
             if job is None:
+                return False
+            schema = job.schema
+        out = self._answer(body if isinstance(body, dict) else {}, schema, size)
+        with self._cv:
+            if self._held(wid, lease) is not job:      # (gone meanwhile: its deadline, the worker revoked)
                 return False
             self._leases.pop(lease, None)
             w = self.workers.get(wid)
             if w is not None and w.lease == lease:
                 w.lease = ""
-            out = self._answer(body if isinstance(body, dict) else {}, job.schema)
             if w is not None:
                 if out is not None:
                     w.fails = 0
                 else:
                     self._failed(wid, self.clock())
+            self._recompute(self.clock())
             self._cv.notify_all()
         self._flush()
         self._resolve(job, out, "ok" if out is not None else "invalid", w,
@@ -535,6 +595,7 @@ class Lane:
             if why == "error":
                 self._failed(wid, self.clock())
             r = self._unlease(job, "gaming" if why == "gaming" else why)
+            self._recompute(self.clock())
         self._flush()
         self._finish([r])
         return True
@@ -542,6 +603,9 @@ class Lane:
     def tick(self, now: float | None = None) -> int:
         """Deadlines, lost leases, a worker switched off. Nobody ready at all: what waits is None at once (no_worker /
         gaming). How many were resolved."""
+        if self._switcher is None and time.monotonic() - self._switch_at >= 1.0:
+            self._refresh()                            # (no switch thread: a lane not started, tests)
+            self._leader = self._may_write()
         now = self.clock() if now is None else now
         out = []
         with self._cv:
@@ -558,8 +622,9 @@ class Lane:
                     out.append(self._unlease(job, "no_worker"))
                 elif not self._on(w.id):                  # the admin switched it (or the pool) off: no more prompts
                     out.append(self._unlease(job, "no_worker"))
+            self._recompute(now)
             anyone = any(self._ready(w, now) for w in self.workers.values())
-            nobody = "" if anyone else self._nobody_why()
+            nobody = "" if anyone else self._nobody
             for job in list(self._queue):
                 if not anyone or job.deadline_at - now < MIN_LEFT_S:
                     self._queue.remove(job)
@@ -602,7 +667,7 @@ class Lane:
 
     # -- the worker API (sizeup/cloud/sttworkers.py hands a GPU worker's /api/station/stt/infer/* here) --------------
 
-    def handle(self, wid: str, path: str, d: dict) -> tuple[int, dict]:
+    def handle(self, wid: str, path: str, d: dict, size: int | None = None) -> tuple[int, dict]:
         if path == API + "claim":
             job = self.claim(wid, d.get("wait"), d.get("state"), d.get("models"))
             return 200, {"job": self.public(job, self.clock()) if job is not None else None, "llm_on": self._on(wid)}
@@ -610,7 +675,7 @@ class Lane:
         if m is None:
             return 404, {"error": "not found"}
         if m.group(2) == "complete":
-            r = self.complete(wid, m.group(1), d)
+            r = self.complete(wid, m.group(1), d, size)
             return (200, {"ok": True}) if r else (409, {"error": "lease lost"})
         return (200, {"ok": True}) if self.release(wid, m.group(1), str(d.get("why") or "")[:40]) else \
             (409, {"error": "lease lost"})

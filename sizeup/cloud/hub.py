@@ -965,6 +965,7 @@ class HubApp(App):
                                          enabled=lambda: bool(self.hub.workers.pool_settings()["on"]),
                                          llm_on=self.hub.workers.llm_on)
         self.stt_api.infer = self.infer_lane
+        self.hub.workers.listeners.append(self.infer_lane.switched)     # (a switch holds at once, not a second later)
         self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
         self.cad.stt_workers_live = self._worker_live
         self.cad.stt_pool_forget = lambda wid: (self.sttpool.forget(wid, "revoked"), self.infer_lane.forget(wid))[0]
