@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "poll_s": 25.0,
+  "pool_on": true,
+  "classes": [
+    "urgent",
+    "high",
+    "context-fallback",
+    "context",
+    "live",
+    "rerun",
+    "low",
+    "catchup"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "base": "station-state/valid/with-status.json",
+  "patch": [
+    {"op": "add", "path": "/capabilities_rev", "value": "5d41402abc4b2a76b9719d911017c592"},
+    {"op": "add", "path": "/roles_applied", "value": "7d793037a0760186574b0282f2f435e7"}
+  ]
+}

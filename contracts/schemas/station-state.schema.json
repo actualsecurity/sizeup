@@ -1,0 +1,1117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-state.schema.json",
+  "title": "Station state post",
+  "description": "The body of POST /api/station/state, as the station sends it today (StationLink._state, sizeup/cloud/station.py). The latest post wins and nothing is queued: it is the station's heartbeat, who is talking now, the page going out now and, about every 5 s, its whole status. Plain JSON, never gzipped, with a Content-Length; the hub takes at most 4 MiB. Times are Unix seconds (a fraction allowed), never milliseconds. Two variants: without `status` (sent at once when the talkers change, and every 2 s while someone talks) and with `status`.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["at", "talking", "paging"],
+  "additionalProperties": true,
+  "properties": {
+    "at": {
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMaximum": 100000000000,
+      "description": "The station's clock when it built this post, Unix seconds with a fraction (never milliseconds: the hub would take them as a clock 50,000 years ahead). The hub keeps (its own clock - at) as this station's clock skew, in seconds; it stamps the snapshot with its own clock."
+    },
+    "talking": {
+      "type": "array",
+      "description": "Everyone transmitting now, and whoever just finished and was not shown live. The whole list every time ([] when nobody talks). The hub keeps the first 50 entries and drops the snapshot when it is older than 8 s. The hub reads `paging` only when `talking` is present.",
+      "items": {"$ref": "#/$defs/talker"}
+    },
+    "paging": {
+      "type": "array",
+      "description": "The two-tone pages going out now, newest first. The whole list every time ([] when none). The hub keeps the first 8 entries.",
+      "items": {"$ref": "#/$defs/page"}
+    },
+    "status": {"$ref": "#/$defs/status"}
+  },
+  "$defs": {
+    "talker": {
+      "title": "One talker",
+      "description": "One radio transmitting now, on a P25 talkgroup or an analog FM channel (sizeup/radio/live.py).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "system", "channel", "tg", "radio_id", "alias", "rig", "label", "since", "talk_since", "ended", "until", "dispatcher", "main"],
+      "additionalProperties": true,
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Stable id of this entry while it lasts: `p25:<system name>:<call key>:<radio id>` or `fm:<channel>:<since, 2 decimals>:<radio id>`. Opaque to the hub."
+        },
+        "system": {
+          "type": "string",
+          "description": "The kind of radio system. The hub looks the radio up in its own registry under P25 unless this is `fm`.",
+          "x-known": ["p25", "fm"]
+        },
+        "channel": {"type": "string", "description": "The talkgroup's name (P25) or the channel's label (FM)."},
+        "tg": {"type": ["integer", "null"], "description": "The P25 talkgroup number; null on an FM channel."},
+        "radio_id": {
+          "type": "string",
+          "description": "The transmitting radio's id as decoded (P25 unit id, MDC-1200 or FleetSync id), digits as a string; \"\" when not known yet."
+        },
+        "alias": {"type": "string", "description": "The radio's over-the-air alias (P25); \"\" when none."},
+        "rig": {
+          "type": "string",
+          "description": "The unit the station's registry gives this radio; \"\" when unknown. The hub replaces it from its own registry whenever `radio_id` is set."
+        },
+        "label": {"type": "string", "description": "The registry's label for the radio; replaced on the hub like `rig`."},
+        "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the call or the carrier started, Unix seconds."},
+        "talk_since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this radio started talking within the call, Unix seconds."},
+        "ended": {"type": "boolean", "description": "True for a talker who just finished and is flashed until `until`."},
+        "until": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "exclusiveMaximum": 100000000000,
+          "description": "Unix seconds until which an ended entry is still shown; null while talking."
+        },
+        "dispatcher": {"type": "boolean", "description": "The alias looks like a dispatch console."},
+        "main": {"type": "boolean", "description": "The talkgroup is one of the main ones (always true on FM)."},
+        "id_on_release": {"type": "boolean", "description": "FM entries only: the carrier is open and no id was decoded yet (these radios send it when the key is released)."}
+      }
+    },
+    "page": {
+      "title": "One page going out",
+      "description": "A two-tone page as it is decoded, pair by pair (sizeup/radio/livepage.py). The hub drops an entry without a `pairs` list.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "channel", "started", "pairs", "phase", "ours", "ended", "until", "page_id"],
+      "additionalProperties": true,
+      "properties": {
+        "key": {"type": "string", "description": "`page:<channel>:<started, 2 decimals>`. Opaque to the hub."},
+        "channel": {"type": "string", "description": "The paging channel's label."},
+        "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the first tone started, Unix seconds."},
+        "pairs": {
+          "type": "array",
+          "description": "The tone pairs decoded so far, in order.",
+          "items": {
+            "title": "One tone pair",
+            "description": "One A/B tone pair of the page.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["a", "b", "names", "ours"],
+            "additionalProperties": true,
+            "properties": {
+              "a": {"type": "number", "description": "The first tone, Hz."},
+              "b": {"type": "number", "description": "The second tone, Hz."},
+              "names": {"type": "array", "items": {"type": "string"}, "description": "Who this pair pages, by name; [] for a pair the station does not know."},
+              "ours": {"type": "boolean", "description": "The pair pages one of this department's own."}
+            }
+          }
+        },
+        "phase": {"type": "string", "description": "`tones` while pairs are still coming, `voice` once the dispatcher speaks.", "x-known": ["tones", "voice"]},
+        "ours": {"type": "boolean", "description": "Any pair is ours."},
+        "ended": {"type": "boolean", "description": "The page is over; shown until `until`."},
+        "until": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "exclusiveMaximum": 100000000000,
+          "description": "Unix seconds until which an ended page is still shown; null while it goes out."
+        },
+        "page_id": {"type": "string", "description": "The id of the finished page this became; \"\" until then."}
+      }
+    },
+    "status": {
+      "title": "Station status",
+      "description": "Everything else the station reports, about every 5 s and right after it ran a job (StationLink.status). The hub keeps the whole object as the station's latest status, replaces `id` with the authenticated id and takes `talkgroups` out into its own list. Objects marked x-complete list every key the station sends; the few that are not are named as known gaps in contracts/README.md.",
+      "x-complete": true,
+      "type": "object",
+      "required": [
+        "id",
+        "config_id",
+        "name",
+        "radios",
+        "sdr",
+        "rerun",
+        "channels",
+        "p25_systems",
+        "reception",
+        "stt_terms",
+        "outbox",
+        "stt_input",
+        "pool_worker",
+        "stt_alert_rev",
+        "version",
+        "logship",
+        "metrics",
+        "health"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The station id this post claims: the config's until the hub's answer names another (`station`). It must be the id the bearer token proves, else 401 `id_mismatch`. At most 64 printable characters; a station with its own token has `[a-z0-9][a-z0-9_-]{0,39}`."
+        },
+        "config_id": {
+          "type": "string",
+          "description": "`[station] id` from the station's config file. The hub uses it to forget a renamed station's former ids once the config has caught up."
+        },
+        "name": {"type": "string", "description": "`[station] name`, free text for people."},
+        "radios": {
+          "type": "array",
+          "description": "One row per receiver and service, in order: each FM / AM channel, the county P25 system, each other P25 system, speech-to-text (`STT`), the dispatch voice (`Voice`). The station's own `Hub` row is left out.",
+          "items": {
+            "title": "One radio row",
+            "description": "A receiver's or service's state (App.radio_status). Every row has the eight common keys. An FM row (sizeup/radio/fm.py) adds the squelch's numbers; one with the noise squelch also `min_open_s`, `short_per_min`, `squelch_default`, `channel_kind`. An AM airband row (sizeup/radio/am.py) is an FM row with `am`, `freqs`, `now`. The county P25 row (sizeup/radio/p25.py) and the `STT` and `Voice` rows have the common keys only; another P25 system's row (sizeup/radio/systems.py) adds `system`.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["label", "mhz", "state", "detail", "restarts", "open", "last_heard", "quieting_db"],
+            "additionalProperties": true,
+            "properties": {
+              "label": {"type": "string", "description": "The row's name: a channel's label, a P25 system's, `STT` or `Voice`."},
+              "mhz": {"type": ["number", "null"], "description": "The channel's frequency, MHz; null for a row that is not one frequency."},
+              "state": {"type": "string", "description": "The row's state in a word.", "x-known": ["ok", "starting", "down", "off", "absent", "ambiguous"]},
+              "detail": {"type": "string", "description": "A sentence for people about the state."},
+              "restarts": {"type": "integer", "minimum": 0, "description": "How many times the receiver's program was restarted since the station started."},
+              "open": {"type": "boolean", "description": "The squelch is open now (receiving)."},
+              "last_heard": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "When it last received something, Unix seconds; null for never."
+              },
+              "quieting_db": {"type": ["number", "null"], "description": "FM: how far the noise is quieted now, dB; null when not measured."},
+              "word": {"type": "string", "description": "A short word shown in place of the state (`RX hold`, `no audio`), only when there is one."},
+              "open_s": {
+                "type": ["number", "null"],
+                "description": "FM / AM: how long the squelch has been open without a break, seconds; null when closed.",
+                "minimum": 0
+              },
+              "stuck": {"type": "boolean", "description": "FM / AM: open for longer than a transmission can be."},
+              "open_db": {"type": "number", "description": "FM / AM: the squelch opens at this much quieting, dB."},
+              "close_db": {"type": "number", "description": "FM / AM: the squelch closes below this much quieting, dB."},
+              "hiss_db": {"type": ["number", "null"], "description": "FM / AM: the idle hiss the quieting is measured from, relative dB; null until measured."},
+              "floor_db": {"type": ["number", "null"], "description": "FM / AM: the channel's noise floor, relative dB; null until measured."},
+              "min_open_s": {"type": "number", "description": "FM noise squelch only: the shortest opening kept, seconds.", "minimum": 0},
+              "short_per_min": {"type": "number", "description": "FM noise squelch only: openings shorter than `min_open_s`, per minute.", "minimum": 0},
+              "squelch_default": {
+                "title": "Squelch defaults",
+                "description": "FM noise squelch only: the receiver's own defaults.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["open_db", "close_db", "min_open_s"],
+                "additionalProperties": true,
+                "properties": {
+                  "open_db": {"type": "number", "description": "Opens at this much quieting, dB."},
+                  "close_db": {"type": "number", "description": "Closes below this much quieting, dB."},
+                  "min_open_s": {"type": "number", "description": "The shortest opening kept, seconds."}
+                }
+              },
+              "channel_kind": {"type": "string", "description": "FM noise squelch only: the channel's kind from the config (`paging`, `traffic`); \"\" when unknown."},
+              "keyups": {"type": "object", "description": "FM traffic channels only: counts of recent key-ups with no speech (App.keyups). Not typed here."},
+              "am": {"const": true, "description": "AM airband rows only: always true."},
+              "schedule": {"type": "string", "description": "AM rows whose frequency changes by the time of day: the plan in words."},
+              "multichannel": {"type": "boolean", "description": "AM rows with more than one frequency: they are received at once on one dongle."},
+              "freqs": {
+                "type": "array",
+                "description": "AM rows: each frequency it listens on now.",
+                "items": {
+                  "title": "One airband frequency",
+                  "description": "One frequency an AM receiver listens on.",
+                  "x-complete": true,
+                  "type": "object",
+                  "required": ["mhz", "label", "name", "open", "quieting_db", "elsewhere"],
+                  "additionalProperties": true,
+                  "properties": {
+                    "mhz": {"type": "number", "description": "The frequency, MHz."},
+                    "label": {"type": "string", "description": "Its channel's label."},
+                    "name": {"type": "string", "description": "A name for it by the time of day (e.g. `CTAF` while a tower is closed); \"\" for none."},
+                    "open": {"type": "boolean", "description": "Its squelch is open now."},
+                    "quieting_db": {"type": ["number", "null"], "description": "The carrier over the noise now, dB; null when not measured."},
+                    "elsewhere": {"type": "boolean", "description": "Another receiver has this frequency now: it is not received here."}
+                  }
+                }
+              },
+              "now": {"type": "string", "description": "AM rows: the frequencies it is on now, in words."},
+              "tower": {
+                "title": "Tower hours",
+                "description": "AM rows on a tower's or ground's frequency: the tower now.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["open", "hours", "next"],
+                "additionalProperties": true,
+                "properties": {
+                  "open": {"type": "boolean", "description": "The tower is open now."},
+                  "hours": {"type": "string", "description": "Its hours, in words."},
+                  "next": {"type": "string", "description": "The local time it next opens or closes, `HH:MM`."}
+                }
+              },
+              "capture": {
+                "title": "Wideband capture",
+                "description": "AM rows received through the channelizer: the capture.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["centre_mhz", "rate"],
+                "additionalProperties": true,
+                "properties": {
+                  "centre_mhz": {"type": "number", "description": "The capture's centre, MHz."},
+                  "rate": {"type": "number", "description": "Its sample rate, samples per second."},
+                  "realtime_pct": {"type": "number", "description": "Samples processed against real time, percent; only once measured."}
+                }
+              },
+              "fallback_until": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "AM rows that fell back to one frequency: until when, Unix seconds."
+              },
+              "ab": {"type": "object", "description": "AM rows with an on-air A/B comparison running: its state. Not typed here."},
+              "system": {"type": "string", "description": "Rows of the other P25 systems only: the system's name."},
+              "hold_until": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "Rows of the other P25 systems only: held back after dropouts until this time, Unix seconds."
+              }
+            }
+          }
+        },
+        "sdr": {
+          "title": "Shared dongles",
+          "description": "The shared dongles and what each is set to (App.sdr). null when every channel has a dongle of its own.",
+          "x-complete": true,
+          "type": ["object", "null"],
+          "required": ["shared", "mode", "modes", "now", "switching", "adsb", "duplicates", "sdrs", "groups", "no_park", "groups_problem"],
+          "additionalProperties": true,
+          "properties": {
+            "shared": {"const": true, "description": "Always true: the object is only there for shared dongles."},
+            "mode": {"type": "string", "description": "The job of the first dongle (kept for a hub from before several dongles)."},
+            "modes": {"type": "array", "description": "Every job a dongle can be set to, `Off` last.", "items": {"type": "string"}},
+            "now": {"type": "object", "description": "Per AM job, the frequencies it is on now, in words; {} for none.", "additionalProperties": {"type": "string"}},
+            "switching": {"type": "boolean", "description": "A switch of a dongle's job is under way."},
+            "adsb": {
+              "type": "object",
+              "description": "The dongle reserved for the ADS-B receiver, its decoder and the forwarding to the hub (App.adsb_row): `serial`, `name`, `present`, `product`, `source`, `held_by`, `installed`, `gain`, `bias_tee`, `decoder`, `forward`. Not typed here."
+            },
+            "duplicates": {
+              "type": "array",
+              "description": "Serials two or more dongles share; [] for none.",
+              "items": {
+                "title": "One shared serial",
+                "description": "Two or more dongles with the same serial (App.usb).",
+                "x-complete": true,
+                "type": "object",
+                "required": ["serial", "indexes", "products", "name", "job", "text"],
+                "additionalProperties": true,
+                "properties": {
+                  "serial": {"type": "string", "description": "The serial they share."},
+                  "indexes": {"type": "array", "description": "Their USB indexes.", "items": {"type": "integer"}},
+                  "products": {"type": "array", "description": "Their product names.", "items": {"type": "string"}},
+                  "name": {"type": "string", "description": "The serial's name here."},
+                  "job": {"type": "string", "description": "The job set for that serial."},
+                  "rename": {"description": "The index of the one to give a new serial, when that can be told; else null."},
+                  "was": {"type": "string", "description": "The product that serial was last seen as; \"\" when unknown."},
+                  "text": {"type": "string", "description": "What to do, in words."}
+                }
+              }
+            },
+            "sdrs": {
+              "type": "array",
+              "description": "One row per dongle.",
+              "items": {
+                "title": "One dongle",
+                "description": "One RTL-SDR dongle and its job.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["serial", "name", "product", "mode", "present", "ambiguous", "set_by", "lent", "held_by", "noaudio"],
+                "additionalProperties": true,
+                "properties": {
+                  "serial": {"type": "string", "description": "Its serial."},
+                  "name": {"type": "string", "description": "Its name here (the serial when none was given)."},
+                  "product": {"type": "string", "description": "Its USB product name; \"\" when it is not plugged in."},
+                  "mode": {"type": "string", "description": "The job it is set to, or `Off`."},
+                  "present": {"type": "boolean", "description": "It is plugged in now."},
+                  "ambiguous": {"type": "string", "description": "Why nothing may open it now (two dongles share its serial); \"\" when fine."},
+                  "set_by": {"type": ["string", "null"], "description": "Who chose its job: `person`, `auto`, or null (a default)."},
+                  "lent": {
+                    "title": "Lent to a reception test",
+                    "description": "While a reception test has the dongle; null otherwise.",
+                    "x-complete": true,
+                    "type": ["object", "null"],
+                    "required": ["label", "job", "paused"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "label": {"type": "string", "description": "The system under test."},
+                      "job": {"type": "string", "description": "The job it runs for the test; \"\" once the test is over."},
+                      "paused": {"type": "string", "description": "Its own job, paused meanwhile."},
+                      "owed": {"const": true, "description": "Its own job is not back yet."}
+                    }
+                  },
+                  "held_by": {
+                    "title": "Holder",
+                    "description": "Another application's claim on the dongle.",
+                    "x-complete": true,
+                    "type": ["object", "null"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "app": {"type": ["string", "null"], "description": "The application's name."},
+                      "mode": {"type": ["string", "null"], "description": "What it says it uses the dongle for."}
+                    }
+                  },
+                  "noaudio": {
+                    "title": "No audio",
+                    "description": "The dongle opens but streams no audio; null otherwise.",
+                    "x-complete": true,
+                    "type": ["object", "null"],
+                    "required": ["since", "job", "retry_min"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Since when, Unix seconds."},
+                      "job": {"type": "string", "description": "The job it was running."},
+                      "retry_min": {"type": "array", "description": "When it is tried again, minutes after `since`.", "items": {"type": "number"}}
+                    }
+                  },
+                  "group": {"type": "string", "description": "Its antenna group's name; absent outside groups."},
+                  "own": {"type": "string", "description": "A stand-in only: its own job, kept aside while it runs another's."},
+                  "for": {"type": "array", "description": "A stand-in only: the dongles it stands in for.", "items": {"type": "string"}},
+                  "on": {"type": "string", "description": "Its job runs on this stand-in dongle instead."}
+                }
+              }
+            },
+            "groups": {
+              "type": "array",
+              "description": "The antenna groups; [] when there are none.",
+              "items": {
+                "title": "One antenna group",
+                "description": "Dongles on one antenna feed, locked to the jobs it carries.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["name", "sdrs", "jobs", "usable", "short", "unowned", "conflicts"],
+                "additionalProperties": true,
+                "properties": {
+                  "name": {"type": "string", "description": "The group's name."},
+                  "sdrs": {"type": "array", "description": "Its dongles' serials.", "items": {"type": "string"}},
+                  "jobs": {"type": "array", "description": "Its jobs, highest first.", "items": {"type": "string"}},
+                  "parked": {"type": "array", "description": "Its jobs switched off on purpose; only when there are any.", "items": {"type": "string"}},
+                  "usable": {"type": "array", "description": "Its dongles that can run a job now.", "items": {"type": "string"}},
+                  "short": {"type": "array", "description": "Its jobs that have no dongle now.", "items": {"type": "string"}},
+                  "unowned": {"type": "array", "description": "Its jobs that are no dongle's own and not parked.", "items": {"type": "string"}},
+                  "conflicts": {"type": "object", "description": "Dongles that run a job against the group, {serial: job}.", "additionalProperties": {"type": "string"}}
+                }
+              }
+            },
+            "no_park": {"type": "array", "description": "The jobs that may not be parked.", "items": {"type": "string"}},
+            "groups_problem": {"type": "string", "description": "Why the groups file was dropped; \"\" when fine."}
+          }
+        },
+        "rerun": {
+          "title": "Re-run progress",
+          "description": "The re-transcription the hub asked for, as counts of clips.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["total", "done", "changed", "failed", "pending"],
+          "additionalProperties": true,
+          "properties": {
+            "total": {"type": "integer", "minimum": 0, "description": "Clips asked for in this run."},
+            "done": {"type": "integer", "minimum": 0, "description": "Clips transcribed again so far."},
+            "changed": {"type": "integer", "minimum": 0, "description": "Of those, how many got another text."},
+            "failed": {"type": "integer", "minimum": 0, "description": "Of those, how many failed."},
+            "pending": {"type": "integer", "minimum": 0, "description": "Clips still waiting, the catch-up's left out."}
+          }
+        },
+        "channels": {
+          "title": "Channel choices applied",
+          "description": "The per-channel choices the hub sent, as this station runs them (App.channels_applied). The hub compares `sig` with its own and sends the choices again when they differ.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["prefs", "aws", "tones", "squelch", "squelch_ok", "deny_ok", "sig"],
+          "additionalProperties": true,
+          "properties": {
+            "prefs": {
+              "type": "object",
+              "description": "Per channel key, the choices in force as the hub sent them; {} for none.",
+              "additionalProperties": {"type": "object"}
+            },
+            "aws": {
+              "type": "object",
+              "description": "What the hub last said about Amazon Transcribe, as the station holds it: `ok` (boolean), `why` (text), `reserve` (channel keys), and `deny` when the hub sent one. Not typed here: it is the hub's own words back."
+            },
+            "tones": {"type": "integer", "minimum": 0, "description": "How many tone-code choices are in force (a count, not the list)."},
+            "squelch": {
+              "type": "object",
+              "description": "Per FM channel label, the squelch numbers the hub set; {} for none.",
+              "additionalProperties": {"type": "object"}
+            },
+            "squelch_ok": {
+              "const": true,
+              "description": "This station takes squelch settings from the hub. An implicit capability flag: the hub sends them only when it is true."
+            },
+            "deny_ok": {"const": true, "description": "This station takes `aws.deny` from the hub. An implicit capability flag, like `squelch_ok`."},
+            "sig": {"type": "string", "description": "A short hex digest of everything above (sizeup/channels.py sig), compared for equality only."}
+          }
+        },
+        "p25_systems": {
+          "type": "array",
+          "description": "The other P25 systems this station runs (sizeup/radio/systems.py state). [] when none. The key's presence is an implicit capability flag: the hub treats a status without it as a station from before the other systems.",
+          "items": {
+            "title": "One P25 system",
+            "description": "A P25 system beside the county's: its jobs, what runs, its control channel and what that showed.",
+            "x-complete": true,
+            "type": "object",
+            "required": [
+              "name",
+              "label",
+              "title",
+              "site",
+              "jobs",
+              "frequencies",
+              "covered",
+              "state",
+              "detail",
+              "last_heard",
+              "hold_until",
+              "cc",
+              "unknown",
+              "encrypted",
+              "watched"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "name": {"type": "string", "description": "The system's short name, lower case."},
+              "label": {"type": "string", "description": "Its name for people."},
+              "title": {"type": "string", "description": "Its long name."},
+              "site": {"type": "object", "description": "The site as its config gives it (NAC, WACN, phase); {} when not given. Not typed here."},
+              "jobs": {
+                "type": "array",
+                "description": "Its dongle jobs.",
+                "items": {
+                  "title": "One job",
+                  "description": "One trunk-recorder source of the system.",
+                  "x-complete": true,
+                  "type": "object",
+                  "required": ["job", "source", "mhz", "span_mhz", "sdr"],
+                  "additionalProperties": true,
+                  "properties": {
+                    "job": {"type": "string", "description": "The job's name."},
+                    "source": {"type": "integer", "minimum": 0, "description": "Its index among the system's sources."},
+                    "mhz": {"type": "number", "description": "Its centre, MHz."},
+                    "span_mhz": {"type": "number", "description": "Its width, MHz."},
+                    "sdr": {"type": ["string", "null"], "description": "The dongle that has it; null for none."}
+                  }
+                }
+              },
+              "frequencies": {"type": "array", "description": "Its control and voice frequencies, MHz.", "items": {"type": "number"}},
+              "covered": {"type": "array", "description": "Those the running jobs take in, MHz.", "items": {"type": "number"}},
+              "state": {"type": "string", "description": "Its state in a word.", "x-known": ["ok", "starting", "down", "off", "absent", "ambiguous"]},
+              "detail": {"type": "string", "description": "A sentence for people."},
+              "last_heard": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "When a call of it last ended, Unix seconds; null for never."
+              },
+              "hold_until": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "Held back after dropouts until this time, Unix seconds; null when not."
+              },
+              "cc": {
+                "title": "Control channel",
+                "description": "Its control channel's decode; null while no job of it runs.",
+                "x-complete": true,
+                "type": ["object", "null"],
+                "required": ["rate", "low_since", "last_low", "retunes", "last_retune", "silent_since"],
+                "additionalProperties": true,
+                "properties": {
+                  "rate": {"type": ["number", "null"], "description": "Messages decoded per second lately; null when none was logged lately."},
+                  "low_since": {
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "exclusiveMaximum": 100000000000,
+                    "description": "Since when the rate has been low, Unix seconds; null when it is not."
+                  },
+                  "last_low": {
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "exclusiveMaximum": 100000000000,
+                    "description": "When it was last low, Unix seconds; null for never."
+                  },
+                  "retunes": {"type": "integer", "minimum": 0, "description": "Control-channel retunes since the start."},
+                  "last_retune": {
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "exclusiveMaximum": 100000000000,
+                    "description": "When it last retuned, Unix seconds; null for never."
+                  },
+                  "silent_since": {
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "exclusiveMaximum": 100000000000,
+                    "description": "Since when nothing at all was logged, Unix seconds; null when it is logging."
+                  }
+                }
+              },
+              "unknown": {"type": "array", "description": "Talkgroups heard that its file does not list: {tg, source, count, first, last}.", "items": {"type": "object"}},
+              "encrypted": {
+                "type": "array",
+                "description": "Recent key-ups on encrypted talkgroups: {tg, name, source, ...}, never the radio.",
+                "items": {"type": "object"}
+              },
+              "watched": {"type": "array", "description": "Counts on the talkgroups being watched: {tg, name, since, grants, ...}.", "items": {"type": "object"}},
+              "split": {"type": "object", "description": "Counts of the cuts the recorder made, or would have made, where a new talker came in on the voice channel (sizeup/radio/systems.py state): a count per kind, and `since`. Optional: a station from before the P25 split sends none.", "properties": {"since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the counts began, Unix seconds."}}, "additionalProperties": {"type": "integer", "minimum": 0}}
+            }
+          }
+        },
+        "reception": {
+          "title": "Reception test",
+          "description": "The reception test (sizeup/radio/reception.py state): what can be tested, the running test, the past ones. null when this station has no P25 system to test.",
+          "x-complete": true,
+          "type": ["object", "null"],
+          "required": ["systems", "durations", "keep_min", "dongles", "active", "alert", "samples", "history"],
+          "additionalProperties": true,
+          "properties": {
+            "systems": {"type": "array", "description": "The systems a test can run on: {name, label, kind, jobs, watch, alert, caveat}.", "items": {"type": "object"}},
+            "durations": {"type": "array", "description": "The lengths offered, minutes (0: until stopped).", "items": {"type": "number"}},
+            "keep_min": {"type": "number", "description": "How long samples are kept, minutes."},
+            "dongles": {
+              "type": "array",
+              "description": "Each dongle and whether it may be lent: {serial, name, job, present, held_by, protected, refuse}.",
+              "items": {"type": "object"}
+            },
+            "active": {"type": ["object", "null"], "description": "The running test; null for none. Not typed here."},
+            "alert": {"type": ["string", "null"], "description": "A job a test paused that is still paused, in words; null for none."},
+            "samples": {"type": "array", "description": "Calls the running test captured, to listen to.", "items": {"type": "object"}},
+            "history": {
+              "type": "array",
+              "description": "The past tests, newest first. The hub logs each ended one once, keyed by `id` and `restored`.",
+              "items": {
+                "title": "One past test",
+                "description": "A reception test that ended (or was interrupted).",
+                "x-complete": true,
+                "type": "object",
+                "required": ["id", "ended", "restored", "halves"],
+                "additionalProperties": true,
+                "properties": {
+                  "id": {"type": "string", "description": "The test's id."},
+                  "system": {"type": "string", "description": "The system tested."},
+                  "label": {"type": "string", "description": "Its name for people."},
+                  "sdr": {"type": "string", "description": "The dongle lent."},
+                  "sdr_name": {"type": "string", "description": "Its name."},
+                  "was": {"type": "string", "description": "The job it ran before."},
+                  "plan": {"type": "array", "description": "The jobs tested, in order.", "items": {"type": "string"}},
+                  "minutes": {"type": ["number", "null"], "description": "Minutes per job; 0 for until stopped."},
+                  "started": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it started, Unix seconds."},
+                  "ended": {
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "exclusiveMaximum": 100000000000,
+                    "description": "When it ended, Unix seconds; null while it has not."
+                  },
+                  "status": {"type": ["string", "null"], "description": "`done`, `stopped`, `failed` or `interrupted`."},
+                  "why": {"type": ["string", "null"], "description": "Why it stopped or failed."},
+                  "note": {"type": ["string", "null"], "description": "The person's note."},
+                  "verdict": {"description": "The overall verdict {grade, hint}, or null."},
+                  "restored": {"type": ["string", "null"], "description": "What happened to the paused job afterwards, in words; null until known."},
+                  "restored_ok": {"type": ["boolean", "null"], "description": "The paused job is back."},
+                  "halves": {
+                    "type": "array",
+                    "description": "Each job's numbers: {job, seconds, grade, hint, cc_mhz, rate, decoded_pct, ...}.",
+                    "items": {"type": "object"}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "stt_terms": {
+          "title": "Term lists applied",
+          "description": "The versions of the private term lists the hub sent for whisper's prompt (never the terms). The hub sends the lists again when `v` differs from its own.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["v"],
+          "additionalProperties": true,
+          "properties": {
+            "v": {"type": "string", "description": "The version of the lists in force; \"\" for none."},
+            "sets": {"type": "object", "description": "Per list name, its own version; present once the hub has sent any.", "additionalProperties": true}
+          }
+        },
+        "outbox": {
+          "title": "Outbox",
+          "description": "The durable queue of events waiting to go up (sizeup/cloud/outbox.py).",
+          "x-complete": true,
+          "type": "object",
+          "required": ["pending", "oldest", "dropped_audio"],
+          "additionalProperties": true,
+          "properties": {
+            "pending": {"type": "integer", "minimum": 0, "description": "Events waiting."},
+            "oldest": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "exclusiveMaximum": 100000000000,
+              "description": "When the oldest waiting event was queued, Unix seconds; null when none waits."
+            },
+            "dropped_audio": {"type": "integer", "minimum": 0, "description": "Clips whose audio was dropped to keep the outbox under its size limit (the events stayed)."}
+          }
+        },
+        "stt_input": {
+          "title": "Speech-to-text inputs",
+          "description": "The lane that sends each clip's exact speech-to-text input to the hub (sizeup/cloud/sttinput.py; StationLink.stt_stats). Counts are since the station started.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["queued", "waiting", "bytes", "made", "sent", "dropped", "hub_takes", "dropped_pre", "dropped_fire", "encoder", "held", "worker"],
+          "additionalProperties": true,
+          "properties": {
+            "queued": {"type": "integer", "minimum": 0, "description": "Inputs waiting to be encoded."},
+            "waiting": {"type": "integer", "minimum": 0, "description": "Encoded inputs waiting to go up."},
+            "bytes": {"type": "integer", "minimum": 0, "description": "Their size, bytes."},
+            "made": {"type": "integer", "minimum": 0, "description": "Inputs encoded."},
+            "sent": {"type": "integer", "minimum": 0, "description": "Inputs the hub stored."},
+            "dropped": {
+              "type": "object",
+              "description": "Inputs dropped, by reason: `queue`, `too_big`, `failed` (the encoder's), `outbox` (over its budget), `refused` (by the hub, for good). Each a count.",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "hub_takes": {"type": "boolean", "description": "The hub's last `caps` had `stt_input`."},
+            "dropped_pre": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of pre-alert channels."},
+            "dropped_fire": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of fire channels."},
+            "encoder": {"type": "string", "description": "Where inputs are encoded: \"\" before the first, else `scope`, `process` or `thread (<why>)`."},
+            "held": {"type": "boolean", "description": "Lower-priority inputs are held now because whisper is behind on live traffic."},
+            "worker": {
+              "title": "Encoder worker",
+              "description": "The encoder worker's state.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["where", "state", "detail", "unhealthy", "in_flight"],
+              "additionalProperties": true,
+              "properties": {
+                "where": {"type": "string", "description": "As `encoder`."},
+                "state": {"type": "string", "description": "`ok`, `slow`, `unhealthy`, `dead`, `thread`, or \"\" before the first input."},
+                "detail": {"type": "string", "maxLength": 300, "description": "What was last said about it."},
+                "unhealthy": {"type": "boolean", "description": "The worker is alive but not answering in time."},
+                "in_flight": {"type": "boolean", "description": "An input is being encoded now."}
+              }
+            }
+          }
+        },
+        "pool_worker": {
+          "title": "Whisper as a pool worker",
+          "description": "This station's whisper as one of the hub's speech-to-text pool workers (sizeup/cloud/stationworker.py). Counts are since the station started.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["claimed", "done", "released", "preempted", "lost", "error", "state", "why"],
+          "additionalProperties": true,
+          "properties": {
+            "claimed": {"type": "integer", "minimum": 0, "description": "Pool jobs claimed."},
+            "done": {"type": "integer", "minimum": 0, "description": "Jobs completed."},
+            "released": {"type": "integer", "minimum": 0, "description": "Jobs handed back."},
+            "preempted": {"type": "integer", "minimum": 0, "description": "Jobs aborted for one of the station's own clips."},
+            "lost": {"type": "integer", "minimum": 0, "description": "Jobs whose lease was lost."},
+            "error": {"type": "string", "maxLength": 200, "description": "The last error; \"\" for none."},
+            "state": {"type": "string", "description": "`off`, `paused` or `online`."},
+            "why": {"type": "string", "description": "Why it is off or paused; \"\" when online."}
+          }
+        },
+        "stt_alert_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "The revision of the pre-alert source list this station has: a content hash of the set as an integer below 2^53 (sizeup/intel/engine.py push_rev), 0 until the hub has sent one. The hub sends its list again when the number differs from its own. The key's presence is an implicit capability flag: a station without it is never sent the list."
+        },
+        "version": {
+          "title": "Version and update",
+          "description": "The build this station runs, the hub's build as it last heard it, and the updater's state (sizeup/cloud/autoupdate.py Watch.status; StationLink.version).",
+          "x-complete": true,
+          "type": "object",
+          "required": ["build", "hub", "update", "adapter", "state", "text"],
+          "additionalProperties": true,
+          "properties": {
+            "build": {"type": "string", "description": "The git sha this station runs; \"\" when unknown (a development checkout)."},
+            "hub": {"type": "string", "description": "The hub's build as its state answers gave it (7 to 40 lower-case hex); \"\" when not heard or not a sha."},
+            "update": {
+              "title": "Updater state",
+              "description": "The updater's own state file, cut to these keys (each but `failed` only when the file has it). Its values are the local file's and are not typed here.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["failed"],
+              "additionalProperties": true,
+              "properties": {
+                "state": {"description": "The updater's state in a word."},
+                "since": {"description": "Since when, Unix seconds."},
+                "to": {"description": "The build it is switching to."},
+                "from": {"description": "The build it is leaving."},
+                "paused": {"description": "Updates are paused."},
+                "windows": {"description": "The quiet windows it waits for."},
+                "last": {"description": "The last update: what, when, how long."},
+                "equivalent": {"description": "Builds with no runtime change between them."},
+                "retry": {"description": "Per target, why it is tried again."},
+                "hold": {"description": "A hold on updating."},
+                "failed": {"type": "object", "description": "Per target sha, why the update to it failed (the newest five); {} for none."}
+              }
+            },
+            "adapter": {
+              "title": "Incident-source adapter",
+              "description": "The private incident-source adapter this release runs. Names and states only: never a credential, a URL or a value read from the source.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["state", "repo", "commit", "text", "health"],
+              "additionalProperties": true,
+              "properties": {
+                "state": {"type": "string", "description": "`off`, `pending`, `installed`, `running` or `failing`."},
+                "repo": {"type": "string", "description": "The adapter repository's short name; \"\" when off."},
+                "commit": {"type": "string", "maxLength": 12, "description": "The installed commit, at most 12 hex characters; \"\" when none."},
+                "text": {"type": "string", "description": "A sentence for people."},
+                "health": {
+                  "type": "array",
+                  "maxItems": 10,
+                  "description": "Each incident source's own health, as its runner last reported it.",
+                  "items": {
+                    "title": "One source's health",
+                    "description": "One incident source.",
+                    "x-complete": true,
+                    "type": "object",
+                    "required": ["source", "label", "state", "reason"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "source": {"type": "string", "maxLength": 120, "description": "The source's id."},
+                      "label": {"type": "string", "maxLength": 120, "description": "Its name for people."},
+                      "state": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "`starting` before the first report, then the runner's word (`ok`, `backing_off`, `failing`, ...)."
+                      },
+                      "reason": {"type": "string", "maxLength": 120, "description": "Why, when not ok; \"\" otherwise."}
+                    }
+                  }
+                }
+              }
+            },
+            "state": {"type": "string", "description": "`ok`, `updating`, `deferred`, `failed`, `paused`, `behind` or `unknown`."},
+            "text": {"type": "string", "description": "A sentence for people."}
+          }
+        },
+        "logship": {
+          "title": "Journal shipper",
+          "description": "The journal shipper's state and counters (sizeup/cloud/logship.py stats). When reading them fails: {state: `error`, reason: <the error's type name>}.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["state", "reason"],
+          "additionalProperties": true,
+          "properties": {
+            "state": {"type": "string", "description": "Its state in a word; `error` when reading the counters failed."},
+            "reason": {"type": "string", "description": "Why, in words."},
+            "level": {"type": ["string", "null"], "description": "The lowest level shipped."},
+            "on": {"type": "boolean", "description": "Shipping is on."},
+            "adapter": {"type": "boolean", "description": "The incident-source adapter's lines are shipped too."},
+            "spool_batches": {"type": "integer", "minimum": 0, "description": "Batches waiting in the spool."},
+            "spool_bytes": {"type": "integer", "minimum": 0, "description": "Their size, bytes."},
+            "spool_max": {"type": "integer", "minimum": 0, "description": "The spool's limit, bytes."},
+            "sent_lines": {"type": "integer", "minimum": 0, "description": "Lines the hub took."},
+            "sent_batches": {"type": "integer", "minimum": 0, "description": "Batches the hub took."},
+            "sent_bytes": {"type": "integer", "minimum": 0, "description": "Their size as sent, bytes."},
+            "dropped_secret": {"type": "integer", "minimum": 0, "description": "Lines dropped for looking like a secret."},
+            "dropped_level": {"type": "integer", "minimum": 0, "description": "Lines dropped for their level."},
+            "dropped_unit": {"type": "integer", "minimum": 0, "description": "Lines dropped for their unit."},
+            "dropped_spool": {"type": "integer", "minimum": 0, "description": "Lines dropped because the spool was full."},
+            "dropped_adapter": {"type": "integer", "minimum": 0, "description": "The incident-source adapter's lines, kept here."},
+            "dropped_error": {"type": "integer", "minimum": 0, "description": "Lines dropped on an error."},
+            "dropped_off": {"type": "integer", "minimum": 0, "description": "Lines dropped while shipping is off."},
+            "rejected": {"type": "integer", "minimum": 0, "description": "Batches the hub refused for good."},
+            "held": {"type": "integer", "minimum": 0, "description": "Lines held back now."},
+            "dropped_held": {"type": "integer", "minimum": 0, "description": "Held lines dropped."},
+            "repeats": {"type": "integer", "minimum": 0, "description": "Repeated lines left out."},
+            "last_ok": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "exclusiveMaximum": 100000000000,
+              "description": "When the hub last took a batch, Unix seconds; null for never."
+            },
+            "error": {"type": "string", "description": "The last error; \"\" for none."}
+          }
+        },
+        "metrics": {
+          "title": "Signal-metrics link",
+          "description": "The signal-metrics sender's counters (sizeup/cloud/metrics.py). No reader of this object was found on the hub.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["pending", "dropped", "sent", "rejected", "last_ok", "error"],
+          "additionalProperties": true,
+          "properties": {
+            "pending": {"type": "integer", "minimum": 0, "description": "Records waiting to go up."},
+            "dropped": {"type": "integer", "minimum": 0, "description": "Records dropped (the memory buffer was full)."},
+            "sent": {"type": "integer", "minimum": 0, "description": "Records the hub took."},
+            "rejected": {"type": "integer", "minimum": 0, "description": "Records the hub refused."},
+            "last_ok": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "exclusiveMaximum": 100000000000,
+              "description": "When the hub last took a batch, Unix seconds; null for never."
+            },
+            "error": {"type": "string", "description": "The last error; \"\" for none."}
+          }
+        },
+        "health": {
+          "title": "Machine and programs",
+          "description": "The machine and its radio programs (sizeup/cloud/health.py station_metrics). When building it fails the object is {error} alone.",
+          "x-complete": true,
+          "type": "object",
+          "additionalProperties": true,
+          "oneOf": [
+            {"required": ["error"]},
+            {
+              "required": [
+                "started",
+                "boot",
+                "host",
+                "cpu_pct",
+                "load1",
+                "cpus",
+                "mem_pct",
+                "mem_total",
+                "temp_c",
+                "disk_path",
+                "disk_pct",
+                "disk_free",
+                "disk_total",
+                "jobs"
+              ]
+            }
+          ],
+          "properties": {
+            "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this process started, Unix seconds."},
+            "boot": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "exclusiveMaximum": 100000000000,
+              "description": "When the machine booted, Unix seconds; null when not known."
+            },
+            "host": {"type": "string", "description": "The machine's host name.", "maxLength": 64},
+            "cpu_pct": {
+              "type": ["number", "null"],
+              "description": "CPU busy since the last report, percent of all cores; null on the first report and where it cannot be read.",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "load1": {"type": ["number", "null"], "description": "The 1-minute load average; null where there is none.", "minimum": 0},
+            "cpus": {"type": ["integer", "null"], "minimum": 0, "description": "Logical CPUs."},
+            "mem_pct": {"type": ["number", "null"], "description": "Memory in use, percent; null where it cannot be read.", "minimum": 0, "maximum": 100},
+            "mem_total": {"type": ["integer", "null"], "minimum": 0, "description": "Installed memory, bytes; null where it cannot be read."},
+            "temp_c": {"type": ["number", "null"], "description": "The hottest thermal zone, degrees Celsius; null without one."},
+            "disk_path": {"type": "string", "description": "The folder whose disk is measured.", "maxLength": 200},
+            "disk_pct": {"type": ["number", "null"], "description": "That disk in use, percent; null when it cannot be read.", "minimum": 0, "maximum": 100},
+            "disk_free": {"type": ["integer", "null"], "minimum": 0, "description": "Free on it, bytes."},
+            "disk_total": {"type": ["integer", "null"], "minimum": 0, "description": "Its size, bytes."},
+            "recorder": {
+              "title": "County trunk-recorder",
+              "description": "The county P25 system's trunk-recorder; only on a station with P25.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["state", "restarts", "detail", "expected"],
+              "additionalProperties": true,
+              "properties": {
+                "state": {"type": ["string", "null"], "description": "Its state in a word."},
+                "restarts": {"type": "integer", "minimum": 0, "description": "Restarts since the station started."},
+                "detail": {"type": "string", "description": "A sentence for people, radio ids removed."},
+                "expected": {"type": "boolean", "description": "It should be running."},
+                "cc": {
+                  "title": "Control channel",
+                  "description": "A P25 control channel's decode, from trunk-recorder's log.",
+                  "x-complete": true,
+                  "type": "object",
+                  "required": ["rate", "low_since", "last_low", "retunes", "last_retune", "silent_since"],
+                  "additionalProperties": true,
+                  "properties": {
+                    "rate": {"type": ["number", "null"], "description": "Messages decoded per second lately; null when none was logged lately."},
+                    "low_since": {
+                      "type": ["number", "null"],
+                      "minimum": 0,
+                      "exclusiveMaximum": 100000000000,
+                      "description": "Since when the rate has been low, Unix seconds; null when it is not."
+                    },
+                    "last_low": {
+                      "type": ["number", "null"],
+                      "minimum": 0,
+                      "exclusiveMaximum": 100000000000,
+                      "description": "When it was last low, Unix seconds; null for never."
+                    },
+                    "retunes": {"type": "integer", "minimum": 0, "description": "Control-channel retunes since the start."},
+                    "last_retune": {
+                      "type": ["number", "null"],
+                      "minimum": 0,
+                      "exclusiveMaximum": 100000000000,
+                      "description": "When it last retuned, Unix seconds; null for never."
+                    },
+                    "silent_since": {
+                      "type": ["number", "null"],
+                      "minimum": 0,
+                      "exclusiveMaximum": 100000000000,
+                      "description": "Since when nothing at all was logged, Unix seconds; null when it is logging."
+                    }
+                  }
+                }
+              }
+            },
+            "whisper": {
+              "title": "whisper-server",
+              "description": "The local speech-to-text server.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["state", "detail"],
+              "additionalProperties": true,
+              "properties": {
+                "state": {"type": ["string", "null"], "description": "Its state in a word."},
+                "detail": {"type": "string", "description": "A sentence for people.", "maxLength": 200}
+              }
+            },
+            "stt_queue": {"type": "object", "description": "The speech-to-text queue's depth, waits and drops (sizeup/stt.py stats). Not typed here."},
+            "jobs": {
+              "type": "object",
+              "description": "Per job label, its program. The hub reads it as an object: a list is not one.",
+              "additionalProperties": {
+                "title": "One job's program",
+                "description": "A receiver's program as it really runs.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["state", "restarts", "detail", "expected"],
+                "additionalProperties": true,
+                "properties": {
+                  "state": {"type": ["string", "null"], "description": "Its state in a word; `off` for a job no dongle has."},
+                  "restarts": {"type": "integer", "minimum": 0, "description": "Restarts since the station started."},
+                  "detail": {"type": "string", "description": "A sentence for people, radio ids removed.", "maxLength": 200},
+                  "expected": {"type": "boolean", "description": "It should be running (a dongle has the job, or dongles are not shared)."},
+                  "context": {"const": true, "description": "A job of another P25 system: never an alert on the hub."},
+                  "hold_until": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Held back after dropouts until this time, Unix seconds."}
+                }
+              }
+            },
+            "reception": {"type": ["object", "null"], "description": "A job a reception test paused that is still paused: {job, sdr, since, text, push}; null for none."},
+            "usb": {
+              "title": "USB",
+              "description": "The dongles on USB now.",
+              "x-complete": true,
+              "type": "object",
+              "required": ["devices", "duplicates"],
+              "additionalProperties": true,
+              "properties": {
+                "devices": {
+                  "type": "array",
+                  "description": "Each dongle.",
+                  "items": {
+                    "title": "One USB dongle",
+                    "description": "A dongle as USB lists it.",
+                    "x-complete": true,
+                    "type": "object",
+                    "required": ["index", "product", "serial"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "index": {"type": "integer", "minimum": 0, "description": "Its USB index."},
+                      "product": {"type": "string", "description": "Its product name."},
+                      "serial": {"type": "string", "description": "Its serial."}
+                    }
+                  }
+                },
+                "duplicates": {
+                  "type": "array",
+                  "description": "Serials two or more of them share.",
+                  "items": {
+                    "title": "One shared serial",
+                    "description": "Two or more dongles with the same serial (App.usb).",
+                    "x-complete": true,
+                    "type": "object",
+                    "required": ["serial", "indexes", "products", "name", "job", "text"],
+                    "additionalProperties": true,
+                    "properties": {
+                      "serial": {"type": "string", "description": "The serial they share."},
+                      "indexes": {"type": "array", "description": "Their USB indexes.", "items": {"type": "integer"}},
+                      "products": {"type": "array", "description": "Their product names.", "items": {"type": "string"}},
+                      "name": {"type": "string", "description": "The serial's name here."},
+                      "job": {"type": "string", "description": "The job set for that serial."},
+                      "rename": {"description": "The index of the one to give a new serial, when that can be told; else null."},
+                      "was": {"type": "string", "description": "The product that serial was last seen as; \"\" when unknown."},
+                      "text": {"type": "string", "description": "What to do, in words."}
+                    }
+                  }
+                }
+              }
+            },
+            "heard": {
+              "type": "object",
+              "description": "Per main talkgroup heard since the start, keyed `tg:<n>`: its last call. For the hub's silence hints.",
+              "additionalProperties": {
+                "title": "One talkgroup heard",
+                "description": "A main talkgroup's last call.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["at", "name"],
+                "additionalProperties": true,
+                "properties": {
+                  "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When, Unix seconds."},
+                  "name": {"type": "string", "description": "The talkgroup's name."}
+                }
+              }
+            },
+            "adsb": {
+              "type": "object",
+              "description": "The ADS-B receiver's dongle, decoder and forwarding (adsb_health); only while a dongle is named for it. Not typed here."
+            },
+            "link_restarts": {
+              "type": "object",
+              "description": "From #782 on, and only when there are any: per thread of the hub link (`hub-state`, `hub-forward`, ...) that ended on an error and was started again, how often and why. Not sent by the code before #782.",
+              "additionalProperties": {"title": "One thread started again", "description": "A thread of the hub link that ended and was started again.", "x-complete": true, "type": "object", "additionalProperties": true, "properties": {"n": {"type": "integer", "minimum": 0, "description": "How many times."}, "why": {"type": "string", "description": "The last error's type name."}, "at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it last did, Unix seconds."}}}
+            },
+            "error": {"type": "string", "description": "Building the report failed: `<Type>: <message>`.", "maxLength": 200}
+          }
+        },
+        "talkgroups": {
+          "type": "array",
+          "description": "Every known or heard P25 talkgroup with its switches (sizeup/talkgroups.py state). Sent only when a row's (tg, record, main, system, tier) changed, or every 30 s; when absent the hub keeps the list it has. [] for a station without P25.",
+          "items": {
+            "title": "One talkgroup",
+            "description": "One talkgroup of the county system or of another one.",
+            "x-complete": true,
+            "type": "object",
+            "required": [
+              "tg",
+              "name",
+              "group",
+              "encrypted",
+              "record",
+              "main",
+              "count",
+              "last",
+              "dropped",
+              "system",
+              "source",
+              "key",
+              "ours",
+              "service",
+              "service_auto",
+              "department",
+              "tier"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "tg": {"type": "integer", "minimum": 0, "description": "The talkgroup number."},
+              "name": {"type": "string", "description": "Its name."},
+              "group": {"type": "string", "description": "Its group in the talkgroups file; `Unknown` when not listed."},
+              "encrypted": {"type": "boolean", "description": "It is encrypted."},
+              "record": {"type": "boolean", "description": "Its calls are recorded."},
+              "main": {"type": "boolean", "description": "It is one of the main talkgroups."},
+              "count": {"type": "integer", "minimum": 0, "description": "Calls heard since the station started."},
+              "last": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "When it was last heard, Unix seconds; null for never."
+              },
+              "dropped": {"type": "integer", "minimum": 0, "description": "Calls heard and not kept."},
+              "system": {"type": "string", "description": "The P25 system's name."},
+              "source": {"type": "string", "description": "Its source key, `p25:<system>:<tg>`."},
+              "key": {"type": "string", "description": "Its channel key for the speech-to-text choices (`tg:<n>` for the county's, `p25:<system>:<n>` otherwise)."},
+              "ours": {"type": "boolean", "description": "As `main`."},
+              "service": {"type": "string", "description": "Its service: the admins' choice for this source, else the automatic one."},
+              "service_auto": {"type": "string", "description": "The automatic service, from the file's group and tag."},
+              "department": {"type": "string", "description": "The department it belongs to; \"\" when none."},
+              "tier": {
+                "type": ["string", "null"],
+                "description": "Another system's talkgroup: its tier (`alert`, `text`, `record`, ...); null for the county system's own switches. The hub adds `tier_set` (tier is not null) when the row has none."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

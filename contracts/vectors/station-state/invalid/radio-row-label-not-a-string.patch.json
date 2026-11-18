@@ -1,0 +1,6 @@
+{
+  "base": "station-state/valid/with-status.json",
+  "patch": [
+    {"op": "replace", "path": "/status/radios/0/label", "value": []}
+  ]
+}

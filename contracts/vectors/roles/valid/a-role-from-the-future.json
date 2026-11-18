@@ -1,0 +1,35 @@
+{
+  "radio-receive": {
+    "channels": [
+      {
+        "job": "Paging 1",
+        "coverage": "overlap"
+      },
+      {
+        "job": "Fireground 1",
+        "coverage": "exclusive"
+      },
+      {
+        "job": "countynet",
+        "coverage": "failover"
+      }
+    ]
+  },
+  "feed-adapter": {
+    "priority": 1
+  },
+  "stt-light": {
+    "pool": true,
+    "classes": [
+      "low",
+      "catchup"
+    ],
+    "max_s": 60
+  },
+  "adsb": {
+    "dongle": "00000105"
+  },
+  "from-the-future": {
+    "x": 1
+  }
+}

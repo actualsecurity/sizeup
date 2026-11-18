@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/node-worker-hello.schema.json",
+  "title": "Worker hello with the node fields",
+  "description": "Designed (docs/nodes.md 1 \"Capabilities\" and 5 step 1), not implemented. Today's worker hello (stt-worker-hello.schema.json) plus the node's capabilities: a worker sends them in full in its hello, and their content hash with them. Both keys are optional, so every hello a worker sends today is valid here, and a hub from before this ignores them.",
+  "x-status": "designed",
+  "x-version": 1,
+  "allOf": [{"$ref": "stt-worker-hello.schema.json"}],
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "capabilities": {"$ref": "capabilities.schema.json"},
+    "capabilities_rev": {"$ref": "node-state.schema.json#/$defs/rev", "description": "The content hash of `capabilities` as sent here."}
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "base": "stt-worker-hello/valid/online-with-gpu.json",
+  "patch": [
+    {"op": "add", "path": "/capabilities_rev", "value": "5d41402abc4b2a76b9719d911017c592"},
+    {"op": "remove", "path": "/state"}
+  ]
+}

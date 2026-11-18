@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/node-state-answer.schema.json",
+  "title": "Station state answer with the node fields",
+  "description": "Designed (docs/nodes.md 2.2 and 5 \"Wire contract\"), not implemented. Today's state answer (station-state-answer.schema.json) plus the optional keys the hub adds for a node: the other halves of the resync and the leases the node holds. Every new key is optional, so every answer a hub sends today is valid here, and a station from before this ignores them.",
+  "x-status": "designed",
+  "x-version": 1,
+  "allOf": [{"$ref": "station-state-answer.schema.json"}],
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "capabilities_wanted": {
+      "type": "boolean",
+      "description": "True when the hub does not hold the capabilities with the `capabilities_rev` of this post: the node sends `capabilities` in full on its next post. Absent or false: the hub has them."
+    },
+    "roles_rev": {
+      "$ref": "node-state.schema.json#/$defs/rev",
+      "description": "The content hash of this node's roles as the hub holds them. The node echoes the one it applied as `roles_applied`."
+    },
+    "roles": {"$ref": "roles.schema.json"},
+    "leases": {
+      "type": "array",
+      "description": "The exactly-one roles this node holds now, one lease each. Sent on every answer while held (each answer renews). A node that finds no lease for a role here does not start that role's work, and stops it when the last one it received runs out.",
+      "items": {"$ref": "lease.schema.json"}
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "state": "online",
+  "model": "large-v3-turbo-q5_0",
+  "version": "2",
+  "gpu": {
+    "util_pct": 3,
+    "mem_used_mb": 1210,
+    "mem_total_mb": 12282,
+    "others": 0,
+    "from_the_future": {
+      "x": [
+        1,
+        {
+          "y": null
+        }
+      ]
+    }
+  },
+  "load": {
+    "own": 0,
+    "queue": 0,
+    "rtf": 1.0,
+    "max_s": 8.0,
+    "cpu_pct": 27.9,
+    "why": "whisper not ready",
+    "from_the_future": {
+      "x": [
+        1,
+        {
+          "y": null
+        }
+      ]
+    }
+  },
+  "from_the_future": {
+    "x": [
+      1,
+      {
+        "y": null
+      }
+    ]
+  }
+}

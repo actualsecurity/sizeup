@@ -1,0 +1,10 @@
+{
+  "radio-receive": {
+    "channels": [
+      {
+        "job": "Paging 1",
+        "coverage": 1
+      }
+    ]
+  }
+}

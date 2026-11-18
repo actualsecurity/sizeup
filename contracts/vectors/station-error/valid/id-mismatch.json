@@ -1,0 +1,4 @@
+{
+  "error": "the token belongs to another station id than the one this request names: the token is st-north, the request says st-south",
+  "reason": "id_mismatch"
+}
