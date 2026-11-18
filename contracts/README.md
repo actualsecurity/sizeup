@@ -102,7 +102,7 @@ no row, a row is not in the code, or a real hub answers a row differently from w
 
 Where today's code departs from the rule or from the design. Not fixed here. Each is pinned by a test
 (`test_known_deviation_*`), which fails the day it is fixed so that the row is removed, unless its row says it was
-found by reading.
+found by reading. Line numbers are those of `b50ea36c`.
 
 | # | where | what | who |
 |---|---|---|---|
