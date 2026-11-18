@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -1314,6 +1315,14 @@ def _same(a: Event, b: Event) -> bool:
     return all(getattr(a, k) == getattr(b, k) for k in keys)
 
 
+def _takes_done(n) -> bool:
+    """The notifier's send() takes a done callback (sizeup/notify.py Notifier / KindNotifier; not every test fake)."""
+    try:
+        return "done" in inspect.signature(n.send).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class LiveSink:
     """The live effects: intel_hits in cad.sqlite, a line in the log, the push through the INTEL kind (the leader
     only, checked again right before sending)."""
@@ -1357,10 +1366,26 @@ class LiveSink:
             if url:
                 m["body"] = f"{m['body']}\nListen: {url}"
                 actions = [{"label": "Listen", "url": url}]
-        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"], **({"actions": actions} if actions else {})):
+        kw = {"actions": actions} if actions else {}
+        if _takes_done(n):                          # ntfy's answer recorded on the event (events.py delivered())
+            kw["done"] = self._delivered(ev.id)
+        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"], **kw):
             self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect (or the queue is full): not pushed")
             return False
         return True
+
+    def _delivered(self, eid: int | None):
+        """The notify thread's outcome of this push onto the event: sent (ntfy's id, the HTTP status) or not (why)."""
+        events, log = self.engine.events, self.engine.log
+
+        def done(outcome: dict) -> None:
+            if eid is None or not hasattr(events, "delivered"):
+                return
+            try:
+                events.delivered(eid, outcome)
+            except Exception as e:  # noqa: BLE001 - the push went (or not) either way
+                log(f"intel: event {eid}: delivery not recorded ({type(e).__name__})")
+        return done
 
     def digest(self, evs: list[Event]) -> None:
         n = self.engine.notifier

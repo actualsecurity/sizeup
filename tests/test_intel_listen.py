@@ -7,6 +7,7 @@ import io
 import json
 import re
 import wave
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
@@ -142,7 +143,7 @@ def test_later_transmissions_restitch_to_the_same_key():
     assert b.puts[1:] == [] and lk.drain() == 1           # refresh only queues; the listen thread uploads
     assert [k for k, _b, _c in b.puts] == [b.puts[0][0]] * 2 and segments(b.puts[-1][1]) == [1.0, 1.5]
     assert lk.link("intel:7", ["p25:mrrs:9211"], ["hit", "readback"], 1000, 1030).split("?")[0] == url.split("?")[0]
-    clock.t = 1000 + 60 + L.LATE_S + 20 * 60 + 1
+    clock.t = 1035 + L.DEFAULTS["listen_expiry_min"] * 60 + 1     # the last link (signed at 1035) has expired
     lk.refresh(clock.t)
     assert lk.items == {}
 
@@ -325,3 +326,268 @@ def test_ntfy_actions_are_https_only_and_at_most_three(monkeypatch):
     got.clear()
     notify.publish("https://ntfy.sh", "pcfd-xmpl-alerts", "t", "b")
     assert "actions" not in got
+
+
+# -- the self-test of a pushed link -----------------------------------------------------------------------------------
+
+SIG_XML = (b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>SignatureDoesNotMatch</Code><Message>The request '
+           b'signature we calculated does not match the signature you provided.</Message></Error>')
+
+
+class ProbeBucket(FakeBucket):
+    """A bucket whose pushed link answers what the test says: (status, body), or an exception (unreachable)."""
+
+    def __init__(self, answer=(206, b"R"), **kw):
+        super().__init__(**kw)
+        self.answer, self.probed = answer, []
+
+    def probe(self, url, timeout):
+        self.probed.append((url, timeout))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+
+def checked(r, b, clock, logs, **cfg):
+    """A Listen whose self-test thread is deferred: spawned holds what would run on it."""
+    spawned = []
+    lk = L.Listen(b, r.query, r.audio.get, settings=lambda: cfg, clock=clock, log=logs.append, ffmpeg="",
+                  tiers=r.tiers, worker=False, spawn=spawned.append)
+    return lk, spawned
+
+
+def run(spawned):
+    while spawned:
+        spawned.pop(0)()
+
+
+@pytest.mark.parametrize("status", [206, 200])
+def test_the_self_test_gets_the_pushed_link_once_and_says_ok(status):
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    b, logs = ProbeBucket((status, b"R")), []
+    lk, spawned = checked(r, b, Clock(1001), logs)
+    url = lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    assert b.probed == [] and spawned == []               # nothing in the push path: not even a thread yet
+    lk.drain()
+    assert b.puts and b.probed == [] and len(spawned) == 1   # after the upload, on a thread of its own
+    run(spawned)
+    assert b.probed == [(url, L.CHECK_TIMEOUT_S)]           # the very URL the push carries
+    assert lk.status()["links"]["state"] == "ok" and lk.health()["text"] == "ok"
+    assert logs == ["intel: listen links ok"]
+    lk.link("intel:2", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    assert spawned == []                                    # ok: never again in this process
+
+
+def test_a_refused_link_is_parsed_logged_once_and_rechecked_at_most_every_15_min():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    b, logs, clock = ProbeBucket((403, SIG_XML)), [], Clock(1001)
+    lk, spawned = checked(r, b, clock, logs)
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    run(spawned)
+    ck = lk.status()["links"]
+    assert ck["state"] == "failed" and ck["status"] == 403 and ck["code"] == "SignatureDoesNotMatch"
+    h = lk.health()
+    assert h["level"] == "warn" and h["text"] == "refused (SignatureDoesNotMatch)" and "403" in h["title"]
+    assert logs == ["intel: listen links refused (SignatureDoesNotMatch)"]
+    clock.t += 60                                           # another upload a minute later: not checked again yet
+    lk.link("intel:2", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    assert spawned == [] and len(b.probed) == 1
+    clock.t += L.CHECK_RETRY_S                              # past the rest: the next upload checks again
+    lk.link("intel:3", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    run(spawned)
+    assert len(b.probed) == 2 and logs == ["intel: listen links refused (SignatureDoesNotMatch)"]   # no change: no line
+    b.answer = (206, b"R")                                  # fixed (sizeup/aws.py): ok, and a line saying so
+    clock.t += L.CHECK_RETRY_S
+    lk.link("intel:4", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    run(spawned)
+    assert logs[-1] == "intel: listen links ok" and lk.status()["links"]["state"] == "ok"
+
+
+def test_an_unreachable_link_is_unchecked_and_never_raises():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    b, logs = ProbeBucket(TimeoutError("timed out")), []
+    lk, spawned = checked(r, b, Clock(1001), logs)
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    run(spawned)
+    ck = lk.status()["links"]
+    assert ck["state"] == "unchecked" and ck["code"] == "TimeoutError" and ck["at"]
+    assert lk.health()["level"] == "off" and logs == ["intel: listen links unchecked (TimeoutError)"]
+
+
+def test_the_link_is_never_logged_nor_shown():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    logs = []
+    for answer in [(206, b"R"), (403, SIG_XML), OSError("boom")]:
+        b = ProbeBucket(answer)
+        lk, spawned = checked(r, b, Clock(1001), logs)
+        url = lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+        lk.drain()
+        run(spawned)
+        shown = json.dumps([lk.status(), lk.health()])
+        key = urlsplit(url).path.lstrip("/")
+        assert url not in shown and key not in shown and "X-Amz" not in shown
+    assert logs and not [m for m in logs if "http" in m or "listen/" in m or "X-Amz" in m]
+
+
+def test_the_s3_store_probes_with_a_ranged_get():
+    sent = []
+
+    def send(method, url, headers, body, timeout):
+        sent.append((method, url, headers, timeout))
+        return 403, {}, SIG_XML
+    creds = aws.Credentials("AKIDEXAMPLE", "secret", "token")
+    st = L.S3ListenStore("audio-bucket-example", "us-east-1", send=send, creds=lambda: creds)
+    u = st.presign("listen/abc.wav", 3600, "audio/wav")
+    status, body = st.probe(u, 5.0)
+    [(method, url, headers, timeout)] = sent
+    assert method == "GET" and url == u and headers == {"Range": "bytes=0-0"} and timeout == 5.0   # never HEAD
+    assert status == 403 and L.s3_code(body) == "SignatureDoesNotMatch"
+    assert L.s3_code(b"<Error><Code>Access<b>Denied</Code></Error>") == ""     # only a plain code
+    assert L.s3_code(b"") == ""
+
+
+# -- the cleanup: each file deleted once its last link has expired ----------------------------------------------------
+
+class CleanBucket(FakeBucket):
+    def __init__(self, listed=(), deny=False, **kw):
+        super().__init__(**kw)
+        self.deleted, self.listed, self.deny, self.lists = [], list(listed), deny, 0
+
+    def delete(self, key):
+        if self.deny:
+            raise aws.AwsError("S3 DELETE: 403 AccessDenied", "AccessDenied", 403)
+        self.deleted.append(key)
+
+    def list(self, prefix):
+        self.lists += 1
+        if self.deny:
+            raise aws.AwsError("S3 LIST: 403 AccessDenied", "AccessDenied", 403)
+        return [(k, t) for k, t in self.listed if k.startswith(prefix)]
+
+
+def test_a_refreshed_key_is_deleted_only_after_its_last_link_expired():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    b, clock = CleanBucket(), Clock(1002)
+    lk = listen(r, b, clock, listen_expiry_min=60)
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    [key] = {k for k, _b, _c in b.puts}
+    clock.t = 2000                                          # a repush of the same event: the same key signed again
+    assert lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    first_expiry = 1002 + 3600
+    clock.t = first_expiry + L.DELETE_MARGIN_S + 1          # the first link has expired, the second hasn't
+    lk.refresh(clock.t)
+    lk.drain()
+    assert b.deleted == [] and "intel:1" in lk.items
+    clock.t = 2000 + 3600 + 1                               # the last link expired: forgotten, its delete waiting
+    lk.refresh(clock.t)
+    lk.drain()
+    assert lk.items == {} and b.deleted == [] and lk.status()["cleanup"]["pending"] == 1
+    clock.t = 2000 + 3600 + L.DELETE_MARGIN_S
+    lk.refresh(clock.t)
+    assert b.deleted == []                                  # refresh() never deletes (the engine's thread)
+    lk.drain()
+    assert b.deleted == [key] and lk.status()["cleanup"] == {"state": "ok", "at": clock.t, "code": "", "pending": 0}
+
+
+def test_the_push_path_never_deletes():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    b, clock = CleanBucket(), Clock(1002)
+    lk = listen(r, b, clock)
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    lk._deletes["listen/" + "x" * 32 + ".wav"] = 0.0         # long due
+    lk.link("intel:2", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.refresh(clock.t)
+    assert b.deleted == [] and b.lists == 0
+    lk.drain()
+    assert b.deleted == ["listen/" + "x" * 32 + ".wav"]
+
+
+def test_after_a_restart_the_sweep_deletes_only_older_files_once_their_links_could_have_expired():
+    old, newer = "listen/" + "a" * 32 + ".wav", "listen/" + "b" * 32 + ".wav"
+    r = Radio()
+    r.add("hit", 50000, 1.0, 500)
+    b, clock = CleanBucket(listed=[(old, 40000.0), (newer, 50500.0), ("audio/clip/x.wav", 1.0)]), Clock(50000)
+    lk = listen(r, b, clock, listen_expiry_min=60)
+    lk.refresh(clock.t)                                     # leads from 50000
+    lk.drain()
+    assert b.lists == 0                                     # a link the last process signed may still play
+    clock.t = 50000 + 3600 + L.DELETE_MARGIN_S
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 50000, 50000)
+    lk.drain()
+    mine = b.puts[0][0]
+    b.listed.append((mine, clock.t))
+    lk.refresh(clock.t)
+    lk.drain()
+    assert b.lists == 1 and b.deleted == [old]              # not the one written since, not its own, nothing outside listen/
+    clock.t += 3600
+    lk.refresh(clock.t)
+    lk.drain()
+    assert b.lists == 1                                     # once a process
+
+
+def test_access_denied_logs_once_rests_and_the_health_row_says_so():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    logs = []
+    b, clock = CleanBucket(deny=True), Clock(1002)
+    lk = L.Listen(b, r.query, r.audio.get, settings=lambda: {"listen_expiry_min": 1}, clock=clock, log=logs.append,
+                  ffmpeg="", tiers=r.tiers, worker=False, spawn=lambda fn: None)
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    clock.t = 1002 + 60 + L.LATE_S + L.DELETE_MARGIN_S + 1
+    lk.refresh(clock.t)
+    lk.drain()
+    assert logs == ["intel: listen cleanup not permitted, relying on the 1-day lifecycle"]
+    h = lk.health()
+    assert h["level"] == "warn" and h["text"].endswith("cleanup not permitted") and "lifecycle" in h["title"]
+    assert lk.status()["cleanup"]["state"] == "denied" and lk.status()["cleanup"]["pending"] == 1
+    tries = b.lists
+    clock.t += 60
+    lk.refresh(clock.t)
+    lk.drain()
+    assert b.lists == tries and len(logs) == 1              # resting: not tried again
+    clock.t += L.CLEANUP_REST_S
+    lk.refresh(clock.t)
+    lk.drain()
+    assert len(logs) == 1                                   # tried again, refused again: no new line
+    b.deny = False                                          # the grant (sizeup-aws 27) is there now
+    clock.t += L.CLEANUP_REST_S
+    lk.refresh(clock.t)
+    lk.drain()
+    assert b.deleted and logs[-1] == "intel: listen cleanup ok" and lk.health()["text"] == "unchecked"
+
+
+def test_the_s3_store_deletes_and_lists_listen_only():
+    sent = []
+    page = (b'<?xml version="1.0"?><ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>listen/abc.wav</Key>'
+            b'<LastModified>2026-11-17T10:00:00.000Z</LastModified></Contents></ListBucketResult>')
+
+    def send(method, url, headers, body, timeout):
+        sent.append((method, url))
+        if method == "DELETE":
+            return (403, {}, b"<Error><Code>AccessDenied</Code></Error>") if "denied" in url else (204, {}, b"")
+        return 200, {}, page
+    creds = aws.Credentials("AKIDEXAMPLE", "secret", "token")
+    st = L.S3ListenStore("audio-bucket-example", "us-east-1", send=send, creds=lambda: creds)
+    st.delete("listen/abc.wav")
+    with pytest.raises(aws.AwsError) as e:
+        st.delete("listen/denied.wav")
+    assert e.value.status == 403 and e.value.code == "AccessDenied" and L.refused(e.value)
+    [(key, at)] = st.list()
+    assert key == "listen/abc.wav" and at == datetime(2026, 11, 17, 10, tzinfo=timezone.utc).timestamp()
+    assert sent[0][0] == "DELETE" and sent[0][1].endswith("/listen/abc.wav")
+    assert "prefix=listen%2F" in sent[-1][1] and "list-type=2" in sent[-1][1]
