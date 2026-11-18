@@ -39,7 +39,7 @@ from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.oos import OosNotices
 from sizeup.cad.statushints import StatusHints
-from sizeup.cad.sources import PAGING_RANK, Sources, proper_case
+from sizeup.cad.sources import PAGING, PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
@@ -280,6 +280,7 @@ class Cad:
         self.comms.atc = self.atc_talkers.decorate
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
+        self.comms.in_state = self.feed.shows            # a transmission on no incident, not the feed's: no rebuild
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
@@ -362,8 +363,15 @@ class Cad:
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
+        # the local model behind the police rules (sizeup/intel/backing.py): the hub's GPU worker when one is there,
+        # else rules only; its answers applied on its own thread, never the one that resolves them
+        from sizeup.intel.backing import ModelBacking
+        self.intel.backing = ModelBacking(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log,
+                                          tz=TZ, worker=True)
+        self.intel.backing.history = self.intel_site_lines
         self.intel_admin = IntelAdmin(self, self.intel)
         self.intel.incidents = self.intel_incidents             # an event at one of ours: linked, never a new lead
+        self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
         self.comms.on_late_text = self._on_late_text          # a P25 call from while sizeup was down (#747)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
@@ -443,8 +451,10 @@ class Cad:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
         # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
-        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one)
-        key = (rev, int(self.clock() // STATE_CLOCK_S))
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one).
+        # state_rev, not rev: a transmission on no incident and not in the feed moves rev (comms_rev) and rebuilds
+        # nothing (Comms.record: quiet_for_state)
+        key = (self.store.state_rev, int(self.clock() // STATE_CLOCK_S))
         if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
@@ -723,6 +733,12 @@ class Cad:
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
 
+    def intel_site_lines(self, place, at: float) -> list[str]:
+        """Up to three short lines of the calls at an intel place before `at` (context_bundle.site_lines): the local
+        model's site history (sizeup/intel/backing.py). A read on the intel thread."""
+        from sizeup.context_bundle import site_lines
+        return site_lines(self, place.label, place.lat, place.lon, at, precision=place.precision)
+
     def intel_incidents(self, now: float) -> list[dict]:
         """Our incidents that a county-wide pack's event may be (sizeup/intel/engine.py near_incident): emergency ones
         (never a notification or a closure), accepted (never a queued page nobody took, nor a dismissed one), placed,
@@ -735,6 +751,37 @@ class Cad:
             "AND emergency = 1 AND status NOT IN ('queued', 'dismissed') AND accepted_at IS NOT NULL "
             "AND lat IS NOT NULL AND lon IS NOT NULL AND (closed_at IS NULL OR closed_at >= ?) "
             "ORDER BY created_at DESC LIMIT 200", (since, since))]
+
+    def intel_fire_incidents(self, opened_since: float, closed_since: float) -> list[dict]:
+        """Our incidents a fire-related PD event may be at (sizeup/intel/engine.py _fire): emergency ones (a person's, a
+        page's, an incident source's: the county feed's too, queued ones included; never a dismissed one) made since
+        opened_since and open, or closed since closed_since, with their type and where the FD is (fire_state). A read
+        on the intel thread, only for such an event; created_at first (incidents_created), then the few incidents'
+        assignments and reports."""
+        rows = [dict(r) for r in self.store.q(
+            "SELECT id, number, type, lat, lon, geo_label AS label, address, address_raw, created_at, closed_at "
+            "FROM incidents WHERE created_at >= ? AND emergency = 1 AND status != 'dismissed' "
+            "AND (closed_at IS NULL OR closed_at >= ?) ORDER BY created_at DESC LIMIT 200",
+            (min(opened_since, closed_since), closed_since))]
+        if not rows:
+            return rows
+        ids = [r["id"] for r in rows]
+        marks = ",".join("?" * len(ids))
+        ours: dict = {}
+        for a in self.store.q(f"SELECT incident_id, onscene_at, cleared_at FROM assignments WHERE incident_id IN ({marks})", ids):
+            ours.setdefault(a["incident_id"], []).append(dict(a))
+        feeds: dict = {}
+        for r in self.store.q(f"SELECT incident_id, data FROM source_reports WHERE incident_id IN ({marks}) "
+                              "AND merged_into = '' AND source != ?", (*ids, PAGING)):
+            try:
+                d = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                feeds.setdefault(r["incident_id"], []).append(d)
+        for r in rows:
+            r["fd"], r["fd_at"] = fire_state(r, ours.get(r["id"], []), feeds.get(r["id"], []))
+        return rows
 
     def intel_state(self, now: float | None = None) -> dict | None:
         """Radio pre-alerts for the console's card (sizeup/intel): signed-in viewers only; never breaks the console."""
@@ -797,7 +844,7 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        key = (self.store.rev, int(now // STATE_CLOCK_S))      # (and the minute: a clear ages out with no write)
+        key = (self.store.state_rev, int(now // STATE_CLOCK_S))   # (and the minute: a clear ages out with no write)
         if self._clears is None or self._clears[0] != key:
             self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
@@ -1579,48 +1626,64 @@ class Cad:
         """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure).
         status (RS, OL...: Assigned > Add unit): a unit heard on the air responding, or showing up,
         that nobody toned out (user, 2026-10-08: "we need to 'add someone responding' even if they
-        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air."""
+        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air.
+        Another agency's unit goes on as its set's first status (Dispatched), or status when that is one of its start
+        statuses (Lists.start_statuses: Dispatched; a third party's Dispatch other too). A third-party unit (keyholder, utility,
+        police: PCFD, 2026-11-17) never goes on Responding or On location: whatever status the rest of the units are
+        added as, it is Dispatched ("we requested them, but we don't necessarily know if they're enroute").
+        -> {ok, moved, status?, as: {unit: the status it went on as}}."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
-        if body.get("status") is not None:
-            return self._add_responding(iid, units, body)
-        op = _text(body, "operator", OPERATOR_MAX)
+        status = _text(body, "status", 40) if body.get("status") is not None else ""
+        if body.get("status") is not None and status not in self.lists.status_ids:   # '' or unknown
+            self._add_check(iid, [], status)                     # "status: RS (Responding) or OL (On location)"
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
+        if status and here:
+            raise CadError(f"Already on this event: {', '.join(here)}")
+        units = [u for u in units if u["name"] not in here]    # a plain attach: one already on it stays as it is
+        start = {u["id"]: self._agency_start(u, status) for u in units if u["response"] == "agency"}
+        if status and any(u["id"] not in start for u in units):
+            self._add_check(iid, [u for u in units if u["id"] not in start], status)   # ours: Responding / On location only
+        op = _text(body, "operator", OPERATOR_MAX, required=bool(status))
         self._by_hand(iid, [u["id"] for u in units], op)
-        ours = [u["id"] for u in units if u["response"] != "agency"]
-        agency = [u["id"] for u in units if u["response"] == "agency"]
-        moved = self.store.assign(iid, ours, op, attach=True, by=PERSON) if ours else []
-        if agency:          # another agency's unit: on the event assigned, not yet responding (#219: never
-            moved += self.store.assign(iid, agency, op, attach=True, by=PERSON)    # straight to On location), then its statuses
-            by = {u["id"]: u for u in units}
-            for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
-                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op, by=PERSON)
+        ours = [u["id"] for u in units if u["id"] not in start]
+        moved, out = [], {}
+        if ours:
+            moved += self.store.assign(iid, ours, op, attach=not status, status=status, by=PERSON)
+            out.update({u["name"]: status for u in units if u["id"] in ours and status})
+        by_status: dict[str, list[int]] = {}
+        for i, st in start.items():                          # "PCPD added: dispatched", "CONED-E added: dispatch other (DO)"
+            by_status.setdefault(st, []).append(i)
+        for st, ids in by_status.items():
+            moved += self.store.assign(iid, ids, op, status=st, by=PERSON)
+            out.update({u["name"]: st for u in units if u["id"] in ids})
         self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved}
+        return {"ok": True, "moved": moved, "as": out, **({"status": status} if status else {})}
 
-    def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
-        """attach with a status: on the event in that status, no dispatch logged, no Disp time. A unit
-        already on this event is refused; one on another call is moved, as a dispatch moves it."""
+    def _agency_start(self, u: dict, status: str) -> str:
+        """What another agency's unit goes on a call as: status when it is one of its start statuses (DP; a
+        third party's DO), else, for a third party, its set's first (Dispatched: never Responding); for EMS and the
+        other agencies the Responding / On location asked for (#220), else its set's first."""
         L = self.lists
-        status = _text(body, "status", 40)
+        start = L.start_statuses(u["name"], u["board"])
+        if status in start or (status in self.store.return_statuses() and not u["third_party"]
+                               and status in L.unit_statuses_for(u["name"], u["board"])):
+            return status
+        if status and not u["third_party"]:
+            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {u['name']}")
+        return start[0]
+
+    def _add_check(self, iid: int, units: list[dict], status: str) -> None:
+        """Our units added with a status (Assigned > Add unit): Responding / On location only, never a placeholder."""
+        L = self.lists
         ok = self.store.return_statuses()
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
-        op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if iid in u["incident_ids"]]
-        if here:
-            raise CadError(f"Already on this event: {', '.join(here)}")
         ph = [u["name"] for u in units if u["placeholder"]]
         if ph:
             raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
-        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
-        if agency:
-            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
-        self._by_hand(iid, [u["id"] for u in units], op)
-        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status, by=PERSON)
-        self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
         """Previews nobody dispatched are dropped after a day; dispatch audio is kept with the log."""
@@ -2758,3 +2821,52 @@ class Cad:
             except ValueError:
                 continue
         return "", "", f"type from {label or 'the feed'}: {raw}"[:200]
+
+
+def fire_state(inc: dict, ours: list, feeds: list) -> tuple[str, float | None]:
+    """(where the FD is at this incident, when it cleared) for intel's fire check (Cad.intel_fire_incidents):
+        on_scene    a unit of ours on scene and not cleared, or a feed's unit (or event) on location and not in
+                    service, on an open incident and an open feed event
+        dispatched  a unit assigned or en route and not cleared (ours, or a feed's listed or timed unit not in
+                    service), none on scene
+        cleared     the incident closed, or every unit known cleared or in service, or every feed event closed
+                    (at: the latest of those times)
+        ""          no unit known yet (a page or a feed event with no units): not the FD there"""
+    if inc.get("closed_at") is not None:
+        return "cleared", float(inc["closed_at"])
+    on = live = False
+    done: list[float] = []
+    for a in ours:
+        if a.get("cleared_at") is not None:
+            done.append(float(a["cleared_at"]))
+        elif a.get("onscene_at") is not None:
+            on = True
+        else:
+            live = True
+    shut = bool(feeds)
+    for d in feeds:
+        ut = d.get("unit_times") if isinstance(d.get("unit_times"), dict) else {}
+        times = {str(u): t for u, t in ut.items() if isinstance(t, dict)}
+        whole = d.get("times") if isinstance(d.get("times"), dict) else {}
+        if d.get("closed"):
+            done += [float(t["in_service"]) for t in times.values() if t.get("in_service")]
+            continue
+        shut = False
+        units = {str(u) for u in d.get("units") or []} | set(times)
+        for u in units:
+            t = times.get(u, {})
+            if t.get("in_service"):
+                done.append(float(t["in_service"]))
+            elif t.get("on_location"):
+                on = True
+            else:
+                live = True
+        if whole.get("on_location") and not whole.get("in_service"):
+            on = True
+    if on:
+        return "on_scene", None
+    if live:
+        return "dispatched", None
+    if done or shut:
+        return "cleared", max(done) if done else None
+    return "", None

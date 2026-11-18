@@ -143,6 +143,12 @@ const StationsCard = (() => {
       const tr = el("tr");
       const tokenWord = s.revoked ? `revoked ${when(s.revoked)}` : s.grace_until ? `rotated · old until ${when(s.grace_until)}` : "own";
       const acts = el("td", "");
+      if (!s.revoked && s.pool_whisper !== undefined) {   // its whisper in the STT pool (#639 phase 2), off by default
+        const pw = btn(s.pool_whisper ? "Whisper in pool: on" : "Whisper in pool: off", "sm", () =>
+          act({ action: "pool_whisper", id: s.id, on: !s.pool_whisper }, ""));
+        pw.title = "This station's whisper takes other stations' clips while it has none of its own";
+        acts.append(pw);
+      }
       if (!s.revoked) {
         acts.append(btn("Rename", "sm", () => { editing = s.id; render(); }));
         acts.append(btn("Rotate", "sm", async () => {

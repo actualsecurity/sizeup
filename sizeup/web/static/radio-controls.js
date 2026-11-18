@@ -345,7 +345,9 @@ window.RadioControls = (() => {
         badge.replaceChildren(...(window.Icon ? [Icon("lock", "sm")] : []), grp.name);
       }
       if (grp) badge.title = `Antenna group ${grp.name}: ${grp.jobs.join(" > ")} (highest priority first)`;
+      row.classList.toggle("noaudio", !!x.noaudio);
       setText(row.querySelector(".sdr-name"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+              + (x.noaudio ? " · no audio" : "")                                       // (#703) out until it streams
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
@@ -358,7 +360,9 @@ window.RadioControls = (() => {
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
         + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
-        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "");
+        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "")
+        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried after `
+           + `${(x.noaudio.retry_min || []).join(", ")} min), it is replugged, or a job is picked for it here` : "");
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
@@ -1362,9 +1366,17 @@ window.RadioControls = (() => {
       const rest = w.grants - w.recording - w.encrypted;
       return `${w.tg} ${w.name}: ${w.grants} grants, ${w.recording} recorded, ${w.encrypted} encrypted${rest > 0 ? `, ${rest} not recorded` : ""}`;
     }).join("; ") : "");
+    // the split patch's counts (#647, systems.Activity): would split (log) / splits (on), ID flips, aliases, of its calls
+    const split = (x) => {
+      const p = x.split;
+      if (!p || !(p.calls || p.would || p.split || p.flip || p.alias)) return "";
+      const cut = p.split ? `${p.split} splits` : `${p.would} would split`;
+      return `\nSplit since ${fmtTime(p.since)}: ${cut}, ${p.flip} ID flips, ${p.alias} aliases, in ${p.calls} calls`
+        + (p.calls ? ` (${Math.min(100, (100 * p.cut) / p.calls).toFixed(1)}%)` : "");
+    };
     n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
       + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")
-      + watched(x)).join("\n\n");
+      + watched(x) + split(x)).join("\n\n");
     show(n.systems, sys.length > 0);
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
     const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);

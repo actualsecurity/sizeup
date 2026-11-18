@@ -119,6 +119,13 @@ window.PrealertInfo = (() => {
   // ---- the sections ------------------------------------------------------------------------------------------------
   const SECTIONS = ["pi-why", "pi-trigger", "pi-around", "pi-site", "pi-place", "pi-now", "pi-outcome"];
 
+  // the local model's answer (sizeup/intel/backing.py) when it raised or noted this event: what, how sure, why
+  function localModel(m) {
+    if (!m) return "";
+    // the reason may be cut at its maxLength (120) mid-word by the hub: shown with an ellipsis, never parsed
+    const reason = m.reason && m.reason.length >= 120 ? `${m.reason}…` : m.reason;
+    return [m.category, pct(m.confidence), m.used === "evidence" ? "evidence only" : "", reason].filter((x) => x).join(" · ");
+  }
   function why(d) {
     const w = d.why, s = d.summary;
     const rules = (w.rules || []).map((r) => {
@@ -139,6 +146,8 @@ window.PrealertInfo = (() => {
       ["Score", score, d.event.kind === "intel" ? "WHAT: how sure it is this kind of call; WHERE: how sure the place is" : "The pre-alert's own confidence (not the aircraft match's)"],
       ["Mode", s.mode || "", "off · shadow (counted only) · log · map · push"],
       ["Model", s.suggested ? `${s.suggested}?` : "", "The model's reading, not the rules': never pushed"],
+      ["Local model", localModel(w.model), w.model ? `${w.model.backend}: ${w.model.model || "?"} ${w.model.model_version || ""}`.trim()
+        + (w.model.weapon && w.model.weapon !== "none" ? ` · weapon ${w.model.weapon}` : "") + (w.model.in_progress ? " · in progress" : "") : ""],
     ])];
     if (!rules.length && !(w.matched || []).length && w.empty) kids.push(none(w.empty));
     if ((s.lines || []).length) kids.push(dl(s.lines.map(([k, v]) => [k, v])));
@@ -249,8 +258,14 @@ window.PrealertInfo = (() => {
       ["Ack", o.acknowledged ? `${o.acknowledged.by || ""} · ${tm(o.acknowledged.at)}` : ""],
       ["Event", o.incident ? incLink(o.incident) : ""],
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
+      ["FD", o.fd || "", o.fd_state === "cleared" ? `${(o.fd || "").split(" · ")[0]} (cleared): pre-alert`
+        : "The FD was already there: no pre-alert (an FYI only when the words added something)"],
       ["Push", o.pushed_at ? tm(o.pushed_at) : o.suppressed ? `held: ${o.suppressed}` : o.pushed ? "pushed" : "",
         o.suppressed ? "Not pushed, and why" : ""],
+      // the last push at ntfy: "sent 16:21:27" / "not sent: 429" (sizeup/intel/events.py delivery)
+      ["Delivery", o.pushed_at && window.IntelCard ? IntelCard.delivered(o, tm) : "",
+        o.delivery ? (o.delivery.ok ? `ntfy took it (HTTP ${o.delivery.status}${o.delivery.id ? `, message ${o.delivery.id}` : ""})`
+          : `ntfy didn't take it: ${o.delivery.error || o.delivery.status}`) : "Queued: no answer from ntfy yet"],
       ["Votes", fb.join("; ")],
     ]));
     return kids;

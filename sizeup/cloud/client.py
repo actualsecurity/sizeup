@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import random
 import ssl
 import time
@@ -25,6 +26,48 @@ REFUSED_HINT = {
     "read_only": "that is a status token: the station needs its station token",
     "multi_station_off": "the hub takes one station until multi-station lands: this one waits (its outbox keeps everything)",
 }
+
+
+def _plain(o):
+    """json.dumps' default: a numpy scalar as its Python value, anything else as its text."""
+    return o.item() if hasattr(o, "item") else str(o)
+
+
+def finite(v):
+    """v with every NaN / Infinity (a float, or a numpy scalar that is one) as None, through dicts, lists and tuples."""
+    if isinstance(v, dict):
+        return {k: finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [finite(x) for x in v]
+    if hasattr(v, "item") and not isinstance(v, (str, bytes)):
+        try:
+            v = v.item()
+        except (TypeError, ValueError):     # an array of more than one: json.dumps' default writes its text
+            return v
+    return None if isinstance(v, float) and not math.isfinite(v) else v
+
+
+def dumps(obj, default: Callable | None = _plain) -> bytes:
+    """Station <-> hub JSON is RFC 8259 (no NaN, no Infinity: contracts/README.md), compact. A number that is not
+    finite goes as null: json.dumps' default wrote the bare token NaN, which no other reader takes, and the hub's clock
+    skew read from one was NaN. Strict first; the walk only when that refuses for that reason. The hub's answers
+    (sizeup/cloud/hub.py _json) pass default=None: an object it can't write stays a TypeError there."""
+    try:
+        return json.dumps(obj, separators=(",", ":"), default=default, allow_nan=False).encode()
+    except ValueError as e:
+        if "Out of range float" not in str(e):    # (a circular reference: as before)
+            raise
+        return json.dumps(finite(obj), separators=(",", ":"), default=default, allow_nan=False).encode()
+
+
+def _null(_name: str) -> None:
+    return None
+
+
+def loads(raw: bytes | str):
+    """JSON from the other side, with the bare tokens NaN / Infinity / -Infinity (an older sender) read as None:
+    nothing made from one is ever NaN."""
+    return json.loads(raw, parse_constant=_null)
 
 
 class HubError(RuntimeError):
@@ -107,13 +150,27 @@ class HubClient:
                 pass
         self._conn = None
 
+    def get_bytes(self, path: str, timeout: float | None = None) -> bytes:
+        """GET, the answer's bytes as they are (a pool job's audio, #639 phase 2). HubError on anything but a 2xx."""
+        conn = self._connect(timeout or self.timeout)
+        try:
+            conn.request("GET", self.prefix + path, headers=dict(self.headers))
+            r = conn.getresponse()
+            raw = r.read()
+        except (OSError, http.client.HTTPException) as e:
+            self.close()
+            raise HubError(f"can't reach the hub: {type(e).__name__}: {e}") from e
+        if not 200 <= r.status < 300:
+            self.close()
+            raise HubError(f"hub said {r.status}", r.status, retry_after(r.getheader("Retry-After")))
+        return raw
+
     def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
                 gzip_body: bool = False, raw_gzip: bytes | None = None) -> dict:
         """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped). gzip_body:
         the body gzipped (the aircraft posts, #235: an endpoint that takes it). raw_gzip: a JSON body already gzipped
         (the station's spooled log batches, sizeup/cloud/logship.py), sent as it is."""
-        data = (json.dumps(body, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)).encode()
-                if body is not None else raw_gzip)
+        data = dumps(body) if body is not None else raw_gzip
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
         if raw_gzip is not None and body is None:
             headers["Content-Encoding"] = "gzip"
@@ -154,7 +211,7 @@ class HubClient:
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
                 raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")))
             try:
-                return json.loads(raw or b"{}")
+                return loads(raw or b"{}")
             except ValueError as e:
                 self.close()
                 raise HubError(f"hub sent something that isn't JSON ({r.getheader('Content-Type')}): "

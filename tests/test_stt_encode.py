@@ -59,6 +59,27 @@ def _items():
     return [(f"Ops-{k}", voice(1.0 + k / 2, seed=40 + k), k % 2 == 0, NORMAL) for k in range(4)]
 
 
+class _NotYet:
+    """Stands in for the encoder's two threads until resume(): submit() only queues (it starts them when they aren't
+    there), so a test lays out the whole queue first, with no race against the threads' picks."""
+
+    def join(self, timeout=None):
+        pass
+
+
+def paused(enc):
+    enc._thread = enc._bg = _NotYet()
+    return enc
+
+
+def resume(enc) -> None:
+    """The encoder's own threads, as submit() starts them (sttinput.Encoder.submit)."""
+    enc._thread = threading.Thread(target=enc._run, name="hub-stt-input", daemon=True)
+    enc._bg = threading.Thread(target=enc._run_bg, name="hub-stt-input-bg", daemon=True)
+    enc._thread.start()
+    enc._bg.start()
+
+
 @pytest.fixture
 def short_dir():
     d = tempfile.mkdtemp(dir="/tmp", prefix="sz-enc-")                     # (a Unix socket's path: short)
@@ -182,10 +203,11 @@ def test_another_releases_worker_leaves_it_to_the_thread_said_once(encode_servic
 
 class FakeWorker:
     """A service that says hello, then never answers ("slow": hello-only), hangs up mid-request ("dead"), or answers
-    late with the real thing ("late": after `delay`)."""
+    late with the real thing ("late": once the test sets `release`)."""
 
-    def __init__(self, path: str, how: str, delay: float = 0.0):
-        self.how, self.delay, self.requests = how, delay, 0
+    def __init__(self, path: str, how: str):
+        self.how, self.requests = how, 0
+        self.release = threading.Event()
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old = os.umask(0o177)
         self.srv.bind(path)
@@ -217,7 +239,7 @@ class FakeWorker:
                 if self.how == "slow":
                     time.sleep(120)                                         # never an answer
                     return
-                time.sleep(self.delay)
+                self.release.wait(60)
                 got = sttinput._blob(head["desc"], head["fm"], head["offset"], np.frombuffer(payload, head["dtype"]))
                 sttencode.write_frame(fout, {"ok": True, "meta": got[1]}, got[0])
         except (OSError, EOFError, struct.error):
@@ -239,29 +261,28 @@ def test_a_hello_only_worker_never_delays_pre_or_fire_and_never_gets_a_clip_twic
     monkeypatch.setenv(sttencode.SOCKET_ENV, path)
     monkeypatch.setattr(sttinput, "WAIT_CAP_S", 0.3)
     made, logs = [], []
-    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], time.monotonic())), log=logs.append,
-                           mode="auto")
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=logs.append, mode="auto")
     try:
         a = voice(1.0, seed=1)
         assert enc.submit(_tx("Ops-1", a), a, NORMAL) and enc.submit(_tx("Ops-2", a), a, NORMAL)
-        assert wait(lambda: fake.requests == 1, 10)                         # Ops-1 in flight: no answer, ever
+        assert wait(lambda: fake.requests == 1, 30)                         # Ops-1 in flight: no answer, ever
         for tid, prio in (("South2-1", PRE), ("FG1-1", FIRE)):
-            t0 = time.monotonic()
             assert enc.submit(_tx(tid, a), a, prio)
-            assert wait(lambda: any(m[0] == tid for m in made), 5)
-            assert next(m[1] for m in made if m[0] == tid) - t0 < 1.0       # at once, on the station's own thread
-        assert wait(lambda: enc.unhealthy, 5)                               # three waits without an answer: unhealthy
-        time.sleep(1.0)
+            assert wait(lambda: tid in made, 30)
+            # made while Ops-1 is still in flight with no answer: never behind the worker (the station's own thread)
+            assert enc._inflight is not None and enc._inflight[1][0][0]["id"] == "Ops-1" and fake.requests == 1
+        assert wait(lambda: enc.unhealthy, 30)                              # three waits without an answer: unhealthy
         assert fake.requests == 1                                           # never sent again, never a second clip
-        assert [m[0] for m in made] == ["South2-1", "FG1-1"]                # Ops-*: never made on the station
+        assert made == ["South2-1", "FG1-1"]                                # Ops-*: never made on the station
         assert enc.stats()["queued"] == 1 and enc.dropped == {"queue": 0, "too_big": 0, "failed": 0}
         assert sum("unhealthy" in m for m in logs) == 1 and sum("is slow" in m for m in logs) == 1   # said once each
         wk = enc.worker()                                                   # (the station's status, Health)
         assert wk["where"] == "service" and wk["state"] == "unhealthy" and wk["unhealthy"] and wk["in_flight"]
         assert "unhealthy" in wk["detail"]
         t0 = time.monotonic()
-        enc.stop()                                                          # promptly, mid-wait on the worker
-        assert time.monotonic() - t0 < 3.0
+        enc.stop()                                                          # mid-wait on the worker: it returns
+        assert time.monotonic() - t0 < 10.0                                 # (the threads joined 2 s each at most)
+        assert not enc._thread.is_alive() and not enc._bg.is_alive()
     finally:
         enc.stop()
         fake.close()
@@ -270,7 +291,7 @@ def test_a_hello_only_worker_never_delays_pre_or_fire_and_never_gets_a_clip_twic
 def test_the_worker_is_unhealthy_after_long_enough_without_an_answer_and_well_again_when_it_answers(
         short_dir, monkeypatch):
     path = f"{short_dir}/encode.sock"
-    fake = FakeWorker(path, "late", delay=2.0)
+    fake = FakeWorker(path, "late")
     monkeypatch.setenv(sttencode.SOCKET_ENV, path)
     monkeypatch.setattr(sttinput, "WAIT_CAP_S", 0.2)
     monkeypatch.setattr(sttinput, "WORKER_SLOW", 100)                       # (the clock trips it, not the count)
@@ -280,8 +301,10 @@ def test_the_worker_is_unhealthy_after_long_enough_without_an_answer_and_well_ag
     try:
         a = voice(1.0, seed=2)
         assert enc.submit(_tx("Ops-1", a), a, NORMAL)
-        assert wait(lambda: enc.unhealthy, 5)
-        assert wait(lambda: made and not enc.unhealthy, 10)                 # the late answer: taken, well again
+        assert wait(lambda: enc.unhealthy, 30)                              # (no answer: it is held back)
+        assert made == [] and fake.requests == 1
+        fake.release.set()                                                  # the late answer ...
+        assert wait(lambda: made and not enc.unhealthy, 30)                 # ... taken: well again
         assert made == [("Ops-1", _made_by("thread", [("Ops-1", a, True, NORMAL)])[0][0][1])] and fake.requests == 1
         assert any("unhealthy" in m for m in logs) and any("answers again" in m for m in logs)
     finally:
@@ -291,14 +314,13 @@ def test_the_worker_is_unhealthy_after_long_enough_without_an_answer_and_well_ag
 
 def test_a_connection_the_service_would_have_closed_for_silence_is_replaced_before_the_next_clip(
         encode_service, monkeypatch):
-    monkeypatch.setattr(sttencode, "SERVER_IDLE_S", 0.5)                    # (the station's side of it)
     made, logs = [], []
     enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=logs.append, mode="auto")
     try:
         a = voice(0.5, seed=3)
         assert enc.submit(_tx("Ops-1", a), a, NORMAL) and wait(lambda: made == ["Ops-1"], 20)
         first = enc._worker
-        time.sleep(0.6)
+        enc._worker_used -= sttencode.SERVER_IDLE_S                         # (silent as long as the service allows)
         assert enc.submit(_tx("Ops-2", a), a, NORMAL) and wait(lambda: made == ["Ops-1", "Ops-2"], 20)
         assert enc._worker is not first and enc.where == "service" and enc._fails == 0
         assert not any("is gone" in m for m in logs)
@@ -309,7 +331,7 @@ def test_a_connection_the_service_would_have_closed_for_silence_is_replaced_befo
 def test_a_service_that_comes_up_after_the_station_is_taken_within_seconds(short_dir, monkeypatch):
     path = f"{short_dir}/encode.sock"
     monkeypatch.setenv(sttencode.SOCKET_ENV, path)
-    monkeypatch.setattr(sttinput, "QUICK_LOOK_S", 0.3)
+    monkeypatch.setattr(sttinput, "QUICK_LOOK_S", 0.0)                      # (each clip looks: no wait on a clock)
     made = []
     enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=lambda m: None, mode="auto")
     proc = None
@@ -319,7 +341,6 @@ def test_a_service_that_comes_up_after_the_station_is_taken_within_seconds(short
         assert enc.where == "thread (no sizeup-stt-encode service)" and enc.worker()["state"] == "thread"
         proc = subprocess.Popen([sys.executable, "-m", "sizeup.cloud.sttencode", "--serve", path])   # (restarted)
         assert wait(lambda: os.path.exists(path), 20)
-        time.sleep(0.4)                                                     # (the next look: 0.3 s, not 5 min)
         assert enc.submit(_tx("Ops-2", a), a, NORMAL) and wait(lambda: made == ["Ops-1", "Ops-2"], 20)
         assert enc.where == "service" and enc.worker()["state"] == "ok"
     finally:
@@ -386,64 +407,99 @@ def _q(*entries):
                            _items=[[p, k, None, None, "", 10_000.0 - age, False] for k, (p, age) in enumerate(entries)])
 
 
+def _transcriber(q):
+    """A real Transcriber's behind_live() over the queue `q` (sizeup/stt.py: SttQueue.behind_live on its list)."""
+    from sizeup.stt import SttQueue, Transcriber
+    real = SttQueue(clock=q.clock)
+    real._items = q._items
+    t = Transcriber.__new__(Transcriber)
+    t._q = real
+    return t
+
+
+@pytest.mark.parametrize("how", ["behind_live", "fallback"])
 @pytest.mark.parametrize("entries, behind", [
     ([(LOW, BEHIND_S + 1)], False),                         # a context talkgroup's clip: kept up to 15 min by design
     ([(CONTEXT_FALLBACK, 1000.0), (CONTEXT, 500.0)], False),
     ([(RERUN, 5000.0)], False),
     ([(LIVE, BEHIND_S - 1), (LOW, 800.0)], False),
+    ([(LIVE, BEHIND_S)], False),                            # (more than BEHIND_S: at it, not yet)
     ([(LIVE, BEHIND_S + 1)], True),
     ([(HIGH, BEHIND_S + 1)], True),
     ([(URGENT, BEHIND_S + 5), (LOW, 10.0)], True),
 ])
-def test_whisper_is_behind_only_on_live_traffic(entries, behind):
-    link = SimpleNamespace(app=SimpleNamespace(stt=SimpleNamespace(_q=_q(*entries))))
-    assert StationLink._whisper_behind(link) is behind
+def test_whisper_is_behind_only_on_live_traffic(entries, behind, how):
+    """Transcriber.behind_live() (#715); a whisper without it (an older Transcriber, a stand-in): the same rule from
+    its queue's own list."""
+    q = _q(*entries)
+    stt = _transcriber(q) if how == "behind_live" else SimpleNamespace(_q=q)
+    assert hasattr(stt, "behind_live") is (how == "behind_live")
+    assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=stt))) is behind
+
+
+def test_the_hold_follows_behind_live_and_never_its_queue_behind_its_back():
+    said = [True]
+    stt = SimpleNamespace(behind_live=lambda: said[0], _q=_q((LIVE, 0.0)))   # (its list says otherwise: not read)
+    link = SimpleNamespace(app=SimpleNamespace(stt=stt))
+    assert StationLink._whisper_behind(link) is True
+    said[0] = False
+    assert StationLink._whisper_behind(link) is False
 
 
 def test_whisper_behind_is_never_a_guess_that_holds_anything():
-    for q in (None, SimpleNamespace(clock=lambda: 1.0, _cv=threading.Lock(), _items=[["x"]]),
-              SimpleNamespace(clock=lambda: 1 / 0, _cv=threading.Lock(), _items=[])):
-        assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=SimpleNamespace(_q=q)))) is False
+    def boom():
+        raise RuntimeError("whisper restarting")
+    for stt in (None, SimpleNamespace(behind_live=boom, _q=_q((LIVE, BEHIND_S + 10))),
+                SimpleNamespace(behind_live="not callable", _q=None),
+                SimpleNamespace(_q=None),
+                SimpleNamespace(_q=SimpleNamespace(clock=lambda: 1.0, _cv=threading.Lock(), _items=[["x"]])),
+                SimpleNamespace(_q=SimpleNamespace(clock=lambda: 1 / 0, _cv=threading.Lock(), _items=[]))):
+        assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=stt))) is False
 
 
 def test_a_live_backlog_holds_normal_and_low_never_pre_or_fire():
     behind = threading.Event()
     behind.set()
     made = []
-    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], prio)), log=lambda m: None,
-                           max_items=5, max_s=100.0, held=behind.is_set, mode="thread")
+    enc = paused(sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], prio)), log=lambda m: None,
+                                  max_items=5, max_s=100.0, held=behind.is_set, mode="thread"))
     try:
         a = voice(0.5)
         for tid, prio in (("ctx-1", LANE_LOW), ("Ops-1", NORMAL), ("ctx-2", LANE_LOW)):
             assert enc.submit(_tx(tid, a), a, prio)
         assert enc.submit(_tx("FG1-1", a), a, FIRE) and enc.submit(_tx("South2-1", a), a, PRE)
-        assert wait(lambda: len(made) == 2, 10)                             # PRE and FIRE: at once, whisper behind or not
+        resume(enc)                                                         # (the whole queue there first)
+        assert wait(lambda: len(made) == 2 and enc.holding, 30)            # PRE and FIRE: whisper behind or not
         assert made == [("South2-1", PRE), ("FG1-1", FIRE)]
-        time.sleep(1.5)
-        assert len(made) == 2 and enc.holding and enc.stats()["queued"] == 3
+        assert enc.stats()["queued"] == 3 and enc._inflight is None         # NORMAL / LOW held: none handed on
         assert enc.submit(_tx("South2-2", a), a, PRE)                       # a page in the middle of a hold: at once
-        assert wait(lambda: len(made) == 3, 5) and made[-1] == ("South2-2", PRE)
+        assert wait(lambda: len(made) == 3, 30) and made[-1] == ("South2-2", PRE)
+        assert enc.stats()["queued"] == 3                                   # (still held)
         behind.clear()                                                      # whisper caught up: the rest, highest first
-        assert wait(lambda: len(made) == 6, 10)
+        assert wait(lambda: len(made) == 6, 30)
         assert made[3:] == [("Ops-1", NORMAL), ("ctx-1", LANE_LOW), ("ctx-2", LANE_LOW)]
-        assert not enc.holding and enc.held_s >= 1.0
+        assert not enc.holding and enc.held_s > 0
     finally:
         enc.stop()
 
 
 def test_a_hold_lasts_at_most_its_cap(monkeypatch):
-    monkeypatch.setattr(sttinput, "HOLD_MAX_S", 1.0)
+    clock = [1000.0]                                                        # the encoder's clock, moved by hand
+    monkeypatch.setattr(sttinput, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(sttinput, "HELD_LOOK_S", 0.02)
     made = []
     enc = sttinput.Encoder(lambda d, data, meta, prio: made.append(d["id"]), log=lambda m: None,
                            held=lambda: True, mode="thread")                # behind all evening
     try:
         a = voice(0.5)
-        t0 = time.monotonic()
         assert enc.submit(_tx("Ops-1", a), a, NORMAL)
-        assert wait(lambda: made == ["Ops-1"], 10)
-        assert 0.9 <= time.monotonic() - t0 < 5.0                           # held its 1 s, then let go
-        assert enc.submit(_tx("Ops-2", a), a, NORMAL)                      # (still behind: the cap goes on)
-        assert wait(lambda: made == ["Ops-1", "Ops-2"], 3)
+        assert wait(lambda: enc.holding, 30)
+        clock[0] += sttinput.HOLD_MAX_S - 1                                 # not yet its cap: still held
+        assert wait(lambda: enc.holding, 30) and made == [] and enc.stats()["queued"] == 1
+        clock[0] += 1                                                       # its cap: let go
+        assert wait(lambda: made == ["Ops-1"], 30)
+        assert enc.submit(_tx("Ops-2", a), a, NORMAL)                       # (still behind: the cap goes on)
+        assert wait(lambda: made == ["Ops-1", "Ops-2"], 30)
     finally:
         enc.stop()
 
@@ -463,13 +519,36 @@ def test_the_station_holds_only_its_normal_and_low_inputs_while_whisper_is_behin
     st.link.stt_encoder.held = lambda: behind[0]
     fire = _transmission(st, "FG1-1790000000300", "FG1", voice(1.0, seed=5), True, eng="aws")
     air = _transmission(st, "HPNATC-1790000000301", "HPN ATC", voice(1.0, seed=6), False, eng="aws")
-    assert wait(lambda: stt_rows(st, fire.id), 10)                          # fire traffic: never held
-    time.sleep(1.0)
+    assert wait(lambda: stt_rows(st, fire.id), 30)                          # fire traffic: never held
+    assert wait(lambda: st.link.stt_encoder.holding, 30)                    # the airband one: held, never made
     assert stt_rows(st, air.id) == [] and st.link.stt_stats()["held"] is True
     behind[0] = False
-    assert wait(lambda: stt_rows(st, air.id), 10)
+    assert wait(lambda: stt_rows(st, air.id), 30)
     assert st.link.stt_stats()["held"] is False and st.link.stt_stats()["encoder"]
     assert "dropped_fire" in st.link.stt_stats()
+
+
+def test_the_station_holds_its_normal_and_low_inputs_on_its_whispers_behind_live(station, monkeypatch):
+    """End to end on a station: the hold follows Transcriber.behind_live(); PRE and FIRE never wait."""
+    from sizeup import app as app_mod
+    from sizeup.radio.page import Page
+    st = station
+    monkeypatch.setattr(app_mod, "AIRBAND_FIRST", {"HPN ATC"})
+    behind = [True]
+    monkeypatch.setattr(st.stt, "behind_live", lambda: behind[0])
+    page = Page("South2-1790000000400", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
+    a = voice(1.0, seed=7)
+    st.link.stt_input(page, a, PRE)
+    fire = _transmission(st, "FG1-1790000000401", "FG1", voice(1.0, seed=8), True, eng="aws")
+    air = _transmission(st, "HPNATC-1790000000402", "HPN ATC", voice(1.0, seed=9), False, eng="aws")
+    assert wait(lambda: stt_rows(st, page.id) and stt_rows(st, fire.id), 30)   # the page and fire traffic: never held
+    assert wait(lambda: st.link.stt_encoder.holding, 30)
+    assert stt_rows(st, air.id) == [] and st.link.stt_stats()["held"] is True
+    behind[0] = False                                                       # whisper caught up
+    assert wait(lambda: stt_rows(st, air.id), 30)
+    monkeypatch.setattr(st.stt, "behind_live", lambda: 1 / 0)              # a whisper that can't say: never held
+    air2 = _transmission(st, "HPNATC-1790000000403", "HPN ATC", voice(1.0, seed=10), False, eng="aws")
+    assert wait(lambda: stt_rows(st, air2.id), 30)
 
 
 # -- the unit (#709) --------------------------------------------------------------------------------------------------

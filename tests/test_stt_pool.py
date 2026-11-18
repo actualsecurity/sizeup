@@ -110,7 +110,7 @@ def test_a_job_nobody_claims_in_its_wait_falls_back_and_the_classes_wait_differe
     clock.t += 0.2
     p.seen("gpu-1")
     assert p.tick() == 1 and p.drain() == 1
-    assert "no GPU worker took it in 2.5 s" in j.fell["page"] and "shed" not in j.fell
+    assert "no pool worker took it in 2.5 s" in j.fell["page"] and "shed" not in j.fell
     clock.t += BUDGETS[CATCHUP][0]
     p.seen("gpu-1")
     assert p.tick() == 1 and p.drain() == 1 and "shed" in j.fell
@@ -161,7 +161,7 @@ def test_a_worker_going_gaming_or_paused_takes_nothing_new_and_what_waits_falls_
     p.seen("gpu-1", "gaming")
     assert p.ready(LIVE) == (False, "no worker ready")
     assert p.claim("gpu-1", 0, state="gaming") is None
-    assert p.tick() == 1 and p.drain() == 1 and j.fell["a"] == "no GPU worker ready"   # at once, not after its wait
+    assert p.tick() == 1 and p.drain() == 1 and j.fell["a"] == "no pool worker ready"   # at once, not after its wait
     assert p.stats()["workers"][0]["state"] == "gaming"
     p.seen("gpu-1", "paused")
     assert not p.submit(j.job("b")) and p.stats()["workers"][0]["state"] == "paused"
@@ -459,7 +459,7 @@ def test_with_no_worker_added_an_aws_clip_goes_to_aws_as_before_and_the_pool_is_
     try:
         asked = []
         real = hub.app.sttpool.ready
-        hub.app.sttpool.ready = lambda cls, now=None: asked.append(cls) or real(cls, now)
+        hub.app.sttpool.ready = lambda cls, now=None, **k: asked.append(cls) or real(cls, now, **k)
         send(hub, pending_event("FG1-1"))
         assert wait(lambda: row(hub, "FG1-1").get("text") == AWS_TEXT + ".", 20)
         assert row(hub, "FG1-1")["model"] == "aws-transcribe"
@@ -520,7 +520,7 @@ def test_a_worker_that_vanishes_mid_job_costs_seconds_and_aws_gives_the_text(tmp
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, pending_event("FG1-3"))
@@ -579,14 +579,14 @@ def test_with_aws_out_too_a_lost_job_goes_to_the_stations_whisper_never_dropped(
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     st = None
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
         assert wait(lambda: st._hub_aws["ok"], 10)              # the station forwards FG1's clips to the hub
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         hub.app.aws.available = lambda key=None: (False, "test: AWS can't take audio now")
         tid = fm_segment(st)
-        assert wait(lambda: w.jobs, 10)                          # a worker took it ... and vanished with it
+        assert wait(lambda: w.jobs, 30)                          # a worker took it ... and vanished with it
         assert wait(lambda: any(t["id"] == tid and t["text"] == "whisper heard this"
                                 for t in all_traffic(hub.get("/api/state"))), 30)
         assert hub.app.sttpool.stats()["fallbacks"]["lease"] == 1
@@ -613,11 +613,18 @@ def test_worker_routes_refuse_bad_tokens_and_station_tokens_and_a_worker_token_o
                              ("POST", "/api/station/stt/jobs/0123456789abcdef/complete")):
             body = {} if method == "POST" else None
             for tok, reason in ((None, "no_token"), ("sw1.gpu-1." + "A" * 43, "token_unknown"), (gone, "token_revoked"),
-                                (TOKEN, "token_unknown")):                   # (a station's token is no worker's)
+                                ("not-a-token", "token_unknown")):
                 code, out = call(hub.url + path, method, body, token=tok)
                 assert code == 401 and out["reason"] == reason, (path, tok, out)
                 assert (tok or "@@") not in json.dumps(out)
         assert call(hub.url + "/api/station/jobs?wait=0", token=good)[0] == 401     # a worker's token: no station route
+        # a station's token is its whisper's, as a station worker (#639 phase 2), never a GPU worker's
+        own = hub.app.hub.stations.add("st-x")
+        assert call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=own)[1]["reason"] == "stations_off"
+        reg.act({"action": "pool", "stations": {"st-x": True}})                  # an admin puts its whisper in
+        code, out = call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=own)
+        assert code == 200 and out["worker"] == "station:st-x"
+        assert hub.app.sttpool.workers[out["worker"]].kind == "station"
         code, out = call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=good)
         assert code == 200 and out["worker"] == "gpu-1" and out["pool_on"] is True and "catchup" in out["classes"]
         assert call(hub.url + "/api/station/stt/jobs/0123456789abcdef/complete", "POST", {"text": "x"}, token=good)[0] == 409
@@ -634,7 +641,7 @@ def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
     hub = HubRun(hub_cfg(tmp_path))
     try:
         reg = hub.app.hub.workers
-        assert reg.enabled(URGENT) is False                  # no worker: off whatever the switches say
+        assert reg.enabled(URGENT) is False                  # no worker, no station's whisper put in (#639 phase 2): off
         reg.add("gpu-1")
         assert reg.enabled(URGENT) and reg.enabled(CATCHUP)
         notes = []
@@ -642,6 +649,7 @@ def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
         assert not reg.enabled(URGENT) and reg.enabled(LIVE)
         reg.act({"action": "pool", "on": False}, "admin", lambda k, o, n: notes.append((k, o, n)))
         assert not reg.enabled(LIVE) and notes == [("stt workers/pool/urgent", "on", "off"), ("stt workers/pool", "on", "off")]
+        assert reg.pool_settings()["stations"] == {}
         with pytest.raises(ValueError):
             reg.act({"action": "pool", "classes": {"nope": True}})
     finally:
@@ -734,7 +742,7 @@ def test_a_shed_clip_a_worker_loses_is_a_failed_try_and_one_nobody_takes_burns_n
     from tests.test_stt_catchup import PD, pd_alert, pd_event
     hub = HubRun(hub_cfg(tmp_path))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         app, now, tid = hub.app, time.time(), "9211-1794-call_10"
         pd_alert(app)
@@ -898,7 +906,7 @@ def test_a_hub_restart_with_a_job_out_sends_it_the_aws_way(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, pending_event("FG1-77"))

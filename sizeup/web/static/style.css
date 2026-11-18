@@ -387,6 +387,7 @@
   :where(.seg) button:where(.elsewhere) { border-style: dashed; color: var(--dim); }
   :where(.seg.absent) { opacity: 0.5; }
   :where(.seg.held) .sdr-label { color: var(--warn); }
+  :where(.seg.noaudio) .sdr-label { color: var(--err); }   /* (#703) opens but streams no audio */
   :where(.seg.held) button { opacity: 0.55; }
   :where(.seg.ambiguous) .sdr-label { color: var(--err); }
   :where(.sdr-dups) { display: grid; gap: var(--s-2); }

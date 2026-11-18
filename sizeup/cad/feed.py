@@ -296,7 +296,9 @@ def load_cfg(lists: Lists) -> FeedCfg:
     joint = set(lists.joint_response)
     units = {c: str(u.get("spoken") or "") for c, u in lists.units.items()
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
-             and (not u.get("department") or u.get("department") in joint)}
+             and (not u.get("department") or u.get("department") in joint)
+             and lists.response(c) == "fire"}           # answers as fire: an apparatus kind Settings marks mutual aid or
+                                                         # another agency's (response) is not ours
     kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
     towns, ours = qualifiers(lists)
     return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds,
@@ -503,6 +505,18 @@ class Feed:
             self.cfg = load_cfg(L)
             self.matcher = Matcher.of(self.cfg)
             self._for = L
+
+    def shows(self, row: dict) -> bool:
+        """Whether state()'s rows() may hold this transmission ({talkgroup, channel, system}): the same test as its query.
+        Anything it can't tell: yes (Comms.record then rebuilds the console's state, as for any write)."""
+        try:
+            self._refresh()
+            tg = row.get("talkgroup")
+            if tg is None:
+                return str(row.get("channel") or "") in self.paging
+            return int(tg) in {int(x) for x in self.cfg.talkgroups} and str(row.get("system") or "") in ("", COUNTY)
+        except Exception:  # noqa: BLE001
+            return True
 
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:
         """The newest transmissions on the feed's talkgroups, newest first, each with pc (why it is
