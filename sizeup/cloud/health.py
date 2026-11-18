@@ -38,6 +38,10 @@ notice when it clears:
     outbox        events waiting on the station for outbox_min (5): it couldn't reach the  warning
                   hub (invisible here until it comes back: worked out from the age of the
                   oldest event it reports)
+    rejected:<type> "Station event rejected by hub: <type>": an event the hub refuses for     critical (a page,
+                  good, held in the station's quarantine (sizeup/cloud/outbox.py): a page,     its text, an alarm,
+                  alarm or incident source's event while it is held (sent again slowly);       a source event;
+                  another type for REJECTED_RECENT_S after its last refusal                    else warning)
     disk          the station's disk over disk_pct (90) full                               warning (critical
                                                                                            from DISK_CRITICAL)
     stt_backlog   the station's whisper queue (sizeup/stt.py SttQueue, #195, #300): its oldest   warning
@@ -189,18 +193,59 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
-              "outbox": "Station's events backing up", "disk": "Station disk full",
+              "outbox": "Station's events backing up", "rejected": "Station event rejected by hub",
+              "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped",
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
-MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected")   # critical ones: muted for a time only, never
+                                                                          # until unmuted
+REJECTED_RECENT_S = 24 * 3600.0     # a non-critical event the hub refused: a warning this long after its last refusal
 
 
 def alert_kind(key: str) -> str:
     """An alert's key -> its kind for muting: "job:FG1" -> "job", "aws_budget80" -> "aws_budget"."""
     k = str(key).partition(":")[0]
     return "aws_budget" if k == "aws_budget80" else k
+
+
+def _quarantine(q, skew: float = 0.0) -> dict:
+    """The station's quarantine as it reported it (sizeup/cloud/outbox.py summary(): the events the hub refused), checked;
+    its times on the hub's clock. A station from before this reports none: nothing."""
+    q = q if isinstance(q, dict) else {}
+    num = (lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None)
+    rows = []
+    for r in (q.get("rows") if isinstance(q.get("rows"), list) else [])[:20]:
+        if not isinstance(r, dict) or not isinstance(r.get("kind"), str) or num(r.get("first_at")) is None:
+            continue
+        rows.append({"kind": r["kind"][:40], "reason": str(r.get("reason") or "")[:40],
+                     "error": str(r.get("error") or "")[:200], "first_at": num(r["first_at"]) + skew,
+                     "last_at": (num(r.get("last_at")) or num(r["first_at"])) + skew,
+                     "tries": int(num(r.get("tries")) or 1), "critical": bool(r.get("critical")),
+                     "next_at": num(r.get("next_at")) + skew if num(r.get("next_at")) is not None else None})
+    return {"n": int(num(q.get("n")) or 0), "critical": int(num(q.get("critical")) or 0), "rows": rows}
+
+
+def _rejected_alerts(q: dict, now: float) -> dict[str, dict]:
+    """"Station event rejected by hub: <type>" per type: critical while a critical one (a page, its text, an alarm, an
+    incident source's event) is held on the station, retried; a warning for another type refused in the last
+    REJECTED_RECENT_S (kept there, never sent again)."""
+    out: dict[str, dict] = {}
+    for kind in dict.fromkeys(r["kind"] for r in q.get("rows") or []):
+        rows = [r for r in q["rows"] if r["kind"] == kind]
+        crit = [r for r in rows if r["critical"]]
+        if not crit and now - max(r["last_at"] for r in rows) > REJECTED_RECENT_S:
+            continue
+        use = crit or rows
+        last = max(use, key=lambda r: r["last_at"])
+        nxt = min((r["next_at"] for r in crit if r["next_at"] is not None), default=None)
+        out[f"rejected:{kind}"] = {
+            "severity": "critical" if crit else "warning", "title": f"Station event rejected by hub: {kind}",
+            "text": f"{len(use)} held on the station · {last['reason']}" + (f": {last['error']}" if last["error"] else "")
+                    + (f" · next try {_hhmm(nxt)}" if nxt else ""),
+            "since": min(r["first_at"] for r in use)}
+    return out
 
 
 def active_mutes(section: dict | None, now: float) -> dict[str, float | None]:
@@ -668,6 +713,7 @@ class StationHealth:
         out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
                                        "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
                                        "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        out["outbox"]["quarantine"] = _quarantine(ob.get("quarantine"), hub.skew)   # the events the hub refused
         fire = si.get("dropped_fire")                               # ... and fire traffic's
         out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
@@ -1091,6 +1137,7 @@ class StationHealth:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
                              "text": f"{ob['pending']} event(s) waiting, oldest {_hhmm(ob['oldest'])} · not reaching the hub",
                              "since": ob["oldest"]}
+        out.update(_rejected_alerts(ob.get("quarantine") or {}, now))
         disk = m["system"].get("disk_pct")
         if isinstance(disk, (int, float)) and disk >= self.disk_pct:
             out["disk"] = {"severity": "critical" if disk >= DISK_CRITICAL else "warning", "title": "Station disk full",

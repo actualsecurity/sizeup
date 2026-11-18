@@ -9,7 +9,10 @@
         alt_text    "both" re-run: whisper's text as the alternative        (App._set_alt)
         heard       a radio ID (and P25 alias) heard on the air             (App._heard)
     forwarder thread   POST /api/station/events: batches in order, retried with backoff; the hub
-                       answers with the last seq it has, which is then deleted here
+                       answers with the last seq it has, which is then deleted here. A batch the hub refuses
+                       for good (400 / 413 / 422) is split until the event it refuses is alone, which is
+                       quarantined (outbox.py; a critical one sent again slowly, and a critical alert on the
+                       hub), so the events behind it still go (_forward_once, _rejected)
     state thread       POST /api/station/state: who is talking now and a page going out now (paging:
                        each tone pair as it decodes), pushed the moment it changes
                        (sub-second; latest wins, never queued) and every 5 s the radio / SDR / STT /
@@ -73,7 +76,7 @@ from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cloud.aircraftlink import AircraftForwarder
 from sizeup.cloud.adapters import request_reset
 from sizeup.cloud.autoupdate import Watch
-from sizeup.cloud.client import Backoff, HubClient, HubError
+from sizeup.cloud.client import REJECTED, Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.metrics import MetricsLink
@@ -374,6 +377,10 @@ class StationLink:
                       "it goes up when the hub is back")
         if self.outbox.dropped_audio:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
+        q = self.outbox.summary(limit=0)
+        if q["n"]:
+            detail += f" · {q['n']} event(s) refused by the hub, kept here" + (f" ({q['critical']} critical, retried)"
+                                                                            if q["critical"] else "")
         lost = sum(self.stt_stats()["dropped"].values())
         if lost:
             detail += f" · {lost} STT input(s) dropped (the hub used the clip)"
@@ -427,26 +434,142 @@ class StationLink:
         client = self._client(60.0)
         backoff = Backoff(first=1.0, fast_cap=5.0, cap=60.0)      # a deploy is seconds now (#247)
         while not self._stop.is_set():
-            rows = self.outbox.batch()
-            if not rows:
+            wait = self._forward_once(client, backoff)
+            if wait is None:
                 self._wake.wait(5.0)
                 self._wake.clear()
-                continue
-            body = {"epoch": self.outbox.epoch, "station": self.station_id,
-                    "events": [dict(r, audio=base64.b64encode(r["audio"]).decode() if r["audio"] else None)
-                               for r in rows]}
-            try:
-                r = client.request("POST", "/api/station/events", body, timeout=60.0)
-                acked = int(r["acked"])
-            except (HubError, KeyError, TypeError, ValueError) as e:
-                self._fail(e)
-                self._stop.wait(backoff.fail(e))
-                continue
-            self.outbox.ack(acked)
-            self.sent += sum(1 for x in rows if x["seq"] <= acked)
-            if not self._stop.is_set():
-                self._ok()
-            backoff.ok()
+            elif wait > 0:
+                self._stop.wait(wait)
+
+    def _post_events(self, client: HubClient, rows: list[dict]) -> dict:
+        # (one cursor (epoch, seq) per outbox, and the hub keeps one: a cursor per node is step 3 of the nodes design,
+        # docs/nodes.md)
+        body = {"epoch": self.outbox.epoch, "station": self.station_id,
+                "events": [{"seq": r["seq"], "at": r["at"], "type": r["type"], "data": r["data"],
+                            "audio": base64.b64encode(r["audio"]).decode() if r["audio"] else None,
+                            "audio_dropped": r["audio_dropped"]} for r in rows]}
+        return client.request("POST", "/api/station/events", body, timeout=60.0)
+
+    def _forward_once(self, client: HubClient, backoff: Backoff, now: float | None = None) -> float | None:
+        """One batch to the hub. Returns how long to wait before the next (0: go on now), None when nothing waits.
+
+        In order, the oldest first. A batch the hub refuses for good (client.REJECTED: 400 / 413 / 422) is split
+        (_rejected) until the event it refuses is alone, which goes to the quarantine (outbox.py) so everything behind
+        it still goes; the critical ones are sent again on a slow schedule and raise a critical alert on the hub
+        (health.py "rejected"). Anything else (5xx, network, a refused token) is retried as it is, with backoff."""
+        for q in self.outbox.requeue_due(now):
+            self.log(f"hub link: sending a {q['kind']} the hub refused again (refused {q['tries']} time(s) so far)")
+        iso = self._isolate
+        rows = (self.outbox.batch(max_bytes=iso["bytes"], max_events=iso["n"], meta=True) if iso
+                else self.outbox.batch(meta=True))
+        if not rows:
+            self._isolate = None
+            return None
+        try:
+            r = self._post_events(client, rows)
+            acked = int(r["acked"])
+        except (HubError, KeyError, TypeError, ValueError) as e:
+            if isinstance(e, HubError) and e.status in REJECTED:
+                wait = self._rejected(client, rows, e, now)
+                if wait is not None:
+                    return wait
+            self._fail(e)
+            return backoff.fail(e)
+        # the events the hub took but couldn't apply ("rejected", a hub from before this sends none): its cursor is past
+        # them, a copy is kept here (and a critical one sent again later)
+        bad = {}
+        listed = r.get("rejected") if isinstance(r, dict) else None
+        for x in listed if isinstance(listed, list) else []:
+            if isinstance(x, dict) and isinstance(x.get("seq"), int) and x["seq"] <= acked:
+                bad[x["seq"]] = x
+        for row in rows:
+            if row["seq"] in bad:
+                self._quarantined(row, str(bad[row["seq"]].get("reason") or "apply_failed"),
+                                  str(bad[row["seq"]].get("error") or ""), now)
+        self.outbox.released([x["qid"] for x in rows if x["qid"] and x["seq"] <= acked and x["seq"] not in bad])
+        for x in rows:
+            if x["qid"] and x["seq"] <= acked and x["seq"] not in bad:
+                self.log(f"hub link: the hub took the {x['type']} it had refused")
+        self.outbox.ack(acked)
+        self.sent += sum(1 for x in rows if x["seq"] <= acked and x["seq"] not in bad)
+        if iso and acked >= iso["hi"]:
+            self._isolate = None                    # past every event of the batch it refused: whole batches again
+        if not self._stop.is_set():
+            self._ok()
+        backoff.ok()
+        return 0.0
+
+    _isolate: dict | None = None        # splitting a refused batch: {n, bytes, hi (its last seq), probed}
+
+    def _rejected(self, client: HubClient, rows: list[dict], e: HubError, now: float | None = None) -> float | None:
+        """The hub refused this batch for good. Split it in halves (by size, too, for a 413) until the event it refuses
+        is alone, then quarantine that one; the rest goes in order. A hub that says which events (its answer's
+        "events": [{seq}]) has them quarantined at once. Returns 0 (go on now), or None: not the events' fault after all
+        (a hub that refuses even an empty batch), retried as it is with backoff."""
+        doc = e.body if isinstance(e.body, dict) else {}
+        reason = str(doc.get("reason") or ("too_large" if e.status == 413 else f"http_{e.status}"))[:40]
+        error = str(doc.get("error") or e)[:300]
+        named = {x.get("seq") for x in (doc.get("events") if isinstance(doc.get("events"), list) else [])
+                 if isinstance(x, dict)}
+        hit = [row for row in rows if row["seq"] in named]
+        if hit:
+            if not self._probe(client):
+                return None                         # the hub refuses everything: hold every event, as for an outage
+            for row in hit:
+                self._quarantined(row, str(next(x for x in doc["events"] if isinstance(x, dict)
+                                                and x.get("seq") == row["seq"]).get("reason") or reason)[:40],
+                                  error, now)
+            return 0.0
+        if len(rows) > 1:
+            iso = self._isolate or {"hi": rows[-1]["seq"], "probed": False}
+            size = sum(len(json.dumps(x["data"], default=str)) + len(x["audio"] or b"") for x in rows)
+            if self._isolate is None:
+                self.log(f"hub link: the hub refused {len(rows)} event(s) ({e.status} {reason}): splitting them "
+                         "to find the one it refuses; the rest go on")
+            self._isolate = dict(iso, n=max(1, len(rows) // 2), hi=max(iso["hi"], rows[-1]["seq"]),
+                                 bytes=max(1, size // 2) if e.status == 413 else (iso.get("bytes") or 4 * 1024 * 1024))
+            return 0.0
+        row = rows[0]
+        if e.status == 413 and row["audio"]:
+            # too large with its clip: it goes without it (the station keeps the clip in its own store)
+            self.outbox.strip_audio(row["seq"])
+            self.log(f"hub link: a {row['type']} too large for the hub ({len(row['audio']) // 1024} KB of audio): "
+                     "sent without its clip")
+            return 0.0
+        if e.status != 413 and not self._probe(client):
+            return None                             # the hub refuses everything: hold every event, as for an outage
+        self._quarantined(row, reason, error, now)
+        return 0.0
+
+    def _probe(self, client: HubClient) -> bool:
+        """Does the hub take an empty batch? Then a batch it refuses is refused for its events, never the hub's own
+        trouble (once per split)."""
+        if self._isolate is not None and self._isolate.get("probed"):
+            return True
+        try:
+            int(client.request("POST", "/api/station/events",
+                               {"epoch": self.outbox.epoch, "station": self.station_id, "events": []},
+                               timeout=30.0)["acked"])
+        except (HubError, KeyError, TypeError, ValueError) as e:
+            if getattr(self, "_probe_said", "") != str(e)[:80]:
+                self._probe_said = str(e)[:80]
+                self.log(f"hub link: the hub refuses even an empty batch ({e}): holding every event until it takes them")
+            return False
+        if self._isolate is not None:
+            self._isolate["probed"] = True
+        return True
+
+    def _quarantined(self, row: dict, reason: str, error: str, now: float | None = None) -> None:
+        """One event the hub refuses: to the quarantine (outbox.py), said in the log (its type and the hub's reason; an
+        incident source's error never, it may quote the county's data)."""
+        q = self.outbox.quarantine(row, reason, error, now)
+        self._isolate = None                        # (found: whole batches again; another bad one is split out the same way)
+        said = "" if row["type"] in ("source_event", "source_health", "source_seen") else f": {error[:160]}"
+        if q["critical"]:
+            self.log(f"hub link: CRITICAL: the hub refused a {row['type']} ({reason}{said}); kept on the station, "
+                     f"sent again in {int((q['next_at'] - (now or time.time())) // 60)} min (refused {q['tries']} time(s))")
+        else:
+            self.log(f"hub link: the hub refused a {row['type']} ({reason}{said}); kept on the station, the rest go on")
 
     # -- the STT inputs (their own lane, under the events) -----------------------------------------------------
 
@@ -490,7 +613,8 @@ class StationLink:
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "stt_terms": app.stt_terms_applied(),         # the term lists the hub sent ({v, sets}: versions only)
-               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
+               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio,
+                          "quarantine": self.outbox.summary()},     # (the events the hub refused: health.py "rejected")
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "version": self.version()}
         try:

@@ -239,6 +239,20 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**An event the hub refuses never blocks the rest.** The hub skips an event it can't parse or apply and lists it in its
+answer (`rejected: [{i, seq, type, reason, error}]`, `reason` `malformed` or `apply_failed`). It refuses a whole batch
+only when it can't read it: `413 {reason: too_large, max_bytes}` or `400 {reason: bad_json | bad_batch}`. The station
+treats 400 / 413 / 422 as "refused for good". It splits the batch in halves (by size too, for a 413) until the refused
+event is alone, then moves that event to the outbox's quarantine table with the hub's reason and error. Everything
+behind it goes on in order. An event too large only because of its clip goes without the clip (the station keeps it).
+Before it quarantines anything, the station checks that the hub takes an empty batch. A hub that refuses everything is
+an outage, so every event waits as before. The quarantine is kept across restarts, and the oldest non-critical rows
+go first when it is full. A page, its text, an alarm or a `source_event` is never dropped: it is sent again as a new
+event after 10 min, 30 min, then hourly, until the hub takes it. Health shows **Station event rejected by hub:
+*type*** (critical for those, else a warning for 24 h). 5xx, network errors and refused tokens are retried as before,
+with backoff. Older releases on either side keep working: an older hub's bare 400 is split the same way, and an
+older station ignores `rejected`.
+
 **The speech-to-text input** (`sizeup/cloud/sttinput.py`). Each transmission's and page's exact whisper input
 (`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis already applied; a page's voice without
 its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
@@ -473,6 +487,7 @@ works from the rows alone and the panel says so.
 | *channel* stuck open | the squelch open without a break (#116's `stuck`, 2 min) | warning |
 | P25 trunk silent | trunk-recorder running but no call on **any** talkgroup for `p25_silent_min` (20 min; `p25_silent_night_min`, 60 min, for a silence that reaches 00-06; longer when the system's learned gaps say so), or trunk-recorder losing the control channel (decode rate under 2/s) for 2 min (below) | critical |
 | Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
+| Station event rejected by hub: *type* | an event the hub refuses for good, held in the station's quarantine ([What flows](#what-flows)): a page, its text, an alarm or an incident source's event while it is held (sent again every 10 min to 1 h); another type for 24 h after it was refused | critical / warning |
 | Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
 | Speech-to-text behind | the station's whisper queue: its oldest clip that matters (not a shed context clip) waiting 10 min; one episode until it has been under 2 min for 15 min. Pushed once, when the oldest has waited 20 min | warning |
 | ADS-B receiver down | the station's decoder down for `down_min` ([our receiver](#our-own-receiver-on-the-station-235)) | warning |
