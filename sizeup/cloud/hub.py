@@ -119,7 +119,7 @@ from sizeup.cloud.sttworkers import API as STT_API, WorkerApi, WorkerRegistry
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
-from sizeup import sttpool, sttruns
+from sizeup import stt_time, sttpool, sttruns
 from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
@@ -1648,6 +1648,7 @@ class HubApp(App):
                 clip_end = self._hub_time(getattr(item, "end", None))
             if cls is None and item is not None:
                 cls = self._pool_class(item, key)
+            check = self._time_check(key, item, text, clip_end)
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
@@ -1657,11 +1658,27 @@ class HubApp(App):
                               queued_at=queued_at, engine_start=engine_start, done_at=now, wait_s=wait_s,
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
-                              call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None))
+                              call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
+                              check=check)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
+
+    def _time_check(self, key: str, item, text: str, clip_end) -> stt_time.Check | None:
+        """The dispatcher's trailing time (#727, sizeup/stt_time.py) on a configured channel, the dispatcher's (or an
+        unknown talker's) clip only: kept with the run, the raw text never changed. None: not checked."""
+        if not text or not stt_time.applies(key, str(getattr(item, "unit", "") or ""), self.cfg.stt_time_channels):
+            return None
+        return stt_time.check(text, clip_end, self._hub_time(getattr(item, "start", None)))
+
+    def stt_time_health(self) -> dict | None:
+        """Settings > Station > Health: the trailing-time match rate per channel, engine, model (and vocab_v), 24 h and
+        TIME_DAYS days, a day at a time (sizeup/sttruns.py Runs.time_rates). None with nothing checked."""
+        rows = self.stt_runs.time_rates()
+        if not rows:
+            return None
+        return {"rows": rows, "rule": stt_time.RULE, "window_min": list(stt_time.WINDOW_MIN), "days": sttruns.TIME_DAYS}
 
     def _clips_logged(self, ids: list[str]) -> set:
         """Of these clip ids, the ones still in the radio log (a run goes with its transcript)."""
