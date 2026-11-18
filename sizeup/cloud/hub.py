@@ -120,6 +120,7 @@ from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
 from sizeup import sttpool, sttruns
+from sizeup.cloud import infer as infer_mod
 from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
@@ -926,9 +927,15 @@ class HubApp(App):
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
                                      log=log)
         self.stt_latency = sttruns.LatencyBook()
+        # the LLM lane (sizeup/cloud/infer.py): a worker's local model for the intel engine's JSON classifications; its own
+        # queue, after the pre-alert clips, off unless a worker advertises an LLM. Prompts and answers never kept
+        self.infer_lane = infer_mod.Lane(stt_busy=self.sttpool.holds_prealert, may_write=self._may_write_audio, log=log,
+                                         enabled=lambda: bool(self.hub.workers.pool_settings()["on"]),
+                                         llm_on=self.hub.workers.llm_on)
+        self.stt_api.infer = self.infer_lane
         self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
         self.cad.stt_workers_live = self._worker_live
-        self.cad.stt_pool_forget = lambda wid: self.sttpool.forget(wid, "revoked")   # what it holds falls back now
+        self.cad.stt_pool_forget = lambda wid: (self.sttpool.forget(wid, "revoked"), self.infer_lane.forget(wid))[0]
         # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
@@ -1701,8 +1708,9 @@ class HubApp(App):
         if w is None:
             return {"state": "offline"}
         now = self.sttpool.clock()
+        lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version}
+                "version": w.version, "llm": lw.llm if lw is not None else ""}
 
     def pool_health(self) -> dict | None:
         """Settings > Station > Health: the pool (its workers, queue, fallbacks, p50/p90) and every channel's latency.
@@ -1712,6 +1720,7 @@ class HubApp(App):
         if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
             return None
         return {"active": active, "settings": self.hub.workers.pool_settings(), **self.sttpool.stats(),
+                "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
                 "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
 
@@ -2459,6 +2468,7 @@ class HubApp(App):
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written
+        infer_mod.install(self.infer_lane.start())  # the LLM lane: sizeup.cloud.infer.submit() asks it from now on
         self.catchup.start()                      # its first look minutes from now: no writes at start
         # radio pre-alerts (sizeup/intel): the "intel" thread, as App.start() starts it. Without it every transcript
         # handed to the engine waited in its queue unread: no rule was ever tried on the hub
@@ -2484,6 +2494,8 @@ class HubApp(App):
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
         self.cad.intel.stop()                          # (a flag: the thread ends at its next wait)
+        infer_mod.uninstall(self.infer_lane)
+        self.infer_lane.stop()                         # (what it had: None at once; the intel engine goes on without)
         left = self.sttpool.stop(fall_back=False)   # (what a GPU worker had stays "pending": the next start routes it)
         if left:
             self.hub.log(f"stt pool: stopping with {left} clip(s) still out: the next start sends them the AWS way")

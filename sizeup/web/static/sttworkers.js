@@ -102,6 +102,22 @@ const SttWorkersCard = (() => {
     return wrap;
   }
 
+  // a GPU worker's local LLM (sizeup/cloud/infer.py): its "LLM jobs" switch, once it has an LLM (or was switched off)
+  function llmCell(w) {
+    const td = el("td", "");
+    if (w.revoked || (!w.llm && w.llm_on !== false)) { td.append("—"); return td; }
+    const l = el("label", "check");
+    const c = el("input");
+    c.type = "checkbox";
+    c.checked = w.llm_on !== false;
+    c.addEventListener("change", () => act({ action: "llm", id: w.id, on: c.checked },
+      `${w.id}: LLM jobs ${c.checked ? "on" : "off"}`));
+    l.append(c, ` ${w.llm || "off"}`);
+    l.title = "The intel engine's classifications on this worker's local model. Off: it gets no prompts";
+    td.append(l);
+    return td;
+  }
+
   function render() {
     if (!card) return;
     const d = last;
@@ -116,7 +132,7 @@ const SttWorkersCard = (() => {
     }
     const t = el("table", "evtable");
     const hr = el("tr");
-    for (const h of ["Name", "Id", "State", "Model", "Last seen", ""]) hr.append(el("th", "", h));
+    for (const h of ["Name", "Id", "State", "Model", "LLM jobs", "Last seen", ""]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
     for (const w of d.workers || []) {
@@ -138,12 +154,12 @@ const SttWorkersCard = (() => {
       const st = w.revoked ? `revoked ${when(w.revoked)}` : (w.state || "offline");
       tr.append(el("td", "", w.name || "—"), el("td", "mono", w.id),
         el("td", w.revoked || st === "offline" ? "hl-bad" : st === "online" ? "hl-ok" : "dim", st),
-        el("td", "", w.model || "—"), el("td", "t", when(w.seen || w.last_used)), acts);
+        el("td", "", w.model || "—"), llmCell(w), el("td", "t", when(w.seen || w.last_used)), acts);
       t.tBodies[0].append(tr);
     }
     if (!(d.workers || []).length) {
       const tr = el("tr");
-      tr.append(Object.assign(el("td", "empty", "None"), { colSpan: 6 }));
+      tr.append(Object.assign(el("td", "empty", "None"), { colSpan: 7 }));
       t.tBodies[0].append(tr);
     }
     const kids = [head, t, poolRow(d)];
