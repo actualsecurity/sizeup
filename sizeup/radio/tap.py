@@ -31,11 +31,10 @@ decoded" check (#163) are as they were: only the decode looks further back.
 Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 1.7 s of audio and
 runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found. Each step decodes only
 what came since the step before, with ID_OVERLAP_FRAMES before it (a burst that ran across the last step's end is whole
-in it), not the whole buffer again (#706). The look-back is decoded only when a frame of it, or of the pre-roll
-before its last, shows a carrier (quieting the hiss RISE_DB or more, the squelch's own measure) or an ID burst: a burst
-that began before the pre-roll rode on a carrier already partly up, or a weak radio's that never opened the squelch.
-RISE_DB is low (safety over CPU: a weak radio's emergency on ~1 dB still alarms), so most key-ups still decode it. Then its first two steps are one decode of the look-back and the buffer together, each ID placed by where
-its sync begins (mdc() gives that: App._mdc_at). Tones
+in it), not the whole buffer again (#706). The first two steps are one decode of the look-back and the buffer
+together, each ID placed by where its sync begins (mdc() gives that: App._mdc_at). The look-back is decoded on every
+carrier: a gate on its quieting saved nothing once it was low enough for a weak radio's emergency (~1 dB over the
+hiss, the squelch shut), and a threshold set higher would lose that alarm again. Tones
 are one FFT per frame, on the paging channel only, while it is open. The IDs found live are handed to
 the finished transmission (ids()), so the row is named even when the burst is cut off its segment;
 a post-ID at release that differs is kept next to it, never instead of it. A key-up window that ends with no ID
@@ -71,8 +70,6 @@ from sizeup.radio.fm import FRAME, RATE, id_burst_frames
 PREROLL_FRAMES = 4      # 0.2 s read before the squelch opened (the start of a key-up burst)
 ID_LOOKBACK_FRAMES = 8  # 0.4 s more before a carrier's buffer, for the ID decode only (a slowly rising carrier, #694)
 LOOKBACK_STEPS = 2      # ... in its first two decode steps (a burst that ran into the pre-roll is whole by then)
-RISE_DB = 0.5           # ... and only when a frame there quieted the hiss this much (a carrier partly up, or a weak radio
-                        # that never opened the squelch: a burst on 0.5-1 dB still decodes), or held a burst
 ID_OVERLAP_FRAMES = 8   # each decode step re-reads this much (0.4 s) before what is new: a whole burst (MDC: 0.18 s,
                         # a double packet 0.27 s; FleetSync 0.05-0.09 s) that ran across the last step's end
 HIST_FRAMES = 64        # a traffic channel's latest frames, open or not: where the look-back comes from
@@ -92,8 +89,6 @@ class _Chan:
     t0: float = 0.0                             # when buf[0] began (on the squelch's clock: since + frames)
     hist: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))
     shut: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))   # per hist frame: the squelch was closed
-    qd: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))     # ... and its quieting (dB; None: unknown)
-    rising: bool = True                         # the look-back is worth a decode (a carrier or a burst in it, #706)
     upto: int = 0                               # buf frames read by the decode steps so far
     back: list = field(default_factory=list)    # the ID look-back: the channel's frames just before buf (#694)
     old: int = 0                                # ... how many of back + buf began before the pre-roll
@@ -168,10 +163,9 @@ class LiveTap:
     def frame(self, channel, frame: np.ndarray, squelch, made: bool = True) -> None:
         """One frame, after squelch.feed(frame) (TapSquelch; made: that feed returned a transmission). Never raises."""
         try:
-            q = getattr(squelch, "quieting_db", None)
             self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)),
                         bool(getattr(squelch, "keyed", squelch.open)), getattr(squelch, "_frames", None),
-                        getattr(squelch, "_hold", None), made, q if isinstance(q, (int, float)) else None)
+                        getattr(squelch, "_hold", None), made)
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
@@ -190,7 +184,6 @@ class LiveTap:
                 if c is not None:
                     c.hist.clear()      # (what comes next doesn't follow on from it)
                     c.shut.clear()
-                    c.qd.clear()
             if was and self.kind(channel.label) == "paging" and self.paging is not None:
                 self.paging.close(channel.label)
         except Exception as e:  # the tap must never stop the receiver
@@ -199,8 +192,7 @@ class LiveTap:
                 self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
 
     def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True,
-               frames: list | None = None, hold: tuple | None = None, made: bool = True,
-               q: float | None = None) -> None:
+               frames: list | None = None, hold: tuple | None = None, made: bool = True) -> None:
         kind = self.kind(label)
         with self._lock:
             c = self._ch.setdefault(label, _Chan())
@@ -238,7 +230,6 @@ class LiveTap:
             if kind == "traffic":
                 c.hist.append(frame)
                 c.shut.append(not is_open)
-                c.qd.append(q)
         if not is_open:
             if was and kind == "paging" and self.paging is not None:
                 self.paging.close(label)
@@ -266,7 +257,7 @@ class LiveTap:
         if not past and (c.n < MDC_MIN_FRAMES or c.n % MDC_EVERY):
             return
         c.steps += 1
-        back = c.steps <= LOOKBACK_STEPS and c.rising
+        back = c.steps <= LOOKBACK_STEPS
         # what is new since the last step, with ID_OVERLAP_FRAMES before it (#706); the look-back's steps: all of it
         a = 0 if back else max(0, c.upto - ID_OVERLAP_FRAMES)
         read = c.buf[a:]
@@ -325,9 +316,9 @@ class LiveTap:
         Its pre-roll: the PREROLL_FRAMES just before since when it opened (the carrier before ended at least the hang
         earlier), on a cut only the drop it was cut at, less its first frame (still partly the carrier before: drop
         frames; 0: the rise rule, no drop)."""
-        n, h, shut, qd = len(c.buf), list(c.hist), list(c.shut), list(c.qd)
+        n, h, shut = len(c.buf), list(c.hist), list(c.shut)
         c.back, c.old, c.before, c.weak, c.lone, c.steps, c.looked = [], 0, None, 0, [], 0, []
-        c.pending, c.pkey, c.ptime, c.heard, c.upto, c.rising = [], "", since, [], 0, True
+        c.pending, c.pkey, c.ptime, c.heard, c.upto = [], "", since, [], 0
         if len(shut) != len(h) or (n and (len(h) < n or h[-1] is not c.buf[-1])):
             return              # (not the frames the tap saw last: never guess)
         b0 = max(0, len(h) - n - ID_LOOKBACK_FRAMES)
@@ -336,17 +327,6 @@ class LiveTap:
         c.old = max(0, at - min(PREROLL_FRAMES, PREROLL_FRAMES if drop is None else drop - 1))
         while c.weak < c.old and shut[c.old - 1 - c.weak]:
             c.weak += 1
-        if c.back and len(qd) == len(h):
-            # (#706) a burst that began before the pre-roll rode on a carrier already up there: its quieting shows in
-            # some frame before the carrier came up (never the last before it: a carrier that came up at once is
-            # partly in that one; on a cut, every frame of the drop and the carrier before), else a burst does.
-            # Neither: the look-back isn't decoded. RISE_DB is low on purpose (safety over CPU): a weak radio's
-            # emergency on a carrier ~1 dB over the hiss still decodes, and hiss frames vary about 0.5 dB, so most
-            # key-ups still decode it (the PR's numbers).
-            end = max(c.old + 2, at - 1)
-            qs = qd[b0:b0 + end]
-            c.rising = (any(x is None or x >= RISE_DB for x in qs)
-                        or any(id_burst_frames(np.concatenate((c.back + c.buf)[:end]))))
 
     def _decode(self, c: _Chan, frames: list, audio: np.ndarray, back: bool = True) -> list:
         """The IDs in these frames of the carrier (from buf[0]; audio: them joined), and with back, the IDs of a burst

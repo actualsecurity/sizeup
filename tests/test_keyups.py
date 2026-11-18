@@ -978,9 +978,9 @@ def rising(burst, rise_s, seed):
 @pytest.mark.parametrize("gap", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("rise", [0.10, 0.15, 0.20, 0.25])
 def test_a_reply_on_a_rising_carrier_after_the_squelch_closed_is_named_and_alarmed_as_main(rise, gap, op):
-    # A unkeys; B replies gap s later, its carrier rising over 0.1-0.25 s with its pre-ID / emergency at once. #706's
-    # look-back gate first looked only at the frames up to the pre-roll's second: on a cut (0.3 s, inside the hang)
-    # the rising frames fell outside it and 8-9 of 10 presses had no alarm. Main: every one, as here.
+    # A unkeys; B replies gap s later, its carrier rising over 0.1-0.25 s with its pre-ID / emergency at once. A guard
+    # on the look-back being decoded on every carrier: #706 first gated it on the frames' quieting, and on a cut (0.3 s,
+    # inside the hang) the rising frames fell outside the gate and 8-9 of 10 presses had no alarm. Main: every one.
     for seed in range(10):
         audio = np.concatenate([idle(3.0, seed), unit(1.0), idle(gap, seed + 20), rising(mdc(B_ID, op), rise, seed),
                                 idle(2.0, seed + 40)])
@@ -997,8 +997,9 @@ def test_a_reply_on_a_rising_carrier_after_the_squelch_closed_is_named_and_alarm
 @pytest.mark.parametrize("kw", CONFIGS)
 @pytest.mark.parametrize("c_id", [C_ID, None, B_ID])
 def test_a_downed_firefighters_button_on_a_carrier_1_db_over_the_hiss_is_alarmed_as_main(c_id, kw):
-    # As above with B's carrier only ~1 dB over the hiss (the squelch shut throughout): #706's look-back gate must still
-    # decode it. Main alarms every one, once, as B's, on the right row; the gate at 2 dB missed 3 of these 5.
+    # As above with B's carrier only ~1 dB over the hiss (the squelch shut throughout): a guard on the look-back being
+    # decoded on every carrier (#706's quieting gate at 2 dB missed 3 of these 5). Main alarms every one, once, as B's,
+    # on the right row.
     for seed in range(5):
         b = mdc(B_ID, EMERGENCY)
         weak = b + 0.4 * 10 ** (-1 / 20) * np.random.default_rng(5 + seed).standard_normal(len(b))
