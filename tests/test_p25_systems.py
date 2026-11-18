@@ -1548,6 +1548,10 @@ def test_unsigned_sweep_on_a_real_station_and_a_real_hub_without_access(tmp_path
     try:
         assert isinstance(hub.app, HubApp) and not hub.app.access_enforced and not st.access_enforced
         assert wait(lambda: "p25_systems" in st.link.hub_caps, 10)               # the hub said what it knows
+        from sizeup.cloud import statusshape                                       # (D5 of #774: a P25 station's real
+        full = st.link.status()                                                   # status, its systems and talkgroups,
+        assert full["p25_systems"] and full["talkgroups"] and statusshape.problem(full) is None   # is taken)
+        assert wait(lambda: hub.app.hub.status is not None, 10) and hub.app.hub.status_refused is None
         iid, (fire, pd) = _with_context_traffic(st)
         # it is recorded on the station and reaches the hub's log, with its words
         assert wait(lambda: (hub.app.cad.store.one("SELECT text FROM radio_traffic WHERE id = ?", (pd,)) or {}).get("text")

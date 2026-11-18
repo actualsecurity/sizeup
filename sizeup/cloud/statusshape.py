@@ -61,6 +61,12 @@ OUTBOX = {"pending": (_opt(lambda v: _int(v) and v >= 0), "a count or null"), "o
           "dropped_audio": (_opt(lambda v: _int(v) and v >= 0), "a count or null")}
 STT_INPUT = {"dropped": DICT, "worker": DICT}
 VERSION = {"build": OSTR, "hub": OSTR, "update": DICT, "adapter": ODICT, "state": OSTR, "text": OSTR}
+# the updater's state as the hub reads it (autoupdate.describe: on the deploy check's path)
+VERSION_UPDATE = {"state": OSTR, "to": OSTR, "from": OSTR, "since": ONUM, "failed": ODICT, "equivalent": ODICT,
+                  "retry": ODICT, "hold": ODICT, "last": ODICT}
+# whisper's queue as Health's watcher reads it (the backlog alert, its text and cause)
+STT_QUEUE = {**{k: ONUM for k in ("queued", "urgent", "oldest_s", "service_s", "in_h", "in_fallback_h")},
+             "top": OLIST, "in_top": OLIST}
 HEALTH = {k: ODICT for k in ("jobs", "recorder", "whisper", "stt_queue", "reception", "usb", "heard", "adsb",
                              "link_restarts")}
 TALKGROUP = {"tg": INT}
@@ -74,18 +80,18 @@ TOP: dict[str, tuple] = {
 NESTED: dict[str, dict] = {"sdr": SDR, "rerun": RERUN, "channels": CHANNELS, "reception": RECEPTION,
                            "stt_terms": STT_TERMS, "outbox": OUTBOX, "stt_input": STT_INPUT, "version": VERSION,
                            "health": HEALTH}
+DEEP: dict[tuple[str, str], dict] = {("version", "update"): VERSION_UPDATE, ("health", "stt_queue"): STT_QUEUE}
 ROWS: dict[str, dict] = {"radios": RADIO_ROW, "p25_systems": {}, "talkgroups": TALKGROUP}   # lists of objects
 
 
 OBOOL = (_opt(lambda v: isinstance(v, bool)), "true, false or null")
 OINT = (_opt(_int), "an integer or null")
-# "talking" and "paging", beside the status (RemoteLive on the hub: each entry until its `until`)
-TALKER = {"key": OSTR, "system": OSTR, "channel": OSTR, "tg": OINT, "radio_id": OSTR, "alias": OSTR, "rig": OSTR,
-          "label": OSTR, "since": ONUM, "talk_since": ONUM, "ended": OBOOL, "until": ONUM, "dispatcher": OBOOL,
-          "main": OBOOL, "id_on_release": OBOOL}
-PAGE = {"key": OSTR, "channel": OSTR, "started": ONUM, "pairs": LIST, "phase": OSTR, "ours": OBOOL, "ended": OBOOL,
-        "until": ONUM, "page_id": OSTR}
-PAIR = {"a": ONUM, "b": ONUM, "names": OLIST, "ours": OBOOL}
+# "talking" and "paging", beside the status (RemoteLive on the hub: each entry until its `until`): only what the hub and
+# the consoles compute with (the rest is shown as text)
+TALKER = {"system": OSTR, "channel": OSTR, "tg": OINT, "radio_id": OSTR, "since": ONUM, "talk_since": ONUM,
+          "ended": OBOOL, "until": ONUM}
+PAGE = {"channel": OSTR, "started": ONUM, "ended": OBOOL, "until": ONUM}
+PAIR = {"a": ONUM, "b": ONUM, "names": OLIST}
 
 
 def _fields(d: dict, spec: dict, path: str) -> str | None:
@@ -106,6 +112,10 @@ def problem(status) -> str | None:
         v = status.get(k)
         if isinstance(v, dict) and (bad := _fields(v, spec, f"status.{k}")):
             return bad
+    for (k, sub), spec in DEEP.items():
+        v = (status.get(k) or {}).get(sub)
+        if isinstance(v, dict) and (bad := _fields(v, spec, f"status.{k}.{sub}")):
+            return bad
     for k, spec in ROWS.items():
         for i, r in enumerate(status.get(k) or []):
             if not isinstance(r, dict):
@@ -122,7 +132,10 @@ def problem(status) -> str | None:
 def live_problem(talking, paging) -> str | None:
     """None when the hub can take a state post's "talking" and "paging"; else why not, as problem() says it
     ("talking[0].until: a number or null"). What RemoteLive already drops passes as it always did: a list that is not
-    one (as none), an entry that is not an object, a page without a list of pairs. An entry it keeps is checked."""
+    one (as none), an entry that is not an object, a page without a list of pairs, the pages beside no list of talkers
+    (Hub._state takes paging only with talking). An entry it keeps is checked."""
+    if not isinstance(talking, list):
+        return None
     for name, entries, spec in (("talking", talking, TALKER), ("paging", paging, PAGE)):
         for i, e in enumerate(entries if isinstance(entries, list) else []):
             if not isinstance(e, dict) or (name == "paging" and not isinstance(e.get("pairs"), list)):

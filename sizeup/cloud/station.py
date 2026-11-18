@@ -172,6 +172,15 @@ def _cpu_pct() -> float | None:
         return None
 
 
+def refused_part(e: HubError) -> str:
+    """What of a state post the hub refused for its shape (Hub._refuse_status: 400, "bad status: ..." for the status,
+    "bad state: ..." for the talkers / pages): "status" | "live" | "" (another error)."""
+    text = str(e)
+    if getattr(e, "status", 0) != 400:
+        return ""
+    return "status" if "400: bad status: " in text else "live" if "400: bad state: " in text else ""
+
+
 class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
                  client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
@@ -219,6 +228,7 @@ class StationLink:
         self._answer_bad: set[str] = set()      # the answer's fields said to be of another type (said once each)
         # the link's threads that raised and started again, by name: {n, why, at} (the Hub row, Health's hints)
         self.restarts: dict[str, dict] = {}
+        self.refused = ""                       # the hub's last refusal of this station's status (its shape), "" none
         self._watch_lock = threading.Lock()
         # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
@@ -334,6 +344,7 @@ class StationLink:
             self._good(field)
             try:
                 apply(v)
+                self._good(f"{field}!")
             except Exception as e:  # noqa: BLE001 - one field never in the way of the rest, nor of the link
                 if f"{field}!" not in self.__dict__.setdefault("_answer_bad", set()):
                     self._answer_bad.add(f"{field}!")
@@ -441,7 +452,7 @@ class StationLink:
     def start(self) -> StationLink:
         if self._threads:
             return self
-        self._threads = [go() for go in self._loops()]
+        self._threads = [go() for _name, go in self._loops()]
         self.aircraft.start()
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         self.logs.start()
@@ -450,9 +461,11 @@ class StationLink:
         return self
 
     def _loops(self) -> tuple:
-        """The link's own threads, in order, each started supervised (_spawn)."""
-        return (lambda: self._spawn("hub-forward", self._forward), lambda: self._spawn("hub-state", self._state),
-                lambda: self._spawn("hub-jobs", self._jobs), lambda: self._spawn("hub-stt", self._stt_forward))
+        """The link's own threads, in order: (name, start it supervised)."""
+        return (("hub-forward", lambda: self._spawn("hub-forward", self._forward)),
+                ("hub-state", lambda: self._spawn("hub-state", self._state)),
+                ("hub-jobs", lambda: self._spawn("hub-jobs", self._jobs)),
+                ("hub-stt", lambda: self._spawn("hub-stt", self._stt_forward)))
 
     def _spawn(self, name: str, fn) -> threading.Thread:
         t = threading.Thread(target=self._supervised, args=(name, fn), name=name, daemon=True)
@@ -499,7 +512,7 @@ class StationLink:
         def dead(t) -> bool:                            # (one made but not started yet, in start(): not dead)
             return t is not None and t.ident is not None and not t.is_alive()
         out = []
-        for i, (name, go) in enumerate(zip(("hub-forward", "hub-state", "hub-jobs", "hub-stt"), self._loops())):
+        for i, (name, go) in enumerate(self._loops()):
             if i < len(self._threads) and dead(self._threads[i]):
                 self._restarted(name, RuntimeError("thread ended"))
                 self._threads[i] = go()
@@ -597,6 +610,8 @@ class StationLink:
         lost = sum(self.stt_stats()["dropped"].values())
         if lost:
             detail += f" · {lost} STT input(s) dropped (the hub used the clip)"
+        if getattr(self, "refused", ""):
+            detail += f" · {self.refused}"
         self.watchdog()
         again = self.restarts_text()
         if again:
@@ -744,10 +759,11 @@ class StationLink:
         backoff = Backoff(first=1.0, fast_cap=3.0, cap=5.0)
         last_status = last_tg = 0.0
         tg_sig = None
+        no_live = False                                 # the hub refused the talkers / pages: left out until a post is taken
         while not self._stop.is_set():
             now = time.time()
-            talking = self.app.live.state()
-            paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
+            talking = [] if no_live else self.app.live.state()
+            paging = [] if no_live else self.app.paging_state()   # a page going out now (a hub before #63 ignores it)
             body: dict = {"at": now, "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
@@ -760,13 +776,28 @@ class StationLink:
                 r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
                 self.apply_answer(r)
+                no_live = False
                 if "status" in body:
-                    last_status, self._status_now = now, False
+                    last_status, self._status_now, self.refused = now, False, ""
                     if "talkgroups" in body["status"]:
                         last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
                                                 for r in body["status"]["talkgroups"]]
                 backoff.ok()
             except HubError as e:
+                what = refused_part(e)
+                if what:
+                    # the hub refused this post's status (or its talkers): the heartbeat goes at once without it, so
+                    # the hub still hears this station and its answer (its build: auto-update) still comes; the status
+                    # is tried again at its usual pace (a release with a shape the hub refuses updates away from it)
+                    if what == "status":
+                        last_status, self._status_now = now, False
+                    else:
+                        no_live = True
+                    if str(e) != self.refused:
+                        self.refused = str(e)
+                        self.log(f"hub link: the hub refused this station's {what}: {e}; the heartbeat goes on without it")
+                    self._stop.wait(0.2)
+                    continue
                 self._fail(e)
                 self._stop.wait(backoff.fail(e))
             self._live_wake.wait(LIVE_REFRESH_S if talking or paging else STATUS_S)
@@ -794,6 +825,8 @@ class StationLink:
                 jobs = None
             if isinstance(jobs, list):
                 self._good("jobs")
+                if all(isinstance(j, dict) for j in jobs):
+                    self._good("jobs[]")
             for job in jobs or []:                  # handed to this station: run, even if just turned off
                 if not isinstance(job, dict):
                     self._wrong("jobs[]")

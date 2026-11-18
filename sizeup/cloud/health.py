@@ -640,7 +640,9 @@ class StationHealth:
         now = self.clock() if now is None else now
         st = self.hub.status if isinstance(self.hub.status, dict) else {}
         try:
-            return self._model(now, st)
+            out = self._model(now, st)
+            self._model_said = None                     # (a later episode is said again)
+            return out
         except Exception as e:  # noqa: BLE001 - a report: never in the way of the panel or the watcher
             why = f"{type(e).__name__}"
             if self.__dict__.get("_model_said") != why:
@@ -663,7 +665,7 @@ class StationHealth:
                           "skew_s": round(hub.skew, 1), "hub_started": hub.started,
                           "silent": self._silent(now)[0] is True}
         v = st.get("version") if isinstance(st.get("version"), dict) else {}
-        desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
+        desc = (hub.version() if st else None) or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
                         "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
@@ -1389,7 +1391,16 @@ class StationHealth:
         with self._lock:
             m = self.model(now)
             self._log_adsb(m.get("adsb"))
-            conds, judged = self.conditions(m, now)
+            try:
+                conds, judged = self.conditions(m, now)
+                self._conds_said = None
+            except Exception as e:  # noqa: BLE001 - a report it can't judge: judged as none (silent still decided)
+                why = type(e).__name__
+                if self.__dict__.get("_conds_said") != why:
+                    self._conds_said = why
+                    self.log(f"health: the station's report not judged: {why}: {str(e)[:160]}")
+                m = dict(m, reported=False)
+                conds, judged = self.conditions(m, now)
             mutes = self._mutes(now)
             changes: list[tuple[str, dict]] = []
             settled = False

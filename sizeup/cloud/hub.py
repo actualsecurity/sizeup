@@ -388,7 +388,10 @@ class Hub:
         v = _part(self.status, "version")
         if v is None:
             return None
-        return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
+        try:
+            return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the routes that show it
+            return {"state": "unknown", "text": f"the station's version not read ({type(e).__name__})"}
 
     def station_row(self) -> dict:
         """The Station row of the radios (everyone's state push): its connection only. Its health alerts are the
@@ -695,10 +698,10 @@ class Hub:
         now = time.time()
         r = self.status_refused or {}
         self.status_refused = {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now}
-        if now - self._refused_said.get(("bad_status:" + why, sid), 0.0) >= REFUSAL_LOG_S:
-            self._refused_said[("bad_status:" + why, sid)] = now
-            self.log(f"hub: station status refused: {why}" + (f" (station {sid})" if sid else "")
-                     + ": the last good status is kept")
+        if now - self._refused_said.get((f"{reason}:{why}", sid), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[(f"{reason}:{why}", sid)] = now
+            self.log(f"hub: station {'status' if reason == 'bad_status' else 'state post'} refused: {why}"
+                     + (f" (station {sid})" if sid else "") + ": nothing of it taken, the last good one kept")
         return _json(400, {"error": f"bad {'status' if reason == 'bad_status' else 'state'}: {why}", "reason": reason})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:

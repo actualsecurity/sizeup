@@ -16,6 +16,7 @@ from sizeup.cloud.client import HubError
 from tests.test_app import wait
 from tests.test_cloud import TOKEN, HubRun, call, free_port, hub_cfg, station, station_cfg
 
+HUB_SHA = "abcdef1234567"                          # (invented)
 GOOD = {"id": "t", "name": "Test station", "radios": [{"label": "FG1", "mhz": 453.0375, "state": "ok", "detail": "",
                                                         "last_heard": None}],
         "outbox": {"pending": 2, "oldest": None, "dropped_audio": 0}, "channels": {"sig": "abc123", "prefs": {}},
@@ -37,6 +38,10 @@ BAD = [
     ("outbox.pending true", {"outbox": {"pending": True}}),
     ("version 5", {"version": 5}),
     ("version.update a list", {"version": {"build": "", "update": []}}),
+    ("version.update.failed a list", {"version": {"build": "1234567", "update": {"failed": [1]}}}),
+    ("version.update.since a word", {"version": {"build": "1234567", "update": {"state": "updating", "to": HUB_SHA,
+                                                                              "since": "x"}}}),
+    ("health.stt_queue.oldest_s a word", {"health": {"stt_queue": {"oldest_s": "late"}}}),
     ("health 5", {"health": 5}),
     ("health.jobs a job not an object", {"health": {"jobs": {"FG1": 5}}}),
     ("sdr 5", {"sdr": 5}),
@@ -70,6 +75,7 @@ def post(hub, status, **kw):
 @pytest.fixture
 def hub(tmp_path):
     h = HubRun(hub_cfg(tmp_path))
+    h.app.hub.build = HUB_SHA                       # (a hub that knows its build: describe() reads the update state)
     try:
         yield h
     finally:
@@ -179,7 +185,10 @@ def test_a_stored_talker_or_page_with_a_wrong_typed_until_never_breaks_the_cad_s
 # a stored value of another type (set behind the check's back: an older hub's, a bug): every reader survives it
 STORED_BAD = [{"radios": 5}, {"radios": [5, None, {"label": []}]}, {"outbox": 5}, {"outbox": {"pending": "x"}},
               {"channels": 5}, {"channels": []}, {"version": 5}, {"health": 5}, {"health": {"jobs": 5}},
-              {"health": {"stt_queue": 5}}, {"sdr": 5}, {"p25_systems": 5}, {"stt_terms": 5}, {"reception": 5},
+              {"health": {"stt_queue": 5}}, {"health": {"stt_queue": {"oldest_s": "late", "queued": "x"}}},
+              {"version": {"build": "1234567", "update": {"failed": [1]}}},
+              {"version": {"build": "1234567", "update": {"state": "updating", "to": HUB_SHA, "since": "x"}}},
+              {"sdr": 5}, {"p25_systems": 5}, {"stt_terms": 5}, {"reception": 5},
               {"rerun": 5}, {"name": 5}, {"name": []}]
 
 
@@ -291,6 +300,9 @@ def linked(tmp_path, monkeypatch):
         app.link.stop()
 
 
+JOBS_JOIN_S = 5.0
+
+
 def posts_go_on(fake, path="/api/station/state", n=3, s=5.0) -> bool:
     k = fake.n(path)
     return wait(lambda: fake.n(path) >= k + n, s)
@@ -395,19 +407,36 @@ def test_a_link_thread_that_raises_starts_again_and_shows_on_the_hub_row_and_hea
     assert statusshape.problem(st) is None
 
 
-def test_the_watchdog_starts_a_dead_link_thread_again(linked):
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")   # (the death it stages)
+def test_the_watchdog_starts_a_dead_link_thread_again_and_never_one_not_started_yet(linked, monkeypatch):
     app, fake, said = linked
-    done = threading.Thread(target=lambda: None)
-    done.start()
-    done.join()
-    app.link._threads[2] = done                       # the jobs thread, as if it had died
-    app.link.aircraft._thread = done
-    app.link.metrics_link._threads[1] = done
-    assert sorted(app.link.watchdog()) == ["hub-aircraft", "hub-jobs", "hub-metrics"]
-    assert app.link._threads[2].is_alive() and app.link.aircraft._thread.is_alive()
-    assert app.link.metrics_link._threads[1].is_alive()
-    assert app.link.restarts["hub-jobs"]["why"] == "RuntimeError"
+    a = app.link.aircraft
+    first = a._thread
+
+    def die(now=None):
+        raise SystemExit                            # (past its catch-all: the thread really ends)
+    monkeypatch.setattr(a, "step", die)
+    first.join(5.0)
+    assert not first.is_alive()
+    monkeypatch.undo()
+    assert app.link.watchdog() == ["hub-aircraft"]
+    assert a._thread is not first and a._thread.is_alive()
+    assert sum(1 for t in threading.enumerate() if t.name == "hub-aircraft" and t.is_alive()) >= 1
+    assert app.link.restarts["hub-aircraft"]["why"] == "RuntimeError"
     assert app.link.watchdog() == []                 # nothing dead now
+    pending = threading.Thread(target=lambda: None, name="hub-logs")
+    app.link.logs._thread = pending                  # made, not started yet (start() in progress): not dead
+    assert app.link.watchdog() == [] and app.link.logs._thread is pending
+    # one of the link's own loops that ends while the link runs: started again
+    jobs, answer = app.link._threads[2], fake.answers["/api/station/jobs"]
+
+    def end(body):
+        raise SystemExit                            # (past the supervisor too: the loop really ends)
+    fake.answers["/api/station/jobs"] = end
+    jobs.join(JOBS_JOIN_S)
+    fake.answers["/api/station/jobs"] = answer
+    assert not jobs.is_alive() and all(t.is_alive() for i, t in enumerate(app.link._threads) if i != 2)
+    assert app.link.watchdog() == ["hub-jobs"] and app.link._threads[2].is_alive()
     assert posts_go_on(fake, "/api/station/jobs")
 
 
@@ -433,3 +462,51 @@ def test_a_caps_file_of_another_shape_is_as_if_none(tmp_path):
     assert app.link.hub_caps == frozenset()
     (tmp_path / "st" / "hub_caps.json").write_text('["p25_systems"]')
     assert make_app(cfg).link.hub_caps == {"p25_systems"}
+
+
+# -- a refused post never cuts the station off: the heartbeat (and the hub's build in its answer) goes on --------------
+
+
+def test_a_station_whose_status_the_hub_refuses_keeps_its_heartbeat_and_hears_the_hubs_build(tmp_path, monkeypatch):
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    said, builds = [], []
+    try:
+        assert wait(lambda: hub.app.hub.status is not None, 10)
+        real = st.link.status
+        monkeypatch.setattr(st.link, "status", lambda talkgroups=True: dict(real(talkgroups), radios=5))
+        monkeypatch.setattr(st.link, "log", said.append)
+        monkeypatch.setattr(st.link.updates, "hub", builds.append)
+        st.link._status_now = True
+        st.link.live_changed()
+        assert wait(lambda: hub.app.hub.status_refused is not None, 10)
+        kept = hub.app.hub.status_at
+        n, t0 = len(builds), time.time()
+        assert wait(lambda: len(builds) >= n + 2 and (hub.app.hub.last_state or 0) > t0, 15)   # heard, and answered
+        assert hub.app.hub.status_at == kept and isinstance(hub.app.hub.status["radios"], list)
+        assert st.link.connected() and "bad status: status.radios: a list" in st.link.refused
+        assert "bad status: status.radios" in st.link.status_row()["detail"]
+        assert len([s for s in said if "refused this station's status" in s]) == 1
+        monkeypatch.setattr(st.link, "status", real)                     # a good status again: taken
+        assert wait(lambda: hub.app.hub.status_refused is None and hub.app.hub.status_at > kept, 15)
+        assert wait(lambda: st.link.refused == "", 10)
+    finally:
+        st.link.stop()
+        hub.close()
+
+
+def test_a_station_whose_talkers_the_hub_refuses_keeps_its_heartbeat_without_them(tmp_path, monkeypatch):
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    try:
+        assert wait(lambda: hub.app.hub.status is not None, 10)
+        monkeypatch.setattr(st.live, "state",
+                            lambda: [dict(TALKER, ended=True, until="soon")])
+        st.link.live_changed()
+        assert wait(lambda: (hub.app.hub.status_refused or {}).get("why", "").startswith("talking[0].until"), 10)
+        t0 = time.time()
+        assert wait(lambda: (hub.app.hub.last_state or 0) > t0, 15) and st.link.connected()
+        assert hub.app.hub.live.state() == []
+    finally:
+        st.link.stop()
+        hub.close()

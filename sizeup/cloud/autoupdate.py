@@ -351,7 +351,7 @@ def short(build) -> str:
 
 
 def failed_entry(failed: dict | None, sha: str) -> dict | None:
-    for k, v in (failed or {}).items():
+    for k, v in (failed.items() if isinstance(failed, dict) else ()):
         if same_build(k, sha):
             return v if isinstance(v, dict) else {"why": str(v)}
     return None
@@ -484,7 +484,7 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
         return {"state": "deferred", "text": f"updating {short(build)} -> {short(hub)}: staged, switching by "
                                              f"{_clock(until)}" + (f" ({why})" if why else "") + win}
     if (upd.get("state") in ("waiting", "updating") and same_build(upd.get("to"), hub)
-            and now - float(upd.get("since") or 0) < STALE_ATTEMPT_S):
+            and now - (float(upd["since"]) if isinstance(upd.get("since"), (int, float)) else 0.0) < STALE_ATTEMPT_S):
         wait = " (waiting for a quiet moment)" if upd.get("state") == "waiting" else ""
         return {"state": "updating", "text": f"updating {short(build)} -> {short(hub)}{wait}{win}"}
     f = failed_for(upd.get("failed"), upd, hub)
