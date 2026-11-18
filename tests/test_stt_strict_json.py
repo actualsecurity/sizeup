@@ -77,7 +77,7 @@ def test_the_llm_lane_still_reads_a_nan_in_an_answer_as_invalid():
     seen = {}
 
     class Lane:
-        def handle(self, wid, path, d):
+        def handle(self, wid, path, d, size=None):
             seen[path] = d
             return 200, {"ok": True}
     reg = SimpleNamespace(resolve=lambda b: "gpu-1", touch=lambda w: None, row=lambda w: None)
