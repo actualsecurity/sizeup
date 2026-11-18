@@ -183,7 +183,10 @@ POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, uni
                                           like dispatch; preview: true is the text only (audio: true renders it too)
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
                                           another agency's unit (any event): on it Dispatched (its set's first
-                                          status: a keyholder Notified), then its statuses (#219)
+                                          status), then its statuses (#219); status DP (DO: a third party's) puts
+                                          it on as that. A third-party unit (keyholder, utility, police) whatever
+                                          the status asked: Dispatched or Dispatch other, never Responding
+                                          -> {ok, moved, as: {unit: status it went on as}, status?}
                                           {unit_ids, status: RS | OL | ET | IC, operator} -> {ok, moved, status}: on
                                           any open event in that status, not dispatched (no Disp time, no dispatch
                                           logged, nothing said); 400 for a unit already on it, out of service, or
@@ -553,6 +556,17 @@ def _on_incident(m, b, o, c):
         what = [x for x in (_type(b.get("type", ""), b.get("subtype", "")) if b.get("type") else "",
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
+    if act == "attach" and isinstance(o.get("as"), dict) and o["as"] and set(o["as"].values()) != {b.get("status")}:
+        # each unit as it went on, when not all as asked (a third party: Dispatched); a plain attach's own units: attached
+        groups: dict[str, list[str]] = {}
+        for name in [x for x in _units(c, b.get("unit_ids")).split(", ") if x and x not in o["as"]]:
+            groups.setdefault("", []).append(name)
+        for name, st in o["as"].items():
+            groups.setdefault(str(st), []).append(str(name))
+        said = "; ".join(f"{', '.join(us)} " + ("attached" if not st else c.lists.status_phrase(st)
+                                               + (" (not dispatched)" if c.lists.role(st) in ("enroute", "onscene") else ""))
+                         for st, us in groups.items())
+        return f"Added to {ev}: {said}" + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else ""), n
     if act == "attach" and b.get("status"):
         return (f"Added {_units(c, b.get('unit_ids'))} to {ev} {c.lists.status_phrase(str(b['status']))} (not dispatched)"
                 + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else "")), n

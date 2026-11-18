@@ -241,7 +241,7 @@
     {"code": "CB", "name": "Call back of escalates", "bg": "#8A2BE2", "fg": "#FFFFFF", "confirm": "role guessed: committed"},
     {"code": "CN", "name": "Cancelled", "role": "free", "bg": "#A8ABB8", "fg": "#0C141C", "confirm": "role guessed: clears the unit off its call, in service"},
     {"code": "CE", "name": "Cancelled enroute", "role": "free", "bg": "#A8ABB8", "fg": "#0C141C", "confirm": "role guessed: clears the unit off its call, in service"},
-    {"code": "DO", "name": "Dispatched by other agency", "bg": "#A8ABB8", "fg": "#0C141C", "confirm": "role guessed: committed"},
+    {"code": "DO", "name": "Dispatch other", "bg": "#A8ABB8", "fg": "#0C141C"},
     {"code": "IC", "name": "Incident command", "role": "onscene", "bg": "#66E044", "fg": "#0C141C", "confirm": "role guessed: on scene (stamps First On Scene)"},
     {"code": "OS", "name": "Out of service", "role": "oos", "bg": "#606060", "fg": "#FFFFFF"},
     {"code": "UNMANNED", "name": "Unmanned", "role": "oos", "bg": "#7F7F7F", "fg": "#FFFFFF", "confirm": "not in the department's list: keep or retire?"}
@@ -271,7 +271,8 @@
   },
   "_status_flow": ["The next-step buttons on a unit in \"Units on this incident\": status -> the statuses offered, in order.",
                    "\"*\" = any other status while on an incident. A free status (AV, CN, CE...) clears the unit off the",
-                   "event; OS asks for the reason. The unit board (right) always offers every status."],
+                   "event; OS asks for the reason. The unit board (right) always offers every status (but a third party's,",
+                   "DO: agency_status_sets.third_party_only). Other agencies' units: their set's flow, else this one's."],
   "status_flow": {
     "DP": ["RS", "OL", "ST", "AV", "CN", "OS"],
     "AK": ["RS", "OL", "ST", "AV", "CN", "OS"],
@@ -290,17 +291,29 @@
                           "(its buttons, chips and the timeline; stored, logged and exported as the code). boards: unit_boards",
                           "id -> set; an agency unit on any other board takes default. full: Port Chester EMS (its",
                           "ambulances go out of service, the desk wants to know). responder: PD, ConEd, BATs, the other",
-                          "agencies (like our rigs, without Out of service: their availability is not ours to run). contact:",
-                          "Keyholders and the Knox box (someone called to come and open up): Notified, En route, On location,",
-                          "Done. Proposed (sizeup): to confirm with the department."],
+                          "agencies (like our rigs, without Out of service: their availability is not ours to run).",
+                          "third_party: true marks a set as third-party units' (PCFD, 2026-11-17: \"keyholder, coned units,",
+                          "pcpd ... we don't dispatch them\"): requested by us, dispatched by someone else, so they go on a call",
+                          "Dispatched and never Responding (nobody knows when they are en route), automation never moves them,",
+                          "and only they may be put in third_party_only (DO, Dispatch other: \"we mark the PCPD code as DO",
+                          "because we requested them, but they get dispatched by another agency\"). third_party: ConEd, PD,",
+                          "utilities, town departments; keyholder: keyholders and the Knox box, with Notified not responding",
+                          "and Failure to respond (PCFD, 2026-11-17). flow (optional): the set's own next-step buttons",
+                          "(status | \"*\" -> statuses of the set), else status_flow's. title: the class's name in Settings >",
+                          "Units, where a unit's set can be changed (units.<code>.status_set; over its board's)."],
   "agency_status_sets": {
     "default": "responder",
+    "third_party_only": ["DO"],
     "sets": {
-      "full": {"statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE", "OS"]},
-      "responder": {"statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE"]},
-      "contact": {"statuses": ["DP", "RS", "OL", "AV"], "labels": {"DP": "Notified", "RS": "En route", "AV": "Done"}}
+      "full": {"title": "EMS", "statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE", "OS"]},
+      "responder": {"title": "Agency", "statuses": ["DP", "RS", "OL", "ST", "AV", "CN", "CE"]},
+      "third_party": {"title": "Third party", "third_party": true, "statuses": ["DP", "DO", "OL", "AV", "CN"],
+                      "flow": {"DP": ["DO", "OL", "AV", "CN"], "DO": ["OL", "AV", "CN"], "OL": ["AV"], "*": ["AV"]}},
+      "keyholder": {"title": "Third party: keyholder", "third_party": true, "statuses": ["DP", "DO", "NR", "FR", "OL", "AV", "CN"],
+                    "flow": {"DP": ["DO", "OL", "NR", "FR", "AV", "CN"], "DO": ["OL", "NR", "FR", "AV", "CN"], "OL": ["AV"], "*": ["AV"]}}
     },
-    "boards": {"ems": "full", "res-keyholder": "contact", "res-knox": "contact"}
+    "boards": {"ems": "full", "res-keyholder": "keyholder", "res-knox": "keyholder", "res-coned": "third_party",
+               "res-pd": "third_party", "agencies": "third_party"}
   },
   "unit_event_cell": {"bg": "#1E4766", "fg": "#EAF4F9"},
   "unit_kinds": [
@@ -423,7 +436,11 @@
     "said on the air), else fire.",
     "station (optional): the firehouse it is housed in, a name from data/firehouses.json (the maps draw it",
     "there while available). Not set for any unit yet: the department hasn't said which apparatus is where.",
-    "Set from the map or Settings > Units (POST /api/cad/unit/<id>/station): a units override in the database."
+    "Set from the map or Settings > Units (POST /api/cad/unit/<id>/station): a units override in the database.",
+    "status_set (optional, another agency's unit): its agency_status_sets set over its board's (Settings > Units,",
+    "Statuses). The Other agencies board is third party; its fire and EMS units (Greenwich, the EMS and fire",
+    "coordinator and fire marshal codes, the fire inspector) and the codes still to confirm (SPCON, SPTAR) keep the",
+    "agency set."
   ],
   "units": {
     "2391": {"kind": "chief", "spoken": "23 91", "title": "Chief of Department"},
@@ -611,7 +628,21 @@
     "CODE_ENFORCE": {"kind": "agency", "retired": true},
     "60CAD": {"kind": "agency", "retired": true},
     "60CAD1": {"kind": "agency", "retired": true},
-    "60CAD2": {"kind": "agency", "retired": true}
+    "60CAD2": {"kind": "agency", "retired": true},
+    "GREENWICH-F": {"kind": "agency", "status_set": "responder"},
+    "GREENWICH-E": {"kind": "agency", "status_set": "responder"},
+    "EMS10": {"kind": "agency", "status_set": "responder"},
+    "EMS11": {"kind": "agency", "status_set": "responder"},
+    "EMS12": {"kind": "agency", "status_set": "responder"},
+    "FC1": {"kind": "agency", "status_set": "responder"},
+    "FC2": {"kind": "agency", "status_set": "responder"},
+    "FM1": {"kind": "agency", "status_set": "responder"},
+    "FM42": {"kind": "agency", "status_set": "responder"},
+    "FM43": {"kind": "agency", "status_set": "responder"},
+    "FM44": {"kind": "agency", "status_set": "responder"},
+    "FIRE_INSP": {"kind": "agency", "status_set": "responder"},
+    "SPCON": {"kind": "agency", "status_set": "responder"},
+    "SPTAR": {"kind": "agency", "status_set": "responder"}
   },
   "_spoken": "How the dispatch voice says a TYPE, TYPE/SUBTYPE or */SUBTYPE (any type): TYPE/SUBTYPE, then */SUBTYPE, then TYPE: '... for a commercial fire alarm.' In a subtype's phrase {type} is the type's phrase: '{type} with multiple injuries' -> 'a motor vehicle accident with multiple injuries'. A subtype with no phrase (ECHO, AIR, MULTI, NEXT, CAD, RMA: meaning unconfirmed) says the type's.",
   "spoken": {
