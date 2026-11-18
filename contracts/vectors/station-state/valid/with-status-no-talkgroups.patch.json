@@ -1,0 +1,6 @@
+{
+  "base": "station-state/valid/with-status.json",
+  "patch": [
+    {"op": "remove", "path": "/status/talkgroups"}
+  ]
+}

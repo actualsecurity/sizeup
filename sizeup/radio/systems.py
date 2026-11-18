@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sizeup import sourcekeys as sources, tiers
-from sizeup.radio.trunkrecd import SYSTEMS, covers, system_dirs
+from sizeup.radio.trunkrecd import CALL_KINDS, SYSTEMS, SplitTally, call_line, covers, split_line, system_dirs
 
 GRANT = re.compile(r"SIZEUP-UNIT (?P<sys>\S+) (?P<src>-?\d+) call (?P<tg>\d+)")
 ACTIVITY_MAX = 500           # encrypted key-ups remembered per system
@@ -201,7 +201,11 @@ class Activity:
     """What a system's control channel says beyond its recorded calls, from the unit script's grant lines
     ("SIZEUP-UNIT mrrs <radio> call <tg>", one per key-up on every talkgroup): a talkgroup that isn't in the file is
     unknown (count, last heard: prefs.unknown_seen), and a key-up on an `activity` (encrypted) talkgroup is kept as
-    (time, talkgroup, radio ID): nothing of it is ever recorded or decoded."""
+    (time, talkgroup, radio ID): nothing of it is ever recorded or decoded. A watched talkgroup's grants ("reception"
+    "watch" of its config.json) are counted by what trunk-recorder did with them (trunkrecd.CALL_KINDS: recording,
+    encrypted, not recorded), since sizeup started: a quiet talkgroup is told from one it can't record. Its split
+    patch's lines (#647, trunkrecd.split_line: would split, splits, ID flips, aliases, in how many calls) are counted
+    the same way, since sizeup started: never a radio ID."""
 
     def __init__(self, system: P25System, prefs, log=lambda m: None, clock=time.time, path: Path | None = None,
                  on_minute=None):
@@ -211,6 +215,10 @@ class Activity:
         self._minutes: dict[tuple[int, int], dict] = {}
         self._lock = threading.Lock()
         self.encrypted: deque[dict] = deque(maxlen=ACTIVITY_MAX)
+        self.watched: dict[int, dict[str, int]] = {
+            int(t): {} for t in system.reception.get("watch") or [] if not isinstance(t, bool) and str(t).isdigit()}
+        self.watched_since = clock()
+        self.split = SplitTally()
         self._saved = 0.0
         try:
             if path and path.is_file():
@@ -219,6 +227,18 @@ class Activity:
             pass
 
     def feed_line(self, line: str) -> None:
+        sp = split_line(line)
+        if sp is not None and sp[0] in ("", self.system.name):
+            with self._lock:
+                self.split.add(sp[1], sp[2])
+        if self.watched and "TG:" in line:
+            c = call_line(line)
+            if c is not None:
+                if c[0] in self.watched:
+                    with self._lock:
+                        n = self.watched[c[0]]
+                        n[c[1]] = n.get(c[1], 0) + 1
+                return
         if "SIZEUP-UNIT " not in line:
             return
         m = GRANT.search(line)
@@ -277,7 +297,13 @@ class Activity:
             e.pop("radio_id", None)               # which radios keyed stays in the log's activity table, not the state
             e["name"] = self.prefs.name(e["tg"], self.system.name)
             e["source"] = sources.p25(self.system.name, e["tg"])
-        return {"unknown": self.prefs.unknown(self.system.name), "encrypted": enc}
+        kinds = dict.fromkeys(k for _w, k, _s in CALL_KINDS)
+        with self._lock:
+            watched = [{"tg": tg, "name": self.prefs.name(tg, self.system.name), "since": round(self.watched_since, 1),
+                        "grants": sum(n.values()), **{k: n.get(k, 0) for k in kinds}}
+                       for tg, n in self.watched.items()]
+            split = dict(self.split.n, since=round(self.watched_since, 1))
+        return {"unknown": self.prefs.unknown(self.system.name), "encrypted": enc, "watched": watched, "split": split}
 
 
 class Runtime:
@@ -295,7 +321,8 @@ class Runtime:
                                  path=(state_dir / f"p25_{system.name}_activity.json") if state_dir else None,
                                  on_minute=on_activity)
         self.ingest = CallIngest(system.capture_dir, system.labels(), lambda call: on_call(self, call), on_event=log,
-                                 name=system.label)
+                                 name=system.label,     # (#747: calls written while sizeup was down come in late)
+                                 mark_path=(state_dir / f"p25_{system.name}_ingest_mark.json") if state_dir else None)
         self.ingest.record_all = False                    # a talkgroup that isn't in its file is never taken
         self.ingest.grants = self.live.grants
         self.ingest.alias_of = lambda src: self.live.aliases.get(src, "")
@@ -326,6 +353,8 @@ class Runtime:
             st.update(state="off", detail="no dongle (Settings > Radios)")
         elif rs["state"] != "ok":
             st.update(state=rs["state"], detail=no_ids(rs["detail"]))
+            if rs.get("hold_until"):
+                st["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: Receivers, Health say until
         else:
             part = "" if len(on) == len(self.system.sources) else f"{len(on)} of {len(self.system.sources)} dongles · "
             st["state"] = "ok"
@@ -346,4 +375,5 @@ class Runtime:
                 "frequencies": [round(f / 1e6, 5) for f in s.frequencies],
                 "covered": [round(f / 1e6, 5) for f in s.covered(on)],
                 "state": row["state"], "detail": row["detail"], "last_heard": row.get("last_heard"),
+                "hold_until": row.get("hold_until"),
                 "cc": cc.status() if cc is not None and on else None, **self.activity.state()}

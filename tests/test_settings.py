@@ -208,7 +208,7 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     u = next(x for x in cad.store.units() if x["id"] == a4)
     assert u["status"] == "DP" and u["incident_id"] == iid
     ev = [e["text"] for e in cad.store.full(iid)["events"]]
-    assert ev[-2:] == ["Attached 77A4", "77A4 dispatched"] and "77A4 on location" not in ev
+    assert ev[-1] == "77A4 added: dispatched" and "77A4 on location" not in ev
     assert cad.store.full(iid)["dispatches"][0]["unit_ids"] == [uid(cad, "E60")]
     # an add-on doesn't say it on the air
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
@@ -218,7 +218,7 @@ def test_ems_and_pd_never_on_run_cards_tick_all_or_the_air_but_can_be_attached()
     cad.unit_status(a4, {"status": "RS", "operator": "JD"})
     cad.unit_status(a4, {"status": "AV", "operator": "JD"})
     assert [e["text"] for e in cad.store.full(iid)["events"]][-2:] == ["77A4 responding", "77A4 cleared"]
-    assert cad.state()["lists"]["agency_statuses"] == ["AV", "DP", "RS", "OL", "ST", "CN", "CE", "OS"]
+    assert cad.state()["lists"]["agency_statuses"] == ["AV", "DP", "RS", "OL", "ST", "FR", "NR", "CN", "CE", "DO", "OS"]
 
 
 def test_mutual_aid_only_by_name_and_said_when_sent():
@@ -388,7 +388,8 @@ def test_settings_api(server):
     code, a = server.j("GET", "/api/cad/settings/audit?section=lists")
     assert code == 200 and a["audit"][0]["key"] == "event_types/MVA" and a["audit"][0]["operator"] == "JD"
     code, exp = server.j("GET", "/api/cad/settings/export")
-    assert code == 200 and exp["overrides"] == {"event_types": {"MVA": {"name": "MVA", "color": "#0000FF"}}}
+    assert code == 200 and exp["overrides"] == {"event_types": {"MVA": {"name": "MVA", "color": "#0000FF"}},
+                                             "radio_services": {}}       # (always: {} with no choices)
     code, dry = server.j("POST", "/api/cad/settings/import", {"action": "dry_run", "settings": exp})
     assert code == 200 and dry["changes"] == []
 

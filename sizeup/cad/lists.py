@@ -18,8 +18,11 @@ shows). A new export can replace the file without a code change:
                                      release_on_close: the free ones that say how a unit left a call
                                      (Cancelled, Cancelled enroute ...): Close event sets them back too (#232)
     agency_status_sets               the statuses other agencies' units go through (#219): set id ->
-                                     {statuses (the first: what Attach puts one on as), labels (a status
-                                     named otherwise for that set)}; boards: board id -> set, default
+                                     {statuses (the first: what one goes on a call as), labels (a status
+                                     named otherwise for that set), flow (its own next-step buttons), title,
+                                     third_party}; boards: board id -> set, default; a unit's own
+                                     (units.<code>.status_set) first; third_party_only: the statuses only a
+                                     third_party set's units may be put in (DO, Dispatch other)
     event_statuses                   name + colors per event status
     unit_kinds, unit_boards, units   the status boards (null = a blank separator row; group_by kind,
                                      rest_title, folded: how the board shows them) and per-unit kind /
@@ -58,9 +61,12 @@ joint-response department's apparatus: run cards by kind, "tick all", the dispat
 (another department's: only when named or picked by hand) and "agency" (EMS, PD, utilities: the
 unit_kinds marked attach_only; never on a run card, never dispatched or said on the air, only
 attached to an event when they show up). Attached, one starts Dispatched (assigned, not yet
-responding) and goes through its board's agency_status_sets set like our rigs (#219): Port Chester EMS
-the whole run of them, PD and the utilities the same but Out of service, a keyholder or the Knox box
-Notified / En route / On location / Done.
+responding) and goes through its agency_status_sets set like our rigs (#219): Port Chester EMS the whole
+run of them, the other agencies the same but Out of service. Third-party units (a third_party set:
+keyholders, the Knox box, utilities, police, town departments) are requested by us and dispatched by
+someone else: they go on a call Dispatched, never Responding, may be put in Dispatch other (DO, theirs
+only), automation never moves them (it follows the fire response only), and a keyholder can be Notified
+not responding / Failure to respond.
 """
 
 from __future__ import annotations
@@ -85,6 +91,9 @@ ANY_KIND = "any"                        # a run-card kind slot that takes any ap
 ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
 COMMAND = "IC"                          # Incident command: one unit per event
 LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
+# Dispositions only the hub sets (a passed Until: store.expire_until): named on events, never on a pick list, refused
+# from a person's Close. Set here, so an edit in Settings can't make one pickable.
+SYSTEM_DISPOSITIONS = ("EXPIRED",)
 
 
 class ListsError(ValueError):
@@ -137,9 +146,9 @@ class Lists:
             self._names[k] = {x["code"]: x["name"] for x in getattr(self, k)}
         self._board_of = {c: b["id"] for b in self.unit_boards for c in b["units"] if c}
         if not self.agency_status_sets:          # a data file without them: assigned, responding, on location, cleared
-            self.agency_status_sets = {"default": "all", "boards": {}, "sets": {"all": {"statuses": tuple(
+            self.agency_status_sets = {"default": "all", "boards": {}, "third_party_only": (), "sets": {"all": {"statuses": tuple(
                 c for c in (self._first("dispatched"), self._first("enroute"), self._first("onscene"), self._first("free")) if c),
-                "labels": {}}}}
+                "labels": {}, "flow": {}, "title": "Agency", "third_party": False}}}
 
     def _first(self, role: str) -> str:
         return next((s["code"] for s in self.unit_statuses if s.get("role") == role and not s.get("retired")), "")
@@ -147,8 +156,9 @@ class Lists:
     # -- codes and names ----------------------------------------------------------------------------
 
     def codes(self, which: str) -> tuple[str, ...]:
-        """The active codes (what can be picked now); a retired one is still named (name())."""
-        return tuple(x["code"] for x in getattr(self, which) if not x.get("retired"))
+        """The active codes (what can be picked now); a retired one, or one only the hub sets (system), is still
+        named (name())."""
+        return tuple(x["code"] for x in getattr(self, which) if not x.get("retired") and not x.get("system"))
 
     def retired(self, which: str, code: str) -> bool:
         return any(x["code"] == code and x.get("retired") for x in getattr(self, which))
@@ -288,14 +298,40 @@ class Lists:
     # -- other agencies' units (#219) ----------------------------------------------------------------
 
     def agency_set(self, code: str, board: str | None = None) -> str:
-        """The agency_status_sets set another agency's unit goes through ('' for ours): its board's, else the
-        default. board: where the units table has it (Settings may have moved it), else the data file's."""
+        """The agency_status_sets set another agency's unit goes through ('' for ours): its own (units.<code>.status_set,
+        Settings > Units), else its board's, else the default. board: where the units table has it (Settings may have
+        moved it), else the data file's."""
         if self.response(code) != "agency":
             return ""
         a = self.agency_status_sets
+        own = (self.units.get(code) or {}).get("status_set")
+        if own in a["sets"]:
+            return own
         b = self._board_of.get(code, "") if board is None else board
         s = a["boards"].get(b) or a["default"]
         return s if s in a["sets"] else next(iter(a["sets"]))
+
+    def third_party(self, code: str, board: str | None = None) -> bool:
+        """A third-party unit (keyholder, utility, police: its set is third_party)? Requested by us, dispatched by someone
+        else: on a call Dispatched (never Responding), Dispatch other offered, never moved by automation."""
+        s = self.agency_set(code, board)
+        return bool(s) and self.agency_status_sets["sets"][s].get("third_party", False)
+
+    @property
+    def third_party_only(self) -> tuple[str, ...]:
+        """The statuses only a third-party unit may be put in (DO, Dispatch other), the active ones."""
+        live = set(self.status_ids)
+        return tuple(c for c in self.agency_status_sets.get("third_party_only", ()) if c in live)
+
+    def start_statuses(self, code: str, board: str | None = None) -> tuple[str, ...]:
+        """What another agency's unit can go on a call as (Assigned > Add unit): its set's first (Dispatched), and a third
+        party's Dispatch other; () for ours."""
+        s = self.agency_set(code, board)
+        if not s:
+            return ()
+        first = self.agency_attach_status(s)
+        mine = self.agency_codes(s)
+        return (first, *(c for c in self.third_party_only if c in mine and c != first)) if self.third_party(code, board) else (first,)
 
     def agency_codes(self, set_id: str) -> tuple[str, ...]:
         """The set's statuses that are active now (one retired in Settings drops out)."""
@@ -314,9 +350,9 @@ class Lists:
         return tuple(c for c in self.status_ids if c in every)
 
     def unit_statuses_for(self, code: str, board: str | None = None) -> tuple[str, ...]:
-        """What the unit may be put in: ours every status, another agency's its set."""
+        """What the unit may be put in: ours every status but the third-party ones, another agency's its set."""
         s = self.agency_set(code, board)
-        return self.agency_codes(s) if s else self.status_ids
+        return self.agency_codes(s) if s else tuple(c for c in self.status_ids if c not in self.third_party_only)
 
     def label(self, status: str, code: str = "", board: str | None = None) -> str:
         """The status's name, or its set's label for another agency's unit (KEYHOLDER: DP 'Notified')."""
@@ -325,15 +361,19 @@ class Lists:
 
     def next_statuses(self, status: str, code: str = "", board: str | None = None) -> tuple[str, ...]:
         """The buttons on a unit that is on an incident (status_flow): what can come next. Without a
-        flow in the data file: every status but the current one. Another agency's unit (code): the
-        flow's steps in its set, else the rest of its set."""
+        flow in the data file: every status but the current one. Another agency's unit (code): its set's own flow,
+        else the flow's steps in its set, else the rest of its set. Ours: never a third-party status (DO)."""
+        s = self.agency_set(code, board) if code else ""
+        own = self.agency_status_sets["sets"][s].get("flow") if s else None
+        if own:
+            mine = self.agency_codes(s)
+            return tuple(c for c in own.get(status, own.get("*", ())) if c != status and c in mine)
         if not self.status_flow:
             nxt = tuple(c for c in self.status_ids if c != status)
         else:
             nxt = tuple(c for c in self.status_flow.get(status, self.status_flow.get("*", ())) if c != status)
-        s = self.agency_set(code, board) if code else ""
         if not s:
-            return nxt
+            return tuple(c for c in nxt if c not in self.third_party_only)
         mine = self.agency_codes(s)
         return tuple(c for c in nxt if c in mine) or tuple(c for c in mine if c != status)
 
@@ -480,7 +520,9 @@ class Lists:
                 "agency_statuses": list(self.agency_statuses()), "command_status": self.command_status,
                 "agency_status_sets": {"default": self.agency_status_sets["default"],
                                        "boards": dict(self.agency_status_sets["boards"]),
-                                       "sets": {k: {"statuses": list(self.agency_codes(k)), "labels": dict(v.get("labels", {}))}
+                                       "third_party_only": list(self.third_party_only),
+                                       "sets": {k: {"statuses": list(self.agency_codes(k)), "labels": dict(v.get("labels", {})),
+                                                    "title": v.get("title") or k, "third_party": bool(v.get("third_party"))}
                                                 for k, v in self.agency_status_sets["sets"].items()}},
                 "unit_event_cell": self.unit_event_cell, "unit_kinds": [dict(k) for k in self.unit_kinds],
                 "unit_boards": [dict(b, units=list(b["units"])) for b in self.unit_boards],
@@ -581,7 +623,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     """The lists from the file's contents (or the defaults with the Settings edits laid over)."""
     types = _items(d, "event_types", where, CODE, ("color", "help"))
     subtypes = _items(d, "event_subtypes", where, CODE, ("help",))
-    dispositions = _items(d, "dispositions", where, LONG_CODE)
+    dispositions = tuple(dict(x, system=True) if x["code"] in SYSTEM_DISPOSITIONS else x
+                         for x in _items(d, "dispositions", where, LONG_CODE))
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
     type_codes, sub_codes = {t["code"] for t in types}, {s["code"] for s in subtypes}
@@ -677,6 +720,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
             raise ListsError(f"{where}: units[{code!r}].response: one of {', '.join(RESPONSES)}")
         if not isinstance(u.get("station", ""), str):
             raise ListsError(f"{where}: units[{code!r}].station: a firehouse name (text)")
+        if not isinstance(u.get("status_set", ""), str):    # a set no longer there: the board's (agency_set)
+            raise ListsError(f"{where}: units[{code!r}].status_set: an agency_status_sets set id")
 
     def agency(code: str) -> bool:
         return unit_response(units.get(code, {}), attach_kinds) == "agency"
@@ -836,11 +881,27 @@ def _agency_sets(v, statuses: tuple[dict, ...], board_ids: set[str], where: str)
         if not isinstance(labels, dict) or not all(c in s["statuses"] and isinstance(t, str) and 0 < len(t.strip()) <= 40
                                                    for c, t in labels.items()):
             raise ListsError(f"{w}.sets[{k!r}].labels: a status of the set -> its name there (text)")
-        sets[str(k)] = {"statuses": tuple(s["statuses"]), "labels": {c: t.strip() for c, t in labels.items()}}
+        flow = s.get("flow") or {}
+        if not isinstance(flow, dict) or not all((c == "*" or c in s["statuses"]) and isinstance(n, list)
+                                                 and all(x in s["statuses"] for x in n) for c, n in flow.items()):
+            raise ListsError(f"{w}.sets[{k!r}].flow: a status of the set (or \"*\") -> the set's statuses offered next")
+        title = s.get("title") or ""
+        if not isinstance(title, str) or len(title) > 40:
+            raise ListsError(f"{w}.sets[{k!r}].title: text (up to 40)")
+        sets[str(k)] = {"statuses": tuple(s["statuses"]), "labels": {c: t.strip() for c, t in labels.items()},
+                        "flow": {c: tuple(n) for c, n in flow.items()}, "title": title.strip() or str(k),
+                        "third_party": bool(s.get("third_party"))}
     default = v.get("default") or next(iter(sets))
     if default not in sets:
         raise ListsError(f"{w}.default: {default!r} is not one of the sets")
     boards = v.get("boards") or {}
     if not isinstance(boards, dict) or not all(b in board_ids and s in sets for b, s in boards.items()):
         raise ListsError(f"{w}.boards: a unit_boards id -> one of the sets")
-    return {"default": default, "sets": sets, "boards": dict(boards)}
+    only = v.get("third_party_only") or []
+    if not isinstance(only, list) or not all(c in role for c in only):
+        raise ListsError(f"{w}.third_party_only: unit_statuses codes")
+    for k, s in sets.items():
+        stray = [c for c in s["statuses"] if c in only and not s["third_party"]]
+        if stray:
+            raise ListsError(f"{w}.sets[{k!r}]: {', '.join(stray)} is third-party only (a third_party set's)")
+    return {"default": default, "sets": sets, "boards": dict(boards), "third_party_only": tuple(only)}

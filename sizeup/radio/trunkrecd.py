@@ -51,7 +51,8 @@ ABSENT_S without counting a restart. Another system's trunk-recorder (SystemSupe
 are unplugged (it stayed up, silent), so its dongles are looked for on USB every UNPLUGGED_S while it runs: one gone
 stops it ("absent"), and it starts again, never as one of the watchdog's capped restarts, once every one is back and
 USB has settled, after the county's trunk-recorder (which may want the same hub's dongles) is up; a flapping dongle is
-held back longer each time, each a restart counted (#592).
+held back longer each time, each a restart counted (#592), its status saying until when ("hold_until", #637). An
+antenna group's move (sizeup/radio/groups.py) waits for the county's trunk-recorder the same way (#637).
 
 The watchdog (#547: a trunk-recorder that stayed up recorded nothing for 22 h): one that runs but has stopped working is
 restarted (Watchdog). Faults, each judged from trunk-recorder's start at the earliest:
@@ -69,7 +70,9 @@ the last one (watchdog). [p25] watchdog_* in /etc/sizeup/config.toml change the 
 
 Its output into the journal (#547, Shipper): the control channel's decode rate (when trunk-recorder first logs it, when
 it is lost or back, and a summary every RATE_LOG_S), and its error / warning / control channel lines, radio IDs masked,
-at most SHIP_BURST different lines per SHIP_WINDOW_S (then a count): the station's logs go to the hub."""
+at most SHIP_BURST different lines per SHIP_WINDOW_S (then a count): the station's logs go to the hub. A watched
+talkgroup's grants that weren't recorded (its config.json's "sizeup" "reception" "watch" list) are said as why
+(encrypted, no recorder, off, no source), at most one line per talkgroup a minute (then a count)."""
 
 from __future__ import annotations
 
@@ -113,7 +116,8 @@ ABSENT_S = 15.0                   # trunk-recorder said its dongle is gone: star
 RETURN_STABLE_S = 5.0             # back: the same (index, serial) list at two looks this far apart before it starts
 RETURN_SETTLE_MAX_S = 60.0        # ... settling at most this long (a flapping dongle elsewhere): then the latest look
 COUNTY_SETTLE_S = 5.0             # ... and the county's trunk-recorder, if it should run, up this long first
-COUNTY_WAIT_S = 60.0              # ... waited for at most this long (the county down for its own reasons)
+COUNTY_WAIT_S = 60.0              # ... waited for at most this long (the county down for its own reasons); the same
+                                  # for an antenna group's move (#637: the county's dongle given back in the same step)
 FLAP_S = 600.0                    # gone again this soon after a return: a flapping dongle (a restart counted)
 FLAP_HOLD_S = (30.0, 120.0, 300.0, 600.0)   # ... then started no sooner than this after it went, per flap in a row
 LONG_ABSENCE_S = 60.0             # gone longer than this: the watchdog's hour of restarts is forgotten at the return
@@ -145,6 +149,34 @@ SHIP_LEVELS = re.compile(r"\((?:warning|error|fatal)\)", re.I)
 SHIP_SKIP = ("SIZEUP-UNIT", "Unit ID set via Control Channel")     # per transmission, and they name radios
 TR_STAMP = re.compile(r"^\[\d{4}-\d\d-\d\d [\d:.]+\]\s*")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# A watched talkgroup's call lines (the "watch" list of the "sizeup" "reception" block of a system's config.json): what
+# trunk-recorder did with each grant, one line per talkgroup per WATCHED_EVERY_S at most, the rest counted. Its 5.2.0
+# log_header, "[<sys>]\t<n>C\tTG: <tg>\tFreq: <f> MHz\t", then (monitor_systems.cc, source.cc, p25_recorder_impl.cc):
+CALL_LINE = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+\d+C\s+TG:\s*(?P<tg>\d+)\b.*?\sFreq:\s*(?P<mhz>[\d.]+)\s*MHz\s+(?P<msg>.*)$")
+CALL_KINDS = (     # (its words, the kind counted, what the journal says)
+    ("Starting P25 Recorder", "recording", "grant, recording"),
+    ("Not Recording: ENCRYPTED", "encrypted", "grant (encrypted, not recorded)"),     # "- src: <radio>": never said
+    ("Not recording talkgroup - Priority is -1", "off", "not recorded, priority -1 (off)"),
+    ("Not recording talkgroup. Priority is", "no_recorder", "not recorded, no recorder"),
+    ("No Digital Recorders Available", "no_recorder", "not recorded, no recorder"),
+    ("Not Recording: no source covering Freq", "no_source", "not recorded, no source covers"),
+)
+CALL_SHORT = {"recording": "recording", "encrypted": "encrypted", "off": "off", "no_recorder": "no recorder",
+              "no_source": "no source"}
+NO_RECORDER = re.compile(r"Priority is (?P<p>\d+) but only (?P<n>\d+) recorders")
+WATCHED_EVERY_S = 60.0
+# The split patch's lines (#638/#647: tr_patch in deploy/station/install-linux.sh), info level and each naming radios:
+# never shipped, only counted (SplitTally), with the calls they came in (one "Starting P25 Recorder" per call), for the
+# review that decides SIZEUP_TR_SPLIT per system. (its words, the kind counted)
+SPLIT_KINDS = (
+    ("sizeup split (log): would split", "would"),        # log: a cut it would have made
+    ("sizeup split: ID flip", "flip"),                    # log / on: a radio's two IDs on one key-up, not a new talker
+    ("sizeup split: ID alias", "alias"),                  # log / on: a new ID early in a turn, the same talker
+    ("Unit ID changed on Voice Channel", "split"),        # on: a cut it made (sizeup/radio/live.py names the talker)
+    ("Starting P25 Recorder", "calls"),                   # a call recorded
+)
+SPLIT_HEAD = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+(?P<call>\d+)C\b")    # log_header's "[<sys>]\t<n>C"
+SPLIT_EVERY_S = 3600.0            # the counts said once an hour per system (and when trunk-recorder is stopped)
 
 
 # -- what to run ----------------------------------------------------------------------------------------------------------
@@ -181,6 +213,25 @@ def rtl_serial(device: str | None) -> str:
     return ""
 
 
+# The station's trunk-recorder patch (#638, install-linux.sh tr_patch): per system, SIZEUP_TR_SPLIT in its environment,
+# from the system's config.json "sizeup": {"split": ...}: off (stock), log (stock; logs where it would cut), on.
+SPLIT_ENV = "SIZEUP_TR_SPLIT"
+SPLIT_MODES = ("off", "log", "on")
+SPLIT_DEFAULT = "log"
+
+
+def split_mode(argv: list[str], workdir: str | Path) -> str:
+    """SIZEUP_TR_SPLIT for the trunk-recorder argv runs in workdir: its config's "sizeup": {"split"} (#638), SPLIT_DEFAULT
+    when it says none (or something else)."""
+    k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
+    name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
+    try:
+        mode = (json.loads((Path(workdir) / name).read_text()).get("sizeup") or {}).get("split")
+    except (OSError, ValueError, AttributeError):
+        mode = None
+    return mode if mode in SPLIT_MODES else SPLIT_DEFAULT
+
+
 def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = None,
                  ambiguous=None, left_out: list[str] | None = None) -> list[str]:
     """argv with --config pointing at a copy of its config (config.runtime.json, written in workdir) whose sources
@@ -194,6 +245,7 @@ def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = N
     if dev is None and not src.is_file():
         return argv                                      # no config of ours to amend: run as configured
     conf = json.loads(src.read_text())
+    conf.pop("sizeup", None)                             # sizeup's side of the file (#638)
     if dev is not None:
         for s in conf.get("sources", []):
             s["device"] = f"rtl={dev}"
@@ -283,6 +335,11 @@ def _dur(s: float) -> str:
     return f"{s} s" if s < 120 else f"{s // 60} min" if s < 7200 else f"{s // 3600} h {s % 3600 // 60} min"
 
 
+def _hhmm(t: float) -> str:
+    """The station's clock time of t ("14:32"): when a held start may go (#637)."""
+    return time.strftime("%H:%M", time.localtime(t))
+
+
 def _mmss(s: float) -> str:
     """sizeup/radio/fm.py _mmss()'s m:ss (this file is stdlib only, installed on its own)."""
     s = max(0, int(s))
@@ -307,6 +364,98 @@ def no_ids(detail) -> str:
             return m.group(0)                       # a frequency or a rate, by what is written around it
         return "#"
     return LONG_NUMBER.sub(one, text)[:200]
+
+
+def call_line(line: str) -> tuple[int, str, str] | None:
+    """(talkgroup, kind, what) of one of trunk-recorder's call lines that says what it did with a grant (CALL_KINDS),
+    else None. Nothing of the line but its talkgroup, its frequency and the recorder counts is kept (no radio ID)."""
+    if "TG:" not in line:
+        return None
+    m = CALL_LINE.search(ANSI.sub("", line))
+    if not m:
+        return None
+    msg = m["msg"]
+    for words, kind, what in CALL_KINDS:
+        if words in msg:
+            if kind == "no_source":
+                what = f"{what} {float(m['mhz']):.4f} MHz"
+            elif kind == "no_recorder":
+                n = NO_RECORDER.search(msg)
+                what = f"{what} (priority {n['p']}, {n['n']} free)" if n else f"{what} (none free)"
+            return int(m["tg"]), kind, what
+    return None
+
+
+def split_line(line: str) -> tuple[str, str, int | None] | None:
+    """(system, kind, call number) of one of the split patch's lines or a call's start (SPLIT_KINDS), else None. Only
+    log_header's system and call number are kept: never the radio IDs the line names."""
+    if "plit" not in line and "Unit ID changed" not in line and "Starting P25" not in line:
+        return None
+    for words, kind in SPLIT_KINDS:
+        if words in line:
+            m = SPLIT_HEAD.search(ANSI.sub("", line))
+            return (m["sys"], kind, int(m["call"])) if m else ("", kind, None)
+    return None
+
+
+class SplitTally:
+    """One system's split lines counted (split_line): would (log: cuts it would have made), split (on: cuts made),
+    flip, alias, calls (recorded), and cut: the calls with at least one would / split, by call number (trunk-recorder
+    numbers its calls from 0 at each start: restarted() forgets the numbers, never the counts)."""
+
+    KEYS = ("would", "split", "flip", "alias", "calls", "cut")
+
+    def __init__(self):
+        self.n = dict.fromkeys(self.KEYS, 0)
+        self._cut: deque[int] = deque(maxlen=64)     # the last calls cut (a call's cuts come close together)
+
+    def add(self, kind: str, call: int | None) -> None:
+        self.n[kind] += 1
+        if kind in ("would", "split") and (call is None or call not in self._cut):
+            self.n["cut"] += 1
+            if call is not None:
+                self._cut.append(call)
+
+    def restarted(self) -> None:
+        self._cut.clear()
+
+    def any(self) -> bool:
+        return any(self.n.values())
+
+    def text(self, mode: str | None, when: str) -> str:
+        """"split (log) last hour: 3 would split, 1 ID flips, 2 aliases, in 120 calls (2.5% of calls)": counts only; X%
+        is the calls with a cut. mode None: "on" if a cut was made, else "log"."""
+        n = self.n
+        mode = mode if mode in ("log", "on") else ("on" if n["split"] else "log")
+        cuts = f"{n['split']} splits" if mode == "on" else f"{n['would']} would split"
+        pct = f" ({min(100.0, 100.0 * n['cut'] / n['calls']):.1f}% of calls)" if n["calls"] else ""
+        return f"split ({mode}) {when}: {cuts}, {n['flip']} ID flips, {n['alias']} aliases, in {n['calls']} calls{pct}"
+
+
+def watched_talkgroups(workdir: str | Path) -> dict[int, str]:
+    """{talkgroup: its name} of the "watch" list in <workdir>/config.json's "sizeup" "reception" block (a system's,
+    #410), named from its talkgroups file's Alpha Tag; {} when there is none or it can't be read."""
+    import csv
+    base = Path(workdir)
+    try:
+        conf = json.loads((base / "config.json").read_text())
+        watch = ((conf.get("sizeup") or {}).get("reception") or {}).get("watch") or []
+        tgs = [int(t) for t in watch if not isinstance(t, bool) and str(t).isdigit()]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+    names: dict[int, str] = {}
+    for s in conf.get("systems") if isinstance(conf.get("systems"), list) else []:
+        tg_file = s.get("talkgroupsFile") if isinstance(s, dict) else None
+        if not tg_file:
+            continue
+        try:
+            with open(base / tg_file, newline="") as f:
+                for row in csv.DictReader(f):
+                    if str(row.get("Decimal") or "").strip().isdigit():
+                        names.setdefault(int(row["Decimal"]), str(row.get("Alpha Tag") or "").strip()[:40])
+        except (OSError, ValueError, TypeError):
+            pass
+    return {t: names.get(t, "") for t in tgs}
 
 
 class Watchdog:
@@ -507,21 +656,48 @@ class Watchdog:
 
 class Shipper:
     """trunk-recorder's own lines worth seeing, into the journal (#547), filtered and rate-limited: line() each line of
-    its output, tick() now and then (the count of lines held back)."""
+    its output, tick() now and then (the count of lines held back). A watched talkgroup's grants that were NOT
+    recorded (watch(): its config's reception "watch" list) are said as what became of them, "<tag>: TG 9212 PD Tac:
+    grant (encrypted, not recorded)", at most one per talkgroup per WATCHED_EVERY_S, then "(+N more: ...)": no traffic
+    is then told from traffic it can't record. A recorded one is traffic already: never said (systems.Activity counts
+    it). The split patch's lines (#647: split_line) are counted per system and said once per SPLIT_EVERY_S and at
+    split_flush() (trunk-recorder stopped), "<tag>: split (log) last hour: 3 would split, 1 ID flips, 2 aliases, in 120
+    calls (2.5% of calls)": counts only, never a radio ID; nothing while its SIZEUP_TR_SPLIT (started()) is off."""
 
     def __init__(self, log, tag: str = "p25"):
         self.log, self.tag = log, tag
+        self.watched: dict[int, str] = {}           # talkgroup -> its name
+        self.calls: dict[int, dict] = {}            # talkgroup -> {"at": its last line, "held": {kind: n}}
         self.win: float | None = None
         self.keys: set[str] = set()
         self.held = 0
         self.rate_low: bool | None = None
         self.rate_said: float | None = None
         self.rates: list[float] = []
+        self.split_mode: str | None = None          # SIZEUP_TR_SPLIT of the trunk-recorder that runs (None: not known)
+        self.splits: dict[str, SplitTally] = {}     # system (log_header's short name) -> its counts since split_win
+        self.split_win: float | None = None
         self._lock = threading.Lock()
+
+    def watch(self, watched: dict[int, str]) -> None:
+        with self._lock:
+            self.watched = dict(watched)
 
     def line(self, line: str, now: float) -> None:
         if not line or any(s in line for s in SHIP_SKIP):
             return
+        sp = split_line(line)
+        if sp is not None:
+            if self.split_mode != "off":
+                self._split(*sp, now)
+            if sp[1] != "calls":                         # a split line names radios: counted, never shipped
+                return
+        if self.watched and "TG:" in line:
+            c = call_line(line)
+            if c is not None and c[0] in self.watched:
+                if c[1] != "recording":                  # a recorded call is traffic already: counted (Activity) only
+                    self._call(*c, now)
+                return
         m = CC_RATE.search(line) if "ontrol" in line else None
         if m:
             try:
@@ -542,9 +718,73 @@ class Shipper:
             self.keys.add(key)
         self.log(f"{self.tag}: trunk-recorder: {text}")
 
+    def _call(self, tg: int, kind: str, what: str, now: float) -> None:
+        with self._lock:
+            c = self.calls.setdefault(tg, {"at": None, "held": {}})
+            if c["at"] is not None and now - c["at"] < WATCHED_EVERY_S:
+                c["held"][kind] = c["held"].get(kind, 0) + 1
+                return
+            more = self._more(c["held"])
+            c["at"], c["held"] = now, {}
+        self.log(f"{self._tg(tg)}: {what}" + (f" (+{more})" if more else ""))
+
+    def _tg(self, tg: int) -> str:
+        name = self.watched.get(tg)
+        return f"{self.tag}: TG {tg}" + (f" {name}" if name else "")
+
+    @staticmethod
+    def _more(held: dict[str, int]) -> str:
+        """"3 more: 2 encrypted, 1 recording" ("" for none)."""
+        n = sum(held.values())
+        return f"{n} more: " + ", ".join(f"{v} {CALL_SHORT.get(k, k)}" for k, v in
+                                         sorted(held.items(), key=lambda kv: -kv[1])) if n else ""
+
+    def _split(self, sys_: str, kind: str, call: int | None, now: float) -> None:
+        with self._lock:
+            said = self._split_roll(now)
+            self.splits.setdefault(sys_, SplitTally()).add(kind, call)
+        for x in said:
+            self.log(x)
+
+    def _split_roll(self, now: float, force: bool = False) -> list[str]:
+        """(under the lock) The window's counts as lines once it is SPLIT_EVERY_S old (force: now, its length said), then
+        a new window."""
+        if self.split_win is None:
+            self.split_win = now
+            return []
+        span = now - self.split_win
+        if span < SPLIT_EVERY_S and not force:
+            return []
+        when = "last hour" if SPLIT_EVERY_S <= span < SPLIT_EVERY_S + 300 else f"last {_dur(span)}"
+        said = []
+        for name, t in sorted(self.splits.items()):
+            if t.any():
+                label = self.tag if not name or self.tag.split()[-1] == name else f"{self.tag} {name}"
+                said.append(f"{label}: {t.text(self.split_mode, when)}")
+            t.n = dict.fromkeys(t.KEYS, 0)              # the call numbers stay: a call cut across the hour counts once
+        self.split_win = now
+        return said
+
+    def split_flush(self, now: float) -> None:
+        """trunk-recorder stopped: the counts since the last line said now; the next start opens a new window."""
+        with self._lock:
+            said = self._split_roll(now, force=True) if self.split_win is not None else []
+            self.split_win = None
+        for x in said:
+            self.log(x)
+
     def tick(self, now: float) -> None:
+        said = []
         with self._lock:
             self._roll(now)
+            if self.split_win is not None or self.split_mode not in (None, "off"):
+                said.extend(self._split_roll(now))
+            for tg, c in self.calls.items():            # a burst that went quiet: its count, once its minute is over
+                if c["held"] and c["at"] is not None and now - c["at"] >= WATCHED_EVERY_S:
+                    said.append(f"{self._tg(tg)}: +{self._more(c['held'])}")
+                    c["at"], c["held"] = now, {}
+        for x in said:
+            self.log(x)
 
     def _roll(self, now: float) -> None:
         if self.win is not None and now - self.win < SHIP_WINDOW_S:
@@ -570,10 +810,17 @@ class Shipper:
             return
         self.rate_said, self.rate_low, self.rates = now, low, []
 
-    def started(self) -> None:
-        """trunk-recorder (re)started: its first decode rate is said again."""
+    def started(self, split: str | None = None, now: float | None = None) -> None:
+        """trunk-recorder (re)started: its first decode rate is said again; split: its SIZEUP_TR_SPLIT (another than
+        the last one's: the counts so far said first, as the last one's)."""
         self.rate_said = self.rate_low = None
         self.rates = []
+        if split != self.split_mode and now is not None:
+            self.split_flush(now)
+        with self._lock:
+            self.split_mode = split
+            for t in self.splits.values():
+                t.restarted()
 
 
 def wanted(path: str = STATE) -> dict:
@@ -852,6 +1099,7 @@ class Supervisor:
         # trunk-recorder runs ffmpeg / sox by name for call audio
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
+        env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)
@@ -865,7 +1113,7 @@ class Supervisor:
         self.lines.clear()
         self.said = ""
         self.watchdog.started(now, capture_dir(argv, r["workdir"]), key)
-        self.shipper.started()
+        self.shipper.started(env[SPLIT_ENV], self._m)
         if getattr(self.proc, "stdout", None) is not None:
             self._drain_thread = threading.Thread(target=self._drain, args=(self.proc, r["workdir"]),
                                                   name="trunk-recorder-output", daemon=True)
@@ -883,7 +1131,7 @@ class Supervisor:
         if code is None:
             if self.started_at is not None and now - self.started_at > 60:
                 self.backoff = BACKOFF_S[0]
-            self.shipper.tick(now)
+            self.shipper.tick(self._m)                  # (the drain's clock: time.monotonic, not the wall's)
             if self._watchdog(now, base):
                 return
             self._set(now, "ok", self.said or "trunk-recorder starting", **keep, **base)
@@ -933,6 +1181,10 @@ class Supervisor:
     def _drain(self, p, workdir: str) -> None:
         """Everything it says, into trunk-recorder.log (capped: LOG_MAX_BYTES, one previous file kept), which sizeup reads
         as it grows; the unit script's grant lines come the same way (its stdout is trunk-recorder's)."""
+        try:
+            self.shipper.watch(watched_talkgroups(workdir))  # its config's reception "watch" list, as it starts
+        except Exception:  # noqa: BLE001 - a config it can't read watches nothing; the drain must still run
+            pass
         path = Path(workdir) / LOG
         log = None
         try:
@@ -956,7 +1208,7 @@ class Supervisor:
                 if any(w in low for w in SAYS):
                     self.said = line[-160:]
                 try:
-                    t = time.monotonic()
+                    t = self.mono()                  # the watchdog's and the shipper's tick()'s clock
                     self.watchdog.line(line, t)
                     self.shipper.line(line, t)
                 except Exception:  # noqa: BLE001 - the drain must never stop (trunk-recorder would block on its output)
@@ -984,6 +1236,10 @@ class Supervisor:
             self._drain_thread.join(timeout=2)
             self._drain_thread = None
         self.running, self.started_at = None, None
+        try:
+            self.shipper.split_flush(self.mono())       # (#647) its split counts so far, after its last lines
+        except Exception:  # noqa: BLE001 - a count, never in the way of a stop
+            pass
 
     def shutdown(self, why: str = "the service is stopping") -> None:
         self.stop(why)
@@ -1199,9 +1455,13 @@ class SystemSupervisor(Supervisor):
         self.back_list: tuple | None = None          # the (index, serial) list since back_since, while it comes back
         self.back_since = 0.0
         self.back_first: float | None = None         # its first look with every dongle back
+        self.back_first_m: float | None = None       # ... on the monotonic clock (the county's wait: a clock step
+                                                     # never lengthens it)
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
+        self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when, monotonic)
+        self.county_done = None                      # ... the wish seq it has waited for (once per move, never again)
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
@@ -1373,8 +1633,7 @@ class SystemSupervisor(Supervisor):
         if self.gone_since is None and now < self.hold_until:
             # a flapping dongle's hold (_went) holds a start on other dongles too (an antenna group's stand-in)
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
-            self._set(now, "absent", f"held back {_dur(self.hold_until - now)} more: a dongle of it went soon after it "
-                                     "came back", **dict(base, restarts=self.restarts))
+            self._set(now, "absent", self._held(), hold_until=self.hold_until, **dict(base, restarts=self.restarts))
             return
         if now < self.next_start:
             self.status.update(base)
@@ -1401,8 +1660,11 @@ class SystemSupervisor(Supervisor):
                               else f"SDR '{s['name']}' not plugged in" + went, **dict(base, restarts=self.restarts))
                 return
             devs[i] = idx
-        if self.gone_since is not None and self._coming_back(now, w, found, base):
-            return
+        if self.gone_since is not None:
+            if self._coming_back(now, w, found, base):     # (its own wait for the county: never both)
+                return
+        elif w.get("group") and self._county_first(now, w, base):
+            return                                         # (#637) a group move: the county first, once per move
         try:
             argv = system_runtime_argv(r["argv"], r["workdir"], devs)
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1411,6 +1673,7 @@ class SystemSupervisor(Supervisor):
             return
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
+        env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)
@@ -1425,6 +1688,7 @@ class SystemSupervisor(Supervisor):
         self.lines.clear()
         self.said = ""
         self.ran_key = key
+        self.county_wait, self.county_done = None, w["seq"]   # (#637) this move's wait is over: never again for it
         if self.gone_since is not None:
             # (#592) as an rtl_fm channel's "dongle '…' back after m:ss"; never one of the watchdog's capped restarts
             self.log(f"{self.tag}: dongles back after {_mmss(now - self.gone_since)}: restarting trunk-recorder")
@@ -1433,7 +1697,7 @@ class SystemSupervisor(Supervisor):
             self.gone_since, self.back_list, self.back_first, self.back_at = None, None, None, now
         self.missing, self.missing_n, self.next_look = [], 0, now + UNPLUGGED_S
         self.watchdog.started(now, capture_dir(argv, r["workdir"]), key)
-        self.shipper.started()
+        self.shipper.started(env[SPLIT_ENV], self._m)
         if getattr(self.proc, "stdout", None) is not None:
             self._drain_thread = threading.Thread(target=self._drain, args=(self.proc, r["workdir"]),
                                                   name="trunk-recorder-system-output", daemon=True)
@@ -1442,6 +1706,39 @@ class SystemSupervisor(Supervisor):
         self.log(f"{self.tag}: trunk-recorder on {on}, pid {self.proc.pid}")
         self._set(now, "ok", "trunk-recorder starting", tr_pid=self.proc.pid, index=devs[min(devs)], argv=argv,
                   started=now, **base)
+
+    def _held(self) -> str:
+        """(#637) A flapping dongle's hold, said as the time it ends: a held start is no fault (Receivers, Health)."""
+        return f"held back until {_hhmm(self.hold_until)} after dropouts"
+
+    def _county_first(self, now: float, w: dict, base: dict) -> bool:
+        """(#637) An antenna group's move (the wish says "group"): when the county's trunk-recorder should run, it
+        starts first, as at a return (_coming_back): this system's start waits until the county's status is "ok" on
+        the dongle its wish names and it has run COUNTY_SETTLE_S, at most COUNTY_WAIT_S from the move (the county
+        down for its own reasons). A group restore that gives the county its dongle back in the same step as this
+        system's therefore opens the county's first. A county already up waits for nothing. Once per move (its wish's
+        seq): a crash restart or a dongle's return later on the same wish never waits for it again (a return has its own
+        wait, _coming_back), and a later restore of the same dongles (a new seq) waits again. Looked at only once its
+        dongles are found (one not plugged in says so first). The cap on the monotonic clock. True while it waits."""
+        county = wanted(self.county_state)
+        if w["seq"] is not None and w["seq"] == self.county_done:
+            return False
+        if not county["on"] or not county["sdr"]:
+            self.county_wait = None
+            return False
+        if self.county_wait is None or self.county_wait[0] != w["seq"]:
+            self.county_wait = (w["seq"], self._m)
+        if self._m - self.county_wait[1] >= COUNTY_WAIT_S:
+            self.county_done = w["seq"]
+            return False
+        st = read_status(self.county_status, now) or {}
+        started = st.get("started")
+        if st.get("state") == "ok" and st.get("sdr") == county["sdr"] and isinstance(started, (int, float)) \
+                and now - started >= COUNTY_SETTLE_S:
+            return False
+        self.next_start = now + 1.0
+        self._set(now, "absent", f"not started yet ({MODE} starts first)", **dict(base, restarts=self.restarts))
+        return True
 
     def _coming_back(self, now: float, w: dict, found: list, base: dict) -> bool:
         """(#592) Every dongle it ran on is back: True while it must still wait. USB settles first (the same (index,
@@ -1457,7 +1754,7 @@ class SystemSupervisor(Supervisor):
         top = max((i for i, x in found if x in ours), default=-1)
         listed = tuple(sorted(e for e in found if e[0] <= top))
         if self.back_first is None:
-            self.back_first = now
+            self.back_first, self.back_first_m = now, self._m
         if listed != self.back_list:
             self.back_list, self.back_since = listed, now
         names = ", ".join(f"'{s['name']}'" for _k, s in sorted(w["sources"].items()))
@@ -1466,10 +1763,11 @@ class SystemSupervisor(Supervisor):
             why = "USB settling"
             self.next_start = min(self.back_since + RETURN_STABLE_S, self.back_first + RETURN_SETTLE_MAX_S)
         elif now < self.hold_until:
-            why = f"held back {_dur(self.hold_until - now)} more: it went soon after it came back"
+            why = self._held()
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
         else:
-            if county["on"] and now - self.back_first < COUNTY_WAIT_S:
+            since = self.back_first_m if self.back_first_m is not None else self._m
+            if county["on"] and self._m - since < COUNTY_WAIT_S:
                 st = read_status(self.county_status, now) or {}
                 started = st.get("started")
                 up = st.get("state") == "ok" and isinstance(started, (int, float)) and now - started >= COUNTY_SETTLE_S
@@ -1477,7 +1775,9 @@ class SystemSupervisor(Supervisor):
                     why, self.next_start = f"{MODE} starts first", now + 1.0
         if not why:
             return False
-        self._set(now, "absent", f"SDR {names} back: not started yet ({why})", **dict(base, restarts=self.restarts))
+        held = {"hold_until": self.hold_until} if why == self._held() else {}
+        self._set(now, "absent", f"SDR {names} back: not started yet ({why})", **held,
+                  **dict(base, restarts=self.restarts))
         return True
 
     def shutdown(self, why: str = "the service is stopping") -> None:

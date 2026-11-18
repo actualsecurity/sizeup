@@ -23,8 +23,43 @@ Noise openings: one frame at open_db opens the squelch and the hang holds it 0.4
 the live "talking" indicator waits for, radio/tap.py) and is counted (short_per_min: the squelch chattering on noise).
 open_db, close_db and min_open_s are per channel, set live (NfmReceiver.set_squelch; Settings > Radios > Squelch).
 
+Key-ups (keyups = "traffic" | "paging", by the channel's kind: config.ChannelCfg). The hang bridges any drop under it,
+so two units talking back to back (A unkeys, B keys 0.1-0.45 s later) came out as one transmission: one clip, one
+transcript, A's and B's IDs on one row (FG1 2026-10-08 to 11-17: 16 of 809 transmissions carried two radios' IDs, all
+1.3-7.7 s long). With keyups set, an open transmission is cut where its carrier dropped, without waiting out the hang,
+once what came back is a new key-up rather than a fade:
+
+    gap      gone (under FULL_DB: hiss, not a sag under close_db) for at least split_s (traffic 0.2 s), then back
+             RETURN_FRAMES (0.15 s) at close_db with a frame at open_db (a carrier that would open the squelch by itself). Of the 110 drops found inside FG1's
+             clips, 107 were under 0.2 s (picket-fencing, a body turning): those stay one key-up, as before.
+    id       under close_db SHORT_GAP_FRAMES (0.1 s) or more, and an MDC-1200 / FleetSync burst at the start of what
+             came back (a pre-ID, nothing said before it) or just before the drop (a post-ID, nothing said after it).
+    level    under close_db 0.1 s or more, and every frame of the carrier back jump_db (traffic 10, = drop_db) over this
+             transmission's own quieting: another, stronger transmitter. Upward only: a carrier back weaker is as
+             often a fade recovering as another radio (a gap or an ID still cuts it).
+
+A cut needs speech or an ID burst before it (a dead carrier, or flutter before an APX's late pre-ID, is no key-up of its
+own: it stays with what follows), and is held until the new carrier has min_open_s of its own: a reply that ends sooner
+stays in the transmission, as without key-ups (no blip row, nothing lost); the piece before is delivered that much
+later. A piece
+that came from a cut is never dropped as a background carrier (drop_db's rise and background rules keep it).
+
+Paging (South 2) is off by default (config: jump_db 0): a simulcast page fades to hiss and comes back stronger mid-page
+(a fade inside a tone, mid-message, a continuation +13 dB), and a page must stay whole, on the same frames, for the
+pre-alert. Set jump_db on a paging channel and only the level rule applies, upward, and only across a drop longer than
+the short hang (HANG_FRAMES) with no tone ringing into it; never a gap or an ID. A transmission back in the
+continuation window that passes it is a transmission of its own (Segment.cont stays False). Every piece is its own
+Segment; Segment.split / prev_start / first_start link it to the piece before and to the first piece of the recording,
+which ends with reason "key-up".
+
 One rtl_fm per channel; if it dies, stalls or the dongle is unplugged, the loop restarts it
 with backoff, forever (same pattern as shortfinal's receivers).
+
+A finished transmission is handed off the reader (SegmentWorkers): the thread that reads rtl_fm's pipe only feeds the
+squelch and the live tap (radio/tap.py: the talker, the emergency alarm, a page going out), and each channel's own
+worker thread runs on_segment (App._segment: the ID decode of the whole transmission, its clip) in the order the
+transmissions ended. A 2-minute transmission took about 1 s there on a fast PC (about 4 s on the station's i5), while
+rtl_fm's pipe holds about 2 s of audio: the reader stalled and audio could be lost with the carrier up.
 """
 
 from __future__ import annotations
@@ -65,6 +100,8 @@ SPEECH_DB = 8.0                # a speech frame: voice band this far over the de
 EDGE_SPEECH_FRAMES = 2         # ... 0.1 s of them between a data-like run and the edge: not a PTT-ID
 MAX_FRAMES = 20 * 120          # split anything over 2 minutes (a long page is ~30-60 s)
 STALL_S = 5.0
+SEG_BEHIND = 4                 # a channel's finished transmissions waiting for its worker: logged from this many ...
+SEG_QUEUE_MAX = 64             # ... and the reader waits for the worker at this many (never one dropped)
 STUCK_S = 120.0                # open continuously this long: shown as "open 4:12 (stuck?)", logged once (#116)
 HF_BAND = (4000.0, 7500.0)
 # A second, weaker carrier on a simplex channel. FG1 2026-10-07 17:17-17:21: PCFD radios quiet the
@@ -103,6 +140,14 @@ STEADY_DB = 3.0                # content: voice-band energy this far over the fr
                                # weak carrier (8 dB of quieting, test_long_page_with_quieting_dips) 2-8 dB.
 DENSE_FRAMES = 3               # content in 3 of the last 20 frames (an MDC burst is ~3.5): not a stray frame
 BUSY_GAP_FRAMES = 20           # closed this briefly (a max-length split, a flicker): still "open continuously"
+# Key-ups (module doc): a transmission cut where a new key-up came in under the hang
+SHORT_GAP_FRAMES = 2           # an ID or a level jump: at least 0.1 s under close_db before it
+RETURN_FRAMES = 3              # the carrier back 0.15 s, every frame at close_db, one at open_db: a new carrier
+ID_RUN = 2                     # an ID burst: 2 id_burst_frames in a row (75 ms; a FleetSync burst is 45-90 ms)
+PRE_ID_AT = (6, 12, EDGE_SEARCH)   # a pre-ID looked for this many frames after the carrier came back (not every frame)
+FULL_DB = 3.0                  # gap: a frame this little quieted is the carrier gone (hiss reads about 0 dB)
+TONE_SHARE = 0.6               # paging: a tone ringing into a drop, this much of the voice band within +-25 Hz of its peak
+KEYUP_MODES = ("", "traffic", "paging")
 
 
 @dataclass
@@ -123,6 +168,104 @@ class Segment:
     q_close: float | None = None
     hiss_db: float | None = None   # the idle hiss level (noise floor) it was measured against
     floor_db: float | None = None  # a background carrier's quieting, if one was on the channel
+    # Key-ups (module doc): a piece cut from the transmission before it ("gap" | "id" | "level"; "" not cut), that
+    # piece's start, and the start of the first piece of the recording (the first piece: its own; None: not split)
+    split: str = ""
+    prev_start: float | None = None
+    first_start: float | None = None
+    # Work left for the segment's worker (radio/am.py: the AGC and the tone notch), run by finish() before on_segment:
+    # audio is the transmission's only once it has run
+    pending: Callable[["Segment"], None] | None = field(default=None, repr=False, compare=False)
+
+
+def finish(seg: Segment) -> Segment:
+    """The segment as on_segment gets it: its pending work done (once)."""
+    fn = getattr(seg, "pending", None)
+    if fn is not None:
+        seg.pending = None
+        fn(seg)
+    return seg
+
+
+class SegmentWorkers:
+    """A receiver's finished transmissions, off its reader thread (module doc): one worker thread per channel (an
+    airband dongle hears several: radio/am.py), each running handler(channel, segment) for its channel's segments in
+    the order they were put. Bounded: SEG_BEHIND waiting is logged (and when it has caught up), and at SEG_QUEUE_MAX
+    the reader waits for the worker (logged): a transmission is never dropped. A reader that is stopping (put's
+    stopping) stops waiting and queues it over the limit (logged). close() lets the workers finish what is queued and
+    end; drain() waits for that. The App keeps one per channel for every receiver it makes of it (a dongle move makes
+    a new receiver: its transmissions queue behind the old one's, in order, never two at once)."""
+
+    def __init__(self, name: str, handler: Callable[[Channel, Segment], None], on_event: Callable[[str], None]):
+        self.name, self.handler, self.on_event = name, handler, on_event
+        self._cv = threading.Condition()
+        self._q: dict[str, deque] = {}          # per channel label: (channel, segment), the one being handled first
+        self._threads: dict[str, threading.Thread] = {}
+        self._behind: set[str] = set()
+        self._closed = False
+
+    def put(self, channel: Channel, seg: Segment, stopping: Callable[[], bool] | None = None) -> None:
+        label = channel.label
+        with self._cv:
+            q = self._q.setdefault(label, deque())
+            if len(q) >= SEG_QUEUE_MAX:
+                self.on_event(f"{label}: {len(q)} transmissions waiting to be handled: the receiver waits for them")
+                while len(q) >= SEG_QUEUE_MAX and not self._closed:
+                    if stopping is not None and stopping():
+                        self.on_event(f"{label}: stopping with {len(q)} waiting: this one queued after them")
+                        break
+                    self._cv.wait(0.25)
+            q.append((channel, seg))
+            if len(q) >= SEG_BEHIND and label not in self._behind:
+                self._behind.add(label)
+                self.on_event(f"{label}: {len(q)} transmissions waiting to be handled (falling behind)")
+            t = self._threads.get(label)
+            if t is None or not t.is_alive():
+                t = self._threads[label] = threading.Thread(target=self._work, args=(label,), daemon=True,
+                                                            name=f"segment-{label}")
+                t.start()
+            self._cv.notify_all()
+
+    def _work(self, label: str) -> None:
+        while True:
+            with self._cv:
+                q = self._q[label]
+                while not q:
+                    if self._closed:
+                        return
+                    self._cv.wait()
+                channel, seg = q[0]             # (still counted as waiting until it is handled: pending, drain)
+            try:
+                self.handler(channel, finish(seg))
+            except Exception as e:  # noqa: BLE001 - one transmission's handler never stops the channel's worker
+                self.on_event(f"segment handler error: {type(e).__name__}: {e}")
+            with self._cv:
+                q.popleft()
+                if not q and label in self._behind:
+                    self._behind.discard(label)
+                    self.on_event(f"{label}: caught up with its transmissions")
+                self._cv.notify_all()
+
+    def pending(self, label: str | None = None) -> int:
+        """Transmissions put and not yet handled (one channel's, or all)."""
+        with self._cv:
+            return sum(len(q) for k, q in self._q.items() if label is None or k == label)
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+
+    def drain(self, timeout: float) -> bool:
+        """Wait (up to timeout s) until every transmission put has been handled. True if they all were."""
+        end = time.monotonic() + timeout
+        with self._cv:
+            while any(self._q.values()):
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cv.wait(left)
+        return True
 
 def data_frames(frames: list[np.ndarray]) -> list[bool]:
     """Which 50 ms frames are an MDC-1200 burst (1200 baud MSK, 1200/1800 Hz: Motorola PTT-ID, sent
@@ -238,8 +381,19 @@ class NoiseSquelch:
     def __init__(self, open_db: float = OPEN_DB, close_db: float = CLOSE_DB,
                  clock: Callable[[], float] = time.time, drop_db: float | None = None,
                  hang_s: float | None = None, continue_s: float = 0.0, min_open_s: float | None = None,
-                 shorts: deque | None = None):
+                 shorts: deque | None = None, keyups: str = "", split_s: float = 0.0, jump_db: float | None = None):
         self.open_db, self.close_db, self.clock, self.drop_db = open_db, close_db, clock, drop_db
+        # Key-ups (module doc): "" (off: the hang bridges everything under it, as before), "traffic" or "paging"
+        if keyups not in KEYUP_MODES:
+            raise ValueError(f"keyups: one of {KEYUP_MODES}")
+        self.keyups = keyups
+        self._split_frames = max(SHORT_GAP_FRAMES, round(split_s * RATE / FRAME)) if split_s and split_s > 0 else 0
+        self.jump_db = jump_db if jump_db and jump_db > 0 else None
+        self._cands: list[list] = []        # [first frame under close_db, frame it came back, return checked]
+        self._piece: tuple[float | None, float | None, str] | None = None   # this piece: (first start, prev, why)
+        self._hold: tuple[int, int, str] | None = None   # a key-up found, not cut until it held min_open_s (_hold_cut)
+        # the last one closed: (start, its recording's first piece's start, quieting, a tone ringing into its end)
+        self._last: tuple[float, float | None, float, bool] | None = None
         self.min_frames = min_frames(min_open_s)
         # set_params(): (open_db, close_db, min_frames) as one tuple, taken by feed() at a frame's start (_applied:
         # the one it took), so a frame never sees a mixed set
@@ -276,6 +430,9 @@ class NoiseSquelch:
         self._up_db = open_db               # quieting that counts as carrier-up in this transmission
         self._content = 0                   # frames with tones / speech in this transmission
         self._recent: deque[bool] = deque(maxlen=20)   # STEADY_DB content in the last 20 frames
+        self._said: list[bool] = []
+        self._idlike: list[bool] = []
+        self._idb = (f >= ID_BAND[0]) & (f <= ID_BAND[1])
         self._last_content = -1             # frame index (in _frames) of the last dense content, -1: none yet
         self._live = False                  # ... enough of them: the long hang applies
         self._breaks: list[tuple[int, int]] = []   # (first quiet frame, frame the carrier came back)
@@ -379,36 +536,25 @@ class NoiseSquelch:
                 if window:
                     self._resume()
             return None
-        self._frames.append(frame)
-        self._qs.append(q)
-        if not self._keyed and q >= self.close_db and len(self._qs) >= self.min_frames:
-            self._keyed = True
-        if q >= self.close_db and self._quiet_run > HANG_FRAMES:
-            k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
-            self._breaks.append((k - self._quiet_run, k))
-        self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
-        vband = float(spec[self._vb].mean())
-        self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
-        if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
-            self._last_content = len(self._frames) - 1
-        if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
-            # (counted on a continuation too, which starts live: only one with tones or speech of its own
-            # may open another window, so noise at the close threshold can't chain them, #116)
-            if vband >= lvl * 10 ** (CONTENT_DB / 10):
-                self._content += 1
-                self._live = self._live or self._content >= CONTENT_FRAMES
+        self._track(frame, q, spec, lvl)
+        if self._cands or self._hold is not None:
+            cut, seg = self._keyup_check()
+            if cut:
+                return seg
         if self.drop_db is not None:
             if self._level is None and len(self._qs) >= LEVEL_FRAMES:
                 self._level = float(np.median(self._qs[:LEVEL_FRAMES]))
             if self._level is not None:
                 self._drop_run = self._drop_run + 1 if q < self._level - self.drop_db else 0
                 self._rise_run = self._rise_run + 1 if q >= self._level + self.drop_db else 0
-                if self._rise_run >= RISE_FRAMES:
-                    # A stronger carrier came up over this one: what came before was the background.
+                if self._rise_run >= RISE_FRAMES and not any(not c[2] for c in self._cands) and self._hold is None:
+                    # A stronger carrier came up over this one: what came before was the background. (Not while a
+                    # drop under close_db just before it is still being looked at: that is a new key-up, keyups)
                     n = len(self._frames) - RISE_FRAMES
                     while n > 1 and self._qs[n - 1] > self._level + EDGE_DB:
                         n -= 1
                     frames, qs, start, level, up = self._frames[:n], self._qs[:n], self._start, self._level, self._up_db
+                    piece = self._piece
                     rest, rest_q = self._frames[n:], self._qs[n:]
                     self._begin(rest[0], rest_q[0], start + n * FRAME / RATE)
                     for f, v in zip(rest[1:], rest_q[1:]):
@@ -416,6 +562,9 @@ class NoiseSquelch:
                         self._qs.append(v)
                     self._set_floor(level)
                     seg = self._segment(frames, qs, start, up)
+                    if seg is not None and piece is not None:   # a piece cut from a key-up before it: kept, linked
+                        self._mark(seg, piece)
+                        return seg
                     return seg if seg is not None and seg.bursts else None   # no ID: not a key-up
                 k = len(self._frames)
                 if k >= BACKGROUND_FRAMES and (k - BACKGROUND_FRAMES) % BACKGROUND_STEP == 0:
@@ -437,6 +586,222 @@ class NoiseSquelch:
             return self._close(len(self._frames), "quiet")
         return None
 
+    def _track(self, frame: np.ndarray, q: float, spec: np.ndarray | None = None, lvl: float | None = None) -> None:
+        """One more frame of the open transmission: its carrier, hang, content and key-up bookkeeping."""
+        if spec is None:
+            spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
+            lvl = float(spec[self._hf].mean()) + 1e-12
+        self._frames.append(frame)
+        self._qs.append(q)
+        if not self._keyed and q >= self.close_db and len(self._qs) >= self.min_frames:
+            self._keyed = True
+        if q >= self.close_db and self._quiet_run > HANG_FRAMES:
+            k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
+            self._breaks.append((k - self._quiet_run, k))
+        if self.keyups and q >= self.close_db and self._quiet_run >= SHORT_GAP_FRAMES:
+            k = len(self._frames) - 1                       # the carrier back after a drop: a new key-up? (_keyup_check)
+            self._cands.append([k - self._quiet_run, k, False, None])
+        self._quiet_run = 0 if q >= self.close_db else self._quiet_run + 1
+        vband = float(spec[self._vb].mean())
+        self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
+        self._said.append(self._recent[-1] and q >= self.close_db)   # something on the carrier (_worth)
+        if self.keyups == "traffic":    # most of the voice band in the ID band: worth a look for a burst (_idish)
+            self._idlike.append(float(spec[self._idb].sum()) >= ID_SHARE * float(spec[self._vb].sum()))
+        if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
+            self._last_content = len(self._frames) - 1
+        if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
+            # (counted on a continuation too, which starts live: only one with tones or speech of its own
+            # may open another window, so noise at the close threshold can't chain them, #116)
+            if vband >= lvl * 10 ** (CONTENT_DB / 10):
+                self._content += 1
+                self._live = self._live or self._content >= CONTENT_FRAMES
+
+    # -- key-ups (module doc) ---------------------------------------------------------------------------------------
+
+    def _keyup_check(self) -> tuple[bool, Segment | None]:
+        """Each drop the carrier came back from (self._cands), as the frames after it come in: a new key-up there (gap,
+        level, id: the module doc) cuts the transmission at the drop. -> (cut, the piece before it or None)."""
+        k = len(self._frames)
+        paging = self.keyups == "paging"
+        if self._hold is not None and self._hold_frames() >= self.min_frames:
+            g0, g1, why = self._hold
+            self._hold = None
+            return True, self._split(g0, g1, why)
+        for c in list(self._cands):
+            g0, g1, checked, level = c
+            if k - g1 > EDGE_SEARCH or (paging and checked):
+                self._cands.remove(c)
+                continue
+            if k - g1 <= RETURN_FRAMES:
+                continue
+            if not checked:
+                c[2] = True
+                ret = self._qs[g1:g1 + RETURN_FRAMES + 1]       # (level: without its first frame, part hiss)
+                if min(ret) < self.close_db:            # a flicker, not a carrier back
+                    self._cands.remove(c)
+                    continue
+                if paging and (self._last[3] if g1 == 0 and self._last else
+                               g1 - g0 <= HANG_FRAMES or self._ringing(g0)):
+                    continue                            # paging: only across a long drop with no tone ringing
+                why = ""
+                if (not paging and self._split_frames and max(ret) >= self.open_db
+                        and sum(v < FULL_DB for v in self._qs[g0:g1]) >= self._split_frames):
+                    why = "gap"
+                elif self.jump_db is not None:
+                    if level is None:
+                        before = [v for v in self._qs[:g0] if v >= self.close_db]
+                        level = float(np.median(before)) if before else None
+                    if level is not None and min(ret[1:]) - level >= self.jump_db:
+                        why = "level"
+                if not why and not paging and g1 > 0 and self._post_id(g0):
+                    why = "id"
+                if why and g1 == 0:
+                    return True, self._split(g0, g1, why)       # (a continuation: nothing to cut, only its link)
+                if why and self._worth(g0):
+                    self._hold_cut(c, why)
+                    continue
+            if not paging and k - g1 in PRE_ID_AT and self._pre_id(g1, k) and (g1 == 0 or self._worth(g0)):
+                if g1 == 0:
+                    return True, self._split(g0, g1, "id")
+                self._hold_cut(c, "id")
+        return False, None
+
+    def _hold_cut(self, c: list, why: str) -> None:
+        """A key-up found at candidate c: held, not cut yet, until its carrier is a transmission of its own (min_open_s
+        of it, ID bursts not counted). A reply that ends sooner stays in this transmission, as without key-ups: no
+        audio is lost to the minimum, and no row is a blip. A later key-up found before then takes its place (the short
+        one stays with the transmission before it)."""
+        self._hold = (c[0], c[1], why)
+        if c in self._cands:
+            self._cands.remove(c)
+
+    def _hold_frames(self) -> int:
+        """Frames of carrier (at close_db, not an ID burst) the held key-up has had since it came back, up to its own
+        end (a drop of SHORT_GAP_FRAMES: what comes after is another key-up's, never counted as this one's)."""
+        g1 = self._hold[1]
+        idl = self._idlike if len(self._idlike) == len(self._frames) else [False] * len(self._frames)
+        n = off = 0
+        for v, b in zip(self._qs[g1:], idl[g1:]):
+            if v < self.close_db:
+                off += 1
+                if off >= SHORT_GAP_FRAMES:
+                    break
+                continue
+            off = 0
+            n += not b
+        return n
+
+    def _worth(self, g0: int) -> bool:
+        """What came before the drop at g0 is a key-up of its own: speech on it, or an ID burst. (Dead carrier, or
+        flutter before a late pre-ID, stays with what follows: no row that is only a click.)"""
+        return sum(self._said[:g0]) >= CONTENT_FRAMES or (self._idish(g0 - EDGE_SEARCH, g0) and bool(
+            self._id_runs(self._frames[max(0, g0 - EDGE_SEARCH):g0])))
+
+    def _ringing(self, g0: int) -> bool:
+        """Paging: a tone (alert tone, a held single tone) ringing into the drop at g0, in the last 0.2 s of carrier
+        before it: a fade inside a page's tones, never the end of a transmission."""
+        on = [f for f, v in zip(self._frames[max(0, g0 - 8):g0], self._qs[max(0, g0 - 8):g0]) if v >= self.close_db]
+        if len(on) < 2:
+            return False
+        x = np.concatenate(on[-4:])
+        S = np.abs(np.fft.rfft(x * np.hanning(len(x)))) ** 2
+        f = np.fft.rfftfreq(len(x), 1 / RATE)
+        band = (f >= VOICE_BAND[0]) & (f <= VOICE_BAND[1])
+        if not S[band].sum():
+            return False
+        peak = f[band][np.argmax(S[band])]
+        return float(S[band & (np.abs(f - peak) <= 25)].sum() / S[band].sum()) >= TONE_SHARE
+
+    def _idish(self, a: int, b: int) -> bool:
+        """Frames a..b could hold an ID burst (a frame mostly in the ID band): a cheap look before _id_runs. True when
+        it can't tell (frames added without _track)."""
+        if len(self._idlike) != len(self._frames):
+            return True
+        return any(self._idlike[max(0, a):b])
+
+    def _id_runs(self, frames: list[np.ndarray]) -> list[tuple[int, int]]:
+        """The ID bursts in these frames: (first, last frame), ID_RUN id_burst_frames in a row or more."""
+        if len(frames) < 2:
+            return []
+        flags = id_burst_frames(np.concatenate(frames))
+        out, i, hop = [], 0, FRAME // 2
+        while i < len(flags):
+            if not flags[i]:
+                i += 1
+                continue
+            e = i
+            while e + 1 < len(flags) and flags[e + 1]:
+                e += 1
+            if e - i + 1 >= ID_RUN:
+                out.append((i * hop // FRAME, min(len(frames) - 1, (e * hop + FRAME - 1) // FRAME)))
+            i = e + 1
+        return out
+
+    def _pre_id(self, g1: int, k: int) -> bool:
+        """An ID burst at the start of what came back at frame g1, nothing said before it: a radio keyed there
+        (traffic channels only)."""
+        if k - g1 < ID_RUN or self.keyups != "traffic" or not self._idish(g1, k):
+            return False
+        body = self._frames[g1:k]
+        runs = self._id_runs(body)
+        if not runs:
+            return False
+        talk = speech_frames(body)
+        return sum(talk[:max(0, runs[0][0] - 1)]) < EDGE_SPEECH_FRAMES
+
+    def _post_id(self, g0: int) -> bool:
+        """An ID burst just before the drop at frame g0, nothing said after it: a radio unkeyed there."""
+        if not self._idish(g0 - EDGE_SEARCH, g0):
+            return False
+        body = self._frames[max(0, g0 - EDGE_SEARCH):g0]
+        runs = self._id_runs(body)
+        if not runs:
+            return False
+        talk = speech_frames(body)
+        return sum(talk[runs[-1][1] + 2:]) < EDGE_SPEECH_FRAMES
+
+    def _split(self, g0: int, g1: int, why: str) -> Segment | None:
+        """Cut the open transmission at the drop: frames before g0 are one key-up (returned), g1 on the next (still
+        open), the hiss between dropped. Neither waits for the hang."""
+        frames, qs, start, up = self._frames, self._qs, self._start, self._up_db
+        piece, cont = self._piece, self.continuing
+        if g1 == 0:                                     # a continuation that is a key-up of its own: nothing to cut
+            self.continuing, self._live, self._chain_start = False, False, self._start
+            last = self._last
+            self._piece = (last[1] if last[1] is not None else last[0], last[0], why) if last else None
+            self._cands = []
+            return None
+        breaks = [b for b in self._breaks if b[1] < g0]
+        head = list(frames[:g0])
+        for b0, b1 in breaks:
+            head[b0:b1] = [np.zeros_like(f) for f in head[b0:b1]]
+        seg = self._segment(head, qs[:g0], start, up, breaks, after=frames[g0])
+        self._begin(frames[g1], qs[g1], start + g1 * FRAME / RATE, up_db=self.close_db)
+        for f, v in zip(frames[g1 + 1:], qs[g1 + 1:]):
+            self._track(f, v)
+        if seg is None:
+            self._piece = (piece[0], piece[1], why) if piece else None
+            return None
+        seg.reason, seg.cont = "key-up", cont
+        self._mark(seg, piece)
+        self._remember(seg, qs[:g0])
+        self._piece = (seg.first_start, seg.start, why)
+        return seg
+
+    def _mark(self, seg: Segment, piece: tuple | None) -> None:
+        """A piece of a split recording: linked to the piece before it and the recording's first."""
+        if piece is None:
+            seg.first_start = seg.start
+        else:
+            seg.first_start, seg.prev_start, seg.split = piece
+
+    def _remember(self, seg: Segment, qs: list[float], ringing: bool = False) -> None:
+        """The transmission just closed: its start, its recording's first piece and its quieting, for a continuation
+        that may be a key-up of its own."""
+        if self.keyups:
+            up = [v for v in qs if v >= self.close_db]
+            self._last = (seg.start, seg.first_start, float(np.median(up)) if up else seg.quieting_db, ringing)
+
     def _begin(self, frame: np.ndarray, q: float, start: float, up_db: float | None = None) -> None:
         if not self.open and (self.open_since is None or self._n - self._closed_n > BUSY_GAP_FRAMES):
             self.open_since = start
@@ -447,12 +812,17 @@ class NoiseSquelch:
         self._up_db = self.open_db if up_db is None else up_db
         self._content, self._live, self._breaks, self.continuing = 0, False, [], False
         self._recent.clear()
+        self._said = [False]                # per frame: tones / speech on the carrier (the voice band over its hiss)
+        self._idlike = [False]              # per frame: ID-band heavy (traffic key-ups only)
         self._last_content = -1
         self._cont_left, self._cont_run = 0, []
+        self._cands, self._piece, self._hold = [], None, None
 
     def _resume(self) -> None:
         """The transmission just opened came back inside the continuation window: it continues the last."""
         self.continuing, self._live, self._chain_start = True, self._cont_live, self._cont_chain
+        if self.keyups and self._last is not None:      # a new key-up instead? (_keyup_check: level, ID)
+            self._cands.append([0, 0, False, self._last[2]])
 
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped (rtl_fm stalled, died, or was stopped) with the squelch open: what was
@@ -465,19 +835,27 @@ class NoiseSquelch:
     def _close(self, n: int, reason: str = "") -> Segment | None:
         """Close the squelch; the transmission is its first n frames (the rest is dropped)."""
         frames, qs, start = self._frames[:n], self._qs[:n], self._start
+        after = self._frames[n] if n < len(self._frames) else None     # (the end of a burst sent to the last moment)
         live, cont, breaks = self._live, self.continuing, [b for b in self._breaks if b[1] < n]
+        piece, self._hold = self._piece, None         # (a key-up still held: never cut, one transmission as before)
+        ring = self.keyups == "paging" and self._ringing(n)     # (a continuation after it: not a key-up of its own)
         self._frames, self._qs, self.open, self.continuing = [], [], False, False
         self._closed_n = self._n
         for g0, g1 in breaks:   # carrier gone (hiss) inside the hang: silence, as a radio's squelch would
             frames[g0:g1] = [np.zeros_like(f) for f in frames[g0:g1]]
-        seg = self._segment(frames, qs, start, self._up_db, breaks)
+        seg = self._segment(frames, qs, start, self._up_db, breaks, after)
+        if seg is not None and piece is not None:
+            self._mark(seg, piece)
+        if seg is not None:
+            self._remember(seg, qs, ring)
         if seg is None and reason == "quiet":
             self.shorts.append(self.clock())        # a noise opening (or a blip): nothing kept
         # A window only after a page (or a continuation with tones / speech of its own) went quiet, and
         # only while the page and its continuations span under 2 minutes: they can't chain on noise at
         # the close threshold (#116). After a max-length split the next part has to reach open_db.
+        # A unit's key-up cut from a page (keyups: piece) is no page: nothing of it to wait for.
         window = (live and self._cont_frames > 0 and reason == "quiet" and (not cont or 0 <= self._last_content < n)
-                  and self.clock() - self._chain_start < CHAIN_S)
+                  and self.clock() - self._chain_start < CHAIN_S and piece is None)
         self._cont_left, self._cont_run, self._cont_live = (self._cont_frames if window else 0), [], live
         self._cont_chain = self._chain_start
         if seg is not None:
@@ -513,7 +891,7 @@ class NoiseSquelch:
         qs = self._qs[:n]
         self._set_floor(float(np.median(self._qs[n:])))
         floor = self.floor
-        if n == 0 or not (any(data_frames(self._frames[:n]))
+        if n == 0 or not (self._piece is not None or any(data_frames(self._frames[:n]))
                           or speech_seconds(np.concatenate(self._frames[:n])) >= BACKGROUND_SPEECH_S
                           or sum(v >= floor + self.drop_db for v in qs) >= self.min_frames):
             self._frames, self._qs, self.open = [], [], False      # the background all along
@@ -561,7 +939,8 @@ class NoiseSquelch:
         return True
 
     def _segment(self, frames: list[np.ndarray], qs: list[float], start: float,
-                 up_db: float | None = None, breaks: list[tuple[int, int]] = ()) -> Segment | None:
+                 up_db: float | None = None, breaks: list[tuple[int, int]] = (),
+                 after: np.ndarray | None = None) -> Segment | None:
         # Keep the carrier-up span: first to last frame fully quieted.
         # Carrier-up span: from the first fully quieted frame to the last frame still above the
         # hold-open level. (Ending at the last *fully* quieted frame cut a 60 s South 2 page at 17 s:
@@ -597,7 +976,11 @@ class NoiseSquelch:
             b = k
             while b - 1 >= lo and data[b - 1]:
                 b -= 1
-            bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
+            piece = body[max(lo, b - 1):min(hi, k + 1) + 1]
+            nxt = frames[i0 + len(body)] if i0 + len(body) < len(frames) else after
+            if k == len(body) - 1 and nxt is not None:
+                piece = piece + [nxt]       # a burst to the carrier's last moment: its end is in the frame after it
+            bursts.append(np.concatenate(piece))
             hi = b - 2
         if hi - lo + 1 < self.min_frames:
             if not bursts:
@@ -744,8 +1127,10 @@ class NfmReceiver:
                  on_event: Callable[[str], None] = lambda m: None,
                  open_db: float = OPEN_DB, drop_db: float | None = None,
                  hang_s: float | None = None, continue_s: float = 0.0,
-                 close_db: float = CLOSE_DB, min_open_s: float | None = None):
+                 close_db: float = CLOSE_DB, min_open_s: float | None = None, keyups: str = "",
+                 split_s: float = 0.0, jump_db: float | None = None):
         self.rtl_fm, self.device, self.gain_db, self.channel = rtl_fm, device, gain_db, channel
+        self.keyups, self.split_s, self.jump_db = keyups, split_s, jump_db    # key-ups (NoiseSquelch, module doc)
         self.on_segment, self.on_event = on_segment, on_event
         self.open_db, self.drop_db, self.hang_s, self.continue_s = open_db, drop_db, hang_s, continue_s
         self.close_db, self.min_open_s = close_db, min_open_s
@@ -759,6 +1144,16 @@ class NfmReceiver:
         self.clock: Callable[[], float] = time.time
         self._stuck: float | None = None        # busy_since of the open spell logged as stuck
         self._gone: float | None = None         # when its dongle went absent (logged once; once again when back, #547)
+        # (#703) the app's: a stall with no audio at all since its rtl_fm started (on_stall), and audio (on_audio:
+        # the first of each start). Each called from this receiver's own thread; one that raises is ignored.
+        self.on_stall: Callable[[], None] | None = None
+        self.on_audio: Callable[[], None] | None = None
+        # Its finished transmissions, off the reader (SegmentWorkers, module doc): from start(), its owner's (workers:
+        # the App's, the same for every receiver of the channel) or its own. One never started (the tests' receivers,
+        # fed by hand) hands each to on_segment at once, as before.
+        self.workers: SegmentWorkers | None = None
+        self.segments: SegmentWorkers | None = None
+        self._thread: threading.Thread | None = None
 
     def _absent(self, detail: str) -> None:
         """Its dongle isn't there (looked for again every 15 s): said once, not at every look (#547)."""
@@ -768,16 +1163,25 @@ class NfmReceiver:
         self.state, self.detail = "absent", detail
 
     def _present(self) -> None:
-        """Audio again after its dongle was absent: said once (#547)."""
+        """Audio again after its dongle was absent: said once (#547). The first audio of each start (#703: on_audio)."""
+        self._hook(self.on_audio)
         if self._gone is not None:
             self.on_event(f"{self.channel.label}: dongle '{self.device_name}' back after {_mmss(self.clock() - self._gone)}")
             self._gone = None
+
+    def _hook(self, fn) -> None:
+        try:
+            if fn is not None:
+                fn()
+        except Exception as e:  # noqa: BLE001 - the app's hook never stops the receiver
+            self.on_event(f"{self.channel.label}: hook error: {type(e).__name__}: {e}")
 
     def new_squelch(self) -> NoiseSquelch:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
         # of the weaker-carrier rules live: 16:32 on 2026-10-08 was held open 51 s by the background.)
         return NoiseSquelch(open_db=self.open_db, close_db=self.close_db, drop_db=self.drop_db, hang_s=self.hang_s,
-                            continue_s=self.continue_s, min_open_s=self.min_open_s, shorts=self.shorts)
+                            continue_s=self.continue_s, min_open_s=self.min_open_s, shorts=self.shorts,
+                            keyups=self.keyups, split_s=self.split_s, jump_db=self.jump_db)
 
     def set_squelch(self, open_db: float, close_db: float, min_open_s: float | None) -> bool:
         """Settings > Radios > Squelch, live: the running squelch and every new one (rtl_fm restarts). True if changed."""
@@ -803,8 +1207,26 @@ class NfmReceiver:
                 or (self.device if isinstance(self.device, str) else "") or "any")
 
     def start(self) -> NfmReceiver:
-        threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True).start()
+        self._open_segments()
+        self._thread = threading.Thread(target=self._run, name=f"nfm-{self.channel.label}", daemon=True)
+        self._thread.start()
         return self
+
+    def _open_segments(self) -> None:
+        self.segments = self.workers or SegmentWorkers(self.channel.label, lambda ch, seg: self.on_segment(ch, seg),
+                                                       lambda m: self.on_event(m))
+
+    def pending(self, label: str | None = None) -> bool:
+        """A finished transmission of this channel (label: of that one of its channels) not yet handled."""
+        return self.segments is not None and self.segments.pending(label) > 0
+
+    def drain(self, timeout: float = 10.0) -> bool:
+        """After stop(): wait (up to timeout s) for its reader to end (what the squelch held goes out: _flush) and for
+        every finished transmission to be handled. True if they all were."""
+        end = time.monotonic() + timeout
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(max(0.0, end - time.monotonic()))
+        return self.segments is None or self.segments.drain(max(0.0, end - time.monotonic()))
 
     def stop(self) -> None:
         self._stop.set()
@@ -921,8 +1343,14 @@ class NfmReceiver:
             else:
                 self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
+            if stalled == "rtl_fm stalled" and not got:
+                # (#703) opened, then not a byte of audio: the app counts these per dongle. Never the airband
+                # channelizer's ("rtl_sdr stalled"): radio/am.py falls back to rtl_fm by itself first
+                self._hook(self.on_stall)
             self._stop.wait(2.0 if got else backoff)
             backoff = 2.0 if got else min(backoff * 2, 15)
+        if self.segments is not None and self.segments is not self.workers:
+            self.segments.close()       # its own workers finish what is queued, then end (drain() waits for them)
 
     def _program(self) -> str:
         """What this receiver runs, for its messages (radio/am.py: rtl_sdr and the channelizer for several)."""
@@ -985,7 +1413,10 @@ class NfmReceiver:
         if seg is None:
             return
         self.last_heard = seg.end
+        if self.segments is not None:   # its channel's worker (module doc): the reader goes straight back to the pipe
+            self.segments.put(channel or self.channel, seg, self._stop.is_set)
+            return
         try:
-            self.on_segment(channel or self.channel, seg)
+            self.on_segment(channel or self.channel, finish(seg))
         except Exception as e:
             self.on_event(f"segment handler error: {type(e).__name__}: {e}")

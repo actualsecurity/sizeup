@@ -1,0 +1,260 @@
+"""contracts/ (ADR 0004): the harness. Every schema in contracts/schemas/ is JSON Schema 2020-12 with an $id, a title,
+a status, a version and a description for every field; its $refs resolve without a network; it takes unknown keys;
+its vectors in contracts/vectors/<name>/ validate (valid/) or are refused (invalid/); and contracts/README.md lists it
+with its status. The harness is /api/v1's (jsonschema from the dev extras; tests/openapi_spec.py is the OpenAPI
+side)."""
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+from jsonschema import Draft202012Validator
+
+from tests import contracts as c
+
+NAMES = c.names()
+ID_BASE = "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/"
+FUTURE = re.compile(r"from[_-]the[_-]future")           # the vectors' stand-in for a key this build does not know
+
+
+def walk(node, path="$"):
+    """Every (path, object) in a schema document."""
+    if isinstance(node, dict):
+        yield path, node
+        for k, v in node.items():
+            yield from walk(v, f"{path}/{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from walk(v, f"{path}[{i}]")
+
+
+def test_there_are_schemas_and_each_has_vectors_both_ways():
+    assert len(NAMES) >= 15
+    for name in NAMES:
+        assert c.vectors(name, "valid") and c.vectors(name, "invalid"), f"{name}: valid/ and invalid/ vectors"
+    assert {p.name for p in c.VECTORS.iterdir()} == set(NAMES), "a vectors folder without its schema (or the reverse)"
+    extra = [str(p.relative_to(c.VECTORS)) for p in c.VECTORS.rglob("*") if p.is_file()
+             and (p.parent.name not in ("valid", "invalid") or p.suffix != ".json")
+             and p.relative_to(c.VECTORS).as_posix() != "lease/order.json"]
+    assert extra == [], "files in contracts/vectors/ no test reads"
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_the_schema_is_2020_12_and_says_what_it_is(name):
+    doc = c.load(name)
+    Draft202012Validator.check_schema(doc)
+    assert doc["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert doc["$id"] == f"{ID_BASE}{name}.schema.json"
+    assert doc["title"] and len(doc["description"]) > 80
+    assert doc["x-status"] in c.STATUSES and isinstance(doc["x-version"], int) and doc["x-version"] >= 1
+    assert doc["description"].startswith("Designed (docs/nodes.md") == (doc["x-status"] == "designed")
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_field_has_a_description_and_every_ref_resolves_here(name):
+    doc = c.load(name)
+    resolver = c.registry().resolver(doc["$id"])
+    for path, node in walk(doc):
+        if isinstance(node.get("$ref"), str):
+            resolver.lookup(node["$ref"])                              # raises when it resolves nowhere in contracts/
+    for path, prop in c.properties(doc):
+        target = resolver.lookup(prop["$ref"]).contents if "$ref" in prop else {}
+        assert (prop.get("description") or target.get("description") or "").strip(), f"{name} {path}: no description"
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_objects_take_unknown_keys(name):
+    """The compatibility rule in the schemas themselves: no object refuses a key it does not name (the code under these
+    schemas refuses none: tests/test_contracts_station_state.py sends them). A closed object would have to be listed
+    under Known deviations in contracts/README.md first."""
+    for path, node in walk(c.load(name)):
+        assert node.get("additionalProperties") is not False, f"{name} {path}"
+        assert node.get("unevaluatedProperties") is not False, f"{name} {path}"
+        if node.get("x-complete") is True:
+            assert "properties" in node, f"{name} {path}: x-complete with no properties"
+
+
+def cases(kind):
+    return [pytest.param(name, file, inst, id=f"{name}/{file}") for name in NAMES for file, inst in c.vectors(name, kind)]
+
+
+@pytest.mark.parametrize("name,file,inst", cases("valid"))
+def test_a_valid_vector_validates(name, file, inst):
+    assert not isinstance(inst, c.Unfit), inst
+    assert inst is not c.NOT_JSON, "a valid vector is JSON a strict reader takes"
+    assert c.errors(name, inst) == []
+    # ... names no key the schema does not, but for the stand-ins for a newer build's
+    assert [p for p in c.undeclared(name, inst) if not FUTURE.search(p)] == []
+
+
+@pytest.mark.parametrize("name,file,inst", cases("invalid"))
+def test_an_invalid_vector_is_refused_for_exactly_one_rule(name, file, inst):
+    """One rule each: a vector that breaks two would go on failing after one of them was (wrongly) lifted, and a
+    patched one whose base has since changed under it would fail for a reason of its own."""
+    assert not isinstance(inst, c.Unfit), inst
+    assert inst is c.NOT_JSON or len(c.errors(name, inst)) == 1, c.errors(name, inst)
+
+
+def test_patched_vectors_are_a_base_and_a_json_patch():
+    """A vector that differs from a recorded one in a value or two is written as that: {"base", "patch"} (RFC 6902:
+    add, remove, replace). The base is a plain vector, so re-recording it updates every vector made from it."""
+    files = sorted(c.VECTORS.rglob("*" + c.PATCH))
+    assert len(files) >= 25
+    bases = set()
+    for f in files:
+        doc = c.loads_strict(f.read_text(encoding="utf-8"))
+        assert set(doc) == {"base", "patch"} and (c.VECTORS / doc["base"]).is_file(), f.name
+        assert 1 <= len(doc["patch"]) <= 25 and all(op["op"] in ("add", "remove", "replace") for op in doc["patch"]), f.name
+        assert c.vector(f) != c.vector(c.VECTORS / doc["base"]), f.name
+        bases.add(doc["base"])
+    assert {"station-state/valid/with-status.json", "station-state/valid/with-status-plain.json",
+            "station-state/valid/talking-only.json"} <= bases
+    # no plain vector is big but the recorded bases: a body near a recorded one is a patch, never a copy
+    big = sorted(str(p.relative_to(c.VECTORS)) for p in c.VECTORS.rglob("*.json")
+                 if len(p.read_text(encoding="utf-8")) > 4000)
+    assert big == ["station-state/valid/with-status-plain.json", "station-state/valid/with-status.json"]
+    doc = {"a": [1, 2], "b": {"c": 1}}
+    assert c.patched(doc, [{"op": "add", "path": "/a/-", "value": 3}, {"op": "remove", "path": "/b/c"},
+                           {"op": "replace", "path": "/a/0", "value": 0}, {"op": "add", "path": "/b/x~1y", "value": 1}]) \
+        == {"a": [0, 2, 3], "b": {"x/y": 1}} and doc == {"a": [1, 2], "b": {"c": 1}}
+    for gone in ({"op": "remove", "path": "/b/zz"}, {"op": "replace", "path": "/a/5", "value": 1}):
+        with pytest.raises(AssertionError):
+            c.patched(doc, [gone])                       # a patch that no longer fits its base fails: it never passes
+
+
+def test_a_patch_that_no_longer_fits_is_one_named_failure(tmp_path):
+    """A base re-recorded without a key that a patch removes or replaces: vector() gives an Unfit that names the patch
+    file and the pointer, the two vector tests fail on it by that name, and the file's other tests are still
+    collected."""
+    assert not [inst for kind in ("valid", "invalid") for p in cases(kind) if isinstance(inst := p.values[2], c.Unfit)]
+    base = "station-state/valid/talking-only.json"
+    for n, op in enumerate(({"op": "remove", "path": "/talking/0/no_such_key"},
+                            {"op": "replace", "path": "/no_such/deeper/key", "value": 1},
+                            {"op": "remove", "path": "/talking/99/source"})):
+        f = tmp_path / f"stale-{n}.patch.json"
+        f.write_text(json.dumps({"base": base, "patch": [op]}), encoding="utf-8")
+        got = c.vector(f)
+        assert isinstance(got, c.Unfit) and f.name in got and op["path"] in got and base in got, got
+    f.write_text(json.dumps({"base": base, "patch": [{"op": "add", "path": "/new_key", "value": 1}]}), encoding="utf-8")
+    assert c.vector(f)["new_key"] == 1 and not isinstance(c.vector(f), c.Unfit)
+
+
+def test_no_vector_names_a_machine_or_a_run():
+    """The recorded vectors are scrubbed (tests/contracts.py scrub): no path of a home or temporary folder, and the
+    machine's numbers are the fixed made-up ones."""
+    for f in c.VECTORS.rglob("*.json"):
+        text = f.read_text(encoding="utf-8")
+        assert not re.search(r"/Users/|/home/|/private/|/var/folders|/tmp/|pytest|\.local\b", text), f.name
+    for rel in ("station-state/valid/with-status.json", "station-state/valid/with-status-plain.json"):
+        post = c.vector(c.VECTORS / rel)
+        hl = post["status"]["health"]
+        assert post["at"] == c.T0 and {k: hl[k] for k in c.MACHINE} == c.MACHINE
+        assert (hl["started"], hl["boot"]) == (c.T0 - 3600.0, c.T0 - 86400.0)
+
+
+def test_unknown_keys_are_among_the_valid_vectors_of_every_schema():
+    """Each schema proves the rule on itself: at least one valid vector carries a key from a newer build."""
+    for name in NAMES:
+        if c.load(name).get("allOf"):
+            continue                                   # (the designed extensions: the schema they extend has one)
+        assert any(FUTURE.search(repr(inst)) for _, inst in c.vectors(name, "valid")), name
+
+
+def test_no_valid_vector_has_an_integer_a_float_would_change():
+    """Transport (docs/nodes.md 5): an integer that may pass 2^53 goes as a string. A plain one above it is refused by
+    lease.schema.json's counter, and no valid vector of any schema has one."""
+    def ints(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                yield from ints(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from ints(v)
+        elif isinstance(node, int) and not isinstance(node, bool):
+            yield node
+    for name in NAMES:
+        for file, inst in c.vectors(name, "valid"):
+            assert all(c.float_exact(n) for n in ints(inst)), (name, file)
+    assert c.float_exact(2 ** 53 - 1) and not c.float_exact(2 ** 53 + 1) and float(2 ** 53 + 1) == float(2 ** 53)
+
+
+def test_the_strict_reader_refuses_what_is_not_json():
+    assert c.loads_strict('{"a": 9007199254740993}') == {"a": 9007199254740993}       # exact, never a float
+    for bad in ('{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}', '{"a": 1, "a": 2}'):
+        with pytest.raises(c.NotStrictJson):
+            c.loads_strict(bad)
+
+
+def test_undeclared_finds_a_key_the_schema_does_not_name():
+    """The check that keeps an as-built schema complete, on itself: a key added where the schema lists every key is
+    found at any depth; one added where it does not, or under a map of free keys, is not."""
+    post = dict(c.vectors("station-state", "valid"))["with-status.json"]
+    assert c.undeclared("station-state", post) == []
+    post["status"]["outbox"]["new_counter"] = 1
+    post["talking"] = [dict(dict(c.vectors("station-state", "valid"))["talking-only.json"]["talking"][0], new_flag=True)]
+    post["status"]["health"]["new_gauge"] = 1
+    post["status"]["radios"][2]["freqs"][0]["new_flag"] = True
+    post["status"]["stt_input"]["dropped"]["new_reason"] = 0           # (a map of counts by reason: a key is data)
+    post["status"]["health"]["jobs"]["A new job"] = dict(post["status"]["health"]["jobs"]["Tower"])   # (a map by job)
+    post["status"]["health"]["stt_queue"]["new_gauge"] = 1             # (an object the schema leaves open: a known gap)
+    post["new_top"] = 1
+    assert sorted(c.undeclared("station-state", post)) == [
+        "$.new_top", "$.status.health.new_gauge", "$.status.outbox.new_counter", "$.status.radios[2].freqs[0].new_flag",
+        "$.talking[0].new_flag"]
+    assert c.errors("station-state", post) == []                       # ... while it still validates: keys are open
+
+
+def test_with_unknown_keys_reaches_every_object_the_schema_describes():
+    """The other check on itself: the key from a newer build goes into every object with listed fields, at every
+    depth, and nowhere else; the result is still valid, and what `undeclared` then finds is exactly those."""
+    post = dict(c.vectors("station-state", "valid"))["with-status.json"]
+    out, n = c.with_unknown_keys("station-state", post)
+    assert c.undeclared("station-state", post) == [] and c.errors("station-state", out) == []
+    found = c.undeclared("station-state", out)
+    assert len(found) == n > 50 and all(p.endswith(".from_the_future") for p in found)
+    objects = lambda node: (1 + sum(objects(v) for v in node.values()) if isinstance(node, dict)      # noqa: E731
+                            else sum(objects(v) for v in node) if isinstance(node, list) else 0)
+    # every object of the post but the maps' own level and the few the schema leaves open (contracts/README.md, gaps)
+    assert objects(post) - n < 45
+    jobs = out["status"]["health"]["jobs"]
+    assert "from_the_future" not in jobs and "from_the_future" in jobs["Tower"]
+    assert post == dict(c.vectors("station-state", "valid"))["with-status.json"]         # (a copy: nothing changed)
+
+
+def test_words_are_open_strings_with_the_values_known_today():
+    """The rule for a value, as for a key: a reader takes a word it does not know as unknown and never refuses the
+    body for it. So no schema closes a set of words (`enum`): a word is a string, with the values the code knows
+    today under `x-known`. The one exception narrows a role on purpose (`not`: stt-light never takes a pre-alert
+    class)."""
+    known = 0
+    for name in NAMES:
+        for path, node in walk(c.load(name)):
+            if "/not" in path:
+                continue
+            assert not any(isinstance(v, str) for v in node.get("enum", [])), f"{name} {path}: a closed set of words"
+            if "x-known" in node:
+                known += 1
+                assert node.get("type") in ("string", "array"), (name, path)
+                assert all(isinstance(v, str) for v in node["x-known"]), (name, path)
+    assert known >= 15
+
+
+def test_the_readme_lists_every_schema_with_its_status_and_version():
+    text = (c.ROOT / "README.md").read_text(encoding="utf-8")
+    rows = dict((m[1], (m[2], int(m[3]))) for m in
+                re.finditer(r"^\| `([a-z-]+)` \| (as built|designed) \| (\d+) \|", text, re.M))
+    want = {n: (c.load(n)["x-status"].replace("-", " "), c.load(n)["x-version"]) for n in NAMES}
+    assert rows == want
+
+
+def test_each_known_deviation_is_pinned_by_a_test_or_says_it_was_read():
+    text = (c.ROOT / "README.md").read_text(encoding="utf-8")
+    tests = (c.ROOT.parent / "tests" / "test_contracts_station_state.py").read_text(encoding="utf-8")
+    rows = {m[1]: m[0] for m in re.finditer(r"^\| (D\d+) \|.*$", text, re.M)}
+    assert len(rows) >= 4
+    pinned = set(re.findall(r'def test_known_deviation_\w+\(.*\):\n    \"\"\"(D\d+)\. ', tests))
+    for d, row in rows.items():
+        assert (d in pinned) != ("Found by reading" in row), f"{d}: pinned by a test, or found by reading"
+        assert re.search(r"`[a-z/_.]+\.(py|md):\d+", row), f"{d}: file:line"
+    assert pinned <= set(rows), "a test pins a deviation the README does not list"

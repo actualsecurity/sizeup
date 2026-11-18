@@ -10,6 +10,9 @@
 #   E  an incident-source adapter (#301) from a local repo standing in for the private one: set up, installed into a
 #      copy of A's release, a new adapter commit alone rebuilds, a broken one is never switched to, a rollback brings
 #      the previous adapter back, removed: A without it
+#   F  trunk-recorder's patch (#638) taken out: stock 5.2.0 built in the same source tree (only what the patch touches
+#      compiled again), switched to; G  the patch back: its build reused, nothing compiled; rollback: stock again
+# Before A: the patch tested on the real transmission_sink (tr-split-test.sh), against the build install-linux.sh made.
 set -euo pipefail
 
 WORK=/srv/sizeup-ci
@@ -40,6 +43,9 @@ state_is() { [ "$(field 'd.get("state")')" = "$1" ] && [ "$(field 'd.get("hub")'
 push() { gitc commit -q -am "$1"; gitc push -q --force "$BARE" main; gitc rev-parse HEAD; }
 hub_runs() { echo "$1" > "$WANT"; }      # what the station writes when the hub reports that build
 
+say "trunk-recorder's patch (#638) on the real transmission_sink"
+"$here/.github/scripts/tr-split-test.sh" /opt/sizeup/src/trunk-recorder
+
 say "A: a local repo, and the station on git"
 rm -rf "$WORK"
 mkdir -p "$SRC"
@@ -54,6 +60,10 @@ test "$(current)" = "$A"
 systemctl daemon-reload
 systemctl restart sizeup-station.service
 wait_for 120 is_build "$A"
+# no settling here (a burst of hub deploys coalesced: tests/test_autoupdate.py), so each step switches at once
+mkdir -p /etc/systemd/system/sizeup-update.service.d
+printf '[Service]\nEnvironment=SIZEUP_UPDATE_SETTLE_S=0\n' > /etc/systemd/system/sizeup-update.service.d/ci-no-settle.conf
+systemctl daemon-reload
 systemctl enable --now sizeup-update.path sizeup-update.timer
 sizeup-station status || true
 
@@ -240,4 +250,65 @@ wait_for 600 release_is "$A"
 wait_for 300 idle
 wait_for 60 is_build "$A"
 test ! -e /opt/sizeup/current/ADAPTER.json && test -z "$(in_venv /opt/sizeup/current)"
+
+say "F: trunk-recorder's patch (#638) taken out: stock 5.2.0, built in the same source tree"
+tr_link() { readlink -f /opt/sizeup/trunk-recorder; }
+mtime() { stat -c %Y "$1"; }
+obj=/opt/sizeup/src/trunk-recorder/build/CMakeFiles/trunk_recorder_library.dir/trunk-recorder
+f_why() {      # what F/G saw, when a check fails
+  echo "--- trunk-recorder link: $(tr_link) (patched: $patched)"
+  ls -ld /opt/sizeup/builds/trunk-recorder* || true
+  stat -c '%Y %n' "$obj/talkgroup.cc.o" "$obj/gr_blocks/transmission_sink.cc.o" || true
+  grep -c "Building CXX" /var/log/sizeup-install.log || true
+  tail -n 40 /var/log/sizeup-install.log || true
+  tail -n 5 /var/log/sizeup-update.log || true
+}
+check() {      # check WHAT CMD...: say it, run it, and on failure say why
+  local what=$1
+  shift
+  if "$@"; then echo "ok: $what"; else echo "FAILED: $what" >&2; f_why >&2; return 1; fi
+}
+patched=$(tr_link)
+check "the running build is the patched one ($patched)" grep -Eq -- '-p[0-9a-f]{8}$' <<<"$patched"
+untouched=$(mtime "$obj/talkgroup.cc.o")
+sink0=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
+built0=$(grep -c "Building CXX" /var/log/sizeup-install.log || true)
+echo "before F: talkgroup.o $untouched, transmission_sink.o $sink0, $built0 objects compiled so far"
+gitc reset -q --hard "$A"
+python3 - "$SRC/deploy/station/install-linux.sh" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+t = re.sub(r"(tr_patch\(\) \{\n)  cat <<'PATCH'\n.*?\nPATCH\n\}", lambda m: m.group(1) + "  :\n}", s, count=1, flags=re.S)
+assert t != s
+open(p, "w").write(t)
+PY
+F=$(push F)
+trpid=$(tr_pid)
+hub_runs "$F"
+echo "F is $F: waiting for the station to build and switch to it"
+check "the station switched to F" wait_for 1200 state_is current "$F"
+check "F is current" test "$(current)" = "$F"
+check "the stock build runs: $(tr_link)" test "$(tr_link)" = "${patched%-p*}"
+built=$(( $(grep -c "Building CXX" /var/log/sizeup-install.log || true) - built0 ))
+echo "F compiled $built objects"
+check "an incremental build: talkgroup.o untouched" test "$(mtime "$obj/talkgroup.cc.o")" = "$untouched"
+check "transmission_sink.o compiled again" test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" -gt "$sink0"
+check "trunk-recorder's service restarted (it runs another build)" test "$(tr_pid)" != "$trpid"
+check "the patched build stays for A" test -d "$patched"
+
+say "G: the patch back: its build reused, nothing compiled"
+gitc checkout -q "$A" -- deploy/station/install-linux.sh
+G=$(push G)
+built=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
+hub_runs "$G"
+check "the station switched to G" wait_for 600 state_is current "$G"
+check "the patched build runs again" test "$(tr_link)" = "$patched"
+check "nothing compiled for G" test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" = "$built"
+check "trunk-recorder: up to date" grep -q "trunk-recorder: up to date" /var/log/sizeup-install.log
+
+say "rollback: stock again"
+sizeup-station rollback
+check "back on F" test "$(current)" = "$F"
+check "the stock build runs" test "$(tr_link)" = "${patched%-p*}"
 say "ok"

@@ -18,6 +18,11 @@ all-in-one), on its own thread, a few at a time:
                 reserve; otherwise the local model (the station's whisper: its catch_up call), in the CATCHUP class:
                 under every other clip, started only after a quiet spell with nothing of ours heard, one greedy pass,
                 one try, a short timeout, at most MAX_CLIP_S of audio (sizeup/stt.py)
+    the pool    a GPU worker ready (sizeup/sttpool.py, #639): route "pool" first, whatever the channel's engine. It doesn't
+                wait for whisper to be idle; fire work pauses it like the rest (a worker busy on old clips is one the
+                pre-alerts can't have). Quiet all the same, POOL_BATCH a tick, up to POOL_MAX_CLIP_S long. A clip the
+                pool hands back untried (no worker took it) is forgotten here, no try burnt: the next tick routes it
+                again; a lease lost on it is a failed try on its row
     bounds      WHISPER_BATCH clips to whisper a tick and none more until the station says they are done,
                 AWS_BATCH per channel; a try that failed is on the row (rerun_result "failed: why; catch-up try N":
                 it outlives a restart and a handover) and is tried again after RETRY_S, at most MAX_TRIES times; a
@@ -47,6 +52,8 @@ RETRY_S = 900.0            # a clip sent that is still skipped this long after: 
 MAX_TRIES = 2              # ... at most this many times in all
 FETCH = 60                 # eligible rows taken a tick
 MAX_CLIP_S = CATCHUP_MAX_CLIP_S   # a longer clip never goes to whisper (AWS takes it, on a channel that may)
+POOL_BATCH = 20            # clips handed to the GPU pool a tick (#639)
+POOL_MAX_CLIP_S = CATCHUP_MAX_CLIP_S   # ... each at most this long (the catch-up's own cap, on any worker)
 CAUGHT_CACHE_S = 60.0      # the 24 h count is read from the radio log this often
 DEFAULT_MAX_AGE_H = 6.0
 MAX_AGE_RANGE_H = (0.5, 48.0)
@@ -76,12 +83,13 @@ class CatchUp:
         pause()               why nothing is caught up now ("" = go): fire work first
         scan(since, limit, sort)   Comms.shed_clips: (the eligible rows in order, how many rows got each word)
         caught(since)         how many were caught up since then
-        route(key)            "aws" | "whisper" | "" (not transcribed now)
+        route(key)            "pool" | "aws" | "whisper" | "" (not transcribed now)
         whisper_ready(after)  (ok, why): whisper idle, and its word on that taken after `after` (the last batch sent)
         aws_idle(key)         nothing of that channel's open on AWS
         to_whisper(specs)     {queued: [ids], refused: {id: why}, hold: why}; None: the call itself failed
         to_aws(row)           (sent, why it never can be)
-        give_up(id, why)      say on the row that it is given up (no recording, too long)"""
+        give_up(id, why)      say on the row that it is given up (no recording, too long)
+        to_pool(row)          (sent, why it never can be) to the GPU pool; (False, "") = not now (#639)"""
 
     def __init__(self, *, settings: Callable[[], tuple[bool, float]], may_run: Callable[[], bool],
                  pause: Callable[[], str], scan: Callable[..., tuple[list[dict], dict]], caught: Callable[[float], int],
@@ -89,11 +97,12 @@ class CatchUp:
                  aws_idle: Callable[[str], bool], to_whisper: Callable[[list[dict]], dict | None],
                  to_aws: Callable[[dict], tuple[bool, str]], give_up: Callable[[str, str], None],
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 max_clip_s: float = MAX_CLIP_S):
+                 max_clip_s: float = MAX_CLIP_S, to_pool: Callable[[dict], tuple[bool, str]] | None = None):
         self.settings, self.may_run, self.pause, self.scan, self.caught = settings, may_run, pause, scan, caught
         self.route, self.whisper_ready, self.aws_idle = route, whisper_ready, aws_idle
         self.to_whisper, self.to_aws, self.give_up, self.log, self.clock = to_whisper, to_aws, give_up, log, clock
         self.max_clip_s = float(max_clip_s)
+        self.to_pool = to_pool or (lambda row: (False, ""))
         self._sent: dict[str, tuple[int, float]] = {}       # id -> (times sent by this process, last sent)
         self._whisper_at = 0.0                               # the last batch handed to whisper
         self._caught: tuple[float, int | None] = (0.0, None)  # (read at, the 24 h count)
@@ -139,6 +148,8 @@ class CatchUp:
             if tries >= MAX_TRIES or (n >= MAX_TRIES and now - at >= RETRY_S):
                 return "gave up"
             if how == "whisper" and float(r.get("seconds") or 0.0) > self.max_clip_s:
+                return "too long"
+            if how == "pool" and float(r.get("seconds") or 0.0) > POOL_MAX_CLIP_S:
                 return "too long"
             if n and now - at < RETRY_S:
                 return "in flight" if n > tries else "retry later"
@@ -192,15 +203,15 @@ class CatchUp:
             self.state["why"] = "nothing to catch up"
             return 0
         paused = self.pause()
-        if paused:                                       # fire work first: nothing goes, to whisper or to AWS
+        if paused:                                       # fire work first: nothing goes, to the pool, whisper or AWS
             self.state["why"] = f"paused: {paused}"
             return 0
+        sent, why = self._pool(rows, now)                # the GPU pool (#639) first
         whisper = [r for r in rows if r.get("route") == "whisper"]      # (in order: the alert tier, then the newest)
         aws: dict[str, list[dict]] = {}
         for r in rows:
             if r.get("route") == "aws":
                 aws.setdefault(str(r["key"]), []).append(r)
-        sent, why = 0, []
         for key, rs in aws.items():
             if not self.aws_idle(key):
                 why.append(f"{key}: AWS busy")
@@ -233,6 +244,24 @@ class CatchUp:
         self.state["sent"] = self.state.get("sent", 0) + sent
         self.state["why"] = "; ".join(why)
         return sent
+
+    def _pool(self, rows: list[dict], now: float) -> tuple[int, list[str]]:
+        """The rows routed to the GPU pool, POOL_BATCH at most: (how many went, why the rest waits)."""
+        sent = 0
+        for r in [r for r in rows if r.get("route") == "pool"][:POOL_BATCH]:
+            ok, never = self.to_pool(r)
+            if ok:
+                self._note_sent(str(r["id"]), now)
+                sent += 1
+            elif never:
+                self.give_up(str(r["id"]), never)
+            else:
+                return sent, ["GPU pool: busy"]
+        return sent, []
+
+    def forget(self, cid: str) -> None:
+        """A clip the pool handed back: not counted as sent, so the next tick routes it again (no try burnt)."""
+        self._sent.pop(str(cid), None)
 
     def _note_sent(self, cid: str, now: float) -> None:
         n, _at = self._sent.get(cid, (0, 0.0))

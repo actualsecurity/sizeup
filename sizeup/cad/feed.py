@@ -12,11 +12,23 @@ Settings come from the data file (data/cad_lists.json, "comms_feed"):
     talkgroups   P25 talkgroups shown (default [307] Fire/EMS 15; add 333 for an Airport incident)
     limit        how many transmissions (default 6)
     phrases      words that mean a transmission is about us ("Port Chester", "PCFD", "headquarters" ...)
+    raise_words  the words after a short name of ours that make it 60 Control raising us ("base", "command" ...)
+    short_names  more short names of ours besides the home town's initials and the joint-response tags (PC, RB)
 
 A transmission is "talking to us" (rows[i]["pc"] says why) when its transcript or talker names a
-phrase, or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
+phrase, one of our short names raising us ("PC", "RB": Matcher._short_ours; at the addressee, "60 Control to PC", or
+before a raise word, "PC base", "RB units"; comms_feed.raise_words), or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
 or it is 60 Control's turn right before or after such a unit's turn in the same P25 call (looking past
-the key-ups of unknown radios in between).
+the key-ups of unknown radios in between). A base phrase ("headquarters", "HQ", "base") counts only when it is ours:
+bare ("60 Control to headquarters") or named ours ("Port Chester headquarters", "Rye Brook headquarters"), never
+another town's or department's ("Rye headquarters", "Harrison base"; the CAD's towns and aliases and the county's
+towns and departments; nor another service's: "Rye PD headquarters"). Whom it is to decides: a bare one among the
+addressees is ours whatever other departments' bases follow ("60 Control to headquarters, ... cover Rye
+headquarters", "Rye and headquarters, 60 Control, mutual aid"); with none there, a bare one in a transmission to
+another department isn't ("Harrison, 60 Control, contact headquarters"). Speech-to-text's "right headquarters" /
+"right face" at the addressee ("60s to right headquarters right face.") are read as Rye's for this (read_rye), never
+an acknowledgement ("That's right headquarters"); the transcript stays as heard. The CAD feed's "PC" badge and the 60 Control column's "Possible incoming"
+(sizeup/cad/sources.py consider_radio) both decide by Matcher.match.
 
 A page whose tones aren't ours but whose text names our units (#115, South 2 2026-10-14 07:04: "6462 to rescue
 40, ... Westchester County Airport", tones nobody's code matched) is flagged (rows[i]["names_ours"]: the unit
@@ -32,11 +44,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from sizeup.sourcekeys import COUNTY
 from sizeup.cad.comms import _tones, events_of, with_alarms
-from sizeup.cad.lists import Lists, ListsError
+from sizeup.cad.lists import HOME_DEPARTMENT, Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
 
 DEFAULT_TITLE = "60 Control · Fire/EMS 15"
@@ -44,6 +57,12 @@ DEFAULT_TGS = (307,)
 DEFAULT_LIMIT = 6
 MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
+# The words after one of our short names ("PC", "RB": short_names) that make it 60 Control raising us ("60s to PC base",
+# "PC Command", "RB units"); the data file's comms_feed.raise_words replaces them. Never EMS / ambulance: "PC Rye EMS"
+# is another agency (the ambulance), not PCFD.
+DEFAULT_RAISE_WORDS = ("base", "field", "fire", "FD", "F.D.", "department", "command", "units", "headquarters", "HQ",
+                       "quarters", "station", "firehouse", "house", "dispatch", "central", "alarm", "desk", "chief",
+                       "chiefs", "duty officer", "engine", "ladder", "rescue", "tower")
 PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
 # A chief's code (all digits, "2391") heard as a number is never a house number read out before a street ("2391 Example
 # Drive", unless a command or status word follows: "2391 Example Drive command" is the chief naming his command), a
@@ -75,6 +94,112 @@ BARE_STREET = re.compile(r"\s*,?\s+" + STREET_NAME + r"(?:" + STREET_WORDS + r"|
 # never right after to / at / respond(ing) to ("responding to 6462": an address)
 SPLIT_NEXT = re.compile(r"\s*(?:to\b|,?\s*(?:engine|ladder|tower|rescue|utility|marine|medic|car|truck)\b|[.;!?]|$)", re.I)
 SPLIT_NOT_AFTER = re.compile(r"\b(?:to|at)$", re.I)
+
+# A "headquarters" phrase ("headquarters", "HQ", "base", "fire headquarters") is ours only when nothing makes it another
+# department's (2026-11-17: 60 Control's "60s to right headquarters right face." and "16 Rye headquarters." were Rye
+# FD's, flagged PC and raised "Possible incoming"): Matcher._base_ours. Bare, it is still ours ("60 Control to
+# headquarters": how 60 Control calls our HQ), unless the transmission is to another department.
+BASE_PHRASE = re.compile(r"(?:fire\s+)?(?:head\s*quarters?|h\.?\s?q\.?|base|quarters)", re.I)
+BASE_WORD = r"(?:fire\s+)?(?:head\s*quarters|h\.?q\.?|base)"
+# between a town and its base: "Rye FD headquarters", "Rye Fire Department base", "Rye's headquarters"
+QUALIFIER_FILLER = {"fire", "fd", "f", "d", "department", "dept", "volunteer", "vol", "s"}
+# ... another service's: "Rye PD headquarters", "Sample EMS base", "police headquarters" are never a fire department's
+AGENCY_FILLER = {"pd", "p", "police", "ems", "vac", "ambulance"}
+QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dots of "F.D.", "H.Q."
+WHOSE_WINDOW = 120                       # how far before a base its qualifier is looked for (characters)
+# who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
+ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
+# another agency of the same town: "PC PD", "RB Police", "PC EMS", "PC Ambulance", "PC Rye EMS" (the ambulance), and
+# its radios' aliases with a number after ("PC-EMS5-M", "PC AMB 1", "PCPD3")
+AGENCY_AFTER = re.compile(r"[\s-]*(?:rye\s+)?(?:P\.?\s?D\.?|police|E\.?\s?M\.?\s?S\.?|ambulance|ambo|amb|medic|"
+                          r"V\.?A\.?C\.?)(?![A-Za-z])", re.I)
+ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
+# the words an addressee list is made of besides town names: "Rye and headquarters", "16 Rye FD headquarters"
+ADDRESSEE_WORDS = QUALIFIER_FILLER | AGENCY_FILLER | {"and", "head", "headquarters", "quarters", "hq", "h", "q", "base"}
+# Speech-to-text hears "Rye" as "right" before a base ("right headquarters", "right HQ", "right base"; "right face" for
+# "Rye base"): read as Rye for this decision only (the stored transcript is never changed), and only where the
+# addressee is: right after 60 Control's "60s to" / "60 Control to" / "60 to" ("60s to right headquarters right face."),
+# or as the first words before a base ("Right headquarters, 60 Control"). Never an acknowledgement whose comma STT
+# dropped: "That's right headquarters", "Copy right headquarters", "Right face, 60 Control to headquarters".
+CALL_TO = re.compile(r"^\W*(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*to\s+", re.I)
+RIGHT_LEAD = re.compile(r"right(?=\s+" + BASE_WORD + r"(?!\w))", re.I)
+RIGHT_CALLED = re.compile(r"right(?:\s+face)?(?=\s+(?:" + BASE_WORD + r")(?!\w)|\s*[,.;:!?]|\s*$)|right\s+face(?!\w)", re.I)
+RIGHT_MORE = re.compile(r"(\s+)right\s+(?:face|base)(?!\w)", re.I)       # "... headquarters right face": Rye base too
+LEAD_BASE = re.compile(r"\s+" + BASE_WORD + r"(?!\w)", re.I)
+
+
+def _words(s: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", s.lower()))
+
+
+def read_rye(text: str) -> str:
+    """The words as whose-base reads them: STT's "right" for Rye at the addressee ("60s to right headquarters right
+    face." -> "60s to Rye headquarters Rye base."; "right headquarters, ..." at the start -> "Rye headquarters, ...").
+    Anywhere else "right" stays ("That's right headquarters"). For this decision only: the stored transcript is never
+    changed."""
+    t = text or ""
+    call = CALL_TO.match(t)
+    at = call.end() if call else len(t) - len(t.lstrip())
+    m = (RIGHT_CALLED if call else RIGHT_LEAD).match(t, at)
+    if not m:
+        return t
+    face = m.group(0).lower().endswith("face")
+    out = t[:at] + ("Rye base" if face else "Rye") + t[m.end():]
+    pos = at + 3                                      # after "Rye": its base, then more of Rye's ("right face")
+    while (b := LEAD_BASE.match(out, pos)) and (more := RIGHT_MORE.match(out, b.end())):
+        out = out[:b.end()] + more.group(1) + "Rye base" + out[more.end():]
+        pos = b.end() + len(more.group(1)) + 3
+    return out
+
+
+@lru_cache(maxsize=1)
+def _county_qualifiers() -> dict[tuple[str, ...], str]:
+    """The county's towns and departments (data/westchester_towns.txt, westchester_departments.csv and the EMS file's
+    places: sizeup/cad/sources.py county_towns, sizeup/cad/tonelist.py county_places): {name words: name}."""
+    from sizeup.cad.sources import county_towns
+    from sizeup.cad.tonelist import county_places
+    out = {k: v for k, v in county_towns().items() if k}
+    for p in county_places():
+        out.setdefault(_words(p), p)
+    return {k: v for k, v in out.items() if k}
+
+
+def qualifiers(lists: Lists | None = None) -> tuple[dict[tuple[str, ...], str], frozenset[str]]:
+    """({name words: town or department}, the ones that are ours) for Matcher._base_ours: the county's, then the CAD's
+    towns and aliases (geo_town_order, geo_town_aliases: "purchase" is Harrison, "rye neck" Mamaroneck, "city of rye"
+    Rye). Ours: the home department's town and the joint-response towns (Port Chester, Rye Brook; "PC", "PCFD")."""
+    home = re.sub(r"\s+(?:FD|Fire(?:\s+Department)?)$", "", HOME_DEPARTMENT).strip()
+    joint = getattr(lists, "joint_response", None) if lists is not None else None
+    ours = {home, *(joint if joint is not None else ("Rye Brook",))}
+    towns = dict(_county_qualifiers())
+    if lists is not None:
+        for t in getattr(lists, "geo_town_order", ()) or ():
+            towns[_words(t)] = t
+        for a, t in (getattr(lists, "geo_town_aliases", None) or {}).items():
+            towns[_words(a)] = t
+    for t in ours:
+        towns[_words(t)] = t
+    initials = "".join(w[0] for w in home.split()).lower()
+    towns[(initials,)] = towns[(initials + "fd",)] = home
+    towns.pop((), None)
+    return towns, frozenset(ours)
+
+
+def short_names(lists: Lists | None = None, extra=()) -> tuple[str, ...]:
+    """Our departments' short names: the home department's town's initials ("PC") and each joint-response town's tag
+    (joint_response.<town>.tag, "RB"), then the data file's comms_feed.short_names."""
+    home = re.sub(r"\s+(?:FD|Fire(?:\s+Department)?)$", "", HOME_DEPARTMENT).strip()
+    joint = getattr(lists, "joint_response", None) if lists is not None else None
+    tags = [str(j.get("tag") or "") for j in joint.values()] if joint is not None else ["RB"]
+    return tuple(dict.fromkeys(n.upper() for n in ["".join(w[0] for w in home.split()), *tags, *extra] if n))
+
+
+def _short_re(name: str) -> str:
+    """'PC' -> P.C. / P C / PC, with an optional FD after ('PCFD', 'P.C.F.D.', 'PC FD'): capitals only, a token of its
+    own (never inside "PCPD", "EPC" or "UPC")."""
+    letters = r"\.?\s?".join(re.escape(ch) for ch in name) + r"\.?"
+    return r"(?<![\w.])(?:" + letters + r")(?P<fd>[\s-]?F\.?\s?D\.?)?(?![\w])"
+
 
 def _phrase_re(p: str) -> str:
     """'Port Chester' -> Port[\\s-]*Chester ('Portchester', 'Port-Chester'); an acronym 'PCFD' also
@@ -128,6 +253,10 @@ class FeedCfg:
     phrases: tuple[str, ...] = DEFAULT_PHRASES
     units: dict[str, str] = field(default_factory=dict)      # code -> spoken: PCFD's and Rye Brook's units
     kinds: dict[str, str] = field(default_factory=dict)      # code -> kind ("chief", "engine" ...)
+    towns: dict[tuple[str, ...], str] | None = None           # whose base: qualifiers(lists) (None: the county's)
+    ours: frozenset[str] | None = None
+    short: tuple[str, ...] | None = None                      # our short names: short_names(lists) ("PC", "RB")
+    raise_words: tuple[str, ...] = DEFAULT_RAISE_WORDS
 
 
 def load_cfg(lists: Lists) -> FeedCfg:
@@ -158,20 +287,45 @@ def load_cfg(lists: Lists) -> FeedCfg:
     title = f.get("title", DEFAULT_TITLE)
     if not isinstance(title, str) or not title.strip():
         raise ListsError(f"{where}: comms_feed.title: text")
+    raise_words = f.get("raise_words", list(DEFAULT_RAISE_WORDS))
+    if not isinstance(raise_words, list) or not all(isinstance(p, str) and p.strip() for p in raise_words):
+        raise ListsError(f"{where}: comms_feed.raise_words: a list of words or phrases (\"base\", \"command\" ...)")
+    extra = f.get("short_names", [])
+    if not isinstance(extra, list) or not all(isinstance(n, str) and re.fullmatch(r"[A-Za-z]{2,6}", n) for n in extra):
+        raise ListsError(f"{where}: comms_feed.short_names: a list of 2-6 letter names (\"PC\")")
     joint = set(lists.joint_response)
     units = {c: str(u.get("spoken") or "") for c, u in lists.units.items()
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
-             and (not u.get("department") or u.get("department") in joint)}
+             and (not u.get("department") or u.get("department") in joint)
+             and lists.response(c) == "fire"}           # answers as fire: an apparatus kind Settings marks mutual aid or
+                                                         # another agency's (response) is not ours
     kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
-    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds)
+    towns, ours = qualifiers(lists)
+    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds,
+                   towns, ours, short_names(lists, extra), tuple(w.strip() for w in raise_words))
 
 
 class Matcher:
     """Is a transmission about us? match(text, talker, rig) -> the reason ('Port Chester', 'E60'), or ''."""
 
-    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None):
+    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None,
+                 towns: dict[tuple[str, ...], str] | None = None, ours: frozenset[str] | None = None,
+                 short: tuple[str, ...] | None = None, raise_words: tuple[str, ...] | list[str] = DEFAULT_RAISE_WORDS):
+        """towns, ours: qualifiers(lists) (None: the county's, Port Chester and Rye Brook ours); short: short_names(lists)
+        (None: PC, RB); raise_words: the words after a short name that make it ours."""
         kinds = kinds or {}
-        self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I)) for p in phrases]
+        if towns is None or ours is None:
+            towns, ours = qualifiers(None)
+        self.towns, self.ours = towns, ours
+        self.longest = max((len(k) for k in towns), default=1)
+        short = short_names(None) if short is None else short
+        self.short = [(n, re.compile(_short_re(n))) for n in short]
+        self.town_words = {w for k in towns for w in k} | {x for n in short for x in (n.lower(), *n.lower())}
+        words = sorted((w.strip() for w in raise_words if w.strip()), key=len, reverse=True)
+        self.raise_re = re.compile(r"[\s-]*(?:" + "|".join(_phrase_re(w) for w in words) + r")(?![\w])", re.I) \
+            if words else None
+        self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I),
+                         bool(BASE_PHRASE.fullmatch(p.strip()))) for p in phrases]        # (phrase, regex, a base?)
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
@@ -211,14 +365,115 @@ class Matcher:
                 out += codes
         return out
 
-    def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
+    def _whose(self, before: str) -> str:
+        """The town or department named right before a base ("16 Rye headquarters": Rye; "Rye FD headquarters",
+        "Rye's base", "Rye Brook headquarters": Rye Brook, the longest name), '' when none is (across a comma or a
+        sentence's end it never is: "Rye. Headquarters ..."). Another service's ("Rye PD headquarters", "EMS base",
+        "police headquarters") is never ours: "<town> PD" or "PD". before: the text just before the base (a window)."""
+        cut = max((m.end() for m in QUALIFIER_BREAK.finditer(before)), default=0)
+        w = list(_words(before[cut:]))[-(self.longest + 4):]
+        agency = ""
+        while w and w[-1] in QUALIFIER_FILLER | AGENCY_FILLER:
+            if w[-1] in AGENCY_FILLER and w[-1] != "p":
+                agency = "PD" if w[-1] in ("pd", "police") else "EMS"
+            w.pop()
+        for n in range(min(self.longest, len(w)), 0, -1):
+            t = self.towns.get(tuple(w[-n:]))
+            if t:
+                return f"{t} {agency}" if agency else t
+        return agency
+
+    def _addressed_elsewhere(self, text: str) -> bool:
+        """The transmission is to another department: its first words (past "60 Control to", "60's to") name another
+        town or department ("Harrison, 60 Control ...", "60's to Rye ..."), never a street ("Harrison Avenue ...")."""
+        rest = text[ADDRESSEE.match(text).end():]
+        rest = rest[:next((m.start() for m in QUALIFIER_BREAK.finditer(rest)), len(rest))]
+        w = _words(rest)
+        for n in range(min(self.longest, len(w)), 0, -1):
+            t = self.towns.get(w[:n])
+            if t:
+                end = re.match(r"\W*" + r"\W+".join(map(re.escape, w[:n])), rest, re.I)
+                return t not in self.ours and not (end and ADDRESSEE_STREET.match(rest[end.end():]))
+        return False
+
+    def _addressee_end(self, text: str, lead: int) -> int:
+        """Where the addressees end: only towns, departments, numbers, "and" and bases from the addressee's start
+        ("60s to Rye headquarters Rye base", "Rye and headquarters, 60 Control", "16 Rye headquarters"), up to a comma,
+        a sentence's end or any other word ("60 Control to headquarters relocate ...")."""
+        stop = QUALIFIER_BREAK.search(text, lead)
+        end = stop.start() if stop else len(text)
+        for w in re.finditer(r"[a-z0-9]+", text[lead:end], re.I):
+            x = w.group(0).lower()
+            if not (x.isdigit() or x in ADDRESSEE_WORDS or x in self.town_words):
+                return lead + w.start()
+        return end
+
+    def _base_ours(self, text: str, rx: re.Pattern) -> bool:
+        """A base phrase ("headquarters", "HQ", "base") is ours when one is named ours ("Port Chester headquarters",
+        "PC base", "Rye Brook headquarters"); else by whom the transmission is to: a bare base among its addressees
+        is ours ("60 Control to headquarters, ... cover Rye headquarters", "Rye and headquarters, 60 Control, mutual
+        aid"), only others' bases there never are ("60s to right headquarters right face.": read_rye, "16 Rye
+        headquarters."). With no base among the addressees: ours when every one is bare and the transmission isn't
+        to another department ("Harrison, 60 Control, contact headquarters" isn't)."""
+        text = read_rye(text)
+        hits = [m.start() for m in rx.finditer(text)]
+        whose = [self._whose(text[max(0, at - WHOSE_WINDOW):at]) for at in hits]
+        if not whose:
+            return False
+        if any(w in self.ours for w in whose):
+            return True
+        lead = ADDRESSEE.match(text).end()
+        end = self._addressee_end(text, lead)
+        addressed = [w for at, w in zip(hits, whose) if lead <= at < end]
+        if addressed:
+            return not all(addressed)
+        return not any(whose) and not self._addressed_elsewhere(text)
+
+    @classmethod
+    def of(cls, cfg: FeedCfg) -> "Matcher":
+        return cls(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours, cfg.short, cfg.raise_words)
+
+    def _short_ours(self, text: str, talker: bool = False) -> str:
+        """One of our short names said as 60 Control raising us: "PC" / "RB" (as written or "P.C.", "P C") at the
+        addressee ("60 Control to PC", "60s to RB", "PC, 60 Control", "Harrison and PC, 60 Control"), or followed by a
+        raise word ("PC base", "P.C. Command", "RB units", "PC Ambulance"); with FD it is ours anywhere ("RBFD", "PC
+        FD"). Never inside another word ("PCPD", "UPC"), another town's ("Rye PC base"), nor another agency ("PC PD",
+        "PC EMS", "PC Ambulance", "PC Rye EMS"). talker: a radio's alias, never an addressee nor raising anyone: ours only
+        with FD ("PCFD-2391", "PC-FD"), never "PC CAR 1" or "PC-EMS5-M" (the unit codes of ours: match's units)."""
+        lead = end = None
+        for n, rx in self.short:
+            for m in rx.finditer(text):
+                if AGENCY_AFTER.match(text, m.end()):
+                    continue                                           # "PC PD", "PC EMS": another agency
+                w = self._whose(text[max(0, m.start() - WHOSE_WINDOW):m.start()])
+                if w and w not in self.ours:
+                    continue                                           # another town's ("Rye PC base")
+                if m.group("fd"):
+                    return n + "FD"
+                if talker:
+                    continue
+                if self.raise_re and self.raise_re.match(text, m.end()):
+                    return n
+                if lead is None:
+                    lead = ADDRESSEE.match(text).end()
+                    end = self._addressee_end(text, lead)
+                if lead <= m.start() < max(end, lead + 1):
+                    return n
+        return ""
+
+    def match(self, text: str = "", talker: str = "", rig: str = "", short: bool = True) -> str:
+        """short=False: our short names don't count (a page: judged by its tones, sizeup/cad/sources.py consider_radio;
+        "6 PC Rye EMS ..." is the ambulance's page). The full names (phrases) and units do."""
         for r in (x.strip() for x in (rig or "").split(",")):
             if r in self.codes:
                 return r
         hay = f"{talker or ''}\n{text or ''}"
-        for p, rx in self.phrases:
-            if rx.search(hay):
+        for p, rx, base in self.phrases:
+            if (any(self._base_ours(s, rx) for s in (talker or "", text or "")) if base else rx.search(hay)):
                 return p
+        for s, alias in ((talker or "", True), (text or "", False)) if short else ():
+            if s and (n := self._short_ours(s, alias)):
+                return n
         found = [(m.start(), c) for c, rx in self.units if (m := rx.search(hay))]
         return min(found)[1] if found else ""          # the first one named
 
@@ -248,8 +503,20 @@ class Feed:
         L = self._lists()
         if L is not self._for:
             self.cfg = load_cfg(L)
-            self.matcher = Matcher(self.cfg.phrases, self.cfg.units, self.cfg.kinds)
+            self.matcher = Matcher.of(self.cfg)
             self._for = L
+
+    def shows(self, row: dict) -> bool:
+        """Whether state()'s rows() may hold this transmission ({talkgroup, channel, system}): the same test as its query.
+        Anything it can't tell: yes (Comms.record then rebuilds the console's state, as for any write)."""
+        try:
+            self._refresh()
+            tg = row.get("talkgroup")
+            if tg is None:
+                return str(row.get("channel") or "") in self.paging
+            return int(tg) in {int(x) for x in self.cfg.talkgroups} and str(row.get("system") or "") in ("", COUNTY)
+        except Exception:  # noqa: BLE001
+            return True
 
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:
         """The newest transmissions on the feed's talkgroups, newest first, each with pc (why it is

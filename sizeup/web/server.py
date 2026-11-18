@@ -10,8 +10,9 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
-POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
@@ -43,7 +44,9 @@ POST /api/station-mode {"forward": bool?, "hub_url": str?, "operator": str?}  on
 POST /api/station-mode/test {"hub_url": str?}  the hub's /healthz and station path with the token
 GET  /cad                      the PCFD dispatch console (static/cad.html); its API is /api/cad/... (sizeup/cad/api.py).
                                Views: Dispatch, Overview, Radio (/cad#radio?unit=&channel=&event=&q=: every transmission
-                               with its rig, radio ID, channel and events), Settings (/cad#settings/<section>)
+                               with its rig, radio ID, channel and events), Settings (/cad#settings/<section>).
+                               Its scripts and stylesheets as one file each when the image built them
+                               (static/bundle/, sizeup/web/bundle.py); /cad?bundle=0: the separate files
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
 Caching (#137): /static/... named by version from the pages (?v=, kept a year), else revalidated (ETag, 304);
 the layers' data (airport, GIS catalog and layers, roads) ETag + max-age, must-revalidate; text gzipped.
@@ -70,6 +73,8 @@ POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every threa
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
 GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
+POST /api/cad/health/dismiss {kind}  the hub only, admins: Health's Dismiss on a station event the hub refused (stuck,
+                               or an alarm delivered late): the station drops those (Hub.dismiss_rejected), audited
 GET  /api/cad/health           the hub only: Settings > Station > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
@@ -137,10 +142,12 @@ from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
 from sizeup.api.v1.handler import BODY_METHODS, V1, BodyRefused
+from sizeup.web import bundle as bundle_mod
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
-V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not ALL come in this long: 408 (a dribbling device holds no slot)
+V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not come in this long IN TOTAL: 408 (a dribbling device holds no slot)
+HEALTH_DISMISS = "/api/cad/health/dismiss"   # Health's Dismiss (Hub.dismiss_rejected)
 # Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
 COMMON_PLACES_PATH = "/api/cad/settings/common_places"
 MAX_COMMON_PLACES_BODY = 4608 * 1024
@@ -184,14 +191,17 @@ def compressible(ctype: str) -> bool:
 class Assets:
     """The static folder as served: each file's bytes, ETag, version (from its content) and gzip, re-read
     when it changes on disk. Pages (.html) and stylesheets have their /static/... references versioned
-    (?v=<the file's version>), so a browser keeps each version for good and a deploy names new ones."""
+    (?v=<the file's version>), so a browser keeps each version for good and a deploy names new ones. A page's
+    bundle blocks are replaced by their bundles when the image built them (sizeup/web/bundle.py), unless
+    bundled=False (/cad?bundle=0)."""
 
     def __init__(self, root: Path):
         self.root = root.resolve()
+        self.bundles = bundle_mod.Bundles(self.root)
         self._cache: dict[str, tuple[tuple[int, int], dict]] = {}
         self._lock = threading.Lock()
 
-    def get(self, rel: str) -> dict | None:
+    def get(self, rel: str, bundled: bool = True) -> dict | None:
         """{"body", "etag", "version", "ctype"} or None when it isn't a file under the folder."""
         target = (self.root / rel).resolve()
         if self.root not in target.parents:
@@ -203,22 +213,27 @@ class Assets:
         if not target.is_file():
             return None
         stamp, refs = (st.st_mtime_ns, st.st_size), target.suffix in (".html", ".css")
+        key = rel if bundled or target.suffix != ".html" else rel + "#files"
         with self._lock:
-            hit = self._cache.get(rel)
+            hit = self._cache.get(key)
         if hit and hit[0] == stamp and not refs:
             return hit[1]
         body = target.read_bytes()
         if refs:                        # what it names may have changed even if it didn't
-            body = VERSIONED.sub(self._ref, body.decode("utf-8")).encode("utf-8")
+            text = body.decode("utf-8")
+            if target.suffix == ".html":
+                text = bundle_mod.render(text, self.bundles if bundled else None)
+            body = VERSIONED.sub(self._ref, text).encode("utf-8")
             if hit and hit[0] == stamp and hit[1]["body"] == body:
                 return hit[1]
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        ctype = ("application/json" if target.suffix == ".map"         # a bundle's source map
+                 else mimetypes.guess_type(target.name)[0] or "application/octet-stream")
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
         etag = etag_of(body)
         a = {"body": body, "etag": etag, "version": etag.strip('"')[:10], "ctype": ctype, "gz": None}
         with self._lock:
-            self._cache[rel] = (stamp, a)
+            self._cache[key] = (stamp, a)
         return a
 
     def _ref(self, m: re.Match) -> str:
@@ -231,6 +246,32 @@ class Assets:
         return a["gz"]
 
 
+# A gzip stream's header as zlib writes it (no name, no mtime, OS unix): a gzipped SSE stream starts with it, then
+# carries deflate_segment()s. The trailer (CRC, length) is never written: a stream ends by its connection closing,
+# as it always has.
+GZIP_HEAD = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"
+
+
+def deflate_segment(raw: bytes, level: int = 6, after: bytes = b"") -> bytes:
+    """raw as deflate blocks ended by a sync flush (byte-aligned, not final), so segments can follow one another on a
+    gzip stream. They refer to nothing before them, so any number of them in any order make a valid deflate stream;
+    or, with after (the bytes the stream decoded last: zlib's preset dictionary, its last 32 KB), back into those
+    bytes too, which is right only on a stream whose last bytes are exactly those (as one zlib stream per page was:
+    a section that changed a little since the last event costs a little)."""
+    z = zlib.compressobj(level, zlib.DEFLATED, -15, zdict=after[-32768:]) if after else \
+        zlib.compressobj(level, zlib.DEFLATED, -15)
+    return z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)
+
+
+class _Event:
+    __slots__ = ("mu", "raw", "gz")
+
+    def __init__(self):
+        self.mu = threading.Lock()
+        self.raw: bytes | None = None
+        self.gz: dict[tuple | None, bytes] = {}       # the event this one follows on the page (None: any) -> gzip
+
+
 class Broadcaster:
     """The state, rebuilt every period_s (or at once on poke()), kept as sections: each top-level key
     serialized on its own, with the push (seq) it last changed at. A page is sent the whole state once
@@ -241,9 +282,15 @@ class Broadcaster:
     ?since= (X-State-Id on GET). A delta is {"_delta": 1, <changed sections>, "_gone": [removed keys]?};
     a page merges it into what it has (live.js). An id from another boot, or none: the whole state."""
     MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
+    EVENTS_KEPT = 64   # event(): (push, since) pairs kept, of the newest two pushes only (then: not kept)
 
-    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0):
+    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
+        # reuse: state_fn hands back the same object for a section that hasn't changed and never changes one in place
+        # (Cad.state: its cached sections, rebuilt only on a new store.state_rev): that section's JSON is kept, not made again
+        # each second (the incidents and units are most of ~400 KB; #446)
+        self.reuse = reuse
+        self._made: dict[str, tuple[object, bytes]] = {}     # key -> (the object last serialized, its JSON)
         self.boot = secrets.token_hex(4)
         self._wake = threading.Event()
         self._cond = threading.Condition()
@@ -251,6 +298,9 @@ class Broadcaster:
         self._sections: dict[str, tuple[bytes, int]] = {}     # key -> (JSON, the seq it last changed at)
         self._gone: dict[str, int] = {}                      # key -> the seq it went away at
         self._full: tuple[int, bytes] = (0, b"{}")
+        self._ev_mu = threading.Lock()
+        self._events: dict[tuple[int, int | None], _Event] = {}   # (seq, since) -> the event, made once (event())
+        self._ev_top = 0
         self.stopped = False
 
     def start(self) -> None:
@@ -279,7 +329,7 @@ class Broadcaster:
             st = self.state_fn() if st is None else st
             if not isinstance(st, dict):
                 raise TypeError(f"state is a {type(st).__name__}, not a dict")
-            parts = {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+            parts = self._serialize(st)
         except Exception as e:  # never let one bad state kill the display
             parts = {"time": json.dumps(time.time()).encode(), "error": json.dumps(f"{type(e).__name__}: {e}").encode()}
         with self._cond:
@@ -290,6 +340,21 @@ class Broadcaster:
             self._seq, self._sections, self._gone = seq, sections, gone
             self._cond.notify_all()
         return seq
+
+    def _serialize(self, st: dict) -> dict[str, bytes]:
+        if not self.reuse:
+            return {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+        made, out = {}, {}
+        for k, v in st.items():
+            k = str(k)
+            was = self._made.get(k)
+            # the same object (held here, so its id is never another's) and a container: its JSON as made last time.
+            # A scalar or a new object: made again (cheap, or changed)
+            b = was[1] if was is not None and was[0] is v and isinstance(v, (dict, list)) else \
+                json.dumps(v, separators=(",", ":")).encode()
+            made[k], out[k] = (v, b), b
+        self._made = made
+        return out
 
     # -- what a page is sent ----------------------------------------------------------------------------------
 
@@ -327,6 +392,47 @@ class Broadcaster:
         if went:
             parts.append(b'"_gone":' + json.dumps(went).encode())
         return b"{" + b",".join(parts) + b"}"
+
+    def event(self, snap, since: int | None, gz: bool = False, after: tuple[int, int | None] | None = None) -> bytes:
+        """The SSE event for snap as a page that has since gets it ("id: ...\\ndata: <body>\\n\\n"), made once per
+        (push, since) and shared by every stream that asks: most pages are one push behind, so one delta and, gz, one
+        compression serve them all, not one per page (with 200 pages and a change each second that was ~680 ms of CPU
+        a second; native-notes FINDINGS §3.5). gz: the event as deflate blocks ended by a sync flush (GZIP_HEAD once,
+        then these: deflate_segment), compressed against the event the page got last (after: its (seq, since), what
+        this returned it) while that one is still kept, else against nothing, so it decodes the same on any page's
+        stream. Concurrent askers wait for the first to make it rather than making it again.
+        What makes the dictionary right: an event's bytes are a pure function of (seq, since) (body() of that push's
+        sections, ident of this boot), and _stream writes nothing between two events."""
+        seq, key = snap[0], (snap[0], since)
+        e = self._events.get(key)                # (a dict read: safe without the lock; most pages find it here)
+        if e is None:
+            with self._ev_mu:
+                e = self._events.get(key)
+                if e is None:
+                    if seq > self._ev_top:          # a new push: the ones before the last are nobody's any more
+                        self._ev_top = seq
+                        self._events = {k: v for k, v in self._events.items() if k[0] >= seq - 1}
+                    e = _Event()
+                    if len(self._events) < self.EVENTS_KEPT:   # full (pages at many places): made for this page alone
+                        self._events[key] = e
+        raw = e.raw
+        if raw is None:
+            with e.mu:
+                if e.raw is None:
+                    e.raw = b"id: " + self.ident(seq).encode() + b"\ndata: " + self.body(snap, since) + b"\n\n"
+                raw = e.raw
+        if not gz:
+            return raw
+        prev = self._events.get(after) if after is not None else None
+        last = prev.raw if prev is not None else None
+        on = after if last is not None else None
+        out = e.gz.get(on)
+        if out is None:
+            with e.mu:
+                out = e.gz.get(on)
+                if out is None:
+                    out = e.gz[on] = deflate_segment(raw, after=last or b"")
+        return out
 
     def latest(self) -> tuple[int, bytes]:
         """(seq, the whole state)."""
@@ -441,7 +547,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
-    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log)
+    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log, cad=getattr(cad, "cad", None))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -534,24 +640,26 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def _v1_body(self, limit: int) -> bytes | None:
             """The body hook of /api/v1 (handler.py; every route with a body reuses it): exactly Content-Length bytes,
-            ALL of them within V1_BODY_TIMEOUT_S in total (a monotonic deadline: a socket timeout alone restarts on every
-            byte, so a dribble would hold the slot for hours). None: over the limit (413). BodyRefused: no
-            Content-Length or a chunked body (411: the bytes would be left on a kept-alive connection), a Content-Length
-            that is not plain ASCII digits (at most 6) or is sent twice (400), a client that is too slow (408) or
-            stops short (400). Every refusal closes the connection. DELETE may have no body at all."""
+            within V1_BODY_TIMEOUT_S IN TOTAL (a deadline, not a per-read timeout: a client sending a byte at a time
+            holds nothing for long). None: over the limit (413). BodyRefused: no Content-Length or a chunked body
+            (411: the bytes would be left on a kept-alive connection), a bad or repeated Content-Length (400), a
+            client that is too slow (408) or stops short (400). Every refusal closes the connection. DELETE may have
+            no body at all. A whole body read keeps the connection only if the client wanted it kept (not an HTTP/1.0
+            client, not `Connection: close`: http.server's own decision, made before this ran)."""
+            wanted = not self.close_connection        # http.server's choice from the request line and headers
             self.close_connection = True              # until the whole body has been read, nothing is kept alive
             if self.headers.get("Transfer-Encoding"):
                 raise BodyRefused(411, "length_required", "send Content-Length: chunked bodies are not accepted")
+            if len(self.headers.get_all("Content-Length") or []) > 1:
+                raise BodyRefused(400, "bad_body", "Content-Length is given more than once")
             raw_len = self.headers.get("Content-Length")
             if raw_len is None:
                 if self.command == "DELETE":
-                    self.close_connection = False
+                    self.close_connection = not wanted
                     return b""
                 raise BodyRefused(411, "length_required", "send a Content-Length header")
-            if len(self.headers.get_all("Content-Length") or ()) > 1:
-                raise BodyRefused(400, "bad_body", "send Content-Length once")
-            if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):
-                raise BodyRefused(400, "bad_body", "Content-Length must be a whole number of bytes")
+            if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):    # not "1_0", "+5", " 7"
+                raise BodyRefused(400, "bad_body", "Content-Length: a number")
             n = int(raw_len)
             if n > limit:
                 return None
@@ -559,12 +667,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             deadline = time.monotonic() + V1_BODY_TIMEOUT_S
             parts, got = [], 0
             try:
-                while got < n:
+                while got < n:                        # each read is bounded by what is left of the one deadline
                     left = deadline - time.monotonic()
                     if left <= 0:
-                        raise TimeoutError
+                        raise BodyRefused(408, "request_timeout", "the body did not arrive in time")
                     self.connection.settimeout(max(0.1, left))
-                    chunk = self.rfile.read1(n - got)       # what has come (buffered or one recv), up to what is left
+                    chunk = self.rfile.read1(n - got)
                     if not chunk:
                         break
                     parts.append(chunk)
@@ -576,10 +684,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.connection.settimeout(before)
                 except OSError:
                     pass
-            if got != n:
+            data = b"".join(parts)
+            if len(data) != n:
                 raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
-            self.close_connection = False
-            return b"".join(parts)
+            self.close_connection = not wanted
+            return data
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -812,7 +921,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path in ("/", "/index.html") and cad is not None:   # user, 2026-10-07: "make .../cad the default page"
                 return self._redirect("/cad")
             if path in ("/cad", "/cad.html", "/monitor") and cad is not None:
-                return self._static("cad.html")
+                # one script and one stylesheet when the image built them (sizeup/web/bundle.py); ?bundle=0: the files
+                return self._static("cad.html", bundled=("bundle", "0") not in parse_qsl(url.query))
             if path in ("/comms", "/comms.html") and cad is not None:   # Comms is the CAD's Radio view now
                 return self._redirect("/cad#radio" + (f"?{url.query}" if url.query else ""))
             if path == "/api/cad/stream" and cad_b is not None:
@@ -927,9 +1037,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return None
             return self.rfile.read(n) if 0 <= n <= limit else None
 
-        # HEAD: what GET would answer, without the body. Netskope's browser isolation checks a page
-        # with HEAD before loading it; it got 501 here (ECC workstation, 2026-10-08).
-        do_HEAD = do_GET
+        def do_HEAD(self) -> None:
+            """What GET would answer, without the body. Netskope's browser isolation checks a page with HEAD before
+            loading it; it got 501 here (ECC workstation, 2026-10-08). Not the station API: a GET there does things
+            (the job poll hands each waiting job out once; any route marks the station seen), so a HEAD (a probe, a
+            proxy's health check) gets 405 and no handler runs. Every other GET is a read (the streams stop after
+            their headers on HEAD; /api/v1 counts a HEAD as a read)."""
+            if urlsplit(self.path).path.startswith("/api/station/"):
+                self.close_connection = True
+                return self._send(405, b'{"error":"GET or POST, not HEAD"}', "application/json", {"Allow": "GET, POST"})
+            self.do_GET()
 
         def _other_method(self) -> None:
             """PUT, PATCH, DELETE, OPTIONS: nothing serves them but /api/v1, which answers in its own error shape (a
@@ -939,6 +1056,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
             if gate.refuse(write=True):
                 return self._updating()          # (closes the connection: the body is left unread)
+            gate.enter()                         # as POST: the gate counts it, a fenced write is a 503, perf sees it
+            try:
+                self._fenced(self._other_v1)
+            finally:
+                gate.leave()
+                if perf is not None:
+                    self._account()
+
+        def _other_v1(self) -> None:
+            url = urlsplit(self.path)
             if self._admit(url.path):
                 self._v1(url.path, url.query)
 
@@ -963,6 +1090,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == HEALTH_DISMISS and station is not None and cad is not None and hasattr(station, "dismiss_rejected"):
+                return self._health_dismiss(path)
             if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
                 return self._adapter_password(path)
             if path == "/api/cad/preplan/docs" and cad is not None:
@@ -982,7 +1111,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, b'{"error":"bad or too large body (%d KB max)"}' % (limit // 1024),
                                       "application/json")
                 return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()),
-                                  {"Cache-Control": "no-store"} if path == "/api/cad/stations" else None)   # a new token
+                                  {"Cache-Control": "no-store"} if path in ("/api/cad/stations", "/api/cad/stt-workers")
+                                  else None)   # a new token
             if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, client=self._client())):
                 self.close_connection = True     # the body is left unread
                 return self._send(*refused)
@@ -998,6 +1128,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         if got is None:
                             raise ValueError("source: p25:<system>:<talkgroup>")
                         tier = body.get("tier")
+                        # (the county's too: its system says it is the county's even where the number is also
+                        # another system's; the hub sends it bare to a station from before #409)
                         err = set_talkgroup(got[1], body.get("record"), body.get("main"),
                                             None if tier is None else str(tier), got[0])
                     else:
@@ -1208,6 +1340,30 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(202, json.dumps({"running": True, **p}).encode(), "application/json")
             self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json", {"Cache-Control": "no-store"})
 
+        def _health_dismiss(self, path: str) -> None:
+            """POST /api/cad/health/dismiss {kind} (admins: cad.permit, not in WRITES; JSON with X-Sizeup-Action: dismiss
+            only): Health's Dismiss on "Station event rejected by hub: <kind>" (or a late alarm). The station drops its
+            stuck and late events of that kind (a quarantine_dismiss call); audited on the hub (Hub.dismiss_rejected)."""
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json" or self.headers.get("X-Sizeup-Action") != "dismiss":
+                self.close_connection = True
+                return self._send(400, b'{"error":"JSON with X-Sizeup-Action: dismiss only"}', "application/json")
+            if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
+            raw = self._body(1024)
+            try:
+                body = json.loads(raw or b"{}") if raw is not None else None
+                if not isinstance(body, dict):
+                    raise ValueError("a JSON object, at most 1 KB")
+                out = station.dismiss_rejected(str(body.get("kind") or ""), getattr(self.who, "email", "") or "")
+            except ValueError as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except RuntimeError as e:            # (StationOffline too): the station couldn't
+                return self._send(503, json.dumps({"error": str(e)[:300]}).encode(), "application/json")
+            self._did(path, body)
+            self._send(200, json.dumps(out).encode(), "application/json")
+
         def _adapter_password(self, path: str) -> None:
             """POST /api/cad/adapter-password: an admin's new station adapter password, written to SSM (write-only).
             Who, the header and the length are checked before a byte of the body is read; the body is read into a
@@ -1290,15 +1446,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             """SSE: the whole state first (or, with an id from this boot, only what changed since: Last-Event-ID
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
             changed but the clock: {"_delta":1,"time":...}, so the page knows the stream is alive.
-            gzip (a browser that takes it): one stream, flushed at each event (Z_SYNC_FLUSH)."""
+            gzip (a browser that takes it): one gzip stream, each event its own sync-flushed deflate blocks, compressed
+            once per push for every page that is at the same place (Broadcaster.event)."""
             self.answered = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store, no-transform")
             self.send_header("X-Accel-Buffering", "no")       # proxies: pass events through, don't buffer
             self.send_header("Connection", "close")
-            z = zlib.compressobj(6, zlib.DEFLATED, 31) if stream_gzip and accepts_gzip(self.headers) else None
-            if z is not None:
+            z = bool(stream_gzip and accepts_gzip(self.headers))
+            if z:
                 self.send_header("Content-Encoding", "gzip")
                 self.send_header("Vary", "Accept-Encoding")
             self.end_headers()
@@ -1309,25 +1466,24 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 threading.current_thread().name = "http-stream"
             since = b.since(self.headers.get("Last-Event-ID")
                             or next((v for k, v in parse_qsl(urlsplit(self.path).query) if k == "since"), None))
-            out = (lambda raw: z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)) if z is not None else (lambda raw: raw)
             try:
                 # Reconnect after 2 s; and 2 KB of comment so proxies that hold a response until they
                 # have "enough" of it pass the first event straight on (pages also poll if this fails).
                 # Gzipped, 2 KB of spaces would shrink to nothing: random hex instead.
-                pad = secrets.token_hex(1024).encode() if z is not None else b" " * 2048
-                self.wfile.write(out(b"retry: 2000\n:" + pad + b"\n\n"))
+                hello = b"retry: 2000\n:" + (secrets.token_hex(1024).encode() if z else b" " * 2048) + b"\n\n"
+                self.wfile.write(GZIP_HEAD + deflate_segment(hello) if z else hello)
+                last = None                       # the event this page got last: the next one compressed against it
                 while not b.stopped:
                     snap = b.snapshot()
-                    body = b.body(snap, since)
-                    self.wfile.write(out(b"id: " + b.ident(snap[0]).encode() + b"\ndata: " + body + b"\n\n"))
+                    self.wfile.write(b.event(snap, since, z, last))
                     self.wfile.flush()
-                    since = snap[0]
+                    last, since = (snap[0], since), snap[0]
                     b.wait(since)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
 
-        def _static(self, rel: str, query: str = "") -> None:
-            a = assets.get(rel)
+        def _static(self, rel: str, query: str = "", bundled: bool = True) -> None:
+            a = assets.get(rel, bundled)
             if a is None:
                 return self._send(404, b"not found\n", "text/plain")
             v = next((x for k, x in parse_qsl(query) if k == "v"), "")
@@ -1367,7 +1523,7 @@ class WebServer:
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
-        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
+        self.cad_broadcaster = Broadcaster(cad.cad.state, reuse=True) if cad is not None and role != "station" else None
         self.perf = perf                # sizeup/perf.py Perf (the hub, #425): each request thread's CPU as it ends
 
         class Httpd(ThreadingHTTPServer):
@@ -1438,6 +1594,14 @@ class WebServer:
         threading.Thread(target=run, name="drain", daemon=True).start()
 
     def shutdown(self) -> None:
+        """Stop serving (tests; a deploy drains instead). The station's long poll ends now, empty, as in drain():
+        left waiting, its request thread would answer up to 25 s later, after the server was gone (#665). Every request
+        after this one gets 503 and its connection closed (a station still running backs off; without it, on its
+        kept-alive connection, it would poll again at once, get [] at once, and so on, thousands a second)."""
+        self.gate.draining.set()
+        jobs = getattr(self.station, "jobs", None)
+        if jobs is not None and hasattr(jobs, "close"):
+            jobs.close()
         self.broadcaster.stop()
         if self.cad_broadcaster:
             self.cad_broadcaster.stop()

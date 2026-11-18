@@ -2,16 +2,25 @@
 trunk-recorder, no whisper, no voice server: nothing here opens an SDR or starts a program, so it
 runs on a bare Linux box with Python + numpy.
 
-    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?}]} -> {acked}
+    POST /api/station/events      {epoch, station, events: [{seq, at, type, data, audio?}]} -> {acked, rejected?}
                                   applied in order through the same App code as on the station
                                   (_page_heard, _transcribed, _retext, the radio registry); each
                                   event once: the hub remembers the last seq per outbox epoch
-                                  (hub.sqlite), and pages / transmissions are keyed by their ids
+                                  (hub.sqlite), and pages / transmissions are keyed by their ids.
+                                  An event it can't parse or apply is skipped and listed in "rejected"
+                                  ({i, seq, type, reason, error}); a batch it can't read at all is 413 / 400
+                                  {error, reason}: the station splits it and quarantines the event (_events)
+    POST /api/station/stt         each clip's speech-to-text input, gzipped (sizeup/cloud/sttinput.py): {v, station,
+                                  items: [{n, id, kind, ..., stt}]} -> {ok, stored: [n], refused: [n]}: kept as clip
+                                  "<id>.src" beside the clip (before or after its event); read_stt_audio reads it.
+                                  Its own lane: never through the events' cursor
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size, its version -> {ok, build}: the hub's own
-                                  build (SIZEUP_BUILD), which the station follows (autoupdate.py)
+                                  progress, outbox size, its version -> {ok, build, caps, station, services}:
+                                  the hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
+                                  and the id it took the post as, which the station adopts (stations.py);
+                                  services: the admins' service per source (sourcekeys.set_service_overrides)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
                                   (jobs: tts, call, sources_reset: an incident source's reset(), #301)
@@ -34,6 +43,8 @@ runs on a bare Linux box with Python + numpy.
                                   Taken from any station (like its logs), never through the events' cursor, never
                                   "seen" (a second station's metrics don't make the station look connected)
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
+    /api/station/stt/...         the GPU speech-to-text workers (#639, sizeup/cloud/sttworkers.py): their own tokens
+                                 (sw1...), never a station's; claim / audio / extend / complete / release
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
                                  The station token or the status token, which opens nothing else; not "seen"
@@ -82,6 +93,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
 import re
 import secrets
@@ -92,7 +104,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels, sourcekeys
+from sizeup import channels, sourcekeys, stt_terms
 from sizeup import tz
 from sizeup import app as app_mod
 from sizeup import fence as fence_mod
@@ -100,14 +112,19 @@ from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALL
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
+from sizeup.audiostore import STT_SRC
+from sizeup.cloud import client as wire, statusshape, sttinput
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.cloud.stations import Principal, Refused, StationRegistry
+from sizeup.cloud.sttworkers import API as STT_API, STATION_PREFIX, WorkerApi, WorkerRegistry
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
-from sizeup.stt import CATCHUP_NOTE
+from sizeup import stt_time, sttpool, sttruns
+from sizeup.cloud import infer as infer_mod
+from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -119,6 +136,9 @@ MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; 
 MAX_LOGS_BODY = 4 * 1024 * 1024       # a station log batch, gzipped (sizeup/cloud/logship.py: ~512 KB before gzip)
 MAX_METRICS_BODY = 2 * 1024 * 1024    # a metrics batch, gzipped (sizeup/cloud/metrics.py: 2000 records, ~250 KB before gzip)
 MAX_METRICS_JSON = 4 * 1024 * 1024    # ... and unpacked
+MAX_STT_BODY = 12 * 1024 * 1024       # STT inputs, gzipped (the station sends ~256 KB of FLAC a post; one may be 8 MB)
+MAX_STT_JSON = 16 * 1024 * 1024       # ... and unpacked (base64)
+STT_WAIT_MAX_S = 30.0                 # read_stt_audio's wait_s at most this
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -131,14 +151,18 @@ RESEND_MAX = 200         # ... at most this many, the newest first
 RECOVER_S = 3600.0       # after a restart: what waited for AWS less than this goes to AWS again, older to whisper
 RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to reconnect first
 CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged idle only on a report this fresh
+POOL_CAP = "stt_pool"    # the hub takes clips a station hands to the pool (#639 phase 2: transcript_pending "pool")
+POOL_AUDIO_WAIT_S = 10.0  # a pool job's audio: the station's STT input waited for this long before the listening clip
 CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 # Every route Hub.handle serves, each behind _principal (tests/test_station_identity.py fails on one not listed here)
 STATION_ROUTES = (("GET", "/api/station/status"), ("GET", "/api/station/hello"), ("GET", "/api/station/jobs"),
                   ("POST", "/api/station/events"), ("POST", "/api/station/state"), ("POST", "/api/station/aircraft"),
                   ("POST", "/api/station/vessels"), ("POST", "/api/station/logs"), ("POST", "/api/station/metrics"),
+                  ("POST", "/api/station/stt"),
                   ("POST", "/api/station/jobs/0123456789abcdef"))
 REFUSAL_LOG_S = 3600.0   # a refused station request: logged once per (reason, station) this often
+MISMATCH_LOG_S = 60.0    # ... an id_mismatch this often (a live station locked out: its log says who it says it is)
 TOKEN_ID = re.compile(r"sz1\.([a-z0-9][a-z0-9_-]{0,39})\.")    # the station id a refused own token names (for the log)
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
@@ -147,8 +171,16 @@ class StationOffline(RuntimeError):
     pass
 
 
+def _part(status, key: str, kind: type = dict):
+    """The station's status' `key` when the status is a dict and the value a `kind`, else None: a reader never gets a
+    value of another type (each status is checked as it comes, sizeup/cloud/statusshape.py; this keeps the readers
+    safe from a value stored otherwise)."""
+    v = status.get(key) if isinstance(status, dict) else None
+    return v if isinstance(v, kind) else None
+
+
 def _json(code: int, obj) -> tuple[int, bytes, str]:
-    return code, json.dumps(obj, separators=(",", ":")).encode(), JSON
+    return code, wire.dumps(obj, default=None), JSON      # strict JSON: a number that isn't finite goes as null
 
 
 def _hhmm(t: float | None) -> str:
@@ -213,6 +245,12 @@ class Jobs:
             return len(self._open())
 
 
+def _until(e: dict) -> float:
+    """An ended talker's / page's `until` (0: gone now): never a value of another type (statusshape.live_problem)."""
+    u = e.get("until")
+    return float(u) if isinstance(u, (int, float)) and not isinstance(u, bool) and math.isfinite(u) else 0.0
+
+
 class RemoteLive:
     """The station's "talking now", standing in for LiveTalk on the hub. Rigs are looked up again
     in the hub's own radio registry (the one people edit here)."""
@@ -243,7 +281,7 @@ class RemoteLive:
         with self._lock:
             if now - self._at > LIVE_STALE_S:
                 return []
-            return [dict(p) for p in self._paging if not (p.get("ended") and (p.get("until") or 0) <= now)]
+            return [dict(p) for p in self._paging if not (p.get("ended") and _until(p) <= now)]
 
     def state(self) -> list[dict]:
         now = self.clock()
@@ -253,7 +291,7 @@ class RemoteLive:
             entries = [dict(e) for e in self._entries]
         out = []
         for e in entries:
-            if e.get("ended") and (e.get("until") or 0) <= now:
+            if e.get("ended") and _until(e) <= now:
                 continue
             rid = str(e.get("radio_id") or "")
             if rid:
@@ -284,10 +322,15 @@ class Hub:
         # shared token above as one station
         self.stations = StationRegistry(app.mdb, self.token, getattr(cfg, "cloud_status_token", ""),
                                         getattr(cfg, "cloud_legacy_station_id", ""), log=log)
+        self.stations.on_rename = self._station_renamed
         self._refused_said: dict[tuple[str, str], float] = {}
+        # the GPU speech-to-text workers' own tokens (#639, sizeup/cloud/sttworkers.py; hub.sqlite, made on first use)
+        self.workers = WorkerRegistry(app.mdb, log=log)
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
+        self.status_refused: dict | None = None  # the latest status left out for its shape ({at, why, n, since})
+        self.live_refused: dict | None = None    # ... and talker / page going out
         self.talkgroups: list[dict] = []
         self.skew = 0.0                          # hub clock - station clock (s)
         self.errors, self.last_error = 0, ""
@@ -296,6 +339,9 @@ class Hub:
         self.epoch = app.mdb.get("station_epoch")
         self.seq = int(app.mdb.get("station_seq", "0") or 0)
         self._failed: tuple[str, int, int] = ("", 0, 0)   # (epoch, seq, tries) of a source_event that failed to apply
+        # the events it couldn't apply lately, {(epoch, seq): {seq, type, reason, error}}: listed again on a retry
+        self._rejections: OrderedDict[tuple[str, int], dict] = OrderedDict()
+        self._wrong_results: set[tuple[str, str]] = set()     # (job, key) said once (_wrong_result)
 
     # -- health --------------------------------------------------------------------------------------
 
@@ -308,14 +354,15 @@ class Hub:
     def health(self) -> dict:
         """{state, word, detail}: the "Station" row and the console's header pill."""
         now = time.time()
-        name = (self.status or {}).get("name") or "the station"
+        name = _part(self.status, "name", str) or "the station"
         reg = getattr(self, "stations", None)
         if not (reg.ingest_on() if reg is not None else self.token):
             return {"state": "down", "word": "no token",
                     "detail": "no station token configured on the hub (SIZEUP_STATION_TOKEN): the station can't connect"}
         if self.connected():
             ago = 0 if self.polling else int(now - (self.last_seen or now))
-            q = ((self.status or {}).get("outbox") or {}).get("pending") or 0
+            q = (_part(self.status, "outbox") or {}).get("pending")
+            q = q if isinstance(q, int) and not isinstance(q, bool) and q > 0 else 0
             # the seconds only once they matter (as the word does): a count ticking every second between two
             # polls would change the pushed state every second for nothing (#146)
             detail = (f"{name}: connected" + (f", last seen {ago} s ago" if ago >= 5 else "")
@@ -345,10 +392,13 @@ class Hub:
         """{state, text}: the station's version against this hub's build ("up to date", "updating",
         "update to abc1234 failed ..."), from what the station last reported; None from a station
         that doesn't report one."""
-        v = (self.status or {}).get("version")
-        if not isinstance(v, dict):
+        v = _part(self.status, "version")
+        if v is None:
             return None
-        return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
+        try:
+            return describe(str(v.get("build") or ""), self.build, v.get("update") if isinstance(v.get("update"), dict) else {})
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the routes that show it
+            return {"state": "unknown", "text": f"the station's version not read ({type(e).__name__})"}
 
     def station_row(self) -> dict:
         """The Station row of the radios (everyone's state push): its connection only. Its health alerts are the
@@ -364,7 +414,9 @@ class Hub:
         unknown with what they last said (never a stale "ok")."""
         rows = [self.station_row()]
         on = self.connected()
-        for r in (self.status or {}).get("radios") or []:
+        for r in _part(self.status, "radios", list) or []:
+            if not isinstance(r, dict):
+                continue
             r = dict(r)
             if not on:
                 r.update(state="unknown", open=False, quieting_db=None, word="",
@@ -375,10 +427,10 @@ class Hub:
 
     def sdr(self) -> dict | None:
         """The station's SDR switches, only while it is there to switch them."""
-        return (self.status or {}).get("sdr") if self.connected() else None
+        return _part(self.status, "sdr") if self.connected() else None
 
     def rerun(self) -> dict:
-        r = (self.status or {}).get("rerun") if self.connected() else None
+        r = _part(self.status, "rerun") if self.connected() else None
         return dict(r) if isinstance(r, dict) else {"total": 0, "done": 0, "changed": 0, "failed": 0, "pending": 0}
 
     def cad_cloud(self) -> dict:
@@ -428,13 +480,40 @@ class Hub:
             raise AudioUnavailable(f"Voice unavailable — {e}: text only") from None
         except RuntimeError as e:
             raise AudioUnavailable(f"Voice unavailable — station: {e}: text only") from None
+        audio, label = res.get("audio"), res.get("label")
+        if not isinstance(audio, (str, type(None))) or not isinstance(label, (str, type(None))):
+            self._wrong_result("tts", "audio" if not isinstance(audio, (str, type(None))) else "label")
         try:
-            wav = base64.b64decode(res.get("audio") or "", validate=True)
+            wav = base64.b64decode(audio if isinstance(audio, str) else "", validate=True)
         except (binascii.Error, ValueError):
             wav = b""
         if wav[:4] != b"RIFF":
             raise AudioUnavailable("Voice unavailable — the station sent no audio: text only")
-        return wav, str(res.get("label") or "Voice: rendered by the station")
+        return wav, (label if isinstance(label, str) and label else "Voice: rendered by the station")
+
+    def _wrong_result(self, job: str, key: str) -> None:
+        """A job's result with a wrong type where its caller reads it: taken as a station that sent nothing there. Said
+        once per job and key."""
+        if (job, key) not in self._wrong_results:
+            self._wrong_results.add((job, key))
+            self.log(f"hub: the station's {job} result has a wrong type in {key!r}: taken as nothing sent")
+
+    def dismiss_rejected(self, kind: str, by: str = "") -> dict:
+        """POST /api/cad/health/dismiss (an admin, Settings > Station > Health): the station drops its stuck and late
+        quarantined events of this type (sizeup/cloud/outbox.py dismiss, by a quarantine_dismiss call), so their alert
+        clears. Logged and audited (settings_audit, System) with who asked. ValueError for a bad type, StationOffline /
+        RuntimeError from the station."""
+        kind = str(kind or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", kind):
+            raise ValueError("kind: an event type")
+        n = int(self.remote("quarantine_dismiss", kind) or 0)
+        who = by or "someone (no sign-in)"
+        self.log(f"hub: the station's refused {kind} event(s) dismissed by {who}: {n}")
+        from sizeup.cad.radios import audit
+        store = self.app.cad.store
+        with store.tx() as db:
+            audit(db, time.time(), by, "system", f"health_dismiss:{kind}", "stuck / late on the station", f"dismissed ({n})")
+        return {"ok": True, "dismissed": n}
 
     def remote(self, fn: str, *args, timeout: float = CALL_WAIT_S):
         """One of the station's switches (StationOffline / RuntimeError with the reason)."""
@@ -459,11 +538,15 @@ class Hub:
             return self._refuse(e, m.group(1) if m and self.stations.row(m.group(1)) is not None else "")
 
     def _refuse(self, e: Refused, sid: str = "") -> tuple[int, bytes, str]:
-        """The 401: {error, reason} (fixed text, never the token); in the log once per (reason, station) an hour."""
+        """The 401: {error, reason} (fixed text, never the token); in the log once per (reason, station) an hour, an
+        id_mismatch once a minute with the two ids (Health's "Station rejected" too: StationRegistry.mismatch)."""
         now = time.time()
-        if now - self._refused_said.get((e.reason, sid), 0.0) >= REFUSAL_LOG_S:
+        every = MISMATCH_LOG_S if e.reason == "id_mismatch" else REFUSAL_LOG_S
+        if now - self._refused_said.get((e.reason, sid), 0.0) >= every:
             self._refused_said[(e.reason, sid)] = now
-            self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else ""))
+            m = self.stations.mismatch() if e.reason == "id_mismatch" else None
+            self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else "")
+                     + (f": the station says {m['said'] or '?'}, the token is {m['token']}" if m else ""))
         return _json(401, {"error": str(e), "reason": e.reason})
 
     def _other_station(self, p: Principal) -> tuple[int, bytes, str]:
@@ -483,9 +566,24 @@ class Hub:
             return self.stations.claim(p, claimed)
         except Refused as e:
             said = re.sub(r"[^A-Za-z0-9_.-]", "?", claimed[:40]) if isinstance(claimed, str) else ""
+            if e.reason == "id_mismatch":
+                self.stations.mismatched(said, p.id or "the shared one")
             raise Refused(e.reason, f"the token is {p.id or 'the shared one'}, the request says {said}") from None
 
+    def _station_renamed(self, old: str, new: str) -> None:
+        """The shared token's station renamed (StationRegistry.set_shared_id): what the hub keys by the id moves with
+        it. Its status now (the next post says so too); the station's signal metrics in the background, never on the
+        admin's request (HubApp.apply_station_renames: chunked, from the renames kept in hub.sqlite). Its CloudWatch
+        streams are named per id and day: new ones get the new id, the old ones stay in the group the Logs view reads."""
+        if isinstance(self.status, dict) and self.status.get("id") == old:
+            self.status = dict(self.status, id=new)
+        move = getattr(self.app, "apply_station_renames", None)
+        if move is not None:
+            threading.Thread(target=move, name="station-rename", daemon=True).start()
+
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
+        if path.startswith(STT_API):                 # a GPU worker (#639): its own token, never a station's; not "seen"
+            return self.app.stt_api.handle(method, path, headers, body)
         if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
             p = self._principal(headers, read_only=True)
             if not isinstance(p, Principal):
@@ -528,11 +626,13 @@ class Hub:
                 return self._logs(body(MAX_LOGS_BODY), headers, p)
             if method == "POST" and path == "/api/station/metrics":
                 return self._metrics(body(MAX_METRICS_BODY), headers, p)
+            if method == "POST" and path == "/api/station/stt":           # (sttinput.PATH)
+                return self._stt_inputs(body(MAX_STT_BODY), headers, p)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
                     return _json(413, {"error": "too large"})
-                res = json.loads(raw or b"{}")
+                res = wire.loads(raw or b"{}")
                 if not isinstance(res, dict):
                     return _json(400, {"error": "a JSON object"})
                 return _json(200, {"ok": True}) if self.jobs.finish(m.group(1), res) else \
@@ -542,6 +642,15 @@ class Hub:
         except ValueError as e:
             return _json(400, {"error": f"bad request: {e}"})
         return _json(404, {"error": "not found"})
+
+    def station_of(self, bearer: str) -> str | None:
+        """The station id a station's own token (or the shared one) proves, None when it proves none: a station's
+        whisper claims pool jobs as "station:<id>" (#639 phase 2). Never a status token."""
+        try:
+            p = self.stations.resolve(bearer)
+        except Refused:
+            return None
+        return p.id if p.id and not p.read_only else None
 
     def _jobs(self, query: str) -> tuple[int, bytes, str]:
         from urllib.parse import parse_qs
@@ -562,33 +671,87 @@ class Hub:
         """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
         if raw is None:
             return _json(413, {"error": "too large"})
-        d = json.loads(raw or b"{}")
+        d = wire.loads(raw or b"{}")
         if not isinstance(d, dict):
             raise ValueError("a JSON object")
         claimed = d["status"].get("id") if isinstance(d.get("status"), dict) else None
         sid = self._claim(p, claimed) if p is not None else ""
+        # What the hub can't read (sizeup/cloud/statusshape.py: a wrong-typed field stored broke every reader of it until
+        # the next) is left out, never the post: a status of another shape is not taken (the last good one stays), a
+        # talker / page going out of another shape is dropped (the others are taken). The heartbeat, the rest of the
+        # post and the answer (its build: a station of any release still auto-updates) go on; the answer says what was
+        # left out ("refused", "reason").
+        who = sid or (p.id if p is not None else "")
+        refused, why = [], []
+        if d.get("status") is not None and (bad := statusshape.problem(d["status"])):
+            self._refused("status", bad, who)
+            refused.append("status")
+            why.append(bad)
+            tgs = d["status"].get("talkgroups") if isinstance(d["status"], dict) else None
+            if isinstance(tgs, list) and statusshape.problem({"talkgroups": tgs}) is None:
+                self._take_talkgroups(tgs)          # (they ride in the status: a good list is still taken)
+            d["status"] = None
+        talking, paging, bad = statusshape.live_clean(d.get("talking"), d.get("paging"))
+        if bad:
+            self._refused("live", bad, who)
+            refused.append("live")
+            why.append(bad)
         now = time.time()
         self.last_state = now
-        if isinstance(d.get("at"), (int, float)):
-            self.skew = now - float(d["at"])
+        if isinstance(d.get("at"), (int, float)) and not isinstance(d["at"], bool) and math.isfinite(d["at"]):
+            self.skew = now - float(d["at"])     # (never NaN: wire.loads reads a bare NaN as None)
         if isinstance(d.get("status"), dict):
             st = dict(d["status"])
             if sid:
                 st["id"] = sid                     # the authenticated id (what Health shows), never only the claimed one
+            if p is not None and p.via == "shared":
+                self.stations.reconfigured(claimed, st.get("config_id"))   # posting as the current id from its config
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
-                self.talkgroups = tgs
-            self.status, self.status_at = st, now
+                self._take_talkgroups(tgs)
+            self.status, self.status_at, self.status_refused = st, now, None
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
+            self.app.alert_keys_check()        # ... and another revision of the pre-alerts' sources (#639 phase 2)
+            self.app.stt_terms_check()         # ... or other term lists for whisper's prompt (sizeup/stt_terms.py)
             try:
                 self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
             except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
-        if isinstance(d.get("talking"), list):
-            self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
+        if isinstance(talking, list):
+            self.live.update(talking, now, paging if isinstance(paging, list) else None)
+        # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
+        # station: the id the hub took it as (the station adopts it: StationLink.adopt; a rename never locks it out)
+        # services: the admins' service per source (settings radio_services, sizeup/sourcekeys.py): the station tags
+        # its rows (and picks its speech-to-text profile) as the hub does; a station before this ignores it
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems", sttinput.CAP, POOL_CAP],
+                           "pool": self.app.pool_word(sid or (p.id if p is not None else "")),
+                           "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
+                           **({"station": sid or p.id} if p is not None and (sid or p.id) else {}),
+                           **({"refused": refused, "reason": "; ".join(why)} if refused else {})})
+
+    def _take_talkgroups(self, tgs: list) -> None:
+        # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
+        # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
+        self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
+                           else r for r in tgs]
+        if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
+            getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
+
+    def _refused(self, part: str, why: str, sid: str = "") -> None:
+        """A part of a state post left out for its shape ("status": the last good one stays; "live": that talker /
+        page): logged once per reason an hour. self.status_refused / live_refused: {at, why, n, since} of the latest;
+        status_refused is None again once a status is taken (Health's hint while it lasts)."""
+        now = time.time()
+        attr = "status_refused" if part == "status" else "live_refused"
+        r = getattr(self, attr, None) or {}
+        setattr(self, attr, {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now})
+        if now - self._refused_said.get((f"{part}:{why}", sid), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[(f"{part}:{why}", sid)] = now
+            self.log(f"hub: station {'status' if part == 'status' else 'talker / page going out'} left out: {why}"
+                     + (f" (station {sid})" if sid else "")
+                     + (": the last good status kept" if part == "status" else "") + "; the rest of the post taken")
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
@@ -607,7 +770,7 @@ class Hub:
         layer = getattr(self.app, "aircraft", None)
         if layer is None:
             return _json(404, {"error": "no aircraft layer here"})
-        return _json(200, layer.station_ingest(json.loads(raw or b"{}"), size))
+        return _json(200, layer.station_ingest(wire.loads(raw or b"{}"), size))
 
     def _vessels(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our AIS receiver's vessels, forwarded by the station (#402): into the Vessels layer, nothing else."""
@@ -625,7 +788,7 @@ class Hub:
         layer = getattr(self.app, "vessels", None)
         if layer is None:
             return _json(404, {"error": "no vessels layer here"})
-        return _json(200, layer.station_ingest(json.loads(raw or b"{}")))
+        return _json(200, layer.station_ingest(wire.loads(raw or b"{}")))
 
     def _logs(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
         """The station's journal, scrubbed (sizeup/cloud/logship.py): into CloudWatch (sizeup/cloud/cwlogs.py), in the
@@ -641,6 +804,50 @@ class Hub:
             self.log(f"station logs: {type(e).__name__}")
             return _json(503, {"error": f"station logs: {type(e).__name__}"})
         return _json(code, out)
+
+    def _stt_inputs(self, raw: bytes | None, headers, p: Principal | None = None) -> tuple[int, bytes, str]:
+        """The station's STT inputs (sizeup/cloud/sttinput.py): each kept beside its clip. stored / refused (a bad one,
+        never sent again: whatever went wrong with one item, the rest still go); a write the fence refused fails the
+        whole post (503: the station sends it to the leader)."""
+        if raw is None:
+            return _json(413, {"error": "too large"})
+        if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+            import zlib
+            z = zlib.decompressobj(wbits=31)
+            try:
+                raw = z.decompress(raw, MAX_STT_JSON)
+            except zlib.error as e:
+                return _json(400, {"error": f"bad gzip: {e}"})
+            if z.unconsumed_tail:
+                return _json(413, {"error": "too large"})
+        if len(raw or b"") > MAX_STT_JSON:
+            return _json(413, {"error": "too large"})
+        d = wire.loads(raw or b"{}")
+        if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+            raise ValueError("{items: [...]}")
+        sid = ""
+        if p is not None:
+            # (the station a payload names must be the one its token proves; its id keys the arrival delays, #677)
+            sid = self._claim(p, d.get("station")) or p.id
+        stored, refused = [], []
+        try:
+            for it in d["items"][:200]:
+                n = it.get("n") if isinstance(it, dict) else None
+                if not isinstance(n, int) or isinstance(n, bool):
+                    continue
+                fenced = fence_mod.refused()
+                try:
+                    ok = self.app.put_stt_input(it, station=sid)
+                except Exception as e:  # noqa: BLE001 - one malformed item never fails the post (nor stalls the lane)
+                    if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != fenced:
+                        raise
+                    self.app._stt_say(f"hub: speech-to-text input refused: {type(e).__name__}")
+                    ok = False
+                (stored if ok else refused).append(n)
+        finally:
+            if stored:
+                self.app.stt_stored()               # the waiters (read_stt_audio's wait_s): once per post
+        return _json(200, {"ok": True, "stored": stored, "refused": refused})
 
     def _metrics(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
         """The station's signal metrics (sizeup/cloud/metrics.py): into metrics.sqlite under the authenticated id."""
@@ -662,7 +869,7 @@ class Hub:
         if store is None:
             return _json(404, {"error": "no station metrics here"})
         try:
-            d = json.loads(raw or b"{}")
+            d = wire.loads(raw or b"{}")
         except (ValueError, RecursionError, OverflowError) as e:
             # a batch that isn't one: 400, which the station drops (never sent again and again)
             return _json(400, {"error": f"bad JSON: {type(e).__name__}"})
@@ -687,31 +894,75 @@ class Hub:
         self._failed = (self.epoch, seq, n)
         return n < SOURCE_RETRIES
 
+    def _refused_batch(self, code: int, reason: str, error: str, **extra) -> tuple[int, bytes, str]:
+        """A batch of events refused as a whole: {error, reason, ...} (the station splits it to find the event:
+        sizeup/cloud/station.py _rejected), in the log once per reason every REFUSAL_LOG_S."""
+        now = time.time()
+        if now - self._refused_said.get(("events", reason), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[("events", reason)] = now
+            self.log(f"hub: refused a batch of the station's events: {code} {reason}")
+        return _json(code, {"error": error, "reason": reason, **extra})
+
     def _events(self, raw: bytes | None, p: Principal | None = None) -> tuple[int, bytes, str]:
-        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
+        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test).
+
+        -> 200 {ok, acked, applied, rejected?: [{i, seq, type, reason, error}]}: each event it couldn't parse
+        ("malformed") or apply ("apply_failed") is skipped, never blocking the ones behind it, and listed (by its index
+        in the batch and its seq), so the station keeps it (sizeup/cloud/outbox.py quarantine). A batch it can't read
+        at all: 413 {reason: too_large, max_bytes} / 400 {reason: bad_json | bad_batch}. A station from before this
+        ignores "rejected"; a hub from before this sends none (and a 400 without a reason: the station splits it)."""
         if raw is None:
-            return _json(413, {"error": f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): send smaller batches"})
-        d = json.loads(raw or b"{}")
+            return self._refused_batch(413, "too_large", f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): "
+                                                         "send smaller batches", max_bytes=MAX_EVENTS_BODY)
+        try:
+            d = wire.loads(raw or b"{}")
+        except (ValueError, RecursionError) as e:
+            return self._refused_batch(400, "bad_json", f"bad request: not JSON ({type(e).__name__})")
         if not isinstance(d, dict) or not isinstance(d.get("events"), list):
-            raise ValueError("{epoch, events: [...]}")
+            return self._refused_batch(400, "bad_batch", "bad request: {epoch, events: [...]}")
         if p is not None:
-            self._claim(p, d.get("station"))     # (one outbox cursor still: a cursor per station is design step A3)
+            # (one outbox cursor still: a cursor per node is step 3 of the nodes design, docs/nodes.md)
+            self._claim(p, d.get("station"))
         epoch = str(d.get("epoch") or "")[:40]
+        rejected: list[dict] = []
+        events: list[tuple[int, int, dict]] = []
+        for i, ev in enumerate(d["events"]):
+            seq = ev.get("seq") if isinstance(ev, dict) else None
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                # can't be acked or skipped by its seq: listed by its index, never moving the cursor
+                rejected.append({"i": i, "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+                                 "type": str(ev.get("type"))[:40] if isinstance(ev, dict) else "",
+                                 "reason": "malformed", "error": "an event needs a seq (an integer from 1)"})
+                continue
+            events.append((seq, i, ev))
         with self._ingest:
             if epoch != self.epoch:
                 if self.epoch:
                     self.log(f"hub: the station's outbox is new (epoch {epoch}): counting its events from the start")
                 self.epoch, self.seq = epoch, 0
             n = 0
-            for ev in sorted((e for e in d["events"] if isinstance(e, dict)), key=lambda e: int(e.get("seq") or 0)):
-                seq = int(ev.get("seq") or 0)
+            for seq, i, ev in sorted(events, key=lambda x: (x[0], x[1])):
                 if seq <= self.seq:
-                    continue                   # delivered before (the station retried): already applied
+                    # delivered before (the station retried): already applied. One it couldn't apply is listed again
+                    # (the post that said so may have ended in a 503 later on, never reaching the station)
+                    if (self.epoch, seq) in self._rejections:
+                        rejected.append(dict(self._rejections[(self.epoch, seq)], i=i))
+                    continue
                 kind = str(ev.get("type"))
                 refused = fence_mod.refused()
                 try:
+                    if not isinstance(ev.get("data") or {}, dict):
+                        raise BadEvent("data: a JSON object")
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
-                    self.app.apply(kind, ev.get("data") or {}, audio)
+                    data = ev.get("data") or {}
+                    if p is not None and p.id and isinstance(data, dict) and kind in ("traffic", "page_text"):
+                        # whose clip it is, on the clip (a pool job never goes back to the station it came from)
+                        data = {**data, "origin_station": p.id}
+                    if kind == "source_event":
+                        # a copy the station's quarantine sends again (its qid): applied only over an older snapshot
+                        # (on_event); said by the hub alone, never taken from the station's data
+                        data = {**data, "resent": isinstance(ev.get("qid"), int) and not isinstance(ev["qid"], bool)}
+                    self.app.apply(kind, data, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
                     if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
@@ -723,6 +974,15 @@ class Hub:
                     self.log(f"hub: could not apply {kind} #{seq}: {type(e).__name__}")
                     if kind == "source_event" and not isinstance(e, SourceError) and self._retry(seq):
                         break                  # not acked: the station sends it again (a malformed one is skipped)
+                    # malformed: never applies, whenever it is sent (the station doesn't keep sending it); else it may
+                    # once the hub is fixed
+                    bad = {"seq": seq, "type": kind[:40],
+                           "reason": "malformed" if isinstance(e, (BadEvent, SourceError)) else "apply_failed",
+                           "error": f"{type(e).__name__}{said}"[:200]}
+                    rejected.append(dict(bad, i=i))
+                    self._rejections[(self.epoch, seq)] = bad
+                    while len(self._rejections) > REJECTIONS_KEPT:
+                        self._rejections.popitem(last=False)
                 if fence_mod.refused() != refused or not self.app._may_write_audio():
                     # a write of this event was refused (the lease went, #501), even if something on the way caught
                     # it, or the lease is gone now: neither it nor anything after it is acked (seq stays), the
@@ -734,11 +994,16 @@ class Hub:
             if n:
                 self.app.sync()
                 self.live.on_change()       # push the display now, not on its next second
-            return _json(200, {"ok": True, "acked": self.seq, "applied": n})
+            return _json(200, {"ok": True, "acked": self.seq, "applied": n, **({"rejected": rejected} if rejected else {})})
 
 
 SOURCE_KINDS = ("source_event", "source_health", "source_seen")   # an external incident source's (#297)
 SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malformed one) is retried this often, then skipped
+REJECTIONS_KEPT = 200       # the events it couldn't apply, remembered to say so again on a retried post (Hub._events)
+
+
+class BadEvent(ValueError):
+    """A station event that can never apply (a bad id, data that isn't an object): "malformed" in the answer."""
 AUDIO_UPLOAD_S = 5.0        # the audio uploader's round (#414): the clips the ingest couldn't store, then the migration
 AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
@@ -782,6 +1047,17 @@ class HubApp(App):
     """App with no radios: the station's events go through the same code (apply), the station's
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
+    @property
+    def clip_origin(self) -> str:
+        """The station the catch-up's clips come from: the one station this hub takes until multi-station (a clip handed
+        over carries its own, origin_station; the catch-up per station's rows is #725, with multi-station)."""
+        hub = getattr(self, "hub", None)
+        reg = getattr(hub, "stations", None)
+        try:
+            return reg.legacy_id() if reg is not None else ""
+        except Exception:  # noqa: BLE001 - none known
+            return ""
+
     def __init__(self, cfg, log: Callable[[str], None] = print, fence=None):
         self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
@@ -789,6 +1065,7 @@ class HubApp(App):
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
+        self._stt_cond = threading.Condition()          # an STT input stored (read_stt_audio's wait_s)
         state = Path(cfg.cad_db).parent if cfg.cad_db else None
         self.mdb = MonitorDb(state / "hub.sqlite" if state else ":memory:")
         # audio.sqlite: under the hub's supervisor (sizeup/handoff.py) the standby follows it with cad and hub, so
@@ -815,6 +1092,30 @@ class HubApp(App):
             self.mdb.db.on_refuse = self.audio.db.on_refuse = self.fence.check    # refused: the process stops (#501)
         self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
+        # the GPU worker pool (#639, sizeup/sttpool.py): AWS-channel clips and the shed clips' catch-up go to a worker
+        # first while one is ready, else the way they went before; off with no worker added (Settings > Station > STT
+        # workers). Every transcript is kept as written (sizeup/sttruns.py), its latency per channel on Health.
+        reg = self.hub.workers
+        self.sttpool = sttpool.Pool(enabled=reg.enabled, log=log, allowed=lambda wid: (
+            reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)))
+        # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
+        # rotate or revoke; revoking the station ends its worker too
+        self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
+        from sizeup.cloud.metricsbackup import S3Copies
+        self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
+                                     backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
+                                     log=log)
+        self.stt_latency = sttruns.LatencyBook()
+        # the LLM lane (sizeup/cloud/infer.py): a worker's local model for the intel engine's JSON classifications; its own
+        # queue, after the pre-alert clips, off unless a worker advertises an LLM. Prompts and answers never kept
+        self.infer_lane = infer_mod.Lane(stt_busy=self.sttpool.holds_prealert, may_write=self._may_write_audio, log=log,
+                                         enabled=lambda: bool(self.hub.workers.pool_settings()["on"]),
+                                         llm_on=self.hub.workers.llm_on)
+        self.stt_api.infer = self.infer_lane
+        self.hub.workers.listeners.append(self.infer_lane.switched)     # (a switch holds at once, not a second later)
+        self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
+        self.cad.stt_workers_live = self._worker_live
+        self.cad.stt_pool_forget = lambda wid: (self.sttpool.forget(wid, "revoked"), self.infer_lane.forget(wid))[0]
         # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
@@ -825,8 +1126,14 @@ class HubApp(App):
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
-        # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py)
-        self.health.intel = lambda: self.cad.intel.counts()["packs"]
+        # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py); first, a warning
+        # row when intel pushes go nowhere (no intel topic of its own, or one refused: notify.Pushes.intel_health); then
+        # the Listen links' self-test and cleanup (sizeup/intel/listen.py health()); and last, the local model behind the
+        # police rules (sizeup/intel/backing.py): PC worker ok / rules only
+        lk = lambda: getattr(self.cad.intel, "listen", None)      # noqa: E731
+        bk = lambda: getattr(self.cad.intel, "backing", None)     # noqa: E731
+        self.health.intel = lambda: [r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] \
+            + self.cad.intel.counts()["packs"] + ([bk().health_row()] if bk() is not None else [])
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
         # and each aircraft source with the FAA registry (#542: last good read, failures and back-off on hover)
         self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else []) \
@@ -855,7 +1162,7 @@ class HubApp(App):
         # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
         self.cad.source_rows = lambda: self.hub.talkgroups or []
         self.cad.source_systems = lambda: {self.tg.county: "County", **{
-            str(x.get("name")): str(x.get("label") or x.get("name")) for x in ((self.hub.status or {}).get("p25_systems") or [])
+            str(x.get("name")): str(x.get("label") or x.get("name")) for x in (_part(self.hub.status, "p25_systems", list) or [])
             if isinstance(x, dict) and x.get("name")}}
         self.paging_state = self.live.paging_state     # the station's page going out now
         self.cad.remote_voice = self.hub.render_voice
@@ -901,6 +1208,17 @@ class HubApp(App):
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
+        # #606: the suggested squelch, Health's sparks (GET /api/cad/metrics?view=) and the shift warnings (Health hints)
+        from sizeup.cloud.metricsinsight import SECTION as SIGNAL_SECTION, Insight
+        self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
+        self.cad.station_metrics_insight = self.metric_insight
+        self.health.shifts = self.metric_insight.hints
+        # #677: each STT input's arrival after its event (sizeup/cloud/sttarrival.py): into the metrics store, on Health
+        from sizeup.cloud.sttarrival import Arrival
+        self.stt_arrival = Arrival()
+        self._stt_arrival_cache = None
+        self.health.stt_arrival = self.stt_arrival_stats
+        self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
@@ -921,8 +1239,8 @@ class HubApp(App):
             if obj is not None:
                 self.perf.gauge(name, size(obj, attr))
         # context clips the station's whisper shed (#300, radio-intel PR 3): lost recall that would otherwise look quiet
-        self.perf.gauge("stt_shed_context", lambda: ((self.hub.status or {}).get("health") or {}).get("stt_queue", {})
-                        .get("shed_context") if isinstance(getattr(self.hub, "status", None), dict) else None)
+        self.perf.gauge("stt_shed_context", lambda: q.get("shed_context") if isinstance(
+            q := (_part(self.hub.status, "health") or {}).get("stt_queue"), dict) else None)
         # ... and caught up later (sizeup/sttcatchup.py): the backlog waiting, and caught up in the last 24 h
         self.perf.gauge("stt_catchup_waiting", lambda: self.catchup.stats().get("waiting"))
         self.perf.gauge("stt_caught_up_24h", lambda: self.catchup.stats().get("caught_24h"))
@@ -937,12 +1255,13 @@ class HubApp(App):
             # #275: a station whose config isn't renamed yet (its update is deferred once) sends the old name: its
             # transmissions are the renamed channel's here (airband, the pre-alerts, AWS); the id stays the station's
             d = {**d, "source": RENAMED[d["source"]]}
-        if kind == "page":
-            self._apply_page(d, audio)
+        if kind in ("page", "traffic"):
+            (self._apply_page if kind == "page" else self._apply_traffic)(d, audio)
+            arrival = getattr(self, "stt_arrival", None)
+            if arrival is not None:                  # (#677: its STT input's arrival is measured from now)
+                arrival.event(str(d.get("id") or ""))
         elif kind == "page_text":
             self._apply_page_text(d)
-        elif kind == "traffic":
-            self._apply_traffic(d, audio)
         elif kind == "retext":
             pid = self._id(d)
             with self._lock:
@@ -953,12 +1272,23 @@ class HubApp(App):
                 page.raw, page.confidence = str(d.get("text") or ""), d.get("confidence")
                 page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
                 page.stt, page.flagged = "", False  # type: ignore[attr-defined]
+                page.vocab_v = str(d.get("vocab_v") or "")[:80]  # type: ignore[attr-defined]
                 self._transcribed(page)
+                self._stt_ran(pid, "station-whisper", page.model, page.raw, page.status, page.confidence, item=page)
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
+            # (standing in for AWS: the text of record; else a person's re-run, or the catch-up's)
+            role = "catchup" if d.get("catchup") else "text" if pid in self._aws_asked else "rerun"
+            self._prompt_time(pid, d)               # (#727: whisper's prompt had the clip's own time)
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
-                         quiet=bool(d.get("catchup")))      # (a shed clip caught up: old words, nothing alerts)
+                         quiet=bool(d.get("catchup")),      # (a shed clip caught up: old words, nothing alerts)
+                         vocab_v=str(d.get("vocab_v") or "")[:80],
+                         late=bool(d.get("late")))          # (#747: a call from while the station was down: the same)
+            if str(d.get("status") or "done") in ("done", "no_speech"):     # the station's whisper's text (#639)
+                self._stt_ran(pid, "station-whisper", str(d.get("model") or ""), str(d.get("text") or ""),
+                              str(d.get("status") or "done"), d.get("confidence"), role=role,
+                              vocab_v=str(d.get("vocab_v") or "")[:80])
         elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
@@ -981,14 +1311,20 @@ class HubApp(App):
     def _id(d: dict) -> str:
         cid = str(d.get("id") or "")
         if not CLIP_ID.fullmatch(cid) or ".." in cid:
-            raise ValueError(f"bad id {cid[:40]!r}")
+            raise BadEvent(f"bad id {cid[:40]!r}")
         return cid
 
     def _apply_page(self, d: dict, audio: bytes | None) -> None:
         pid = self._id(d)
         with self._lock:
-            if any(p.id == pid for p in self.pages):
-                return
+            have = next((p for p in self.pages if p.id == pid), None)
+        if have is not None:
+            # here before (its page_text came first: the page event was late, or sent again from the station's
+            # quarantine): its clip, if it has none yet, and its row in Radio again (with play)
+            if audio and not self.audio.has(pid):
+                self.audio.put(pid, audio, "clip", at=have.end, channel=have.label)
+                self._page_to_cad(have)
+            return
         page = page_from_dict(d)
         if audio:
             self.audio.put(pid, audio, "clip", at=page.end, channel=page.label)
@@ -1004,12 +1340,17 @@ class HubApp(App):
             page = page_from_dict(d)
             with self._lock:
                 self.pages.appendleft(page)
-        elif (page.status != "pending" and not getattr(page, "flagged", False)) or getattr(page, "stt", "") == "aws":
-            return                                    # applied before (or Amazon Transcribe reads it here)
+        elif (page.status != "pending" and not getattr(page, "flagged", False)) or getattr(page, "stt", "") in ("aws", "pool"):
+            return                                    # applied before (or Amazon Transcribe or the pool reads it here)
+        if str(d.get("stt") or "") == "pool" and not d.get("raw"):     # the station handed it to the pool (its restart)
+            return self._pool_clip(page, page.label, self.audio.get(pid), "urgent")
         page.flagged = False  # type: ignore[attr-defined]   (flagged by the sweep: its text came after all)
         page.raw, page.confidence = str(d.get("raw") or ""), d.get("confidence")
         page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
+        page.vocab_v = str(d.get("vocab_v") or "")[:80]  # type: ignore[attr-defined]
         self._transcribed(page)
+        if page.status in ("done", "no_speech"):         # the station's whisper's text (#639)
+            self._stt_ran(pid, "station-whisper", page.model, page.raw, page.status, page.confidence, item=page)
         if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
@@ -1051,7 +1392,13 @@ class HubApp(App):
         key = traffic_key(t)
         if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
             return self._aws_from_clip(t, audio, key)
+        if d.get("transcript_pending") == "pool":           # a station handed it to the pool (#639 phase 2)
+            return self._pool_clip(t, key, audio, d.get("stt_class"))
         self._transcribed(t)
+        if t.status in ("done", "no_speech"):                  # the station's whisper's text, as it came (#639)
+            self._stt_ran(t.id, "station-whisper", str(getattr(t, "model", "") or ""), t.text, t.status,
+                          getattr(t, "confidence", None), key=key, item=t, wait_s=d.get("stt_wait_s"),
+                          run_s=d.get("stt_run_s"))
         if d.get("stt") == "both" and t.status in ("done", "no_speech"):
             self._aws_from_clip(t, audio, key, both=True)
 
@@ -1074,18 +1421,27 @@ class HubApp(App):
         self._aws_start(item, pcm, key)
 
     def _aws_start(self, item, pcm, key: str) -> None:
+        if self._pool_first(item, pcm, key):       # a GPU worker ready (#639): it first, AWS if it can't
+            return
         self._aws_since[item.id] = time.time()
         self._aws_asked.pop(item.id, None)
         super()._aws_start(item, pcm, key)
 
     def _aws_done(self, job, text: str, conf) -> None:
-        super()._aws_done(job, text, conf)
+        since, ran = self._aws_since.get(job.id), time.time()
+        super()._aws_done(job, text, conf)              # (the text first: the record never delays it)
+        self._stt_ran(job.id, "aws", channels_model(), text, "done" if text else "no_speech", conf, key=job.channel,
+                      item=job.page if job.kind == "page" else None, queued_at=since,
+                      run_s=ran - since if since else None,     # (AWS's stream: its wait and run as one)
+                      role="catchup" if job.catchup else "rerun" if job.rerun else "text", vocab_v=job.vocab_v)
         if job.alt is None and not job.rerun:
             self._aws_since.pop(job.id, None)
             self._aws_asked.pop(job.id, None)
         self.sync()
 
     def _aws_late(self, job, text: str, conf) -> None:
+        self._stt_ran(job.id, "aws", channels_model(), text, "done" if text else "no_speech", conf, key=job.channel,
+                      role="late", vocab_v=job.vocab_v)
         if job.id in self._aws_late_wait and job.alt is None and not job.rerun:
             self._aws_late_wait.discard(job.id)     # nothing else was asked for it: AWS's late answer is the text
             item, _key = self._find(job.id)
@@ -1222,6 +1578,8 @@ class HubApp(App):
                 d.pop(cid, None)
         self._aws_late_wait.intersection_update(ids)
         for item, key, kind in pending:
+            if self.sttpool.has(item.id):          # a GPU worker has it (#639): the pool's own clock falls it back
+                continue
             asked = self._aws_asked.get(item.id)
             if asked is not None:
                 if now - asked >= FALLBACK_WAIT_S:
@@ -1263,7 +1621,7 @@ class HubApp(App):
     def _flag_waiting(self, now: float) -> int:
         """A page waiting for the station's own whisper (not AWS) PENDING_FLAG_S after the hub got it: flagged."""
         with self._lock:
-            waiting = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") != "aws"]
+            waiting = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") not in ("aws", "pool")]
         ids = {p.id for p in waiting}
         for cid in [c for c in self._pending_seen if c not in ids]:
             self._pending_seen.pop(cid, None)
@@ -1296,6 +1654,7 @@ class HubApp(App):
                 and self.channel_pref(key)["engine"] == "aws"
                 and self.aws.available(key)[0]
                 and (it.id not in self._aws_since or it.id in self._aws_asked)     # (not one AWS is doing now)
+                and not self.sttpool.has(it.id)                                     # (nor one a GPU worker has)
                 and self._rerun_note.get(it.id) != CATCHUP_NOTE]                    # (nor one the catch-up sent it)
         todo.sort(key=lambda x: -x[0].end)
         n = 0
@@ -1337,6 +1696,381 @@ class HubApp(App):
             except Exception as e:  # the sweep must never die
                 self.hub.log(f"hub: Amazon Transcribe sweep: {type(e).__name__}: {e}")
 
+    # -- the GPU worker pool (#639, sizeup/sttpool.py) ---------------------------------------------------------------
+
+    @staticmethod
+    def _pool_wav(pcm) -> bytes:
+        """A clip (int16, 8 kHz, as AWS takes it) as whisper-server takes it: 16 kHz with 0.5 s of silence each side,
+        what the station's WhisperClient posts."""
+        import numpy as np
+        x = np.asarray(pcm, dtype=np.float32) / 32768.0
+        if len(x) > 1:
+            x = np.interp(np.arange(2 * len(x)) / 2.0, np.arange(len(x)), x).astype(np.float32)
+        pad = np.zeros(8000, dtype=np.float32)
+        return wav_bytes(np.concatenate([pad, x, pad]), 16000)
+
+    def _pool_class(self, item, key: str) -> float:
+        try:
+            return self._stt_priority(item, key)
+        except Exception:  # noqa: BLE001 - a talkgroup the hub can't place: live
+            from sizeup.stt import LIVE
+            return LIVE
+
+    def _pool_first(self, item, pcm, key: str) -> bool:
+        """An AWS-channel clip to a GPU worker first (it is shown as transcribing; AWS, then the station's whisper, if
+        no worker gives its text in time). False: the pool can't take it now (no worker ready, off for its class, too
+        busy to beat its wait): the caller goes the AWS way, nothing changed."""
+        if pcm is None or getattr(self, "sttpool", None) is None:
+            return False
+        cls = self._pool_class(item, key)
+        if not self.sttpool.ready(cls, gpu_only=True)[0]:     # (an AWS channel's: never a station's slower whisper)
+            return False
+        page = None if isinstance(item, Traffic) else item
+        item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
+        item.stt = "aws"                          # (still waiting for the AWS path: the sweep and a restart know it)
+        if page is None:
+            item.__dict__.pop("transcript_pending", None)
+            self._transcribed(item)
+        else:
+            self._save_page(item)
+            self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item)
+        except Exception:  # noqa: BLE001 - no prompt is still a transcript
+            prompt, vocab_v = "", ""
+        job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
+                          audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
+                          on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
+                          gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
+        if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
+            self._pool_to_aws(job, "the GPU pool couldn't take it")
+        self.sync()
+        return True
+
+    def _pool_audio_of(self, cid: str, page, pcm):
+        """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
+        own whisper input (#671's stt-src, waited for up to POOL_AUDIO_WAIT_S: it comes on its own lane) at 16 kHz with
+        0.5 s of silence each side, exactly what whisper-server would get on the station; else the listening clip."""
+        def audio(wait_s: float = 0.0) -> bytes | None:
+            import numpy as np
+            sa = None
+            try:
+                sa = self.read_stt_audio(cid, float(getattr(page, "voice_offset_s", 0.0) or 0.0) if page is not None
+                                         else 0.0, wait_s=min(POOL_AUDIO_WAIT_S, wait_s))
+            except Exception as e:  # noqa: BLE001 - the listening clip then
+                self.hub.log(f"stt pool: {cid}: no STT input ({type(e).__name__})")
+            if sa is not None and sa.input == "stt-src" and sa.rate == 16000:
+                pad = np.zeros(8000, dtype=np.float32)
+                return wav_bytes(np.concatenate([pad, np.asarray(sa.pcm, dtype=np.float32) / 32768.0, pad]), 16000)
+            if pcm is not None:
+                return self._pool_wav(pcm)
+            return self._pool_wav(sa.pcm) if sa is not None and sa.rate == 8000 else None
+        return audio
+
+    def pool_word(self, sid: str = "") -> dict:
+        """The pool as a station hears it in its state answer (#639 phase 2): on (it may hand clips over and claim
+        some), worker (its whisper may claim), and ready: how many workers other than its own whisper could take a
+        context clip now (a station hands one over at once only when one could)."""
+        reg = self.hub.workers
+        try:
+            word = self.sttpool.word(sid)
+        except Exception:  # noqa: BLE001 - none
+            word = {"ready": 0, "max_s": 0.0, "gpu_idle": False, "gpu_idle_n": 0}
+        return {"on": reg.enabled(sttpool.LOW), "worker": reg.stations_on(sid), **word}
+
+    def _pool_clip(self, item, key: str, wav: bytes | None, cls_name=None, fresh: bool = True) -> None:
+        """A clip a station handed to the pool (#639 phase 2: its whisper too busy to keep it, or the station stopping):
+        shown as transcribing, a pool job (any worker: a GPU worker first, then an idle station's whisper), and when
+        none takes it, the next way (_pool_elsewhere). Never dropped. fresh=False: one the pool held before a restart."""
+        from sizeup.transcribe import wav_pcm
+        page = None if isinstance(item, Traffic) else item
+        pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
+        cls = self._pool_class(item, key)
+        if fresh:
+            item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
+            item.stt = "pool"
+            if page is None:
+                item.__dict__.pop("transcript_pending", None)
+                self._transcribed(item)
+            else:
+                self._save_page(item)
+                self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item)
+        except Exception:  # noqa: BLE001 - no prompt is still a transcript
+            prompt, vocab_v = "", ""
+        seconds = len(pcm) / 8000.0 if pcm is not None else max(0.0, float(item.end) - float(item.start))
+        job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
+                          audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
+                          on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
+                          extra={"pcm": pcm, "page": page, "handed": True,
+                                 "origin": str(getattr(item, "origin_station", "") or self.clip_origin),
+                                 "vocab_v": vocab_v})
+        if not self.sttpool.submit(job):
+            return self._pool_elsewhere(job, "no pool worker could take it now")
+        self.sync()
+
+    def _pool_elsewhere(self, job: sttpool.Job, why: str) -> None:
+        """A handed-over clip no pool worker transcribed: a live one to AWS (its budget allowing), else to the station's
+        whisper at live priority (it waits for a station restarting to come back); a context or catch-up one marked
+        shed, so the catch-up runs it once there is room. Nothing is dropped."""
+        from sizeup.stt import HIGH, LIVE, SHED, URGENT
+        page = job.extra.get("page")
+        item = page if job.kind == "page" else self._find(job.id)[0]
+        if item is None or getattr(item, "raw", "") or getattr(item, "text", "") or \
+                getattr(item, "status", "") not in ("pending", "remote"):
+            return
+        if job.cls in (URGENT, HIGH, LIVE):         # (a context class never at live priority, never past the
+                                                   # catch-up's own AWS cap: the catch-up takes it, CATCHUP_AWS_PCT)
+            item.stt = "aws"                       # (the AWS path's sweep and a hub restart know it from here)
+            if job.extra.get("pcm") is not None and self.aws is not None and self.aws.available(job.channel)[0]:
+                self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: Amazon Transcribe")
+                return self._pool_to_aws(job, why)
+            self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: the station's whisper")
+            self._aws_failed(AwsJob(job.kind, job.id, job.channel, page=page, recovered=True), f"pool: {why[:80]}")
+            return self.sync()
+        self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: left for the catch-up")
+        self._stt_state(item, job.id, "skipped", f"{sttpool.PENDING_MODEL} ({SHED}: {why[:80]}; the catch-up runs it)")
+        item.stt = ""
+        self.sync()
+
+    def _pool_recover(self) -> int:
+        """After a restart: what the pool held for a station (stt "pool", still pending) goes the pool's way again (the
+        pool empty at start: the next way, _pool_elsewhere). How many."""
+        with self._lock:
+            pages = [(p, p.label) for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "pool"]
+        items = pages + [(t, traffic_key(t)) for t in list(self.store.loose) + [t for i in self.store.incidents
+                                                                              for t in i.traffic]
+                         if t.status == "pending" and getattr(t, "stt", "") == "pool"]
+        for item, key in items:
+            self._pool_clip(item, key, self.audio.get(item.id), fresh=False)
+        if items:
+            self.hub.log(f"hub: after the restart, {len(items)} clip(s) the pool held sent on again")
+        return len(items)
+
+    def _hub_time(self, t) -> float | None:
+        """A station time on the hub's clock."""
+        return float(t) + float(getattr(self.hub, "skew", 0.0) or 0.0) if isinstance(t, (int, float)) else None
+
+    def _pool_done(self, job: sttpool.Job, res: dict) -> None:
+        """A GPU worker's text: judged like the station's whisper (no speech, hallucinations), the raw words kept
+        (stt_runs), then the same way AWS's text goes: the page read, the transmission's text, the catch-up's row."""
+        raw = str(res.get("text") or "")
+        probs = [float(w[1]) for w in res.get("words") or []
+                 if isinstance(w[1], (int, float)) and math.isfinite(w[1]) and 0.0 <= w[1] <= 1.0]
+        conf = round(sum(probs) / len(probs), 2) if probs else None
+        vocab_v = str(job.extra.get("vocab_v") or "")       # a term list in its prompt: the read-back guard too
+        text, status = judge(raw, job.seconds, prompt=job.prompt, vocab_v=vocab_v)
+        kind = str(job.extra.get("kind") or "gpu")
+        model = sttpool.model_label(str(res.get("model") or ""), job.worker, kind)
+        catchup = bool(job.extra.get("catchup"))
+        done_at = time.time()
+        if catchup:
+            changed = self._retext(job.id, text, status, conf, model, why="pool worker catch-up", quiet=True,
+                                   vocab_v=vocab_v)
+            self._rerun_finish(job.id, "changed" if changed or text else "same", model)
+        elif job.kind == "page" and job.extra.get("page") is not None:
+            page = job.extra["page"]
+            page.raw, page.confidence, page.status, page.model = text, conf, status, model
+            page.stt = ""
+            page.vocab_v = vocab_v  # type: ignore[attr-defined]
+            self._transcribed(page)
+        else:
+            self._retext(job.id, text, status, conf, model, why="pool worker", vocab_v=vocab_v)
+        self._aws_since.pop(job.id, None)
+        self._aws_asked.pop(job.id, None)
+        self.sync()
+        self._stt_ran(job.id, "station-whisper" if kind == "station" else "gpu-worker", str(res.get("model") or ""),
+                      raw, status, conf, key=job.channel,                                                      # (after
+                      item=job.extra.get("page"), role="catchup" if catchup else "text", words=res.get("words"),  # the text)
+                      queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker,
+                      prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
+                      wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
+                      run_s=done_at - job.claimed_at if job.claimed_at else None,
+                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v)
+
+    def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
+        """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
+        catch-up clip: back to the catch-up, no try burnt, when nobody took it (no worker, unclaimed, handed back); a
+        lease lost or a result that couldn't be applied is a failed try on its row (a clip that kills workers ends)."""
+        if job.extra.get("catchup"):
+            if job.extra.get("fell") in ("lease", "error"):
+                self.hub.log(f"stt pool: catch-up {job.id}: {why}: a failed try")
+                self._rerun_finish(job.id, f"failed: GPU worker: {why[:80]}")     # ("; catch-up try N": its note)
+                return self.sync()
+            self.hub.log(f"stt pool: catch-up {job.id}: {why}: back to the catch-up")
+            self._rerun_note.pop(job.id, None)
+            self.catchup.forget(job.id)
+            return
+        if job.extra.get("handed"):               # a station handed it over (busy, or restarting): the next way on
+            return self._pool_elsewhere(job, why)
+        self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: Amazon Transcribe")
+        self._pool_to_aws(job, why)
+
+    def _pool_to_aws(self, job: sttpool.Job, why: str) -> None:
+        """The AWS path for a clip that was the pool's (its row already says it is transcribing): AWS if it can take
+        it, else _aws_failed (the station's whisper, or "transcription failed")."""
+        page = job.extra.get("page")
+        item = page if job.kind == "page" else self._find(job.id)[0]
+        if item is None:
+            return
+        if (getattr(item, "raw", "") or getattr(item, "text", "")
+                or getattr(item, "status", "") not in ("pending", "remote")):
+            return                                 # its text came meanwhile
+        aws_job = AwsJob(job.kind, job.id, job.channel, page=page)
+        ok, awhy = self.aws.available(job.channel) if self.aws is not None else \
+            (False, "Amazon Transcribe isn't set up on the hub")
+        if not ok:
+            self._aws_failed(aws_job, f"GPU worker: {why[:80]}; {awhy}")
+            return self.sync()
+        self._aws_since[job.id] = time.time()
+        self._aws_asked.pop(job.id, None)
+        self._stt_state(item, job.id, "pending", channels_model())
+        self.aws.submit(job.channel, aws_job, job.extra["pcm"])
+        self.sync()
+
+    def _catchup_route(self, key: str) -> str:
+        """The GPU pool first for a shed clip while a worker is ready (#639), else as before (AWS on a context channel
+        with budget, else the station's whisper)."""
+        how = super()._catchup_route(key)
+        # (a worker other than the clip's own station: its own whisper takes its own clips the catch-up's way, with its
+        # quiet spell and its idleness rules)
+        if how and getattr(self, "sttpool", None) is not None and self.sttpool.ready(CATCHUP, origin=self.clip_origin)[0]:
+            return "pool"
+        return how
+
+    def _catchup_pool(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to the GPU pool (quiet: old words alert nothing). (sent, why it never can be)."""
+        cid, key = str(row.get("id") or ""), str(row.get("key") or "")
+        if not CLIP_ID.fullmatch(cid) or self.sttpool.has(cid):
+            return False, ""
+        pcm = self._catchup_pcm(cid, key, str(row.get("source") or ""))
+        if pcm is None:
+            return False, "no recording"
+        item = self._find(cid)[0]
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item) if item is not None else ("", "")
+        except Exception:  # noqa: BLE001 - no prompt is still a transcript
+            prompt, vocab_v = "", ""
+        end = row.get("start")
+        job = sttpool.Job(cid, CATCHUP, key, "traffic", len(pcm) / 8000.0, audio_wait=True, audio=self._pool_audio_of(cid, None, pcm),
+                          on_done=self._pool_done, on_fallback=self._pool_fallback, prompt=prompt,
+                          clip_end=self._hub_time(float(end) + float(row.get("seconds") or 0.0))
+                          if isinstance(end, (int, float)) else None,
+                          extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin, "vocab_v": vocab_v})
+        self._rerun_note[cid] = CATCHUP_NOTE
+        if not self.sttpool.submit(job):
+            self._rerun_note.pop(cid, None)
+            return False, ""
+        return True, ""
+
+    def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
+                 prompted: bool | None = None,
+                 role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
+                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None) -> None:
+        """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
+        here) counted for Health when it is the text of record. Never in the way of the transcript."""
+        try:
+            if item is None:
+                item = self._find(cid)[0]
+            if not key and item is not None:
+                key = traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "") or "")
+            if clip_end is None and item is not None:
+                clip_end = self._hub_time(getattr(item, "end", None))
+            if cls is None and item is not None:
+                cls = self._pool_class(item, key)
+            check = self._time_check(key, item, text, clip_end, engine, prompted)
+            now = time.time()
+            if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
+                return
+            if vocab_v is None:                  # (the item's own: whisper's prompt or AWS's stream, sizeup/stt_terms.py)
+                vocab_v = str(getattr(item, "vocab_v", "") or "")
+            self.stt_runs.add(cid, engine, text=text, status=status, model=model, worker=worker, prompt_v=prompt_v,
+                              vocab_v=vocab_v,
+                              role=role, confidence=conf if isinstance(conf, (int, float)) else None, words=words,
+                              channel=key, cls=sttpool.class_key(cls) if cls is not None else "", clip_end=clip_end,
+                              queued_at=queued_at, engine_start=engine_start, done_at=now, wait_s=wait_s,
+                              run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
+                              keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
+                              call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
+                              check=check)
+            if role == "text" and clip_end is not None:
+                self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
+        except Exception as e:  # noqa: BLE001 - bookkeeping
+            self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
+
+    def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
+                    prompted: bool | None = None) -> stt_time.Check | None:
+        """The dispatcher's trailing time (#727, sizeup/stt_time.py) on a configured channel, the dispatcher's (or a
+        talker-less) transmission only: kept with the run, the raw text never changed. None: not checked (no clip
+        found here, no end). prompted: the engine's prompt carried the clip's time (a GPU worker's: from its job's
+        prompt); None: the station's whisper says so on the clip (stt_prompt_time), any other engine had none. Never in
+        the way of the run: a failure is no check."""
+        try:
+            if item is None or not text or not stt_time.applies(key, str(getattr(item, "unit", "") or ""),
+                                                                 self.cfg.stt_time_channels):
+                return None
+            if prompted is None:
+                prompted = engine == "station-whisper" and bool(getattr(item, "stt_prompt_time", False))
+            return stt_time.check(text, clip_end, prompted=bool(prompted))
+        except Exception as e:  # noqa: BLE001 - bookkeeping
+            self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
+            return None
+
+    def _prompt_time(self, cid: str, d: dict) -> None:
+        """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission
+        for its run's trailing-time check (_time_check)."""
+        item = self._find(cid)[0]
+        if item is not None:
+            try:
+                item.stt_prompt_time = bool(d.get("stt_prompt_time"))
+            except AttributeError:
+                pass
+
+    def stt_time_health(self) -> dict | None:
+        """Settings > Station > Health: the trailing-time match rate per channel, engine, model (and vocab_v), 24 h and
+        TIME_DAYS days, a day at a time (sizeup/sttruns.py Runs.time_rates). None with nothing checked."""
+        rows = self.stt_runs.time_rates()
+        if not rows:
+            return None
+        info, names = self.cfg.p25_tg_info or {}, self.cfg.p25_talkgroups or {}
+        for r in rows:                         # (a county talkgroup's name: "Fire/EMS 15")
+            ch = str(r.get("channel") or "")
+            n = int(ch[3:]) if ch.startswith("tg:") and ch[3:].isdigit() else None
+            r["name"] = ((info.get(n) or {}).get("name") or names.get(n) or ch) if n is not None else ch
+        return {"rows": rows, "rule": stt_time.RULE, "window_min": list(stt_time.WINDOW_MIN), "days": sttruns.TIME_DAYS}
+
+    def _clips_logged(self, ids: list[str]) -> set:
+        """Of these clip ids, the ones still in the radio log (a run goes with its transcript)."""
+        out: set = set()
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            rows = self.cad.store.q(f"SELECT id FROM radio_traffic WHERE id IN ({', '.join('?' * len(part))})", tuple(part))
+            out.update(r["id"] for r in rows)
+        return out
+
+    def _worker_live(self, wid: str) -> dict:
+        """A worker's live state for Settings > Station > STT workers."""
+        w = self.sttpool.workers.get(wid)
+        if w is None:
+            return {"state": "offline"}
+        now = self.sttpool.clock()
+        lw = self.infer_lane.workers.get(wid)
+        return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
+                "version": w.version, "llm": lw.llm if lw is not None else ""}
+
+    def pool_health(self) -> dict | None:
+        """Settings > Station > Health: the pool (its workers, queue, fallbacks, p50/p90) and every channel's latency.
+        None while no worker was ever added and no transcript timed (nothing to show)."""
+        lat = self.stt_latency.table()
+        active = self.hub.workers.any() or bool(self.sttpool.workers)
+        if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
+            return None
+        return {"active": active, "settings": self.hub.workers.pool_settings(), **self.sttpool.stats(),
+                "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
+                "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
+                "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
+
     # -- Settings > Radios > Channels on the station ----------------------------------------------------
 
     def channels_changed(self) -> None:
@@ -1366,6 +2100,25 @@ class HubApp(App):
         return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),
                 "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny)}
 
+    def _aws_word_log(self, ok: bool, why: str, reserve: list, deny: list, deny_why: str) -> None:
+        """A channel denied AWS (the monthly budget, the breaker; police past its own budget) is said in the log when
+        it starts and when it ends (#639: the baseline's gap), never per clip."""
+        word = (bool(ok), tuple(sorted(str(k) for k in reserve)) if not ok else (), tuple(sorted(str(k) for k in deny)))
+        was = getattr(self, "_aws_word", None)
+        self._aws_word = word
+        if was is None or was == word:
+            if was is None and (not ok or deny):
+                self.hub.log(f"aws transcribe: denied now: {'our channels' if not ok else ''}"
+                             f"{' and ' if not ok and deny else ''}{', '.join(word[2])}"
+                             f" ({why if not ok else deny_why}); reserve: {', '.join(word[1]) or 'none'}")
+            return
+        if was[0] != word[0]:
+            self.hub.log("aws transcribe: our channels " + ("may use AWS again" if ok else
+                         f"denied AWS ({why}): the station's whisper; reserve kept: {', '.join(word[1]) or 'none'}"))
+        if was[2] != word[2]:
+            self.hub.log("aws transcribe: " + (f"denied AWS on its own budget: {', '.join(word[2])} ({deny_why})"
+                                               if word[2] else "no channel denied on its own budget any more"))
+
     def squelch_defaults(self, key: str) -> dict:
         """The station's receiver defaults, as it reported them (its config's, not the hub's)."""
         hub = getattr(self, "hub", None)          # (None while App's __init__ runs)
@@ -1375,20 +2128,45 @@ class HubApp(App):
         return {f: d.get(f) for f in channels.SQUELCH} if isinstance(d, dict) else super().squelch_defaults(key)
 
     def _deny_ok(self) -> bool:
-        return bool(((self.hub.status or {}).get("channels") or {}).get("deny_ok"))
+        return bool((_part(self.hub.status, "channels") or {}).get("deny_ok"))
 
     def _squelch_ok(self) -> bool:
-        return bool(((self.hub.status or {}).get("channels") or {}).get("squelch_ok"))
+        return bool((_part(self.hub.status, "channels") or {}).get("squelch_ok"))
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""
         self.channels_check(force=True)
 
+    def alert_keys_check(self) -> None:
+        """The station has another revision of the pre-alerts' sources than the intel engine's (its status says which):
+        sent (set_stt_alert_keys, a call job; one at a time). A station from before this reports none and is never sent
+        them (it refuses the call)."""
+        if not self._may_write_audio():                # a standby sends nothing (only the leader's word counts)
+            return
+        keys, rev = self._stt_alert_source()
+        st = self.hub.status or {}
+        if "stt_alert_rev" not in st or st.get("stt_alert_rev") == rev or not self.hub.connected():
+            return
+        if getattr(self, "_alert_push", False):
+            return
+        self._alert_push = True
+
+        def push() -> None:
+            try:
+                self.hub.remote("set_stt_alert_keys", sorted(keys), rev, timeout=CALL_WAIT_S)
+            except Exception as e:  # noqa: BLE001 - again at the next state post
+                self.hub.log(f"hub: the pre-alerts' sources not sent to the station: {str(e)[:120]}")
+            finally:
+                self._alert_push = False
+        threading.Thread(target=push, name="alert-keys", daemon=True).start()
+
     def channels_check(self, force: bool = False) -> None:
         """Send the station these choices when what it reports differs (a change here, a station that was
         offline, AWS's limit reached or a new month): one push at a time, at most every 10 s unless forced."""
         want = self.channel_desired()
-        got = (self.hub.status or {}).get("channels") or {}
+        a = want["aws"]
+        self._aws_word_log(a["ok"], a["why"], a["reserve"], a.get("deny") or [], a.get("deny_why") or "")
+        got = _part(self.hub.status, "channels") or {}
         if got.get("sig") == want["sig"] or not self.hub.connected():
             return
         now = time.time()
@@ -1404,7 +2182,8 @@ class HubApp(App):
             try:
                 res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"],
                                       *([want["squelch"]] if want["squelch"] is not None else []))
-                if isinstance(res, dict) and self.hub.status is not None:
+                if isinstance(res, dict) and self.hub.status is not None \
+                        and statusshape.problem({"channels": res}) is None:      # (of the shape a status' is)
                     self.hub.status["channels"] = res
                 self._chan_push["error"] = ""
             except (StationOffline, RuntimeError) as e:
@@ -1418,9 +2197,19 @@ class HubApp(App):
                     self.channels_check(force=True)
         threading.Thread(target=push, name="hub-channels", daemon=True).start()
 
+    def stt_terms_check(self) -> None:
+        """The station is sent the private term lists' top (whisper's prompt, sizeup/stt_terms.py) when the copy it reports
+        differs: after a change here, or a station that restarted with none. A station from before this refuses the
+        call: tried again a minute later, said once."""
+        push = self.__dict__.get("_terms_push")
+        if push is None:
+            push = self._terms_push = stt_terms.StationPush(
+                self.stt_terms_payload, lambda p: self.hub.remote("set_stt_terms", p), log=self.hub.log)
+        push.check(_part(self.hub.status, "stt_terms"), self.hub.connected())
+
     def channels_sync(self) -> dict:
         want = self.channel_desired()
-        got = (self.hub.status or {}).get("channels") or {}
+        got = _part(self.hub.status, "channels") or {}
         if not self.hub.status:
             return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
         if got.get("sig") == want["sig"] and self._sq_ov and not self._squelch_ok():
@@ -1443,12 +2232,109 @@ class HubApp(App):
     # -- what App does with local radios -----------------------------------------------------------------
 
     def clip(self, cid: str) -> bytes | None:
-        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+        if not CLIP_ID.fullmatch(cid) or ".." in cid or cid.endswith(STT_SRC):   # (an STT input is no clip to play)
             return None
         return self.audio.get(cid)
 
     def has_clip(self, cid: str) -> bool:
-        return self.audio.has(cid)
+        return not cid.endswith(STT_SRC) and self.audio.has(cid)
+
+    # -- the speech-to-text input (sizeup/cloud/sttinput.py) -------------------------------------------------------
+
+    def put_stt_input(self, it: dict, station: str = "") -> bool:
+        """One clip's STT input from POST /api/station/stt, beside its clip (the same channel, talkgroup and time: the
+        same retention), whether its event came already or not. False: not one to keep (refused for good, logged; its
+        STT consumers get the listening clip). A write the fence refused is raised (nothing acked). Its arrival after
+        its event is measured (#677, sizeup/cloud/sttarrival.py), under `station` (the post's)."""
+        try:
+            cid = self._id(it)
+            kind = it.get("kind")
+            if kind not in ("traffic", "page"):
+                raise ValueError(f"kind {str(kind)[:20]!r}")
+            data, meta = sttinput.from_wire(it.get("stt"))
+        except ValueError as e:
+            self._stt_say(f"hub: speech-to-text input refused: {str(e)[:120]}")
+            return False
+        d = dict(it)
+        if kind == "traffic" and d.get("source") in RENAMED and d["source"] not in self._kind \
+                and RENAMED[d["source"]] in self._kind:
+            d["source"] = RENAMED[d["source"]]                  # (#275, as apply() does for its event)
+        end = d.get("end")
+        at = float(end) if isinstance(end, (int, float)) and not isinstance(end, bool) else time.time()
+        where = _where(d) if kind == "traffic" else {"channel": str(d.get("label") or "")}
+        refused = fence_mod.refused()
+        try:
+            sttinput.store(self.audio, cid, data, meta, at, **where)
+        except Exception as e:  # noqa: BLE001 - a store that fails never costs anything else (its clip is read)
+            if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
+                raise
+            self._stt_say(f"hub: speech-to-text input for {cid} not stored: {type(e).__name__}: {str(e)[:120]}")
+            return False
+        status = self.hub.status if isinstance(getattr(self.hub, "status", None), dict) else {}
+        self.stt_arrival.blob(cid, station or str(status.get("id") or ""), kind, where.get("channel") or "")
+        return True
+
+    def stt_arrival_flush(self) -> int:
+        """The STT input arrival delays measured since (#677) into the station metrics (kind "stt_in", the subject the
+        channel): graphed on the Signal tab, Health's p50 / p95. On the metrics-backup thread, never a request's (a
+        standby's write refused there must not fail a post): on a standby they are dropped (the leader measures its
+        own). The records added."""
+        got = self.stt_arrival.take()
+        if not got:
+            return 0
+        n = 0
+        for station, recs in got.items():
+            try:
+                n += int(self.metric_store.ingest(station, recs, tell=False).get("accepted") or 0)
+            except fence_mod.FencedWrite:
+                pass
+            except Exception as e:  # noqa: BLE001 - a measurement, never in anything's way
+                self._stt_say(f"hub: STT input arrival not kept: {type(e).__name__}: {str(e)[:120]}")
+        if n:
+            self._stt_arrival_cache = None
+        return n
+
+    def stt_arrival_stats(self, now: float | None = None) -> dict | None:
+        """Health: the STT inputs' arrival after their events, p50 / p95 per kind and channel over 1 h and 24 h (#677).
+        Read from the metrics store at most once a minute."""
+        from sizeup.cloud import sttarrival
+        now = time.time() if now is None else now
+        hit = getattr(self, "_stt_arrival_cache", None)
+        if hit is not None and 0 <= now - hit[0] < 60.0:
+            return hit[1]
+        out = sttarrival.stats(self.metric_store, now)
+        self._stt_arrival_cache = (now, out)
+        return out
+
+    def stt_stored(self) -> None:
+        """STT inputs were stored: wake read_stt_audio's waiters (once per post)."""
+        with self._stt_cond:
+            self._stt_cond.notify_all()
+
+    def _stt_say(self, msg: str) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "_stt_said", -1e9) >= 60.0:
+            self._stt_said = now
+            self.hub.log(msg)
+
+    def read_stt_audio(self, cid: str, voice_offset_s: float | None = None,
+                       wait_s: float = 0.0) -> sttinput.SttAudio | None:
+        """The audio a speech-to-text engine on the hub should take for this transmission or page (Amazon Transcribe,
+        a GPU worker): the station's own whisper input ("stt-src") when it came, else the listening clip ("listening-8k",
+        a page's from its voice on), else None. voice_offset_s: a page's (None: looked up among the pages here).
+        wait_s: the STT input comes on its own lane, usually a moment after its event: wait up to this long for it
+        before taking the listening clip (0: never wait)."""
+        if not CLIP_ID.fullmatch(cid) or ".." in cid:
+            return None
+        if voice_offset_s is None:
+            with self._lock:
+                page = next((p for p in self.pages if p.id == cid), None)
+            voice_offset_s = float(page.voice_offset_s) if page is not None else 0.0
+        wait_s = min(max(0.0, float(wait_s or 0.0)), STT_WAIT_MAX_S)
+        if wait_s > 0:
+            with self._stt_cond:
+                self._stt_cond.wait_for(lambda: self.audio.has(sttinput.src_id(cid)), timeout=wait_s)
+        return sttinput.read(self.audio, cid, voice_offset_s, log=self.hub.log)
 
     def radio_status(self) -> list[dict]:
         return self.hub.radio_rows()
@@ -1459,8 +2345,7 @@ class HubApp(App):
     def state(self) -> dict:
         st = super().state()
         st["talkgroups"] = self.hub.talkgroups
-        systems = (self.hub.status or {}).get("p25_systems")
-        st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
+        st["p25_systems"] = _part(self.hub.status, "p25_systems", list) or []      # (#409) the station's other P25 systems
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return self._hide_context(st)       # (#419: the station's lists too, where nobody is signed in)
@@ -1501,8 +2386,8 @@ class HubApp(App):
 
     def reception_state(self) -> dict | None:
         """The station's reception tests as it last reported them (admins only: server.py); None while it is away."""
-        rec = (self.hub.status or {}).get("reception")
-        return rec if isinstance(rec, dict) and self.hub.connected() else None
+        rec = _part(self.hub.status, "reception")
+        return rec if rec is not None and self.hub.connected() else None
 
     def reception_seen(self, rec) -> None:
         """The station's report: each test that ended since the last one, and each paused job that came back late,
@@ -1552,6 +2437,8 @@ class HubApp(App):
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:
+        if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
+            system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
             return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)
@@ -1639,8 +2526,7 @@ class HubApp(App):
         last = getattr(self.hub, "status_at", None) or 0.0
         if last <= after or time.time() - last > CATCHUP_STATUS_S:
             return False, "waiting for the station's report"
-        hl = (self.hub.status or {}).get("health")
-        hl = hl if isinstance(hl, dict) else {}
+        hl = _part(self.hub.status, "health") or {}
         wh = hl.get("whisper") if isinstance(hl.get("whisper"), dict) else {}
         if wh.get("state") not in (None, "ok"):
             return False, "whisper not ready"
@@ -1663,6 +2549,9 @@ class HubApp(App):
             return None
         if not isinstance(got, dict):
             return None
+        if not isinstance(got.get("queued"), (list, type(None))):
+            self.hub._wrong_result("catch_up", "queued")
+            return None                     # (as a call that failed: nothing counted as tried)
         refused = got.get("refused") if isinstance(got.get("refused"), dict) else {}
         return {"queued": [str(x) for x in got.get("queued") or [] if isinstance(x, str)],
                 "refused": {str(k): str(v)[:160] for k, v in refused.items()}, "hold": str(got.get("hold") or "")[:160]}
@@ -1866,15 +2755,52 @@ class HubApp(App):
                                 "key IN (?, ?) AND at >= ? AND at < ? ORDER BY at LIMIT 500",
                                 (f"squelch/{subject}", f"channel/{subject}", t0, t1))
 
+    def apply_station_renames(self) -> int:
+        """The shared token's renames (hub.sqlite meta "station_renames", StationRegistry.moves) applied to the station's
+        signal metrics: each former id's rows from before its rename moved to the id it is now (a later row under it is
+        another station's), in chunks, never on an admin's request. Run after a rename, at the janitor's turn, and once
+        the store settles (a takeover restores a copy that may be from before a rename: metrics.sqlite isn't
+        replicated). The janitor's rollups wait while it runs (_renaming). Moved anything: a copy goes up soon. The
+        rows moved."""
+        store = getattr(self, "metric_store", None)
+        if store is None or not store.settled or not self._renaming.acquire(blocking=False):
+            return 0
+        try:
+            n = 0
+            for old, (new, at) in self.hub.stations.moves().items():
+                m = store.rename_station(old, new, before=at)     # (only its rows from before the rename)
+                if m:
+                    self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
+                    ins = getattr(self, "metric_insight", None)     # #606: its suggestions / sparks / shifts follow
+                    if ins is not None:
+                        ins.renamed(old, new)
+                n += m
+            if n:
+                store.copy_soon()
+            return n
+        except fence_mod.FencedWrite:
+            return 0                               # not the leader now: the next one does it
+        finally:
+            self._renaming.release()
+
     def _metrics_backup(self) -> None:
         """The station metrics' copies (sizeup/cloud/metricstore.py backup_turn): settle from the bucket, then a copy
         every 3 h. The leader's only (the store checks); never takes anything down."""
         from sizeup.cloud.metricstore import BACKUP_TURN_S
         while not self._stopping.wait(BACKUP_TURN_S):
+            try:                                   # (#677) the STT input arrival delays measured since: into the store
+                self.stt_arrival_flush()
+            except Exception as e:  # noqa: BLE001
+                self.hub.log(f"metrics: STT input arrival: {type(e).__name__}: {e}")
             try:
-                self.metric_store.backup_turn()
+                if self.metric_store.backup_turn() in ("restored", "none"):
+                    self.apply_station_renames()   # settled from a copy: a rename since it was made, again
             except Exception as e:  # noqa: BLE001
                 self.hub.log(f"metrics: backup error: {type(e).__name__}: {e}")
+            try:                                  # every transcript as written (#639): stt.sqlite's copies, the same way
+                self.stt_runs.backup_turn()
+            except Exception as e:  # noqa: BLE001
+                self.hub.log(f"stt runs: backup error: {type(e).__name__}: {e}")
 
     def _hub_janitor(self) -> None:
         while not self._stopping.wait(600):
@@ -1882,10 +2808,29 @@ class HubApp(App):
                 self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
-            try:                                  # the station metrics: rollups, retention
-                self.metric_store.maintain()
+            try:                                  # every transcript as written (#639): KEEP_DAYS, a batch a pass
+                self.stt_runs.prune()             # (the leader's only: Runs checks)
+            except Exception as e:  # noqa: BLE001 - never takes anything down
+                self.hub.log(f"stt runs: prune error: {type(e).__name__}: {e}")
+            try:                                  # the station metrics: renames, rollups, retention
+                self.metrics_turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
+            try:                                  # ... then the shift checks (#606): Health's warnings, never a push
+                self.metric_insight.turn()
+            except Exception as e:  # noqa: BLE001 - never takes anything down
+                self.hub.log(f"metrics: shift check error: {type(e).__name__}: {e}")
+
+    def metrics_turn(self) -> dict | None:
+        """The janitor's station-metrics turn: the renames, then the rollups and retention (maintain), which wait for
+        the next turn while a move runs (a rollup of a move half done would be wrong). None: skipped for a move."""
+        self.apply_station_renames()
+        if not self._renaming.acquire(blocking=False):
+            return None
+        try:
+            return self.metric_store.maintain()
+        finally:
+            self._renaming.release()
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
@@ -1894,24 +2839,42 @@ class HubApp(App):
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
+        self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written
+        infer_mod.install(self.infer_lane.start())  # the LLM lane: sizeup.cloud.infer.submit() asks it from now on
         self.catchup.start()                      # its first look minutes from now: no writes at start
+        # radio pre-alerts (sizeup/intel): the "intel" thread, as App.start() starts it. Without it every transcript
+        # handed to the engine waited in its queue unread: no rule was ever tried on the hub
+        self.cad.intel.start()
         self.perf.start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
         self.start_sources()                      # held reports and promotion (#297); the adapters are the station's
         self.start_layers()                       # the maps' data, as App starts it (road projects too: #225)
+        if isinstance(self.stt_terms, stt_terms.TermStore):
+            self.stt_terms.start()                # the private term lists (sizeup/stt_terms.py): now, then every 5 min
+        self._terms_cleanup()                     # ([stt] terms_aws off: the term vocabularies made before deleted)
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         try:
             self._aws_recover()
         except Exception as e:  # never in the way of starting
             self.hub.log(f"hub: could not resume Amazon Transcribe work: {type(e).__name__}: {e}")
+        try:
+            self._pool_recover()
+        except Exception as e:  # never in the way of starting
+            self.hub.log(f"hub: could not resume the pool's clips: {type(e).__name__}: {e}")
         return self
 
     def stop(self) -> None:
         from sizeup.timing import Phases
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
+        self.cad.intel.stop()                          # (a flag: the thread ends at its next wait)
+        infer_mod.uninstall(self.infer_lane)
+        self.infer_lane.stop()                         # (what it had: None at once; the intel engine goes on without)
+        left = self.sttpool.stop(fall_back=False)   # (what a GPU worker had stays "pending": the next start routes it)
+        if left:
+            self.hub.log(f"stt pool: stopping with {left} clip(s) still out: the next start sends them the AWS way")
         steps = [("catch-up", self.catchup.stop), ("perf", self.perf.stop)]
         if self.prealert is not None:
             steps.append(("pre-alert", self.prealert.stop))

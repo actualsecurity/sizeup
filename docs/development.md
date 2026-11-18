@@ -158,9 +158,20 @@ dongles plugged in:
   on a busy machine). Skips say why (`-rs`). On a clone with node installed, 13 to 45 skip: private replay data, and
   Litestream or Playwright if missing. Without node about 210 skip (the UI script tests). CI runs
   `python -m pytest -q -p no:cacheprovider -n auto --dist loadfile` on Ubuntu, Python 3.14, with node.
+- CI splits the test files into three parallel shards (`tools/ci_shard.py`, the `shard` job in `test.yml`): whole
+  files, so `--dist loadfile` behaves as before, dealt out longest first by the durations in
+  `tools/ci_shard_durations.json`. The files are the ones pytest's own collection finds with the repo's config
+  (subdirectories and `*_test.py` included). A new file with no recorded duration is still run (it counts as 2 s),
+  and `tests/test_ci_shard.py` fails if any split drops or repeats a file or misses one `pytest --collect-only`
+  finds. The `pytest` check is green only when all three shards are. To run one shard locally:
+  `.venv/bin/python -m pytest -n auto -q $(python tools/ci_shard.py 2 3)`.
+  Refresh the durations when the suite has changed a lot: run it once with `--durations=0 > /tmp/d.txt`, then
+  `python tools/ci_shard.py --refresh /tmp/d.txt` (the shards only get uneven, never wrong, as it ages).
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
   select()` (#457).
 - The only custom marker is `replay` (private captures; [below](#replay-tests)). Everything else is plain pytest.
+- `SIZEUP_TEST_THREAD_REPORT=1` lists, at the end, the threads each test left running into the next one (#665: a
+  leftover thread can trip a later test's process-wide fake). A report, never a failure.
 
 **On a Mac, keep it awake and bounded.** A sleeping Mac stalls the run. `caffeinate -i` stops that, and `perl alarm`
 is the timeout (macOS has no `timeout`):
@@ -200,6 +211,22 @@ these tests look for `node` on `PATH`, then in `/opt/homebrew/bin` and `/usr/loc
 skip without it. One focus-order test in `tests/test_new_call.py` also wants `jsdom` where node can `require` it, and
 `tests/test_tts.py` wants the Kokoro voice set up (`tools/setup_tts.sh`, ~1.3 GB); both skip otherwise.
 
+### Contract tests
+
+`contracts/` holds a JSON Schema for each interface between a station (or any node) and the hub, with bodies that
+must and must not validate. `tests/test_contracts_*.py` check that today's hub, station and worker client send
+exactly that and ignore keys they don't know, and that every `/api/station/` route has its row in `contracts/routes.json`. A new key on
+the wire or a new route fails there until its schema or its row is brought up to date:
+[`contracts/README.md`](../contracts/README.md).
+
+### The /cad bundles
+
+The hub image joins `/cad`'s scripts into one file and its stylesheets into another (`sizeup/web/bundle.py`, run by the
+Dockerfile; written to `sizeup/web/static/bundle/`, which git ignores). A checkout serves the separate files, as do
+`/cad?bundle=0` and any bundle older than a file it holds. `python -m sizeup.web.bundle` builds them locally;
+delete `sizeup/web/static/bundle/` to go back. A script between the page's `<!-- bundle js cad -->` markers must
+start with `"use strict";` (the build refuses it otherwise) and be a plain `<script src>`.
+
 ### Replay tests
 
 `@pytest.mark.replay(...)` tests replay private captures from a cache outside the repo (`~/.cache/sizeup-replay` or
@@ -231,7 +258,8 @@ There is no Python linter or formatter in CI. Don't reformat files or reorder im
 |---|---|---|
 | 19 failures in `tests/test_preplan_docs.py` | the venv lacks pypdf / Pillow | `pip install -e '.[dev]'` |
 | 2 failures, `filedescriptor out of range in select()` (`test_squelch_stuck`, `test_vessels`) | a serial run on macOS passes 1024 open descriptors (#457) | run with `-n auto` |
-| Timing asserts under load: `test_cloud::test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends` (#513), `test_transcribe` idle stream (#449), `test_roads` probe timeout (#468), `test_unit_follow` frame loop (#480), `test_perf` ratio (#481), `test_reception` / `test_fg2` (#500), reception history race (#503) | a slow or busy machine | rerun the file on its own. If it passes alone and on main, it is the known flake: name the issue in your PR. A failure not on this list is yours until shown otherwise; a new flake gets its own issue. |
+| Marked `@pytest.mark.flaky(issue=NNN)`: `test_cloud` page pair by pair (#513), `test_channels` AWS-refused fallback (#610, #630), `test_atc_stt` marginal transmission (#616), `test_handoff` lease file fresh (#668) | known flakes, each with its open issue | they are retried once when they fail (`tests/conftest.py`): "R" in the progress line, "N rerun" in the totals, a list at the end and a warning annotation in CI. Any other failure is final. Mark a new flake only with its issue; remove the mark when the issue is fixed |
+| Timing asserts under load: `test_transcribe` idle stream (#449), `test_roads` probe timeout (#468), `test_unit_follow` frame loop (#480), `test_perf` ratio (#481), `test_reception` / `test_fg2` (#500), reception history race (#503) | a slow or busy machine | rerun the file on its own. If it passes alone and on main, it is the known flake: name the issue in your PR. A failure not on this list is yours until shown otherwise; a new flake gets its own issue. |
 
 ## Making a change
 

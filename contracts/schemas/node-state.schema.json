@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/node-state.schema.json",
+  "title": "Station state post with the node fields",
+  "description": "Designed (docs/nodes.md 5 \"Wire contract\"), not implemented. Today's state post (station-state.schema.json) plus the optional keys a node adds: its capabilities and the two halves of the resync. Every new key is optional, so every post a station sends today is valid here, and a hub from before this ignores them. Resync is by content hash, never by a counter: a restart, a rollback or a restored replica can then never leave the two sides agreeing on a number and disagreeing on the content.",
+  "x-status": "designed",
+  "x-version": 1,
+  "allOf": [{"$ref": "station-state.schema.json"}],
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "capabilities_rev": {
+      "$ref": "#/$defs/rev",
+      "description": "On every post: the content hash of the node's capabilities as it would send them now. The hub compares it with the version it holds."
+    },
+    "capabilities": {"$ref": "capabilities.schema.json"},
+    "roles_applied": {
+      "description": "On every post: the `roles_rev` of the roles this node has applied; \"\" when it has applied none. The hub sends the full roles only when this differs from its own `roles_rev`.",
+      "oneOf": [{"const": ""}, {"$ref": "#/$defs/rev"}]
+    }
+  },
+  "$defs": {
+    "rev": {
+      "title": "Content hash",
+      "description": "A digest of the content it names, as 8 to 64 lower-case hex characters. Compared for equality only; nothing is read from it and it is never ordered.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8,64}$"
+    }
+  }
+}

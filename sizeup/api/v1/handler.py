@@ -12,7 +12,8 @@ Order, so that a v1 problem never reaches the console (docs/mobile-api.md "Shari
     is rate limited per address, one with a principal per device (limits.py): 429 + Retry-After. Then no principal
     on a device route: 401;
  6. v1's share of concurrent requests: 503 + Retry-After when it is used up;
- 7. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
+ 7. a route with a body (BODY_METHODS): the body is read, at most MAX_BODY (411, 408, 400, 413 otherwise);
+ 8. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
 from __future__ import annotations
 
 import json
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
+from . import reads
 from .errors import JSON, error
 from .limits import Limits
 from .principal import Resolver, none_yet, person
@@ -30,9 +32,9 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
-# The request-body hook, shared by every v1 route with a body (writes now, push and the others reuse it verbatim):
-# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit or an unusable length: 413;
-# it raises BodyRefused for a missing length or a body that stalls). The handler sees the bytes as Ctx.body.
+# The request-body hook, shared by every v1 route with a body (push now; writes, if they return, reuse it verbatim):
+# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit, a 413; it raises BodyRefused
+# for a missing, repeated or malformed length or a body that stalls). The handler sees the bytes as Ctx.body.
 MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
 BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")      # the verbs the hook reads a body for
 
@@ -56,12 +58,14 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, cad=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
+        self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -70,8 +74,8 @@ class V1:
                 body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
-        request body up to a limit (None: missing or too big); called only for a POST that got past the token, the
-        limits and the busy check."""
+        request body up to a limit (None: over it); called only for a body verb that got past the token, the limits and the
+        busy check."""
         try:
             return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
@@ -130,16 +134,21 @@ class V1:
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
             raw = b""
-            if route.method in BODY_METHODS and body is not None:   # a body: bounded, read only now (#562)
+            if route.method in BODY_METHODS and body is not None:   # a body: bounded, read only now
                 try:
                     raw = body(MAX_BODY)
                 except BodyRefused as e:
                     return error(e.status, e.code, e.message)
                 if raw is None:
                     return error(413, "body_too_large", f"the body is over {MAX_BODY // 1024} KB")
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw)
-            status, obj, *extra = route.handler(ctx)             # extra: optional response headers (writes.py)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, \
-                {"Cache-Control": "no-store", **(extra[0] if extra else {})}
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads, raw)
+            # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
+            # finished (status, body, content type, headers), which is what errors.error() makes
+            res = route.handler(ctx)
+            if len(res) == 4:
+                return res
+            status, obj, extra = (*res, {})[:3]
+            body = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
+            return status, body, JSON, {"Cache-Control": "no-store", **extra}
         finally:
             self.limits.leave()

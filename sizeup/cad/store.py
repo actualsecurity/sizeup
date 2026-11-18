@@ -14,6 +14,7 @@
       run_cards     TYPE or TYPE/SUBTYPE -> ordered slots ("3 x engine", "2398")
       events        the chronology (and unit status changes with no incident)
       unit_history  every unit status change: old -> new, event, operator, why (out of service)
+      oos_notices   automation refused on an out-of-service unit (sizeup/cad/oos.py: the gate, _oos_gated, is here)
       dispatches    what was (or, transmit off, would have been) sent, with its audio
       radios        radio ID -> rig (sizeup/cad/radios.py)
       settings_audit every change made in Settings (who, section, key, old -> new)
@@ -42,6 +43,8 @@ short. The schema version is PRAGMA user_version; _migrate() brings an older fil
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import re
 import sqlite3
@@ -52,8 +55,9 @@ from pathlib import Path
 
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
+from sizeup.cad import oos as oos_mod
 from sizeup.cad.lists import Lists
-from sizeup.fence import GuardedConnection, refuse
+from sizeup.fence import FencedWrite, GuardedConnection, refuse
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -65,12 +69,21 @@ OPEN = ("queued", "pending", "active")
 # here is well under that; the cap also bounds the radio links the state fetches for them, comms.for_incidents).
 CLOSED_HOURS = 24
 CLOSED_MAX = 40
+# A non-emergency event's Until enforced (Store.expire_until): closed with this disposition, by this operator.
+EXPIRED = "EXPIRED"
+UNTIL_OPERATOR = "Until"
+UNTIL_GRACE_S = 60.0       # an Until this far in the past still taken (the minute typed is the current one)
+UNTIL_OPEN = "until_at IS NOT NULL AND status IN ('pending', 'active')"    # incidents_until_open's WHERE, and the look's
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
 PLACEHOLDER_SCHEMA = """CREATE TABLE IF NOT EXISTS placeholder_releases (
     id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL, placeholder_id INTEGER NOT NULL, assignment_id INTEGER NOT NULL,
     by_unit_id INTEGER NOT NULL, at REAL NOT NULL, restored_at REAL)"""
+# A source's service changed (settings radio_services): its recent rows still to re-tag, written with the setting and
+# taken off when the re-tag is done (Cad.retag_services); a start of the CAD of record runs what is left
+RETAG_SCHEMA = """CREATE TABLE IF NOT EXISTS radio_retag_pending (
+    key TEXT PRIMARY KEY, at REAL NOT NULL, operator TEXT NOT NULL DEFAULT '')"""
 
 SCHEMA = """
 CREATE TABLE units (
@@ -405,6 +418,44 @@ class CadError(ValueError):
     """A request that can't be done as asked (shown to the operator as the 400 reason)."""
 
 
+# Who writes a unit's status or puts it on a call (sizeup/cad/oos.py): PERSON is a person's own action through the API;
+# anything else names the automation (radio | county | page), AUTO when it says nothing. Out of service is a person's
+# to end: an automated write on an out-of-service unit is refused (fail closed).
+PERSON = "person"
+AUTO = "automation"
+
+
+class OosLocked(CadError):
+    """An automated write refused: the unit is out of service (sizeup/cad/oos.py). notice: the notice kept for it."""
+
+    def __init__(self, unit: str, status: str, notice: int):
+        super().__init__(f"{unit} is {status}: only a person puts it back in service")
+        self.unit, self.status, self.notice = unit, status, notice
+
+
+def _oos_gated(units):
+    """The one gate on the unit status write path: the decorated Store method takes by= (PERSON, or the automation's
+    name; default AUTO) and cause= (sizeup/cad/oos.py cause(): what the automation was doing, for its notice). units(args)
+    -> (unit ids, incident id, the status it would set) from the call's arguments. Checked under the store's lock, and
+    the write made under it too, so a unit put out of service meanwhile is never written over by automation."""
+    def deco(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def run(self, *a, **kw):
+            c = kw.pop("cause", None)
+            ba = sig.bind(self, *a, **kw)
+            ba.apply_defaults()
+            with self.lock:
+                by = ba.arguments.get("by") or AUTO
+                if by != PERSON:
+                    uids, iid, wanted = units(ba.arguments)
+                    self._oos_gate(uids, by, c, iid, wanted)
+                return fn(self, *a, **kw)
+        return run
+    return deco
+
+
 def local_year(at: float) -> int:
     return datetime.fromtimestamp(at, TZ).year
 
@@ -412,6 +463,12 @@ def local_year(at: float) -> int:
 def event_number(year: int, n: int) -> str:
     """The sheet's EVENT #: 2-digit year, dash, 6-digit sequence (26-000001)."""
     return f"{year % 100:02d}-{n:06d}"
+
+
+def _when(at: float, now: float) -> str:
+    """A time on a timeline line: "13:37" on the day of now, else "11/17 13:37" (local)."""
+    d = datetime.fromtimestamp(at, TZ)
+    return d.strftime("%H:%M" if d.date() == datetime.fromtimestamp(now, TZ).date() else "%m/%d %H:%M")
 
 
 class Store:
@@ -429,7 +486,12 @@ class Store:
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self._closed = False
-        self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
+        # state_rev: what the console's state is built from (Cad.state): it moves with rev (and with every `rev += 1`
+        # anywhere), except for a transaction that said its write is no part of that state (quiet_for_state(): a
+        # transmission on no incident and not in the 60 Control feed), so such a write rebuilds nothing
+        self.state_rev = 0
+        self._state_quiet = False
+        self.rev = 0          # bumped on every committed change (a row written): the page refetches nothing, it's pushed
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
         self.after_commit = self.after_rollback = self.touch = None
@@ -471,9 +533,15 @@ class Store:
             if stmt.strip():
                 self.db.execute(stmt)
         self.db.execute(PLACEHOLDER_SCHEMA)               # which unit's sign-on released a placeholder (undo puts it back)
+        self.db.execute(RETAG_SCHEMA)                     # a source's rows still to re-tag (settings radio_services)
+        for stmt in oos_mod.SCHEMA.split(";"):            # automation refused on an out-of-service unit (oos.py)
+            if stmt.strip():
+                self.db.execute(stmt)
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
+        # the open events with an Until (expire_until's look, every 5 s: its WHERE says the same), 2026-11-17
+        self.db.execute(f"CREATE INDEX IF NOT EXISTS incidents_until_open ON incidents(until_at) WHERE {UNTIL_OPEN}")
         dcols = {r["name"] for r in self.db.execute("PRAGMA table_info(dispatches)")}
         for col in ("audio_state", "audio_tones"):       # the voice rendered after the answer (#426): old rows keep ''
             if dcols and col not in dcols:
@@ -530,6 +598,10 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if tcols and "mhz" not in tcols:                  # the frequency an airband row was heard on (#260: NY Approach
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN mhz REAL")   # changes by the time of day), 2026-11-06
+        if tcols and "vocab_v" not in tcols:              # the term list / vocabulary that biased its text (sizeup/stt_terms.py:
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")   # vocab_v), 2026-11-16
+        if tcols and "text_at" not in tcols:              # when its first transcript landed (#639: updated_at moves with
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN text_at REAL")   # every later edit), 2026-11-17
         # Every row's source, qualified by its system (#409, #415: talkgroup numbers repeat between P25 systems), 2026-11-10.
         # "group" is the talkgroup file's; ours: in "Our calls"; dept / safety: for #412 / #411 (nothing writes them yet).
         for col, kind in (("source", "TEXT NOT NULL DEFAULT ''"), ("system", "TEXT NOT NULL DEFAULT ''"),
@@ -758,6 +830,25 @@ class Store:
     def may_write(self, fn) -> None:
         self._may_write = self.db.may_write = fn
 
+    @property
+    def rev(self) -> int:
+        return self._rev
+
+    @rev.setter
+    def rev(self, v: int) -> None:
+        """Any change of rev (a commit, or a module's own `store.rev += 1`) moves state_rev too: only tx() itself, for a
+        transaction that called quiet_for_state(), moves rev alone."""
+        self._rev = v
+        self.state_rev += 1
+
+    def quiet_for_state(self) -> None:
+        """In an open tx(), by its own thread: what this transaction writes is no part of the console's state (Cad.state
+        never reads it), so its commit moves rev (the Radio page, comms_rev, every per-rev cache) and not state_rev.
+        The caller vouches for every row the transaction wrote."""
+        if not self.db.in_transaction:
+            raise RuntimeError("quiet_for_state: only inside an open tx()")
+        self._state_quiet = True
+
     def tx(self):
         """`with store.tx() as db:` one transaction under the lock."""
         store = self
@@ -767,6 +858,11 @@ class Store:
                 store.lock.acquire()
                 try:
                     store.db.execute("BEGIN IMMEDIATE")
+                    # what the connection had changed before: a transaction that changed no row (a feed's list with
+                    # nothing new, an expiry with nothing due) is no CAD change, so no rev (#446: each bump rebuilds
+                    # the whole console state and makes every open page ask again)
+                    self.changes0 = store.db.total_changes
+                    store._state_quiet = False
                 except BaseException:
                     # Busy past the timeout, or a transaction already open: __exit__ never runs for a failed
                     # __enter__, so the lock is given back here (else every later write waits on it forever).
@@ -811,9 +907,13 @@ class Store:
                                         pass
                                 raise
                             done = not store.db.in_transaction       # (a COMMIT that took)
-                    if done:
-                        store.rev += 1
+                    if done and store.db.total_changes != self.changes0:
+                        if store._state_quiet:
+                            store._rev += 1             # rev alone: the console's state has nothing new
+                        else:
+                            store.rev += 1
                 finally:
+                    store._state_quiet = False
                     # What rides on a transaction without being part of it (the Radio page's change notes,
                     # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
                     # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
@@ -934,6 +1034,8 @@ class Store:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
             r["status_set"] = self.lists.agency_set(r["name"], r["board"])   # another agency's: its statuses (#219)
+            r["third_party"] = self.lists.third_party(r["name"], r["board"])    # keyholder, utility, police: never Responding on add
+            r["start"] = list(self.lists.start_statuses(r["name"], r["board"]))  # what Add unit puts it on as (DP; DO)
             r["station"] = self.lists.station(r["name"])    # home firehouse: the data file, or Settings
         return rows
 
@@ -1075,7 +1177,7 @@ class Store:
                 out.append(r["name"])
         return out
 
-    def _placeholder_status(self, uid: int, status: str, iid: int | None, operator: str) -> dict:
+    def _placeholder_status(self, uid: int, status: str, iid: int | None, operator: str, by: str = AUTO) -> dict:
         """A placeholder's status from the board or a call's unit row: only Dispatched (put on that call, its other calls
         kept) or a free one (off that call; from the board, iid None: off every call)."""
         L = self.lists
@@ -1087,7 +1189,7 @@ class Store:
         if role == "dispatched":
             if not iid:
                 raise CadError(f"{u['name']} is a department placeholder: Dispatched only on a call")
-            self.assign(iid, [uid], operator)
+            self.assign(iid, [uid], operator, by=by)
             return self.unit(uid)
         if iid:
             if not self.placeholder_off_call(iid, uid, operator):
@@ -1138,22 +1240,38 @@ class Store:
         db.execute("UPDATE assignments SET dispatched_at = MIN(dispatched_at, COALESCE(enroute_at, dispatched_at), "
                    "COALESCE(onscene_at, dispatched_at)) WHERE id = ? AND dispatched_at IS NOT NULL", (aid,))
 
+    def _oos_gate(self, uids, by: str, cause: dict | None, iid, wanted: str) -> None:
+        """An automated write (by: not PERSON) on an out-of-service unit: refused, with its notice kept
+        (sizeup/cad/oos.py). The caller holds the lock (_oos_gated)."""
+        L = self.lists
+        for uid in uids:
+            u = self.db.execute("SELECT id, name, status, status_at, board FROM units WHERE id = ?", (uid,)).fetchone()
+            if u is None or L.role(u["status"]) != "oos":
+                continue
+            with self.tx() as db:
+                nid, _ = oos_mod.record(self, db, u, by, cause, iid, wanted, self.clock())
+            raise OosLocked(u["name"], L.status_phrase(u["status"]), nid)
+
+    @_oos_gated(lambda a: ([a["uid"]], a["call"], a["status"]))
     def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "", why: str = "",
-                        call: int | None = None) -> dict:
+                        call: int | None = None, by: str = AUTO) -> dict:
         """The status dropdown. A free or out-of-service status clears the unit off its event;
         dispatched, en route and on scene stamp the assignment's times. why: where the status came from, after the
-        chronology line ("Status from radio (heard ...)": a suggestion accepted, sizeup/cad/statushints.py)."""
+        chronology line ("Status from radio (heard ...)": a suggestion accepted, sizeup/cad/statushints.py).
+        by: PERSON, or the automation writing (refused on an out-of-service unit: _oos_gated, sizeup/cad/oos.py)."""
         L = self.lists
         if status not in L.status_ids:
             raise CadError(f"unknown status {status!r}; one of {', '.join(L.status_ids)}")
         role = L.role(status)
         u = self.unit(uid)
         if u["placeholder"]:                             # not a rig: Dispatched or in quarters, per call
-            return self._placeholder_status(uid, status, call, operator)
+            return self._placeholder_status(uid, status, call, operator, by)
         if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"]):
             ok = [L.label(s, u["name"], u["board"]) for s in L.unit_statuses_for(u["name"], u["board"])]
             raise CadError(f"{u['name']} is another agency's unit: {', '.join(ok[:-1])} or {ok[-1]}" if len(ok) > 1
                            else f"{u['name']} is another agency's unit: only {''.join(ok)}")
+        if u["response"] != "agency" and status in L.third_party_only:        # DO: a third party's only
+            raise CadError(f"{L.name('unit_statuses', status)} is for third-party units (keyholders, utilities, police)")
         now = self.clock()
         with self.tx() as db:
             a = db.execute("SELECT * FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (uid,)).fetchone()
@@ -1165,8 +1283,8 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status, u['name'], u['board'])}" \
-                + (f" ({note})" if note and role == "oos" else "")
+            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' and status not in L.release_on_close else L.status_phrase(status, u['name'], u['board'])}" \
+                + (f" ({status})" if status in L.third_party_only else "") + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
             relieved = []
             if iid is not None and status == L.command_status:      # one line: "Command: E63 (from 2392)"
@@ -1181,17 +1299,18 @@ class Store:
             out["command_from"] = relieved
         return out
 
+    @_oos_gated(lambda a: ([a["uid"]], a["incident_id"], a["status"]))
     def set_unit_status_on(self, uid: int, status: str, incident_id: int, operator: str = "", note: str = "",
-                           why: str = "") -> dict:
+                           why: str = "", by: str = AUTO) -> dict:
         """The board's working statuses ask which call (user, 2026-10-07: "it should prompt us ... to
         select the call they are now responding to and remove them from the old call if they were
         on one"). incident_id > 0: put the unit on that call first (moved off any other, noted on both
         chronologies); 0: on no call (cleared off the one it was on). Then the status. A placeholder: that call only."""
         L = self.lists
         if self.lists.placeholder(self.unit(uid)["name"]):
-            return self._placeholder_status(uid, status, incident_id or None, operator)
+            return self._placeholder_status(uid, status, incident_id or None, operator, by)
         if L.role(status) in ("free", "oos"):
-            return self.set_unit_status(uid, status, operator, note, why)
+            return self.set_unit_status(uid, status, operator, note, why, by=by)
         u = self.unit(uid)
         now = self.clock()
         if incident_id:
@@ -1200,7 +1319,7 @@ class Store:
                 raise CadError(f"no incident {incident_id}")
             if inc[0]["status"] not in ("pending", "active"):
                 raise CadError("that call isn't open")
-            self.assign(incident_id, [uid], operator)
+            self.assign(incident_id, [uid], operator, by=by)
             if status == L.status_for("dispatched"):
                 return self.unit(uid)                       # assign() already set and logged it
         else:
@@ -1213,7 +1332,7 @@ class Store:
                                 operator, uid, now)
             if a is not None:
                 self._unassigned(a["incident_id"])
-        return self.set_unit_status(uid, status, operator, note, why)
+        return self.set_unit_status(uid, status, operator, note, why, by=by)
 
     def _unassigned(self, iid) -> None:
         if iid and self.on_unassigned is not None:
@@ -1228,7 +1347,8 @@ class Store:
         return tuple(c for c in L.status_ids if L.role(c) in ("enroute", "onscene")
                      and not any(s["code"] == c and s.get("retired") for s in L.unit_statuses))
 
-    def return_to_incident(self, iid: int, uid: int, status: str, operator: str = "") -> dict:
+    @_oos_gated(lambda a: ([a["uid"]], a["iid"], a["status"]))
+    def return_to_incident(self, iid: int, uid: int, status: str, operator: str = "", by: str = AUTO) -> dict:
         """A unit that cleared a call that is still open goes back to it (user, 2026-10-07: "after units
         clear an alarm that is still opened, we need a way to send them back en route and then on
         scene"). Its assignment on that call is reopened; the first times it recorded are kept."""
@@ -1378,6 +1498,12 @@ class Store:
                     changes["emergency"] = e
         if changes.get("received_via") and changes["received_via"] not in self.lists.received_codes:
             raise CadError(f"received_via: one of {', '.join(self.lists.received_codes)}")
+        # now a non-emergency event (unticked, or a type that is one) with an Until already passed: expire_until would
+        # close it on its next look, so the Until goes, said on the timeline (a new one is set with Edit)
+        now, passed = self.clock(), None
+        until = changes.get("until_at", inc["until_at"])
+        if changes.get("emergency") == 0 and inc["emergency"] and until is not None and until <= now:
+            passed, changes["until_at"] = until, None
         if not changes:
             return inc
         with self.tx() as db:
@@ -1402,11 +1528,16 @@ class Store:
                 parts.append("remarks updated")
             if "map_layers" in changes:                   # the set itself stays out of the log (#111)
                 parts.append("map layers: " + ("chosen for this event" if changes["map_layers"] else "the default again"))
-            if "until_at" in changes:
+            if passed is not None:
+                parts.append(f"until {_when(passed, now)} (passed) cleared")
+            elif "until_at" in changes:
                 parts.append("until: " + (datetime.fromtimestamp(changes["until_at"], TZ).strftime("%m/%d %H:%M")
                                           if changes["until_at"] else "(none)"))
             if log and parts:
                 self._event(db, iid, "edit", "Edited " + "; ".join(parts), operator)
+            elif passed is not None:                      # a quiet edit (a page's type): this one is said anyway
+                self._event(db, iid, "edit", f"Until {_when(passed, now)} (passed) cleared: now a non-emergency event",
+                            operator)
         return self.incident(iid)
 
     def accept(self, iid: int, operator: str = "") -> dict:
@@ -1540,6 +1671,79 @@ class Store:
                         + (f"; cleared {names}" if names else ""), operator, at=now)
         return self.incident(iid)
 
+    def expire_until(self, now: float | None = None) -> list[dict]:
+        """A non-emergency event's Until (a closure, a hydrant out of service, a notification) enforced: every open
+        one whose until_at has passed is closed, disposition EXPIRED, "Event closed: Expired at 13:37 (until
+        13:37)" on its timeline by UNTIL_OPERATOR. Derived from the stored until_at alone, so a restart, a takeover
+        or a sleep only makes it later, never forgotten (Sources' ticker runs it at its start and every TICK_S). A
+        unit still on the event (anything attached: our rigs, agencies, keyholders) keeps it open (a clock never
+        takes a unit off a call): one line "Until 13:37 passed: open while E60 is on it", and it closes on the sweep
+        after the last one clears. An emergency event or a queued page: never. The leader only (may_write): a
+        standby neither looks nor writes. Reads decide; a transaction only for a write (a held event that was
+        already said costs no commit, no rev). The lease lost part way (FencedWrite): what was committed before it
+        is returned, the rest left to the next leader.
+        -> [{id, number, until_at, closed, units (still on it)}] of what it acted on."""
+        now = self.clock() if now is None else now
+        if not self.may_write():
+            return []
+        rows = self.q(f"SELECT id FROM incidents WHERE {UNTIL_OPEN} AND until_at <= ? AND emergency = 0 "
+                      "ORDER BY until_at, id", (now,))
+        out = []
+        for r in rows:
+            try:
+                d = self._expire_one(r["id"], now)
+            except FencedWrite:                          # not the leader any more: the rest is the next one's
+                break
+            if d is not None:
+                out.append(d)
+        return out
+
+    def _on_it(self, db, iid: int) -> list[str]:
+        """The units still on an event (an open assignment), board order."""
+        return [a["name"] for a in db.execute(
+            "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+            "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY u.sort, u.id", (iid,))]
+
+    def _expire_one(self, iid: int, now: float) -> dict | None:
+        def due(inc) -> bool:
+            return (inc is not None and inc["status"] in ("pending", "active") and not inc["emergency"]
+                    and inc["until_at"] is not None and inc["until_at"] <= now)
+
+        def held_line(inc, on) -> str:
+            return (f"Until {_when(inc['until_at'], now)} passed: open while {', '.join(on)} "
+                    f"{'is' if len(on) == 1 else 'are'} on it")
+
+        def said(db, inc, text) -> bool:
+            return db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'system' AND text = ?",
+                              (inc["id"], text)).fetchone() is not None
+
+        look = "SELECT id, number, until_at, status, emergency FROM incidents WHERE id = ?"
+        with self.lock:                                  # reads first: most looks write nothing
+            inc = self.db.execute(look, (iid,)).fetchone()
+            if not due(inc):
+                return None
+            on = self._on_it(self.db, iid)
+            if on and said(self.db, inc, held_line(inc, on)):
+                return None                              # held, and said so already
+        with self.tx() as db:                            # the same checks again, under the write
+            inc = db.execute(look, (iid,)).fetchone()
+            if not due(inc):
+                return None
+            on = self._on_it(db, iid)
+            d = {"id": iid, "number": inc["number"], "until_at": inc["until_at"], "closed": not on, "units": on}
+            if on:                                       # said once per set of units, then left to them
+                text = held_line(inc, on)
+                if said(db, inc, text):
+                    return None
+                self._event(db, iid, "system", text, UNTIL_OPERATOR, at=now)
+                return d
+            names = ", ".join(self._release_all(db, iid, UNTIL_OPERATOR, now))
+            db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
+                       (now, EXPIRED, iid))
+            self._event(db, iid, "closed", f"Event closed: Expired at {_when(now, now)} (until "
+                        f"{_when(inc['until_at'], now)})" + (f"; cleared {names}" if names else ""), UNTIL_OPERATOR, at=now)
+        return d
+
     def reopen(self, iid: int, operator: str = "") -> dict:
         """A closed or dismissed event back on the boards, its number kept (#89). Closed: Active if a unit
         was ever on it, else Pending (a non-emergency one: open again); the disposition is cleared and
@@ -1561,9 +1765,14 @@ class Store:
         else:
             at = "?"
         who = re.sub(r"\s*<[^<>]*>\s*$", "", operator).strip()       # "Name <email>" (api.py): the name
+        # an Until already passed would close it again on the next sweep (expire_until): taken off, said so; a new
+        # one is set with Edit
+        gone = inc["until_at"] is not None and inc["until_at"] <= now
         with self.tx() as db:
-            db.execute("UPDATE incidents SET status = ?, closed_at = NULL, disposition = '' WHERE id = ?", (status, iid))
-            self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}", operator, at=now)
+            db.execute("UPDATE incidents SET status = ?, closed_at = NULL, disposition = ''"
+                       + (", until_at = NULL" if gone else "") + " WHERE id = ?", (status, iid))
+            self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}"
+                        + (f"; until {_when(inc['until_at'], now)} (passed) cleared" if gone else ""), operator, at=now)
         return self.incident(iid)
 
     def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = (),
@@ -1580,8 +1789,9 @@ class Store:
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
 
+    @_oos_gated(lambda a: (list(a["unit_ids"]), a["iid"], a["status"] or ("" if a["attach"] else a["self"].lists.status_for("dispatched"))))
     def assign(self, iid: int, unit_ids: list[int], operator: str = "", attach: bool = False, verb: str = "",
-               quiet: bool = False, status: str = "") -> list[str]:
+               quiet: bool = False, status: str = "", by: str = AUTO) -> list[str]:
         """Units dispatched to the event (PENDING -> ACTIVE), or, attach=True, attached with no
         dispatch (a non-emergency event: logged on the chronology, unit status unchanged). A unit
         committed elsewhere is moved (its old assignment cleared, noted on both chronologies);
@@ -1612,10 +1822,15 @@ class Store:
                 if status and self.lists.placeholder(u["name"]):
                     raise CadError(f"{u['name']} is a department placeholder: never {self.lists.name('unit_statuses', status)}")
                 if status:
-                    col = ON_TIMES[self.lists.role(status)]
+                    # Responding / On location (#220): that time, Disp left empty. Another agency's unit put on as
+                    # Dispatched or Dispatch other (a third party's: requested, dispatched by someone else): Disp.
+                    role = self.lists.role(status)
+                    col = ON_TIMES.get(role) or "dispatched_at"
                     db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (now, cur.lastrowid))
                     db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
-                    self._event(db, iid, "status", f"{u['name']} added {self.lists.status_phrase(status, u['name'], u['board'])} (not dispatched)",
+                    said = self.lists.status_phrase(status, u["name"], u["board"])
+                    self._event(db, iid, "status", f"{u['name']} added {said} (not dispatched)" if role in ("enroute", "onscene")
+                                else f"{u['name']} added: {said}" + (f" ({status})" if status in self.lists.third_party_only else ""),
                                 operator, uid, now)
                     self._history(db, uid, u["status"], status, iid, operator, now)
                     if status == self.lists.command_status:

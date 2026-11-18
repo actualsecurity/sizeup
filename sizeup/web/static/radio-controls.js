@@ -31,7 +31,9 @@ window.RadioControls = (() => {
   const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), error: "", sdrBusy: false, sdrError: "",
                adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
-               stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false };
+               stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
+               names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
+               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
@@ -45,6 +47,18 @@ window.RadioControls = (() => {
     + "limit reached) AWS channels use Local until it's back.\nPolice (another P25 system): its own monthly AWS limit, "
     + "never the fire one; reached: Local.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
+  // Another P25 system's talkgroup: a tier, never Record / Main / Transcribe (#409). The hub has the station's
+  // TalkgroupPrefs.state() rows, tier_set added on the way in (sizeup/cloud/hub.py); a row without it: by its tier
+  const isOther = (r) => (r.tier_set !== undefined && r.tier_set !== null ? !!r.tier_set : r.tier != null);
+  // A talkgroup's one key: its source, qualified by its system (sizeup/sourcekeys.py). Never its number alone: a
+  // number is only unique inside its system, and a bare number is the county's
+  const srcOf = (r) => r.source || `tg:${r.tg}`;
+  // An FM / airband channel's source key, as the radio rail names it (sizeup/sourcekeys.py fm())
+  const fmKey = (r) => `${r.kind === "airband" ? "air" : "fm"}:${r.chan}`;
+  const NAME_MAX = 40;                        // a display name (sizeup/cad/radiofolders.py NAME_MAX)
+  // A source's service (sizeup/sourcekeys.py SERVICES): the admins' choice over its talkgroup file's and its name's
+  const SERVICES = [["fire", "Fire"], ["police", "Police"], ["ems", "EMS"], ["transit", "Transit"], ["air", "Air"], ["other", "Other"]];
+  const SERVICE_NAME = Object.fromEntries(SERVICES);
   const groupName = (g) => g || "Unknown";
   const groupColor = (g) => GROUP_COLORS[g || ""] || GROUP_COLORS[""];
 
@@ -84,8 +98,10 @@ window.RadioControls = (() => {
       n.tgErr.hidden = true;
       n.groups = el("div", "tg-groups rc-groups");
       n.groups.addEventListener("click", onSwitch);
+      n.groups.addEventListener("click", onRename);
       n.groups.addEventListener("change", onEngine);
       n.groups.addEventListener("change", onTier);
+      n.groups.addEventListener("change", onService);
       n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
       n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
@@ -119,7 +135,9 @@ window.RadioControls = (() => {
              + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
              + "dongles says how.\nAntenna group: dongles on one antenna feed, locked to its jobs (highest priority first). "
              + "A grouped dongle runs only those; they run only on its dongles. One gone: the rest run the higher "
-             + "jobs; back: each its own again.", n.radios, n.dups, n.sdr, n.ag, n.adsb, n.storage)),
+             + "jobs; back: each its own again. A parked job is off on purpose: no warning, never started by a fallback.\n"
+             + "Held to hh:mm: a P25 system whose dongle dropped out again soon after it came back; it starts by itself "
+             + "then.", n.radios, n.dups, n.sdr, n.ag, n.adsb, n.storage)),
         ...(n.rxCard ? [n.rxCard] : []),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
@@ -134,6 +152,10 @@ window.RadioControls = (() => {
              + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow, n.catchupRow)));
     }
     loadStt();
+    st.namesApi = opts.names || null;              // Settings > Radios on the CAD (settings.js S_RC_NAMES); never the station's page
+    if (st.namesApi && st.tab === "channels") loadNames();
+    st.servicesApi = opts.services || null;        // ... and the service per source (settings.js S_RC_SERVICES)
+    if (st.servicesApi && st.tab === "channels") loadServices();
     poll();
   }
 
@@ -149,6 +171,12 @@ window.RadioControls = (() => {
         st.stateId = s ? r.headers.get("X-State-Id") || "" : "";
         if (s && !s.error) { st.state = s; settle(); render(); }
       }
+      // an admin named a channel (here or on the radio rail): the names again (the state push carries their rev)
+      const fr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_folders === "string" ? cad.state.radio_folders : null;
+      if (fr !== null && st.namesApi && st.names !== null && fr !== st.namesRev && !st.namesBusy) loadNames();
+      // ... or a source's service (the rail's Edit too): their rev in the push
+      const sr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : null;
+      if (sr !== null && st.servicesApi && st.services !== null && sr !== st.servicesRev && !st.servicesBusy) loadServices();
       if (st.n.rxCard && st.tab === "receivers" && !ro()) {   // the reception tests (#410): admins', Receivers only
         const x = await fetch("/api/reception", { cache: "no-store" });
         st.rx = x.ok ? (await x.json()).reception : null;
@@ -178,7 +206,7 @@ window.RadioControls = (() => {
     const radios = (st.state && st.state.radios) || [];
     syncList(st.n.radios, radios, {
       key: (r) => r.label,
-      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck,
+      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck, r.hold_until,
                                   r.hiss_db, r.floor_db, r.open_db, r.close_db, r.now, r.tower, r.freqs]),
       make: () => el("span", "pill radio"),
       fill: (node, r) => {
@@ -188,13 +216,16 @@ window.RadioControls = (() => {
         // noise holding the squelch (GitHub #116). Amber, with how long; the station logged it once.
         const stuck = on && !!r.stuck;
         node.className = `pill radio ${state}${on ? " open" : ""}${stuck ? " stuck" : ""}`;
-        const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
+        // (#637) another P25 system held back after dropouts (a flapping dongle): not a fault, it starts by itself then
+        const held = state !== "ok" && r.hold_until ? `held to ${fmtTime(r.hold_until)}` : "";
+        const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : held || r.word || (RADIO_STATE[state] ?? state);
         // #275: what it is on now ("126.4", "118.575 CTAF + 120.8") and HPN's tower, short (#278); the rest in the title
         const live = state === "ok" && r.now;
         node.replaceChildren(el("b", null, r.label), ...(live ? [el("span", "fq", r.now)] : []),
                              ...(r.tower ? [el("span", "tw", r.tower.open ? "Tower open" : "Tower closed")] : []),
                              ...(word ? [el("span", "st", word)] : []));
-        const bits = [r.detail || r.label];
+        // (#637) the hold in the viewer's time, as the pill says it (the station's detail has the station's clock)
+        const bits = [held ? `held back until ${fmtTime(r.hold_until)} after dropouts` : r.detail || r.label];
         if (r.mhz) bits.push(`${r.mhz} MHz`);
         if (r.restarts) bits.push(`${r.restarts} restarts`);
         const lines = [bits.join(" · ")];
@@ -268,10 +299,11 @@ window.RadioControls = (() => {
     const list = sdr.sdrs || [{ serial: "", mode: sdr.mode, present: true }];
     const modes = sdr.modes || [];
     const groups = sdr.groups || [];
-    // antenna groups: a grouped dongle offers only its group's jobs (and Off); another dongle never a group's job
+    // antenna groups: a grouped dongle offers only its group's jobs (and Off), never a parked one (#637); another
+    // dongle never a group's job
     const allowed = (x, m) => { const g = groups.find((y) => y.sdrs.includes(x.serial));
-      return m === "Off" || (g ? g.jobs.includes(m) : !groups.some((y) => y.jobs.includes(m))); };
-    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|") + "#" + JSON.stringify(groups.map((g) => [g.sdrs, g.jobs]));
+      return m === "Off" || (g ? g.jobs.includes(m) && !(g.parked || []).includes(m) : !groups.some((y) => y.jobs.includes(m))); };
+    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|") + "#" + JSON.stringify(groups.map((g) => [g.sdrs, g.jobs, g.parked || []]));
     if (box.dataset.key !== key) {
       box.replaceChildren();
       for (const x of list) {
@@ -313,7 +345,9 @@ window.RadioControls = (() => {
         badge.replaceChildren(...(window.Icon ? [Icon("lock", "sm")] : []), grp.name);
       }
       if (grp) badge.title = `Antenna group ${grp.name}: ${grp.jobs.join(" > ")} (highest priority first)`;
+      row.classList.toggle("noaudio", !!x.noaudio);
       setText(row.querySelector(".sdr-name"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+              + (x.noaudio ? " · no audio" : "")                                       // (#703) out until it streams
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
@@ -326,7 +360,9 @@ window.RadioControls = (() => {
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
         + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
-        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "");
+        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "")
+        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried after `
+           + `${(x.noaudio.retry_min || []).join(", ")} min), it is replugged, or a job is picked for it here` : "");
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
@@ -967,9 +1003,10 @@ window.RadioControls = (() => {
       const jobs = el("span", "ag-jobs");
       g.jobs.forEach((j, k) => {
         if (k) jobs.append(el("span", "dim", " › "));
-        const off = (g.short || []).includes(j);
-        const t = el("span", off ? "warn" : "", j);
+        const off = (g.short || []).includes(j), parked = (g.parked || []).includes(j);
+        const t = el("span", off ? "warn" : parked ? "dim" : "", parked ? `${j} (parked)` : j);
         if (off) t.title = `${j}: not running (its dongle is gone and no lower job's dongle could take it)`;
+        if (parked) t.title = `${j}: parked (off on purpose): no warning, never started by a fallback`;
         jobs.append(t);
       });
       jobs.title = "Priority order: with a dongle gone, the higher jobs run";
@@ -978,7 +1015,7 @@ window.RadioControls = (() => {
         const ed = el("button", "sm quiet", "Edit");
         ed.type = "button";
         ed.disabled = ag.busy || !!ag.edit;
-        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs] }; ag.error = ""; renderGroups(); });
+        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs], parked: [...(g.parked || [])] }; ag.error = ""; renderGroups(); });
         line.append(ed);
       }
       kids.push(line);
@@ -989,7 +1026,7 @@ window.RadioControls = (() => {
       add.type = "button";
       add.title = "Lock dongles on one antenna feed to the jobs it carries";
       add.disabled = ag.busy;
-      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [] }; ag.error = ""; renderGroups(); });
+      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [], parked: [] }; ag.error = ""; renderGroups(); });
       kids.push(add);
     }
     if (ag.error && !ag.edit) kids.push(el("div", "sdr-err", ag.error));
@@ -1023,7 +1060,14 @@ window.RadioControls = (() => {
       const li = el("li", "ag-job");
       const mv = (d) => { const t = e.jobs.slice(); [t[k], t[k + d]] = [t[k + d], t[k]]; e.jobs = t; ag.key = ""; renderGroups(); };
       const up = el("button", "sm quiet", "↑"), dn = el("button", "sm quiet", "↓"), x = el("button", "sm quiet", "✕");
-      for (const b of [up, dn, x]) b.type = "button";
+      // (#637) parked: off on purpose (a fireground left off for coverage): no warning, never started by a fallback
+      const parked = (e.parked || []).includes(j);
+      const pk = el("button", `sm quiet ag-park${parked ? " active" : ""}`, parked ? "Parked" : "Park");
+      pk.setAttribute("aria-pressed", String(parked));
+      pk.title = parked ? `${j} is off on purpose: click to unpark` : `Keep ${j} off on purpose: no warning, never started by a fallback`;
+      pk.addEventListener("click", () => { e.parked = parked ? e.parked.filter((y) => y !== j) : [...(e.parked || []), j]; ag.key = ""; renderGroups(); });
+      for (const b of [up, dn, x, pk]) b.type = "button";
+      pk.hidden = !parked && (sdr.no_park || []).includes(j);    // the county's and paging: never parked (fire coverage)
       up.disabled = k === 0;
       dn.disabled = k === e.jobs.length - 1;
       up.setAttribute("aria-label", `${j} up`);
@@ -1031,8 +1075,8 @@ window.RadioControls = (() => {
       x.setAttribute("aria-label", `Remove ${j}`);
       up.addEventListener("click", () => mv(-1));
       dn.addEventListener("click", () => mv(1));
-      x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); ag.key = ""; renderGroups(); });
-      li.append(el("span", "", `${k + 1}. ${j}`), up, dn, x);
+      x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); e.parked = (e.parked || []).filter((y) => y !== j); ag.key = ""; renderGroups(); });
+      li.append(el("span", parked ? "dim" : "", `${k + 1}. ${j}`), up, dn, pk, x);
       jobs.append(li);
     });
     const add = el("select", "sm ag-addjob");
@@ -1044,8 +1088,8 @@ window.RadioControls = (() => {
     const save = el("button", "sm primary", "Save"), cancel = el("button", "sm quiet", "Cancel");
     for (const b of [save, cancel]) { b.type = "button"; b.disabled = ag.busy; }
     save.addEventListener("click", () => {
-      const g = { name: e.name.trim(), sdrs: e.sdrs, jobs: e.jobs };
-      const all = groups.map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs }));
+      const g = { name: e.name.trim(), sdrs: e.sdrs, jobs: e.jobs, parked: (e.parked || []).filter((j) => e.jobs.includes(j)) };
+      const all = groups.map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs, parked: x.parked || [] }));
       if (e.i === -1) all.push(g); else all[e.i] = g;
       postGroups(all);
     });
@@ -1057,7 +1101,7 @@ window.RadioControls = (() => {
       del.disabled = ag.busy;
       del.addEventListener("click", async () => {
         if (await UI.confirm(`Delete antenna group ${groups[e.i].name}? Its dongles and jobs are free again.`, { ok: "Delete", danger: true })) {
-          postGroups(groups.filter((_g, k) => k !== e.i).map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs })));
+          postGroups(groups.filter((_g, k) => k !== e.i).map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs, parked: x.parked || [] })));
         }
       });
       btns.append(del);
@@ -1189,15 +1233,16 @@ window.RadioControls = (() => {
   }
 
   // ---- talkgroups: Record / Main, one at a time or a whole section --------------------------------------
-  // state.talkgroups is the truth. A switch shows at once (pending) until a push agrees, or 8 s.
+  // state.talkgroups is the truth. A switch shows at once (pending) until a push agrees, or 8 s. Every talkgroup is
+  // its source ("p25:mrrs:9211"): its row, what is pending on it, what is sent (POST /api/talkgroup {source}).
 
   function talkgroups() {
     const rows = ((st.state && st.state.talkgroups) || []).map((r) => {
-      const c = chan(r.key || `tg:${r.tg}`);
-      if (r.tier_set) c.transcribe = r.tier === "alert" || r.tier === "text";      // its tier says (#409)
-      return { ...r, ...c, ckey: r.key || `tg:${r.tg}`, record: r.record };
+      const other = isOther(r), c = chan(r.key || `tg:${r.tg}`);
+      if (other) c.transcribe = r.tier === "alert" || r.tier === "text";      // its tier says (#409)
+      return { ...r, ...c, tier_set: other, src: srcOf(r), ckey: r.key || `tg:${r.tg}`, record: r.record };
     });
-    return st.pending.size ? rows.map((r) => (st.pending.has(r.tg) ? { ...r, ...st.pending.get(r.tg).vals, pending: true } : r)) : rows;
+    return st.pending.size ? rows.map((r) => (st.pending.has(r.src) ? { ...r, ...st.pending.get(r.src).vals, pending: true } : r)) : rows;
   }
   // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels, no text for [stt] record_only),
   // what is saved, what was just clicked.
@@ -1218,10 +1263,10 @@ window.RadioControls = (() => {
     return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, schedule: f.schedule || "", fm: true, ...chan(f.key) }));
   }
   function settle() {
-    const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [r.tg, r]));
-    for (const [tg, p] of st.pending) {
-      const r = by.get(tg);
-      if (!r || now > p.until || Object.entries(p.vals).every(([k, v]) => r[k] === v)) st.pending.delete(tg);
+    const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [srcOf(r), r]));
+    for (const [src, p] of st.pending) {
+      const r = by.get(src);
+      if (!r || now > p.until || Object.entries(p.vals).every(([k, v]) => r[k] === v)) st.pending.delete(src);
     }
     const c = (st.state && st.state.channels) || {};
     for (const [key, p] of st.cpending) {
@@ -1231,15 +1276,15 @@ window.RadioControls = (() => {
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }
   }
-  function mark(tg, field, value) {
-    const p = st.pending.get(tg) || { vals: {} };
+  function mark(src, field, value) {
+    const p = st.pending.get(src) || { vals: {} };
     p.vals[field] = value;
     p.until = Date.now() + PENDING_MS;
-    st.pending.set(tg, p);
+    st.pending.set(src, p);
   }
-  function unmark(tg, field) {
-    const q = st.pending.get(tg);
-    if (q) { delete q.vals[field]; if (!Object.keys(q.vals).length) st.pending.delete(tg); }
+  function unmark(src, field) {
+    const q = st.pending.get(src);
+    if (q) { delete q.vals[field]; if (!Object.keys(q.vals).length) st.pending.delete(src); }
   }
   async function post(path, body) {
     const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -1248,13 +1293,14 @@ window.RadioControls = (() => {
     if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || `HTTP ${r.status}`);
   }
   async function setTalkgroup(r, field, value) {
-    mark(r.tg, field, value);
+    mark(r.src, field, value);
     st.error = "";
     renderTalkgroups();
     try {
-      await post("/api/talkgroup", { tg: r.tg, [field]: value });
+      // by its source, never its number alone (a bare number is the county's: an "Unknown" card, #409)
+      await post("/api/talkgroup", r.source ? { source: r.source, [field]: value } : { tg: r.tg, [field]: value });
     } catch (err) {
-      unmark(r.tg, field);
+      unmark(r.src, field);
       st.error = `Couldn't change ${field === "main" ? "Main" : "Record"} for ${r.name}: ${err.message}`;
     }
     renderTalkgroups();
@@ -1310,12 +1356,27 @@ window.RadioControls = (() => {
   function renderSystems() {
     const n = st.n, sys = (st.state && st.state.p25_systems) || [], t = ((st.state && st.state.channels) || {}).tiers;
     const jobs = (x) => x.jobs.map((j) => `${j.job}${j.sdr ? ` on ${j.sdr}` : ""}`).join(", ");
-    setText(n.systems, sys.map((x) => `${x.label}: ${x.state}`
+    setText(n.systems, sys.map((x) => `${x.label}: ${x.state !== "ok" && x.hold_until ? `held to ${fmtTime(x.hold_until)}` : x.state}`
       + (x.cc && x.cc.rate != null ? ` · control ${x.cc.rate}/s` : "")
       + (x.unknown && x.unknown.length ? ` · ${x.unknown.length} unknown TG${x.unknown.length === 1 ? "" : "s"}` : "")
-      + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")).join(" · "));
+      + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")
+      + (x.watched || []).filter((w) => w.encrypted).map((w) => ` · TG ${w.tg} encrypted ×${w.encrypted}`).join("")).join(" · "));
+    // a watched talkgroup's grants by what became of them (systems.Activity): no traffic told from traffic not recorded
+    const watched = (x) => (x.watched && x.watched.length ? `\nWatched since ${fmtTime(x.watched[0].since)}: ` + x.watched.map((w) => {
+      const rest = w.grants - w.recording - w.encrypted;
+      return `${w.tg} ${w.name}: ${w.grants} grants, ${w.recording} recorded, ${w.encrypted} encrypted${rest > 0 ? `, ${rest} not recorded` : ""}`;
+    }).join("; ") : "");
+    // the split patch's counts (#647, systems.Activity): would split (log) / splits (on), ID flips, aliases, of its calls
+    const split = (x) => {
+      const p = x.split;
+      if (!p || !(p.calls || p.would || p.split || p.flip || p.alias)) return "";
+      const cut = p.split ? `${p.split} splits` : `${p.would} would split`;
+      return `\nSplit since ${fmtTime(p.since)}: ${cut}, ${p.flip} ID flips, ${p.alias} aliases, in ${p.calls} calls`
+        + (p.calls ? ` (${Math.min(100, (100 * p.cut) / p.calls).toFixed(1)}%)` : "");
+    };
     n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
-      + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")).join("\n\n");
+      + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")
+      + watched(x) + split(x)).join("\n\n");
     show(n.systems, sys.length > 0);
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
     const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);
@@ -1324,15 +1385,16 @@ window.RadioControls = (() => {
     if (t) n.tiers.title = "Expected storage, from the last 7 days of audio per tier.\n" + t.storage.tiers.map((r) => `${r.label}: ${Math.round(r.s_per_day / 60)} min/day, ${r.mb} MB`).join("\n");
     show(n.tiers, !!(t && sys.length));
   }
-  async function setGroup(group, record) {
-    const rows = ((st.state && st.state.talkgroups) || []).filter((r) => (r.group || "") === group && !(record && r.encrypted));
-    for (const r of rows) mark(r.tg, "record", record);
+  async function setGroup(group, record) {       // a county section (another system's: a tier each, no switch)
+    const rows = ((st.state && st.state.talkgroups) || []).filter((r) => !isOther(r) && (r.group || "") === group
+                                                                     && !(record && r.encrypted));
+    for (const r of rows) mark(srcOf(r), "record", record);
     st.error = "";
     renderTalkgroups();
     try {
       await post("/api/talkgroup-group", { group: group || "Unknown", record });
     } catch (err) {
-      for (const r of rows) unmark(r.tg, "record");
+      for (const r of rows) unmark(srcOf(r), "record");
       st.error = `Couldn't change Record for ${groupName(group)}: ${err.message}`;
     }
     renderTalkgroups();
@@ -1347,13 +1409,13 @@ window.RadioControls = (() => {
       if (!cur) return;
       return setChannel(key, b.dataset.field, !cur[b.dataset.field], li.dataset.label || key);
     }
-    const tg = Number(li.dataset.key);
-    const r = talkgroups().find((x) => x.tg === tg);
-    if (!r) return;
+    const src = li.dataset.source;
+    const r = talkgroups().find((x) => x.src === src);
+    if (!r || r.tier_set) return;                    // another system's: its tier is the switch
     const field = b.dataset.field, next = !r[field];
-    if (field === "record" && next && r.encrypted && st.confirm !== tg) {   // two taps: an encrypted talkgroup records noise
+    if (field === "record" && next && r.encrypted && st.confirm !== src) {   // two taps: an encrypted talkgroup records noise
       clearTimeout(st.confirmTimer);
-      st.confirm = tg;
+      st.confirm = src;
       st.confirmTimer = setTimeout(() => { st.confirm = null; renderTalkgroups(); }, 6000);
       return renderTalkgroups();
     }
@@ -1428,15 +1490,165 @@ window.RadioControls = (() => {
     show(n.limitHit, hit);
   }
 
+  // ---- display names (#607 / Settings > Radios > Channels): the radio rail's own store ---------------------------
+  // opts.names {load, save} from settings.js (the rail's folders: {rev, names: {source key: name}}); none (the
+  // station's own page, no CAD): no names, no pencil. A name is display only: keys, recordings, transcripts, rules
+  // and exports keep the real one.
+
+  async function loadNames() {
+    if (!st.namesApi) return;
+    st.namesBusy = true;
+    try {
+      const f = await st.namesApi.load();
+      st.names = (f && f.names) || {};
+      st.namesRev = (f && f.rev) || "";
+    } catch (_) { /* the next push asks again */ }
+    st.namesBusy = false;
+    renderTalkgroups();
+  }
+  // a row's name key: its source ("fm:FG1", "air:HPN Tower", "p25:mrrs:9211")
+  const nameKey = (r) => (r.fm ? fmKey(r) : r.src);
+  function shownName(r) {
+    const k = nameKey(r);
+    if (st.namePending.has(k)) return st.namePending.get(k) || r.name;
+    const nm = st.names || {};
+    // (a county talkgroup's name kept under its older key "tg:307" too)
+    return nm[k] || (!r.fm && !r.tier_set ? nm[`tg:${r.tg}`] : "") || r.name;
+  }
+  function onRename(e) {
+    const b = e.target.closest("button.tg-ren");
+    if (!b || b.disabled || ro() || st.names === null || !st.namesApi) return;
+    const li = b.closest(".tg-row");
+    st.renaming = li.dataset.nkey;
+    renderTalkgroups();
+    const i = li.querySelector("input.tg-rename");
+    if (i && i.focus) { i.focus(); if (i.select) i.select(); }
+  }
+  async function saveName(li, keep) {
+    const key = li.dataset.nkey, i = li.querySelector("input.tg-rename");
+    if (!key || st.renaming !== key || !i) return;
+    st.renaming = "";
+    const orig = li.dataset.label, v = keep ? i.value.replace(/\s+/g, " ").trim().slice(0, NAME_MAX) : null;
+    const cur = (st.names || {})[key] || "";
+    const want = v === null || v === orig ? "" : v;          // its own name typed back in: no name of its own
+    if (v === null || want === cur) return renderTalkgroups();
+    st.namePending.set(key, want);
+    st.error = "";
+    renderTalkgroups();
+    try {
+      const f = await st.namesApi.save(key, want);
+      st.names = (f && f.names) || {};
+      st.namesRev = (f && f.rev) || "";
+    } catch (err) {
+      st.error = `Couldn't rename ${orig}: ${err.message}`;
+    }
+    st.namePending.delete(key);
+    renderTalkgroups();
+  }
+  function renameInput() {
+    const i = el("input", "sm tg-rename");
+    Object.assign(i, { type: "text", maxLength: NAME_MAX, autocomplete: "off", spellcheck: false });
+    i.setAttribute("aria-label", "Display name");
+    i.hidden = true;
+    i.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveName(i.closest(".tg-row"), true); }
+      else if (e.key === "Escape") { e.preventDefault(); saveName(i.closest(".tg-row"), false); }
+    });
+    i.addEventListener("blur", () => saveName(i.closest(".tg-row"), true));
+    return i;
+  }
+
+  // ---- a source's service (fire, police, ... : the settings section radio_services) ---------------------------
+  // opts.services {load, save} from settings.js: {source key: service} the admins chose; none: automatic (its
+  // talkgroup file's Service column, else its name's words; an FM channel fire, an airband one air). Admins only, the
+  // CAD's only (the station's own page has none). Its recent rows are re-tagged on the hub.
+
+  async function loadServices() {
+    if (!st.servicesApi) return;
+    st.servicesBusy = true;
+    try {
+      const got = (await st.servicesApi.load()) || {};
+      // {services, waiting}: the choices, and the sources whose re-tag waits for the station (a bare map: choices alone)
+      st.services = got.services && typeof got.services === "object" ? got.services : got;
+      st.svcWaiting = new Set(Array.isArray(got.waiting) ? got.waiting : []);
+      st.servicesRev = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : "";
+    } catch (_) { /* the next push asks again */ }
+    st.servicesBusy = false;
+    renderTalkgroups();
+  }
+  // automatic: what the station worked out (service_auto; a station before that: service), an FM channel's kind
+  const autoService = (r) => (r.fm ? (r.kind === "airband" ? "air" : "fire") : r.service_auto || r.service || "");
+  function chosenService(r) {
+    const k = nameKey(r);
+    return st.svcPending.has(k) ? st.svcPending.get(k) : (st.services || {})[k] || "";
+  }
+  async function onService(e) {
+    const s = e.target.closest("select.tg-svc");
+    if (!s || s.disabled || ro() || !st.servicesApi || st.services === null) return;
+    const li = s.closest(".tg-row"), key = li.dataset.nkey, want = s.value;
+    if (!key || want === ((st.services || {})[key] || "")) return;
+    st.svcPending.set(key, want);
+    st.error = "";
+    renderTalkgroups();
+    try {
+      st.services = (await st.servicesApi.save(key, want || "automatic")) || {};
+    } catch (err) {
+      st.error = `Couldn't set the service of ${li.dataset.label}: ${err.message}`;
+    }
+    st.svcPending.delete(key);
+    renderTalkgroups();
+  }
+  function serviceSelect() {
+    const sel = el("select", "tg-svc sm");
+    sel.append(new Option("Auto", ""), ...SERVICES.map(([v, label]) => new Option(label, v)));
+    sel.setAttribute("aria-label", "Service");
+    return sel;
+  }
+
+  // ---- the Channels list, by radio system ------------------------------------------------------------------------
+  // Analog FM (FG1, FG2, South 2, ...), Airband, County P25, then each other P25 system by its label; under a P25
+  // system its groups (the talkgroups file's Tag). [{id, label, fm, list} | {id, label, groups: [{g, group, list}]}]
+  function bySystem(rows, fm) {
+    const out = [];
+    const analog = fm.filter((r) => r.kind !== "airband"), air = fm.filter((r) => r.kind === "airband");
+    if (analog.length) out.push({ id: "analog", label: "Analog FM", fm: true, list: analog });
+    if (air.length) out.push({ id: "airband", label: "Airband", fm: true, list: air });
+    const rank = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? GROUP_ORDER.length - 1 : i; };
+    const sysOrder = ((st.state && st.state.p25_systems) || []).map((x) => x.name);
+    const sys = new Map();
+    for (const r of rows) {
+      const id = r.tier_set ? r.system || "?" : "";       // "": the county's
+      if (!sys.has(id)) sys.set(id, []);
+      sys.get(id).push(r);
+    }
+    const ids = [...sys.keys()].sort((a, b) => (a === "" ? -1 : b === "" ? 1 : 0)
+      || ((sysOrder.indexOf(a) + 1 || 1e3) - (sysOrder.indexOf(b) + 1 || 1e3)) || a.localeCompare(b));
+    for (const id of ids) {
+      const by = new Map();
+      for (const r of sys.get(id)) {
+        const g = r.group || "";
+        if (!by.has(g)) by.set(g, []);
+        by.get(g).push(r);
+      }
+      const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
+        .map(([g, list]) => ({ g: `${id}\u0001${g}`, group: g, other: id !== "", list: list.slice().sort((a, b) => (b.main - a.main)
+          || ((b.last || 0) - (a.last || 0)) || shownName(a).localeCompare(shownName(b), "en", { numeric: true })) }));
+      const label = id === "" ? "County" : systemLabel(id);
+      out.push({ id: id === "" ? "county" : `p25:${id}`, label: /\bP25\b/i.test(label) ? label : `${label} P25`, groups });
+    }
+    return out;
+  }
+
   function renderTalkgroups() {
     renderSystems();
     if (!st.box) return;
     renderSync();
     const n = st.n, rows = talkgroups(), lock = ro();
     const words = n.filter.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const sysWord = (r) => (r.fm ? (r.kind === "airband" ? "airband" : "analog fm") : r.tier_set ? `${systemLabel(r.system)} p25` : "county p25");
     const match = (r) => !words.length || words.every((w) =>
-      `${r.name} ${r.tg ?? ""} ${r.fm ? "fm channels" : groupName(r.group)} ${r.main ? "main" : ""} ${r.encrypted ? "encrypted" : ""} `
-      .concat(`${r.engine} ${r.transcribe ? "" : "off"}`).toLowerCase().includes(w));
+      `${shownName(r)} ${r.name} ${r.tg ?? ""} ${r.fm ? "fm channels" : groupName(r.group)} ${sysWord(r)} ${r.main ? "main" : ""} `
+      .concat(`${r.encrypted ? "encrypted" : ""} ${r.engine} ${r.transcribe ? "" : "off"}`).toLowerCase().includes(w));
     const shown = rows.filter(match);
     const fm = fmRows().filter(match);
     const count = (p) => rows.filter(p).length;
@@ -1446,24 +1658,31 @@ window.RadioControls = (() => {
       + (shown.length !== rows.length ? `, ${shown.length} shown` : "") : "");
     setText(n.tgErr, st.error);
     show(n.tgErr, !!st.error);
-    const by = new Map();
-    for (const r of shown) {
-      const gk = (r.tier_set ? `${r.system}\u0001` : "") + (r.group || "");     // (#409) never blended into a county group
-      if (!by.has(gk)) by.set(gk, []);
-      by.get(gk).push(r);
+    // one flat list for the page: a system's heading, then its groups (an FM system: one group, no heading of its own)
+    const items = [];
+    for (const x of bySystem(shown, fm)) {
+      const tgs = x.fm ? x.list : x.groups.flatMap((g) => g.list);
+      items.push({ head: true, id: x.id, label: x.label, n: tgs.length, fm: !!x.fm, heard: tgs.filter((r) => r.count).length });
+      if (x.fm) items.push({ g: x.id, fm: true, list: x.list });
+      else items.push(...x.groups);
     }
-    const rank = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? GROUP_ORDER.length - 1 : i; };
-    const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
-      .map(([g, list]) => ({ g, list: list.slice().sort((a, b) => (b.main - a.main) || ((b.last || 0) - (a.last || 0))
-                                                         || a.name.localeCompare(b.name, "en", { numeric: true })) }));
-    if (fm.length) groups.unshift({ g: "\u0000fm", fm: true, list: fm });
-    const rowSig = (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
-                                         st.confirm === r.tg, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
-                                         (((st.state && st.state.channels) || {}).sync || {}).state]);
-    syncList(n.groups, groups, {
-      key: (x) => `g:${x.g}`,
-      sig: (x) => JSON.stringify([x.list.map(rowSig), st.confirm, lock, (((st.state && st.state.channels) || {}).sync || {}).state]),
-      make: () => {
+    const nameable = st.names !== null && !!st.namesApi && !lock;
+    const servable = st.services !== null && !!st.servicesApi && !lock;
+    const rowSig = (r) => JSON.stringify([shownName(r), r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
+                                         st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
+                                         r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
+                                         nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
+                                         st.svcWaiting.has(nameKey(r))]);
+    syncList(n.groups, items, {
+      key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
+      sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
+        : JSON.stringify([x.list.map(rowSig), st.confirm, lock, (((st.state && st.state.channels) || {}).sync || {}).state])),
+      make: (x) => {
+        if (x.head) {
+          const h = el("h3", "tg-sys");
+          h.append(el("span", "tg-sysname"), el("span", "dim tg-syscount"));       // "MRRS P25", "2 TGs · 1 heard"
+          return h;
+        }
         const sec = el("section", "tg-group");
         const h = el("h3", "tg-ghead");
         h.append(el("span", "chip tg-gchip"), el("span", "dim tg-gcount"), el("span", "tg-gspacer"), switchButton(""));
@@ -1472,35 +1691,40 @@ window.RadioControls = (() => {
         return sec;
       },
       fill: (sec, x) => {
+        if (x.head) {
+          const [nm, cnt] = sec.children;
+          setText(nm, x.label);
+          setText(cnt, x.fm ? `${x.n} ch` : `${x.n} TG${x.n === 1 ? "" : "s"}` + (x.heard ? ` · ${x.heard} heard` : ""));
+          return;
+        }
         const [h, ol] = sec.children;
         const [gchip, gcount, , gsw] = h.children;
-        if (x.fm) {
-          setText(gchip, "FM channels");
-          gchip.style.setProperty("--c", "var(--accent)");
-          setText(gcount, `${x.list.length} channel${x.list.length === 1 ? "" : "s"}, squelch + MDC IDs`);
-          show(gsw, false);
-        } else {
-          const other = x.list.length > 0 && !!x.list[0].tier_set;      // another P25 system's: tiers, row by row
-          show(gsw, !other);
+        show(h, !x.fm);                                      // an FM system's heading says it all
+        if (!x.fm) {
+          show(gsw, !x.other);                               // another P25 system's: tiers, row by row
           const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
           const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
-          gsw.dataset.group = x.g;
+          gsw.dataset.group = x.group;
           setSwitch(gsw, all, mixed ? "Record: some" : all ? "Record: all" : "Record: none");
           gsw.classList.toggle("mixed", mixed);
           gsw.disabled = !dec.length || lock;
           gsw.title = !dec.length ? "All encrypted" : all ? `Recording all ${dec.length}: tap to stop` : `Record all ${dec.length} (encrypted stay off)`;
-          setText(gchip, other ? `${systemLabel(x.list[0].system)} \u00b7 ${groupName(x.list[0].group)}` : groupName(x.g));
-          gchip.style.setProperty("--c", groupColor(x.g));
+          setText(gchip, groupName(x.group));
+          gchip.style.setProperty("--c", groupColor(x.other ? "" : x.group));
           const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
           setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") + (hd ? `, ${hd} heard` : ""));
         }
         syncList(ol, x.list, {
-          key: (r) => (r.fm ? r.key : String(r.tg)),      // (talkgroup numbers are unique across the systems here)
+          key: (r) => (r.fm ? r.key : r.src),          // a talkgroup by its source: numbers repeat across systems
           sig: rowSig,
           make: () => {
             const li = el("li", "tg-row");
             const id = el("div", "tg-id");
-            id.append(el("span", "tg-mark"), el("b", "tg-name"), el("span", "tg-num"), el("span", "tg-badge", "MAIN"));
+            const pen = el("button", "mini quiet tg-ren", "✎");
+            pen.type = "button";
+            pen.setAttribute("aria-label", "Rename");
+            id.append(el("span", "tg-mark"), el("b", "tg-name"), renameInput(), pen, serviceSelect(), el("span", "tg-num"),
+                      el("span", "tg-badge", "MAIN"));
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
@@ -1510,20 +1734,40 @@ window.RadioControls = (() => {
           },
           fill: (li, r) => {
             const [id, info, sw] = li.children;
-            const [mk, name, num, badge] = id.children;
+            const [mk, name, input, pen, svc, num, badge] = id.children;
             const [heard, note] = info.children;
-            const confirming = !r.fm && st.confirm === r.tg;
+            const confirming = !r.fm && st.confirm === r.src;
+            const nk = nameKey(r), shownAs = shownName(r), renaming = nameable && st.renaming === nk;
             li.dataset.fm = r.fm ? "1" : "";
             li.dataset.ckey = r.fm ? r.chan : r.ckey;
-            li.dataset.source = r.source || "";
+            li.dataset.source = r.fm ? "" : r.src;
+            li.dataset.nkey = nk;
             li.dataset.label = r.name;
             li.className = "tg-row" + (r.main ? " main" : "") + (r.encrypted ? " enc" : "") + (r.record ? "" : " norec")
               + (r.pending || r.cpending ? " pending" : "") + (confirming ? " confirm" : "") + (r.effective === "aws" || r.effective === "both" ? " aws" : "");
             setText(mk, r.encrypted ? "🔒" : "");
             show(mk, !!r.encrypted);
-            setText(name, r.name);
+            setText(name, shownAs);
             // a schedule (#260, NY Approach): each frequency with its local hours, "126.4 07:00-23:00, 120.8 23:00-07:00 · AM"
-            setText(num, r.fm ? `${r.schedule || `${r.mhz} MHz`}${r.kind === "paging" ? " · paging" : r.kind === "airband" ? " · AM" : ""}` : `TG ${r.tg}`);
+            const where = r.fm ? `${r.schedule || `${r.mhz} MHz`}` : `TG ${r.tg}`;
+            setText(num, r.fm ? `${where}${r.kind === "paging" ? " · paging" : r.kind === "airband" ? " · AM" : ""}` : where);
+            name.title = `${r.name} · ${where}`;               // the hover: its own name and its number / frequency
+            show(name, !renaming);
+            if (renaming && input.hidden) { input.value = (st.names || {})[nk] || ""; input.placeholder = r.name; }
+            show(input, renaming);
+            show(pen, nameable && !renaming);
+            pen.title = `Rename (display only; blank: ${r.name})`;
+            // its service: Auto (what its file or name says) or the admins' choice; the hover says what it does
+            const auto = autoService(r), chosen = chosenService(r);
+            show(svc, servable);
+            if (servable) {
+              svc.options[0].textContent = auto ? `Auto (${SERVICE_NAME[auto] || auto})` : "Auto";
+              if (svc.value !== chosen) svc.value = chosen;
+              svc.disabled = st.svcPending.has(nk);
+              svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE_NAME[auto] || auto} (its talkgroup file or name)` : ""}`
+                + "\nA change re-tags its last 30 days" + (r.fm || !r.tier_set ? "\nFire here: never muted" : "")
+                + (st.svcWaiting.has(nk) ? "\nRe-tag waits for the station" : "");
+            }
             show(badge, !!r.main);
             setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));
             heard.className = r.fm || r.count ? "tg-heard" : "tg-heard dim";
@@ -1729,5 +1973,6 @@ window.RadioControls = (() => {
     poll();
   }
 
-  return { mount, _rx: { rxDur, rxTargets, rxResult, rxHistRow, renderReception, st, rxSt } };   // _rx: the tests
+  return { mount, _rx: { rxDur, rxTargets, rxResult, rxHistRow, renderReception, st, rxSt },   // _rx, _tg: the tests
+           _tg: { render: renderTalkgroups, loadNames } };
 })();

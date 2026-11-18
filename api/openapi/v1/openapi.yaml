@@ -14,6 +14,16 @@ security:
 paths:
   /api/v1/meta:
     $ref: ./paths/meta.yaml
+  /api/v1/snapshot:
+    $ref: ./paths/snapshot.yaml
+  /api/v1/incidents:
+    $ref: ./paths/incidents.yaml
+  /api/v1/incidents/{id}:
+    $ref: ./paths/incident.yaml
+  /api/v1/units:
+    $ref: ./paths/units.yaml
+  /api/v1/alarms:
+    $ref: ./paths/alarms.yaml
   /api/v1/devices/{id}/push:
     $ref: ./paths/devices_push.yaml
 components:

@@ -1,0 +1,368 @@
+{
+ "why": "An alert level's pre-alert expires like any other while no incident of it is open (Alert 1, a standby: kept at 1800 s, expired at 1801 s), but never while its incident is open (#369: Alert 2's queued incident).",
+ "steps": [
+  {
+   "step": {
+    "do": "radio",
+    "t": 0,
+    "id": "fire-1",
+    "tg": 307,
+    "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, runway 16"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 0.0,
+     "title": "HPN Alert 1 · standby · Citation · flaps · RWY 16",
+     "detail": "60 Control: alert level 1",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, runway 16",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 5,
+      "lines": [
+       [
+        "Alert",
+        "declared 11:59 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "flaps",
+       "runway": "16",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 1,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": -4.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (60 Control): HPN Alert 1 · standby · Citation · flaps · RWY 16 (alert high 100%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 1 · standby · Citation · flaps · RWY 16",
+     "message": "“60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, runway 16” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 1"
+   ]
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 1800
+   },
+   "console": {
+    "read": "open",
+    "open": [
+     "A1"
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 1801
+   },
+   "console": {
+    "read": "open",
+    "open": []
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 0.0,
+     "title": "HPN Alert 1 · standby · Citation · flaps · RWY 16",
+     "detail": "60 Control: alert level 1",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "expired",
+     "outcome_at": 1801.0,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 1 for a Citation with flap issues, runway 16",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 5,
+      "lines": [
+       [
+        "Alert",
+        "declared 11:59 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "flaps",
+       "runway": "16",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 1,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 1801.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 11:59:56 expired (unanswered 30 min): HPN Alert 1 · standby · Citation · flaps · RWY 16",
+     "operator": ""
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 2000,
+    "id": "fire-2",
+    "tg": 307,
+    "text": "60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": 1996.0,
+     "updated_at": 2000.0,
+     "title": "HPN Alert 2 · King Air · gear · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-2",
+        "at": 1996.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Alert",
+        "declared 12:33 · Fire/EMS 15"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "King Air",
+       "problem": "gear",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 2000.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-2",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A2",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 12:33:16): HPN Alert 2 · King Air · gear · RWY 34 (alert high 100%)\n12:33:16 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34”\nAlert: declared 12:33 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "King Air",
+     "acft_nature": "gear",
+     "acft_runway": "34",
+     "created_at": 2000.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 1996.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (60 Control): HPN Alert 2 · King Air · gear · RWY 34 (alert high 100%)",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 2000.0,
+     "kind": "created",
+     "text": "From 60 Control radio, waiting to be accepted: Airport / Alert 2 (full emergency) at 240 Airport Rd; received via Radio",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 1996.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 2 · King Air · gear · RWY 34: “60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34” · queued, not dispatched",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 2000.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:33:16 on this event: HPN Alert 2 · King Air · gear · RWY 34",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 2 · King Air · gear · RWY 34",
+     "message": "“60 Control, car 9901, declaring an alert level 2 for a King Air, gear problem, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 2"
+   ]
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 3801
+   },
+   "console": {
+    "read": "open",
+    "open": [
+     "A2"
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 9000
+   },
+   "console": {
+    "read": "open",
+    "open": [
+     "A2"
+    ]
+   }
+  }
+ ]
+}

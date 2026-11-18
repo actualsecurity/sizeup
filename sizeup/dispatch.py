@@ -5,6 +5,9 @@
   -> departments ["Port Chester FD"], type "Fire alarm" (category fire), location text
      "209 West Chester Avenue", cross street "Pearl Street", time out "14:32"
 
+The cross streets are the next two streets after the address; a street said with the address's own house number in
+front ("47 Sample Avenue ... 47 Model Avenue": the page read again, misheard) is never one.
+
 The incident vocabulary is a first guess at 60 Control phrasing; it is meant to be tuned on
 real captured pages (docs/PLAN.md). Unknown types are kept as "Unknown" with the raw text:
 the display never invents a type.
@@ -125,6 +128,20 @@ def _spoken_digits(text: str) -> str:
                   lambda m: join(m) + " ", text, flags=re.I).strip()
 
 
+# A house number the dispatcher said twice that speech-to-text ran together ("412, 412 Sample Road" heard as "412412
+# Sample Road"): a number of six digits or more whose two halves are the same, three digits a half at least, before a
+# word. Never a house number here (ADDRESS takes five digits at most: the address was lost, and the page matched on its
+# street alone), so it is always the repeat. A four-digit doubling ("1717") may be a real number: it stays as heard and
+# matching halves it (sizeup/cad/sources.py halved). "412 412" (two words) is parse()'s own repeat rule.
+DOUBLED = re.compile(r"\b([1-9]\d{2,4})\1\b(?=[\s,.;:]+[A-Za-z])")
+
+
+def undouble(text: str) -> str:
+    """'412412 Sample Road' -> '412 Sample Road' (DOUBLED); anything else as it is. For a page's text only: parse()
+    and the page locator (sizeup/geo/pagegeo.py locate_page) read it so."""
+    return DOUBLED.sub(r"\1", text or "")
+
+
 def _clean_street(s: str) -> str:
     words = s.split()
     while words and words[0] in STOP_WORDS:
@@ -213,6 +230,7 @@ def parse(text: str, known=None) -> Dispatch:
     # "16-10-191-22": 60 Control's run number, not engines (the normalising below turns "-" into spaces).
     t = _spoken_digits(_norm(_unit_slash(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text), known)))
     t = re.sub(r"\b(\d+)(?:\s+\1\b)+", r"\1", t)          # "42 42 stratton road": a repeat, not two numbers
+    t = undouble(t)                                       # "412412 sample road": the repeat run together
     for name, phrases in DEPARTMENTS.items():
         if any(p in t for p in phrases):
             d.departments.append(name)
@@ -265,7 +283,10 @@ def parse(text: str, known=None) -> Dispatch:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
         after = masked[a.end():]
         crosses = []
+        again = re.compile(rf"\b{re.escape(a.group(1))}\s+$")
         for sm in STREET.finditer(after[:160]):
+            if again.search(after[:sm.start()]):
+                continue                                   # the address read again, however misheard: never a cross
             name = _road(sm.group(1), tw)
             if name and name not in crosses and name != _clean_street(a.group(2)):
                 crosses.append(name)

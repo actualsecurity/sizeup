@@ -4,6 +4,7 @@
    admins answer (POST /api/cad/radio-id); a viewer, and the wall board, see the question and nothing to press.
    Naming it puts its transmissions on that unit's calls, the ones already heard too; nothing is ever guessed.
    Each question keeps its own row across the state push (keyed by radio), so a pick being made isn't redrawn away. */
+"use strict";
 (function () {
   "use strict";
   const busy = new Set();                  // radios being answered: not offered twice

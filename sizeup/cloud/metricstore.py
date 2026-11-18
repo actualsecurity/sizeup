@@ -28,7 +28,8 @@ Tables (made on first use, never at the hub's start):
              RAW_DAYS (30) days. One B-tree (WITHOUT ROWID): a series' range is one seek
     events   (station, subject, at, ev) -> detail: what explains a shift (the station's; the Settings audit's squelch and
              channel changes are joined in when read, from cad.sqlite), EVENT_DAYS (365)
-    hourly   (station, subject, metric, hour) -> n, lo, p50, p90, hi: the rollups, HOURLY_DAYS (365)
+    hourly   (station, subject, metric, hour) -> n, lo, p50, p90, hi, p95 (p95 since #677: NULL in older rows), the
+             rollups, HOURLY_DAYS (365)
     series   (station, subject, kind) -> first, last: what there is (the API's index, the retention's list)
     meta     snapshot_at (when this copy was made), settled
 
@@ -56,6 +57,8 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import fence as fence_mod
+from sizeup.cloud.metricsbackup import (attached, common_columns as _common_columns, copy_file,   # (shared, #639)
+                                        merge_copies)
 
 RAW_DAYS = 30
 HOURLY_DAYS = 365
@@ -64,10 +67,12 @@ SNAPSHOT_S = 3 * 3600.0         # a copy to the bucket this often, once settled
 FIRST_UPLOAD_S = 900.0          # ... the first this long after settling
 BACKOFF_S = (30.0, 1800.0)      # settling or an upload failed: again in 30 s, doubling to 30 min
 BACKUP_TURN_S = 30.0            # the backup thread's look
+RENAME_CHUNK = 20000            # a station renamed: its rows moved this many a transaction
 UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
 COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
-KINDS = ("floor", "tx", "cc")
+KINDS = ("floor", "tx", "cc", "stt", "stt_in")   # (stt: the whisper queue, #639; stt_in: each STT input's
+                                                 # arrival delay on the hub, #677, sizeup/cloud/sttarrival.py)
 MAX_RECORDS = 5000              # a post
 MAX_DOC = 2048                  # one record's numbers, as JSON
 MAX_FUTURE_S = 86400.0          # a station clock this far ahead: refused
@@ -85,7 +90,7 @@ CREATE TABLE IF NOT EXISTS events (station TEXT NOT NULL, subject TEXT NOT NULL,
                                    detail TEXT NOT NULL DEFAULT '', PRIMARY KEY (station, subject, at, ev)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hourly (station TEXT NOT NULL, subject TEXT NOT NULL, metric TEXT NOT NULL,
                                    hour INTEGER NOT NULL, n INTEGER NOT NULL, lo REAL, p50 REAL, p90 REAL, hi REAL,
-                                   PRIMARY KEY (station, subject, metric, hour)) WITHOUT ROWID;
+                                   p95 REAL, PRIMARY KEY (station, subject, metric, hour)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS series (station TEXT NOT NULL, subject TEXT NOT NULL, kind TEXT NOT NULL, first REAL NOT NULL,
                                    last REAL NOT NULL, PRIMARY KEY (station, subject, kind)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -99,6 +104,8 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "idle_qmax":    ("floor", lambda d: True, lambda d: d.get("qmax")),
     "noise_opens":  ("floor", lambda d: True, lambda d: d.get("noise")),
     "open_s":       ("floor", lambda d: True, lambda d: d.get("open_s")),
+    "sq_open":      ("floor", lambda d: True, lambda d: d.get("open")),      # the squelch as running (sent when it
+    "sq_close":     ("floor", lambda d: True, lambda d: d.get("close")),     # changes and every 15 min): #606's steps
     "tx_q":         ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("q")),
     "tx_q_open":    ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qo")),
     "tx_q_close":   ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qc")),
@@ -108,8 +115,19 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "noise_q":      ("tx", lambda d: d.get("kind") == "noise", lambda d: d.get("q")),
     "cc_rate":      ("cc", lambda d: True, lambda d: d.get("rate")),
     "cc_lo":        ("cc", lambda d: True, lambda d: d.get("lo")),
+    # the station's whisper queue, each minute (#639, sizeup/cloud/metrics.py "stt")
+    "stt_queued":   ("stt", lambda d: True, lambda d: d.get("queued")),
+    "stt_oldest_s": ("stt", lambda d: True, lambda d: d.get("oldest")),
+    "stt_shed":     ("stt", lambda d: True, lambda d: d.get("shed")),
+    "stt_done":     ("stt", lambda d: True, lambda d: d.get("done")),
+    "stt_wait_p50": ("stt", lambda d: True, lambda d: d.get("wait50")),
+    "stt_wait_p95": ("stt", lambda d: True, lambda d: d.get("wait95")),
+    "stt_run_p50":  ("stt", lambda d: True, lambda d: d.get("run50")),
     "cc_uncovered": ("cc", lambda d: True, lambda d: sum((d.get("unc") or {}).values()) if d.get("n") or d.get("unc")
                      else None),
+    # #677: each STT input's arrival on the hub after its event (s; negative: it came first). Recorded by the hub
+    # itself (sizeup/cloud/sttarrival.py), the subject its channel
+    "stt_delay":    ("stt_in", lambda d: True, lambda d: d.get("delay")),
 }
 
 
@@ -158,20 +176,6 @@ def _clean_doc(rec: dict) -> dict:
     return out
 
 
-def _common_columns(db: sqlite3.Connection, table: str) -> list[str] | None:
-    """The columns of `table` both this store (main) and an attached copy (snap) have, in this store's order; None when
-    the copy hasn't the table, or lacks a key column or one here that must have a value (NOT NULL, no default)."""
-    def info(schema: str) -> list[tuple]:
-        return db.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
-    mine, theirs = info("main"), {r[1] for r in info("snap")}
-    if not theirs:
-        return None
-    for _cid, name, _type, notnull, default, pk in mine:
-        if name not in theirs and (pk or (notnull and default is None)):
-            return None
-    return [r[1] for r in mine if r[1] in theirs]
-
-
 class MetricStore:
     def __init__(self, path: str | Path, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
@@ -218,6 +222,8 @@ class MetricStore:
         db.execute("PRAGMA synchronous = NORMAL")
         db.execute("PRAGMA busy_timeout = 5000")
         db.executescript(SCHEMA)
+        if "p95" not in {r[1] for r in db.execute("PRAGMA table_info(hourly)")}:       # (a file from before #677)
+            db.execute("ALTER TABLE hourly ADD COLUMN p95 REAL")
         self._db = db
         if self.path == ":memory:":
             self._ro, self._rlock = db, self._lock
@@ -269,10 +275,11 @@ class MetricStore:
 
     # -- in ---------------------------------------------------------------------------------------------------------
 
-    def ingest(self, station: str, records: list) -> dict:
+    def ingest(self, station: str, records: list, tell: bool = True) -> dict:
         """POST /api/station/metrics from `station` (the authenticated id). What can't be read is skipped and counted,
         never refused whole: {ok, accepted, skipped, resend_from?}. MetricsError for a body that isn't one (the station
-        drops it); fence.FencedWrite when this task isn't the leader (a 503: the station sends it again)."""
+        drops it); fence.FencedWrite when this task isn't the leader (a 503: the station sends it again). tell=False:
+        the hub's own records for the station (#677's STT input arrival), never the answer that asks it to resend."""
         if not isinstance(records, list):
             raise MetricsError("records: a list")
         if len(records) > MAX_RECORDS:
@@ -332,10 +339,101 @@ class MetricStore:
                 self._dirty.add((st, s, int(at // 3600)))
         self.ingested += n
         out = {"ok": True, "accepted": n, "skipped": skipped}
-        if self.settled and self.resend_from is not None and station not in self._told:
+        if tell and self.settled and self.resend_from is not None and station not in self._told:
             self._told.add(station)
             out["resend_from"] = self.resend_from          # this store lost what came after: again, please
         return out
+
+    def rename_station(self, old: str, new: str, chunk: int = RENAME_CHUNK, before: float | None = None) -> int:
+        """A station renamed on the hub (sizeup/cloud/hub.py HubApp.apply_station_renames, from the renames in hub.sqlite):
+        its rows move from `old` to `new`, so its graphs go on with their history under the new id. before: the rename's
+        time: only rows from before it move (an hour's rollups: those of the hours that began before it). After a
+        rename the hub files the station's own posts under the new id even when they say the old one, so a row under
+        the old id from after it is another station's (an own token reusing the id) and stays. In chunks of `chunk`
+        rows, each its own transaction (the writer's lock let go between them: the station's posts go on), in
+        primary-key order. Rows the new id has already (it posted under both) are kept once (raw and events: the same
+        key is the same record); a series spans both; the hours both had, and the rename's own hour, are rolled again
+        from raw at the janitor's next turn (HubApp holds it off while a move runs). The rows moved (0: nothing under the
+        old id; no file made). fence.FencedWrite when this task isn't the leader."""
+        old, new = _text(old, 64), _text(new, 64)
+        if not old or not new or old == new or not self._exists():
+            return 0
+        lim = float("inf") if before is None else float(before)
+        when = {"raw": ("at < ?", lim), "events": ("at < ?", lim), "hourly": ("hour * 3600.0 < ?", lim)}
+        if not any(self._read(f"SELECT 1 FROM {t} WHERE station = ? AND {when[t][0]} LIMIT 1", (old, lim))
+                   for t in ("raw", "events", "hourly")):
+            return 0                               # (an index lookup each: cheap at every janitor turn)
+        if not self.may_write():
+            fence_mod.refuse("station metrics")
+        both = {(s_, h) for s_, h in self._read(
+            "SELECT DISTINCT o.subject, o.hour FROM hourly o JOIN hourly n ON n.station = ? AND n.subject = o.subject "
+            "AND n.hour = o.hour WHERE o.station = ? AND o.hour * 3600.0 < ?", (new, old, lim))}
+        spans = self._read("SELECT subject, kind, first, last FROM series WHERE station = ? AND first < ?", (old, lim))
+        n = 0
+        for table, key, rest in (("raw", ("subject", "kind", "at"), ("doc",)),
+                                 ("events", ("subject", "at", "ev"), ("detail",)),
+                                 ("hourly", ("subject", "metric", "hour"), ("n", "lo", "p50", "p90", "hi", "p95"))):
+            k, cols = ", ".join(key), ", ".join(key + rest)
+            cond = f"station = ? AND {when[table][0]}"
+            while True:
+                with self._lock:
+                    if not self.may_write():
+                        fence_mod.refuse("station metrics")
+                    db = self._open()
+                    # the chunk: the old id's first `chunk` rows in key order, up to (not past) the next one's key
+                    edge = db.execute(f"SELECT {k} FROM {table} WHERE {cond} ORDER BY {k} LIMIT 1 OFFSET ?",
+                                      (old, lim, chunk)).fetchone()
+                    where = cond + (f" AND ({k}) < ({', '.join('?' * len(key))})" if edge else "")
+                    args = (old, lim, *edge) if edge else (old, lim)
+                    db.execute("BEGIN")
+                    try:
+                        n += db.execute(f"INSERT OR IGNORE INTO {table} (station, {cols}) SELECT ?, {cols} FROM {table} "
+                                        f"WHERE {where}", (new, *args)).rowcount
+                        db.execute(f"DELETE FROM {table} WHERE {where}", args)
+                        db.execute("COMMIT")
+                    except Exception:
+                        if db.in_transaction:
+                            db.execute("ROLLBACK")
+                        raise
+                if not edge:
+                    break
+        cut = int(lim // 3600) if before is not None else None
+        with self._lock:
+            db = self._open()
+            db.execute("BEGIN")
+            try:
+                for s_, kind, first, last in spans:       # the new id's span takes what moved; the old one's what stays
+                    # (the raw rows say where the split is; past raw's days, the rename's time does)
+                    upto = db.execute("SELECT MAX(at) FROM raw WHERE station = ? AND subject = ? AND kind = ? AND at < ?",
+                                      (new, s_, kind, lim)).fetchone()[0]
+                    db.execute("INSERT INTO series (station, subject, kind, first, last) VALUES (?, ?, ?, ?, ?) "
+                               "ON CONFLICT(station, subject, kind) DO UPDATE SET first = MIN(first, excluded.first), "
+                               "last = MAX(last, excluded.last)",
+                               (new, s_, kind, first, min(last, lim) if upto is None else max(first, upto)))
+                    if last < lim:
+                        db.execute("DELETE FROM series WHERE station = ? AND subject = ? AND kind = ?", (old, s_, kind))
+                    else:
+                        since = db.execute("SELECT MIN(at) FROM raw WHERE station = ? AND subject = ? AND kind = ?",
+                                           (old, s_, kind)).fetchone()[0]
+                        db.execute("UPDATE series SET first = ? WHERE station = ? AND subject = ? AND kind = ?",
+                                   (since if since is not None else lim, old, s_, kind))
+                db.execute("COMMIT")
+            except Exception:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+            subjects = {s_ for s_, _k, _a, _b in spans}
+            edge_hours = {(st, s_, cut) for s_ in subjects for st in (old, new)} if cut is not None else set()
+            self._dirty = {(new if st == old and (cut is None or h < cut) else st, s_, h) for st, s_, h in self._dirty} \
+                | {(new, s_, h) for s_, h in both} | edge_hours
+        if old in self._told:
+            self._told.add(new)
+        return n
+
+    def copy_soon(self) -> None:
+        """A copy to the bucket at the backup thread's next turn (after a rename: a takeover then restores it renamed)."""
+        if self.settled and self._next_upload is not None:
+            self._next_upload = min(self._next_upload, self.clock())
 
     # -- the rollups, the retention ---------------------------------------------------------------------------------
 
@@ -343,8 +441,9 @@ class MetricStore:
         """Each (station, subject, hour) rolled up again from raw. The rows written."""
         out = 0
         for st, s, hour in sorted(keys):
-            rows = self._read("SELECT kind, doc FROM raw WHERE station = ? AND subject = ? AND kind IN ('floor', 'tx', "
-                              "'cc') AND at >= ? AND at < ?", (st, s, hour * 3600.0, hour * 3600.0 + 3600.0))
+            rows = self._read(f"SELECT kind, doc FROM raw WHERE station = ? AND subject = ? AND kind IN "
+                              f"({', '.join('?' * len(KINDS))}) AND at >= ? AND at < ?",
+                              (st, s, *KINDS, hour * 3600.0, hour * 3600.0 + 3600.0))
             docs: dict[str, list[dict]] = {}
             for kind, doc in rows:
                 try:
@@ -366,9 +465,9 @@ class MetricStore:
                 try:
                     db.execute("DELETE FROM hourly WHERE station = ? AND subject = ? AND hour = ?", (st, s, hour))
                     for metric, v in vals.items():
-                        db.execute("INSERT INTO hourly (station, subject, metric, hour, n, lo, p50, p90, hi) "
-                                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                   (st, s, metric, hour, len(v), min(v), _pct(v, 50), _pct(v, 90), max(v)))
+                        db.execute("INSERT INTO hourly (station, subject, metric, hour, n, lo, p50, p90, hi, p95) "
+                                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   (st, s, metric, hour, len(v), min(v), _pct(v, 50), _pct(v, 90), max(v), _pct(v, 95)))
                         out += 1
                     db.execute("COMMIT")
                 except Exception:
@@ -460,21 +559,9 @@ class MetricStore:
             self._copy_at = now                    # (none to have: the clock for "no copy since" starts here)
             self.log("metrics: no copies in the bucket: starting from what comes in")
             return "none"
-        pick = [copies[0]] + ([c] if (c := max(copies, key=lambda c: c["size"])) is not copies[0] else [])
-        merged, snap_at, last_err = 0, None, None
-        for c in pick + [c for c in copies if c not in pick]:
-            if merged and c not in pick:
-                break                              # the newest (and largest) are in: enough
-            try:
-                n, at = self.merge(self.backup.get(c["slot"]))
-            except Exception as e:  # noqa: BLE001 - a torn copy (zlib.error, a bad file, ...): the next one is tried
-                last_err = e
-                self.log(f"metrics: copy {c['slot']} not read ({type(e).__name__}: {e})")
-                continue
-            merged += 1
+        snap_at = None
+        for _n, at in merge_copies(copies, self.backup.get, self.merge, self.log, "metrics"):   # (raises: none read)
             snap_at = at if snap_at is None else max(snap_at, at or 0.0)
-        if not merged:
-            raise RuntimeError(f"no copy could be read ({type(last_err).__name__ if last_err else 'none'})")
         self._fails = 0
         self._rolled_once, self._reroll_all = False, True    # its hours (all raw has) rolled at the janitor's next turn
         with self._lock:
@@ -487,19 +574,11 @@ class MetricStore:
         """A copy (an SQLite file's bytes) merged in: INSERT OR IGNORE (what is here stays), the series by min / max.
         Column by column (the columns both have): a copy from a release with a column more or less still merges, as
         long as it has every key column and every column here that must have a value. (rows added, its snapshot_at)."""
-        if data[:16] != b"SQLite format 3\x00":
-            raise ValueError("not an SQLite file")
-        with self._lock:
-            self._open()                           # (its folder made: the copy is written beside it)
-        fd, tmp = tempfile.mkstemp(prefix=".metrics-copy.", suffix=".sqlite",
-                                   dir=None if self.path == ":memory:" else str(Path(self.path).parent))
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            n = 0
-            with self._lock:
-                db = self._open()
-                db.execute("ATTACH DATABASE ? AS snap", (tmp,))
+        n = 0
+        with copy_file(data, None if self.path == ":memory:" else str(Path(self.path).parent), ".metrics-copy.") as tmp, \
+                self._lock:                        # (the file written first: ingest never waits on the disk)
+            db = self._open()
+            with attached(db, tmp):
                 try:
                     try:
                         v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()
@@ -525,10 +604,6 @@ class MetricStore:
                     if db.in_transaction:
                         db.execute("ROLLBACK")
                     raise
-                finally:
-                    db.execute("DETACH DATABASE snap")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
         self.log(f"metrics: {n} row(s) merged in from a copy")
         try:
             return n, float(v[0]) if v else None
@@ -599,7 +674,7 @@ class MetricStore:
                            self._read("SELECT station, subject, kind, first, last FROM series ORDER BY station, subject, kind")]}
 
     def query(self, q: dict) -> dict:
-        """?subject=FG1 [&station=] [&from=&to= (epoch s; default the last 24 h)] [&res=raw|hour|auto] [&kind=floor|tx|cc]
+        """?subject=FG1 [&station=] [&from=&to= (epoch s; default the last 24 h)] [&res=raw|hour|auto] [&kind=<KINDS>]
         [&metric=...]: the subject's series and its events (the station's and the Settings audit's). No subject: the
         index. MetricsError for a bad one."""
         def one(name: str, default=None):
@@ -633,7 +708,7 @@ class MetricStore:
             raise MetricsError(f"station: one of {', '.join(stations)}")
         kind = one("kind")
         if kind is not None and kind not in KINDS:
-            raise MetricsError("kind: floor, tx or cc")
+            raise MetricsError(f"kind: {', '.join(KINDS)}")
         out: dict = {"station": station, "subject": subject, "from": t0, "to": t1, "res": res, "stations": stations}
         if res == "raw":
             kinds = [kind] if kind else list(KINDS)
@@ -657,25 +732,50 @@ class MetricStore:
             out["rows"] = rows[:MAX_ROWS]
         else:
             metric = one("metric")
-            if metric is not None and metric not in METRICS:
-                raise MetricsError(f"metric: one of {', '.join(METRICS)}")
-            ms = [metric] if metric else [m for m, (k, _w, _v) in METRICS.items() if not kind or k == kind]
+            picked = [m for m in str(metric).split(",") if m] if metric is not None else []      # one, or "a,b,c"
+            if metric is not None and (not picked or len(picked) > len(METRICS) or any(m not in METRICS for m in picked)):
+                raise MetricsError(f"metric: one of {', '.join(METRICS)} (or several, comma-separated)")
+            ms = list(dict.fromkeys(picked)) if picked else [m for m, (k, _w, _v) in METRICS.items() if not kind or k == kind]
             rows = []
             for m in ms:
-                rows += [{"metric": m, "at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi}
-                         for h, n, lo, p50, p90, hi in self._read(
-                             "SELECT hour, n, lo, p50, p90, hi FROM hourly WHERE station = ? AND subject = ? AND metric = ? "
-                             "AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, m, int(t0 // 3600),
+                rows += [{"metric": m, "at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi, "p95": p95}
+                         for h, n, lo, p50, p90, hi, p95 in self._read(
+                             "SELECT hour, n, lo, p50, p90, hi, p95 FROM hourly WHERE station = ? AND subject = ? "
+                             "AND metric = ? AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, m, int(t0 // 3600),
                                                                           int(math.ceil(t1 / 3600))))]
             out["truncated"] = len(rows) > MAX_ROWS
             out["rows"] = rows[:MAX_ROWS]
         out["events"] = self.events(station, subject, t0, t1)
         return out
 
-    def _settings_before(self, station: str, subject: str, t0: float) -> dict:
-        """The settings of the last floor record before t0 that had them (the station sends them every 15 min)."""
+    def docs(self, station: str, subject: str, kind: str, t0: float, t1: float, limit: int = MAX_ROWS,
+             newest: bool = False) -> list[dict]:
+        """One series' raw records in [t0, t1), oldest first, at most `limit` (the oldest kept, or the newest with
+        newest=True: one seek of the primary key either way): {"at", ...its numbers}. A floor record's settings as
+        sent (not carried forward). For sizeup/cloud/metricsinsight.py (the suggestions, the shift checks), never
+        the alert path."""
+        out = []
+        for at, doc in self._read("SELECT at, doc FROM raw WHERE station = ? AND subject = ? AND kind = ? AND at >= ? "
+                                  f"AND at < ? ORDER BY at {'DESC' if newest else ''} LIMIT ?",
+                                  (station, subject, kind, t0, t1, max(0, int(limit)))):
+            try:
+                out.append({"at": at, **json.loads(doc)})
+            except ValueError:
+                continue
+        return out[::-1] if newest else out
+
+    def hours(self, station: str, subject: str, metric: str, t0: float, t1: float) -> list[dict]:
+        """One metric's hourly rollups in [t0, t1): [{at, n, lo, p50, p90, hi, p95}] (the drift check)."""
+        return [{"at": h * 3600, "n": n, "lo": lo, "p50": p50, "p90": p90, "hi": hi, "p95": p95}
+                for h, n, lo, p50, p90, hi, p95 in self._read(
+            "SELECT hour, n, lo, p50, p90, hi, p95 FROM hourly WHERE station = ? AND subject = ? AND metric = ? "
+            "AND hour >= ? AND hour < ? ORDER BY hour", (station, subject, metric, int(t0 // 3600), int(math.ceil(t1 / 3600))))]
+
+    def _settings_before(self, station: str, subject: str, t0: float, back_s: float = 1800.0) -> dict:
+        """The settings of the last floor record before t0 (at most back_s before) that had them (the station sends
+        them every 15 min)."""
         for (doc,) in self._read("SELECT doc FROM raw WHERE station = ? AND subject = ? AND kind = 'floor' AND at < ? "
-                                 "AND at >= ? ORDER BY at DESC LIMIT 30", (station, subject, t0, t0 - 1800.0)):
+                                 "AND at >= ? ORDER BY at DESC LIMIT 30", (station, subject, t0, t0 - back_s)):
             try:
                 d = json.loads(doc)
             except ValueError:
@@ -683,6 +783,11 @@ class MetricStore:
             if any(f in d for f in SETTINGS):
                 return {f: d[f] for f in SETTINGS if f in d}
         return {}
+
+    def settings_before(self, station: str, subject: str, t0: float, back_s: float = 86400.0) -> dict:
+        """What ran before t0 (back_s before it at most: a day by default), from the floor records (metricsinsight.py's
+        restart echo and restarts, #686)."""
+        return self._settings_before(station, subject, t0, back_s)
 
     def events(self, station: str, subject: str, t0: float, t1: float) -> list[dict]:
         """The subject's events and the station's own (a restart, records dropped), and the Settings audit's changes to

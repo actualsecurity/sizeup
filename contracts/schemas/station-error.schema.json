@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-error.schema.json",
+  "title": "Station route error",
+  "description": "The JSON body of an answer of 400 or above on /api/station/ routes for a station's token, as the hub sends it today (sizeup/cloud/hub.py, sizeup/web/server.py). The station reads `error` and `reason` and nothing else. A refused token is 401 (403 for `ingest_off`), another station than the hub's one is 409, a hub that is deploying or not the leader is 503 with a Retry-After header, a body over the route's limit is 413, a body that is not the JSON the route takes is 400.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["error"],
+  "additionalProperties": true,
+  "properties": {
+    "error": {"type": "string", "description": "A sentence for people. Fixed text, never the token."},
+    "reason": {
+      "type": "string",
+      "description": "On a refused request, why, as one word a program can act on. Today: `no_token`, `token_unknown`, `token_revoked`, `token_retired`, `read_only`, `id_mismatch` (all 401), `multi_station_off` (409), `ingest_off` (403); on the workers' routes under /api/station/stt/ a station's token also gets `stations_off` (its whisper is not in the pool) and `gpu_only` (a route for GPU workers alone), both 403. The station cuts it to 40 characters and must take a word it does not know as a plain refusal.",
+      "x-known": [
+        "no_token",
+        "token_unknown",
+        "token_revoked",
+        "token_retired",
+        "read_only",
+        "id_mismatch",
+        "multi_station_off",
+        "ingest_off",
+        "stations_off",
+        "gpu_only"
+      ]
+    },
+    "updating": {"const": true, "description": "On a 503: the hub is deploying or this task is not the leader. The same request works again in seconds."}
+  }
+}

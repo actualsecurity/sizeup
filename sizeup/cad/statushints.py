@@ -54,6 +54,7 @@ import io
 import json
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -62,10 +63,13 @@ from sizeup import sourcekeys
 from sizeup.cad.feed import load_cfg, unit_forms
 from sizeup.cad.lists import ListsError
 from sizeup.cad.statusrepair import repair
-from sizeup.cad.store import TZ, CadError
+from sizeup.cad.oos import cause as oos_cause
+from sizeup.cad.store import AUTO, TZ, CadError
 
 EXPIRE_S = 300
 SAID_MAX = 120
+REPAIRED_MAX = 8192          # Phrases.repair results kept (a rebuild repairs every radio row of every open event again;
+                             # an LRU walked in the same order each rebuild: more rows than this and every one misses)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS status_hints (
@@ -235,10 +239,38 @@ class Phrases:
         self.spoken = dict(units)
         # every unit number any board knows (ours, Rye Brook's, mutual aid's): a heard one is never someone else's
         self.known_numbers = set(known_numbers) | {re.sub(r"\D", "", c) for c in units if c.isdigit()}
+        # (text, talker, dispatcher, fine_ok given) -> (fixed, fixes, the fine_ok answers it was made with); one
+        # Phrases per lists (StatusHints._refresh), so a change of units makes a new, empty cache
+        self._repaired: OrderedDict[tuple, tuple[str, list[dict], tuple[tuple[str, bool], ...]]] = OrderedDict()
+        self._repaired_lock = threading.Lock()
 
     def repair(self, text: str, talker: str = "", fine_ok=None, dispatcher: bool = False) -> tuple[str, list[dict]]:
-        """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py)."""
-        return repair(text, self.named, self.spoken, talker, fine_ok, dispatcher)
+        """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py).
+
+        Memoised: every CAD rebuild repairs every radio row of every open event again. The result depends on the
+        text, the talker, dispatcher and, for "is fine", the fine_ok answers (live dispatch state): an entry keeps
+        the answers it was made with, in the order asked, and is used only while fine_ok still gives them all (the
+        repair is deterministic, so the same answers replay the same path); otherwise it is made again."""
+        key = (text, talker, bool(dispatcher), fine_ok is None)
+        with self._repaired_lock:
+            hit = self._repaired.get(key)
+            if hit is not None:
+                self._repaired.move_to_end(key)
+        if hit is not None and all(bool(fine_ok(code)) == said for code, said in hit[2]):
+            return hit[0], [dict(x) for x in hit[1]]
+        asked: list[tuple[str, bool]] = []
+
+        def ask(code: str) -> bool:
+            said = bool(fine_ok(code))
+            asked.append((code, said))
+            return said
+        fixed, fixes = repair(text, self.named, self.spoken, talker, None if fine_ok is None else ask, dispatcher)
+        with self._repaired_lock:
+            self._repaired[key] = (fixed, [dict(x) for x in fixes], tuple(asked))
+            self._repaired.move_to_end(key)
+            while len(self._repaired) > REPAIRED_MAX:
+                self._repaired.popitem(last=False)
+        return fixed, fixes
 
     def own_number(self, talker: str, heard: str) -> bool:
         """A bare number heard before a status is the talker's own: its number, or (a chief, 4 digits) the same
@@ -422,15 +454,16 @@ class StatusHints:
             if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
                 rigs = [x.strip() for x in (r.get("rig") or "").split(",") if x.strip()]
                 talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
-                heard_fine: set[str] = set()
-                if FINE_WORD.search(r["text"]):  # "is fine" shown as en route when it was taken so when heard, or now
-                    heard_fine = {h["unit"] for h in self.store.q("SELECT unit, phrase FROM status_hints WHERE traffic_id = ?",
-                                                                  (r.get("id"),)) if FINE_WORD.search(h["phrase"])}
+                heard_fine: list[set[str]] = []  # looked up only when the repair asks (a "fine" after our callsign)
 
-                def ok(code, heard_fine=heard_fine):
+                def ok(code, heard_fine=heard_fine, tid=r.get("id")):
+                    if not heard_fine:           # "is fine" shown as en route when it was taken so when heard, or now
+                        heard_fine.append({h["unit"] for h in self.store.q("SELECT unit, phrase FROM status_hints WHERE "
+                                                                           "traffic_id = ?", (tid,))
+                                           if FINE_WORD.search(h["phrase"])})
                     if code not in dispatched:
                         dispatched[code] = self.fine_ok(code)
-                    return code in heard_fine or dispatched[code]
+                    return code in heard_fine[0] or dispatched[code]
                 fixed, fixes = self.phrases.repair(r["text"], talker, ok, bool(r.get("dispatcher")))
                 if fixes:
                     r["fixed_text"], r["fixes"] = fixed, fixes
@@ -623,11 +656,12 @@ class StatusHints:
     def active(self) -> list[dict]:
         """The suggestions to show now, newest first: {id, unit, unit_id, status, status_name, incident_id,
         incident_number, onto (accepting puts the unit on that event), traffic_id, heard_at, said, text, phrase,
-        channel, who, expires_at}."""
+        channel, who, expires_at, oos (the unit is out of service now: a person's ✓ asks first, sizeup/cad/oos.py)}."""
         self.sweep()
         L = self._lists()
-        rows = self.store.q("SELECT h.*, i.number AS incident_number, a.incident_id AS on_incident FROM status_hints h "
-                            "LEFT JOIN incidents i ON i.id = h.incident_id "
+        rows = self.store.q("SELECT h.*, i.number AS incident_number, a.incident_id AS on_incident, u.status AS unit_status "
+                            "FROM status_hints h LEFT JOIN incidents i ON i.id = h.incident_id "
+                            "LEFT JOIN units u ON u.id = h.unit_id "
                             "LEFT JOIN assignments a ON a.unit_id = h.unit_id AND a.cleared_at IS NULL "
                             "WHERE h.outcome = 'pending' ORDER BY h.heard_at DESC, h.id DESC")
         out = []
@@ -638,7 +672,8 @@ class StatusHints:
                         "incident_number": r["incident_number"] or "",
                         "onto": bool(r["incident_id"] and r["on_incident"] != r["incident_id"] and role not in ("free", "oos")),
                         "traffic_id": r["traffic_id"], "heard_at": r["heard_at"], "said": r["said"], "text": r["text"],
-                        "phrase": r["phrase"], "channel": r["channel"], "who": r["who"], "expires_at": r["expires_at"]})
+                        "phrase": r["phrase"], "channel": r["channel"], "who": r["who"], "expires_at": r["expires_at"],
+                        "oos": L.role(r["unit_status"] or "") == "oos"})
         return out
 
     # -- decided -------------------------------------------------------------------------------------------------
@@ -655,18 +690,22 @@ class StatusHints:
                             "withdrawn": "the transcript no longer says it"}.get(h["outcome"], h["outcome"]))
         return h
 
-    def accept(self, hid: int, operator: str = "") -> dict:
+    def accept(self, hid: int, operator: str = "", by: str = AUTO) -> dict:
         """✓: the unit's status set as suggested (on the event it is for: put on it when it isn't), with where it came
-        from in the chronology: "E64 on location. Status from radio (heard 14:32:10 “Engine 64 on location”)"."""
+        from in the chronology: "E64 on location. Status from radio (heard 14:32:10 “Engine 64 on location”)".
+        by: PERSON for a person's ✓; else the automation taking it (60 Control dispatching), refused on an
+        out-of-service unit (OosLocked, with its notice: sizeup/cad/oos.py), the suggestion left pending."""
         with self._lock:
             h = self._pending(hid)
             why = f"Status from radio (heard {_hms(h['heard_at'])} “{h['said']}”)"
             L = self._lists()
             u = self.store.unit(h["unit_id"])
+            c = oos_cause("radio", f"radio heard “{h['phrase']}”", h["intent"], h["traffic_id"], h["incident_id"])
             if h["incident_id"] and u["incident_id"] != h["incident_id"] and L.role(h["status"]) not in ("free", "oos"):
-                out = self.store.set_unit_status_on(h["unit_id"], h["status"], h["incident_id"], operator, why=why)
+                out = self.store.set_unit_status_on(h["unit_id"], h["status"], h["incident_id"], operator, why=why, by=by,
+                                                    cause=c)
             else:
-                out = self.store.set_unit_status(h["unit_id"], h["status"], operator, why=why)
+                out = self.store.set_unit_status(h["unit_id"], h["status"], operator, why=why, by=by, cause=c)
             with self.store.tx() as db:
                 db.execute("UPDATE status_hints SET outcome = 'accepted', decided_at = ?, operator = ? WHERE id = ?",
                            (self.store.clock(), operator, hid))

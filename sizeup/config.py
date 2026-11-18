@@ -10,6 +10,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup import stt_time
 from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.cloud.access import team_host
 from sizeup.polly import DEFAULT_VOICE as POLLY_DEFAULT
@@ -29,6 +30,13 @@ STATION_LL = (40.99600, -73.66453)   # lat, lon: the station PC is at the South 
 
 PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
 PAGING_CONTINUE_S = 3.0
+# Key-ups (sizeup/radio/fm.py, am.py): a transmission is cut where its carrier dropped and a new key-up came back
+# inside the hang. split_s: the drop (under the close level) that alone makes one, 0: never; jump_db: every frame of
+# the carrier back this far over its own level after 0.1 s gone (upward only). Measured 2026-11 (#645): FG1 drops
+# inside a key-up 107 of 110 under 0.2 s; HPN Tower carriers 3-17 dB over the floor. Both 0: off (the hang bridges
+# every drop). Paging is off: a simulcast page fades and comes back stronger mid-page (opt in with jump_db: radio/fm.py).
+KEYUP_SPLIT_S = {"traffic": 0.2, "paging": 0.0, "airband": 0.15}
+KEYUP_JUMP_DB = {"traffic": 10.0, "paging": 0.0, "airband": 6.0}
 KINDS = ("paging", "traffic", "airband")
 # Airband (#233: HPN ATC, AM): shortfinal's tested receiver settings (sizeup/radio/am.py): the carrier squelch opens
 # 3.5 dB over the noise floor, 36.4 dB of gain. hang_s / drop_db / continue_s are the FM squelch's: not used here.
@@ -70,9 +78,21 @@ class ChannelCfg:
     # local day (None: all day); label: the airband channel that frequency belongs to (its transmissions are that
     # channel's). More than one frequency on: rtl_sdr + the channelizer instead of rtl_fm (sizeup/radio/channelize.py).
     also: tuple[tuple[float, int | None, int | None, str], ...] = ()
+    # Key-ups (KEYUP_SPLIT_S / KEYUP_JUMP_DB above): None: by kind
+    split_s: float | None = None
+    jump_db: float | None = None
+
+    @property
+    def keyups(self) -> str:
+        """The FM squelch's key-up mode (radio/fm.py NoiseSquelch keyups): the kind, or "" when both are 0 (off)."""
+        return self.kind if (self.split_s or self.jump_db) and self.kind in ("traffic", "paging") else ""
 
     def __post_init__(self):
         paging = self.kind == "paging"
+        if self.split_s is None:
+            object.__setattr__(self, "split_s", KEYUP_SPLIT_S.get(self.kind, 0.0))
+        if self.jump_db is None:
+            object.__setattr__(self, "jump_db", KEYUP_JUMP_DB.get(self.kind, 0.0))
         if self.hang_s is None:
             object.__setattr__(self, "hang_s", PAGING_HANG_S if paging else None)
         if self.continue_s is None:
@@ -99,6 +119,7 @@ class Config:
     tones_file: str = ""                       # the tone list file read into tones ([radio] tones_file), "" for none
     p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
+    p25_tg_file_rows: int = 0      # rows the county's talkgroups file gave (0: no file; the [p25] talkgroups only)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     p25_emergency_window_min: float = 10.0   # the emergency button keeps its talkgroup and radio this long (#128)
     # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
@@ -112,6 +133,8 @@ class Config:
     unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
     stt_beam_size: int = 0            # whisper-server -bs (0/1 = greedy). Beam search: fewer garbled digit strings
     stt_talker_prompt: str = "off"    # "ids": hint whisper with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": + HHMM
+    # the dispatcher's trailing time checked on these channels ([stt] time_channels, #727, sizeup/stt_time.py)
+    stt_time_channels: tuple[str, ...] = stt_time.DEFAULT_CHANNELS
     # Amazon Transcribe streaming ([stt] aws*, sizeup/transcribe.py, sizeup/channels.py): where it runs (the hub;
     # all-in-one only with credentials here), and which channels default to it (Settings > Radios changes that).
     stt_aws: bool = False             # this process may call Transcribe (the hub: deploy/hub/config.hub.toml)
@@ -125,6 +148,12 @@ class Config:
     stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307", "p25:mrrs:9211")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
     stt_record_only: tuple[str, ...] = ()     # recorded, not transcribed by default ([stt] record_only, #201)
+    # Private term lists per kind of source (sizeup/stt_terms.py, docs/stt-vocabulary.md): read from the hub's backups
+    # bucket (vocab/), else from terms_dir (all-in-one, dev). terms_whisper: the top of a source's list in whisper's
+    # prompt (the hub sends it to the station); terms_aws: one Amazon Transcribe vocabulary per list. Off: as before.
+    stt_terms_dir: str = ""
+    stt_terms_whisper: bool = False
+    stt_terms_aws: bool = False
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
     start_mode: str = ""         # with shared_device: what the dongle does at startup ("South 2", "FG1", "Fire/EMS 15")
     sdrs: tuple[str, ...] = ()   # dongles (exact USB serials) sizeup may use, each switched in the web app
@@ -237,13 +266,15 @@ class Config:
     # neither: no pushes. And station health's thresholds. Never the topics [prealert] subscribes to: refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
-    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). "" = the alerts' topic.
+    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). Its own channel only: "" = no
+    # intel pushes (never the alerts' or status' topic); one equal to either (case aside) is dropped with alerts_config_note.
     alerts_intel_topic: str = ""
     alerts_intel_topic_source: str = ""
     alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
     alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
     alerts_ntfy_server_source: str = "default"
     alerts_ntfy_server: str = "https://ntfy.sh"
+    alerts_config_note: str = ""          # an [alerts] value not used as given (logged by the app at start)
     alerts_silent_min: float = 3.0       # no state post from the station this long
     alerts_behind_min: float = 15.0      # the station on another build than the hub this long
     alerts_down_min: float = 2.0         # whisper or trunk-recorder down this long
@@ -465,7 +496,8 @@ def hub_url_problem(url: str) -> str:
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
 #                                /sizeup-hub/status-topic)
-#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts; unset: the alerts topic)
+#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts, a topic of their own; unset: no intel
+#                                pushes; the alerts or status topic: refused, logged, intel unset)
 #   SIZEUP_511NY_USER / _PASS         [roads]: 511NY's username and password for the CARS API and CARS-Hub (only
 #                                     ever here; the hub: SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
@@ -627,8 +659,10 @@ def _alerts(data: dict, prealert: dict) -> dict:
     """[alerts] -> Config fields: our ntfy topics for pushes (sizeup/notify.py route(): ntfy_topic for the
     emergency alarms, #128; status_topic for station health, #79, and Amazon Transcribe) and station health's
     thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
-    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name."""
-    from sizeup.notify import server_problem, topic_problem
+    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name. intel_topic: its own
+    channel only (no fallback); one equal to ntfy_topic or status_topic (case aside) is refused without stopping the
+    start: intel unset, alerts_config_note says why (the app logs it)."""
+    from sizeup.notify import INTEL_SAME_WHY, same_topic, server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
                                                   "remind_min", "p25_silent_min", "p25_silent_night_min",
@@ -643,6 +677,10 @@ def _alerts(data: dict, prealert: dict) -> dict:
             raise ConfigError(f"alerts.{key} / {env}: {why}")
         topics[key] = t
         sources[key] = ("env" if os.environ.get(env, "").strip() else "config") if t else ""
+    note = ""
+    if same_topic(topics["intel_topic"], (topics["ntfy_topic"], topics["status_topic"])):
+        note = f"alerts.intel_topic / SIZEUP_INTEL_TOPIC refused: {INTEL_SAME_WHY}; intel pushes off"
+        topics["intel_topic"], sources["intel_topic"] = "", ""
     topic = topics["ntfy_topic"]
     server = _env("SIZEUP_ALERT_SERVER", str(al.get("ntfy_server", "https://ntfy.sh"))).strip().rstrip("/")
     if server_problem(server):
@@ -664,7 +702,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
     return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
                 alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
                 alerts_intel_topic=topics["intel_topic"], alerts_intel_topic_source=sources["intel_topic"],
-                alerts_ntfy_server_source=server_source, **out)
+                alerts_ntfy_server_source=server_source, alerts_config_note=note, **out)
 
 
 P25_JOB = "Fire/EMS 15"   # the dongle job that runs trunk-recorder (sizeup/app.py P25_MODE)
@@ -690,8 +728,20 @@ def _airband(c: dict, i: int) -> ChannelCfg:
         raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
     sched = _schedule(c["schedule"], mhz, where) if "schedule" in c else ()
     also = _also(c["also"], where) if "also" in c else ()
+    split, jump = _keyup_keys(c, where)
     return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq,
-                      schedule=sched, also=also)
+                      schedule=sched, also=also, split_s=split, jump_db=jump)
+
+
+def _keyup_keys(c: dict, where: str) -> tuple[float | None, float | None]:
+    """A channel's split_s (0 to 2 s) and jump_db (0 to 40 dB), each None when not set (by kind: KEYUP_SPLIT_S)."""
+    out = []
+    for k, hi in (("split_s", 2.0), ("jump_db", 40.0)):
+        v = c.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= float(v) <= hi):
+            raise ConfigError(f"{where}.{k}: 0 to {hi:g} (0: off)")
+        out.append(None if v is None else float(v))
+    return out[0], out[1]
 
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -1361,12 +1411,19 @@ def _stt_aws(stt: dict) -> dict:
     vocab = str(stt.get("aws_vocabulary", "sizeup-pcfd"))
     if not re.fullmatch(r"[0-9a-zA-Z._-]{1,200}", vocab):
         raise ConfigError("stt.aws_vocabulary: letters, digits, . _ -")
+    for k in ("terms_whisper", "terms_aws"):
+        if not isinstance(stt.get(k, False), bool):
+            raise ConfigError(f"stt.{k}: true or false")
+    if not isinstance(stt.get("terms_dir", ""), str):
+        raise ConfigError("stt.terms_dir: a folder (or leave it out)")
     return dict(stt_aws=bool(stt.get("aws", False)), stt_aws_region=str(stt.get("aws_region", "")),
                 stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
                 stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
                 stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
                 stt_aws_context_limit_usd=ctx_limit,
-                stt_aws_vocabulary=vocab, stt_record_only=record_only)
+                stt_aws_vocabulary=vocab, stt_record_only=record_only,
+                stt_terms_dir=str(Path(stt["terms_dir"]).expanduser()) if stt.get("terms_dir") else "",
+                stt_terms_whisper=stt.get("terms_whisper", False), stt_terms_aws=stt.get("terms_aws", False))
 
 
 # [adapter] (#301): the station's incident-source adapter, read only by the station's updater
@@ -1436,7 +1493,7 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db", "hang_s", "continue_s", "schedule", "also"})
+                                                 "drop_db", "hang_s", "continue_s", "schedule", "also", "split_s", "jump_db"})
         if c.get("kind", "traffic") not in KINDS:
             raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
@@ -1458,11 +1515,13 @@ def load(path: str | Path) -> Config:
         cont = c.get("continue_s")
         if cont is not None and not 0 <= float(cont) <= 30:
             raise ConfigError(f"radio.channels[{i}].continue_s: 0 to 30 seconds")
+        split, jump = _keyup_keys(c, f"radio.channels[{i}]")
         channels.append(ChannelCfg(c["label"], float(c["mhz"]), kind, c.get("device", ""),
                                    c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0)),
                                    float(drop) if drop else None,
                                    float(hang) if hang is not None else None,
-                                   float(cont) if cont is not None else None))
+                                   float(cont) if cont is not None else None,
+                                   split_s=split, jump_db=jump))
     labels = [c.label for c in channels]
     if len(set(labels)) != len(labels):
         raise ConfigError("radio.channels: two channels have the same label")
@@ -1484,13 +1543,17 @@ def load(path: str | Path) -> Config:
                               t.get("agency", ""), source="config"))
         if t.get("ours", False):
             ours.add(t["name"])
-    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
+    stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size", "time_channels",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
                                              "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
-                                             "aws_context_budget_usd", "record_only"})
+                                             "aws_context_budget_usd", "record_only", "terms_dir", "terms_whisper",
+                                             "terms_aws"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
+    tchans = stt.get("time_channels", list(stt_time.DEFAULT_CHANNELS))
+    if not isinstance(tchans, list) or not all(isinstance(c, (int, str)) and not isinstance(c, bool) for c in tchans):
+        raise ConfigError('stt.time_channels: a list of talkgroups and channel keys, e.g. [307, "tg:303"] ([] = off)')
     aws_stt = _stt_aws(stt)
     if "aws_channels" not in stt:     # an airband channel (HPN ATC, #233) is a priority channel: AWS by default
         aws_stt["stt_aws_channels"] = tuple(dict.fromkeys([*aws_stt["stt_aws_channels"],
@@ -1512,6 +1575,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError("p25.emergency_window_min: minutes from 0 to 120 (10: the default)")
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
     p25_info: dict[int, dict] = {k: {"name": v, "group": "", "encrypted": False} for k, v in p25_tgs.items()}
+    p25_tg_rows = 0
     if p25.get("talkgroups_file"):  # trunk-recorder's talkgroups.csv: one list for both programs
         import csv
         tf = Path(p25["talkgroups_file"])
@@ -1519,6 +1583,7 @@ def load(path: str | Path) -> Config:
         if not tf.is_file():
             raise ConfigError(f"p25.talkgroups_file: {tf} not found")
         for r in csv.DictReader(tf.read_text().splitlines()):
+            p25_tg_rows += 1
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
@@ -1647,8 +1712,9 @@ def load(path: str | Path) -> Config:
         stt_server=stt.get("server_binary", "whisper-server"), stt_model=rel(stt.get("model", "models/ggml-large-v3-turbo.bin")),
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)), **aws_stt,
+        stt_time_channels=stt_time.channels_of(tchans),
         p25_dir=rel(p25.get("capture_dir", "")),
-        p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
+        p25_talkgroups=p25_tgs, p25_tg_info=p25_info, p25_tg_file_rows=p25_tg_rows,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()}, p25_emergency_window_min=em_window,
         p25_systems=more_systems, tier_keep_days=tier_days, context_audio_max_mb=context_mb,

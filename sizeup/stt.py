@@ -22,6 +22,8 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup import stt_time
+
 NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not speech
 # What whisper says about a short burst of noise (a mic click, a squelch tail).
 # What whisper says for dead air / a mic click (FG1 bench: "Thank you." or "Yes." on 6 of 6
@@ -29,6 +31,20 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
                   "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
+# A prompt with a term list in it (sizeup/stt_terms.py; only then: the item's vocab_v says so) can be read back on dead
+# air or noise. prompt_noise(): no speech when the text is mostly a run of PROMPT_ECHO_TERMS or more of the prompt's
+# items in its order and the clip is short or holds more words than anyone says in that time (PROMPT_ECHO_WPS), or
+# the run is PROMPT_ECHO_LONG items and 90% of the text (no one recites the list in its order); or a
+# short clip's text is nothing but PROMPT_ONLY_ITEMS or more of the prompt's items, in any order; or, short or quiet
+# like HALLUCINATIONS, one of PROMPT_HALLUCINATIONS (large-v3-turbo with a term list, on dead air). Real traffic that
+# says a few of the same words with anything else keeps its text; so does any clip of SHORT_S or more at a speaking pace.
+PROMPT_ECHO_TERMS = 3
+PROMPT_ECHO_COVER = 0.7
+PROMPT_ECHO_WPS = 4.5
+PROMPT_ECHO_LONG = 6              # ... and a run this long that is nearly all the text, at any length or pace
+PROMPT_ONLY_ITEMS = 3            # (2 dropped a real "Engine 61, Port Chester." at 1.3 s: a talker and a town)
+PROMPT_ONLY_FILLER = {"and", "the", "a", "to", "on", "of", "uh", "um"}
+PROMPT_HALLUCINATIONS = {"well be right back", "and well see you next time", "well see you next time", "see you next time"}
 # Queue priority (SttQueue), strict: a class is served only when every class above it is empty (#300). Pages,
 # Fire/EMS 15 and the firegrounds first, the airband pre-alerts next, other live traffic, a person's re-run, then
 # the talkgroups heard only as context (not "main" in Settings > Radios: other towns' fire, county police). #195:
@@ -113,11 +129,13 @@ def notch_lines(X: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, list[float]]:
     cand = (f >= LINE_BAND[0]) & (f <= LINE_BAND[1]) & (mag_db - baseline > LINE_OVER_DB)
     lines: list[float] = []
     gain = np.ones(len(f))
+    h = int(LINE_HALF_HZ / df) + 2         # (the bins are evenly spaced: none further out can be within LINE_HALF_HZ)
     for i in np.where(cand)[0]:
         if mag_db[i] < mag_db[max(0, i - 2):i + 3].max():
             continue                       # only the peak bin of each line
         lines.append(float(f[i]))
-        gain[np.abs(f - f[i]) <= LINE_HALF_HZ] = 0.0
+        a, b = max(0, i - h), min(len(f), i + h + 1)
+        gain[a:b][np.abs(f[a:b] - f[i]) <= LINE_HALF_HZ] = 0.0   # the same test, on the bins round the line only
     return X * gain, lines
 
 
@@ -178,6 +196,85 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: b
 voice_band = radio_voice  # older name
 
 
+def _said_words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9' ]", " ", str(text or "").lower()).split()
+
+
+def prompt_echo(text: str, prompt: str, min_terms: int = PROMPT_ECHO_TERMS, cover: float = PROMPT_ECHO_COVER) -> bool:
+    """The text is the prompt read back: a run of at least min_terms of the prompt's items (split at , . ; :), one after
+    the other in the prompt's order, makes up at least `cover` of the text's words."""
+    items = [w for w in (_said_words(x) for x in re.split(r"[,.;:]", str(prompt or ""))) if w]
+    out = _said_words(text)
+    if len(items) < min_terms or not out:
+        return False
+    best = 0
+    for i, first in enumerate(items):
+        for p in range(len(out) - len(first) + 1):
+            if out[p:p + len(first)] != first:
+                continue
+            k, q = 1, p + len(first)
+            while i + k < len(items) and out[q:q + len(items[i + k])] == items[i + k]:
+                q += len(items[i + k])
+                k += 1
+            if k >= min_terms:
+                best = max(best, q - p)
+    return best >= cover * len(out)
+
+
+def prompt_only(text: str, prompt: str) -> int:
+    """How many of the prompt's items the text is made of, when it is nothing else (in any order; PROMPT_ONLY_FILLER
+    words aside); 0 when any other word is in it."""
+    items = sorted({tuple(w) for w in (_said_words(x) for x in re.split(r"[,.;:]", str(prompt or ""))) if w},
+                   key=len, reverse=True)
+    out = _said_words(text)
+    found, i = set(), 0
+    while i < len(out):
+        hit = next((it for it in items if tuple(out[i:i + len(it)]) == it), None)
+        if hit is not None:
+            found.add(hit)
+            i += len(hit)
+        elif out[i] in PROMPT_ONLY_FILLER:
+            i += 1
+        else:
+            return 0
+    return len(found)
+
+
+def prompt_noise(raw: str, prompt: str, seconds: float, low_energy: bool = False) -> bool:
+    """whisper read its prompt back (no speech). Only for a prompt that has a term list in it (the caller's say)."""
+    if not raw or not prompt:
+        return False
+    if re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip() in PROMPT_HALLUCINATIONS and (seconds < SHORT_S or low_energy):
+        return True
+    n = len(_said_words(raw))
+    if prompt_echo(raw, prompt) and (seconds < SHORT_S or n > PROMPT_ECHO_WPS * max(seconds, 0.5)):
+        return True
+    if prompt_echo(raw, prompt, PROMPT_ECHO_LONG, 0.9):
+        return True
+    if seconds < SHORT_S and prompt_only(raw, prompt) >= PROMPT_ONLY_ITEMS:   # short: nothing but the prompt's items
+        return True
+    # ... or, with no voice energy too, only a number, one of the prompt's or a piece of it (with a term list in front of
+    # it, large-v3-turbo wrote the talker's ID from the prompt, or part of it, on dead-air FG1 key-ups it otherwise
+    # called nothing; a short real "191 responding" can come back as "191." alone: never on the length alone)
+    digits = re.sub(r"\D", "", raw)
+    if not low_energy or not digits or re.search(r"[a-z]", raw.lower()):
+        return False
+    return any(digits in re.sub(r"\D", "", x) for x in re.split(r"[,.;:]", prompt))
+
+
+def judge(raw: str, seconds: float, low_energy: bool = False, prompt: str = "", vocab_v: str = "") -> tuple[str, str]:
+    """whisper's words -> (text, status): "" and "no_speech" for a noise label, nothing said ("." = a squelch tail) or
+    a stock hallucination on a short or quiet clip, or (vocab_v: a term list went in its prompt, sizeup/stt_terms.py)
+    the prompt read back (prompt_noise); else (raw, "done"). The station's whisper and the GPU workers
+    (sizeup/sttpool.py) judge alike."""
+    said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
+    if (not raw or NOISE_LABEL.match(raw) or not said
+            or (said in HALLUCINATIONS and (seconds < SHORT_S or low_energy))
+            or (vocab_v and prompt_noise(raw, prompt, seconds, low_energy))):
+        return "", "no_speech"
+    return raw, "done"
+
+
 class WhisperClient:
     def __init__(self, url: str, timeout_s: float = 60.0):
         self.url, self.timeout_s = url, timeout_s
@@ -187,7 +284,17 @@ class WhisperClient:
         """fast: one greedy pass, no temperature fallback (whisper-server decodes a hard clip up to 5 more times at
         higher temperatures): the context talkgroups' clips while the queue is behind (#300)."""
         pad = np.zeros(8000, dtype=np.float32)  # whisper likes a little silence around speech
-        body_wav = wav_bytes(np.concatenate([pad, audio16k.astype(np.float32), pad]))
+        out = self.transcribe_wav(wav_bytes(np.concatenate([pad, audio16k.astype(np.float32), pad])), prompt, fast,
+                                  timeout_s)
+        text = " ".join(str(out.get("text", "")).split())
+        probs = [w.get("probability") for s in out.get("segments", []) for w in s.get("words", [])
+                 if isinstance(w.get("probability"), (int, float))]
+        return text, (round(float(np.mean(probs)), 2) if probs else None)
+
+    def transcribe_wav(self, body_wav: bytes, prompt: str = "", fast: bool = False,
+                       timeout_s: float | None = None) -> dict:
+        """A WAV as whisper-server takes it (16 kHz, padded) -> its verbose_json answer, as it gave it (the station's
+        whisper as a pool worker sends the hub its segments and words, #639 phase 2)."""
         boundary = uuid.uuid4().hex
         parts = []
         fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
@@ -204,10 +311,7 @@ class WhisperClient:
                                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
         with urllib.request.urlopen(req, timeout=timeout_s or self.timeout_s) as r:
             out = json.load(r)
-        text = " ".join(str(out.get("text", "")).split())
-        probs = [w.get("probability") for s in out.get("segments", []) for w in s.get("words", [])
-                 if isinstance(w.get("probability"), (int, float))]
-        return text, (round(float(np.mean(probs)), 2) if probs else None)
+        return out if isinstance(out, dict) else {}
 
 
 class SttQueue:
@@ -274,6 +378,16 @@ class SttQueue:
             for e in out:
                 self._items.remove(e)
         return [e[2] for e in out]
+
+    def withdraw_all(self, priority: float | None = None) -> list[tuple]:
+        """Every waiting item (of that class; None: of every class) taken out, the best first (the station stopping:
+        handed on, #549, #639 phase 2): [(priority, item, audio, channel)]."""
+        with self._cv:
+            now = self.clock()
+            out = sorted((e for e in self._items if priority is None or e[0] == priority), key=lambda e: self._key(e, now))
+            for e in out:
+                self._items.remove(e)
+        return [(e[0], e[2], e[3], e[4]) for e in out]
 
     def put(self, entry: tuple, fallback: bool = False) -> bool:
         """entry (priority, seq-or-None, item, audio[, channel]). fallback: the hub's, for a clip AWS couldn't do.
@@ -381,6 +495,13 @@ class SttQueue:
         with self._cv:
             return any(e[0] not in NOT_LIVE and now - e[5] >= BEHIND_S for e in self._items)
 
+    def behind_live(self) -> bool:
+        """The oldest clip of ours (URGENT, HIGH, LIVE: not a context class, a re-run or the catch-up's) has waited
+        more than BEHIND_S. Thread-safe."""
+        now = self.clock()
+        with self._cv:
+            return any(e[0] in LIVE_CLASSES and now - e[5] > BEHIND_S for e in self._items)
+
     def stats(self) -> dict:
         """Depth by kind, the oldest clip's wait, where they come from: station status and health (the backlog
         alert says how many wait and why, sizeup/cloud/health.py). oldest_s: the oldest clip that matters
@@ -441,6 +562,12 @@ class Transcriber:
         self._working = False
         self._prio = LIVE                         # the class of the item being transcribed
         self._took: deque = deque(maxlen=50)      # (finished at, seconds) of the last transcriptions: whisper's pace
+        self._queued: dict[int, float] = {}       # id(item) -> when it was queued (its wait, #639)
+        self._current: tuple | None = None        # (priority, item, audio, channel) being transcribed now
+        self._channels: dict[int, str | None] = {}   # id(item) -> its channel key, while queued
+        self._stopping = False                    # stop(): nothing more is taken from the queue
+        self.timed: deque = deque(maxlen=2000)    # (done at, class, wait s, run s, audio s) of each transcript (station
+                                                  # metrics; the station's pace as a pool worker)
 
     def busy(self, catchup: bool = True) -> int:
         """Transcriptions queued or running (the station's auto-update waits for none before a restart;
@@ -457,10 +584,47 @@ class Transcriber:
     def withdraw_catchup(self) -> list:
         return self._q.withdraw(CATCHUP)
 
+    def withdraw(self, priority: float | None = None) -> list[tuple]:
+        """Waiting items taken out (priority None: every class, the best first; else that class only): [(priority,
+        item, audio, channel, queued at)]. Nothing of them is said to on_drop: the caller hands them on (the station
+        stopping: to the hub's pool, or saved for its next start; #549, #639 phase 2)."""
+        got = self._q.withdraw_all(priority)
+        out = []
+        for prio, item, audio, ch in got:
+            out.append((prio, item, audio, ch if ch is not None else self._channels.get(id(item)),
+                        self._queued.pop(id(item), None)))
+            self._channels.pop(id(item), None)
+        return out
+
+    def behind_live(self) -> bool:
+        """True when the oldest clip in a live class (URGENT, HIGH, LIVE; not LOW, CONTEXT / CONTEXT_FALLBACK, a re-run
+        or the catch-up's) has waited more than BEHIND_S: fire traffic is behind (behind() counts the context classes
+        too, which are behind most evenings). Thread-safe: what other threads read (the STT input's encoder pauses its
+        normal and low work meanwhile)."""
+        return self._q.behind_live()
+
+    def current(self) -> tuple | None:
+        """The item being transcribed now: (priority, item, audio, channel), None when whisper is idle."""
+        cur = self._current
+        return cur if cur is not None and self._working else None
+
+    def stop(self, timeout: float = 0.0) -> tuple | None:
+        """Stopping: nothing more is taken from the queue (what waits stays there: withdraw() it); the item being
+        transcribed gets `timeout` seconds to finish. The one still running then, handed back: (priority, item, audio,
+        channel), else None. (Its text, if whisper still gives it before the exit, is the same clip's: whoever has it
+        then takes the first.)"""
+        self._stopping = True
+        end = time.monotonic() + max(0.0, timeout)
+        while self.current() is not None and time.monotonic() < end:
+            time.sleep(0.05)
+        return self.current()
+
     def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None,
                fallback: bool = False) -> bool:
         """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already.
         fallback: the hub asked for it because Amazon Transcribe couldn't (counted: the backlog's cause)."""
+        self._queued[id(item)] = time.time()
+        self._channels[id(item)] = channel
         return self._q.put((priority, None, item, audio, channel), fallback=fallback)
 
     def stats(self) -> dict:
@@ -474,10 +638,43 @@ class Transcriber:
 
     def _dropped(self, item, why: str) -> None:
         """on_drop on its own thread: never in the context of submit(), whose caller may hold its own locks."""
+        self._queued.pop(id(item), None)
+        self._channels.pop(id(item), None)
         self._drops.put((item, why))
         if self._drop_thread is None:
             self._drop_thread = threading.Thread(target=self._drop_loop, name="stt-drops", daemon=True)
             self._drop_thread.start()
+
+    def _timing(self, item, prio, queued: float | None, began: float, seconds: float = 0.0) -> None:
+        """Its wait in the queue and its run (#639: what the hub keeps with each transcript, and the station metrics'
+        minute): on the item (stt_wait_s, stt_run_s, stt_class: sent with a transmission) and in `timed`."""
+        done = time.time()
+        wait = round(began - queued, 2) if queued is not None else None
+        run = round(done - began, 2)
+        self.timed.append((done, prio, wait, run, round(seconds, 2)))
+        try:
+            item.stt_wait_s, item.stt_run_s, item.stt_class = wait, run, CLASS_NAMES.get(prio, str(prio))
+        except AttributeError:      # (an item that takes no attributes: the numbers are in `timed` all the same)
+            pass
+
+    @property
+    def prompt(self) -> Callable[[object], str]:
+        """whisper's prompt for an item (the function given), which also marks on the item whether it carried the
+        clip's own time (stt_prompt_time: sent with a transmission; the hub's trailing-time check never counts such a
+        run, sizeup/stt_time.py)."""
+        return self._prompt_of
+
+    @prompt.setter
+    def prompt(self, fn: Callable[[object], str]) -> None:
+        self._prompt_fn = fn
+
+    def _prompt_of(self, item) -> str:
+        prompt = self._prompt_fn(item)
+        try:
+            item.stt_prompt_time = stt_time.prompted(prompt, getattr(item, "end", None) or getattr(item, "start", None))
+        except AttributeError:      # (an item that takes no attributes)
+            pass
+        return prompt
 
     def _drop_loop(self) -> None:
         while True:
@@ -494,11 +691,27 @@ class Transcriber:
     def _run(self) -> None:
         while True:
             self._working = False
-            prio, _n, item, audio = self._q.get()
+            if self._stopping:
+                time.sleep(0.2)
+                continue
+            try:
+                prio, _n, item, audio = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self._stopping:                    # (taken just as it stopped: back in, for withdraw())
+                self._q.put((prio, None, item, audio, self._channels.get(id(item))))
+                continue
+            self._current = (prio, item, audio, self._channels.pop(id(item), None))
             self._prio, self._working = prio, True
+            began = time.time()
+            queued = self._queued.pop(id(item), None)
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
             fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
             tries = 3
+            try:
+                prompt = self.prompt(item)
+            except Exception as e:  # noqa: BLE001 - no prompt is better than no transcript
+                self.last_error, prompt = f"prompt: {type(e).__name__}: {e}"[:160], ""
             if prio == CATCHUP:
                 # a shed clip caught up: one greedy pass, one try, a short timeout, no backoff: never minutes of whisper
                 fast, tries = {"fast": True, "timeout_s": CATCHUP_TIMEOUT_S}, 1
@@ -508,7 +721,7 @@ class Transcriber:
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
                     # but changed 1 of 4 real transcripts ("Testing one two" -> "Nothing wanted").
                     raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False),
-                                                      self.prompt(item), **fast)
+                                                      prompt, **fast)
                     self._took.append((time.time(), time.monotonic() - t0))
                     break
                 except Exception as e:
@@ -519,13 +732,9 @@ class Transcriber:
                 item.status = "error"
                 self.on_done(item)
                 continue
-            said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
-            if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
-                    or (said in HALLUCINATIONS
-                        and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))):
-                raw, status = "", "no_speech"
-            else:
-                status = "done"
+            raw, status = judge(raw, len(audio) / 16000, getattr(item, "low_energy", False), prompt,
+                                getattr(item, "vocab_v", ""))   # (vocab_v: a term list went in its prompt)
+            self._timing(item, prio, queued, began, len(audio) / 16000)
             item.raw, item.confidence = raw, conf
             item.status = status                # last: a reader that sees "done" sees its text (and read_twice)
             self.on_done(item)

@@ -2,6 +2,7 @@
 // under the header for anyone, nothing of it in the state push). GET /api/cad/health (admins only: sizeup/cad/api.py
 // ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
 // on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
+"use strict";
 const StationHealth = (() => {
   // shed clips caught up (Settings > Radios > Speech-to-text, Catch up): "4 waiting · 12 caught up (24 h) · 1 gave up · paused: an event is open"
   function catchupLine(cu, sq) {
@@ -12,6 +13,33 @@ const StationHealth = (() => {
   }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;
+  // #606: 24 h of each channel's idle quieting and noise opens, each P25 system's decode rate, in half hours
+  // (GET /api/cad/metrics?view=spark, the hub's, admins): a spark on its row, a click to its charts. Every SPARK_MS.
+  const SPARK_MS = 60000;
+  let sparks = null, sparkAt = 0;
+  async function loadSparks() {
+    if (Date.now() - sparkAt < SPARK_MS) return;
+    sparkAt = Date.now();
+    try {
+      const r = await fetch("/api/cad/metrics?view=spark", { headers: { Accept: "application/json" } });
+      sparks = r.ok ? Object.fromEntries(((await r.json()).subjects || []).map((x) => [x.subject, x])) : null;
+    } catch (_) { /* the next turn */ }
+  }
+  const sparkLink = (subject, ...svgs) => {
+    const a = el("a", "hl-spark");
+    a.href = `#settings/radios/signal?s=${encodeURIComponent(subject)}`;
+    a.title = `${subject}: the charts (Settings > Radios > Signal)`;
+    a.append(...svgs);
+    return a;
+  };
+  function chanSpark(label) {
+    const x = sparks && sparks[label];
+    if (!x || !window.SignalChart || !(x.level || x.opens)) return "";
+    const lastOf = (v) => [...(v || [])].reverse().find((y) => y !== null && y !== undefined);
+    const q = SignalChart.spark(x.level, { title: `${x.am ? "Floor" : "Idle q90"} 24 h · now ${lastOf(x.level) ?? "—"} ${x.am ? "dBFS" : "dB"}` });
+    const o = SignalChart.spark(x.opens, { w: 60, lo: 0, cls: "sg-sp-noise", title: `Noise opens/min 24 h · now ${lastOf(x.opens) ?? "—"}` });
+    return sparkLink(label, q, o);
+  }
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const longDur = (s) => {
@@ -31,9 +59,11 @@ const StationHealth = (() => {
 
   function dl(pairs) {
     const d = el("dl", "admin");
-    for (const [k, v, cls] of pairs) {
+    for (const [k, v, cls, hover] of pairs) {
       const w = el("div");
-      w.append(el("dt", "", k), el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v)));
+      const dd = el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v));
+      if (hover) dd.title = hover;
+      w.append(el("dt", "", k), dd);
       d.append(w);
     }
     return d;
@@ -87,6 +117,7 @@ const StationHealth = (() => {
         : n.on ? `Pushed to the status topic; "Recovered" once clear ${th.settle_min || 15} min` : "Push off: it clears here and in the log only";
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
+      if (a.dismiss) r.append(dismissBtn(a));
       return r;
     });
   }
@@ -124,7 +155,17 @@ const StationHealth = (() => {
     if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
-      for (const x of h.hints) box.append(el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`));
+      for (const x of h.hints) {
+        const p = el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`);
+        if (x.title) p.title = x.title;   // (#686: why a level wasn't checked)
+        if (x.link) {                  // a signal shift (#606): the chart at that time
+          const a = el("a", "nav", "Chart");
+          a.href = x.link;
+          a.title = "Settings > Radios > Signal, the 24 h around it";
+          p.append(" ", a);
+        }
+        box.append(p);
+      }
       kids.push(el("h3", "hl-sub", "Hints"), box);
     }
     const so = d.sources;
@@ -186,7 +227,7 @@ const StationHealth = (() => {
     ]));
     kids.push(el("h3", "hl-sub", "Version"), dl([
       ["Station build", short(b.station)], ["Hub build", short(b.hub)],
-      ["State", b.text, stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
+      ["State", b.text, b.state === "deferred" ? "hl-warn" : stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
       ["Behind since", b.behind_since ? when(b.behind_since) : ""],
       ["Last update", last ? `${when(last.at)} ${short(last.from)} → ${short(last.to)}: ${last.result || "?"}${last.why ? ` (${last.why})` : ""}` : ""],
       ["Timings", last && last.seconds !== undefined && last.seconds !== null ? [`${last.seconds} s total`,
@@ -205,6 +246,14 @@ const StationHealth = (() => {
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
+      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")
+        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : "") + (ob.dropped_stt_fire ? ` · ${ob.dropped_stt_fire} fire` : ""),
+        ob.dropped_stt_pre || ob.dropped_stt_fire ? "hl-warn" : ""],
+      // (#677) where the station's STT inputs are made, and the encoder service's state (a wedged one is seen here)
+      ...(ob.stt_worker ? [["STT encoder", [ob.stt_worker.where.split(" (")[0], ob.stt_worker.state,
+        ob.stt_worker.held ? "held" : ""].filter((x, i, a) => x && a.indexOf(x) === i).join(" · "),
+        ["unhealthy", "slow", "dead"].includes(ob.stt_worker.state) ? "hl-warn" : "",
+        [ob.stt_worker.where, ob.stt_worker.detail].filter(Boolean).join("\n")]] : []),
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],
@@ -272,6 +321,90 @@ const StationHealth = (() => {
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
     }
+    const sa = h.stt_arrival;
+    if (sa) {             // #677: each STT input's arrival on the hub after its event (sizeup/cloud/sttarrival.py)
+      const q = (w) => (w ? `${w.p50} / ${w.p95} s` : "");
+      const n = (w) => [String(w ? w.n : 0), "", w && w.early ? `${w.early} before their event` : ""];
+      const hd = el("h3", "hl-sub", "STT input arrival (hub)");
+      hd.title = "Event applied → its STT input stored, p50 / p95. Negative: the STT input came first";
+      kids.push(hd, table(["Channel", "Kind", "1 h", "24 h", "n 24 h"], [
+        ...Object.entries(sa.kinds || {}).map(([k, w]) => [["All", "dim"], k, q(w.h1), q(w.d1), n(w.d1)]),
+        ...(sa.channels || []).map((c) => [c.channel, c.kind, q(c.h1), q(c.d1), n(c.d1)]),
+      ], ""));
+      if (sa.more) kids.push(el("p", "dim small", `+${sa.more} more channels`));
+    }
+    const sp = h.stt_pool;
+    if (sp && !sp.error) {  // the GPU worker pool (#639, sizeup/sttpool.py): workers, queue, fallbacks, latency by channel
+      const fb = sp.fallbacks || {}, fbn = Object.values(fb).reduce((a, b) => a + (b || 0), 0);
+      const sec = (v) => (v === null || v === undefined ? "—" : `${v} s`);
+      const hd = el("h3", "hl-sub", "GPU workers (hub)");
+      hd.title = "Clips go to a ready worker first, else AWS, else the station's whisper. A worker offline is never an alert";
+      kids.push(hd, dl([
+        ["Pool", !sp.active ? "No worker" : sp.settings && !sp.settings.on ? "Off" : `On · ${sp.ready || 0} ready`,
+          sp.active && sp.settings && sp.settings.on && !sp.ready ? "hl-warn" : ""],
+        ["Queue", `${sp.queued || 0} waiting · ${sp.leased || 0} out`
+          + Object.entries(sp.queued_by_class || {}).map(([k, n]) => ` · ${n} ${k}`).join("")],
+        ["Done (queued → text)", `${sp.done_h || 0}/h · p50 ${sec(sp.p50_s)} · p90 ${sec(sp.p90_s)}`],
+        ["Transcript copies", !sp.copies ? "" : sp.copies.settled
+          ? (sp.copies.copy_at ? `${when(sp.copies.copy_at)} · ${longDur(serverNow() - sp.copies.copy_at)} ago` : "none yet")
+          : `unsettled since ${when(sp.copies.unsettled_since)}`, sp.copies && sp.copies.warn ? "hl-warn" : ""],
+        ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
+          + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
+      ]));
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Load", "Jobs/h", "Lost", "Last seen"],
+        sp.workers.map((w) => {
+          const g = w.gpu || {}, l = w.load || {};
+          // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
+          const load = w.kind === "station"
+            ? [`${l.own ?? 0} own`, l.cpu_pct !== undefined ? `CPU ${Math.round(l.cpu_pct)}%` : "", l.service_s ? `${l.service_s} s/clip` : ""].filter(Boolean).join(" · ")
+            : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
+          const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
+          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, load,
+            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
+        }), ""));
+      const inf = sp.infer;
+      if (inf) {  // the workers' local LLM (sizeup/cloud/infer.py): its own lane after the pre-alert clips; tasks, times, counts only
+        const ms = (v) => (v === null || v === undefined ? "—" : `${v} s`);
+        const bad = Object.entries(inf.why_h || {}).filter(([k, n]) => k !== "ok" && n);
+        const ih = el("h3", "hl-sub", "GPU workers: LLM");
+        ih.title = "Classifications for the intel engine on a worker's local model. Pre-alert clips always first; a gaming worker stops its LLM. Prompts and answers are never kept";
+        kids.push(ih, dl([
+          ["LLM", inf.available ? `On · ${inf.ready} ready` : "None ready", inf.available ? "" : "dim"],
+          ["Done", `${inf.ok_h || 0}/h · p50 ${ms(inf.p50_s)} · p95 ${ms(inf.p95_s)}` + (inf.queued || inf.leased ? ` · ${inf.queued} waiting · ${inf.leased} out` : "")],
+          ["Failed", bad.length ? bad.map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ") : "none", bad.length ? "hl-warn" : ""],
+        ]));
+        kids.push(table(["Worker", "State", "STT", "LLM", "Jobs/h", "Failed"], (inf.workers || []).map((w) => [
+          w.id, [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim"],
+          w.stt, [w.llm || "none", w.llm ? "" : "dim", w.llm_version ? `Version ${w.llm_version}` : ""], w.jobs_h, w.fails_h]), ""));
+        const tasks = Object.entries(inf.tasks || {});
+        if (tasks.length) kids.push(table(["Task", "Jobs/h", "p50", "p95", "Tokens in/out", "Failed"], tasks.map(([k, t]) => [
+          k, t.n, ms(t.p50_s), ms(t.p95_s), t.tokens_in === null ? "—" : `${t.tokens_in}/${t.tokens_out}`,
+          [Object.entries(t.why || {}).map(([w, n]) => `${n} ${w.replace("_", " ")}`).join(" · ") || "0", Object.keys(t.why || {}).length ? "hl-warn" : ""]]), ""));
+      }
+      const lat = sp.latency || [];
+      if (lat.length) {
+        const lh = el("h3", "hl-sub", "Speech-to-text latency");
+        lh.title = `Transmission end → text on the hub, last 2 h. Pre-alert channels' target: p50 ≤ ${sp.target.p50_s} s, p95 ≤ ${sp.target.p95_s} s`;
+        kids.push(lh, table(["Channel", "Clips", "p50", "p95", "Engines"], lat.map((r) => [
+          [r.channel, r.target ? "" : "dim", r.target ? "Pre-alert channel" : ""], r.n,
+          [sec(r.p50_s), r.over ? "hl-bad" : ""], [sec(r.p95_s), r.over ? "hl-bad" : ""],
+          Object.entries(r.engines || {}).map(([k, n]) => `${k} ${n}`).join(" · ")]), ""));
+      }
+    }
+    const tt = h.stt_time;
+    if (tt && !tt.error && (tt.rows || []).length) {  // the dispatcher's trailing time (#727, sizeup/stt_time.py)
+      const rate = (v) => (v === null || v === undefined ? "—" : `${Math.round(v)}%`);
+      const voc = tt.rows.some((r) => r.vocab_v);
+      const th = el("h3", "hl-sub", "Trailing time");
+      th.title = `The dispatcher's closing HHMM against the clip's air time (${tt.window_min[0]}…+${tt.window_min[1]} min), `
+        + `first passes only. Match: matched / time said; a clip with no time is not a failure; a run whose prompt `
+        + `carried the time is not counted. Rule ${tt.rule}`;
+      kids.push(th, table(["Channel", "Engine", "Model", ...(voc ? ["Vocab"] : []), "Clips 24 h", "Said", "Match 24 h", `Match ${tt.days} d`, `${tt.days} d`],
+        tt.rows.map((r) => [[r.name || r.channel, "", r.channel], r.engine, r.model, ...(voc ? [r.vocab_v] : []), r.n_24h,
+          [r.n_24h ? `${Math.round((100 * r.said_24h) / r.n_24h)}%` : "—", "", `${r.said_24h} of ${r.n_24h} ended with a time`],
+          [rate(r.rate_24h), "", `${r.match_24h} of ${r.said_24h}`], [rate(r.rate), "", `${r.match} of ${r.said} · ${r.n} clips`],
+          window.SignalChart ? SignalChart.spark(r.daily, { w: 60, lo: 0, hi: 100, title: `Match by day, ${tt.days} d: ${r.daily.map(rate).join(" · ")}` }) : ""]), ""));
+    }
     const er = d.errors;
     if (er) {             // the hub's own error lines (#285, sizeup/errwatch.py): the rate and the top errors
       kids.push(el("h3", "hl-sub", "Hub errors"), dl([
@@ -317,12 +450,20 @@ const StationHealth = (() => {
     kids.push(table(["SDR", "Serial", "Plugged in", "Group", "Job", "Running", "Restarts", "Detail"],
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
         x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
-        [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
-        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
+        // (#637) a P25 system held back after dropouts: no fault, until when
+        // (#703) out: it opens but streams no audio
+        x.noaudio ? ["no audio", "hl-bad", `Opens but streams no audio since ${fmtTime(x.noaudio.since)} (${x.noaudio.job}); replug it, or pick its job once fixed`]
+          : x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
+          : [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
+        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})`
+          : x.hold_until && !x.running ? `held back until ${fmtTime(x.hold_until)} after dropouts` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));
     if ((h.groups || []).length) {       // antenna groups (sizeup/radio/groups.py): short of dongles, what doesn't run
       kids.push(table(["Antenna group", "SDRs", "Jobs (priority)", "Not running"], h.groups.map((g) => [g.name,
-        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""], g.jobs.join(" › "),
+        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""],
+        // (#637) a parked job: off on purpose, never "not running"
+        [g.jobs.map((j) => ((g.parked || []).includes(j) ? `${j} (parked)` : j)).join(" › "), "",
+         (g.parked || []).length ? `Parked (off on purpose): ${g.parked.join(", ")}` : ""],
         [g.short.join(", ") || "—", g.short.length ? "hl-bad" : "dim"]]), ""));
     }
     if ((h.usb || []).length) {
@@ -343,13 +484,22 @@ const StationHealth = (() => {
           cc && cc.low_since ? "hl-bad" : cc && cc.rate !== null && cc.rate !== undefined ? "hl-warn" : ""],
         ["Retunes", cc && cc.retunes ? `${cc.retunes} · last ${when(cc.last_retune)}` : ""],
       ]));
+      const ps = Object.values(sparks || {}).filter((x) => x.rate && x.rate.some((v) => v !== null));
+      if (ps.length && window.SignalChart) {
+        const row = el("div", "row hl-sparks");
+        for (const x of ps) {
+          const now = [...x.rate].reverse().find((v) => v !== null);
+          row.append(el("span", "dim small", x.subject), sparkLink(x.subject, SignalChart.spark(x.rate, { lo: 0, title: `${x.subject} decode rate 24 h · now ${now} msg/s` })));
+        }
+        kids.push(row);
+      }
     }
-    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "Restarts", "Hint"],
+    kids.push(el("h3", "hl-sub", "Channels"), table(["Channel", "MHz", "State", "Last heard", "Quiet for", "Usually within", "Squelch", "Quieting", "24 h", "Restarts", "Hint"],
       (h.channels || []).map((c) => [c.name || c.label, c.mhz || "", [c.word || c.state || "?", stateCls(c.state)],
         c.last_heard ? when(c.last_heard) : "never", c.quiet_s !== null && c.quiet_s !== undefined ? longDur(c.quiet_s) : "",
         c.usual_now_s ? longDur(c.usual_now_s) : c.typical_gap_s ? longDur(c.typical_gap_s) : (c.gaps ? `learning (${c.gaps})` : ""),
         [c.stuck ? `stuck open ${fmtDur(c.open_s)}` : c.open ? `open ${fmtDur(c.open_s)}` : "closed", c.stuck ? "hl-bad" : ""],
-        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", c.restarts || 0, [c.hint || "", c.hint ? "dim" : ""]]),
+        c.quieting_db !== null && c.quieting_db !== undefined ? `${c.quieting_db} dB` : "", chanSpark(c.label), c.restarts || 0, [c.hint || "", c.hint ? "dim" : ""]]),
       "No channels reported"));
     kids.push(el("h3", "hl-sub", "Alert history (24 h)"), table(["Started", "Recovered", "Lasted", "Severity", "Alert", "Where", "Pushed"],
       [...d.alerts.map((a) => [when(a.since), ["not yet", "hl-bad"], longDur(serverNow() - a.since), [a.severity, a.severity === "critical" ? "hl-bad" : "hl-warn"],
@@ -371,6 +521,27 @@ const StationHealth = (() => {
     if (window.Help && Help.info) thr.append(" ", Help.info(rules, "Alert rules")); else thr.title = rules;
     kids.push(thr);
     card.replaceChildren(...kids);
+  }
+
+  // A station event the hub refused for good, stuck (no more tries) or an alarm delivered too late: the station drops
+  // them (POST /api/cad/health/dismiss: a quarantine_dismiss call; who pressed it is audited on the hub). Admins only.
+  function dismissBtn(a) {
+    const btn = el("button", "", "Dismiss");
+    btn.title = `Drop the station's stuck / late ${a.dismiss} event(s) (sizeup-station quarantine shows them)`;
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Dismiss ${a.title}?\nThe station drops these ${a.dismiss} event(s); the hub never gets them.`)) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/cad/health/dismiss", { method: "POST",
+          headers: { "Content-Type": "application/json", "X-Sizeup-Action": "dismiss" },
+          body: JSON.stringify({ kind: a.dismiss }) });
+        const d = await res.json().catch(() => ({}));
+        btn.title = res.ok ? `Dismissed ${d.dismissed || 0}` : (d.error || `HTTP ${res.status}`);
+        if (res.ok) btn.textContent = "Dismissed";
+        else btn.disabled = false;
+      } catch (e) { btn.title = String(e); btn.disabled = false; }
+    });
+    return btn;
   }
 
   // An incident source stopped itself (#301, e.g. a login it won't retry): its reset() on the station, admins only
@@ -423,7 +594,7 @@ const StationHealth = (() => {
       const r = await fetch("/api/cad/health", { headers: { Accept: "application/json" } });
       if (r.status === 403) { again = false; say("Admins only"); }
       else if (r.status === 404 || r.status === 409) { again = false; say("On the hub only"); }
-      else if (r.ok) { last = await r.json(); render(last); }
+      else if (r.ok) { last = await r.json(); await loadSparks(); render(last); }
     } catch (_) { /* the next poll tries again */ }
     busy = false;
     if (again && isOpen()) timer = setTimeout(poll, POLL_MS);

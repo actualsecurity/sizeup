@@ -8,6 +8,11 @@ Tables (created IF NOT EXISTS here; no SCHEMA_VERSION bump):
     intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed), a year
 
 Events are kept 90 days (the radio log's own default for context traffic), hits 30.
+
+intel_events.delivery: the last push's outcome at ntfy, JSON {ok, at, status, id} or {ok: false, at, status, error} ("":
+none yet), written by delivered() from the notify thread (sizeup/notify.py Notifier.send's done). Not an Event field:
+the engine's save() never touches it, so a save racing the notify thread can't undo it. Added to an older table by
+ALTER TABLE at start.
 """
 
 from __future__ import annotations
@@ -44,8 +49,10 @@ CREATE TABLE IF NOT EXISTS intel_events (
   pushed_at REAL, push_count INTEGER NOT NULL DEFAULT 0, suppressed TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
+  fd TEXT NOT NULL DEFAULT '',                       -- the FD at a fire-related event's place: on_scene | dispatched | there | cleared
   updated_at REAL NOT NULL,
-  dismissed_by TEXT NOT NULL DEFAULT ''
+  dismissed_by TEXT NOT NULL DEFAULT '',
+  delivery TEXT NOT NULL DEFAULT ''                  -- the last push's outcome at ntfy (JSON; the module doc)
 );
 CREATE INDEX IF NOT EXISTS intel_events_status ON intel_events(status, until);
 CREATE INDEX IF NOT EXISTS intel_events_source ON intel_events(source_key, last_at);
@@ -84,11 +91,20 @@ def row_event(r: dict) -> Event:
     return Event(id=r["id"], **d)
 
 
+def _delivery(raw) -> dict | None:
+    try:
+        d = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
 class MemoryEvents:
     """Events in memory only (replay, tests)."""
 
     def __init__(self):
         self.rows: dict[int, Event] = {}
+        self.delivery: dict[int, dict] = {}
         self._next = 1
         self._lock = threading.Lock()
 
@@ -110,6 +126,9 @@ class MemoryEvents:
     def all(self) -> list[Event]:
         return sorted(self.rows.values(), key=lambda e: e.id or 0)
 
+    def delivered(self, eid: int, outcome: dict) -> None:
+        self.delivery[int(eid)] = dict(outcome)
+
     def recent_closed(self, pack: str, category: str, since: float) -> list[Event]:
         return [e for e in self.rows.values() if e.status in ("ended", "dismissed") and e.pack == pack
                 and e.category == category and e.updated_at >= since]
@@ -123,6 +142,11 @@ class SqlEvents:
         self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
         with store.lock:
             store.db.executescript(SCHEMA)
+            cols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_events)")}
+            if "delivery" not in cols:              # a table from before the column
+                store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
+            if "fd" not in cols:                    # a table from before the FD check (engine._fire)
+                store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _w(self):
@@ -171,8 +195,15 @@ class SqlEvents:
         for r in self.store.q(f"SELECT * FROM intel_events WHERE {where} ORDER BY last_at DESC, id DESC LIMIT ?", (*args, limit)):
             e = row_event(r).as_dict()
             e["dismissed_by"] = r.get("dismissed_by") or ""
+            e["delivery"] = _delivery(r.get("delivery"))
             out.append(e)
         return out
+
+    def delivered(self, eid: int, outcome: dict) -> None:
+        """The last push's outcome at ntfy (the notify thread): that column only."""
+        keep = {k: outcome[k] for k in ("ok", "at", "status", "id", "error") if k in outcome}
+        with self._w() as db:
+            db.execute("UPDATE intel_events SET delivery = ? WHERE id = ?", (json.dumps(keep), int(eid)))
 
     def dismiss(self, eid: int, operator: str, now: float) -> bool:
         with self._w() as db:

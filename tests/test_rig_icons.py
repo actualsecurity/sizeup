@@ -38,13 +38,15 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
     # board-only codes (no units entry: kind "agency"): battalion and fire coordinators' cars; fire marshals generic
     boards = {c for b in json.loads((ROOT / "data" / "cad_lists.json").read_text())["unit_boards"] for c in b.get("units") or [] if c}
     for code, icon in {"BAT10": "suv", "BAT19": "suv", "FC1": "suv", "FC2": "suv", "FM1": "other", "FM42": "other"}.items():
-        assert code in boards and code not in units, code
+        assert code in boards and units.get(code, {}).get("kind", "agency") == "agency", code   # FC/FM: a status_set only
         assert mapview.icon_of({"name": code, "kind": "agency"}) == icon, code
     by_kind = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
     for code, u in units.items():                          # every unit on the board: by its kind, a known icon
         icon = mapview.icon_of({"name": code, **u})
         if code.upper().startswith("DPT"):                   # a department placeholder: no icon, never drawn
             assert icon == "", code
+            continue
+        if code in boards and set(u) == {"kind", "status_set"}:   # a board-only code given its statuses (FC1): above
             continue
         assert icon in mapview.ICONS, code
         by_code = "other"

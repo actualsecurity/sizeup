@@ -1,0 +1,7 @@
+{
+  "base": "station-state/valid/talking-only.json",
+  "patch": [
+    {"op": "replace", "path": "/talking/0/system", "value": "dmr"},
+    {"op": "replace", "path": "/paging/0/phase", "value": "data"}
+  ]
+}

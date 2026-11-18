@@ -37,8 +37,9 @@ from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
+from sizeup.cad.oos import OosNotices
 from sizeup.cad.statushints import StatusHints
-from sizeup.cad.sources import PAGING_RANK, Sources, proper_case
+from sizeup.cad.sources import PAGING, PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
@@ -46,7 +47,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, UNTIL_GRACE_S, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -60,6 +61,8 @@ COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "de
 COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
+RETAG_DAYS = 30            # a source's service changed: its rows this recent re-tagged (Cad.retag_services)
+RETAG_PAUSE_S = 0.05       # ... between batches (the store's lock let go for live writers)
 # A dispatch whose voice was never attached (#426): the row's audio_note, as "Voice unavailable — ...: text only".
 VOICE_RESTARTED = "Voice not rendered — the hub restarted first: text only"
 VOICE_BUSY = "Voice not rendered — too many dispatches waiting for theirs: text only"
@@ -179,6 +182,15 @@ def _bool(body: dict, key: str) -> bool | None:
     return v
 
 
+def services_rev(m: dict | None) -> str:
+    """A short fingerprint of the admins' service choices ("" none): the pages ask again when it moves."""
+    return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:10] if m else ""
+
+
+
+STATE_CLOCK_S = 60.0   # Cad.state / clears: rebuilt at least this often, a write or not (what ages with the clock)
+
+
 class Cad:
     @property
     def may_write(self) -> Callable[[], bool]:
@@ -225,6 +237,10 @@ class Cad:
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
         self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
+        self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
+        self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
+        self.retag_thread: threading.Thread | None = None    # the last one started
+        self.retag_waiting: set[str] = set()                 # sources whose re-tag waits for the station's talkgroups
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -264,9 +280,13 @@ class Cad:
         self.comms.atc = self.atc_talkers.decorate
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
+        self.comms.in_state = self.feed.shows            # a transmission on no incident, not the feed's: no rebuild
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
+        # Out of service is a person's to end (sizeup/cad/oos.py): what automation was refused on such a unit, with
+        # "In service?" for a person.
+        self.oos = OosNotices(self)
         self.comms.on_text = self._on_text
         self.comms.fix = self.hints.decorate             # the Radio rows: misheard status words put back, heard on hover
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
@@ -343,9 +363,17 @@ class Cad:
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
+        # the local model behind the police rules (sizeup/intel/backing.py): the hub's GPU worker when one is there,
+        # else rules only; its answers applied on its own thread, never the one that resolves them
+        from sizeup.intel.backing import ModelBacking
+        self.intel.backing = ModelBacking(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log,
+                                          tz=TZ, worker=True)
+        self.intel.backing.history = self.intel_site_lines
         self.intel_admin = IntelAdmin(self, self.intel)
         self.intel.incidents = self.intel_incidents             # an event at one of ours: linked, never a new lead
+        self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
+        self.comms.on_late_text = self._on_late_text          # a P25 call from while sizeup was down (#747)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
@@ -422,7 +450,12 @@ class Cad:
     def state(self) -> dict:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
-        if self._state is None or self._state[0] != rev:
+        # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one).
+        # state_rev, not rev: a transmission on no incident and not in the feed moves rev (comms_rev) and rebuilds
+        # nothing (Comms.record: quiet_for_state)
+        key = (self.store.state_rev, int(self.clock() // STATE_CLOCK_S))
+        if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
@@ -433,7 +466,7 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
-            self._state = (rev, {
+            self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
@@ -458,6 +491,8 @@ class Cad:
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
+                # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
+                "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -467,6 +502,8 @@ class Cad:
                 # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
                 # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
                 "radio_folders": radiofolders.rev(self.radio_folders),
+                # the admins' service per source: only their rev ("" none); both pages ask again when it moves
+                "radio_services": services_rev(self.radio_services),
             })
         st = self._state[1]
         now = self.clock()
@@ -477,7 +514,7 @@ class Cad:
                     comms_rev=self.comms.rev_for(),
                     talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
-                    status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
+                    status_hints=self.status_hints(), oos_notices=self.oos_notices(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
                     sources=self.sources_state(now), trains_rev=self._trains_rev())
 
     def _trains_rev(self) -> int | None:
@@ -516,6 +553,14 @@ class Cad:
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
+
+    def _on_late_text(self, tid: str) -> None:
+        """A transcript on a P25 call written while sizeup was down (#747): the per-incident radio log (#311) only. It is
+        minutes old: no pre-alert, status suggestion, dispatch step, possible incoming or airport alert level from it."""
+        try:
+            self.radiolog.consider(tid)
+        except Exception as e:  # noqa: BLE001 - the log never stops the transcript
+            self.log(f"CAD: radio log: {type(e).__name__}")
 
     def _display_incs(self, incs: list[dict]) -> None:
         """A page's transcript in an event's remarks and timeline as shown: vocabulary phrases without AWS's hyphens
@@ -609,15 +654,36 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         if action != "accept":
             return self.hints.dismiss(hid, op)
-        h = self.store.one("SELECT unit_id, incident_id FROM status_hints WHERE id = ?", (hid,))
+        h = self.store.one("SELECT unit_id, incident_id, status FROM status_hints WHERE id = ?", (hid,))
+        if h is not None:                                # out of service: only once the person said so (sizeup/cad/oos.py)
+            u = self.store.unit(h["unit_id"])
+            if self.lists.role(u["status"]) == "oos" and not _bool(body, "confirm"):
+                L = self.lists
+                onto = h["incident_id"] and u["incident_id"] != h["incident_id"] and L.role(h["status"]) not in ("free", "oos")
+                raise CadError(f"{u['name']} is {L.status_phrase(u['status'])}: "
+                               + ("put it on the call anyway?" if onto else f"set it {L.status_phrase(h['status'])} anyway?")
+                               + " (confirm: true)")
         if h is not None:                                # a person's, before the write (#311 L4): where it was and goes
             was = self.store.unit(h["unit_id"])["incident_id"]
             for i in {was, h["incident_id"]}:
                 self._by_hand(i, [h["unit_id"]], op)
-        out = self.hints.accept(hid, op)
+        out = self.hints.accept(hid, op, by=PERSON)
         self._by_hand(out.get("incident_id"), [out["id"]], op)
         self.auto.recheck_close([was] if h is not None else [])   # a unit off a call that waits to close (#311 N1)
         return out
+
+    def oos_notices(self) -> list[dict]:
+        """Automation refused on out-of-service units (sizeup/cad/oos.py); a fault never breaks the console."""
+        try:
+            return self.oos.active()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: out-of-service notices: {type(e).__name__}: {e}")
+            return []
+
+    def oos_notice(self, nid: int, action: str, body: dict) -> dict:
+        """POST /api/cad/oos-notice/<id>/service | dismiss {operator}: the unit back in service (a person's), or left
+        out of service."""
+        return self.oos.act(nid, action, _text(body, "operator", OPERATOR_MAX))
 
     def alarms_state(self, now: float | None = None) -> dict | None:
         """Open alarms, notices and the just acknowledged (sizeup/cad/alarms.py; a fault never breaks the console)."""
@@ -667,6 +733,12 @@ class Cad:
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
 
+    def intel_site_lines(self, place, at: float) -> list[str]:
+        """Up to three short lines of the calls at an intel place before `at` (context_bundle.site_lines): the local
+        model's site history (sizeup/intel/backing.py). A read on the intel thread."""
+        from sizeup.context_bundle import site_lines
+        return site_lines(self, place.label, place.lat, place.lon, at, precision=place.precision)
+
     def intel_incidents(self, now: float) -> list[dict]:
         """Our incidents that a county-wide pack's event may be (sizeup/intel/engine.py near_incident): emergency ones
         (never a notification or a closure), accepted (never a queued page nobody took, nor a dismissed one), placed,
@@ -679,6 +751,37 @@ class Cad:
             "AND emergency = 1 AND status NOT IN ('queued', 'dismissed') AND accepted_at IS NOT NULL "
             "AND lat IS NOT NULL AND lon IS NOT NULL AND (closed_at IS NULL OR closed_at >= ?) "
             "ORDER BY created_at DESC LIMIT 200", (since, since))]
+
+    def intel_fire_incidents(self, opened_since: float, closed_since: float) -> list[dict]:
+        """Our incidents a fire-related PD event may be at (sizeup/intel/engine.py _fire): emergency ones (a person's, a
+        page's, an incident source's: the county feed's too, queued ones included; never a dismissed one) made since
+        opened_since and open, or closed since closed_since, with their type and where the FD is (fire_state). A read
+        on the intel thread, only for such an event; created_at first (incidents_created), then the few incidents'
+        assignments and reports."""
+        rows = [dict(r) for r in self.store.q(
+            "SELECT id, number, type, lat, lon, geo_label AS label, address, address_raw, created_at, closed_at "
+            "FROM incidents WHERE created_at >= ? AND emergency = 1 AND status != 'dismissed' "
+            "AND (closed_at IS NULL OR closed_at >= ?) ORDER BY created_at DESC LIMIT 200",
+            (min(opened_since, closed_since), closed_since))]
+        if not rows:
+            return rows
+        ids = [r["id"] for r in rows]
+        marks = ",".join("?" * len(ids))
+        ours: dict = {}
+        for a in self.store.q(f"SELECT incident_id, onscene_at, cleared_at FROM assignments WHERE incident_id IN ({marks})", ids):
+            ours.setdefault(a["incident_id"], []).append(dict(a))
+        feeds: dict = {}
+        for r in self.store.q(f"SELECT incident_id, data FROM source_reports WHERE incident_id IN ({marks}) "
+                              "AND merged_into = '' AND source != ?", (*ids, PAGING)):
+            try:
+                d = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                feeds.setdefault(r["incident_id"], []).append(d)
+        for r in rows:
+            r["fd"], r["fd_at"] = fire_state(r, ours.get(r["id"], []), feeds.get(r["id"], []))
+        return rows
 
     def intel_state(self, now: float | None = None) -> dict | None:
         """Radio pre-alerts for the console's card (sizeup/intel): signed-in viewers only; never breaks the console."""
@@ -741,9 +844,9 @@ class Cad:
 
     def clears(self, now: float) -> dict[int, dict]:
         """Each unit's latest cleared call (a returning rig's start), re-read only when something changed."""
-        rev = self.store.rev
-        if self._clears is None or self._clears[0] != rev:
-            self._clears = (rev, self.store.recent_clears(now - mapview.RECENT_S))
+        key = (self.store.state_rev, int(now // STATE_CLOCK_S))   # (and the minute: a clear ages out with no write)
+        if self._clears is None or self._clears[0] != key:
+            self._clears = (key, self.store.recent_clears(now - mapview.RECENT_S))
         return self._clears[1]
 
     def locations(self, units: list[dict] | None = None, now: float | None = None) -> dict[str, dict | None]:
@@ -881,6 +984,8 @@ class Cad:
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
+        if f.get("until_at") is not None and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            raise CadError("Until is in the past: check the day (or leave it empty)")   # it would expire at once
         self._place(f)
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
@@ -891,6 +996,12 @@ class Cad:
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
+        if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
+            old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
+            if old["until_at"] is not None and f["until_at"] // 60 == old["until_at"] // 60:
+                del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
+            elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
+                raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
@@ -919,6 +1030,18 @@ class Cad:
         one a person set (#297)."""
         return self.sources.feed_use(iid, _text(body, "field", 20, required=True), _text(body, "operator", OPERATOR_MAX))
 
+    def merge(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/merge {into, operator} | {undo: true, operator}: a page's own queued card merged
+        into the CAD feed's incident it is (the card's "Merge into #N", sizeup/cad/pagematch.py), or that merge undone
+        (the card back in the queue). Sources.merge_page / unmerge_page."""
+        op = _text(body, "operator", OPERATOR_MAX)
+        if body.get("undo") is True:
+            return self.sources.unmerge_page(iid, op)
+        into = body.get("into")
+        if not isinstance(into, int) or isinstance(into, bool) or into <= 0:
+            raise CadError("into: an event id")
+        return self.sources.merge_page(iid, into, op)
+
     def accept(self, iid: int, body: dict) -> dict:
         """A queued 60 Control page accepted (the type can be picked in the same call)."""
         op = _text(body, "operator", OPERATOR_MAX)
@@ -939,6 +1062,16 @@ class Cad:
 
     def close(self, iid: int, body: dict) -> dict:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
+
+    def expire_until(self, now: float | None = None) -> list[dict]:
+        """Non-emergency events whose Until has passed closed (Store.expire_until; Sources' ticker calls this at its
+        start and every TICK_S), each one a line in the hub log."""
+        done = self.store.expire_until(now)
+        for d in done:
+            until = datetime.fromtimestamp(d["until_at"], TZ).strftime("%m/%d %H:%M")
+            self.log(f"CAD: {d['number'] or d['id']}: until {until} passed: "
+                     + ("closed (Expired)" if d["closed"] else f"kept open, {', '.join(d['units'])} on it"))
+        return done
 
     def reopen(self, iid: int, body: dict) -> dict:
         """A closed or dismissed event back on the boards (#89): see Store.reopen. A feed's in service no longer closes
@@ -1436,7 +1569,7 @@ class Cad:
         text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
         self._by_hand(iid, [u["id"] for u in units], operator)
         moved = self.store.assign(iid, [u["id"] for u in units], operator,
-                                  verb="added to the assignment" if kind == "add_on" else "")
+                                  verb="added to the assignment" if kind == "add_on" else "", by=PERSON)
         self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "add-on" if kind == "add_on" else "dispatch", moved,
                           remarks, plan)
@@ -1485,7 +1618,7 @@ class Cad:
             what.append(L.wording["full_response"])
         self.store.note(iid, "Upgrade: " + "; ".join(what or ["more units"]), operator, kind="upgrade")
         self._by_hand(iid, [u["id"] for u in units], operator)
-        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)") if units else []
+        moved = self.store.assign(iid, [u["id"] for u in units], operator, verb="dispatched (upgrade)", by=PERSON) if units else []
         self._recheck_from(iid, units)
         return self._send(iid, text, units, operator, channel, "upgrade", moved, remarks, plan)
 
@@ -1493,48 +1626,64 @@ class Cad:
         """Units on an event with no dispatch (a non-emergency event: a hydrant, a closure).
         status (RS, OL...: Assigned > Add unit): a unit heard on the air responding, or showing up,
         that nobody toned out (user, 2026-10-08: "we need to 'add someone responding' even if they
-        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air."""
+        were not on the original dispatch"). Any open event, emergency too; nothing is said on the air.
+        Another agency's unit goes on as its set's first status (Dispatched), or status when that is one of its start
+        statuses (Lists.start_statuses: Dispatched; a third party's Dispatch other too). A third-party unit (keyholder, utility,
+        police: PCFD, 2026-11-17) never goes on Responding or On location: whatever status the rest of the units are
+        added as, it is Dispatched ("we requested them, but we don't necessarily know if they're enroute").
+        -> {ok, moved, status?, as: {unit: the status it went on as}}."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("pending", "active"):
             raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
-        if body.get("status") is not None:
-            return self._add_responding(iid, units, body)
-        op = _text(body, "operator", OPERATOR_MAX)
+        status = _text(body, "status", 40) if body.get("status") is not None else ""
+        if body.get("status") is not None and status not in self.lists.status_ids:   # '' or unknown
+            self._add_check(iid, [], status)                     # "status: RS (Responding) or OL (On location)"
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
+        if status and here:
+            raise CadError(f"Already on this event: {', '.join(here)}")
+        units = [u for u in units if u["name"] not in here]    # a plain attach: one already on it stays as it is
+        start = {u["id"]: self._agency_start(u, status) for u in units if u["response"] == "agency"}
+        if status and any(u["id"] not in start for u in units):
+            self._add_check(iid, [u for u in units if u["id"] not in start], status)   # ours: Responding / On location only
+        op = _text(body, "operator", OPERATOR_MAX, required=bool(status))
         self._by_hand(iid, [u["id"] for u in units], op)
-        ours = [u["id"] for u in units if u["response"] != "agency"]
-        agency = [u["id"] for u in units if u["response"] == "agency"]
-        moved = self.store.assign(iid, ours, op, attach=True) if ours else []
-        if agency:          # another agency's unit: on the event assigned, not yet responding (#219: never
-            moved += self.store.assign(iid, agency, op, attach=True)    # straight to On location), then its statuses
-            by = {u["id"]: u for u in units}
-            for i in agency:                                            # "RBPD dispatched", "KEYHOLDER notified"
-                self.store.set_unit_status(i, self.lists.agency_attach_status(by[i]["status_set"]), op)
+        ours = [u["id"] for u in units if u["id"] not in start]
+        moved, out = [], {}
+        if ours:
+            moved += self.store.assign(iid, ours, op, attach=not status, status=status, by=PERSON)
+            out.update({u["name"]: status for u in units if u["id"] in ours and status})
+        by_status: dict[str, list[int]] = {}
+        for i, st in start.items():                          # "PCPD added: dispatched", "CONED-E added: dispatch other (DO)"
+            by_status.setdefault(st, []).append(i)
+        for st, ids in by_status.items():
+            moved += self.store.assign(iid, ids, op, status=st, by=PERSON)
+            out.update({u["name"]: st for u in units if u["id"] in ids})
         self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved}
+        return {"ok": True, "moved": moved, "as": out, **({"status": status} if status else {})}
 
-    def _add_responding(self, iid: int, units: list[dict], body: dict) -> dict:
-        """attach with a status: on the event in that status, no dispatch logged, no Disp time. A unit
-        already on this event is refused; one on another call is moved, as a dispatch moves it."""
+    def _agency_start(self, u: dict, status: str) -> str:
+        """What another agency's unit goes on a call as: status when it is one of its start statuses (DP; a
+        third party's DO), else, for a third party, its set's first (Dispatched: never Responding); for EMS and the
+        other agencies the Responding / On location asked for (#220), else its set's first."""
         L = self.lists
-        status = _text(body, "status", 40)
+        start = L.start_statuses(u["name"], u["board"])
+        if status in start or (status in self.store.return_statuses() and not u["third_party"]
+                               and status in L.unit_statuses_for(u["name"], u["board"])):
+            return status
+        if status and not u["third_party"]:
+            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {u['name']}")
+        return start[0]
+
+    def _add_check(self, iid: int, units: list[dict], status: str) -> None:
+        """Our units added with a status (Assigned > Add unit): Responding / On location only, never a placeholder."""
+        L = self.lists
         ok = self.store.return_statuses()
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
-        op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if iid in u["incident_ids"]]
-        if here:
-            raise CadError(f"Already on this event: {', '.join(here)}")
         ph = [u["name"] for u in units if u["placeholder"]]
         if ph:
             raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
-        agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
-        if agency:
-            raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
-        self._by_hand(iid, [u["id"] for u in units], op)
-        moved = self.store.assign(iid, [u["id"] for u in units], op, status=status)
-        self._recheck_from(iid, units)
-        return {"ok": True, "moved": moved, "status": status}
 
     def _prune_audio(self) -> None:
         """Previews nobody dispatched are dropped after a day; dispatch audio is kept with the log."""
@@ -1578,7 +1727,7 @@ class Cad:
             raise CadError("unit_id: required") from None
         op = _text(body, "operator", OPERATOR_MAX)
         self._by_hand(iid, [uid], op)
-        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op)
+        return self.store.return_to_incident(iid, uid, _text(body, "status", 40, required=True), op, by=PERSON)
 
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
@@ -1594,9 +1743,9 @@ class Cad:
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number (0 = no call)") from None
             self._by_hand(iid, [uid], op)
-            out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200))
+            out = self.store.set_unit_status_on(uid, status, iid, op, _text(body, "note", 200), by=PERSON)
         else:
-            out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200))
+            out = self.store.set_unit_status(uid, status, op, _text(body, "note", 200), by=PERSON)
         for i in {was, out.get("incident_id")}:          # a person's: automation leaves the unit alone there (#311)
             self._by_hand(i, [uid], op)
         if was and out.get("incident_id") != was:
@@ -1621,7 +1770,7 @@ class Cad:
         ids = [call] if call else list(u["incident_ids"])
         for i in ids:                                    # a person's, before the write (#311 L4)
             self._by_hand(i, [u["id"]], op)
-        out = self.store.set_unit_status(u["id"], status, op, call=call)
+        out = self.store.set_unit_status(u["id"], status, op, call=call, by=PERSON)
         self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
@@ -1878,7 +2027,8 @@ class Cad:
         now = self.clock()
         minute = int(now // 60)
         folders = self.radio_folders
-        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{radiofolders.rev(folders)}"
+        rev = (f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{services_rev(self.radio_services)}"
+               f".{radiofolders.rev(folders)}")
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -1900,6 +2050,10 @@ class Cad:
             except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the tree
                 freqs = {}
             seen = {r["source"]: r for r in self.comms.sources_seen()}
+            try:                                   # a source still to re-tag: its rows' tag is not its automatic one
+                stale = {r["key"] for r in self.store.q("SELECT key FROM radio_retag_pending")} | set(self.radio_services)
+            except Exception:  # noqa: BLE001
+                stale = set(self.radio_services)
             counts = self.comms.minute_counts(now)
             ems = self.comms.emergencies(now)
             out = []
@@ -1921,9 +2075,14 @@ class Cad:
                     continue                             # a talkgroup only listed: never heard, not ours, not chosen
                 group = str(i.get("group") or s.get("group") or ("Airband" if kind == "airband" else "Analog" if not got else ""))
                 em = ems.get(key) or {}
-                svc = str(i.get("service") or s.get("service") or sourcekeys.service(group, kind=kind))
+                # automatic (the station's row, the log's while no admin chose one, the words), the admins' over it
+                # (not known yet: no "Auto (...)" label, the row's tag for its service)
+                auto = self.auto_service(key, i, group, kind, "" if key in stale else str(s.get("service") or ""),
+                                         bool(info))
+                svc = sourcekeys.overridden(key, auto or str(s.get("service") or ""))
+                auto = auto or ""
                 out.append({"key": key, "system": system, "system_label": labels.get(system, system), "group": group,
-                            "name": name, "service": svc,
+                            "name": name, "service": svc, "service_auto": auto,
                             "tier": tier, "ours": ours, "encrypted": bool(i.get("encrypted")),
                             # fire channels can't be muted: Our calls, and any fire source of ours (in All too)
                             "mutable": not (ours or (svc == "fire" and system in sourcekeys.OURS_SYSTEMS)),
@@ -1941,7 +2100,99 @@ class Cad:
             return {"unchanged": True, "rev": rev, "live": live_keys}
         return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1],
                 "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
-                                                   hidden_labels=self.context_labels())}
+                                                   hidden_labels=self.context_labels()),
+                "services": self.settings.services_page(),
+                # a source's re-tag waiting for the station's talkgroups (its automatic service not known yet)
+                "retag_waiting": sorted(k for k in self.retag_waiting if context or not radiofolders.context_key(k))}
+
+    def auto_service(self, key: str, row: dict | None = None, group: str = "", kind: str | None = None,
+                     logged: str = "", listed: bool | None = None) -> str | None:
+        """A source's service with no admin's choice: the station's talkgroup row (its talkgroups file's column, else
+        its group's words: service_auto, or service from a station before that), an FM channel's fire, an airband
+        channel's air. A talkgroup the station doesn't list: `logged` (its newest row's tag, when that is no admin's),
+        else its group's words (as given, or its newest row's), as the station would. None: not known yet (a
+        talkgroup while no station has said what it lists: a hub just started, the station away) - never a guess."""
+        rows = None
+        if row is None:
+            rows = self.source_rows()
+            row = next((r for r in rows if str(r.get("source") or "") == key), None) or {}
+        if row.get("service_auto") or row.get("service"):
+            return str(row.get("service_auto") or row.get("service"))
+        got = sourcekeys.parse(key)
+        if kind is None:
+            kind = "airband" if key.startswith("air:") else "" if got else "traffic"
+        if kind:
+            return sourcekeys.service(kind=kind)
+        if logged in sourcekeys.SERVICES:
+            return logged
+        if not (listed if listed is not None else rows if rows is not None else self.source_rows()):
+            return None
+        if not group:
+            r = self.store.one('SELECT "group" AS grp FROM radio_traffic WHERE source = ? ORDER BY start DESC LIMIT 1',
+                               (key,)) or {}
+            group = str(r.get("grp") or "")
+        return sourcekeys.service(group)
+
+    def retag_services(self, keys=None, operator: str = "", wait: bool = False) -> threading.Thread | None:
+        """The sources whose service was chosen or put back (radio_retag_pending, written with the setting): each one's
+        rows of the last RETAG_DAYS tagged with the service it has now (the admins', else automatic), off the
+        caller's thread, one source at a time; its mark taken off and the count audited (radio_services/<key>/retag)
+        once done. A talkgroup whose automatic service isn't known yet (no station has said what it lists) waits,
+        marked, for its rows (retag_resume). Only the CAD of record writes: a fenced hub task leaves the marks for the
+        task that takes over. keys, operator: (older callers; the marks say both). wait: in this thread (tests)."""
+        def run() -> None:
+            with self._retag_lock:
+                try:
+                    todo = self.store.q("SELECT key, at, operator FROM radio_retag_pending ORDER BY at, key")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"CAD: service re-tags not read ({type(e).__name__}: {e})")
+                    return
+                for p in todo:
+                    key = p["key"]
+                    if not self.may_write():
+                        return
+                    try:
+                        chosen = self.radio_services.get(key)
+                        auto = chosen or self.auto_service(key)          # (a choice needs no automatic service)
+                        if auto is None:
+                            if key not in self.retag_waiting:
+                                self.log(f"CAD: {key}: re-tag waits for the station's talkgroups (its automatic service)")
+                                self.retag_waiting.add(key)
+                                self.store.rev += 1         # (the pages: its hover says so)
+                            continue
+                        self.retag_waiting.discard(key)
+                        want = chosen or auto
+                        since = self.clock() - RETAG_DAYS * 86400
+                        self.log(f"CAD: {key} is {want}: re-tagging its transmissions of the last {RETAG_DAYS} days")
+                        n = self.comms.retag(key, want, since, pause=RETAG_PAUSE_S)
+                        with self.store.tx() as db:
+                            self.settings._audit(db, self.clock(), p["operator"], "radios",
+                                                 f"{settings_mod.SVC_SECTION}/{key}/retag", None,
+                                                 {"service": want, "rows": n, "days": RETAG_DAYS})
+                            # (marked again meanwhile, a newer choice: kept for the run that follows it)
+                            db.execute("DELETE FROM radio_retag_pending WHERE key = ? AND at = ?", (key, p["at"]))
+                        self.store.rev += 1                 # (the tree's Auto label: known again)
+                        self.log(f"CAD: {key} is {want}: {n} transmission(s) re-tagged")
+                    except Exception as e:  # noqa: BLE001 - the setting is saved; its mark stays for the next start
+                        self.log(f"CAD: {key}: rows not re-tagged ({type(e).__name__}: {e})")
+        if wait:
+            run()
+            return None
+        t = self.retag_thread = threading.Thread(target=run, name="cad-retag", daemon=True)
+        t.start()
+        return t
+
+    def retag_resume(self, rows_came: bool = False) -> threading.Thread | None:
+        """The re-tags left marked: at the start of the CAD of record (a restart, a hub task that took over), and when
+        the station's talkgroups arrive for one that waited for them (rows_came). Nothing marked: nothing started."""
+        if rows_came and not self.retag_waiting:
+            return None
+        try:
+            if not self.store.one("SELECT 1 AS x FROM radio_retag_pending LIMIT 1"):
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        return self.retag_services()
 
     def context_labels(self) -> list[str]:
         """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""
@@ -2570,3 +2821,52 @@ class Cad:
             except ValueError:
                 continue
         return "", "", f"type from {label or 'the feed'}: {raw}"[:200]
+
+
+def fire_state(inc: dict, ours: list, feeds: list) -> tuple[str, float | None]:
+    """(where the FD is at this incident, when it cleared) for intel's fire check (Cad.intel_fire_incidents):
+        on_scene    a unit of ours on scene and not cleared, or a feed's unit (or event) on location and not in
+                    service, on an open incident and an open feed event
+        dispatched  a unit assigned or en route and not cleared (ours, or a feed's listed or timed unit not in
+                    service), none on scene
+        cleared     the incident closed, or every unit known cleared or in service, or every feed event closed
+                    (at: the latest of those times)
+        ""          no unit known yet (a page or a feed event with no units): not the FD there"""
+    if inc.get("closed_at") is not None:
+        return "cleared", float(inc["closed_at"])
+    on = live = False
+    done: list[float] = []
+    for a in ours:
+        if a.get("cleared_at") is not None:
+            done.append(float(a["cleared_at"]))
+        elif a.get("onscene_at") is not None:
+            on = True
+        else:
+            live = True
+    shut = bool(feeds)
+    for d in feeds:
+        ut = d.get("unit_times") if isinstance(d.get("unit_times"), dict) else {}
+        times = {str(u): t for u, t in ut.items() if isinstance(t, dict)}
+        whole = d.get("times") if isinstance(d.get("times"), dict) else {}
+        if d.get("closed"):
+            done += [float(t["in_service"]) for t in times.values() if t.get("in_service")]
+            continue
+        shut = False
+        units = {str(u) for u in d.get("units") or []} | set(times)
+        for u in units:
+            t = times.get(u, {})
+            if t.get("in_service"):
+                done.append(float(t["in_service"]))
+            elif t.get("on_location"):
+                on = True
+            else:
+                live = True
+        if whole.get("on_location") and not whole.get("in_service"):
+            on = True
+    if on:
+        return "on_scene", None
+    if live:
+        return "dispatched", None
+    if done or shut:
+        return "cleared", max(done) if done else None
+    return "", None

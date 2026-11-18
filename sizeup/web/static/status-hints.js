@@ -3,7 +3,10 @@
    "E64 on location? ✓ ✕" with what was heard on hover, and one line under the transmission that said it
    ("Suggests E64 on location"). ✓ sets the status (dispatchers and admins; the chronology says it came from the radio),
    ✕ dismisses it. A viewer, and the wall board, see the suggestion and nothing to press. Nothing changes on its own.
+   A unit out of service (h.oos, sizeup/cad/oos.py): ✓ asks first ("E62 is out of service: put it on the call
+   anyway?"); left alone, the suggestion expires and the unit stays as it was.
    Drawn after every render (cad.hooks) over what cad.js drew: cad.js only marks each transmission row (data-tx). */
+"use strict";
 (function () {
   "use strict";
   const busy = new Set();                  // suggestions being accepted / dismissed: not offered twice
@@ -28,10 +31,14 @@
   }
 
   async function decide(h, action) {
+    const sure = action === "accept" && h.oos;
+    if (sure && !await UI.confirm(h.onto ? `${h.unit} is out of service: put it on the call anyway?`
+      : `${h.unit} is out of service: set it ${h.status_name} anyway?`, { ok: h.onto ? "Put on call" : "Set" })) return;
     busy.add(h.id);
     draw();
     try {
-      await api("POST", `/api/cad/hint/${h.id}/${action}`, { operator: typeof operator === "function" ? operator() : "" });
+      await api("POST", `/api/cad/hint/${h.id}/${action}`,
+        { operator: typeof operator === "function" ? operator() : "", ...(sure ? { confirm: true } : {}) });
       if (action === "accept") UI.toast(`${label(h)}${onto(h)}`, "ok", "From the radio");
     } catch (e) {
       busy.delete(h.id);

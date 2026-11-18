@@ -1,0 +1,7 @@
+{
+  "base": "station-state/valid/with-status-plain.json",
+  "patch": [
+    {"op": "replace", "path": "/status/health", "value": {"error": "OSError: [Errno 5] Input/output error"}},
+    {"op": "replace", "path": "/status/logship", "value": {"state": "error", "reason": "OSError"}}
+  ]
+}

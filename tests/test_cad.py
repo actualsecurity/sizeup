@@ -158,6 +158,7 @@ def test_lists_file_has_the_sheets_vocabulary():
     # the sheet's 51 subtypes are all there (the department has since added more, e.g. GAS-ODOR)
     assert len(L.subtype_codes) >= 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
     assert len(L.disposition_codes) == 20 and "NOTIF MADE" in L.disposition_codes
+    assert L.dispositions[-1]["code"] == "EXPIRED"        # not the sheet's: the hub's own, for a passed Until
     # The department's 17 status codes, in its order, then UNMANNED (kept: not in its list, to confirm).
     assert L.status_ids == ("AQ", "AV", "DP", "AK", "RS", "OL", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "DO",
                             "IC", "OS", "UNMANNED")
@@ -184,7 +185,7 @@ def test_lists_file_has_the_sheets_vocabulary():
         "IC": "onscene", "OS": "oos", "UNMANNED": "oos"}
     assert L.status_for("free") == "AV" and L.status_for("dispatched") == "DP" and L.status_for("oos") == "OS"
     to_confirm = {s["code"] for s in L.unit_statuses if s.get("confirm")}
-    assert to_confirm == {"AQ", "AK", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "DO", "IC", "UNMANNED"}
+    assert to_confirm == {"AQ", "AK", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "IC", "UNMANNED"}
     # The department's colors (CN, CE, DO are black in its sheet: a light grey here, readable on the dark theme).
     bg = {s["code"]: s["bg"] for s in L.unit_statuses}
     assert (bg["AV"], bg["DP"], bg["OL"], bg["ST"], bg["CB"], bg["OS"], bg["CN"]) == (
@@ -456,7 +457,7 @@ def test_emergency_class_from_type_with_override():
     L = lists.load()
     assert not L.is_emergency("NOTIF") and not L.is_emergency("SERVICE", "WATER") and not L.is_emergency("HAZARD", "NOTIF-PD")
     assert L.is_emergency("RESCUE", "WATER") and L.is_emergency("STRU") and L.is_emergency("SERVICE", "BOAT")
-    cad = make_cad()
+    cad = make_cad(clock=Clock(local(2026, 10, 10, 9, 0)))
     road = cad.create({"type": "NOTIF", "address": "Westchester Ave", "remarks": "road closed for paving",
                        "until_at": local(2026, 10, 10, 18, 0)})
     assert road["emergency"] == 0 and road["until_at"] == local(2026, 10, 10, 18, 0) and road["number"]

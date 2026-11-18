@@ -189,7 +189,7 @@ What `install-linux.sh` installs (Linux, and WSL on the Windows PC):
 | one release per commit: the code (`git archive`, root-owned: the service user only reads it), its own venv, `BUILD` (the sha), `BUILDS` (the builds it runs with) | `/opt/sizeup/releases/<sha>` |
 | the release that runs (a link, swapped by rename) | `/opt/sizeup/current` |
 | rtl-sdr-blog v1.3.6 (RTL-SDR Blog V4 support): rtl_fm, rtl_test, rtl_eeprom, librtlsdr | `/opt/sizeup/rtl-sdr` -> `builds/rtl-sdr-blog-<tag>-<commit>` |
-| trunk-recorder v5.2.0 with its plugins (unit_script) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>` |
+| trunk-recorder v5.2.0 with its plugins (unit_script), patched (#638) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>-p<patch hash>` |
 | whisper.cpp v1.9.4 whisper-server, built for this CPU (AVX2 on the i5-6400T) | `/opt/sizeup/whisper` -> `builds/whisper.cpp-<tag>-<commit>-native` |
 | readsb v3.16.21 (wiedehopf), RTL-SDR with the bias-tee switch, against rtl-sdr-blog's librtlsdr: the ADS-B decoder (#235) | `/opt/sizeup/readsb` -> `builds/readsb-<tag>-<commit>` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
@@ -221,7 +221,9 @@ Not installed by it: AIS-catcher ([AIS receiver](#ais-receiver)).
 | `sizeup-update.path` / `.timer` / `.service` | root | The auto-updater ([Updating](#updating)). |
 
 The source builds are pinned to a tag **and** its commit (a moved tag is refused), built once per
-pin into their own directory under `/opt/sizeup/builds`, and rebuilt only with `--rebuild`. trunk-recorder's `config.json` in
+pin into their own directory under `/opt/sizeup/builds`, and rebuilt only with `--rebuild`. trunk-recorder gets one
+patch of ours before its build (`tr_patch` in `install-linux.sh`, [why](../trunk-recorder/README.md#one-row-per-key-up-issue-62)):
+its hash is in the build's name, so changing the patch makes a new build. trunk-recorder's `config.json` in
 `/var/lib/sizeup/trunk-recorder` is made from the repo's `deploy/trunk-recorder/config.json` on every
 run: change it there. The whisper models come from huggingface.co/ggerganov/whisper.cpp at a fixed
 revision and are checked against the SHA-256 that revision lists for them. On Ubuntu 24.04,
@@ -330,10 +332,28 @@ How it goes, end to end:
    the system python3 (adsbd.py, aisd.py, trunkrecd.py, autoupdate.py, configupdate.py, logread.py and
    tools/stt_diag.py: stdlib only, Python 3.11+) load with it. A missing `rtl_sdr` is only a warning. A failure: no switch, the sha is recorded as failed and reported to the hub, with the
    error (for a script, the system Python's version and its exception).
-7. **A quiet moment**: no carrier open, nobody talking, no transcription queued or running, no re-run
-   pending (the station's `GET /api/station-mode`, `update.busy`). It looks every 5 s and waits up to 5 minutes
-   for one, then goes anyway. Shed clips being caught up ([below](#speech-to-text-and-cpu)) never count as busy:
-   the ones still waiting are taken back while an update waits.
+7. **The moment to switch** (the station's `GET /api/station-mode`, `update.hold`): one restart per burst of hub
+   deploys, never mid-page.
+   * **Settle**: the hub's build has held still 10 min. A newer one meanwhile is staged and waited for instead; the
+     older one is never switched to ("2 hub build(s) in between skipped" in the log line).
+   * **Busy**: nothing a restart would cut off: a page coming in or held for its continuation, an emergency event
+     of ours dispatched in the last 5 min, an emergency window open, a carrier open, someone talking, a page or
+     Fire/EMS clip waiting for speech-to-text.
+   * **A short queue**: at most 5 transcriptions waiting, 20 after 10 more minutes, 60 after 20.
+   * **Ceiling**: 45 min behind the hub (counted from when it first fell behind, whatever the hub deployed since),
+     neither settling nor the queue holds it, and it switches to the build it staged rather than chase a newer one;
+     "busy" 5 min more at most (from the ceiling, or from when this wait began if that was later), then it goes
+     anyway. A build that failed is not counted: the ceiling starts again when the hub moves on.
+   * **Urgent**: `sudo sizeup-station autoupdate now`, or a commit since the running build with a line
+     `Station-Update: now` in its message: no settling, no queue, "busy" 5 min at most.
+   While it waits, the station's Hub row (and the hub's) say "staged, switching by HH:MM" and why; the journal says
+   each reason once, and the result line says what it waited for, why it went and what was in flight. Shed clips
+   being caught up ([below](#speech-to-text-and-cpu)) never count: they go on while it waits and are taken back at
+   the switch. Clips still waiting for speech-to-text when sizeup-station stops are not lost: pages and Fire/EMS
+   clips get 8 s more, then everything still waiting goes up marked "skipped: busy" (row and recording, through the
+   outbox): the hub's catch-up transcribes the transmissions later, and Re-transcribe takes any of them.
+   While it waits, `sizeup-station update` and `rollback` refuse (an update is running): `sudo sizeup-station
+   autoupdate now` switches now, `sudo sizeup-station autoupdate off` stops it waiting (nothing switches).
 8. **The switch**: `install-linux.sh --activate <sha>` swaps the build links and `/opt/sizeup/current`
    (each one rename), installs the release's units and commands, and restarts sizeup-station once.
    whisper-server is its own service now (`sizeup-whisper.service`) and keeps its model loaded; it is
@@ -661,7 +681,7 @@ job): **+ Antenna group**, a name, its dongles, its jobs in priority order (high
 | Locked | A grouped dongle offers and runs only its group's jobs (and Off). A group's jobs run only on its dongles: never picked for, moved to or auto-assigned to a dongle outside it. A dongle (or job) in no group behaves as it always did. |
 | Mapping | Which dongle runs which job is still picked per dongle, as before: the admin's mapping. While every dongle of the group can run, nothing else happens. |
 | One gone | A dongle unplugged, held by another app or with its serial shared, for 10 s: the group's other dongles run the **highest-priority** jobs of the mapping. A spare dongle of the group (Off, not switched Off by a person) stands in first; otherwise the lowest-priority job gives its dongle up. Log: `sdr: group UHF: SDR V3 #3: FG1 -> South 2 (for SDR V4; its own FG1 until then)`. |
-| Back | Back for 10 s: each dongle runs its own job again (`... (its own job again)`). A dongle that goes again within 30 min of coming back is flapping: its job stays on the stand-in until it has stayed 2 min, then 10 min, then 30 min (`gone again … stayed 120 s`). MRRS's own flap hold (#594) carries over such a move, never a person's switch or a reception test. A dongle seen late at boot counts as there until it has been missing 10 s, so USB attaching late moves nothing. |
+| Back | Back for 10 s: each dongle runs its own job again (`... (its own job again)`). A dongle that goes again within 30 min of coming back is flapping: its job stays on the stand-in until it has stayed 2 min, then 10 min, then 30 min (`gone again … stayed 120 s`). MRRS's own flap hold (#594) carries over such a move, never a person's switch or a reception test. MRRS started by a group move (a restore that gives the county's dongle back in the same step, too) waits until the county's trunk-recorder is up 5 s (at most a minute), as at a return, once per move: a crash restart or a dongle's return later never waits for it again (#637). A dongle seen late at boot counts as there until it has been missing 10 s, so USB attaching late moves nothing. |
 | Restart | `sdr_modes.json` always keeps the mapping (an older release starts that). The stand-ins running are kept in `antenna_standins.json` and run again at the next start (only those plugged in then), before anything else: an update during a shortage never hands the county's job back to the dongle that is still gone. |
 | Never | A fallback never turns on a dongle a person switched Off (how a dongle is handed to shortfinal), never gives a fire job's dongle (Fire/EMS 15, paging, a fireground) to a job that isn't one, never touches a dongle outside the group: the county's trunk-recorder moves only if Fire/EMS 15 is in that group and a higher job took its place. A dongle lent to a reception test is left out; a reception test only lends a grouped dongle to its group's jobs, and never a stand-in. |
 | Two-dongle systems | MRRS 770 and MRRS 773 are two jobs, one per dongle. With one dongle left the higher side runs and MRRS decodes the control channels that side covers (`1 of 2 dongles`). A side that alone would cover none of the system's control channels is never given a dongle by a fallback. |
@@ -669,8 +689,10 @@ job): **+ Antenna group**, a name, its dongles, its jobs in priority order (high
 | At startup | A saved fire job the groups don't allow there (a dongle renamed by hand) keeps running where it was, logged `CRITICAL … kept running`, and Health says "Antenna group UHF check"; any other such job starts Off. `sizeup-station sdr-serial` moves a renamed dongle in `antenna_groups.json` too. A groups file that doesn't read is dropped (every dongle unlocked), logged CRITICAL and alerted ("Antenna groups dropped") until the groups are saved again. |
 | Shared serial | Two dongles with one serial (#242): a job already running on the grouped dongle stays there; one that can't start there is stood in for. |
 | Shown | A lock badge with the group's name on each grouped dongle; one line per group: dongles running / in the group, its jobs in order, a job not running in amber. A stand-in's row says `for <SDR>`, the missing dongle's `on <SDR>`. Settings > Station > Health: the dongles' Group column and an Antenna groups table; the alert **Antenna group UHF short** (warning, after 60 s) lists the jobs not running, and **Antenna group UHF check** a job the group lists that no dongle has, or a dongle running a job against it. |
+| Parked | A job of the list switched off on purpose (a fireground left off for coverage reasons): **Park** beside it in the editor. Shown `FG2 (parked)`, never in "Antenna group X check"; no dongle may pick it, and no fallback or auto-assign starts it. It keeps its place in the order for when it is unparked. Fire/EMS 15 and paging can never be parked (fire coverage: "no dongle has" stays a warning); parking a fireground is asked once ("Save anyway"). Parking a job a dongle runs or has as its own, or one a running reception test is on, is refused (switch that dongle Off, or stop the test, first). Audited like any group save (`…; parked FG2`). (#637) |
+| No audio | A dongle that opens but streams no audio (`rtl_fm stalled: no audio for 5 s` again and again; it never leaves USB, #703): 3 such stalls with not a byte of audio within 2 min, then one USB reset (native Linux only: `USBDEVFS_RESET`; under WSL2 there is none, a reset through usbipd never reaches the dongle), then 3 more: it is **out**, as if unplugged. Its job moves to another dongle of its group by the fallback order above (a spare, else the lowest job's dongle; never a higher job's, never a parked job). With nothing to take, the job keeps retrying where it is. Logged once (`sdr: CRITICAL SDR V4 streams no audio (South 2): out …`); Receivers says `no audio` on the dongle (and on the channel when it stays there), Health shows it in the dongles table and alerts once (**SDR V4 no audio**, critical, mutable as "SDR no audio"), never per stall. It is back when it streams again (idle, it is tried with rtl_fm for 8 s, audio the whole time, after 2 min, then 10, then every 30 min; never while another app or a reception test has it), when a person picks a job for it (or Off), or when it is replugged (gone from USB and back, or a new USB device number). Stalls don't count for 2 min after a start (a restart or an update), during an update or a switch, or while another app (shortfinal) holds the dongle, nor the airband channelizer's (`rtl_sdr stalled`: it falls back to rtl_fm by itself first). With no healthy dongle for a job, an out dongle is the last resort: the job stays on (or goes back to) one and keeps retrying there, never stops. Out dongles are kept over a restart or an update (`antenna_noaudio.json`, only at the same USB address). A missed USB look never counts as a replug (two looks in a row with other dongles listed). **Not covered:** Fire/EMS 15 (trunk-recorder: its own watchdog and the #592 unplug handling) and other P25 systems. |
 | Groups changed | A group deleted (or a dongle taken out) while a stand-in runs: the stand-in goes back to its own job, and the job it ran waits on its own dongle again, as any job does. |
-| File | `antenna_groups.json` (`{"groups": [{"name", "sdrs", "jobs"}]}`), next to `sdr_modes.json` (beside `captures/clips`). No groups: no file, and nothing changes. |
+| File | `antenna_groups.json` (`{"groups": [{"name", "sdrs", "jobs", "parked"?}]}`), next to `sdr_modes.json` (beside `captures/clips`). No groups: no file, and nothing changes. A rollback to a release before #637 ignores `parked` (those jobs are unparked: auto-assign may give one to a spare again), and a group saved there drops it; park them again after updating. |
 
 ## trunk-recorder, its own service
 
@@ -735,7 +757,7 @@ Nothing of it runs until a person gives it a dongle. The files, the tiers and th
 | Runs as | A second trunk-recorder under `sizeup-trunk-recorder.service`, at a lower CPU priority (nice 5) than the county's. Only the sources that have a dongle run. The county's trunk-recorder never restarts for it. |
 | Files | `/var/lib/sizeup/trunk-recorder/systems/mrrs/` (`config.json` and `talkgroups.csv` from the release, `trunk-recorder.log`). Calls: `/var/lib/sizeup/captures/p25-mrrs`. sizeup's wish: `/var/lib/sizeup/state/p25_recorder.mrrs.json`. |
 | Claims | Each of its dongles has a claim with its job as the mode ([docs/handoff-shortfinal-dongles.md](../../docs/handoff-shortfinal-dongles.md)). |
-| Unplugged | A dongle of it gone from USB stops its trunk-recorder (`absent`, not green); it starts again once every one is back, the USB list (up to its own and the county's dongles) has stayed the same 5 s (at most a minute) and the county's trunk-recorder is up (journal: `p25 mrrs: dongles back after m:ss: restarting trunk-recorder`). Not a watchdog restart. A dongle that goes again within 10 min of coming back is held back 30 s, 2, 5, then 10 min, each a restart counted (#592). |
+| Unplugged | A dongle of it gone from USB stops its trunk-recorder (`absent`, not green); it starts again once every one is back, the USB list (up to its own and the county's dongles) has stayed the same 5 s (at most a minute) and the county's trunk-recorder is up (journal: `p25 mrrs: dongles back after m:ss: restarting trunk-recorder`). Not a watchdog restart. A dongle that goes again within 10 min of coming back is held back 30 s, 2, 5, then 10 min, each a restart counted (#592). While held, the Receivers row and Health say `held to hh:mm` (amber, no fault; the detail `held back until hh:mm after dropouts`), and it starts by itself then (#637). |
 | Talkgroup tiers | `alert` (record, transcribe, may pre-alert), `text` (record, transcribe), `record` (audio only), `off`, and `activity` for an encrypted talkgroup: never recorded, only that it was active. The file's `Tier` column is the default; Settings > Radios changes it. |
 | Source keys | Its talkgroups are named with the system: `p25:mrrs:<talkgroup>`. The county's keep `tg:<talkgroup>`. |
 | Its traffic | Context only: never Main, never on our incident, never an incident source. |

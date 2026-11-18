@@ -133,6 +133,8 @@ GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels
                                           quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
 POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
                                           an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
+POST /api/cad/settings/signal_metrics    {action: set {key, value} | reset {key}}: the suggested squelch's margin and the
+                                          shift warnings' thresholds (sizeup/cloud/metricsinsight.py, #606): admins, audited
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -159,6 +161,10 @@ POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{lab
 GET  /api/cad/incident/<id>/units?q=e6    unit autocomplete: on the event first, then fire units, then the rest
 POST /api/cad/incident/<id>/recommend     {type?, subtype?}      -> {units, unfilled, already, card, note}
 POST /api/cad/incident/<id>/feed-use      {field: type|location} -> the event: the CAD feed's value over a person's (#297)
+POST /api/cad/incident/<id>/merge         {into, operator?} a page's own queued card merged into the CAD feed's event it
+                                          is (the card's "Merge into #N", sizeup/cad/pagematch.py): its page goes there,
+                                          the card dismissed | {undo: true, operator?} that merge undone (the card queued
+                                          again). Dispatchers and admins; 400 for a card with units on it
 POST /api/cad/incident/<id>/auto-undo     {step, operator?}  an automatic step (60 Control dispatching, #311; the event's
                                           auto.steps) taken back: the unit (or the close) is then a person's
 POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an automatic radio-log link (mention / fireground,
@@ -177,7 +183,10 @@ POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, uni
                                           like dispatch; preview: true is the text only (audio: true renders it too)
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
                                           another agency's unit (any event): on it Dispatched (its set's first
-                                          status: a keyholder Notified), then its statuses (#219)
+                                          status), then its statuses (#219); status DP (DO: a third party's) puts
+                                          it on as that. A third-party unit (keyholder, utility, police) whatever
+                                          the status asked: Dispatched or Dispatch other, never Responding
+                                          -> {ok, moved, as: {unit: status it went on as}, status?}
                                           {unit_ids, status: RS | OL | ET | IC, operator} -> {ok, moved, status}: on
                                           any open event in that status, not dispatched (no Disp time, no dispatch
                                           logged, nothing said); 400 for a unit already on it, out of service, or
@@ -221,10 +230,15 @@ POST /api/cad/airport-alert/<id>/accept   {operator?}  an airport pre-alert (HPN
                                           sizeup/cad/airport_alerts.py) made into a PENDING event: never a dispatch
 POST /api/cad/airport-alert/<id>/dismiss  {operator?, reason?}  ... that is nothing; dispatchers and admins
 GET  /api/cad/export/airport-alerts.csv   every airport pre-alert kept (90 days), ATC and ADS-B, with its outcome
-POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
+POST /api/cad/hint/<id>/accept            {operator?, confirm?}  a unit status suggested from the radio (#37, the state's
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
-                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
+                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins; a unit out of
+                                          service (oos: true): 400 unless confirm: true (sizeup/cad/oos.py)
 POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
+POST /api/cad/oos-notice/<id>/service   {operator?}  an automation refused on an out-of-service unit (the state's
+                                          oos_notices; sizeup/cad/oos.py): the unit back in service (its free status);
+                                          /dismiss: left out of service. Dispatchers and admins; 400 once it lapsed
+                                          (5 min, or its call closed)
 GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
 GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarms.py, #128): {open, notices, recent, drill,
                                           settings: {keywords, channels, other, drill, defaults, edited, push}, history}
@@ -266,16 +280,27 @@ GET  /api/cad/stations                    Settings > Station > Stations (sizeup/
                                           created, rotated, revoked, last used) and the shared token's state; never a hash.
                                           The hub's only; a signed-in admin only
 POST /api/cad/stations                    {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's}}:
-                                          a signed-in admin only. add / rotate
+                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's,
+                                          confirm?}}: a signed-in admin only. shared_id while its station is live:
+                                          409 {error: the question, confirm: true} until sent with confirm. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
+GET  /api/cad/stt-workers                 Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): each GPU worker
+                                          (id, name, created, rotated, revoked, last used, its live state) and the pool's
+                                          switches; never a hash. The hub's only; a signed-in admin only
+POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
+                                          pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
+                                          (no-store), the one time it is shown. In the Settings audit (System) and the
+                                          person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
                                           the station's signal metrics (sizeup/cloud/metricstore.py): a channel's ("FG1")
                                           or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
                                           most) or hourly (n, lo, p50, p90, hi), with the events that explain a shift (the
                                           station's and the Settings audit's); no subject: what series there are. The
-                                          hub's only; a signed-in admin only (never without a verified sign-in)
+                                          hub's only; a signed-in admin only (never without a verified sign-in).
+                                          metric= one or several, comma-separated. ?view=squelch: each channel's
+                                          suggested squelch and the numbers behind it; view=spark: 24 h in half hours
+                                          (Health); view=shifts: the shift warnings (sizeup/cloud/metricsinsight.py)
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -298,8 +323,15 @@ POST /api/cad/settings/department_units  {action: set {key: a feed's department 
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
-POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, section, items}], base?} | reset {base?}}: the
-                                          Radio page rail's folders for everyone (#607, sizeup/cad/radiofolders.py); admins
+POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, section, items}], base?} | name {key, name,
+                                          base?} | reset {base?}}: the Radio page rail's folders for everyone (#607,
+                                          sizeup/cad/radiofolders.py; name: one channel's display name, blank its own,
+                                          also from Settings > Radios > Channels); admins
+POST /api/cad/settings/radio_services     {action: set {key, service} | set_many {services: {key: service}}}: a source's
+                                          service (fire | police | ems | transit | air | other; automatic: none chosen)
+                                          over its talkgroups file's and its words (sizeup/sourcekeys.py); its rows of
+                                          the last 30 days re-tagged, off the request; from Settings > Radios > Channels
+                                          and the rail's Edit; admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
                                           (#414, sizeup/audiostore.py); _format: wav only for now; admins
@@ -327,6 +359,11 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
                                           signed in (sourcekeys.may_see_context), 403 otherwise
 POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
+GET  /api/cad/prealerts/<kind>/<id>       a pre-alert's More info (kind airport | intel; /cad#prealert/<kind>/<id>): its
+                                          context bundle (sizeup/context_bundle.py: why, the transmissions and their
+                                          audio, before / after, the place, site history, now, the outcome). Anyone
+                                          signed in (403 otherwise, as the radio pre-alerts); 404 when there is none
+                                          (or it is a shadow / log one and the reader no admin)
 POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
                                           anyone signed in
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
@@ -350,9 +387,15 @@ from sizeup.cad.settings import LastAdmin
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
 
+
+class NeedsConfirm(CadError):
+    """A change that affects something live (sizeup/cloud/stations.py ConfirmNeeded): 409 {error, confirm: true}; the
+    page asks the question (the error) and sends it again with confirm: true."""
+
+
 JSON = "application/json"
 MAX_BODY = 65536
-INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo))?")
+INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
 PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
@@ -368,7 +411,9 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+OOS_NOTICE = re.compile(r"/api/cad/oos-notice/(\d{1,9})/(service|dismiss)")      # automation refused (sizeup/cad/oos.py)
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
+PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
@@ -395,6 +440,7 @@ ADMIN_READS = {
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/stations": "stations and their tokens are for admins (Settings > Station > Stations)",
+    "/api/cad/stt-workers": "speech-to-text workers and their tokens are for admins (Settings > Station > STT workers)",
     "/api/cad/metrics": "the station's signal metrics are for admins (Settings > Radios)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
@@ -404,12 +450,13 @@ ADMIN_READS = {
 # anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
-                r"|attach|link|unlink|keep|return|feed-use|auto-undo))?)?"), "dispatch"),      # events, notes, dispatches, radio links
+                r"|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?)?"), "dispatch"),      # events, notes, dispatches, radio links
     (DISPATCH_MODE, "dispatch"),                                            # 60 Control / PCFD dispatching (#311)
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (OOS_NOTICE, "dispatch"),                                               # an out-of-service unit back in service
     (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
     (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
@@ -431,6 +478,7 @@ WRITES = (
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (re.compile(r"/api/cad/stations"), "admin"),                            # stations' tokens (sizeup/cloud/stations.py)
+    (re.compile(r"/api/cad/stt-workers"), "admin"),                         # GPU workers' tokens (sizeup/cloud/sttworkers.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -479,7 +527,7 @@ def _created(m, b, o, c):
 def _on_incident(m, b, o, c):
     iid, act = int(m.group(1)), m.group(2)
     n = _number(c, iid)
-    ev = n or ("a 60 Control page" if act in ("dismiss", "accept", "reopen") else f"event {iid}")
+    ev = n or ("a 60 Control page" if act in ("dismiss", "accept", "reopen", "merge") else f"event {iid}")
     if act is None:
         return f"Edited {ev}: {', '.join(k for k in b if k != 'operator') or 'nothing'}", n
     if act in ("recommend", "preview") or (act == "upgrade" and b.get("preview")):
@@ -492,6 +540,11 @@ def _on_incident(m, b, o, c):
         return f"Closed {ev}: {b.get('disposition', '')}", n
     if act == "feed-use":
         return f"Used the CAD feed's {_clip(b.get('field'), 20)} on {ev}", n
+    if act == "merge":                   # a page's card into the feed's event (sizeup/cad/pagematch.py), or undone
+        if b.get("undo") is True:
+            return f"Undid the merge of {ev}: back in the queue", n
+        return f"Merged {ev} into {_number(c, b['into']) or 'event ' + str(b['into'])}" if isinstance(b.get("into"), int) \
+            else f"Merged {ev}", n
     if act == "reopen":
         return f"Reopened {ev}" + (f": {o['status']}" if o.get("status") else ""), n
     if act == "note":
@@ -503,6 +556,17 @@ def _on_incident(m, b, o, c):
         what = [x for x in (_type(b.get("type", ""), b.get("subtype", "")) if b.get("type") else "",
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
+    if act == "attach" and isinstance(o.get("as"), dict) and o["as"] and set(o["as"].values()) != {b.get("status")}:
+        # each unit as it went on, when not all as asked (a third party: Dispatched); a plain attach's own units: attached
+        groups: dict[str, list[str]] = {}
+        for name in [x for x in _units(c, b.get("unit_ids")).split(", ") if x and x not in o["as"]]:
+            groups.setdefault("", []).append(name)
+        for name, st in o["as"].items():
+            groups.setdefault(str(st), []).append(str(name))
+        said = "; ".join(f"{', '.join(us)} " + ("attached" if not st else c.lists.status_phrase(st)
+                                               + (" (not dispatched)" if c.lists.role(st) in ("enroute", "onscene") else ""))
+                         for st, us in groups.items())
+        return f"Added to {ev}: {said}" + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else ""), n
     if act == "attach" and b.get("status"):
         return (f"Added {_units(c, b.get('unit_ids'))} to {ev} {c.lists.status_phrase(str(b['status']))} (not dispatched)"
                 + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else "")), n
@@ -651,6 +715,9 @@ DOES = (
     (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
                                f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
+    (OOS_NOTICE, lambda m, b, o, c: ((f"Put {o.get('name', '')} in service" if m.group(2) == "service"
+                                      else f"Kept {o.get('name', '')} out of service")
+                                     + f" ({_clip(o.get('what'), 60)})", "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
@@ -689,6 +756,9 @@ DOES = (
     (re.compile(r"/api/cad/stations"), lambda m, b, o, c: (
         f"Stations: {_clip(str(b.get('action') or '').replace('_', ' '), 20)}"
         + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
+    (re.compile(r"/api/cad/stt-workers"), lambda m, b, o, c: (
+        f"STT workers: {_clip(str(b.get('action') or ''), 20)}"
+        + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
@@ -699,7 +769,9 @@ DOES = (
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/antenna-groups"), lambda m, b, o, c: ("Antenna groups: " + (_clip("; ".join(
-        f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))})"
+        f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))}"
+        + (f"; parked {', '.join(map(str, g.get('parked')))}" if isinstance(g.get("parked"), list) and g.get("parked")
+           else "") + ")"
         for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
         + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
@@ -979,6 +1051,19 @@ class CadApi:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
 
+    def _prealert_info(self, kind: str, pid: int, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/prealerts/<kind>/<id>: the context bundle (sizeup/context_bundle.py). Fails closed: a verified
+        sign-in (or a CAD that broadcasts context on purpose), as the radio pre-alerts and their transcripts."""
+        from sizeup import context_bundle
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+            return _json(403, {"error": "pre-alert details need a sign-in (Cloudflare Access)"})
+        try:
+            out = context_bundle.build(self.cad, kind, pid, admin=self._admin(who),
+                                       may=self._may(who))
+        except context_bundle.NotFound as e:
+            return _json(404, {"error": str(e)})
+        return 200, json.dumps(out, separators=(",", ":"), default=str).encode(), JSON, {"Cache-Control": "no-store"}
+
     def _admin(self, who) -> bool:
         """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
         if who is None or not who.email:
@@ -1067,7 +1152,23 @@ class CadApi:
             return _json(404, {"error": "stations are the hub's"})
         if (why := self._signed_admin(who)) is not None:
             return _json(403, {"error": why})
-        return _json(200, reg.panel())
+        out = reg.panel()
+        sw = getattr(self.cad, "stt_workers", None)          # each station's whisper in the STT pool (#639 phase 2)
+        if sw is not None:
+            on = sw.pool_settings().get("stations") or {}
+            for s in out.get("stations", []):
+                s["pool_whisper"] = bool(on.get(s["id"], False))
+        return _json(200, out)
+
+    def _stt_workers(self, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/stt-workers: Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639). The hub's only,
+        and only for an admin with a verified sign-in. Never a hash."""
+        reg = getattr(self.cad, "stt_workers", None)
+        if reg is None:
+            return _json(404, {"error": "speech-to-text workers are the hub's"})
+        if (why := self._signed_admin(who)) is not None:
+            return _json(403, {"error": why})
+        return _json(200, reg.panel(getattr(self.cad, "stt_workers_live", None)))
 
     def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
         """GET /api/cad/metrics: the station's signal metrics (sizeup/cloud/metricstore.py). The hub's only, and only for
@@ -1078,8 +1179,17 @@ class CadApi:
         if (why := self._signed_admin(who)) is not None:
             return _json(403, {"error": why})
         from sizeup.cloud.metricstore import MetricsError
+        q = parse_qs(query)
+        if "view" in q:                         # #606: suggestions, Health's sparks, the shifts (metricsinsight.py)
+            ins = getattr(self.cad, "station_metrics_insight", None)
+            if ins is None:
+                return _json(404, {"error": "station metrics are the hub's"})
+            try:
+                return _json(200, ins.view(q["view"][0]))
+            except ValueError as e:
+                return _json(400, {"error": str(e)})
         try:
-            return _json(200, store.query(parse_qs(query)))
+            return _json(200, store.query(q))
         except MetricsError as e:
             return _json(400, {"error": str(e)})
 
@@ -1095,6 +1205,8 @@ class CadApi:
                 return self._logs(path, query, who)
             if path == "/api/cad/stations":
                 return self._stations(who)
+            if path == "/api/cad/stt-workers":
+                return self._stt_workers(who)
             if path == "/api/cad/metrics":
                 return self._metrics(query, who)
             if path == "/api/cad/datasources":
@@ -1152,6 +1264,8 @@ class CadApi:
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
+            if m := PREALERT_INFO.fullmatch(path):
+                return self._prealert_info(m.group(1), int(m.group(2)), who)
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -1219,7 +1333,7 @@ class CadApi:
         c = self.cad
         signed = who is not None and bool(who.email)
         body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
-        if path == "/api/cad/stations" and not signed:
+        if path in ("/api/cad/stations", "/api/cad/stt-workers") and not signed:
             return _json(403, {"error": "Admins only: sign in"})     # a station's keys: never without a verified admin
         try:
             if signed:                             # signed in: that's the operator, not what the page typed
@@ -1236,6 +1350,8 @@ class CadApi:
             if signed:
                 self.refused(path, who, "the last admin", client)
             return _json(409, {"error": str(e)})
+        except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm
+            return _json(409, {"error": str(e), "confirm": True})
         except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting
             if signed:
                 self.refused(path, who, str(e), client)
@@ -1252,12 +1368,34 @@ class CadApi:
         c = self.cad
         if m := SETTINGS.fullmatch(path):
             return c.settings_post(m.group(1), body, guard=guard)
+        if path == "/api/cad/stations" and body.get("action") == "pool_whisper" and getattr(c, "stt_workers", None):
+            from sizeup.cloud.sttworkers import WorkerError
+            op = str(body.get("operator") or "")
+            sid, on = str(body.get("id") or ""), body.get("on")
+            if not sid or not isinstance(on, bool) or c.stations.row(sid) is None:
+                raise CadError("pool_whisper: {id: a station, on: true or false}")
+            try:     # this station's whisper in the STT pool (#639 phase 2): audited like the pool's switches
+                return c.stt_workers.act({"action": "pool", "stations": {sid: on}}, op,
+                                         lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except WorkerError as e:
+                raise CadError(str(e)) from None
         if path == "/api/cad/stations" and getattr(c, "stations", None) is not None:
-            from sizeup.cloud.stations import StationError
+            from sizeup.cloud.stations import ConfirmNeeded, StationError
             op = str(body.get("operator") or "")
             try:     # in the Settings audit (System): what was done to which station, never a token
                 return c.stations.act(body, op, lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except ConfirmNeeded as e:
+                raise NeedsConfirm(str(e)) from None
             except StationError as e:
+                raise CadError(str(e)) from None
+        if path == "/api/cad/stt-workers" and getattr(c, "stt_workers", None) is not None:
+            from sizeup.cloud.sttworkers import WorkerError
+            op = str(body.get("operator") or "")
+            pool = getattr(c, "stt_pool_forget", None)
+            try:     # in the Settings audit (System): what was done to which worker, never a token
+                return c.stt_workers.act(body, op, lambda k, old, new: c.settings.note(op, "system", k, old, new),
+                                         on_revoke=pool)
+            except WorkerError as e:
                 raise CadError(str(e)) from None
         if path == "/api/cad/incident":
             return c.create(body)
@@ -1266,7 +1404,7 @@ class CadApi:
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,
                   "recommend": c.recommend, "preview": c.preview, "dispatch": c.dispatch, "upgrade": c.upgrade,
                   "attach": c.attach, "link": c.link_traffic, "unlink": c.unlink_traffic, "keep": c.keep_traffic,
-                  "return": c.return_unit, "feed-use": c.feed_use, "auto-undo": c.auto_undo}[action]
+                  "return": c.return_unit, "feed-use": c.feed_use, "auto-undo": c.auto_undo, "merge": c.merge}[action]
             return fn(iid, body)
         if m := UNIT.fullmatch(path):
             return c.unit_status(int(m.group(1)), body)
@@ -1280,6 +1418,8 @@ class CadApi:
             return c.airport_alert(int(m.group(1)), m.group(2), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := OOS_NOTICE.fullmatch(path):
+            return c.oos_notice(int(m.group(1)), m.group(2), body)
         if m := INTEL_EVENT.fullmatch(path):
             if not sourcekeys.may_see_context(c.comms.context_broadcast):
                 raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")

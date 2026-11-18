@@ -1,0 +1,497 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 10,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 123 25 miles out, declaring an emergency, engine failure",
+     "hits": [
+      [
+       "declaring",
+       "declaring an emergency"
+      ],
+      [
+       "engine",
+       "engine failure"
+      ]
+     ],
+     "score": 0.9875,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "emergency",
+      "subject": "acft:JBU123",
+      "group": "HPN Tower",
+      "title": "HPN ATC: emergency declared: JBU123",
+      "confidence": 0.99,
+      "rank": 3,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "JBU123",
+        "b00123",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU123",
+       "hex": "b00123",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU123",
+       "hex": "b00123",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU123",
+       "hex": "b00123"
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:JBU123",
+      "group": "",
+      "title": "HPN ATC: abnormal · engine, emergency · JBU123 (A320)",
+      "confidence": 0.7,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "JBU123",
+        "b00123",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "added"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: emergency declared: JBU123 (0.99)",
+    "airport_watch: airport watch: JBU123: abnormal -> pre-alert #A1 (0.70)"
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 50
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 60,
+    "id": "twr-2"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-2",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 12 4 mile final, we have smoke in the cabin",
+     "hits": [
+      [
+       "smoke-aircraft",
+       "smoke in the cabin"
+      ]
+     ],
+     "score": 0.950781,
+     "adsb": null,
+     "context": [
+      "twr-1"
+     ],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "emergency",
+      "subject": "acft:JBU12",
+      "group": "HPN Tower",
+      "title": "HPN ATC: emergency declared: JBU12",
+      "confidence": 0.95,
+      "rank": 3,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "JBU12",
+        "b00012",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "added"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-2",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU12",
+       "hex": "b00012"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-2",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 110
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 120,
+    "id": "twr-3"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-3",
+     "ch": "HPN Tower",
+     "fed": "Westchester traffic JBU1234 mile final for runway 34 Westchester",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-3",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "JBU1234",
+       "hex": "b01234"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-3",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 170
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 180,
+    "id": "twr-4"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-4",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 45 2 miles out, we just got lasered, green laser from the ground",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.74125,
+     "adsb": null,
+     "context": [
+      "twr-2",
+      "twr-3"
+     ],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "fire_acft",
+      "subject": "fire:34",
+      "group": "HPN Tower",
+      "title": "HPN ATC: smoke on board reported by JBU1234, runway 34",
+      "confidence": 0.74,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "JBU1234",
+        "b01234",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "added"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-4",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU45",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "JBU45",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU45",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-4",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 230
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 240,
+    "id": "twr-5"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-5",
+     "ch": "HPN Tower",
+     "fed": "Westchester traffic JBU1234 3 mile final for runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-5",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "JBU1234",
+       "hex": "b01234"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-5",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 290
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 300,
+    "id": "twr-6"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-6",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 12 34 mile final, runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-6",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU1234",
+       "hex": "b01234",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU1234",
+       "hex": "b01234"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-6",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "picture",
+    "t": 350
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 360,
+    "id": "twr-7"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-7",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 12 25 miles out, with you for runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-7",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU12",
+       "hex": "b00012"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-7",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "read",
+    "t": 380
+   }
+  }
+ ]
+}

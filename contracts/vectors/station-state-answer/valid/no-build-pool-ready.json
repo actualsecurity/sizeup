@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "build": "",
+  "caps": [
+    "p25_systems",
+    "stt_input",
+    "stt_pool"
+  ],
+  "pool": {
+    "on": true,
+    "worker": true,
+    "ready": 2,
+    "max_s": 3600.0,
+    "gpu_idle": true,
+    "gpu_idle_n": 1
+  },
+  "services": {
+    "p25:countynet:4101": "fire",
+    "fm:Fireground 1": "fire"
+  },
+  "station": "st-north"
+}

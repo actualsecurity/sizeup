@@ -141,6 +141,11 @@
   .qs { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .qnote { font-weight: 700; margin-block: var(--s-1); }
   .qnote:empty { display: none; }
+  /* a page that may be the CAD feed's event (sizeup/cad/pagematch.py): "Same call as #N?" and its one-tap merge */
+  .q-merge, .qmerge { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .q-merge { margin-block-start: var(--s-1); font-weight: 700; }
+  .qmerge { margin-block: var(--s-1); font-weight: 700; }
+  .qmerge[hidden] { display: none; }
   .qi .chips { margin-block-start: var(--s-1); }
   /* from the Overview's old cards (#217): a rig on the call talking now lights the card and rings its chip, with a TX
      line; the call's newest transmission and note, one line each, on the Overview only */
@@ -476,6 +481,9 @@
   .add-chip.skip { --c: var(--dim); text-decoration: line-through; }
   .add-chip.nomatch { --c: var(--err); border-style: dashed; }
   .add-chip.typing { --c: var(--dim); border-style: dashed; }
+  .add-chip.third { --c: var(--info); }                 /* a third party typed with our units: on Dispatched */
+  .note-sugg > li.grp { min-block-size: auto; padding-block: var(--s-1) 0; cursor: default; pointer-events: none;
+    background: none; font-size: var(--fs-2xs); font-weight: 600; }
   /* a note's "@place" (#67): a chip in the text that shows the spot on the map */
   .place-tag { --c: var(--info); font-weight: 600; white-space: normal; text-align: start; }
   .place-tag .ico { inline-size: var(--ico-sm); block-size: var(--ico-sm); }
@@ -604,6 +612,9 @@
   .hint-chip .hint-ok { color: var(--ok-text); border-color: var(--ok); }
   .hint-chip .hint-no { color: var(--dim); }
   .hint-line { color: var(--info); font-style: italic; margin-block-start: var(--s-1); }
+  /* automation refused on an out-of-service unit (oos-notices.js, sizeup/cad/oos.py): the same chip, in warning */
+  .hint-chip.oos-chip { border-color: var(--warn); color: var(--warn); }
+  .oos-line { display: flex; min-inline-size: 0; margin-block-start: var(--s-1); }
 
   /* a transmission with no radio ID (#163): what was found, dashed, never in the talker's place */
   .chip.noid { color: var(--dim); border-style: dashed; background: transparent; }
@@ -701,8 +712,31 @@
      list on the right. .nav-on: this viewer turned it on, and the page as before is put away. The rail folds to a
      strip of view marks (.mini); under 640 px it is a sheet over the list (.sheet), behind Sources. ---- */
   .radio-view.nav-on > :is(.rv-filters, .rv-sec) { display: none; }
-  .rn { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: var(--gutter); align-items: start; min-inline-size: 0; }
+  /* the rail's own default (not --rail-w: the queue column dragged narrower must not take the rail under its minimum) */
+  .rn { display: grid; grid-template-columns: minmax(17.5rem, 20%) minmax(0, 1fr); gap: var(--gutter); align-items: start; min-inline-size: 0;
+        --rn-gap: calc(var(--gutter) + var(--s-2)); }
   .rn.mini { grid-template-columns: calc(var(--ctl) + 2 * var(--s-2)) minmax(0, 1fr); }
+  .rn > .rn-rail { grid-area: 1 / 1; }
+  .rn > .rn-main { grid-area: 1 / 2; }
+  /* the rail's width, dragged at its right edge (radio-nav.js): what this viewer chose (--rn-w), at least the layout's
+     own minimum, at most 60% of the window, the list never under 16rem; the handle: the gap itself, widened to 20 px
+     beside a side rail (neither the rail's scrollbar nor the list under it), a line in its middle while hovered,
+     focused or dragged; none while folded or a sheet */
+  .rn-size { display: none; }
+  @media (min-width: 641px) {
+    .rn:not(.mini) { column-gap: var(--rn-gap); }
+    .rn.sized:not(.mini) { grid-template-columns: max(17.5rem, min(var(--rn-w), 60vw, 100% - 16rem - var(--rn-gap))) minmax(0, 1fr); }
+    .rn:not(.mini) > .rn-size {
+      display: block; grid-area: 1 / 1; justify-self: end; align-self: stretch; position: relative; z-index: var(--z-sticky);
+      inline-size: var(--rn-gap); margin-inline-end: calc(-1 * var(--rn-gap)); cursor: col-resize; touch-action: none; pointer-events: auto;
+    }
+  }
+  .rn-size::before {
+    content: ""; position: absolute; inset-block: 0; inset-inline-start: calc(var(--rn-gap) / 2 - var(--bw));
+    inline-size: calc(2 * var(--bw)); background: transparent; transition: background-color 0.12s;
+  }
+  .rn-size:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
+  .rn-size:focus-visible { outline: none; }
   .rn-rail { display: grid; gap: var(--s-1); padding: var(--s-2); background: var(--panel); border: var(--bw) solid var(--line);
              border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: 0;
              max-block-size: calc(100vh - 2 * var(--hdr-h)); overflow-y: auto; }
@@ -728,6 +762,11 @@
   .rn-edsec { min-inline-size: 0; font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .rn-edi { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; padding-inline-start: var(--s-2); }
   .rn-edch { flex: 1 1 auto; min-inline-size: 0; }
+  /* a channel's service: after Move to, on its own line under the name when the rail is narrow */
+  .rn-edi:has(> .rn-edsvc) { flex-wrap: wrap; }
+  .rn-edi:has(> .rn-edsvc) > .rn-edch { flex: 1 1 5rem; }
+  .rn-edsvc { flex: none; inline-size: auto; max-inline-size: 9rem; min-inline-size: 0; margin-inline-start: var(--s-3);
+              font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .rn-edto { flex: none; inline-size: 4.5rem; min-inline-size: 0; }
   .rn-edsec { color: var(--text-2); }
   .rn-edempty { padding-inline-start: var(--s-4); font-size: var(--fs-xs); line-height: var(--lh-xs); }
@@ -778,6 +817,7 @@
   #rn-older { justify-self: center; }
   @media (max-width: 640px) {
     .rn, .rn.mini { grid-template-columns: minmax(0, 1fr); }
+    .rn > .rn-main { grid-area: 1 / 1; }
     .rn-rail { display: none; }
     .rn-rail.sheet { display: grid; position: fixed; inset: var(--hdr-h) 0 0 0; z-index: var(--z-overlay); max-block-size: none;
                      border-radius: 0; align-content: start; }
@@ -809,6 +849,41 @@
   .sv-table td.num { white-space: nowrap; }
   .sv-notes { display: flex; flex-direction: column; gap: var(--s-2); }
   .sv-notes td.pn-text { overflow-wrap: anywhere; font-weight: 600; }
+
+  /* ---- a pre-alert's More info (prealert-info.js, /cad#prealert/<kind>/<id>): the bundle, a small map beside it --- */
+  body[data-view="prealert"] .overview { display: none; }    /* the middle column is the page's (cadmap.js shows the Overview) */
+  .pi-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .pi-view .view-head { flex-wrap: wrap; row-gap: var(--s-1); }
+  .pi-title { min-inline-size: 0; overflow-wrap: anywhere; color: var(--text); }
+  .pi-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); gap: var(--gutter); align-items: start; }
+  .pi-main, .pi-side { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .pi-sec { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; padding: var(--s-2) var(--s-3);
+            border: var(--bw) solid var(--line); border-radius: var(--radius); background: var(--card); }
+  .pi-sec h3 { font-size: var(--fs-md); line-height: var(--lh-md); }
+  .pi-sub { margin: var(--s-2) 0 0; font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
+  .pi-mapbox { position: relative; block-size: calc(var(--map-h) * 0.6); border-radius: var(--radius); border: var(--bw) solid var(--line); }
+  .pi-map { position: absolute; inset: 0; border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  .pi-none { padding-block: var(--s-1); }
+  .pi-dl { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); margin: 0; align-items: baseline; }
+  .pi-dl dt { color: var(--text-2); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  .pi-dl dd { margin: 0; min-inline-size: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: var(--s-1); align-items: baseline; }
+  .pi-txs { margin: 0; }
+  .pi-tx.pi-ev { border-inline-start: var(--s-1) solid var(--accent); }
+  .pi-tx.pi-ctx { opacity: 0.8; }
+  .pi-hit { color: var(--warn); overflow-wrap: anywhere; }
+  .pi-rules, .pi-kept { overflow-wrap: anywhere; }
+  .pi-word { font-family: var(--mono); }
+  .pi-calls, .pi-prior { margin: 0; }
+  .pi-call { display: flex; flex-direction: column; gap: var(--s-0); padding-block: var(--s-1); }
+  .pi-call-head, .pi-now-row { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-2); align-items: baseline; min-inline-size: 0; }
+  .pi-remarks, .pi-cmt, .pi-note, .pi-acft { overflow-wrap: anywhere; }
+  .pi-cmt { color: var(--text-2); padding-inline-start: var(--s-3); }
+  .pi-note { padding: var(--s-1) var(--s-2); border-inline-start: var(--s-1) solid var(--warn); background: var(--raised); }
+  .pi-inc { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .pi-level.high { color: var(--accent-text); }
+  .pi-level.medium { color: var(--warn); }
+  .aa-more { margin-right: auto; }
+  @media (max-width: 1100px) { .pi-grid { grid-template-columns: minmax(0, 1fr); } }
 
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
   .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }

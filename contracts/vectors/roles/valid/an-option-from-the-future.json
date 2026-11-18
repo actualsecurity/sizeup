@@ -1,0 +1,6 @@
+{
+  "infer": {
+    "llm_jobs": false,
+    "from_the_future": 1
+  }
+}

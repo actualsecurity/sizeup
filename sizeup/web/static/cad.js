@@ -46,6 +46,7 @@ const cad = {
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
   search: false,             // the Search view is open (#search, search-view.js, #403)
+  pinfo: false,              // a pre-alert's More info is open (#prealert/<kind>/<id>, prealert-info.js)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
@@ -140,6 +141,22 @@ function toLocalInput(unix) {
   if (!unix) return "";
   const p = Object.fromEntries(fmt("parts").formatToParts(new Date(unix * 1000)).map((x) => [x.type, x.value]));
   return `${p.year}-${p.month}-${p.day}T${p.hour === "24" ? "00" : p.hour}:${p.minute}`;
+}
+// An event's Until, as shown on its card and its facts: the day too when it isn't today or the day the event began;
+// flagged when it is before the event was created (a wrong day) or has passed while the event is still open (a
+// non-emergency one closes by itself once no unit is on it: sizeup/cad/store.py expire_until). -> {text, warn, tip} | null
+function untilInfo(inc, now = serverNow()) {
+  const u = inc.until_at;
+  if (!u) return null;
+  const day = (t) => toLocalInput(t).slice(0, 10), d = new Date(u * 1000);
+  const dated = day(u) !== day(now) || (!!inc.created_at && day(u) !== day(inc.created_at));
+  const text = (dated ? `${fmt("short").format(d)} ` : "") + fmt("hm").format(d);
+  const before = !!inc.created_at && u < inc.created_at - 60, passed = !before && u <= now && isOpen(inc);
+  const flag = before ? "before created" : passed ? "passed" : "";
+  const tip = before ? `Until ${fmtRecv(u)} is before the event was created (${fmtRecv(inc.created_at)}): check the day`
+    : passed ? (inc.emergency ? "Until has passed" : "Until has passed: closes once no unit is on it")
+    : inc.emergency ? fmtRecv(u) : `${fmtRecv(u)}: closes by itself then (Expired)`;
+  return { text: flag ? `${text} · ${flag}` : text, warn: !!flag, tip };
 }
 function fromLocalInput(v) {
   if (!v) return null;
@@ -325,7 +342,7 @@ function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SU
   for (const k of keys) if (k in c) return c[k] === "emergency";
   return true;
 }
-const live = (x) => !x.retired;     // retired: named on old events, off the pick lists
+const live = (x) => !x.retired && !x.system;     // retired, or the hub's own (Expired): named on events, off the pick lists
 function subtypesFor(t) {            // the type -> subtype map: only those listed (none, or not in the map: no subtype)
   const m = (L().type_subtypes || {})[t] || [];
   return (L().event_subtypes || []).filter((s) => live(s) && m.includes(s.code));
@@ -436,9 +453,17 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || cad.search || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || cad.pinfo || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
+  // #prealert/<kind>/<id>: a pre-alert's More info (prealert-info.js)
+  const pinfo = !BOARD && location.hash.startsWith("#prealert/");
+  if (pinfo !== cad.pinfo || pinfo) {
+    cad.pinfo = pinfo;
+    show($("#prealert-view"), pinfo);
+    if (window.PrealertInfo) { if (pinfo) PrealertInfo.open(location.hash.slice("#prealert/".length)); else PrealertInfo.close(); }
+    if (cad.state) render();
+  }
   const search = !BOARD && location.hash.startsWith("#search");
   if (search !== cad.search || search) {
     cad.search = search;
@@ -458,7 +483,7 @@ function route() {                    // #radio?filters: the Radio view; #search
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.pinfo ? "prealert" : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
@@ -564,9 +589,12 @@ function fillQueueItem(li, inc) {
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
     if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
-    li.append(el("div", "qs dim", "Accept or Dismiss"));
+    const mo = inc.merge_offer;          // the CAD feed's event this page may be (sizeup/cad/pagematch.py): one tap
+    if (mo && !BOARD && canDo("dispatch")) li.append(mergeRow(inc, "qs q-merge"));
+    else li.append(el("div", "qs dim", mo ? `Same call as ${mo.ref}?` : "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
-    if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
+    const u = untilInfo(inc);
+    if (u) li.append(Object.assign(el("div", u.warn ? "qs warn" : "qs dim", `Until ${u.text}`), { title: u.tip }));
   } else if (!isOpen(inc)) {
     const foot = el("div", "qs dim closed-foot");
     foot.append(el("span", "", inc.status === "dismissed" ? "Dismissed" : nameOf("dispositions", inc.disposition) || "Closed"));
@@ -621,12 +649,12 @@ function renderPrealert() {
   // airport pre-alerts (airport-alerts.js, #233): HPN ATC; accept makes a pending event (never a dispatch)
   const aa = cad.state && cad.state.airport_alerts;
   if (window.AirportAlerts) {
-    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), select: selectIncident, alarms: cad.state && cad.state.alarms });
+    AirportAlerts.column($(BOARD ? "#b-airport" : "#q-airport"), aa, { ...deps, readonly: BOARD || !canDo("dispatch"), more: !BOARD, select: selectIncident, alarms: cad.state && cad.state.alarms });
     AirportAlerts.notify(aa);
   }
   show($("#csv-airport-alerts"), !!aa);
   // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
-  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false });
+  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false, more: true });
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -637,8 +665,9 @@ function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed], queueExtra(i)]);
+    i.until_at, untilInfo(i)?.text, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed],
+    i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -667,7 +696,28 @@ function closedFold(open) {
 }
 // The closed row's "⋯" (the queue, Records): Reopen (#89)
 function closedMenuItems(inc) {
-  return [{ label: "Reopen", hint: inc.status === "dismissed" ? "to 60 Control" : "", run: () => reopenIncident(inc.id) }];
+  const m = inc.merged_into;           // a page merged into the feed's event by a person: undone here
+  return [...(m ? [{ label: "Undo merge", hint: `out of ${m.ref}`, run: () => mergeIncident(inc.id, { undo: true }) }] : []),
+    { label: "Reopen", hint: inc.status === "dismissed" ? "to 60 Control" : "", run: () => reopenIncident(inc.id) }];
+}
+// A page's own card merged into the CAD feed's event it is (POST merge; the card's "Merge into #N"), or undone.
+async function mergeIncident(iid, body) {
+  try {
+    await api("POST", `/api/cad/incident/${iid}/merge`, { operator: operator(), ...body });
+    UI.toast(body.undo ? "Merge undone: back in the queue" : "Merged");
+  } catch (e) {
+    UI.toast(e.message, "err");
+  }
+}
+// "Same call as #N?  [Merge into #N]": the evidence in the hover (concise on screen).
+function mergeRow(inc, cls) {
+  const mo = inc.merge_offer, row = el("div", cls);
+  const b = el("button", "sm primary", `Merge into ${mo.ref}`);
+  b.type = "button";
+  b.title = `${mo.address ? `${mo.ref}: ${mo.address}\n` : ""}${mo.why || ""}`;
+  b.addEventListener("click", (e) => { e.stopPropagation(); b.disabled = true; mergeIncident(inc.id, { into: mo.into }).finally(() => { b.disabled = false; }); });
+  row.append(el("span", "", `Same call as ${mo.ref}?`), " ", b);
+  return row;
 }
 // A closed event back on the boards (POST reopen): Active if a unit was ever on it, else Pending; a dismissed
 // page back to 60 Control. The disposition goes into the chronology; the dispatcher adds units again.
@@ -705,7 +755,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio || cad.search) {      // the Radio view (radio-view.js) or Search (search-view.js) has the middle column
+  if (cad.radio || cad.search || cad.pinfo) {      // Radio (radio-view.js), Search, a pre-alert's More info: the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }
@@ -744,6 +794,16 @@ function renderDetail() {
     const qsrc = inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source === "60 Control radio" ? "60 Control radio" : "60 Control page";
     setText($("#d-qhead"), `${qsrc}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
+    const mbox = $("#d-qmerge"), mo = inc.merge_offer;
+    show(mbox, !!mo);
+    if (mo) {
+      const sig = JSON.stringify([inc.id, mo, BOARD || !canDo("dispatch")]);
+      if (mbox._sig !== sig) {
+        mbox._sig = sig;
+        if (BOARD || !canDo("dispatch")) mbox.replaceChildren(el("span", "", `Same call as ${mo.ref}?`));
+        else mbox.replaceChildren(...mergeRow(inc, "").childNodes);
+      }
+    }
     const ts = $("#d-acc-type");
     const key = `${inc.type || ""}/${inc.subtype || ""}`;
     // follow the incident's type (a CAD feed may change it while queued) until a person picks another one here
@@ -777,8 +837,11 @@ function renderDetail() {
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");
-  show($("#d-until-w"), !!inc.until_at);
-  setText($("#d-until"), inc.until_at ? fmtTime(inc.until_at) : "");
+  const until = untilInfo(inc);
+  show($("#d-until-w"), !!until);
+  setText($("#d-until"), until ? until.text : "");
+  $("#d-until").classList.toggle("warn", !!until && until.warn);
+  $("#d-until").title = until ? until.tip : "";
   show($("#d-disp-w"), !!inc.disposition);
   setText($("#d-disp"), inc.disposition ? nameOf("dispositions", inc.disposition) : "");
   const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
@@ -791,7 +854,9 @@ function renderDetail() {
   if (window.PreplanDocs) PreplanDocs.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its site documents (#459)
   renderOnUnits(inc);
   renderAddUnit(inc);
-  show($("#d-attach"), open && inc.status !== "queued");
+  // Attach: a non-emergency event's own units, no dispatch. Other agencies (EMS, PD, utilities, keyholders) are added from
+  // Assigned > Add unit, on any event (PCFD, 2026-11-17): no Other agencies card; the ones on it show in Assigned.
+  show($("#d-attach"), open && inc.status !== "queued" && !inc.emergency);
   renderAttach(inc);
   renderDispatchCard(inc, open);
   renderRadio(inc);
@@ -1628,6 +1693,7 @@ function sttSaid(t) {
   if (t.status === "pending" && m.startsWith("whisper")) return m.startsWith("whisper on the station")
     ? "Transcribing on the station (whisper)" : "Transcribing (whisper)";
   if (t.status === "pending" && m.startsWith("aws-transcribe")) return "Transcribing (AWS)";
+  if (t.status === "pending" && m.startsWith("gpu-worker")) return "Transcribing (GPU)";
   return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            skipped: "Skipped: busy", error: "Transcription failed" }[t.status] || "—";
 }
@@ -1831,13 +1897,14 @@ function statusButtons(u, where) {
 function statusChoices(u, where) {
   const all = L().unit_statuses || [];
   const set = agencySet(u);
-  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  const only = ((L().agency_status_sets || {}).third_party_only) || [];     // DO: a third party's only
+  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all.filter((s) => !only.includes(s.code));
   if (u.placeholder) return mine.filter((s) => s.code === u.quarters);   // in quarters only: the county assigns it
   if (where !== "inc") return mine;
   const flow = L().status_flow || {};
   const next = u.next || (!set && (flow[u.status] || flow["*"]));
   if (!next) return mine;                              // a server without the flow: as before
-  return next.map((c) => all.find((s) => s.code === c)).filter(Boolean);
+  return next.map((c) => all.find((s) => s.code === c)).filter((s) => s && (set || !only.includes(s.code)));
 }
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
 // hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
@@ -2733,15 +2800,10 @@ async function placeAsLocation(inc, p) {
 // ---- non-emergency: attach units --------------------------------------------------------------
 
 function renderAttach(inc) {
-  if (!inc || !isOpen(inc)) return;
-  // An emergency event: only other agencies (EMS, PD) that show up; they are never dispatched.
-  setText($("#a-title"), inc.emergency ? "Other agencies" : "Attach");
-  $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities, keyholders: attached as Dispatched (a keyholder or the Knox box: Notified), "
-    + "then their statuses like our units, here and in the right column. Never toned out or said on the air."
-    : "Non-emergency: no run card, no dispatch.";
-  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id)
-    && (!inc.emergency || u.response === "agency"));
-  const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
+  if (!inc || !isOpen(inc) || inc.emergency) return;
+  // Our units only: other agencies' go on from Assigned > Add unit (Dispatched; a third party never Responding)
+  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id) && u.response !== "agency");
+  const sig = JSON.stringify([others.map((u) => [u.id, u.status, u.incident_number])]);
   const sel = $("#a-unit");
   if (sel._sig === sig) return;
   sel._sig = sig;
@@ -2813,10 +2875,24 @@ function returnButtons(inc, a) {
 // matched nothing stays in the box, with a note, to fix or clear (the rest are added: nothing is lost, nothing
 // asks); a unit already on the event, or typed twice, is skipped with a note.
 
+// Other agencies' units are added here too (PCFD, 2026-11-17: the Other agencies card is gone). A third-party unit
+// (keyholder, utility, police: its status set's third_party) goes on Dispatched whatever button is pressed, never
+// Responding ("we requested them, but we don't necessarily know if they're enroute"); typed alone, the buttons are its
+// own: Dispatched (Enter) or Dispatch other. EMS and the other agencies typed alone: Dispatched too, as Attach did.
 const addUnit = { items: [], idx: 0, iid: null, moved: false };
-function addStatuses() {                  // Responding, On location: the first of each role
+function addStatuses(taken = []) {        // the buttons for the units typed; the first is Enter's
   const all = L().unit_statuses || [];
-  return ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
+  const fire = ["enroute", "onscene"].map((r) => all.find((s) => s.role === r && !s.retired)).filter(Boolean);
+  if (!taken.length || !taken.every((u) => u.response === "agency")) return fire;
+  // the server's start (u.start: what each can go on as, Dispatched first; a third party's Dispatch other too)
+  const start = (taken[0].start || []).filter((c) => taken.every((u) => (u.start || []).includes(c)))
+    .map((c) => all.find((s) => s.code === c)).filter(Boolean);
+  if (taken.every((u) => u.third_party)) return start;          // Dispatched (Enter), Dispatch other
+  const sets = taken.filter((u) => !u.third_party).map(agencySet);      // (a third party typed with them: Dispatched)
+  return [...fire.filter((s) => sets.every((x) => x && x.statuses.includes(s.code))), ...start];   // EMS: Enter Responding
+}
+function addTaken(inc) {                  // the units typed that would be added
+  return inc ? addParse(inc).filter((g) => g.unit && !g.why).map((g) => g.unit) : [];
 }
 function addCandidates(inc) {
   const on = new Set(openAssignments(inc).map((a) => a.name));
@@ -2881,17 +2957,40 @@ function renderAddPreview() {
   const inc = selected(), box = $("#o-preview");
   const got = inc ? addParse(inc) : [];
   show(box, got.length > 0);
+  const taken = got.filter((g) => g.unit && !g.why).map((g) => g.unit);
+  const thirdAlone = taken.length && taken.every((u) => u.third_party);
   box.replaceChildren(...got.map((g) => {
     const u = g.unit, away = u && !g.why && awayOn(u, inc.id);
     const oos = u && !g.why && roleOf(u.status) === "oos" && u.response !== "agency";
+    const asDisp = u && !g.why && u.third_party && !thirdAlone;    // with our units: on Dispatched, not as they are
     const c = el("span", "chip add-chip" + (g.why === "unknown" ? " nomatch" : g.why === "typing" ? " typing"
       : g.why ? " skip" : away || oos ? " moving" : ""), u ? u.name : g.text);
     c.title = g.why === "unknown" ? `No unit ${g.text}` : g.why === "typing" ? "Still typing"
       : g.why === "here" ? `${u.name}: already on this event` : g.why === "twice" ? `${u.name}: typed twice`
       : oos ? `${u.name}: ${unitStatus(u.status).name}` : away ? `${u.name}: on ${u.incident_number || "another call"} (moved here)`
+      : asDisp ? `${u.name}: third party, added ${statusLabel(u, (addStatuses([u])[0] || {}).code || "")}`
       : [u.name, u.title || u.department].filter(Boolean).join(", ");
+    if (asDisp) c.classList.add("third");
     if (u && u.name.toLowerCase() !== g.text.toLowerCase()) c.title += ` (typed "${g.text}")`;
     return c;
+  }));
+  renderAddButtons(inc, taken);
+}
+function renderAddButtons(inc, taken = addTaken(inc)) {
+  const box = $("#o-status"), list = addStatuses(taken);
+  const one = taken.length === 1 ? taken[0] : null;          // a keyholder's own names for its statuses, if any
+  const sig = JSON.stringify(list.map((s) => [s.code, s.name, s.bg, one && statusLabel(one, s.code)]));
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.replaceChildren(...list.map((s) => {
+    const name = one ? statusLabel(one, s.code) : s.name;
+    const b = statusColors(el("button", "", name), s);
+    b.type = "button";
+    b.dataset.status = s.code;
+    b.title = !["enroute", "onscene"].includes(s.role) ? `On this event as ${name} (${s.code}): requested, nothing said on the air`
+      : `On this event as ${name}, not dispatched` + (taken.some((u) => u.third_party) ? "; third party: Dispatched" : "");
+    b.addEventListener("click", () => submitAddUnit(s.code));
+    return b;
   }));
 }
 
@@ -2899,17 +2998,7 @@ function renderAddUnit(inc) {
   const ok = !BOARD && isOpen(inc) && inc.status !== "queued";
   if (!$("#o-form").hidden && (!ok || addUnit.iid !== inc.id)) closeAddUnit();    // another event, or this one closed
   show($("#o-open"), ok && $("#o-form").hidden);
-  const box = $("#o-status"), sig = JSON.stringify(addStatuses().map((s) => [s.code, s.name, s.bg]));
-  if (box._sig === sig) return;
-  box._sig = sig;
-  box.replaceChildren(...addStatuses().map((s) => {
-    const b = statusColors(el("button", "", s.name), s);
-    b.type = "button";
-    b.dataset.status = s.code;
-    b.title = `On this event as ${s.name}, not dispatched`;
-    b.addEventListener("click", () => submitAddUnit(s.code));
-    return b;
-  }));
+  if (ok) renderAddButtons(inc);
 }
 function openAddUnit() {
   const inc = selected();
@@ -2944,27 +3033,62 @@ function suggestAddUnit() {
   const inc = selected(), input = $("#o-unit"), w = addLastWord(input), q = w ? w.text.toLowerCase() : "";
   if (!inc || !q) return hideAddSugg();
   const before = new Set(unitWords(input.value.slice(0, w.start)).map((x) => x.toLowerCase()));
-  const items = addCandidates(inc).filter((u) => u.name.toLowerCase().startsWith(q) && !before.has(u.name.toLowerCase()))
-    .sort((a, b) => (b.name.toLowerCase() === q) - (a.name.toLowerCase() === q)).slice(0, 8);   // what was typed, first
+  const items = addMatches(addCandidates(inc).filter((u) => !before.has(u.name.toLowerCase())), q);
   if (!items.length || (items.length === 1 && items[0].name.toLowerCase() === q)) return hideAddSugg();
   if (addUnit.items.map((u) => u.id).join() !== items.map((u) => u.id).join()) { addUnit.idx = 0; addUnit.moved = false; }
   addUnit.items = items;
-  const box = $("#o-sugg");
-  box.replaceChildren(...items.map((u, i) => {
-    const li = el("li", i === addUnit.idx ? "on" : "");
-    li.id = `o-sugg-${i}`;
-    li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", String(i === addUnit.idx));
-    li.append(el("b", "", u.name));
-    if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
-    else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
-    else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
-    li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
-    return li;
-  }));
+  const box = $("#o-sugg"), heads = new Set(items.map(boardTitle)).size > 1, rows = [];
+  items.forEach((u, i) => {
+    if (heads && (i === 0 || boardTitle(items[i - 1]) !== boardTitle(u))) {
+      const h = el("li", "grp dim", boardTitle(u));             // a group: "Agencies: PD"
+      h.setAttribute("role", "presentation");
+      rows.push(h);
+    }
+    rows.push(addSuggRow(inc, u, i));
+  });
+  box.replaceChildren(...rows);
   show(box, true);
   input.setAttribute("aria-expanded", "true");
   input.setAttribute("aria-activedescendant", `o-sugg-${addUnit.idx}`);
+}
+// A unit's group: its board's title (the main board: its kind's); the third parties say so on hover.
+function boardTitle(u) {
+  const b = (L().unit_boards || []).find((x) => x.id === u.board);
+  if (!b || b.group_by === "kind") return "Fire";
+  return b.title || b.id;
+}
+// What the box offers for the word being typed: the units whose code starts with it (what was typed, first), then other
+// agencies' units found by any part of their code or their group's name ("pd", "coned", "keyholder"), grouped by board.
+const ADD_SUGG_MAX = 12;
+function addMatches(cands, q) {
+  if (!q) return [];
+  const words = (u) => boardTitle(u).toLowerCase().split(/[^a-z0-9]+/).filter((x) => x && x !== "agencies");
+  const rank = (u) => {
+    const n = u.name.toLowerCase();
+    if (n === q) return 0;
+    if (n.startsWith(q)) return 1;
+    if (u.response !== "agency" || q.length < 2) return -1;
+    if (unitKey(u.name).includes(unitKey(q)) && unitKey(q)) return 2;
+    return words(u).some((x) => x.startsWith(q)) ? 3 : -1;
+  };
+  const hit = cands.map((u, i) => ({ u, i, r: rank(u) })).filter((x) => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.i - b.i).slice(0, ADD_SUGG_MAX);
+  const order = [];                                   // groups in the order they first come
+  for (const x of hit) if (!order.includes(boardTitle(x.u))) order.push(boardTitle(x.u));
+  return hit.sort((a, b) => order.indexOf(boardTitle(a.u)) - order.indexOf(boardTitle(b.u))).map((x) => x.u);
+}
+function addSuggRow(inc, u, i) {
+  const li = el("li", i === addUnit.idx ? "on" : "");
+  li.id = `o-sugg-${i}`;
+  li.setAttribute("role", "option");
+  li.setAttribute("aria-selected", String(i === addUnit.idx));
+  li.append(el("b", "", u.name));
+  if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
+  else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
+  else if (u.third_party) li.append(el("span", "dim small", "Third party"));
+  else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
+  li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
+  return li;
 }
 function takeAddUnit(name) {             // the suggestion in place of the word being typed
   const input = $("#o-unit"), w = addLastWord(input);
@@ -2987,7 +3111,7 @@ function addUnitKeys(e) {
   } else if (e.key === "Enter") {                 // the units typed (or taken): Responding
     e.preventDefault();
     hideAddSugg();
-    const first = addStatuses()[0];
+    const first = addStatuses(addTaken(selected()))[0];
     if (first) submitAddUnit(first.code);
   } else if (e.key === "Escape") {
     e.preventDefault();
@@ -3309,6 +3433,7 @@ function openEdit() {
   $("#e-phone").value = inc.phone || "";
   $("#e-via").value = inc.received_via || "";
   $("#e-emergency").checked = !!inc.emergency;
+  show($("#e-until-w"), !inc.emergency);               // an Until is a non-emergency event's (it closes it)
   $("#e-until").value = toLocalInput(inc.until_at);
   $("#e-remarks").value = inc.remarks || "";
   airportForm("e", inc);
@@ -3894,6 +4019,7 @@ $("#d-events-toggle").addEventListener("click", () => timelineFold(!cad.timeline
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
+$("#e-emergency").addEventListener("change", () => show($("#e-until-w"), !$("#e-emergency").checked));
 $("#e-type").addEventListener("change", () => {     // a new type offers only its subtypes; back to the event's: as it was
   const inc = selected(), t = $("#e-type").value;
   fillSubtypes($("#e-subtype"), t);
@@ -3983,6 +4109,7 @@ $("#note-text").addEventListener("click", suggestNote);
 $("#runcards-open").addEventListener("click", openRunCards);
 $("#dispatch-open").addEventListener("click", openDispatch);
 window.addEventListener("hashchange", route);
+$("#pi-reload").addEventListener("click", () => { if (window.PrealertInfo) PrealertInfo.reload(); });   // a pre-alert's More info
 if (BOARD) setText($("#page-title"), "Monitor");
 Radio.mountAlerts($("#alerts"));
 CadFeed.mount($("#feed"), { state: () => cad.state, radioRow, time: (u) => fmtTime(u, true), rev: () => cad.txRev,
@@ -4114,7 +4241,7 @@ function askAdmin() {
   return a.length ? `Ask an admin (${a.join(", ")})` : "Ask an admin";
 }
 // What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
-const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
+const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-qmerge button, #d-edit, "
   + "#d-close, #d-reopen, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #o-open, #o-form :is(input, button:not(#o-cancel)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
   + ".ubtns button, .pa-dismiss";        // (a transmission's menu leaves out what the role can't do: txMenuItems)

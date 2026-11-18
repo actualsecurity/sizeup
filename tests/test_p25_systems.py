@@ -201,7 +201,7 @@ def test_tiers_per_talkgroup_and_the_county_file_stays_as_an_older_release_reads
     assert rows["p25:mrrs:9211"] | {"count": 0, "last": None} == {
         "tg": PD, "name": "PD Dispatch", "group": "Police", "encrypted": False, "record": True, "main": False,
         "count": 0, "last": None, "dropped": 0, "system": "mrrs", "source": "p25:mrrs:9211", "key": "p25:mrrs:9211",
-        "ours": False, "service": "police", "department": "", "tier": "alert"}
+        "ours": False, "service": "police", "service_auto": "police", "department": "", "tier": "alert"}
     assert (rows["p25:westchester:307"]["key"], rows["p25:westchester:307"]["tier"]) == ("tg:307", None)
     assert rows["p25:mrrs:9121"]["department"] == "Metro-North"
 
@@ -1143,7 +1143,7 @@ def test_the_hub_never_gives_another_systems_radio_a_rig_or_a_dispatcher(tmp_pat
     assert set(hub.channel_desired()["prefs"]) == {"tg:307"}
     hub.hub.status = {"p25_systems": []}
     assert "p25:mrrs:9211" in hub.channel_desired()["prefs"]
-    assert json.loads(hub.hub._state(json.dumps({"at": now}).encode())[1])["caps"] == ["p25_systems"]
+    assert json.loads(hub.hub._state(json.dumps({"at": now}).encode())[1])["caps"][:1] == ["p25_systems"]
 
 
 def test_the_station_keeps_context_out_of_an_older_hub_and_out_of_the_fire_audio_budget(tmp_path):
@@ -1283,11 +1283,11 @@ def test_county_groups_still_show_beside_another_systems(two):
     assert {r["group"] for r in county} == {"Fire/EMS"} and {r["system"] for r in county} == {"westchester"}
     assert {r["tg"] for r in county} == {307, 301} and len(other) == len(MRRS.talkgroups)
     assert all(r["system"] == "mrrs" and r["tier"] in tiers.TIERS for r in other)
-    # Settings > Radios groups by the group name alone for the county's (as before: its sections, order and colours)
-    # and by system + group for another system's, so neither swallows the other
+    # Settings > Radios groups by system first (County P25, then each other system), then by group within it, so
+    # neither swallows the other (tests/test_channels_by_system.py runs it)
     js = (ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
-    assert 'const gk = (r.tier_set ? `${r.system}\\u0001` : "") + (r.group || "");' in js
-    assert "key: (x) => `g:${x.g}`" in js and "show(gsw, !other);" in js
+    assert 'const id = r.tier_set ? r.system || "?" : "";' in js and ".map(([g, list]) => ({ g: `${id}\\u0001${g}`" in js
+    assert "key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`)" in js and "show(gsw, !x.other);" in js
 
 
 def test_no_ids_hub_caps_and_queue_stats(tmp_path):
@@ -1304,7 +1304,7 @@ def test_no_ids_hub_caps_and_queue_stats(tmp_path):
     link._set_caps(["p25_systems"])
     assert json.loads(link._caps_file.read_text()) == ["p25_systems"] and link.hub_caps == {"p25_systems"}
     src = (ROOT / "sizeup" / "cloud" / "station.py").read_text()
-    assert 'with_name("hub_caps.json")' in src and "self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))" in src
+    assert 'with_name("hub_caps.json")' in src and "kept = json.loads(self._caps_file.read_text())" in src
     q = stt.SttQueue(lambda item, why: None)
     q.put((stt.CONTEXT, None, "pd", None, "p25:mrrs:9211"))
     q.put((stt.LIVE, None, "fire", None, "tg:301"))
@@ -1548,6 +1548,10 @@ def test_unsigned_sweep_on_a_real_station_and_a_real_hub_without_access(tmp_path
     try:
         assert isinstance(hub.app, HubApp) and not hub.app.access_enforced and not st.access_enforced
         assert wait(lambda: "p25_systems" in st.link.hub_caps, 10)               # the hub said what it knows
+        from sizeup.cloud import statusshape                                       # (D5 of #774: a P25 station's real
+        full = st.link.status()                                                   # status, its systems and talkgroups,
+        assert full["p25_systems"] and full["talkgroups"] and statusshape.problem(full) is None   # is taken)
+        assert wait(lambda: hub.app.hub.status is not None, 10) and hub.app.hub.status_refused is None
         iid, (fire, pd) = _with_context_traffic(st)
         # it is recorded on the station and reaches the hub's log, with its words
         assert wait(lambda: (hub.app.cad.store.one("SELECT text FROM radio_traffic WHERE id = ?", (pd,)) or {}).get("text")

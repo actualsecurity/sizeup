@@ -26,6 +26,17 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               the carrier dropped: a weak or fading carrier opens the squelch late, and "Westchester Tower" came out
               "Chester Tower" (tools/atc_eval.py preroll: opening 0.3 s late, 85% of the first 0.3 s of speech was
               kept with 0.2 s, 100% with 0.4 s).
+    key-ups   (split_s / jump_db, by the channel: config.ChannelCfg; airband 0.15 s / 6 dB.) The hang bridged a tower /
+              pilot exchange keyed back to back into one transmission. A carrier that drops at least FULL_DROP_DB (6
+              dB) under its own level and under the close level for split_s, then holds over the close level for
+              AM_RETURN_FRAMES (0.2 s) with a frame over the open level, is a new key-up: the transmission is cut there
+              at once (the first piece keeps its TAIL_FRAMES, the next takes the frames before its carrier as its
+              pre-roll, up to PREROLL_FRAMES); so is one fully dropped for 0.1 s or more whose every frame back is
+              jump_db over the level it had (another, stronger transmitter: upward only, a fade recovers on a ramp). A
+              weak carrier (under 6 dB) never reads as fully dropped: its dips stay inside the hang, as before. The
+              piece before a cut needs MIN_FRAMES of carrier (else nothing is cut), and the cut is held until the new
+              carrier has MIN_FRAMES too: a reply that ends sooner stays in the transmission, as without key-ups (no
+              blip row, nothing lost). The pieces are linked (Segment.split, prev_start, first_start; radio/fm.py).
     lengths   under 0.6 s of carrier (MIN_FRAMES, the carrier's own frames: not the pre-roll) is a blip, not kept;
               anything over 30 s (MAX_FRAMES) is split.
     AGC       the envelope over its own carrier (agc()): the voice as modulation depth, held through a carrier that
@@ -76,7 +87,8 @@ import numpy as np
 from sizeup import atc_hours
 from sizeup.radio import channelize
 from sizeup.radio.amtones import detone, find_tones
-from sizeup.radio.fm import FRAME, RATE, STALL_S, STUCK_S, Channel, NfmReceiver, Segment, _mmss, readable
+from sizeup.radio.fm import (FRAME, RATE, SHORT_GAP_FRAMES, STALL_S, STUCK_S, Channel, NfmReceiver,
+                             Segment, _mmss, finish, readable)
 from sizeup.tz import TZ
 
 AM_RATE = 12000                # rtl_fm's AM output rate (shortfinal's RATE)
@@ -107,6 +119,8 @@ DROP_WINDOW_S = 30.0           # the channelizer's output measured against real 
 DROP_PCT = 97.0                # ... under this percent: logged (rtl_sdr losing samples) ...
 DROP_STEP = 1.0                # ... then again only when it moves this many points (#307)
 BACK_PCT = 99.0                # ... and once when it is back at this
+FULL_DROP_DB = 6.0             # key-ups: a carrier gone, this far under its own level (and under the close level)
+AM_RETURN_FRAMES = 4           # ... and back this long before it counts (0.2 s: a fade recovering ramps through it)
 
 
 class Schedule:
@@ -139,8 +153,17 @@ class CarrierSquelch:
     """Streaming AM carrier squelch. feed() 50 ms frames (16 kHz, float, the envelope with its DC); finished
     Segments come back (audio: the carrier-up part with the pre-roll, DC removed)."""
 
-    def __init__(self, open_db: float = SQUELCH_DB, clock: Callable[[], float] = time.time):
+    def __init__(self, open_db: float = SQUELCH_DB, clock: Callable[[], float] = time.time, split_s: float = 0.0,
+                 jump_db: float | None = None):
         self.open_db, self.clock = float(open_db), clock
+        # key-ups (module doc): 0 / None: off, the hang bridges every drop under it (as before)
+        self._split_frames = max(SHORT_GAP_FRAMES, round(split_s * RATE / FRAME)) if split_s and split_s > 0 else 0
+        self.jump_db = jump_db if jump_db and jump_db > 0 else None
+        self._cands: list[tuple[int, int]] = []     # (first frame under close, frame the carrier came back)
+        self._piece: tuple[float | None, float | None, str] | None = None   # (first piece's start, prev, why)
+        self._hold: tuple[int, int, str] | None = None   # a key-up found, not cut until its carrier held MIN_FRAMES
+        self._hold_on = 0                                # ... its frames over the close level so far
+        self._hold_off = 0                               # ... and under it in a row (SHORT_GAP_FRAMES: it ended)
         self.close_db = max(0.0, self.open_db - HYSTERESIS_DB)
         # #270: the sustained-weak open (a ground transmitter far under the aircraft overhead): weak_db held for
         # WEAK_HOLD_FRAMES. It closes like any other (close_db), kept under weak_db so it doesn't chop.
@@ -159,6 +182,9 @@ class CarrierSquelch:
         self._n = 0
         self._start = 0.0
         self._last_level = 0.0
+        # A transmission's AGC and tone notch (the most of its close: about 6 ms per second of audio) left to its
+        # worker (Segment.pending, radio/fm.py SegmentWorkers): set by a started AmReceiver, never on the reader
+        self.defer = False
 
     # -- what NoiseSquelch's callers read ------------------------------------------------------------------------------
 
@@ -215,9 +241,20 @@ class CarrierSquelch:
             return None
         self._frames.append(frame)
         on = self._over(level, self.close_db)
+        if on and self._quiet >= SHORT_GAP_FRAMES and (self._split_frames or self.jump_db):
+            k = len(self._frames) - 1
+            self._cands.append((k - self._quiet, k))
         self._quiet = 0 if on else self._quiet + 1
         if on:
             self._levels.append(level)
+        if self._cands and len(self._frames) - self._cands[0][1] >= AM_RETURN_FRAMES:
+            self._keyup(self._cands.pop(0))
+        elif self._hold is not None and self._hold_off < SHORT_GAP_FRAMES:   # (its own carrier: not one after it)
+            self._hold_on, self._hold_off = (self._hold_on + 1, 0) if on else (self._hold_on, self._hold_off + 1)
+        if self._hold is not None and self._hold_on >= MIN_FRAMES:
+            g0, g1, why = self._hold
+            self._hold = None
+            return self._cut(g0, g1, why)
         if self._quiet > HANG_FRAMES:
             return self._close("quiet")
         if len(self._frames) >= MAX_FRAMES:
@@ -234,6 +271,49 @@ class CarrierSquelch:
         self._levels = run[-len(pre):] + [level] if run and pre else [level]
         self._pre = deque(maxlen=PREROLL_FRAMES + WEAK_HOLD_FRAMES)
         self._run, self._quiet, self._opened = [], 0, how
+        self._cands, self._piece, self._hold = [], None, None
+
+    def _keyup(self, cand: tuple[int, int]) -> tuple[bool, None]:
+        """The carrier came back at frame g1 after dropping at g0: a new key-up (module doc)? Held (self._hold) if so."""
+        g0, g1 = cand
+        lv = [float(np.mean(f)) for f in self._frames]
+        ret = lv[g1:g1 + AM_RETURN_FRAMES]
+        before = [x for x in lv[self._npre:g0] if self._over(x, self.close_db)]
+        if len(before) < MIN_FRAMES or not all(self._over(x, self.close_db) for x in ret):
+            return False, None                           # (no key-up of its own before it, or a flicker back)
+        own = float(np.median(before))
+        if max(lv[g0:g1]) > own * 10 ** (-FULL_DROP_DB / 20):
+            return False, None                           # not fully gone: a fade, the hang's
+        why = ""
+        if self._split_frames and g1 - g0 >= self._split_frames and any(self._over(x, self.open_db) for x in ret):
+            why = "gap"
+        elif self.jump_db is not None and min(ret[1:]) >= own * 10 ** (self.jump_db / 20):   # (not the first: part gone)
+            why = "level"
+        if not why:
+            return False, None
+        # Held, not cut yet: only once the new carrier is a transmission of its own (MIN_FRAMES). A reply that ends
+        # sooner stays in this one, as without key-ups: no audio is lost to a blip's rule (_close).
+        self._hold, self._hold_off = (g0, g1, why), 0
+        self._hold_on = sum(self._over(x, self.close_db) for x in lv[g1:])
+        return False, None
+
+    def _cut(self, g0: int, g1: int, why: str) -> Segment | None:
+        """Cut the open transmission at the drop g0..g1 (a held key-up, _keyup): the first piece back, the rest open."""
+        lv = [float(np.mean(f)) for f in self._frames]
+        before = [x for x in lv[self._npre:g0] if self._over(x, self.close_db)]
+        frames, start, npre, opened, piece = self._frames, self._start, self._npre, self._opened, self._piece
+        tail = min(g1 - g0, TAIL_FRAMES)
+        seg = self._make(frames[:g0 + tail], before, start, npre, opened, tail, "key-up", piece)
+        pre = frames[max(g0, g1 - PREROLL_FRAMES):g1]   # the drop before the new carrier: its pre-roll
+        self._start = start + (g1 - len(pre)) * FRAME / RATE
+        self._frames, self._npre, self._opened = pre + frames[g1:], len(pre), "carrier"
+        self._levels = [x for x in lv[g1:] if self._over(x, self.close_db)]
+        self._cands = [(a - g1 + len(pre), b - g1 + len(pre)) for a, b in self._cands if a >= g1]
+        if seg is None:
+            self._piece = (piece[0], piece[1], why) if piece else None
+        else:
+            self._piece = (seg.first_start, seg.start, why)
+        return seg
 
     def flush(self, reason: str = "stopped") -> Segment | None:
         """The audio stopped with the squelch open: what was heard, now."""
@@ -242,30 +322,46 @@ class CarrierSquelch:
     def _close(self, reason: str) -> Segment | None:
         tail = min(self._quiet, TAIL_FRAMES)
         frames = self._frames[: len(self._frames) - (self._quiet - tail)]
-        levels, start, npre, opened = self._levels, self._start, self._npre, self._opened
+        levels, start, npre, opened, piece = self._levels, self._start, self._npre, self._opened, self._piece
         self._frames, self._levels, self._quiet, self._npre, self._opened = [], [], 0, 0, "carrier"
+        self._cands, self._piece, self._hold = [], None, None   # (a key-up still held: not cut, one transmission)
+        return self._make(frames, levels, start, npre, opened, tail, reason, piece)
+
+    def _make(self, frames: list[np.ndarray], levels: list[float], start: float, npre: int, opened: str, tail: int,
+              reason: str, piece: tuple | None) -> Segment | None:
+        """A transmission from its frames (npre of pre-roll, tail after the carrier); piece: it was cut from the one
+        before it (a key-up), (the first piece's start, the one before's, why)."""
         if len(frames) - npre - tail < MIN_FRAMES:       # the carrier itself was up too short: a blip
             return None
         med = float(np.median(levels or [self.floor_level]))
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
         snr = voice_snr_db(frames, npre, len(frames) - tail)     # #270: measured before the AGC, per segment
-        audio = agc(np.concatenate(frames), med)
-        # a heterodyne's steady tone over the voice (#263): looked for on the carrier (#263: not in the pre-roll and the
-        # tail, which have none), notched out of the whole clip
-        tones = find_tones(audio, RATE, span=(npre * FRAME, (len(frames) - tail) * FRAME))
-        audio = detone(audio, RATE, tones)
-        seg = Segment(start, start + len(frames) * FRAME / RATE, audio, quieting_db=carrier, reason=reason)
+        span = (npre * FRAME, (len(frames) - tail) * FRAME)
+
+        def voice(seg: Segment) -> None:
+            audio = agc(np.concatenate(frames), med)
+            # a heterodyne's steady tone over the voice (#263): looked for on the carrier (#263: not in the pre-roll and
+            # the tail, which have none), notched out of the whole clip
+            tones = find_tones(audio, RATE, span=span)
+            seg.audio = detone(audio, RATE, tones)
+            seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
+        seg = Segment(start, start + len(frames) * FRAME / RATE, np.zeros(0, np.float32), quieting_db=carrier,
+                      reason=reason)
         seg.q_open = seg.q_close = carrier
         seg.hiss_db = self.hiss_db
         seg.weak = carrier < MIN_CARRIER_DB            # type: ignore[attr-defined]
         seg.marginal = not seg.weak and carrier < MARGINAL_DB   # type: ignore[attr-defined]
         seg.preroll_s = npre * FRAME / RATE            # type: ignore[attr-defined]
-        seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
         # #270: what the hub needs to tell a weak transmitter from a missing one, per transmission
         seg.carrier_dbfs = round(float(20 * np.log10(max(med, 1e-9))), 1)   # type: ignore[attr-defined]
         seg.snr_db = None if snr is None else round(snr, 1)    # type: ignore[attr-defined]
         seg.opened = opened                                    # type: ignore[attr-defined]  carrier | sustained
-        return seg
+        if piece is not None:
+            seg.first_start, seg.prev_start, seg.split = piece
+        elif reason == "key-up":
+            seg.first_start = seg.start
+        seg.pending = voice
+        return seg if self.defer else finish(seg)
 
 
 def voice_snr_db(frames: list[np.ndarray], npre: int, end: int) -> float | None:
@@ -421,7 +517,8 @@ class AmReceiver(NfmReceiver):
                  also: Iterable[Extra | tuple] = (), owner: Callable[[float], str | None] | None = None,
                  covered: Callable[[float, "AmReceiver"], bool] | None = None, rtl_sdr: str | None = None,
                  python: str | None = None, multichannel: bool = False,
-                 clock: Callable[[], float] | None = None, **_ignored):
+                 clock: Callable[[], float] | None = None, split_s: float = 0.0, jump_db: float | None = None,
+                 **_ignored):
         self._up = Upsampler()
         self.base_mhz = float(channel.mhz)
         self.extras = [x if isinstance(x, Extra) else Extra(*x) for x in also]
@@ -442,7 +539,8 @@ class AmReceiver(NfmReceiver):
         self._stuck_subs: dict[int, float] = {}           # #116's stuck watch, per other frequency
         self.rate_pct: float | None = None                # the channelizer's output against real time, last window
         self._drop_said: float | None = None              # the percent last logged under DROP_PCT, None: not short
-        super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db)
+        super().__init__(rtl_fm, device, gain_db, channel, on_segment, on_event, open_db=open_db, split_s=split_s,
+                         jump_db=jump_db)
         if clock is not None:               # the tests' time, before plan_at picks the frequency it starts on (#346)
             self.clock = clock
         self.schedule = schedule if isinstance(schedule, Schedule) or not schedule else Schedule(schedule)
@@ -495,8 +593,13 @@ class AmReceiver(NfmReceiver):
         subs = []
         for k, mhz in enumerate(self.active):
             ch = Channel(mhz, self.label_for(mhz), self.channel.ctcss)
-            subs.append(Sub(ch, first if k == 0 else CarrierSquelch(open_db=self.open_db), Upsampler()))
+            subs.append(Sub(ch, first if k == 0 else self._carrier_squelch(), Upsampler()))
         return subs
+
+    def _carrier_squelch(self) -> CarrierSquelch:
+        sq = CarrierSquelch(open_db=self.open_db, split_s=self.split_s, jump_db=self.jump_db)
+        sq.defer = getattr(self, "segments", None) is not None   # started: AGC + notch on its worker (fm.py)
+        return sq
 
     def describe_plan(self) -> str:
         """'126.4 07:00-23:00, 120.8 23:00-07:00 + 124.65 07:00-23:00'."""
@@ -587,7 +690,7 @@ class AmReceiver(NfmReceiver):
 
     def new_squelch(self) -> CarrierSquelch:
         self._up = Upsampler()
-        return CarrierSquelch(open_db=self.open_db)
+        return self._carrier_squelch()
 
     def _program(self) -> str:
         return "rtl_sdr" if len(self.active) > 1 else "rtl_fm"

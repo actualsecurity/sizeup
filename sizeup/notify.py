@@ -19,7 +19,7 @@ Publishing is ntfy's JSON form (POST <server>/ with {topic, title, message, prio
 titles and bodies can be any UTF-8. ntfy topics are public by name: whoever knows the name can read and
 post, so a topic of ours is a long random name (docs/cloud.md "Station health and alerts").
 
-Two topics, by kind (route(), Pushes; user, 2026-11-01):
+Three topics, by kind (route(), Pushes; user, 2026-11-01; intel's own only: admin, 2026-11-17):
 
     ALERTS  [alerts] ntfy_topic / SIZEUP_ALERT_TOPIC (the hub: SSM /sizeup-hub/alert-topic): incident-level
             alarms: the emergency buttons (P25, MDC, FleetSync) and the fireground mayday (sizeup/cad/alarms.py),
@@ -32,11 +32,17 @@ Two topics, by kind (route(), Pushes; user, 2026-11-01):
             #285), and their recovery notices
 
     INTEL   [alerts] intel_topic / SIZEUP_INTEL_TOPIC: radio-intelligence pre-alerts (sizeup/intel: what the police
-            or fire chatter said, where), the "intel thread". Not set: they go wherever the alerts go (FALLBACK), so
-            they reach sizeup's alerts topic on day one; a topic set in Settings splits them off, no deploy.
+            or fire chatter said, where), the "intel thread". ONLY its own topic, a different channel from sizeup's
+            own pre-alerts (admin, 2026-11-17): never the alerts or status topic. Not set: intel pushes are not sent
+            (the engine counts each event "held", unsent), the startup line says "intel → off (no intel topic set)" and
+            Settings > Station > Health has a warning row (Pushes.intel_health(); never a push about it). An intel
+            topic equal to the alerts or status topic (case aside) is refused: Settings won't save it (nor an alerts /
+            status topic equal to the intel one), the config drops it at startup with a log line, and effective()
+            refuses it again at every send (source "same").
 
-Only one of alerts / status set: every kind goes there (as before the split). Neither: no pushes. The app logs at startup
-where each kind goes (Pushes.line(): "topic set (SSM)", "off", never a topic's name).
+Only one of alerts / status set: both of those kinds go there (as before the split; FALLBACK). Neither: no alarms or
+status pushes. The app logs at startup where each kind goes (Pushes.line(): "topic set (SSM)", "off", never a topic's
+name).
 
 Settings > System > Push notifications (admins only) can change either topic and the server (Pushes, the CAD
 settings' section "notify"): Settings win over env / SSM, which win over the config file; empty = that default;
@@ -91,9 +97,10 @@ PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5
 ALERTS, STATUS = "alerts", "status"     # the kinds of push (route()): incident alarms; the system's own health
 INTEL = "intel"                         # radio-intelligence pre-alerts (sizeup/intel)
 KINDS = (ALERTS, STATUS, INTEL)
-# A kind with no topic of its own goes where this one goes: alerts and status share the one set; intel follows the
-# alerts (which may themselves be on the status topic). Turned off: no fallback for that kind.
-FALLBACK = {STATUS: ALERTS, ALERTS: STATUS, INTEL: ALERTS}
+# A kind with no topic of its own goes where this one goes: alerts and status share the one set. Turned off: no fallback
+# for that kind. INTEL has none: no topic of its own, no intel pushes (never the alerts' or status' channel, 2026-11-17).
+FALLBACK = {STATUS: ALERTS, ALERTS: STATUS}
+INTEL_SAME_WHY = "the intel topic must differ from the alerts and status topics"
 TIMEOUT_S = 10.0
 RETRIES = (2.0, 10.0, 30.0)     # Notifier: waits between attempts after a network error or a 5xx/429
 
@@ -193,11 +200,18 @@ def topic_problem(topic: str, protected: Iterable[str] = ()) -> str:
     return ""
 
 
+def same_topic(topic: str, others: Iterable[str]) -> bool:
+    """True when topic (trimmed, case aside) is one of others: an intel topic that is an alerts or status one."""
+    t = (topic or "").strip().lower()
+    return bool(t) and t in {str(o or "").strip().lower() for o in others}
+
+
 def route(alert_topic: str = "", status_topic: str = "", intel_topic: str = "") -> dict[str, str]:
     """Which topic each kind of push goes to: {ALERTS, STATUS, INTEL: topic}, "" for none. Only one of alerts /
-    status set: both kinds go to it. Neither: no pushes. Intel: its own, else the alerts' (FALLBACK)."""
+    status set: both kinds go to it. Neither: no pushes of those kinds. Intel: its own only, never the alerts' or the
+    status' (no fallback); one that is the alerts or status topic (case aside) is refused ("")."""
     a, s, i = (alert_topic or "").strip(), (status_topic or "").strip(), (intel_topic or "").strip()
-    return {ALERTS: a or s, STATUS: s or a, INTEL: i or a or s}
+    return {ALERTS: a or s, STATUS: s or a, INTEL: "" if same_topic(i, (a, s)) else i}
 
 
 def server_problem(server: str) -> str:
@@ -299,12 +313,14 @@ class Notifier:
         return bool(self.topic)
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None, actions=()) -> bool:
-        """Queued for sending: True; off or the queue full: False. who: a Who / dict (compose())."""
+             who=None, actions=(), done: Callable[[dict], None] | None = None) -> bool:
+        """Queued for sending: True; off or the queue full: False. who: a Who / dict (compose()). done: called once on
+        the notify thread with the outcome, {ok, at, status, id} when ntfy took it, {ok: False, at, status (0: none),
+        error} when given up on (an intel event's delivery, sizeup/intel/engine.py)."""
         if not self.enabled:
             return False
         try:
-            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ())))
+            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ()), done))
         except queue.Full:
             self.log("notify: too many waiting: dropped " + repr(title[:80]))
             return False
@@ -334,17 +350,20 @@ class Notifier:
             finally:
                 self._q.task_done()
 
-    def _deliver(self, title, body, priority, tags, click, who=None, actions=()) -> None:
+    def _deliver(self, title, body, priority, tags, click, who=None, actions=(), done=None) -> None:
+        status = 0
         for attempt in range(len(self.retries) + 1):
             try:
                 prot = self._protected()
                 # protected since this Notifier was made (or, the static backstop, always)
                 if UNKNOWN in prot or always_protected(self.topic) or topic_problem(self.topic, prot):
                     raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
-                publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
+                out = publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
                 self.sent += 1
                 self.last_error = ""
                 self.last_at, self.last_ok = time.time(), True
+                # urlopen raises on anything but 2xx; ntfy answers 200 with the message's JSON
+                _done(done, {"ok": True, "at": self.last_at, "status": 200, "id": str((out or {}).get("id") or "")[:64]})
                 return
             except NotifyError as e:
                 self.last_error = str(e)
@@ -356,6 +375,16 @@ class Notifier:
         self.failed += 1
         self.last_at, self.last_ok = time.time(), False
         self.log(f"notify: not sent ({self.last_error}): {title[:80]}")
+        _done(done, {"ok": False, "at": self.last_at, "status": status, "error": self.last_error[:200]})
+
+
+def _done(done, outcome: dict) -> None:
+    """A send()'s done callback: never in the way of the next push."""
+    if done is not None:
+        try:
+            done(outcome)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # -- the topics in effect, live (Settings over env / SSM over the config file) ----------------------------------------
@@ -371,7 +400,8 @@ UNKNOWN = "\0"      # in protected(): Settings could not be read, so any topic m
 PREALERT_RING, PREALERT_STATUS, PROTECTED = "prealert_ring", "prealert_status", "protected"
 LABELS = {ALERTS: "Alerts topic", STATUS: "Status & health topic", INTEL: "Pre-alerts (intel) topic"}
 SOURCES = {"settings": "Settings", "ssm": "SSM", "env": "environment", "config": "config file", "default": "default",
-           "fallback": "shared", "off": "turned off in Settings", "none": "not set"}
+           "fallback": "shared", "off": "turned off in Settings", "none": "not set",
+           "same": "refused: same as the alerts or status topic"}
 TEST_TITLE = "sizeup test: {kind} topic"
 
 
@@ -381,8 +411,8 @@ def lane(kind: str) -> str:
 
 
 def other(kind: str) -> str:
-    """The kind this one falls back to when it has no topic of its own (FALLBACK)."""
-    return FALLBACK[kind]
+    """The kind this one falls back to when it has no topic of its own (FALLBACK); "" for INTEL, which has none."""
+    return FALLBACK.get(kind, "")
 
 
 def fingerprint(topic: str) -> str:
@@ -423,13 +453,15 @@ class KindNotifier:
     last_error = property(lambda self: self._of("last_error", ""))
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None, actions=()) -> bool:
+             who=None, actions=(), done=None) -> bool:
         try:      # the app's devices (#563), on purpose before ntfy's "is there a topic" check; ntfy as before
             self.pushes.fan_out(self.kind, title, body, priority, who, click)
         except Exception:  # noqa: BLE001 - whatever it does, the ntfy push below is sent
             pass
         n = self.current()
-        return n.send(title, body, priority, tags, click, who=who, actions=actions) if n is not None else False
+        if n is None:
+            return False
+        return n.send(title, body, priority, tags, click, who=who, actions=actions, **({"done": done} if done else {}))
 
     def flush(self, timeout: float = 10.0) -> bool:
         return all(n.flush(timeout) for n in self.pushes.made(lane(self.kind)))
@@ -566,28 +598,54 @@ class Pushes:
         t, src = self.defaults[kind]
         return (t, src) if t and not self.problem(t, ov) else ("", "none")
 
+    def named(self, kinds: Iterable[str], ov: dict | None = None) -> set[str]:
+        """Every topic name configured for these kinds, lower case: the default (SSM / env / config) and Settings' own,
+        whether or not it is in effect (one turned off is still that kind's channel: phones subscribe to it)."""
+        ov = self._ov() if ov is None else ov
+        out = set()
+        for k in kinds:
+            out.add(self.defaults[k][0].lower())
+            v = ov.get(k)
+            if isinstance(v, dict):
+                out.add(str(v.get("topic") or "").strip().lower())
+        out.discard("")
+        return out
+
     def effective(self, kind: str, ov: dict | None = None) -> dict:
-        """{topic ("" = no push), source: settings | ssm | env | config | fallback (the other kind's) | off | none}.
-        Intel with none of its own goes where the alerts go (their own topic, else the status one they share)."""
+        """{topic ("" = no push), source: settings | ssm | env | config | fallback (the other kind's) | off | none |
+        same}. Alerts and status with none of their own share the other's. Intel: its own only (no fallback); one that
+        is an alerts or status topic (any configured, case aside) is refused: "same", no push."""
         ov = self._ov() if ov is None else ov
         t, src = self._own(kind, ov)
+        if kind == INTEL:
+            if t and same_topic(t, self.named((ALERTS, STATUS), ov)):
+                return {"topic": "", "source": "same"}
+            return {"topic": t, "source": src}
         if src == "none":
-            if kind == INTEL:
-                a = self.effective(ALERTS, ov)
-                return {"topic": a["topic"], "source": "fallback"} if a["topic"] else {"topic": "", "source": "none"}
             ot, _ = self._own(other(kind), ov)
             if ot:
                 return {"topic": ot, "source": "fallback"}
         return {"topic": t, "source": src}
 
     def shared(self, kind: str, ov: dict | None = None) -> str:
-        """Whose topic a kind on "fallback" is really on: intel follows the alerts, which may themselves be on the
-        status topic (then it is the status topic, and the line says so)."""
-        ov = self._ov() if ov is None else ov
-        k = other(kind)
-        if kind == INTEL and not self._own(ALERTS, ov)[0]:
-            k = STATUS
-        return k
+        """Whose topic a kind on "fallback" is really on: the other of alerts / status (intel never falls back)."""
+        return other(kind)
+
+    def intel_health(self, ov: dict | None = None) -> dict | None:
+        """Settings > Station > Health's row when intel pushes go nowhere (the intel engine's pack rows' shape): no intel
+        topic set, or one refused (the alerts' or status'), a warning; turned off in Settings, plain. None: a topic is
+        in effect. Shown only: never a push about it."""
+        e = self.effective(INTEL, ov)
+        if e["topic"]:
+            return None
+        text, level, title = {
+            "off": ("turned off in Settings", "off", "No intel pushes until a topic is set again"),
+            "same": ("intel topic refused: same as the alerts or status topic", "warn",
+                     f"Not pushed: {INTEL_SAME_WHY}. Set a topic of its own"),
+        }.get(e["source"], ("no intel topic set", "warn", "Pre-alerts are not pushed (counted held) until intel has a "
+                            "topic of its own: never the alerts or status topic"))
+        return {"pack": "push", "label": "Intel pushes", "on": True, "level": level, "text": text,
+                "title": title + " (Settings > System > Push notifications, Pre-alerts (intel) topic)"}
 
     def line(self) -> str:
         """Where each kind goes, for the log: never a topic's name."""
@@ -599,6 +657,9 @@ class Pushes:
 
         def say(k: str) -> str:
             e = eff[k]
+            if k == INTEL and not e["topic"]:
+                return {"off": "off (Settings)", "same": f"off (intel topic refused: {INTEL_SAME_WHY})"}.get(
+                    e["source"], "off (no intel topic set)")
             if e["source"] == "fallback":
                 return f"the {self.shared(k, ov)} topic (no {k} topic set)"
             if e["source"] == "off":

@@ -99,6 +99,7 @@ SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per reque
 COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
 SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
 BRANCH_MAX = 64                       # a group or tier resolved to its sources: at most this many index walks
+RETAG_BATCH = 500                     # retag(): rows per transaction when a source's service changes
 CHANGES_MAX = 400                     # ?changed=: more transmissions changed than this since the cursor: reload
 CHANGES_KEPT = 50000                  # radio_changes rows kept (prune): a cursor older than those is told to reload
 EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: uncleared ones this recent
@@ -223,11 +224,18 @@ class Comms:
         self.display = None
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
+        # {talkgroup, channel, system} -> whether the console's state shows such a row whatever its links (the 60 Control
+        # feed's: Feed.shows), set by the CAD. None: every transmission is taken as shown (record() rebuilds the state)
+        self.in_state = None
         # traffic id -> None: a transcript arrived or changed on another P25 system's row (context only; the intel
         # pre-alerts); never called for our rows. Called after the transaction has committed, never under store.lock.
         # May fire again for the same tid (replace re-records, the startup backfill of old rows): a consumer dedupes
         # by tid + text, ignores a stale `start`, and queues rather than blocks (it runs on the writer's thread).
         self.on_context_text = None
+        # traffic id -> None: a transcript on one of our rows from a P25 call written while sizeup was down (#747,
+        # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
+        # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
+        self.on_late_text = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
         self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
@@ -261,10 +269,12 @@ class Comms:
 
     def record(self, t: dict, replace: bool = True) -> list[int]:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
-        text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
+        text, status, model, emergency?, evidence?, vocab_v? (the term list that biased its text: sizeup/stt_terms.py),
+        late?}. Returns the event ids it is linked to. replace=False: skip
         one already logged (the startup backfill). An emergency once logged stays (a later write without the
-        flag never clears it), and so does its evidence. Must not be called with store.lock held: the hooks
-        (on_text, on_context_text) run on the caller's thread after commit."""
+        flag never clears it), and so does its evidence. late (#747: a P25 call from while sizeup was down): logged
+        and linked by its rules like any, told only to on_late_text. Must not be called with store.lock held: the
+        hooks (on_text, on_context_text, on_late_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
         call_id, turn = split_call(tid, p25)
@@ -274,7 +284,8 @@ class Comms:
         start = float(t["start"])
         rigs = [r.strip() for r in (t.get("rig") or "").split(",") if r.strip()]
         with self.store.tx() as db:
-            have = db.execute("SELECT 1 FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+            have = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+                              "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
             if have and not replace:
                 return []
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
@@ -291,8 +302,12 @@ class Comms:
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
-            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire
-            given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire.
+            # The admins' service for the source wins over either (sourcekeys.overridden: Settings > Radios > Channels)
+            # (service_auto: what the source is with no choice, as the sender worked it out: a row tagged under a choice
+            # since put back to automatic arrives right; a sender from before this sends only its service)
+            given = str(t.get("service_auto") or t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            given = sources.overridden(skey, given)
             src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
             disp = 0 if other else disp          # "60 Ctrl ..." is the county's dispatcher, never another system's
@@ -319,15 +334,30 @@ class Comms:
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            vocab_v = str(t.get("vocab_v") or "")[:80]
+            if vocab_v or have:                 # (its text written again: the version goes with it)
+                db.execute("UPDATE radio_traffic SET vocab_v = ? WHERE id = ?", (vocab_v, tid))
+            if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
+                db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)
+            linked = db.total_changes
             if not other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
                 self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+            # On no incident, before or after (no link made, to it or to another turn of its call), and no row of the
+            # 60 Control feed, before or after: the console's state shows nothing of it, so it rebuilds nothing
+            # (one rebuild a transmission was most of the hub's CPU per transmission: native-notes FINDINGS §1.6)
+            shown = self.in_state
+            if shown is not None and not out and db.total_changes == linked and not (have and have["linked"]) \
+                    and not shown({"talkgroup": t.get("talkgroup"), "channel": t.get("source") or "", "system": system}) \
+                    and not (have and shown(dict(have))):
+                self.store.quiet_for_state()
+        late = bool(t.get("late"))
         if other:
-            if (t.get("text") or "").strip():
+            if (t.get("text") or "").strip() and not late:
                 self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
             return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
@@ -335,8 +365,22 @@ class Comms:
         if self._logged[kind] >= CHANGES_TRIM_EVERY:
             self._logged[kind] = 0
             self._trim_changes(kind)
-        self._heard(tid)
+        if late:
+            self._heard_late(tid)
+        else:
+            self._heard(tid)
         return out
+
+    def _quiet_unless_shown(self, db, tid: str) -> None:
+        """In a transaction that changed only this row of radio_traffic (its text, status, other transcript, re-run): the
+        console's state rebuilds nothing for it when the row is on no incident and no row of the 60 Control feed
+        (store.quiet_for_state; as record() does)."""
+        if self.in_state is None:
+            return
+        r = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+                       "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
+        if r is not None and not r["linked"] and not self.in_state(dict(r)):
+            self.store.quiet_for_state()
 
     def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
                     tg, disp: bool) -> None:
@@ -382,6 +426,42 @@ class Comms:
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
 
+    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
+        """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
+        that differ, walked along radio_traffic_source_start `batch` at a time (each batch its own transaction, carrying
+        on after the last (start, rowid): the store's lock is let go between them). Once done, the Radio page's readers
+        who may know of that source ask afresh, once (another P25 system's: only those who may see it). The number
+        changed."""
+        if not source or service not in sources.SERVICES:
+            return 0
+        got = sources.parse(source)
+        system = got[0] if got else "airband" if source.startswith("air:") else "analog"
+        total, after = 0, (float(since), -1)
+        while True:
+            with self.store.tx() as db:
+                rows = db.execute("SELECT rowid, start FROM radio_traffic WHERE source = ? AND start >= ? "
+                                  "AND (start, rowid) > (?, ?) ORDER BY start, rowid LIMIT ?",
+                                  (source, float(since), after[0], after[1], int(batch))).fetchall()
+                if rows:
+                    self.quiet()                         # (no reader's rev moves batch by batch: once, at the end)
+                    ids = [r[0] for r in rows]
+                    total += db.execute(f"UPDATE radio_traffic SET service = ? WHERE rowid IN ({','.join('?' * len(ids))}) "
+                                        "AND service != ?", (service, *ids, service)).rowcount
+                    after = (rows[-1][1], rows[-1][0])
+            if len(rows) < batch:
+                break
+            if pause:
+                time.sleep(pause)
+        if total:
+            with self.store.tx():
+                if sources.is_context({"system": system}):
+                    self.touch("reset", system)          # (that system's readers only: rev_for, the change log)
+                    self.quiet()
+                else:
+                    self.touch_reset()
+                self.rev += 1
+        return total
+
     def activity(self, source: str, minute: int, calls: int, radios=(), seconds: float = 0.0) -> None:
         """Key-ups on a source that leaves no transmission rows (an encrypted talkgroup, #409): {source, minute,
         calls, radios} as the station counted them, added to that minute."""
@@ -389,6 +469,8 @@ class Comms:
             return
         with self.store.tx() as db:
             self._count(db, source, minute * 60.0, seconds, int(calls), radios)
+            if self.in_state is not None:
+                self.store.quiet_for_state()             # radio_activity: never in the console's state
             if sources.is_context({"system": (sources.parse(source) or ("", 0))[0]}):
                 self.quiet()                             # another system's key-ups: no reader's rev but theirs moves
 
@@ -442,6 +524,14 @@ class Comms:
                 self.on_text(tid)
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
+
+    def _heard_late(self, tid: str) -> None:
+        """on_late_text (#747), once the write has committed."""
+        if self.on_late_text is not None:
+            try:
+                self.on_late_text(tid)
+            except Exception as e:  # noqa: BLE001 - the radio log never stops the write
+                self.log(f"CAD: late transcript {tid}: {type(e).__name__}: {e}")
 
     def _heard_context(self, tid: str) -> None:
         """on_context_text, once the write has committed: whatever it does or raises never reaches the write."""
@@ -625,27 +715,34 @@ class Comms:
         return {"unlinked": True, "why": old["why"], "excluded": auto}
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
-               notify: bool = True) -> bool:
+               notify: bool = True, vocab_v: str = "", late: bool = False) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
         run on the caller's thread after commit. notify=False: a shed clip caught up hours later
         (sizeup/sttcatchup.py): stored and in the change log like any text, but neither hook is told, so nothing
         that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's step, the
-        context pre-alerts) acts on old words."""
+        context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown).
+        late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither)."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
-            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ? WHERE id = ?",
-                           (text, status, model, self.clock(), tid)).rowcount
+            n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
+                           "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech') THEN ? ELSE text_at END "
+                           "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(), status,
+                                            self.clock(), tid)).rowcount
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         if n and notify:
             if row is not None and sources.other_p25(row):
-                self._heard_context(tid)
+                if not late:
+                    self._heard_context(tid)
+            elif late:
+                self._heard_late(tid)
             else:
                 self._heard(tid)
         return bool(n)
@@ -662,6 +759,7 @@ class Comms:
                            (status, model, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
@@ -691,8 +789,8 @@ class Comms:
                 "tries": Comms.catchup_tries_of(r["rerun_result"] or ""), "tried_at": r["rerun_at"] or 0.0}
 
     def shed_clips(self, since: float, limit: int = 60, sort=None) -> tuple[list[dict], dict[str, int]]:
-        """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: the alert tier first,
-        then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, seconds, service, tier,
+        """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: those a station stopped
+        with first, then the alert tier, then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, seconds, service, tier,
         tries, tried_at}. sort(row) -> a word for it ("" = eligible): every row is sorted before the limit, so one
         that can't be sent now (given up, not transcribed, too long) never keeps one further back from its turn.
         -> (the first `limit` eligible rows, how many rows got each word: {"": eligible, "gave up": ...})."""
@@ -701,7 +799,9 @@ class Comms:
         with self.store.lock:
             cur = self.store.db.execute(
                 "SELECT id, start, end, channel, talkgroup, talker, system, service, tier, rerun_result, rerun_at "
-                f"FROM radio_traffic WHERE {self.SHED_WHERE} ORDER BY (tier = 'alert') DESC, start DESC",
+                # (a station's rows it stopped with first: they were heard live, often fire traffic; #549, #639 phase 2)
+                f"FROM radio_traffic WHERE {self.SHED_WHERE} ORDER BY (model LIKE '%station stopped%') DESC, "
+                "(tier = 'alert') DESC, start DESC",
                 (float(since), f"%{SHED}%"))
             rows = [self._shed_row(r) for r in cur]
         for row in rows:
@@ -726,6 +826,7 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def rerun_done(self, tid: str, result: str) -> bool:
@@ -737,6 +838,7 @@ class Comms:
                            (self.clock(), result, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def _section(self, name: str) -> dict:
@@ -1550,12 +1652,15 @@ class Comms:
     def _sees_context(self) -> bool:
         return sources.may_see_context(self.context_broadcast)
 
-    def _fetch(self, where, args, limit) -> list[dict]:
+    def _fetch(self, where, args, limit, order: str = "DESC") -> list[dict]:
+        """Rows by start, newest first (order "ASC": oldest first), behind the one context gate."""
+        if order not in ("ASC", "DESC"):
+            raise ValueError("order: ASC | DESC")
         if not self._sees_context():
             where = list(where) + [f"+t.system IN {sources.OURS_SQL}"]     # (+: the walk stays on its index)
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
                             + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
-                            + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
+                            + f" ORDER BY t.start {order} LIMIT ?", (*args, limit))
 
     def _decorate(self, rows) -> None:
         """Each row's events, its page kind and its alarm (in place)."""
