@@ -66,17 +66,18 @@ jobs:
         timeout-minutes: 27
         env:
           PYTHONFAULTHANDLER: "1"
+        # pytest in the foreground: a background job starts with SIGINT ignored, and then Python never turns SIGINT
+        # into KeyboardInterrupt (_thread.interrupt_main does nothing; test_stt_worker's long-poll stop hung).
         run: |
-          python -m pytest -q -p no:cacheprovider -n auto --dist loadfile $(cat /tmp/shard-files.txt) &
-          pytest_pid=$!
           ( sleep 1260
+            pid=$(ps -A -o pid=,ppid=,comm= | awk -v p="$$" '$2 == p && $3 ~ /[Pp]ython[0-9.]*$/ {print $1; exit}')
             echo "::warning::pytest (this shard) still running after 21 min (#740): its processes and every thread's stack follow"
-            ps -o pid,ppid,etime,rss,args -p "$pytest_pid" --ppid "$pytest_pid" || true
-            kill -USR1 "$pytest_pid" 2>/dev/null || true
-            pkill -USR1 -P "$pytest_pid" || true ) &
+            ps -o pid,ppid,etime,rss,args -p "$pid" --ppid "$pid" || true
+            kill -USR1 "$pid" 2>/dev/null || true
+            pkill -USR1 -P "$pid" || true ) &
           watchdog=$!
           rc=0
-          wait "$pytest_pid" || rc=$?
+          python -m pytest -q -p no:cacheprovider -n auto --dist loadfile $(cat /tmp/shard-files.txt) || rc=$?
           pkill -P "$watchdog" 2>/dev/null || true
           kill "$watchdog" 2>/dev/null || true
           exit "$rc"
