@@ -1,0 +1,19 @@
+{
+  "base": "capture-urgent-request/valid/an-alarm-and-a-page.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/items/1",
+      "value": {
+        "key": "x:1",
+        "rev": 0,
+        "kind": "from_the_future",
+        "at": 1900000000.39,
+        "event_at": 1900000000.123,
+        "age_s": 0.29,
+        "age_src": "boot",
+        "data": {}
+      }
+    }
+  ]
+}

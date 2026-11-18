@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "t": "level",
+  "at": 1900000001.0,
+  "ch": "CH A",
+  "open": true,
+  "quieting_db": 31.2,
+  "hiss_db": -41.5
+}

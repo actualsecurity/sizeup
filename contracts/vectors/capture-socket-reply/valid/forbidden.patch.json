@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [{"op": "replace", "path": "/id", "value": "reload-1"}, {"op": "replace", "path": "/error", "value": "forbidden"}]
+}

@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/ids.json",
+  "patch": [{"op": "remove", "path": "/ids/0/emergency"}]
+}

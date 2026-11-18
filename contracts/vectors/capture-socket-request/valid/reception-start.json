@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-22bb33cc",
+  "op": "reception_start",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {"system": "othersys", "sdr": "sdr-c", "minutes": 15}
+}

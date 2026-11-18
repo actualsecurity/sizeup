@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-status.schema.json",
+  "title": "Capture status file",
+  "description": "Designed (docs/native/capture-split.md 4.5, #773), not implemented. `/run/sizeup-radio/status.json`: what capture OBSERVES, written by capture (its only writer) as compact JSON with tmp + rename every 0.5 s and at once when something changes. Never a reply (those are on the socket) and never a wish. A reader on the same boot (`boot` is its own boot id) takes capture as down when its own CLOCK_BOOTTIME is more than 15 s past `at_boot`; `at` is for people. The app builds today's radio status, dongle rows and health rows from this file plus its own; it carries no secret.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["v", "at", "at_boot", "boot", "pid", "contract", "wish_seq", "channels", "sdrs", "refusals", "spool", "urgent"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The status file's version, 1."},
+    "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture wrote the file, Unix seconds (wall clock): for people."},
+    "at_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The same moment on CLOCK_BOOTTIME, seconds since boot: what staleness is measured from."},
+    "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id `at_boot` belongs to. Opaque: compared for equality only."},
+    "pid": {"type": "integer", "minimum": 1, "description": "Capture's process id."},
+    "impl": {"type": "string", "description": "The implementation: `python`, or a native daemon's name.", "x-known": ["python"]},
+    "build": {"type": "string", "description": "Capture's build."},
+    "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version capture speaks, 1."},
+    "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this capture process started, Unix seconds."},
+    "wish_seq": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The `seq` of the wish capture runs; 0 while it has accepted none (it idles)."},
+    "wish_problem": {"type": "string", "description": "Why a newer wish file could not be read at all (capture keeps running the last one it accepted); \"\" when fine."},
+    "refusals": {
+      "type": "array",
+      "description": "The parts of the applied wish that failed validation and were NOT applied; [] when the wish runs as written. An entry stays until a wish without the fault is applied.",
+      "items": {
+        "title": "One refused part",
+        "description": "One part of a wish capture did not apply; it keeps running what it ran for that part.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["what", "key", "reason", "wish_seq"],
+        "additionalProperties": true,
+        "properties": {"what": {"type": "string", "description": "Which part.", "x-known": ["job", "groups", "adsb", "squelch", "channel"]}, "key": {"type": "string", "description": "Which one: a dongle's serial, a group's name, a channel's label; \"\" when the part has no key."}, "reason": {"type": "string", "description": "Why, text for a person."}, "wish_seq": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "The `seq` of the wish the refusal is about."}}
+      }
+    },
+    "reader": {
+      "title": "The reader",
+      "description": "Whether an app holds the socket as `reader`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["attached"],
+      "additionalProperties": true,
+      "properties": {"attached": {"type": "boolean", "description": "A client that said `role` `reader` is connected."}, "since": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Since when it is attached, or has been gone, Unix seconds; null when never."}}
+    },
+    "channels": {
+      "type": "array",
+      "description": "One row per channel of the set.",
+      "items": {
+        "title": "One channel",
+        "description": "One channel of the set: what it is doing now.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["label", "kind", "run", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "label": {"type": "string", "minLength": 1, "description": "The channel's label."},
+          "kind": {"type": "string", "description": "The channel's kind.", "x-known": ["traffic", "paging", "airband"]},
+          "mhz": {"type": ["number", "null"], "description": "The frequency it is on, MHz; null when it is on none."},
+          "sdr": {"type": "string", "description": "The serial of the dongle it runs on; \"\" when it runs on none."},
+          "run": {"type": "string", "description": "The channel's running state, in the words of docs/nodes.md (`capabilities.channels[].state`): `running`; `waiting` (no dongle, by choice or for lack of one); `out` (a dongle streaming nothing, #710); `held` (another app holds its dongle); `shed` (to a higher job of its group); `not_in_set`; `local` (a person's override). A reader takes a word it does not know as not running.", "x-known": ["running", "waiting", "out", "held", "shed", "not_in_set", "local"]},
+          "state": {"type": "string", "description": "Today's row word beside it.", "x-known": ["ok", "starting", "down", "off", "absent", "ambiguous"]},
+          "detail": {"type": "string", "description": "A sentence for people about the state."},
+          "restarts": {"type": "integer", "minimum": 0, "description": "How many times the receiver's program was restarted since capture started."},
+          "open": {"type": "boolean", "description": "The squelch is open now."},
+          "open_s": {"type": ["number", "null"], "minimum": 0, "description": "How long the squelch has been open without a break, seconds; null when closed."},
+          "stuck": {"type": "boolean", "description": "Open for longer than a transmission can be."},
+          "last_heard": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it last received something, Unix seconds; null for never."},
+          "queued": {"type": "integer", "minimum": 0, "description": "Transmissions that closed and wait for capture's worker: not yet on the spool. A count."},
+          "quieting_db": {"type": ["number", "null"], "description": "How far the noise is quieted now, dB; null when not measured."},
+          "hiss_db": {"type": ["number", "null"], "description": "The idle hiss the quieting is measured from, relative dB; null until measured."},
+          "floor_db": {"type": ["number", "null"], "description": "The channel's noise floor, relative dB; null until measured."},
+          "squelch": {"$ref": "#/$defs/squelch", "description": "The squelch as it runs now: what a `squelch_apply` request's `expect` is compared with."},
+          "short_per_min": {"type": "number", "minimum": 0, "description": "Openings shorter than `min_open_s`, per minute."},
+          "now": {"type": "string", "description": "Airband: the frequencies it is on now, in words."},
+          "ab": {"type": "object", "description": "Airband: an on-air A/B comparison's state while one runs. Not typed here."}
+        }
+      }
+    },
+    "sdrs": {
+      "type": "array",
+      "description": "One row per dongle.",
+      "items": {
+        "title": "One dongle",
+        "description": "One RTL-SDR dongle, as a row of today's `App.sdr()`, with `job` for today's `mode`. The group fields (`group`, `own`, `for`, `on`) are as in station-state.schema.json.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["serial"],
+        "additionalProperties": true,
+        "properties": {
+          "serial": {"type": "string", "minLength": 1, "description": "Its serial."},
+          "name": {"type": "string", "description": "Its name here (the serial when none was given)."},
+          "product": {"type": "string", "description": "Its USB product name; \"\" when it is not plugged in."},
+          "present": {"type": "boolean", "description": "It is plugged in now."},
+          "job": {"type": "string", "description": "The job it runs or is set to, or `Off`."},
+          "set_by": {"type": ["string", "null"], "description": "Who chose its job: `person` (the wish), `auto` (capture's auto-assign: the app mirrors it into its own record), or null (a default)."},
+          "held_by": {
+            "title": "Another application's claim",
+            "description": "Who else holds the dongle; null when nobody.",
+            "x-complete": true,
+            "type": ["object", "null"],
+            "additionalProperties": true,
+            "properties": {"app": {"type": "string", "description": "The other application's name."}, "mode": {"type": "string", "description": "What it says it uses the dongle for."}}
+          },
+          "noaudio": {"type": ["object", "null"], "description": "The dongle opens but streams no audio (#710); null otherwise."},
+          "ambiguous": {"type": "string", "description": "Why nothing may open it now (two dongles share its serial); \"\" when fine."},
+          "lent": {"type": ["object", "null"], "description": "While a reception test has the dongle; null otherwise."},
+          "group": {"type": "string", "description": "Its antenna group's name; absent outside groups."},
+          "own": {"type": "string", "description": "A stand-in only: its own job, kept aside while it runs another's."},
+          "for": {"type": "array", "description": "A stand-in only: the dongles it stands in for.", "items": {"type": "string"}},
+          "on": {"type": "string", "description": "Its job runs on this stand-in dongle instead."}
+        }
+      }
+    },
+    "groups": {"type": "array", "description": "The antenna groups as they run, as `App.sdr()` gives them; [] when there are none. Not typed here.", "items": {"type": "object"}},
+    "groups_problem": {"type": "string", "description": "Why the groups were dropped; \"\" when fine."},
+    "no_park": {"type": "array", "description": "The jobs that may not be parked.", "items": {"type": "string"}},
+    "duplicates": {"type": "array", "description": "Serials two or more dongles share; [] for none.", "items": {"type": "string"}},
+    "adsb": {"type": "object", "description": "The dongle reserved for the ADS-B receiver, as `App.sdr()` gives it. Not typed here."},
+    "p25": {
+      "type": "object",
+      "description": "The P25 systems, by short name.",
+      "additionalProperties": {
+        "title": "One P25 system",
+        "description": "The trunk-recorder side of one system.",
+        "x-complete": true,
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {"state": {"type": "string", "description": "The system's row word.", "x-known": ["ok", "starting", "down", "off", "absent", "ambiguous"]}, "detail": {"type": "string", "description": "A sentence for people about the state."}, "cc": {"type": "object", "description": "The control channel (`ControlChannel.status()`): decode rate, retunes. Not typed here."}, "last_call": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the last call was taken, Unix seconds; 0 for none."}, "mark": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The replay mark (#753): calls that ended before it are done, Unix seconds; null for none."}, "seen": {"type": "integer", "minimum": 0, "description": "The size of the ingest's set of seen calls, a count: bounded (the soak test)."}}
+      }
+    },
+    "reception": {"type": "object", "description": "`Tests.state()`: the running reception test and the history. The app shows it; it runs nothing of the test. Not typed here."},
+    "spool": {
+      "title": "The spool",
+      "description": "The spool's counters, for Health.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["spool_epoch", "seq", "pending", "oldest_s", "bytes", "free_bytes", "dropped", "dropped_audio", "quarantined"],
+      "additionalProperties": true,
+      "properties": {"spool_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The spool's epoch, 16 hex characters."}, "seq": {"type": "integer", "maximum": 999999999999, "minimum": 0, "description": "The last `seq` published; 0 for none."}, "pending": {"type": "integer", "minimum": 0, "description": "Items not yet acknowledged by the reader's cursor, a count."}, "oldest_s": {"type": "number", "minimum": 0, "description": "The age of the oldest unacknowledged item, seconds; 0 when there is none."}, "bytes": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The spool's size on disk, bytes."}, "free_bytes": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "Free space on the spool's filesystem, bytes."}, "dropped": {"type": "integer", "minimum": 0, "description": "Spool writes that failed (the disk was full), a count."}, "dropped_audio": {"type": "integer", "minimum": 0, "description": "Items whose audio was dropped at a bound or under the reserve, a count."}, "quarantined": {"type": "integer", "minimum": 0, "description": "Items in quarantine/, a count."}, "synced_at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the spool was last synced to disk, Unix seconds; null for never."}}
+    },
+    "urgent": {
+      "title": "The urgent lane",
+      "description": "The urgent file and its senders, for Health and for the station's own \"EMERGENCY not delivered to the hub\" banner. \"Unsent\" is the senders' own view, not the rows' states.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["urgent_epoch", "mode", "state", "pending", "pending_alarms", "unsent", "undurable"],
+      "additionalProperties": true,
+      "properties": {
+        "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch, 16 hex characters."},
+        "mode": {"type": "string", "description": "The urgent-mode in effect: `write` or `send` (`write` when the file says `off` in service mode).", "x-known": ["write", "send"]},
+        "state": {"type": "string", "description": "The senders' state. `ok`; `retrying` (no answer, a timeout, 502, 503, 530, 429); `refused` (401, 403, 409: `reason` has the hub's word); `no_route` (404, 405: a hub without the route); `no_credentials` (no token in the credential store: capture does everything but send); `off` (not sending: the mode is `write`, the wish's `hub.forward` is false, or the hub does not advertise `urgent`); `reset` (the file was unreadable at start and replaced). A reader takes a word it does not know as not ok.", "x-known": ["ok", "retrying", "refused", "no_route", "no_credentials", "off", "reset"]},
+        "reason": {"type": "string", "description": "With `refused`: the hub's `reason` word; \"\" otherwise. Never a body, never a token."},
+        "pending": {"type": "integer", "minimum": 0, "description": "Items not yet answered for, alarms and pages, a count."},
+        "pending_alarms": {"type": "integer", "minimum": 0, "description": "Alarms not yet answered for, a count."},
+        "unsent": {
+          "type": "array",
+          "description": "The alarms not yet answered for, oldest first: what the station's page shows as not delivered once one is 10 s old.",
+          "items": {
+            "title": "One unsent alarm",
+            "description": "An alarm the hub has not answered for.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["key", "channel", "unit", "event_at", "age_s"],
+            "additionalProperties": true,
+            "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The alarm's `key`."}, "channel": {"type": "string", "description": "The channel's label (the alarm's `source`)."}, "unit": {"type": "string", "description": "The radio's alias; \"\" when it has none."}, "event_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it happened, Unix seconds."}, "age_s": {"type": "number", "minimum": 0, "description": "Its age when the file was written, seconds, on the boot clock within a boot."}}
+          }
+        },
+        "undurable": {"type": "integer", "minimum": 0, "description": "Items that live in memory only (no row: a failed insert, a stalled disk), a count."},
+        "oldest_alarm_s": {"type": ["number", "null"], "minimum": 0, "description": "The age of the oldest unsent alarm, seconds; null when there is none."},
+        "last_sent_at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the hub last answered for an item, Unix seconds; null for never."},
+        "last_ms": {"type": ["number", "null"], "minimum": 0, "description": "How long the last answered request took, hand-over to answer, milliseconds; null for none."},
+        "sent": {"type": "integer", "minimum": 0, "description": "Items the hub answered for (`applied`, `duplicate`, `stale`) since capture started, a count."},
+        "rejected": {"type": "integer", "minimum": 0, "description": "Items the hub rejected since capture started, a count."},
+        "expired": {"type": "integer", "minimum": 0, "description": "Page items that expired unsent (120 s) since capture started, a count. Alarms never expire."},
+        "last_error": {"type": "string", "description": "The last failure: a status and the hub's reason, never a body, never a token; \"\" for none."},
+        "hub_gen": {
+          "oneOf": [{"$ref": "lease.schema.json#/$defs/counter"}, {"type": "null"}],
+          "description": "The hub's fencing generation in its last answer (lease.schema.json `counter`); null before the first."
+        },
+        "creds_at_boot": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 1000000000, "description": "When the credentials were last taken (at start, or by a reload), on CLOCK_BOOTTIME, seconds since boot; null when there are none."},
+        "p25_transitions_1h": {"type": "integer", "minimum": 0, "description": "P25 emergency-bit transitions in the last hour (#775), a count: a misbehaving radio or decoder shows here."}
+      }
+    }
+  },
+  "$defs": {
+    "squelch": {
+      "title": "Squelch values",
+      "description": "One channel's squelch.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["open_db", "close_db", "min_open_s"],
+      "additionalProperties": true,
+      "properties": {"open_db": {"type": "number", "description": "The squelch opens at this much quieting, dB."}, "close_db": {"type": "number", "description": "The squelch closes below this much quieting, dB."}, "min_open_s": {"type": "number", "minimum": 0, "description": "The shortest opening kept, seconds."}}
+    }
+  }
+}

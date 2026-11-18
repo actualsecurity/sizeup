@@ -1,0 +1,626 @@
+{
+  "x-version": 1,
+  "x-status": "designed",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"Idempotency, on the hub\", 11 H1b to H1k, #773), not implemented. The hub's rules for `POST /api/station/urgent` as a table a test can run: each scenario is a list of steps on the hub's clock and what the hub must answer and hold afterwards. tests/contracts_capture.py `Hub` is the reference model that passes it; the hub's route, and the stub hub the station's tests use, must give the same answers. A step has `at` (seconds on the hub's clock since the scenario began; the on-air event of `alarm` is at 0) and one of: `urgent` (a request's items: each names an entry of `items`, with keys to replace; `data` is merged; `station` defaults to st-north) with `expect` (the status per item, in order; or `expect_http` for a request refused whole, with `reason`; `off_contract`: a body no conforming sender makes, which the hub must survive); `event` (one event of the app's lane, /api/station/events: its times are on the hub's clock here); `ack` (a person acknowledges the alarm that hangs on this traffic id); `state_paging` (the `paging` list of the app's state post); `hub` (`handoff`: stop leading; `lead`: lead again, with a new generation; `{restore_s: n}`: crash and come back from a replica n seconds old). `then` is what holds at the end: how many alarms exist, how many pushes went out, how many late notices; `traffic_ids`, what each alarm hangs on; `page`, the live page under its key. `params.max_age_s` is A7, NOT DECIDED by the admin: 1800 is the recommended rule, and a scenario that depends on it says so (`depends_on`).",
+  "params": {
+    "max_age_s": 1800,
+    "max_age_s_decided": false,
+    "p25_slack_s": 10,
+    "repeat_s": 120,
+    "request_max_items": 32,
+    "request_max_bytes": 65536,
+    "age_clamp_s": 86400
+  },
+  "items": {
+    "alarm": {
+      "key": "CHA-live-1900000000123",
+      "rev": 0,
+      "kind": "alarm",
+      "at": 1900000000.39,
+      "event_at": 1900000000.123,
+      "age_s": 0.29,
+      "age_src": "boot",
+      "data": {
+        "source": "CH A",
+        "start": 1900000000.123,
+        "end": 1900000000.39,
+        "radio_id": "7001",
+        "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "MDC"
+      }
+    },
+    "p25": {
+      "key": "p25-examplesys-4101-7001-1900000300000",
+      "rev": 0,
+      "kind": "alarm",
+      "at": 1900000300.02,
+      "event_at": 1900000300.0,
+      "age_s": 0.03,
+      "age_src": "boot",
+      "data": {
+        "source": "Fire Dispatch 1",
+        "start": 1900000300.0,
+        "radio_id": "7001",
+        "ids": [],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "P25",
+        "system": "examplesys",
+        "talkgroup": 4101
+      }
+    },
+    "page": {
+      "key": "page:PAGE 1:1900000100.25",
+      "rev": 0,
+      "kind": "page",
+      "at": 1900000101.9,
+      "event_at": 1900000100.25,
+      "age_s": 1.66,
+      "age_src": "boot",
+      "data": {
+        "channel": "PAGE 1",
+        "started": 1900000100.25,
+        "phase": "tones",
+        "ours": true,
+        "ended": false,
+        "until": null,
+        "pairs": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"], "ours": true, "at": 1900000101.9}]
+      }
+    },
+    "future": {
+      "key": "x:1",
+      "rev": 0,
+      "kind": "from_the_future",
+      "at": 1900000000.39,
+      "event_at": 1900000000.123,
+      "age_s": 0.29,
+      "age_src": "boot",
+      "data": {}
+    }
+  },
+  "scenarios": [
+    {
+      "name": "the first (station, key) of an alarm, then the same key again",
+      "design": "4.3 idempotency rows 1, 2",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 0.9,
+          "urgent": [{"item": "alarm", "age_s": 0.79}],
+          "expect": ["duplicate"],
+          "note": "capture retried: its answer was lost"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "notices": 0, "traffic_ids": ["CHA-live-1900000000123"]}
+    },
+    {
+      "name": "the app's take-over, an alarm event with id = key",
+      "design": "4.3 idempotency row 3",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 4.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 0.3
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-live-1900000000123"]}
+    },
+    {
+      "name": "the finished transmission takes the alarm over; the key stays in the store",
+      "design": "4.3 idempotency row 4",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 4.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 0.3
+          }
+        },
+        {
+          "at": 8.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 6.4
+          }
+        },
+        {"at": 9.0, "urgent": [{"item": "alarm", "age_s": 8.9}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "the app's lane first, the transmission took the alarm over, it was acknowledged, then the urgent item",
+      "design": "4.3 idempotency row 5; 11 H1k",
+      "steps": [
+        {
+          "at": 0.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 0.3
+          }
+        },
+        {
+          "at": 7.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 6.4
+          }
+        },
+        {"at": 9.0, "ack": "CHA-1900000000123"},
+        {
+          "at": 10.0,
+          "urgent": [{"item": "alarm", "age_s": 9.9}],
+          "expect": ["duplicate"],
+          "note": "from the store's entry written by the events lane: without it, a second alarm and a second push"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "the take-over event arrives after the transmission already took the alarm over",
+      "design": "4.3 idempotency rows 3, 4",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 7.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 6.4
+          }
+        },
+        {
+          "at": 7.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 0.3
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "an alarm raised at the close with key = the transmission's id, then the app's events for it",
+      "design": "4.3 idempotency row 6",
+      "steps": [
+        {"at": 6.6, "urgent": [{"item": "alarm", "key": "CHA-1900000000123", "age_s": 6.5}], "expect": ["applied"]},
+        {
+          "at": 7.0,
+          "event": {"type": "alarm", "id": "CHA-1900000000123", "radio_id": "7001", "source": "CH A", "start": 0.0, "end": 0.3}
+        },
+        {
+          "at": 7.2,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 6.4
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "the same, the app's lane first",
+      "design": "4.3 idempotency row 6",
+      "steps": [
+        {
+          "at": 7.0,
+          "event": {"type": "alarm", "id": "CHA-1900000000123", "radio_id": "7001", "source": "CH A", "start": 0.0, "end": 0.3}
+        },
+        {
+          "at": 7.2,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 6.4
+          }
+        },
+        {"at": 9.0, "urgent": [{"item": "alarm", "key": "CHA-1900000000123", "age_s": 8.9}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "late, under the age limit: raised and pushed with its age",
+      "design": "4.3 idempotency row 7; A7 (recommended)",
+      "depends_on": "max_age_s",
+      "steps": [{"at": 1740.0, "urgent": [{"item": "alarm", "age_s": 1740.0}], "expect": ["applied"]}],
+      "then": {"alarms": 1, "pushes": 1, "notices": 0, "push_age_s": 1740.0}
+    },
+    {
+      "name": "older than the age limit: stale, a late notice, no push",
+      "design": "4.3 idempotency row 8; A7 (recommended)",
+      "depends_on": "max_age_s",
+      "steps": [
+        {"at": 1860.0, "urgent": [{"item": "alarm", "age_s": 1860.0}], "expect": ["stale"]},
+        {
+          "at": 1875.0,
+          "urgent": [{"item": "alarm", "age_s": 1875.0}],
+          "expect": ["duplicate"],
+          "note": "the key was recorded"
+        },
+        {
+          "at": 1880.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 0.0,
+            "end": 0.3
+          }
+        }
+      ],
+      "then": {"alarms": 0, "pushes": 0, "notices": 1}
+    },
+    {
+      "name": "an age that is negative, and one over 24 h, are clamped",
+      "design": "7.5 the new hub route",
+      "depends_on": "max_age_s",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm", "age_s": -5}], "expect": ["applied"], "off_contract": true},
+        {
+          "at": 0.5,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 1000000000.0}],
+          "expect": ["stale"]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "notices": 1, "push_age_s": 0.0}
+    },
+    {
+      "name": "a P25 live alarm, then the end-of-call alarm of the same press",
+      "design": "4.3 idempotency row 9; Q-I; #775",
+      "steps": [
+        {"at": 0.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 4.0,
+          "event": {
+            "type": "alarm",
+            "id": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "start": 0.0,
+            "end": 0.1
+          }
+        },
+        {
+          "at": 14.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 0.0,
+            "end": 12.0
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "the live grant 9 s before the call's span: inside the slack",
+      "design": "Q-I",
+      "steps": [
+        {"at": 0.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 24.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 9.0,
+            "end": 21.0
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "a live alarm with no matching call stands on its own",
+      "design": "4.3 idempotency row 9; Q-I",
+      "steps": [
+        {"at": 0.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 320.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 300.0,
+            "end": 312.0
+          }
+        }
+      ],
+      "then": {
+        "alarms": 2,
+        "pushes": 2,
+        "traffic_ids": ["p25-examplesys-4101-7001-1900000300000", "4101-1900000300_851012500.0-call_17"]
+      }
+    },
+    {
+      "name": "the end-of-call alarm first, then the live item of the same press",
+      "design": "Q-I, the other order",
+      "steps": [
+        {
+          "at": 14.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 0.0,
+            "end": 12.0
+          }
+        },
+        {"at": 15.0, "urgent": [{"item": "p25", "age_s": 14.9}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "the end-of-call alarm first; the live item's grant 9 s after the call's end: inside the slack",
+      "design": "Q-I",
+      "steps": [
+        {
+          "at": 14.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 0.0,
+            "end": 12.0
+          }
+        },
+        {"at": 25.0, "urgent": [{"item": "p25", "age_s": 4.0}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "the live grant 11 s before the call's span: outside the slack, the call's alarm is its own",
+      "design": "Q-I",
+      "steps": [
+        {"at": 0.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 5.0,
+          "ack": "p25-examplesys-4101-7001-1900000300000",
+          "note": "acknowledged, so the same-radio rule does not join the two"
+        },
+        {
+          "at": 26.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 11.1,
+            "end": 23.0
+          }
+        }
+      ],
+      "then": {
+        "alarms": 2,
+        "pushes": 2,
+        "traffic_ids": ["p25-examplesys-4101-7001-1900000300000", "4101-1900000300_851012500.0-call_17"]
+      }
+    },
+    {
+      "name": "the same radio pressing again while its alarm is open",
+      "design": "4.3 idempotency row 10",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 30.4,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 0.3}],
+          "expect": ["applied"],
+          "note": "taken; the alarm code's same-radio rule joins it to the open alarm"
+        },
+        {"at": 40.0, "ack": "CHA-live-1900000000123"},
+        {
+          "at": 60.4,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000060000", "age_s": 0.3}],
+          "expect": ["applied"]
+        }
+      ],
+      "then": {"alarms": 2, "pushes": 2}
+    },
+    {
+      "name": "another station while the hub takes one",
+      "design": "4.3 idempotency row 11",
+      "steps": [
+        {
+          "at": 0.4,
+          "urgent": [{"item": "alarm"}],
+          "expect": [],
+          "station": "st-south",
+          "expect_http": 409,
+          "reason": "multi_station_off"
+        }
+      ],
+      "then": {"alarms": 0, "pushes": 0}
+    },
+    {
+      "name": "two stations, one key each: the store is keyed by (station, key)",
+      "design": "4.3 idempotency row 11; 11 H1j",
+      "hub": {"multi_station": true},
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 0.5,
+          "urgent": [{"item": "alarm"}],
+          "expect": ["applied"],
+          "station": "st-south",
+          "note": "the same key from another station is not a duplicate; one alarm for one press is docs/nodes.md 2.4's rule, not this lane's, and is not modelled"
+        },
+        {"at": 0.9, "urgent": [{"item": "alarm", "age_s": 0.8}], "expect": ["duplicate"], "station": "st-south"}
+      ],
+      "then": {}
+    },
+    {
+      "name": "a page: a higher rev is applied, an equal one a duplicate, a lower one stale",
+      "design": "4.3 idempotency row 12",
+      "steps": [
+        {"at": 1.7, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {"at": 4.7, "urgent": [{"item": "page", "rev": 2, "data": {"phase": "voice"}}], "expect": ["applied"]},
+        {"at": 4.8, "urgent": [{"item": "page", "rev": 1}], "expect": ["stale"]},
+        {"at": 4.9, "urgent": [{"item": "page", "rev": 2, "data": {"phase": "voice"}}], "expect": ["duplicate"]}
+      ],
+      "then": {
+        "alarms": 0,
+        "pushes": 0,
+        "page": {"key": "page:PAGE 1:1900000100.25", "rev": 2, "phase": "voice", "ended": false}
+      }
+    },
+    {
+      "name": "the app's state post for the same page merges by key",
+      "design": "4.3 idempotency row 13",
+      "steps": [
+        {"at": 1.7, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {
+          "at": 2.0,
+          "state_paging": [
+            {
+              "key": "page:PAGE 1:1900000100.25",
+              "channel": "PAGE 1",
+              "started": 1900000100.25,
+              "pairs": [{"a": 600.9, "b": 716.1, "names": ["Example Co 1"], "ours": true}],
+              "phase": "voice",
+              "ours": true,
+              "ended": false,
+              "until": null,
+              "page_id": ""
+            }
+          ]
+        }
+      ],
+      "then": {"pages": 1, "page": {"key": "page:PAGE 1:1900000100.25", "phase": "voice", "ended": false}}
+    },
+    {
+      "name": "the finished page ends the live entry at once",
+      "design": "4.3 idempotency row 14",
+      "steps": [
+        {"at": 1.7, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {"at": 40.0, "event": {"type": "page", "id": "PAGE1-1900000100250", "live_key": "page:PAGE 1:1900000100.25"}}
+      ],
+      "then": {"page": {"key": "page:PAGE 1:1900000100.25", "ended": true}}
+    },
+    {
+      "name": "an unknown kind is rejected and the rest of the request is taken",
+      "design": "4.3 idempotency row 15",
+      "steps": [
+        {
+          "at": 0.4,
+          "urgent": [{"item": "future"}, {"item": "alarm"}],
+          "expect": ["rejected", "applied"],
+          "reasons": ["kind", null]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    },
+    {
+      "name": "a request during a handoff applies nothing; the first retry after it is the first delivery",
+      "design": "4.3 the hub's hot/cold handoff; 11 H1k",
+      "steps": [
+        {"at": 0.2, "hub": "handoff"},
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": [], "expect_http": 503},
+        {"at": 0.9, "urgent": [{"item": "alarm", "age_s": 0.79}], "expect": [], "expect_http": 503},
+        {"at": 3.0, "hub": "lead"},
+        {"at": 3.1, "urgent": [{"item": "alarm", "age_s": 2.99}], "expect": ["applied"], "gen_changed": true}
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    },
+    {
+      "name": "a hub back from a replica 30 s old answers with a new generation and takes the alarm again",
+      "design": "4.3 the sender, \"a hub that lost what it had answered for\"; 11 H1k",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {"at": 10.0, "hub": {"restore_s": 30}},
+        {
+          "at": 10.5,
+          "urgent": [{"item": "alarm", "age_s": 10.4}],
+          "expect": ["applied"],
+          "gen_changed": true,
+          "note": "the first push already left: the hub cannot know, and pushes again"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 2}
+    },
+    {
+      "name": "a request that is not well formed is refused whole",
+      "design": "4.3 the route, answers; 7.5",
+      "steps": [
+        {"at": 0.4, "urgent": [], "expect": [], "expect_http": 422, "reason": "bad_batch"},
+        {
+          "at": 0.5,
+          "urgent": [{"item": "alarm"}, {"item": "alarm", "rev": -1}],
+          "expect": [],
+          "expect_http": 422,
+          "reason": "bad_batch",
+          "note": "nothing of it is applied, the good item neither: the sender cuts it to single items"
+        },
+        {"at": 0.6, "urgent": [{"item": "alarm", "age_s": 0.5}], "expect": ["applied"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    }
+  ]
+}

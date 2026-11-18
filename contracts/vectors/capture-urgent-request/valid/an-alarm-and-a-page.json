@@ -1,0 +1,45 @@
+{
+  "v": 1,
+  "station": "st-north",
+  "urgent_epoch": "9c2d7e10a4b35f68",
+  "sent_at": 1900000000.41,
+  "items": [
+    {
+      "key": "CHA-live-1900000000123",
+      "rev": 0,
+      "kind": "alarm",
+      "at": 1900000000.39,
+      "event_at": 1900000000.123,
+      "age_s": 0.29,
+      "age_src": "boot",
+      "data": {
+        "source": "CH A",
+        "start": 1900000000.123,
+        "end": 1900000000.39,
+        "radio_id": "7001",
+        "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "MDC"
+      }
+    },
+    {
+      "key": "page:PAGE 1:1900000100.25",
+      "rev": 2,
+      "kind": "page",
+      "at": 1900000104.9,
+      "event_at": 1900000100.25,
+      "age_s": 4.66,
+      "age_src": "boot",
+      "data": {
+        "channel": "PAGE 1",
+        "started": 1900000100.25,
+        "phase": "voice",
+        "ours": true,
+        "ended": false,
+        "until": null,
+        "pairs": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"], "ours": true, "at": 1900000100.25}]
+      }
+    }
+  ]
+}

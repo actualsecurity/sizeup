@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-urgent-response.schema.json",
+  "title": "Urgent lane answer",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"The route\", #773), not implemented. The hub's answer to `POST /api/station/urgent`. 200: `ok`, `gen` and one result per item it took; an item missing from `results` was not taken and is sent again. 400, 413, 422: `error` and `reason` (`bad_json`, `bad_batch`, `too_large`): the sender cuts the request to single items. 401, 403, 409: `error` and `reason` as on every station route (station-error.schema.json): kept and retried every 30 s. 503 with a Retry-After header: the hub is not the leader and NOTHING was applied; its body has `error` and `updating`. Only a 200 that names an item `applied`, `duplicate` or `stale` makes it sent.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "On a 200: always true."},
+    "v": {"const": 1, "description": "The answer's version, 1."},
+    "station": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$", "description": "The authenticated station's id."},
+    "gen": {"$ref": "lease.schema.json#/$defs/counter", "description": "On a 200: the hub's fencing generation, a count (lease.schema.json `counter`: an integer up to 2^53 - 1, or a string of decimal digits). When it differs from the last answer's, the sender sends again every alarm it marked sent in the last 120 s."},
+    "results": {"type": "array", "description": "On a 200: one entry per item taken, in any order.", "maxItems": 32, "items": {"$ref": "#/$defs/result"}},
+    "error": {"type": "string", "description": "On a 4xx or 5xx: a sentence for people. Fixed text, never the token."},
+    "reason": {"type": "string", "description": "On a 4xx: why, as one word a program can act on. The route's own are `bad_json`, `bad_batch` and `too_large`; a refused token gets station-error.schema.json's words.", "x-known": ["bad_json", "bad_batch", "too_large", "no_token", "token_unknown", "token_revoked", "token_retired", "read_only", "id_mismatch", "multi_station_off", "ingest_off"]},
+    "updating": {"const": true, "description": "On a 503: the hub is deploying or this task is not the leader."}
+  },
+  "if": {"type": "object", "required": ["error"]},
+  "then": {
+    "anyOf": [{"required": ["reason"]}, {"required": ["updating"]}]
+  },
+  "else": {"required": ["ok", "gen", "results"]},
+  "$defs": {
+    "result": {
+      "title": "One item's answer",
+      "description": "What the hub did with one item of the request, named by its (key, rev).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "rev", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The item's `key`, as sent."},
+        "rev": {"type": "integer", "minimum": 0, "description": "The item's `rev`, as sent."},
+        "status": {"type": "string", "description": "`applied`: taken and acted on (an alarm raised, a page's live state set). `duplicate`: this (station, key) was already taken, by this lane or the app's; nothing new was raised. `stale`: taken, too old to act on (an alarm past the hub's age limit: a late notice, no push; a page rev below the one held). `rejected`: the hub will never take this item. The first three mean sent; a sender keeps and retries an item whose word it does not know.", "x-known": ["applied", "duplicate", "stale", "rejected"]},
+        "reason": {"type": "string", "description": "With `rejected`: why, as one word.", "x-known": ["kind"]}
+      }
+    }
+  }
+}

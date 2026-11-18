@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/hello-reader.json",
+  "patch": [{"op": "replace", "path": "/role", "value": "viewer"}, {"op": "add", "path": "/subscribe", "value": ["level"]}]
+}

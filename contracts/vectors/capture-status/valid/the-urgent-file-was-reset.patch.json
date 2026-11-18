@@ -1,0 +1,7 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/urgent/state", "value": "reset"},
+    {"op": "replace", "path": "/urgent/urgent_epoch", "value": "0a1b2c3d4e5f6071"}
+  ]
+}

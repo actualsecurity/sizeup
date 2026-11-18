@@ -1,0 +1,4 @@
+{
+  "base": "capture-urgent-response/valid/both-applied.json",
+  "patch": [{"op": "replace", "path": "/gen", "value": "9007199254740993"}]
+}

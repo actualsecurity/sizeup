@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-socket-event.schema.json",
+  "title": "Live socket frame, capture to client",
+  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. The JSON header of one frame capture writes on its live socket (`/run/sizeup-radio/live.sock`, a Unix stream socket; framing in contracts/capture/socket.md: `>II` header length and payload length, this JSON object, then the payload, unused in version 1). Every header has `v`, `t` and `at`; `t` says which frame it is and `$defs/<t>` lists its fields. A client skips a `t` it does not know. Live state is latest-wins and nothing is queued for an absent client: what must not be lost is in the spool or the urgent file. A `reply` frame is capture-socket-reply.schema.json.",
+  "x-status": "designed",
+  "x-version": 1,
+  "type": "object",
+  "required": ["v", "t", "at"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The frame's version, 1."},
+    "t": {"type": "string", "description": "Which frame this is. A client skips one it does not know.", "x-known": ["hello", "snapshot", "carrier", "ids", "urgent", "reply", "talking", "paging", "ours", "grant", "spool", "status", "level"]},
+    "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture made the frame, Unix seconds (an `urgent` frame: when it made the item; a `status` frame: the status file's `at`)."}
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "hello", "description": "`t` is `hello`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/hello"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "snapshot", "description": "`t` is `snapshot`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/snapshot"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "carrier", "description": "`t` is `carrier`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/carrier"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "ids", "description": "`t` is `ids`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/ids"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "urgent", "description": "`t` is `urgent`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/urgent"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "talking", "description": "`t` is `talking`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/talking"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "paging", "description": "`t` is `paging`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/paging"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "ours", "description": "`t` is `ours`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/ours"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "grant", "description": "`t` is `grant`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/grant"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "spool", "description": "`t` is `spool`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/spool"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "status", "description": "`t` is `status`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/status"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "level", "description": "`t` is `level`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/level"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "reply", "description": "`t` is `reply`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "capture-socket-reply.schema.json"}
+    }
+  ],
+  "$defs": {
+    "hello": {
+      "title": "hello",
+      "description": "The first frame on every connection.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["contract", "impl", "build", "pid", "started", "spool_epoch", "urgent_epoch", "boot"],
+      "additionalProperties": true,
+      "properties": {
+        "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version this capture speaks, 1. Another major version: the app raises Health and does not read the spool."},
+        "impl": {"type": "string", "description": "The implementation: `python`, or a native daemon's name.", "x-known": ["python"]},
+        "build": {"type": "string", "description": "Capture's build."},
+        "pid": {"type": "integer", "minimum": 1, "description": "Capture's process id."},
+        "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this capture process started, Unix seconds."},
+        "spool_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The spool's epoch (its EPOCH file), 16 hex characters. A new one resets the reader's cursor."},
+        "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch, 16 hex characters. A new one (the file was reset) starts the app's urgent cursor at 0; the set of (key, rev) it has taken still holds."},
+        "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id capture's boot-clock values belong to. Opaque: compared for equality only."}
+      }
+    },
+    "snapshot": {
+      "title": "snapshot",
+      "description": "The whole live state: the first frame after `hello`, again after a client fell 256 frames behind and came back, and the `result` of a `snapshot` request. Latest wins.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["carriers", "talking", "paging", "status_at", "spool_seq"],
+      "additionalProperties": true,
+      "properties": {
+        "carriers": {
+          "type": "array",
+          "description": "Every channel's carrier state now.",
+          "items": {
+            "title": "One channel's carrier",
+            "description": "As a `carrier` frame.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["ch", "state", "since", "continuing", "holding", "quieting_db", "queued"],
+            "additionalProperties": true,
+            "properties": {
+              "ch": {"type": "string", "minLength": 1, "description": "The channel's label."},
+              "state": {"type": "string", "description": "`up`: the squelch opened. `keyed`: it has been open for the squelch's `min_open_s` (only then is it \"talking\"). `down`: it closed.", "x-known": ["up", "keyed", "down"]},
+              "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the carrier came up, Unix seconds (the transmission's `start`)."},
+              "continuing": {"type": "boolean", "description": "Paging: this carrier continues the transmission before it (the continuation window)."},
+              "holding": {"type": "boolean", "description": "Closed, but the squelch still watches for the last transmission to come back (`NoiseSquelch.holding`)."},
+              "quieting_db": {"type": ["number", "null"], "description": "How far the carrier quiets the hiss now, dB; null when not measured."},
+              "queued": {"type": "integer", "minimum": 0, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
+            }
+          }
+        },
+        "talking": {"type": "array", "description": "Everyone transmitting now ([] when nobody talks).", "items": {"$ref": "#/$defs/talker"}},
+        "paging": {"type": "array", "description": "The pages going out now, newest first ([] when none).", "items": {"$ref": "#/$defs/page"}},
+        "status_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The `at` of the status file now on disk, Unix seconds."},
+        "spool_seq": {"type": "integer", "maximum": 999999999999, "minimum": 0, "description": "The `seq` of the last item published to the spool; 0 for none."}
+      }
+    },
+    "carrier": {
+      "title": "carrier",
+      "description": "A channel's squelch opened, was held open long enough to be \"talking\", or closed.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["ch", "state", "since", "continuing", "holding", "quieting_db", "queued"],
+      "additionalProperties": true,
+      "properties": {
+        "ch": {"type": "string", "minLength": 1, "description": "The channel's label."},
+        "state": {"type": "string", "description": "`up`: the squelch opened. `keyed`: it has been open for the squelch's `min_open_s` (only then is it \"talking\"). `down`: it closed.", "x-known": ["up", "keyed", "down"]},
+        "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the carrier came up, Unix seconds (the transmission's `start`)."},
+        "continuing": {"type": "boolean", "description": "Paging: this carrier continues the transmission before it (the continuation window)."},
+        "holding": {"type": "boolean", "description": "Closed, but the squelch still watches for the last transmission to come back (`NoiseSquelch.holding`)."},
+        "quieting_db": {"type": ["number", "null"], "description": "How far the carrier quiets the hiss now, dB; null when not measured."},
+        "queued": {"type": "integer", "minimum": 0, "description": "Transmissions of this channel that closed and wait for capture's worker: not yet on the spool. A count."}
+      }
+    },
+    "ids": {
+      "title": "ids",
+      "description": "Radio ids decoded live on an open carrier (`LiveTalk.fm_ids` from the tap).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["ch", "since", "ids"],
+      "additionalProperties": true,
+      "properties": {"ch": {"type": "string", "minLength": 1, "description": "The channel's label."}, "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The carrier's start, Unix seconds: which carrier the ids belong to."}, "ids": {"type": "array", "description": "The ids decoded so far for this carrier.", "items": {"$ref": "capture-spool-sidecar.schema.json#/$defs/radio-id"}}}
+    },
+    "urgent": {
+      "title": "urgent",
+      "description": "An urgent item, whole: the app takes it over from the frame. The frame's `at` is the item's `at`. Sent when the item is made, and once more when a row is written for an item that was first sent with `durable` false.",
+      "type": "object",
+      "required": ["urgent_epoch"],
+      "additionalProperties": true,
+      "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch, 16 hex characters: `n` counts within it."}},
+      "allOf": [{"$ref": "capture-urgent-item.schema.json#/$defs/held"}]
+    },
+    "talking": {
+      "title": "talking",
+      "description": "Who is talking now, analog and P25: the whole list every time, latest wins.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["entries"],
+      "additionalProperties": true,
+      "properties": {"entries": {"type": "array", "description": "Every talker now, and whoever just finished ([] when nobody talks).", "items": {"$ref": "#/$defs/talker"}}}
+    },
+    "paging": {
+      "title": "paging",
+      "description": "The pages going out now: the whole list every time, latest wins.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["entries"],
+      "additionalProperties": true,
+      "properties": {"entries": {"type": "array", "description": "The pages going out now, newest first ([] when none).", "items": {"$ref": "#/$defs/page"}}}
+    },
+    "ours": {
+      "title": "ours",
+      "description": "A pair of ours started ringing (`LivePaging.on_ours`): the app polls its feed adapters now.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["ch", "pair"],
+      "additionalProperties": true,
+      "properties": {"ch": {"type": "string", "minLength": 1, "description": "The channel's label."}, "pair": {"$ref": "capture-urgent-item.schema.json#/$defs/pair"}}
+    },
+    "grant": {
+      "title": "grant",
+      "description": "A unit event of another P25 system, for the app's `Activity` (unknown and encrypted talkgroups, watched counts).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["system", "tg", "src", "what"],
+      "additionalProperties": true,
+      "properties": {"system": {"type": "string", "minLength": 1, "description": "The system's short name."}, "tg": {"type": "integer", "minimum": 0, "description": "The talkgroup number."}, "src": {"type": "string", "description": "The radio id, digits as a string; \"\" when the line has none."}, "what": {"type": "string", "description": "The event, as trunk-recorder's unit event names it.", "x-known": ["call"]}}
+    },
+    "spool": {
+      "title": "spool",
+      "description": "An item is complete on the spool: its sidecar was renamed into items/.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["seq", "id", "kind"],
+      "additionalProperties": true,
+      "properties": {"seq": {"type": "integer", "minimum": 1, "maximum": 999999999999, "description": "The item's `seq`."}, "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$", "description": "The item's `id`."}, "kind": {"type": "string", "description": "The item's `kind`.", "x-known": ["segment", "call", "metrics"]}, "ch": {"type": "string", "description": "The channel's label (a call: the talkgroup's label); absent for an item with no channel (metrics)."}}
+    },
+    "status": {"title": "status", "description": "The status file changed: its new `at` is the frame's `at`. Nothing else is carried; the reader reads the file.", "type": "object", "additionalProperties": true},
+    "level": {
+      "title": "level",
+      "description": "A channel's levels, once a second per channel, only to a client whose hello subscribed to `level`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["ch", "open", "quieting_db", "hiss_db"],
+      "additionalProperties": true,
+      "properties": {"ch": {"type": "string", "minLength": 1, "description": "The channel's label."}, "open": {"type": "boolean", "description": "The squelch is open now."}, "quieting_db": {"type": ["number", "null"], "description": "How far the noise is quieted now, dB; null when not measured."}, "hiss_db": {"type": ["number", "null"], "description": "The idle hiss the quieting is measured from, relative dB; null until measured."}}
+    },
+    "talker": {
+      "title": "One talker, raw",
+      "description": "One radio transmitting now, as `LiveTalk.state()` gives it, without `rig`, `label` and `main`: the app adds those from the CAD (station-state.schema.json `talker` is the decorated entry).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "system", "channel", "tg", "radio_id", "alias", "since", "talk_since", "ended", "until"],
+      "additionalProperties": true,
+      "properties": {"key": {"type": "string", "description": "Stable id of this entry while it lasts: `p25:<system name>:<call key>:<radio id>` or `fm:<channel>:<since, 2 decimals>:<radio id>`."}, "system": {"type": "string", "description": "The kind of radio system.", "x-known": ["p25", "fm"]}, "channel": {"type": "string", "description": "The talkgroup's name (P25) or the channel's label (FM)."}, "tg": {"type": ["integer", "null"], "minimum": 0, "description": "The P25 talkgroup number; null on an FM channel."}, "radio_id": {"type": "string", "description": "The transmitting radio's id as decoded, digits as a string; \"\" when not known yet."}, "alias": {"type": "string", "description": "The radio's over-the-air alias (P25); \"\" when none."}, "since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the call or the carrier started, Unix seconds."}, "talk_since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this radio started talking within the call, Unix seconds."}, "ended": {"type": "boolean", "description": "True for a talker who just finished and is flashed until `until`."}, "until": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Unix seconds until which an ended entry is still shown; null while talking."}, "dispatcher": {"type": "boolean", "description": "The alias looks like a dispatch console (`LiveTalk.state()` works it out from the alias alone)."}, "id_on_release": {"type": "boolean", "description": "FM entries only: the carrier is open and no id was decoded yet."}}
+    },
+    "page": {
+      "title": "One page going out, raw",
+      "description": "A two-tone page as it is decoded, pair by pair (`LivePaging.state()`), with the contract's `a_hz` / `b_hz` (the state post to the hub says `a` / `b` today: the app maps).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["key", "channel", "started", "pairs", "phase", "ours", "ended", "until", "page_id"],
+      "additionalProperties": true,
+      "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "`page:<channel>:<started, 2 decimals>`: the page's urgent `key` too."}, "channel": {"type": "string", "description": "The paging channel's label."}, "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the first tone started, Unix seconds."}, "pairs": {"type": "array", "description": "The tone pairs decoded so far, in order.", "items": {"$ref": "capture-urgent-item.schema.json#/$defs/pair"}}, "phase": {"type": "string", "description": "`tones` while pairs are still coming, `voice` once the dispatcher speaks.", "x-known": ["tones", "voice"]}, "ours": {"type": "boolean", "description": "Any pair is ours."}, "ended": {"type": "boolean", "description": "The page is over; shown until `until`."}, "until": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Unix seconds until which an ended page is still shown; null while it goes out."}, "page_id": {"type": "string", "description": "The id of the finished page this became (the app's `paging_finished` notice); \"\" until then."}}
+    }
+  }
+}

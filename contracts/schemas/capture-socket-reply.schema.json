@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-socket-reply.schema.json",
+  "title": "Live socket reply",
+  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. Capture's answer to one request (capture-socket-request.schema.json), on the same connection, as a frame with `t` `reply` and the request's `id`. `ok` true: capture has applied it (the app then records it in the wish, which is what makes it outlive a restart of capture). `ok` false: nothing was changed; `error` says why and `confirm` whether the refusal only needs the person's yes (then `error` is the question, and the client asks again with `args.confirm` true under a new id). A repeated id gets this same reply again. No reply ever carries a secret.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["v", "t", "id", "ok", "at"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The frame's version, 1."},
+    "t": {"const": "reply", "description": "Always `reply`."},
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The request's `id`."},
+    "ok": {"type": "boolean", "description": "true: applied (or answered, for an op that changes nothing). false: refused, nothing changed."},
+    "error": {"type": "string", "description": "With `ok` false: why. Text for a person (`refused: parked`, `refused: taken`, a question when `confirm` is true), or one of the words a client acts on: `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0)."},
+    "confirm": {"type": "boolean", "description": "With `ok` false: true when the refusal only needs the person's yes."},
+    "result": {"description": "With `ok` true, for an op that returns something: `urgent_since` (`$defs/urgent-since-result`), `snapshot` (capture-socket-event.schema.json `$defs/snapshot`), `probe` (`audio` or `none`). The reply does not name its op: the client knows it by `id`."},
+    "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture answered, Unix seconds."}
+  },
+  "if": {
+    "type": "object",
+    "properties": {"ok": {"const": false, "description": "`ok` is false."}},
+    "required": ["ok"]
+  },
+  "then": {"required": ["error", "confirm"]},
+  "$defs": {
+    "urgent-since-result": {
+      "title": "The result of urgent_since",
+      "description": "One page of the urgent rows above the asked cursor.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["urgent_epoch", "rows", "more", "memory"],
+      "additionalProperties": true,
+      "properties": {
+        "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch now, 16 hex characters. Not the one asked for: the file was reset and the rows are from 0."},
+        "rows": {"type": "array", "description": "The rows above the cursor in `n` order, at most `limit`; each with `durable` true.", "maxItems": 500, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}},
+        "more": {"type": "boolean", "description": "There are more rows: ask again from the last `n`."},
+        "memory": {"type": "array", "description": "On the first page: the items capture holds that have no row (yet), in full, each with `n` null and `durable` false. They move no cursor.", "maxItems": 256, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}}
+      }
+    }
+  }
+}

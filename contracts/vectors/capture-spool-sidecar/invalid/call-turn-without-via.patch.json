@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-sidecar/valid/call.json",
+  "patch": [{"op": "remove", "path": "/turns/0/via"}]
+}

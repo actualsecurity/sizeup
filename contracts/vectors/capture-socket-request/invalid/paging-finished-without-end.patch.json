@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/paging-finished.json",
+  "patch": [{"op": "remove", "path": "/end"}]
+}

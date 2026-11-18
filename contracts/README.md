@@ -47,6 +47,16 @@ new key, or a new schema, behind a capability string.
 | `node-state` | designed | 1 | `station-state` plus `capabilities`, `capabilities_rev`, `roles_applied` |
 | `node-state-answer` | designed | 1 | `station-state-answer` plus `capabilities_wanted`, `roles_rev`, `roles`, `leases` |
 | `node-worker-hello` | designed | 1 | `stt-worker-hello` plus `capabilities`, `capabilities_rev` |
+| `capture-spool-sidecar` | designed | 1 | the sidecar that completes a spool item: a segment, a P25 call, a minute of metrics |
+| `capture-spool-cursor` | designed | 1 | the spool reader's cursor |
+| `capture-urgent-item` | designed | 1 | an urgent item: an emergency alarm or a live page, `(key, rev)`, with its age |
+| `capture-urgent-request` | designed | 1 | the body of `POST /api/station/urgent` |
+| `capture-urgent-response` | designed | 1 | the hub's answers to it: per item `applied`, `duplicate`, `stale`, `rejected` |
+| `capture-socket-event` | designed | 1 | a frame capture writes on its live socket |
+| `capture-socket-request` | designed | 1 | a frame a client writes: a notice, or a request |
+| `capture-socket-reply` | designed | 1 | capture's answer to a request |
+| `capture-wish` | designed | 1 | the wish file: the desired state of capture |
+| `capture-status` | designed | 1 | the status file: the observed state of capture |
 
 **As built** is what the tests prove, no more:
 
@@ -256,3 +266,120 @@ caffeinate -i .venv/bin/python -m pytest -q -n auto --dist loadfile tests/test_c
 ```
 
 They need `jsonschema` from the dev extras, like `/api/v1`'s contract tests.
+
+## Capture split (designed)
+
+The contract a future `sizeup-radio` service (radio capture as its own process, ADR 0002; in Python first, possibly a
+native daemon later) and the station app will speak. The design is `docs/native/capture-split.md` (#773), approved as
+the boundary by the radio maintainers; **nothing of it is implemented**, so everything here is `designed`: schemas,
+hand-written vectors with made-up values, and tests of the vectors and of the rules. No code under `sizeup/` changes.
+
+| schema | the design's file (10) | from | what |
+|---|---|---|---|
+| `capture-spool-sidecar` | `spool-sidecar.schema.json` | 4.1, 4.6 | the JSON that completes one spool item: a segment, a P25 call, a minute of metrics |
+| `capture-spool-cursor` | `spool-cursor.schema.json` | 4.1 | the reader's `cursor.app.json` |
+| `capture-urgent-item` | `urgent-item.schema.json` | 4.3 | an alarm or a live page as sent to the hub; `$defs/held`, as capture holds it; `$defs/data`, the row's `data` |
+| `capture-urgent-request` | `urgent-request.schema.json` | 4.3, 7.5 | the body of `POST /api/station/urgent` |
+| `capture-urgent-response` | `urgent-response.schema.json` | 4.3 | its answers: `applied`, `duplicate`, `stale`, `rejected` per item; the errors |
+| `capture-socket-event` | `socket-event.schema.json` | 4.2 | a frame from capture: `hello`, `snapshot`, `carrier`, `ids`, `urgent`, `talking`, `paging`, `ours`, `grant`, `spool`, `status`, `level` |
+| `capture-socket-request` | `socket-request.schema.json` | 4.2, 4.3 | a frame to capture: the notices, and a request with its `op` and `args` |
+| `capture-socket-reply` | `socket-reply.schema.json` | 4.2 | the answer to a request; `$defs/urgent-since-result` |
+| `capture-wish` | `wish.schema.json` | 4.4 | `radio_wish.json`: desired state only |
+| `capture-status` | `status.schema.json` | 4.5 | `status.json`: observed state only |
+
+What a schema cannot say is in `contracts/capture/`, and in reference aids the tests run
+(`tests/contracts_capture.py`: each a specification aid, clearly labelled, not production code):
+
+| file | from | what | reference aid |
+|---|---|---|---|
+| `spool.md` | 4.1 | the spool directory: names, tmp + rename, audio first and the sidecar last, `EPOCH`, `SEQ` and its recovery, order per channel, who deletes, the bounds, `late` | `check_spool` (every rule a directory breaks), `Spool` (a writer that keeps them, with the points a crash can stop it at), `recover_seq`, `is_late` |
+| `socket.md`, `socket-frames.json` | 4.2, 4.3, 7.5 | the framing (#709's `>II`) with byte vectors, the first exchange, the request rules, the `credentials` request and its `SO_PEERCRED` rule | `frame`, `unframe`; `Requests` (an id applied once, the deadline on the boot clock, who may ask) |
+| `urgent.md`, `urgent.sql`, `urgent-scenarios.json` | 4.3, 11 | the items and their keys, which clock an age is on, the sender's rules, the urgent file's DDL (the design's, byte for byte), and the hub's idempotency rules as a table of scenarios | `Hub` (the hub's dedupe: the store both lanes write, the alarms, the live pages), `Lane` (capture's sender), `P25Bits` (#775's transition rule), `age` |
+| `modes.json` | 4.3, 6 | `/etc/sizeup/capture-mode` (`inline`, `shadow`, `service`) and `/etc/sizeup/urgent-mode` (`off`, `write`, `send`): all nine combinations, each with who decodes, who writes and who sends | `combination`, `read_mode` |
+
+`POST /api/station/urgent` is in `routes.json` under `designed`: decided (an `sz1` credential with the
+`radio-receive` role) and not served. `tests/test_contracts_capture.py` holds the row and fails the day the hub
+serves the path, as `tests/test_contracts_routes.py` does: the row then moves to `routes`.
+
+Rules for every file and message of this contract (the design's 4, ADR 0004): a `v`; unknown keys are ignored by
+every reader; a word a reader does not know (a kind, a frame, an op, a state) is taken as unknown, never as an
+error; no integer above 2^53 - 1; times are float seconds, Unix seconds on the wall clock and seconds since boot in
+a name ending in `_boot`; a file is written whole under a temporary name and renamed (the wish by the app, the
+status and the spool by capture, the cursor by the reader).
+
+Still open in the design itself, and how it shows here: **A7** (what a late emergency becomes on the hub) is
+not decided by the admin. The recommended 30 min is the parameter `max_age_s` of the reference model and of
+`urgent-scenarios.json`, never a constant; the scenarios that depend on it say so. Live P25 emergencies wait for
+#775: their item, key and rules are a slot in the contract and not a working path.
+
+### Choices, for the radio maintainers to confirm
+
+Where the design is ambiguous or silent, and what these files chose. Each is a proposal until confirmed.
+
+| # | where | the design | chosen here |
+|---|---|---|---|
+| C1 | 10 | puts every artifact in `contracts/capture/` | the schemas are `contracts/schemas/capture-*.schema.json` and the vectors `contracts/vectors/capture-*/`, where #774's harness finds them; `contracts/capture/` holds the rest |
+| C2 | 10 | "`oneOf` by `kind`" (by `t`, by `op`); closed lists of words | each word's fields under `if` word `then` fields, and every word an open string with `x-known`: an unknown kind, frame or op validates, as 4.1, 4.2 and 4.7 want it skipped or answered. A closed `oneOf` would refuse it |
+| C3 | 4, 4.2, 4.5 | a `v` in every file and message; a `contract` in `hello`, the status and `capture.contract` | `v` is the version of that one shape (1); `contract` is the major version of the whole contract (1). The design does not say they are one number |
+| C4 | 4.3 Clocks | which clock a field is on | in its bounds too: a wall-clock time is under 10^11 (never milliseconds, as #774); a `_boot` field is under 10^9, so a Unix time does not validate where seconds since boot belong |
+| C5 | 10 | a call requires "the common ones" | the common ones are `v`, `kind`, `id`, `seq`, `spool_epoch`, `published`; a call also requires `start`, `end`, `closed_boot`, `boot`, `audio`. Inside objects the table names only as a whole: an id entry requires `id`, `system`, `emergency`, `from`; `keyup` requires `split`, `parent`, `prev`; a turn requires `src`, `pos_s`, `emergency`, `via`; `grants_applied` is a boolean |
+| C6 | 4.1 | `closed_boot` is "at squelch close" | for a call, which has no squelch: when capture's ingest took the finished call. The wall age `now - end` covers the wait before that, since `late` takes the larger |
+| C7 | 4.1 | a metrics item has an `id`, not said which; `seq` has no stated range | `metrics-<int(minute start * 1000)>`; `seq` starts at 1 and has at most 12 digits (the file name's width) |
+| C8 | 4.1 | `SEQ` is recovered as `max(SEQ, highest in items/) + 1` | every file in `items/` counts, debris too, so a number is never given out twice; the publish lock is held from taking `seq` to the sidecar's rename (X1) |
+| C9 | 4.6 | `tr`: "file name of trunk-recorder's own JSON, a hard link" | linked as `<seq>-<id>.tr`, not `.json` (X2) |
+| C10 | 4.1 | "per channel, `seq` rises in the order transmissions ended" | for calls "per channel" is per system and talkgroup; the order is by `end` |
+| C11 | 4.1 | audio is dropped at a bound and items are deleted behind the cursor; no order given | the sidecar goes first both times (rewritten, or deleted), then the audio: no sidecar ever names audio that is gone. `audio_dropped`, named only in the Bounds row, is a field of the schema |
+| C12 | 4.1 | "under 60 s is live, older is late" | exactly 60 s is late |
+| C13 | 4.3 | the row's `at` is "wall clock at insert" | `at` is set once, when capture makes the item, and is the same in the row, every frame and every request (X3) |
+| C14 | 4.3 | `gen` (int), the hub's fencing generation | `lease.schema.json`'s `counter`: an integer up to 2^53 - 1 or a string of decimal digits, compared by value, for change only. The same for `urgent.hub_gen` in the status |
+| C15 | 4.3 | says nothing of a `status` or an `age_src` word a build does not know | the sender keeps and retries an item answered with an unknown word (never drops an alarm on it); the hub takes an unknown `age_src` as `wall` |
+| C16 | 7.5 | "every string field length-capped before use", no numbers | only `key` (200 characters), the station id (a node id) and a request's `id` (64) are capped here. The other caps are the hub's to choose |
+| C17 | 4.3 | 400, 413, 422 with `bad_json`, `bad_batch`, `too_large`, not paired; nothing on a request that is half good | 400 `bad_json`, 413 `too_large`, 422 `bad_batch`; a request that is not well formed is refused whole and nothing of it is applied |
+| C18 | 4.3 | an alarm past the age limit is `stale`; nothing on its key | the key is recorded all the same: a retry is `duplicate`, and the app's take-over raises nothing |
+| C19 | 4.3 | "the same radio pressing again: the alarm code's own same-radio rule" | the item is `applied` (it was taken) and joins the open alarm: no second alarm, no second push. `duplicate` stays the word for a key already in the store |
+| C20 | 4.3, 11 | the P25 match for "live, then end of call"; "the newer of the two wins" for a page; an alarm "labelled with its age" | the P25 match holds in either order of arrival; newer is the later to arrive at the hub; every push carries `age_s` (from what age it is shown as late is the hub's) |
+| C21 | 7.1 A7 | open: awaiting the admin | `max_age_s` is a parameter (1800 recommended), never a constant |
+| C22 | 10 | "the header and payload limits", no numbers | a header of at most 65536 bytes (#709's); a version 1 writer sends no payload, a version 1 reader skips one of up to 1 MiB and closes the connection on a longer one |
+| C23 | 4.2 | request ids "unique", remembered "for 10 min" | 1 to 64 characters; the 10 min are on the boot clock; a repeat is answered from the memory even after its deadline; the person's yes goes under a **new** id (X8); `credentials` is never kept in the memory |
+| C24 | 4.2, 10 | notices require `v`, `t`; `urgent_taken` carries `n` | each notice's own fields are required too (`role` and `contract`; `what`; `n`; `ch`, `page_id`, `end`); `urgent_taken` may carry `urgent_epoch`, and capture ignores a notice for another epoch (X6); `at` is optional on a client's frame |
+| C25 | 4.2 | frame fields without types | `holding` is `NoiseSquelch.holding`; `queued` a count; a talker has `channel` and `tg` both, as today's state post, and `dispatcher` (X11); `ours.pair` is a pair as in a page; `grant.src` a string, `grant.what` open; `spool.ch` absent for an item with no channel; a `status` frame's `at` is the file's; `level` is asked for with `subscribe: ["level"]` |
+| C26 | 4.2 | `error` is "text for a person" | one string: text, or one of the words a client acts on (`stale`, `expired`, `unsupported`, `forbidden`), named in its description (X7) |
+| C27 | 4.2 | `args` per op, nothing on which are needed | `squelch_apply`: `label`, `open_db`, `close_db`, `min_open_s`; `credentials`: all three, "" for none; `urgent_since`: `urgent_epoch`, `n`; `snapshot`: `{}`; `reception_start` is not typed |
+| C28 | 4.3 | an alarm's `data` for P25: `system`, `talkgroup` added | `source` is the name the finished call's row carries, so the same-radio rule sees one channel; `radio_id` is several ids joined with `, ` as today; `end` is optional |
+| C29 | 4.3, 10 | "an `sz1` credential with the `radio-receive` role" | `credential: ["sz1"]` in `routes.json`: the hub's shared station token, which every other station route takes today, is not listed. The row is under a new `designed` list: `reserved` is for prefixes no station may ever open |
+| C30 | 4.4 | the wish's fields, some without a shape | `paths` entries are optional with the station defaults; the airband owner rule and the `p25` block but `talkgroups` are not typed (their keys are not named); `talkgroups` is `{system: {talkgroup digits: {alert, kept, encrypted}}}`; `spool.min_free_bytes` is there (X9), and the defaults "2 GB" and "256 MB" are read as 2^31 and 2^28 bytes; `hub` may not carry a key named `url`, `hub_url`, `token`, `secret`, `access_id` or `access_secret` |
+| C31 | 4.5 | the status's fields, some without a shape | `wish_seq` 0 while no wish was accepted; `p25` is a map by system short name; `urgent.mode` is `write` or `send`, never `off`; a dongle's `job` is today's `mode`; a status of another boot is a capture that is down; inside `spool` and `urgent` the counters a Health row reads are required, and a channel row's `label`, `kind`, `run`, `state` |
+| C32 | 4.3, 6 | two one-word files | surrounding whitespace is dropped; a missing or empty file and a word a build does not know are the default (`inline`, `off`). In `shadow` the app writes as in the `inline` row of the same `urgent-mode` and the shadow instance writes its own file beside it |
+| C33 | - | - | two one-line changes to #774's tests, without which no schema designed outside `docs/nodes.md` can exist: `tests/test_contracts_schemas.py` takes a description that starts `Designed (docs/`, and `tests/test_contracts_nodes.py` counts the schemas designed in `docs/nodes.md` by that start |
+
+### Found in the design while writing the schemas
+
+Section, text, and what does not fit. Not changed here: the schemas follow the reading given.
+
+| # | section | the text | the problem | read here as |
+|---|---|---|---|---|
+| X1 | 4.1 | "`seq` ... taken under a lock at the sidecar's rename" | the audio file's name carries `seq` and is renamed first, so `seq` exists before the sidecar's rename | taken before the audio's rename, the lock held until the sidecar's (C8) |
+| X2 | 4.6, 4.1 | `tr`: trunk-recorder's own JSON, a hard link; "a reader lists `*.json` only" | a linked JSON in `items/` would be listed as a sidecar | `.tr` (C9) |
+| X3 | 4.3, 4.2, 10 | the row's `at`: "wall clock at insert"; "every header has `v`, `t`, `at`"; the `urgent` frame lists `at` among the item's fields; the item's `at` is required and never null | an item sent from memory has no insert, and the frame's own time and the row's column are one key | the item's `at`, set when it is made (C13) |
+| X4 | 4.3 Clocks, 6 step 8 | "a page item's 120 s: the larger of the boot-clock age and the wall-clock age"; the test list: "the wall clock stepped an hour either way: no page item expires" | stepped forward, the wall age is an hour and the larger-of-two rule expires the item | the rule of 4.3: a step forward expires a page item, never an alarm |
+| X5 | 4.3 | a page item sets the hub's live paging state "with `until` as its expiry" | `until` is the station's wall clock, which the same section says the hub never trusts for an age | kept as the design has it; the hub needs a rule (its now plus `until` minus `sent_at`, say) |
+| X6 | 4.2, 4.3 | `urgent_taken` (`n`); the cursor is "`(urgent_epoch, n)`" | after the file is reset, an `n` of the old file marks rows of the new one as taken | an optional `urgent_epoch` (C24) |
+| X7 | 4.2 | "`error` is text for a person" | the client must tell `stale`, `expired`, `unsupported` and `forbidden` apart, and with `confirm` the question is in `error` | C26. A `reason` word beside the text, as the station routes have, would be cleaner |
+| X8 | 4.2 | "the client sends the request again with `args.confirm: true`"; "a repeat gets the first reply again" | sent again under its id, the confirmed request gets the refusal again | a new id (C23) |
+| X9 | 4.1, 4.4 | `spool.min_free_bytes` (default 256 MB); the wish's `spool`: "`max_age_h`, `max_bytes`, `max_items`, `sync_s`" | the reserve is a setting with no place in the wish | added to the wish (C30) |
+| X10 | 4.6 | a turn's `via`: `srclist` \| `grant` \| `freqlist` | `Turn.via` in `sizeup/radio/p25.py` is `srclist` \| `grant` \| `split`; nothing produces `freqlist` | all four are known words |
+| X11 | 4.2 | `talking` entries: "`LiveTalk.state()` without `rig`, `label`, `main`" and a field list without `dispatcher` | `LiveTalk.state()` works `dispatcher` out from the alias alone (`sizeup/radio/live.py`) | optional in the entry (C25) |
+| X12 | 4 | "a field's unit is in its name" | `levels.q_open` and `q_close` are dB, `breaks` seconds, a turn's `time` Unix seconds | the design's names kept; the unit is in each description |
+| X13 | 10, 4.3 | the example request carries an alarm and a page | the sender has one connection for alarms "and nothing else" and one for pages: it never builds that request | the vector is kept as written; a hub takes both in one |
+| X14 | 4.4 | `listed`, `auto`, `auto_assign`, `order`, `ignore`, `start_mode`: "the `[radio]` settings of the same names" | the `[radio]` keys are `sdrs`, `sdr_ignore`, `auto_assign`, `auto_assign_order`, `start_mode` (`sizeup/config.py`) | each description names its setting |
+| X15 | 4.3 Clocks, 7.5 | a wall-sourced age "is corrected by the hub's skew measure first" | the age is `now - event_at`, two readings of one clock: a constant skew cancels. What is corrected is not said | not modelled |
+| X16 | 4.5 | `urgent.state`: one word of seven | `reset`, `no_credentials` and `off` can hold at once; which wins, and how long `reset` stays, is not said | not decided here |
+| X17 | 10, 4.3 | the route is "idempotent by (`key`, `rev`)"; the store is "keyed by `(station, key)`" | two stations can send one key | `routes.json` says `station`, `key`, `rev` |
+| X18 | 4.1 | "`id` ... matches `CLIP_ID`" | only spaces are taken out of a label: one with another character outside `[A-Za-z0-9._-]` gives an id that does not match. And today a transmission on a channel that is not recorded has no id (`sizeup/app.py`), while its sidecar needs one | the schema holds `id` to `CLIP_ID`; what capture does with such a label is open |
+
+### Running
+
+```sh
+caffeinate -i .venv/bin/python -m pytest -q -n auto --dist loadfile tests/test_contracts_capture.py \
+    tests/test_contracts_schemas.py tests/test_contracts_nodes.py tests/test_contracts_routes.py
+```

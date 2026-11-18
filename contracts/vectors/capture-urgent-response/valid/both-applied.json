@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "v": 1,
+  "station": "st-north",
+  "gen": 412,
+  "results": [
+    {"key": "CHA-live-1900000000123", "rev": 0, "status": "applied"},
+    {"key": "page:PAGE 1:1900000100.25", "rev": 2, "status": "applied"}
+  ]
+}

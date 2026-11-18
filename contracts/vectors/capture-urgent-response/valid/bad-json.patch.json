@@ -1,0 +1,7 @@
+{
+  "base": "capture-urgent-response/valid/bad-batch.json",
+  "patch": [
+    {"op": "replace", "path": "/error", "value": "not JSON"},
+    {"op": "replace", "path": "/reason", "value": "bad_json"}
+  ]
+}

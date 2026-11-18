@@ -1,0 +1,25 @@
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = FULL;            -- every commit is fsync'd
+PRAGMA wal_autocheckpoint = 0;        -- checkpoints are explicit: never on an alarm's insert
+CREATE TABLE IF NOT EXISTS urgent (
+  n          INTEGER PRIMARY KEY AUTOINCREMENT,
+  key        TEXT    NOT NULL,        -- the idempotency key, above
+  rev        INTEGER NOT NULL DEFAULT 0,
+  kind       TEXT    NOT NULL,        -- 'alarm' | 'page'; a reader leaves an unknown kind alone
+  at         REAL    NOT NULL,        -- wall clock at insert, epoch s
+  event_at   REAL    NOT NULL,        -- when it happened on the air, wall clock, epoch s
+  event_boot REAL    NOT NULL,        -- the same moment on CLOCK_BOOTTIME, s
+  boot       TEXT    NOT NULL,        -- the boot id event_boot belongs to
+  data       TEXT    NOT NULL,        -- JSON object, the item's data (below)
+  state      TEXT    NOT NULL DEFAULT 'new',   -- 'new' | 'sent' | 'rejected' | 'expired' (pages only)
+  sent_at    REAL,                    -- when the hub answered for it
+  hub        TEXT,                    -- the hub's word: 'applied' | 'duplicate' | 'stale' | 'rejected'
+  hub_gen    INTEGER,                 -- the hub generation that answered (the resend rule, below)
+  tries      INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,                    -- a status and a reason, never a body, never a token
+  UNIQUE (key, rev)
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- 'v' = 1, 'urgent_epoch' = 16 hex
+CREATE TABLE IF NOT EXISTS p25_bit (             -- #775: when each radio's emergency bit was last seen set
+  system TEXT NOT NULL, radio TEXT NOT NULL, last_set REAL NOT NULL, PRIMARY KEY (system, radio)
+);

@@ -1,0 +1,4 @@
+{
+  "base": "capture-urgent-request/valid/an-alarm-and-a-page.json",
+  "patch": [{"op": "remove", "path": "/items"}]
+}

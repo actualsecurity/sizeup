@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-socket-request.schema.json",
+  "title": "Live socket frame, client to capture",
+  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. The JSON header of one frame a client (the app as `reader`, a tool as `viewer`, the root reload helper) writes on capture's live socket. Two families by `t`: notices, which get no answer (`hello`, `poke`, `cursor`, `urgent_taken`, `paging_finished`), and `request`, which gets one `reply` (capture-socket-reply.schema.json). Capture skips a `t` it does not know and answers an `op` it does not know `unsupported`. Only a client that said `role` `reader` may make requests; `credentials` is taken from uid 0 alone. No request takes a path or a command line, and none returns a secret.",
+  "x-status": "designed",
+  "x-version": 1,
+  "type": "object",
+  "required": ["v", "t"],
+  "additionalProperties": true,
+  "properties": {"v": {"const": 1, "description": "The frame's version, 1."}, "t": {"type": "string", "description": "Which frame this is.", "x-known": ["hello", "poke", "cursor", "urgent_taken", "paging_finished", "request"]}, "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the client made the frame, Unix seconds. For logs only: nothing is decided by it."}},
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "hello", "description": "`t` is `hello`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/hello"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "poke", "description": "`t` is `poke`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/poke"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "cursor", "description": "`t` is `cursor`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/cursor"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "urgent_taken", "description": "`t` is `urgent_taken`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/urgent_taken"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "paging_finished", "description": "`t` is `paging_finished`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/paging_finished"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}},
+        "required": ["t"]
+      },
+      "then": {"$ref": "#/$defs/request"}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "pick", "description": "`op` is `pick`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-pick"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "squelch_apply", "description": "`op` is `squelch_apply`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-squelch_apply"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "reception_start", "description": "`op` is `reception_start`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-reception_start"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "reception_stop", "description": "`op` is `reception_stop`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-reception_stop"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "probe", "description": "`op` is `probe`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-probe"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "airband_ab", "description": "`op` is `airband_ab`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-airband_ab"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "check", "description": "`op` is `check`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-check"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "urgent_since", "description": "`op` is `urgent_since`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-urgent_since"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "credentials", "description": "`op` is `credentials`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-credentials"}}
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"t": {"const": "request", "description": "`t` is `request`."}, "op": {"const": "snapshot", "description": "`op` is `snapshot`."}},
+        "required": ["t", "op"]
+      },
+      "then": {
+        "properties": {"args": {"$ref": "#/$defs/args-snapshot"}}
+      }
+    }
+  ],
+  "$defs": {
+    "hello": {
+      "title": "hello",
+      "description": "The client's first frame: who it is.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["role", "contract"],
+      "additionalProperties": true,
+      "properties": {
+        "role": {"type": "string", "description": "`reader`: the app; it may make requests, and its connection is what the status reports as `reader.attached`. `viewer`: a status tool; its requests are answered `forbidden`. Self-declared: it keeps a tool from changing anything by mistake and is no defence.", "x-known": ["reader", "viewer"]},
+        "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version the client speaks, 1."},
+        "subscribe": {"type": "array", "description": "The optional frames the client wants; [] or absent for none.", "uniqueItems": true, "items": {"type": "string", "description": "An optional frame's `t`. Capture ignores one it does not know.", "x-known": ["level"]}}
+      }
+    },
+    "poke": {
+      "title": "poke",
+      "description": "Look at something now instead of at the next poll.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["what"],
+      "additionalProperties": true,
+      "properties": {"what": {"type": "string", "description": "What changed: `wish` (the wish file was written).", "x-known": ["wish"]}}
+    },
+    "cursor": {
+      "title": "cursor",
+      "description": "The spool cursor moved: capture may delete what is done. It reads `cursor.app.json` itself; the notice carries nothing.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {}
+    },
+    "urgent_taken": {
+      "title": "urgent_taken",
+      "description": "The app has taken the urgent rows up to `n` over into its own lane.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["n"],
+      "additionalProperties": true,
+      "properties": {"n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "Every row at or below this is taken."}, "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch `n` counts in, 16 hex characters. Capture ignores a notice for another epoch than the file's."}}
+    },
+    "paging_finished": {
+      "title": "paging_finished",
+      "description": "The live page became a finished page (today's `LivePaging.finished`). Without it the live page ends on its own hold timeout.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["ch", "page_id", "end"],
+      "additionalProperties": true,
+      "properties": {"ch": {"type": "string", "minLength": 1, "description": "The paging channel's label."}, "page_id": {"type": "string", "minLength": 1, "description": "The finished page's id."}, "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the page ended, Unix seconds."}}
+    },
+    "request": {
+      "title": "request",
+      "description": "A request: something imperative that needs an answer. Capture answers every request with one `reply` frame carrying the same `id`, on the same connection.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "op", "args", "expires_boot"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Chosen by the client, unique, 1 to 64 characters. Capture applies each id once and remembers the last 256 for 10 min: a repeat gets the first reply again and changes nothing. A request sent again with `args.confirm` true is a new request with a new id."},
+        "op": {"type": "string", "description": "What is asked. An op capture does not know is answered `ok` false, `error` `unsupported`.", "x-known": ["pick", "squelch_apply", "reception_start", "reception_stop", "probe", "airband_ab", "check", "urgent_since", "credentials", "snapshot"]},
+        "args": {"type": "object", "description": "The op's arguments (`$defs/<op>`); {} for an op that has none."},
+        "by": {"type": "string", "description": "Who asked: `person` (a click, on the station or through the hub).", "x-known": ["person"]},
+        "expires_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The deadline, on CLOCK_BOOTTIME, seconds since boot (both ends are on one host). A request that reaches capture after it is answered `expired` and not applied."}
+      }
+    },
+    "args-pick": {
+      "title": "pick",
+      "description": "A person's pick of a dongle's job, or Off (today's `App.set_mode`).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["sdr", "job"],
+      "additionalProperties": true,
+      "properties": {"sdr": {"type": "string", "minLength": 1, "description": "The dongle's serial."}, "job": {"type": "string", "minLength": 1, "description": "The job: a channel's label, the P25 job, a system job, or `Off`."}, "confirm": {"type": "boolean", "default": false, "description": "The person said yes to the question a refusal with `confirm` true asked."}}
+    },
+    "args-squelch_apply": {
+      "title": "squelch_apply",
+      "description": "Apply squelch values to a running channel (#685, #700). With `expect` it is refused (`stale`) when what runs now is not what the suggestion was made for; without it, a plain set.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["label", "open_db", "close_db", "min_open_s"],
+      "additionalProperties": true,
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "description": "The channel's label."},
+        "open_db": {"type": "number", "description": "The squelch opens at this much quieting, dB."},
+        "close_db": {"type": "number", "description": "The squelch closes below this much quieting, dB."},
+        "min_open_s": {"type": "number", "minimum": 0, "description": "The shortest opening kept, seconds."},
+        "expect": {
+          "title": "What must be running",
+          "description": "The values the suggestion was made against.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["open_db", "close_db"],
+          "additionalProperties": true,
+          "properties": {"open_db": {"type": "number", "description": "The running `open_db` the client saw, dB."}, "close_db": {"type": "number", "description": "The running `close_db` the client saw, dB."}}
+        }
+      }
+    },
+    "args-reception_start": {
+      "title": "reception_start",
+      "description": "Start a reception test: the body of today's `reception_post`. Its keys are not typed here.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {}
+    },
+    "args-reception_stop": {
+      "title": "reception_stop",
+      "description": "Stop a reception test.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": true,
+      "properties": {"id": {"type": "string", "minLength": 1, "description": "The test's id."}}
+    },
+    "args-probe": {
+      "title": "probe",
+      "description": "Run the no-audio probe on a dongle now (`App._probe`). `result`: `audio` or `none`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["sdr"],
+      "additionalProperties": true,
+      "properties": {"sdr": {"type": "string", "minLength": 1, "description": "The dongle's serial."}}
+    },
+    "args-airband_ab": {
+      "title": "airband_ab",
+      "description": "An on-air A/B comparison on one airband dongle (`App.airband_ab`).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["label"],
+      "additionalProperties": true,
+      "properties": {"label": {"type": "string", "minLength": 1, "description": "The airband channel's label."}, "minutes": {"type": "number", "minimum": 0, "description": "How long the comparison runs, minutes; 0 stops a running one."}, "phase_s": {"type": "number", "exclusiveMinimum": 0, "description": "How long each side is on before the switch, seconds."}}
+    },
+    "args-check": {
+      "title": "check",
+      "description": "Ask whether an edit would be refused, before the app writes it into the wish. Advisory only: it changes nothing, and capture validates again when it applies the wish.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["what", "value"],
+      "additionalProperties": true,
+      "properties": {"what": {"type": "string", "description": "What is being edited.", "x-known": ["groups", "adsb"]}, "value": {"description": "The edit as it would be written into the wish: `dongles.groups` (a list) for `groups`, the reserved serial for `adsb`."}, "confirm": {"type": "boolean", "default": false, "description": "The person said yes to the question a refusal with `confirm` true asked."}}
+    },
+    "args-urgent_since": {
+      "title": "urgent_since",
+      "description": "The app's take-over after a reconnect: the urgent rows above its cursor, page by page. `result`: capture-socket-reply.schema.json `$defs/urgent-since-result`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["urgent_epoch", "n"],
+      "additionalProperties": true,
+      "properties": {"urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The epoch the app's cursor belongs to, 16 hex characters. When it is not the file's, capture answers from 0."}, "n": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The app's cursor: rows above it are wanted. 0: from the start."}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200, "description": "The most rows in one reply."}}
+    },
+    "args-credentials": {
+      "title": "credentials",
+      "description": "The rotated credentials, handed over by the root reload helper (`systemctl reload sizeup-radio`). ACCEPTED ONLY FROM A PEER WHOSE UID IS 0 (SO_PEERCRED); anyone else is answered `forbidden`. The only frame of the contract that carries a secret; never logged, never replayed from the id memory with its arguments.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["token", "access_id", "access_secret"],
+      "additionalProperties": true,
+      "properties": {"token": {"type": "string", "description": "The station's own `sz1` token (SIZEUP_STATION_TOKEN); \"\" when the store has none."}, "access_id": {"type": "string", "description": "The Cloudflare Access service token's client id; \"\" when the hub is not behind Access."}, "access_secret": {"type": "string", "description": "The Cloudflare Access service token's secret; \"\" when the hub is not behind Access."}}
+    },
+    "args-snapshot": {
+      "title": "snapshot",
+      "description": "Ask for the snapshot. No arguments. `result`: the snapshot (capture-socket-event.schema.json `$defs/snapshot`).",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {}
+    }
+  }
+}

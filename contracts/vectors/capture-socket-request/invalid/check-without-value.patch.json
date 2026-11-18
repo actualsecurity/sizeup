@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/check-groups.json",
+  "patch": [{"op": "remove", "path": "/args/value"}]
+}

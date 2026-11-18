@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/hello.json",
+  "patch": [{"op": "replace", "path": "/v", "value": 2}]
+}

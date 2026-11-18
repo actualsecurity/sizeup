@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/pick.json",
+  "patch": [{"op": "remove", "path": "/args/job"}]
+}

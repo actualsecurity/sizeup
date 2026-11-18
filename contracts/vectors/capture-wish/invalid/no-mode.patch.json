@@ -1,0 +1,4 @@
+{
+  "base": "capture-wish/valid/service.json",
+  "patch": [{"op": "remove", "path": "/mode"}]
+}

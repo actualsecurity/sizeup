@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-sidecar/valid/metrics.json",
+  "patch": [{"op": "remove", "path": "/records"}]
+}

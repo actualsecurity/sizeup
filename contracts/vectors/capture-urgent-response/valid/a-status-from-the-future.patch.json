@@ -1,0 +1,4 @@
+{
+  "base": "capture-urgent-response/valid/both-applied.json",
+  "patch": [{"op": "replace", "path": "/results/0/status", "value": "from_the_future"}]
+}

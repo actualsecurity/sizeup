@@ -1,0 +1,9 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/channels/0/run", "value": "held"},
+    {"op": "replace", "path": "/channels/0/state", "value": "absent"},
+    {"op": "replace", "path": "/channels/0/open", "value": false},
+    {"op": "replace", "path": "/sdrs/0/held_by", "value": {"app": "otherapp", "mode": "scan"}}
+  ]
+}

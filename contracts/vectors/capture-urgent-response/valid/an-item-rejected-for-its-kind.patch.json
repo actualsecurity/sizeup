@@ -1,0 +1,7 @@
+{
+  "base": "capture-urgent-response/valid/both-applied.json",
+  "patch": [
+    {"op": "replace", "path": "/results/1/status", "value": "rejected"},
+    {"op": "add", "path": "/results/1/reason", "value": "kind"}
+  ]
+}

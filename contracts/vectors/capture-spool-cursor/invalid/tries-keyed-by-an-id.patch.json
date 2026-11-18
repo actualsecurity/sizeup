@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-cursor/valid/channels-in-parallel.json",
+  "patch": [{"op": "replace", "path": "/tries", "value": {"CHA-1900000000123": 2}}]
+}

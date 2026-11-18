@@ -1,0 +1,4 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [{"op": "replace", "path": "/wish_problem", "value": "radio_wish.json: not JSON"}]
+}

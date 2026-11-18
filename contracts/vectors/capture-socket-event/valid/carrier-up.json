@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "t": "carrier",
+  "at": 1900000000.18,
+  "ch": "CH A",
+  "state": "up",
+  "since": 1900000000.123,
+  "continuing": false,
+  "holding": false,
+  "quieting_db": 31.0,
+  "queued": 0
+}

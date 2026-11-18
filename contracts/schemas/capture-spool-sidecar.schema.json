@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-spool-sidecar.schema.json",
+  "title": "Spool item sidecar",
+  "description": "Designed (docs/native/capture-split.md 4.1 and 4.6, #773), not implemented. The JSON file that completes one item of the capture spool: `items/<seq, 12 digits>-<id>.json`, written by `sizeup-radio` under tmp/ and renamed into items/ LAST, after the item's audio. A reader lists `*.json` only. `kind` says what the item is: `segment` (a finished FM, paging or airband transmission), `call` (a finished P25 call) or `metrics` (one minute of signal records, no audio); a reader acknowledges and skips a kind it does not know. Wall-clock times are Unix seconds with a fraction (never milliseconds); a name ending in `_boot` is seconds on CLOCK_BOOTTIME, comparable only while `boot` is the reader's own boot id. The layout and the rules a spool directory must keep are in contracts/capture/spool.md; tests/contracts_capture.py `check_spool` is their reference check.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["v", "kind", "id", "seq", "spool_epoch", "published"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The sidecar's version, 1. A change that only adds optional keys keeps it."},
+    "kind": {"type": "string", "description": "What the item is. An unknown kind is acknowledged and skipped by the reader.", "x-known": ["segment", "call", "metrics"]},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$", "not": {"pattern": "\\.\\."}, "description": "The item's idempotency id; the reader drops an id it already handled. A segment: today's clip id, `<channel label without spaces>-<int(start * 1000)>`. A call: trunk-recorder's file stem. A metrics item: `metrics-<int(minute start * 1000)>`. It matches CLIP_ID (sizeup/app.py) and has no `..`. The same transmission never gets two ids."},
+    "seq": {"type": "integer", "minimum": 1, "maximum": 999999999999, "description": "The item's sequence number: one counter for the whole spool, taken under the publish lock. Per channel it rises in the order the transmissions ended; nothing is promised across channels. 12 decimal digits at most (the file name's width)."},
+    "spool_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The spool this item belongs to: the 16 hex characters of the spool's EPOCH file. A reader whose cursor names another epoch starts from 0."},
+    "published": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the sidecar was renamed into items/, Unix seconds (wall clock)."},
+    "published_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "The same moment on CLOCK_BOOTTIME, seconds since boot."},
+    "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id `closed_boot` and `published_boot` belong to: the kernel's (/proc/sys/kernel/random/boot_id), or where there is none (macOS) an id made at process start. Opaque: compared for equality only."},
+    "capture": {
+      "title": "The writer",
+      "description": "Which capture wrote the item, for the compare tool.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {"impl": {"type": "string", "description": "The implementation: `python`, or a native daemon's name.", "x-known": ["python"]}, "build": {"type": "string", "description": "The writer's build."}, "contract": {"type": "integer", "minimum": 1, "description": "The capture contract's major version the writer speaks, 1."}}
+    },
+    "channel": {
+      "title": "The channel",
+      "description": "The channel the transmission was heard on (a segment).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["label", "kind"],
+      "additionalProperties": true,
+      "properties": {"label": {"type": "string", "minLength": 1, "description": "The channel's label, as in the wish."}, "kind": {"type": "string", "description": "The channel's kind.", "x-known": ["traffic", "paging", "airband"]}, "mhz": {"type": "number", "exclusiveMinimum": 0, "description": "The frequency as heard, MHz, to 4 decimals. Airband: the frequency of this transmission (#260)."}, "mod": {"type": "string", "description": "The modulation: `nfm` or `am`.", "x-known": ["nfm", "am"]}}
+    },
+    "sdr": {"type": "string", "description": "The serial of the dongle that received it."},
+    "start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the transmission started, Unix seconds: the wall clock (CLOCK_REALTIME), stamped by the squelch from frame arrival. A call: the call's start as trunk-recorder gives it."},
+    "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it ended, Unix seconds (wall clock)."},
+    "closed_boot": {"type": "number", "minimum": 0, "exclusiveMaximum": 1000000000, "description": "CLOCK_BOOTTIME at the squelch's close, seconds since boot (a call: when capture's ingest took the finished call). What `late` is measured from, while `boot` is the reader's boot."},
+    "replayed": {"type": "boolean", "default": false, "description": "A P25 call capture took from its replay mark after its own restart (#753). Informative: lateness is decided by age alone."},
+    "reason": {"type": "string", "description": "Why the transmission ended, as `Segment.reason`. Open: a reader takes any text.", "x-known": ["quiet", "max length", "steady", "stall", "stopped", "rtl_fm ended", "key-up"]},
+    "partial": {"type": "boolean", "default": false, "description": "Cut by something other than the transmission ending (`stall`, `stopped`, `rtl_fm ended`)."},
+    "cont": {"type": "boolean", "default": false, "description": "Paging (#61): opened within the continuation window of the transmission before it."},
+    "hold_until": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "Paging (#61): the wall-clock time until which the squelch watches for a continuation, Unix seconds; 0 for none."},
+    "breaks": {
+      "type": "array",
+      "description": "Paging (#61): each drop the long hang held through, as [start, end] in seconds into the audio; [] for none.",
+      "items": {
+        "type": "array",
+        "prefixItems": [{"type": "number", "minimum": 0}, {"type": "number", "minimum": 0}],
+        "items": false,
+        "minItems": 2
+      }
+    },
+    "keyup": {
+      "title": "Key-up link",
+      "description": "Set on a piece cut from a longer recording at a key-up (#645); null for a transmission that was not cut. The ids are the pieces' own item ids (`<label without spaces>-<int(start * 1000)>`).",
+      "x-complete": true,
+      "type": ["object", "null"],
+      "required": ["split", "parent", "prev"],
+      "additionalProperties": true,
+      "properties": {"split": {"type": "string", "description": "Why this piece was cut from the one before it: `gap`, `id` or `level`; \"\" for the first piece.", "x-known": ["", "gap", "id", "level"]}, "first_start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The start of the recording's first piece, Unix seconds (the first piece: its own `start`)."}, "prev_start": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The start of the piece before this one, Unix seconds; null for the first piece."}, "parent": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$", "description": "The item id of the recording's first piece (the first piece: its own id)."}, "prev": {"type": "string", "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,120})?$", "description": "The item id of the piece before this one; \"\" for the first piece."}}
+    },
+    "levels": {
+      "title": "Signal levels",
+      "description": "What the squelch measured for this transmission. An FM channel sends the FM keys, an AM (airband) channel the AM keys; `quieting_db` is on both with its own meaning.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {"quieting_db": {"type": ["number", "null"], "description": "FM: how far the carrier quieted the hiss, dB. AM: the carrier over the floor, dB."}, "q_open": {"type": ["number", "null"], "description": "FM: quieting over the first 0.3 s of carrier, dB; null when not measured."}, "q_close": {"type": ["number", "null"], "description": "FM: quieting over the last 0.3 s of carrier, dB; null when not measured."}, "hiss_db": {"type": ["number", "null"], "description": "FM: the idle hiss level the quieting was measured against, relative dB; null when not measured."}, "floor_db": {"type": ["number", "null"], "description": "FM: a background carrier's quieting, dB; null when there was none."}, "carrier_dbfs": {"type": ["number", "null"], "description": "AM: the carrier's level, dBFS."}, "floor_dbfs": {"type": ["number", "null"], "description": "AM: the noise floor the carrier was measured against, dBFS."}, "snr_db": {"type": ["number", "null"], "description": "AM: the audio's signal over noise, dB."}, "opened": {"type": "string", "description": "AM: how the squelch opened: `carrier` (a carrier over the threshold) or `sustained` (a weaker one that held).", "x-known": ["carrier", "sustained"]}, "weak": {"type": "boolean", "description": "AM: the transmission was weak."}, "marginal": {"type": "boolean", "description": "AM: the transmission was marginal."}, "preroll_s": {"type": "number", "minimum": 0, "description": "AM: audio kept from before the squelch opened, seconds."}, "notched_hz": {"type": "array", "description": "AM: the steady tones notched out of the audio, each a frequency in Hz; [] for none.", "items": {"type": "number", "exclusiveMinimum": 0}}}
+    },
+    "speech_s": {"type": "number", "minimum": 0, "description": "Seconds of speech in the audio (`fm.speech_seconds`)."},
+    "ids": {"type": "array", "description": "The radio ids of the transmission, in today's merge order: the live tap's first, then the segment's own; [] for none.", "items": {"$ref": "#/$defs/radio-id"}},
+    "id_burst_seen": {"type": "boolean", "description": "A data burst was there, in the key-up window or at either edge, decoded or not (#163)."},
+    "mdc_crc_failed": {"type": "integer", "minimum": 0, "description": "MDC-1200 sync hits whose CRC failed, a count."},
+    "bursts": {"type": "integer", "minimum": 0, "description": "Data bursts cut off the transmission's edges, a count."},
+    "alarm_key": {"type": "string", "maxLength": 200, "description": "The `key` of the urgent alarm capture raised for this carrier (capture-urgent-item.schema.json); \"\" for none."},
+    "tones_live": {
+      "type": "array",
+      "description": "Paging: the tone pairs the live decode showed, without names. Informative: the page's own tone decode runs over the audio.",
+      "items": {
+        "title": "One tone pair, live",
+        "description": "A pair as the live decode showed it.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["a_hz", "b_hz"],
+        "additionalProperties": true,
+        "properties": {"a_hz": {"type": "number", "exclusiveMinimum": 0, "description": "The first tone, Hz."}, "b_hz": {"type": "number", "exclusiveMinimum": 0, "description": "The second tone, Hz."}, "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the pair was certain, Unix seconds."}}
+      }
+    },
+    "audio": {"$ref": "#/$defs/audio"},
+    "audio_dropped": {"type": "boolean", "default": false, "description": "The audio was removed at a bound (age, size, the free-space reserve) and `audio` is null for that reason. Never set on an item with an emergency id."},
+    "bursts_audio": {"type": ["string", "null"], "pattern": "^[0-9]{12}-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.mdc\\.wav$", "description": "The file name in items/ of the cut-off id bursts, `<seq, 12 digits>-<id>.mdc.wav`; null for none."},
+    "system": {"type": "string", "minLength": 1, "description": "A call: trunk-recorder's short name of the P25 system."},
+    "talkgroup": {"type": "integer", "minimum": 0, "description": "A call: the talkgroup number."},
+    "freq_hz": {"type": ["number", "null"], "exclusiveMinimum": 0, "description": "A call: its voice channel, Hz; null when unknown."},
+    "signal_db": {"type": ["number", "null"], "description": "A call: the signal trunk-recorder measured, dB; null when it measured none."},
+    "noise_db": {"type": ["number", "null"], "description": "A call: the noise trunk-recorder measured, dB; null when it measured none."},
+    "emergency": {"type": "boolean", "description": "A call: the call's JSON says it was granted as an emergency call."},
+    "encrypted": {"type": "boolean", "description": "A call: the call's JSON says it was encrypted."},
+    "turns": {"type": "array", "description": "A call: its key-ups in order, after the live grants were applied.", "items": {"$ref": "#/$defs/turn"}},
+    "grants_applied": {"type": "boolean", "description": "A call: the live grants changed a turn (`apply_grants` returned true). Never true on a replayed call."},
+    "tr": {"type": "string", "pattern": "^[0-9]{12}-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.tr$", "description": "A call: the file name in items/ of trunk-recorder's own JSON for the call, a hard link, `<seq, 12 digits>-<id>.tr`. It does not end in `.json`: in items/ only a sidecar does."},
+    "records": {
+      "type": "array",
+      "description": "A metrics item: the `floor` and `cc` records of sizeup/cloud/metrics.py as they are today, one object each, with `k` (the record's kind), `s` (its subject) and `at` (Unix seconds).",
+      "items": {
+        "type": "object",
+        "required": ["k"],
+        "additionalProperties": true,
+        "properties": {"k": {"type": "string", "description": "The record's kind.", "x-known": ["floor", "cc"]}}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {"kind": {"const": "segment", "description": "`kind` is `segment`."}},
+        "required": ["kind"]
+      },
+      "then": {"required": ["channel", "start", "end", "closed_boot", "boot", "reason", "levels", "ids", "alarm_key", "audio"]}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"kind": {"const": "call", "description": "`kind` is `call`."}},
+        "required": ["kind"]
+      },
+      "then": {"required": ["start", "end", "closed_boot", "boot", "audio", "system", "talkgroup", "turns", "emergency", "encrypted", "tr"]}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"kind": {"const": "metrics", "description": "`kind` is `metrics`."}},
+        "required": ["kind"]
+      },
+      "then": {"required": ["records"]}
+    }
+  ],
+  "$defs": {
+    "radio-id": {
+      "title": "One radio id",
+      "description": "A radio id decoded from an MDC-1200 or FleetSync packet.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "system", "emergency", "from"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "description": "The radio's id as decoded, digits as a string."},
+        "system": {"type": "string", "description": "The signalling it was sent in. A reader takes a word it does not know as an id of an unknown system.", "x-known": ["mdc", "fleetsync"]},
+        "emergency": {"type": "boolean", "description": "The packet was an emergency (the radio's emergency button)."},
+        "from": {"type": "string", "description": "Where it was decoded: `live` by the live tap at the key-up, `lookback` by the tap's look back over the carrier's first frames, `burst` from a data burst cut off the transmission's edge, `audio` from the whole-clip decode at the close.", "x-known": ["live", "lookback", "burst", "audio"]}
+      }
+    },
+    "audio": {
+      "title": "The item's audio file",
+      "description": "The audio of the transmission, beside the sidecar in items/. null when there is none: the wish says the channel is not recorded, or the audio was dropped at a bound (`audio_dropped`).",
+      "x-complete": true,
+      "type": ["object", "null"],
+      "required": ["file", "format", "encoding", "rate_hz", "channels", "samples", "bytes"],
+      "additionalProperties": true,
+      "properties": {
+        "file": {"type": "string", "pattern": "^[0-9]{12}-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\\.wav$", "description": "The file's name in items/: `<seq, 12 digits>-<id>.wav`. A name only, never a path."},
+        "format": {"type": "string", "description": "The container. `wav`: RIFF/WAVE.", "x-known": ["wav"]},
+        "encoding": {"type": "string", "description": "The sample format. `s16le`: signed 16-bit little-endian PCM. For a segment it is the float audio clipped to +-1 and scaled by 32767, exactly today's `<id>.src.wav`.", "x-known": ["s16le"]},
+        "rate_hz": {"type": "integer", "minimum": 1, "description": "Samples per second, Hz. 16000 for a segment; trunk-recorder's own rate for a call (the reader resamples)."},
+        "channels": {"type": "integer", "minimum": 1, "description": "Audio channels, a count. 1."},
+        "samples": {"type": "integer", "minimum": 0, "description": "Samples per channel in the file, a count."},
+        "bytes": {"type": "integer", "minimum": 0, "description": "The whole file's size, bytes. A file on disk of another size (short or empty after a power cut) is logged and skipped, never parsed as audio. A segment's file is a 44-byte header and the samples: 44 + 2 x samples."}
+      }
+    },
+    "turn": {
+      "title": "One key-up inside a P25 call",
+      "description": "One talker's turn, after the live grants were applied (`apply_grants`).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["src", "pos_s", "emergency", "via"],
+      "additionalProperties": true,
+      "properties": {
+        "src": {"type": "string", "description": "The P25 radio id, digits as a string; \"\" when none was decoded."},
+        "pos_s": {"type": "number", "minimum": 0, "description": "Where the turn starts in the call's audio, seconds."},
+        "len_s": {"type": ["number", "null"], "minimum": 0, "description": "The turn's length, seconds of audio; null: until the next turn."},
+        "time": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "The turn's start, Unix seconds (estimated: trunk-recorder gives whole seconds); null when unknown."},
+        "tag": {"type": "string", "description": "trunk-recorder's alias for `src`; \"\" for none."},
+        "emergency": {"type": "boolean", "description": "The call's JSON flags this key-up as an emergency (`srcList[].emergency`)."},
+        "errors": {"type": "integer", "minimum": 0, "description": "The voice channel's error count for the turn (`freqList[].error_count`)."},
+        "via": {"type": "string", "description": "How the turn got its talker: `srclist` (the call's own list), `grant` (named by a live grant), `freqlist`. Today's code also says `split` (cut at a grant) and never `freqlist`: see contracts/README.md, Capture split.", "x-known": ["srclist", "grant", "freqlist", "split"]}
+      }
+    }
+  }
+}

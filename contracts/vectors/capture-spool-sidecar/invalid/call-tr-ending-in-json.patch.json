@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-sidecar/valid/call.json",
+  "patch": [{"op": "replace", "path": "/tr", "value": "000000012350-4101-1900000300_851012500.0-call_17.json"}]
+}

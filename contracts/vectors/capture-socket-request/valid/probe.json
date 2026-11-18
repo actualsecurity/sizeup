@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-44dd55ee",
+  "op": "probe",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {"sdr": "sdr-c"}
+}

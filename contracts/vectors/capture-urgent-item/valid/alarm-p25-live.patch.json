@@ -1,0 +1,24 @@
+{
+  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "patch": [
+    {"op": "replace", "path": "/key", "value": "p25-examplesys-4101-7001-1900000300000"},
+    {"op": "replace", "path": "/at", "value": 1900000300.02},
+    {"op": "replace", "path": "/event_at", "value": 1900000300.0},
+    {"op": "replace", "path": "/age_s", "value": 0.03},
+    {
+      "op": "replace",
+      "path": "/data",
+      "value": {
+        "source": "Fire Dispatch 1",
+        "start": 1900000300.0,
+        "radio_id": "7001",
+        "ids": [],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "P25",
+        "system": "examplesys",
+        "talkgroup": 4101
+      }
+    }
+  ]
+}

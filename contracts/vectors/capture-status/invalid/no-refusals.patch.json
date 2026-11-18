@@ -1,0 +1,4 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [{"op": "remove", "path": "/refusals"}]
+}
