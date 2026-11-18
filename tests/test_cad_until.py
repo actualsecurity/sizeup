@@ -189,6 +189,7 @@ def test_reopening_an_expired_event_clears_its_passed_until():
 def test_a_held_or_idle_sweep_commits_nothing():
     clock = Clock(local(2026, 10, 7, 12, 0))
     cad = make_cad(clock=clock)
+    cad.radiolog.inline = True                                 # its units backfill here, not on a thread committing later
     held = notif(cad, local(2026, 10, 7, 13, 0))
     notif(cad, local(2026, 10, 7, 20, 0))                      # not yet
     cad.attach(held, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
@@ -331,3 +332,39 @@ def test_the_queue_card_and_the_facts_use_it():
     assert 'show($("#e-until-w"), !inc.emergency);' in js
     assert '$("#e-emergency").addEventListener("change", () => show($("#e-until-w"), !$("#e-emergency").checked));' in js
     assert '<label id="e-until-w"' in (STATIC / "cad.html").read_text()
+
+
+def test_an_until_with_seconds_round_trips_through_the_edit_form():
+    clock = Clock(local(2026, 10, 7, 12, 0))
+    cad = make_cad(clock=clock)
+    until = local(2026, 10, 7, 13, 0) + 30                     # stored with seconds (from the API)
+    iid = notif(cad, until)
+    cad.attach(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    clock.t = local(2026, 10, 7, 14, 0)                        # passed, held open by E60
+    cad.expire_until()
+    n = len(texts(cad, iid))
+    # the form shows minutes only and sends 13:00 back with an unrelated edit: the same Until, not a past one
+    cad.update(iid, {"remarks": "detour posted", "until_at": local(2026, 10, 7, 13, 0), "operator": "JD"})
+    inc = cad.store.incident(iid)
+    assert (inc["remarks"], inc["until_at"]) == ("detour posted", until)
+    assert texts(cad, iid)[n:] == ["Edited remarks updated"]                    # no "until:" in it
+    with pytest.raises(CadError, match="Until is in the past"):                   # another minute: a change
+        cad.update(iid, {"until_at": local(2026, 10, 7, 13, 1), "operator": "JD"})
+
+
+def test_settings_shows_expired_read_only_and_refuses_changing_it():
+    from tests.test_settings import item, post
+    cad = make_cad()
+    row = item(cad, "dispositions", EXPIRED)
+    assert row["system"] is True and row["name"] == "Expired"
+    for action, extra in (("edit", {"item": {"name": "Timed out"}}), ("retire", {}), ("restore", {}), ("delete", {})):
+        with pytest.raises(CadError, match="EXPIRED is the hub's own"):
+            post(cad, "dispositions", action=action, code=EXPIRED, **extra)
+    assert item(cad, "dispositions", EXPIRED)["name"] == "Expired" and EXPIRED in [
+        x["code"] for x in cad.store.lists.dispositions]
+    post(cad, "dispositions", action="retire", code="RMA")                         # the others as before
+    assert item(cad, "dispositions", "RMA")["retired"] is True
+    js = (STATIC / "settings.js").read_text()
+    assert 'name.disabled = deleted || !!x.system;' in js and '"set by the hub"' in js
+    i = js.index("if (x.system) {")
+    assert js.index("return li;", i) < js.index('sBtn("Retire"', i)                # no Retire / Delete on it

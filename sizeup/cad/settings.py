@@ -1356,6 +1356,9 @@ class Editor:
         if code not in items and not (action == "reset" and code in o):
             raise CadError(f"no {code!r} in {title}")
         cur = items.get(code)
+        if sec == "dispositions" and code in lists_mod.SYSTEM_DISPOSITIONS and action in ("edit", "retire", "restore", "delete"):
+            raise CadError(f"{code} is the hub's own (a passed Until closes an event with it): "
+                           "it can't be edited, retired or deleted")
         if action == "edit":
             raw = body.get("item")
             if isinstance(raw, dict) and raw.get("code") not in (None, code):

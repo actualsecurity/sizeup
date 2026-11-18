@@ -933,7 +933,9 @@ class Cad:
         f = self._fields(body, partial=True)
         if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
             old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
-            if f["until_at"] != old["until_at"] and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            if old["until_at"] is not None and f["until_at"] // 60 == old["until_at"] // 60:
+                del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
+            elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
                 raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
