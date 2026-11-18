@@ -1,0 +1,25 @@
+get:
+  operationId: getMe
+  summary: Who this device is
+  description: >
+    The person this device's token belongs to, as Settings > Users has them right now (the role is read on every
+    request, so a change shows on the next call). Needs the `auth` feature on. 401 `token_expired` (refresh),
+    `device_revoked` or `user_inactive` (wipe local data, sign in again), else `unauthorized`.
+  responses:
+    "200":
+      description: The signed-in person and device.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Me.yaml
+          example:
+            email: casey@example.org
+            name: Casey Rivera
+            role: dispatcher
+            device_id: dv0123456789abcdef
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

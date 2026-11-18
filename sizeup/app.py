@@ -4832,9 +4832,14 @@ def adapter_password(cfg: Config):
 
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
+    access = access_verifier(cfg)
+    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                      max_streams=cfg.mobile_max_streams)
+    from sizeup.api.v1.wire import make_auth     # the app's sign-in (#558): built only when [mobile] is on with a key
+    mobile_auth = make_auth(cfg, app, access, mobile, log)
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
                        app.set_talkgroup, app.set_talkgroup_group, app.retranscribe, cad=CadApi(app.cad),
-                       station=getattr(app, "hub", None), health=health_info(cfg), access=access_verifier(cfg),
+                       station=getattr(app, "hub", None), health=health_info(cfg), access=access,
                        access_log=log if cfg.cloud_role == "hub" else None, station_mode=app.station,
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
@@ -4846,8 +4851,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
                        adapter_password=adapter_password(cfg),
-                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
-                                       max_streams=cfg.mobile_max_streams))
+                       mobile=mobile, mobile_auth=mobile_auth)
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 

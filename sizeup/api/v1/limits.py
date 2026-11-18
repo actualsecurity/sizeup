@@ -28,6 +28,7 @@ ANON_RATE, ANON_BURST = 5.0, 15.0            # one client address with no princi
 ALL_ANON_RATE, ALL_ANON_BURST = 50.0, 100.0  # every such client together
 STREAMS_PER_DEVICE = 2
 META_RATE, META_BURST = 50.0, 100.0           # `meta`, from every address together
+SIGNIN_RATE, SIGNIN_BURST = 50.0, 100.0       # the sign-in's public routes (/auth/v1/*, /.well-known/): their own
 MAX_KEYS = 4096                               # buckets kept (devices, and addresses, each): the memory bound
 IDLE_FULL_S = 60                              # a bucket idle this long is full again: nothing is lost by dropping it
 
@@ -46,7 +47,8 @@ class Limits:
         self._lock = threading.Lock()
         self._devices: dict[str, Bucket] = {}
         self._ips: dict[str, Bucket] = {}
-        self._shared = {"anon": Bucket(ALL_ANON_BURST, clock()), "meta": Bucket(META_BURST, clock())}
+        self._shared = {"anon": Bucket(ALL_ANON_BURST, clock()), "meta": Bucket(META_BURST, clock()),
+                        "signin": Bucket(SIGNIN_BURST, clock())}
         self._busy = 0
         self._streams: dict[str, int] = {}
 
@@ -73,9 +75,10 @@ class Limits:
         for k in idle:
             del buckets[k]
 
-    def admit(self, device: str | None, write: bool, peer: str = "", public: bool = False) -> int:
+    def admit(self, device: str | None, write: bool, peer: str = "", public: bool = False, shared: str = "meta") -> int:
         """0: go on. Else the Retry-After seconds (a 429). device: the device's key, None: unauthenticated.
-        public: the route needs no token (meta), so it has its own shared bucket."""
+        public: the route needs no token, so it has a shared bucket of its own: `meta` for meta (the app's launch),
+        `signin` for the sign-in's public routes, so a flood on one never drains the other."""
         now = self.clock()
         with self._lock:
             if device:
@@ -84,7 +87,12 @@ class Limits:
             wait = self._take(self._ips, peer or "-", ANON_RATE, ANON_BURST, now)     # its own address first
             if wait:
                 return wait
-            name, rate, burst = ("meta", META_RATE, META_BURST) if public else ("anon", ALL_ANON_RATE, ALL_ANON_BURST)
+            if not public:
+                name, rate, burst = "anon", ALL_ANON_RATE, ALL_ANON_BURST
+            elif shared == "signin":
+                name, rate, burst = "signin", SIGNIN_RATE, SIGNIN_BURST
+            else:
+                name, rate, burst = "meta", META_RATE, META_BURST
             return self._take(self._shared, name, rate, burst, now)
 
     def enter(self) -> bool:

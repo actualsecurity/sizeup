@@ -35,6 +35,7 @@ class Route(NamedTuple):
     need: str          # one of NEEDS (see above)
     flag: str = ""     # one of switches.FEATURES (see above)
     role: str = ""     # one of ROLES, "" for a public route (see above)
+    bucket: str = ""   # a public route's shared rate-limit bucket: "signin" (limits.py), else meta's
 
 
 class Ctx(NamedTuple):
@@ -45,6 +46,18 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
+    method: str = "GET"
+    peer: str = ""                              # the client address (Cf-Connecting-Ip behind the tunnel)
+    read: Callable | None = None                # read(limit) -> the request body, None when missing or too big: only
+                                                # after the request is admitted (the sign-in's POSTs, /auth/v1/token)
+
+
+class Raw(NamedTuple):
+    """A handler's answer that is not the v1 JSON envelope: the sign-in's redirect, its pages and the OAuth endpoints
+    (/auth/v1/*, /.well-known/): (status, Raw(body, content type, headers)). Never cached unless it says so."""
+    body: bytes
+    ctype: str = "application/json"
+    headers: dict | None = None
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -54,6 +67,14 @@ def meta(ctx: Ctx) -> tuple[int, dict]:
                  "server_time": time.time(), "epoch": None}
 
 
+def me(ctx: Ctx) -> tuple[int, dict]:
+    """GET /api/v1/me (#558): who this device is, as Settings > Users has them right now (the resolver read it for this
+    request): the app shows the name and hides what the role may not do."""
+    p = ctx.principal
+    return 200, {"email": p.email, "name": p.name or p.email, "role": p.role, "device_id": p.device}
+
+
 ROUTES: list[Route] = [
     Route("GET", "/api/v1/meta", meta, "public"),
+    Route("GET", "/api/v1/me", me, "device", "auth", "read"),
 ]

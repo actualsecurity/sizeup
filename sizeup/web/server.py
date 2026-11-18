@@ -31,6 +31,8 @@ Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
 (tools/airband_ab.py, curl), are unaffected.
+GET|POST /auth/v1/..., GET /.well-known/{apple-app-site-association,assetlinks.json}   the app's sign-in
+                                (sizeup/api/v1/auth.py, #558)
 GET  /api/v1/...                the mobile app's versioned API (sizeup/api/v1, spec in api/openapi/v1/, #557): the hub only
                                (409 on the station), errors always {"error": {"code", "message", "retry_after_s"?}}
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
@@ -399,7 +401,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
                  clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
-                 mobile_resolver=None):
+                 mobile_resolver=None, mobile_auth=None):
     """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
     (sizeup/sourcekeys.py may_see_context), a 404 to anyone else. cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
@@ -439,7 +441,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
-    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log)
+    # mobile_auth: the app's sign-in (sizeup/api/v1/auth.py, #558): its routes and its resolver unless one is injected
+    v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log, auth=mobile_auth)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -519,13 +522,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
-        def _v1(self, path: str, query: str) -> None:
+        def _v1(self, path: str, query: str, read: Callable | None = None) -> None:
             """/api/v1 (sizeup/api/v1): the hub's. A station has no CAD, so no API for the app: 409 in v1's envelope."""
             if station_ui:
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
             return self._send(*v1.respond(self.command, path, query, self.headers,
-                                          self._client()[0] or self.client_address[0]))
+                                          self._client()[0] or self.client_address[0], read))
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -904,8 +907,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.close_connection = True
                 return self._send(code, body, ctype)
             if v1.handles(path):
-                self.close_connection = True     # no POST is served yet: the body is left unread
-                return self._v1(path, urlsplit(self.path).query)
+                self.close_connection = True     # a refused POST's body is left unread (the sign-in reads its own)
+                return self._v1(path, urlsplit(self.path).query, self._body)
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread
                 return self._send(409, station_says(), "application/json")
@@ -1303,7 +1306,7 @@ class WebServer:
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
                  airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
                  clip_context: Callable[[str], bool] | None = None, adapter_password=None, set_groups=None,
-                 mobile=None, mobile_resolver=None):
+                 mobile=None, mobile_resolver=None, mobile_auth=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -1334,7 +1337,7 @@ class WebServer:
             vessels=vessels, set_groups=set_groups,
             airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
             clip_context=clip_context, adapter_password=adapter_password, mobile=mobile,
-            mobile_resolver=mobile_resolver))
+            mobile_resolver=mobile_resolver, mobile_auth=mobile_auth))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

@@ -207,7 +207,8 @@
   .s-act-row.no .s-act-sum { color: var(--err); }
   .chip.s-kind.signin { --c: var(--info); }
   .chip.s-kind.action { --c: var(--ok); }
-  .chip.s-kind.refused { --c: var(--err); }
+  .chip.s-kind.refused, .chip.s-kind.revoked { --c: var(--err); }
+  .chip.s-kind.device_enrolled { --c: var(--info); }
 
   /* System > Station: forwarding to the hub (settings.js sStation) */
   .sm-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-3); margin-block: var(--s-1); }

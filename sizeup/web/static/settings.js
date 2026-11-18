@@ -345,7 +345,7 @@ async function sLoad(opts = {}) {
 function sRefresh() {
   if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
   S.refreshDue = false;
-  if (S.section === "users") sActivity();
+  if (S.section === "users") { sActivity(); sDevices(); }
   if (S.section !== "system") return;
   sCounts();
   sAudit();
@@ -2000,7 +2000,13 @@ function sUsers(panel) {
       + "viewer read-only.";
   panel.replaceChildren(...sHead("Users", `${signedIn}\n${roles}\nOnce there is an operator, the Operator field becomes a picker of the active ones.`),
     sCard(sCardHead("Operators", `${ops.filter((o) => o.active).length} active`), ol, f));
-  if (cad.who) {                   // signed in through Cloudflare Access: there is activity to show
+  if (cad.who) {                   // signed in through Cloudflare Access: there are devices and activity to show
+    const devs = sCard(null);
+    devs.id = "s-devices";
+    devs.hidden = true;            // until the hub says the app's sign-in is on (sDevices)
+    panel.append(devs);
+    sDevicesRender();
+    sDevices(true);
     const card = sCard(null);
     card.id = "s-activity";
     panel.append(card);
@@ -2009,11 +2015,49 @@ function sUsers(panel) {
   }
 }
 
+// The app's devices (#558, sizeup/api/v1/devadmin.py): one line a device, Revoke signs it out (its next call is a 401).
+// An admin sees everyone's; anyone else their own ("My devices"). GET /api/cad/devices is a 404 where the app's sign-in
+// is off or this is not the hub: the card stays hidden.
+const S_DEV_TTL_MS = 15000;         // GET /api/cad/devices again no sooner than this
+async function sDevices(force) {
+  if (!cad.who || S.section !== "users") return;
+  if (!force && Date.now() - (S.devAt || 0) < S_DEV_TTL_MS) return;
+  S.devAt = Date.now();
+  try { S.dev = await api("GET", "/api/cad/devices"); } catch (e) { S.dev = null; }
+  sDevicesRender();
+}
+function sDevicesRender() {
+  const card = $("#s-devices");
+  if (!card) return;
+  card.hidden = !S.dev;
+  if (!S.dev) return;
+  const all = S.dev.all, rows = S.dev.devices, live = rows.filter((d) => d.active).length;
+  const ol = el("ol", "s-rows");
+  for (const d of rows) {
+    const li = el("li", "s-row" + (d.active ? "" : " retired"));
+    const what = Object.assign(el("strong", "", d.name || d.id), { title: d.id });
+    // Revoke keeps working for a viewer or dispatcher (ro-ok): the hub lets anyone revoke their own
+    const revoke = sBtn("Revoke", "Signs this device out of the app", () => sAsk(`Revoke ${d.name || d.id}${all ? ` (${d.email})` : ""}?`, async () => {
+      try { await api("POST", "/api/cad/devices", { action: "revoke", id: d.id }); sMsg(`${d.name || d.id} revoked`, true); } catch (e) { sMsg(e.message); }
+      sDevices(true);
+    }, "Revoke"), "ro-ok");
+    li.append(...[what, el("span", "dim small", `${d.platform} ${d.app_version}`.trim()), all ? el("span", "dim small", d.email) : null,
+      d.active ? el("span", "dim small", `Seen ${sAgo(d.last_seen)}`) : null, el("span", "spacer"),
+      d.active ? revoke : el("span", "chip s-state retired", `revoked ${sAgo(d.revoked_at)}`)].filter(Boolean));
+    ol.append(li);
+  }
+  if (!rows.length) ol.append(el("li", "empty", "None"));
+  card.replaceChildren(sCardHead(all ? "Devices" : "My devices", all ? `${live} active` : `${live} of ${S.dev.max}`, sHelp("The app's sign-ins: a device signs "
+      + "in through Cloudflare Access once, then renews itself. Revoke signs it out at its next request. At most "
+      + `${S.dev.max} per person; revoked ones stay listed for 30 days.`)), ol);
+}
+
 // Per-person activity on the hub (user, 2026-10-08: "lets add some per user logging too";
 // sizeup/cad/activity.py): each sign-in (once per login), what they did, what they were refused,
 // and when each was last seen. GET /api/cad/activity: an admin anyone's (or everyone's), anyone
 // else only their own. Only behind Cloudflare Access (cad.who): all-in-one records none.
-const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"], ["search", "Searches"]];
+const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"], ["search", "Searches"],
+  ["device_enrolled", "Devices"], ["revoked", "Revoked"]];
 const S_ACT_LIMIT = 300;
 
 function sActAll() { return !!(cad.who && cad.who.may === "admin"); }
@@ -2087,7 +2131,7 @@ function sActivityRender() {
     t.title = `${fmtTime(r.at, true)}`;
     li.append(t);
     if (!email) li.append(Object.assign(el("span", "s-act-who", r.name && r.name !== r.email ? r.name : r.email), { title: r.email }));
-    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused", search: "search" }[r.kind] || r.kind));
+    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused", search: "search", device_enrolled: "device", refresh: "refresh", revoked: "revoked" }[r.kind] || r.kind));
     li.append(Object.assign(el("span", "s-act-sum", r.summary), { title: r.route }));
     li.append(Object.assign(el("span", "s-act-ip dim", r.ip || "—"), { title: r.ua || "" }));
     ol.append(li);

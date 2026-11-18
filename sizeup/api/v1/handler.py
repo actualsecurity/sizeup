@@ -18,17 +18,22 @@ from __future__ import annotations
 import json
 import re
 import sys
+from typing import Callable
 from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
 from .errors import JSON, error
 from .limits import Limits
-from .principal import Resolver, none_yet, person
-from .routes import ROUTES, Ctx, Route
+from .principal import Refusal, Resolver, may, none_yet, person
+from .routes import ROUTES, Ctx, Raw, Route
 from .switches import Switches
 
 PREFIX = "/api/v1/"
+# the sign-in's paths (#558), served by the same switch / flag / catch-all / limit code as /api/v1 but not under it:
+# the whole /auth/v1/ namespace (nothing else is there) and exactly the two association files of /.well-known/
+OTHER_PREFIXES = ("/auth/v1/",)
+WELL_KNOWN = ("/.well-known/apple-app-site-association", "/.well-known/assetlinks.json")
 MAX_PATH = 512
 
 
@@ -42,21 +47,28 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, auth=None):
+        """auth: the sign-in service (sizeup/api/v1/auth.py), or None (not built: mobile off, no token key, no hub
+        database): the /auth/v1 and /.well-known paths are then 404s, and the resolver is the one given."""
+        self.auth = auth
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
+        if auth is not None and routes is None:
+            self.routes += [(r, _pattern(r.path)) for r in auth.routes()]
+            resolver = resolver or auth.resolve
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
 
     def handles(self, path: str) -> bool:
-        return path.startswith(PREFIX)
+        return path.startswith((PREFIX, *OTHER_PREFIXES)) or path in WELL_KNOWN
 
-    def respond(self, method: str, path: str, query: str, headers, peer: str = "") -> tuple[int, bytes, str, dict]:
+    def respond(self, method: str, path: str, query: str, headers, peer: str = "",
+                read: Callable | None = None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
         try:
-            return self._respond(method, path, query, headers, peer)
+            return self._respond(method, path, query, headers, peer, read)
         except FencedWrite:
             raise                             # the handover signal: the server answers it as a 503
         except Exception as e:                # a v1 failure is v1's: the class only, never a token, header or body
@@ -66,7 +78,7 @@ class V1:
                 pass
             return error(500, "internal", "something went wrong: try again")
 
-    def _respond(self, method, path, query, headers, peer) -> tuple[int, bytes, str, dict]:
+    def _respond(self, method, path, query, headers, peer, read=None) -> tuple[int, bytes, str, dict]:
         if len(path) > MAX_PATH:
             return error(414, "uri_too_long", "path too long")
         if not self.switches.enabled() and not (method in ("GET", "HEAD") and path == "/api/v1/meta"):
@@ -81,7 +93,7 @@ class V1:
                 continue
             if not self.switches.allows(route.flag):
                 return self._absent()
-            return self._serve(route, m.groupdict(), query, headers, peer)
+            return self._serve(route, m.groupdict(), query, headers, peer, method, read)
         if allowed:
             return error(405, "method_not_allowed", f"{method} is not allowed here",
                          headers={"Allow": ", ".join(sorted(set(allowed)))})
@@ -95,24 +107,31 @@ class V1:
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
 
-    def _serve(self, route: Route, params: dict, query: str, headers, peer: str) -> tuple[int, bytes, str, dict]:
-        principal = None
+    def _serve(self, route: Route, params: dict, query: str, headers, peer: str, method: str = "GET",
+               read: Callable | None = None) -> tuple[int, bytes, str, dict]:
+        principal, refusal = None, None
         if route.need == "device":
             principal = self.resolver(headers)
-            if not person(principal):             # fail closed: not a device of a person, whatever the resolver said
+            if isinstance(principal, Refusal):     # a reasoned 401 (token_expired, device_revoked, user_inactive)
+                principal, refusal = None, principal
+            elif not person(principal):           # fail closed: not a device of a person, whatever the resolver said
                 principal = None
         # a flood of bad tokens is limited per address too
         wait = self.limits.admit(principal.device if principal else None, write=route.method != "GET", peer=peer,
-                                 public=route.need == "public")
+                                 public=route.need == "public", shared=route.bucket or "meta")
         if wait:
             return error(429, "rate_limited", "too many requests: slow down", wait)
         if route.need == "device" and principal is None:
-            return error(401, "unauthorized", "sign in")
+            return error(401, *(refusal or ("unauthorized", "sign in")))
+        if principal is not None and not may(principal, route.role):      # the person's role now (the resolver's read)
+            return error(403, "forbidden", "your role may not do this")
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), method, peer, read)
             status, obj = route.handler(ctx)
+            if isinstance(obj, Raw):
+                return status, obj.body, obj.ctype, {"Cache-Control": "no-store", **(obj.headers or {})}
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:
             self.limits.leave()
