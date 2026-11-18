@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS urgent (
   tries      INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,                    -- a status and a reason, never a body, never a token
   lost_gen   TEXT,                    -- the hub gen this alarm may have been lost under and was not re-sent (over the cap)
+  lost_at    REAL,                    -- when lost_gen was set, wall clock, epoch s: the warning lasts 24 h from here
   UNIQUE (key, rev)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

@@ -1,0 +1,4 @@
+{
+  "base": "capture-events-answer/valid/with-the-outcomes.json",
+  "patch": [{"op": "replace", "path": "/outcomes", "value": {"CHA-live-1900000000123": "raised"}}]
+}

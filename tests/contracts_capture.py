@@ -33,8 +33,9 @@ from tests import contracts as c
 CAPTURE = c.ROOT / "capture"                 # the contract's files that are not schemas: prose, DDL, data tables
 NAMES = ("capture-spool-sidecar", "capture-spool-cursor", "capture-urgent-item", "capture-urgent-request",
          "capture-urgent-response", "capture-socket-event", "capture-socket-request", "capture-socket-reply",
-         "capture-wish", "capture-status", "capture-hello-answer")
-EXTENSIONS = ("capture-hello-answer",)       # an as-built schema plus optional keys (as the node schemas of #774 are)
+         "capture-wish", "capture-status", "capture-hello-answer", "capture-station-state", "capture-events-answer")
+EXTENSIONS = {"capture-hello-answer": "station-hello-answer",      # an as-built schema plus optional keys (as the node
+              "capture-station-state": "station-state"}            # schemas of #774 are): the as-built one untouched
 
 
 def data(name: str) -> dict:
@@ -681,33 +682,44 @@ def encoded(doc) -> int:
 ITEM_MAX_BYTES = 49_152      # one item, in any frame, reply or hub request; a larger one is trimmed, never dropped
 FRESH_S = 120.0              # an alarm never yet put in a request and under this age goes first, in every request
 TRIM_STRING = 200
-TRIM_ALARM = ("source", "start", "end", "radio_id", "unit", "emergency", "emergency_via", "system", "talkgroup",
-              "key_time")
-TRIM_PAGE = ("channel", "started", "phase", "ours", "ended", "until")
+TRIM_NEVER = ("source", "channel", "radio_id", "system", "talkgroup", "key_time", "start", "end", "started", "until",
+              "emergency", "emergency_via", "phase", "ours", "ended")      # identity and matching: never cut
 
 
-def trimmed(item: dict) -> dict:
-    """An item cut to fit: its `data` cut to the essentials, `trimmed: true` beside them. An alarm: its fields with
-    each string cut to 200 characters, no `ids`. A page: its fields and as many `pairs` as keep the item within
-    ITEM_MAX_BYTES. The row keeps the full `data`; the app's lane carries it whole."""
-    d = item["data"]
-    keep = TRIM_ALARM if item["kind"] == "alarm" else TRIM_PAGE
-    cut = {k: (v[:TRIM_STRING] if isinstance(v, str) else v) for k, v in d.items() if k in keep}
-    out = dict(item, data=dict(cut, trimmed=True))
-    if item["kind"] == "page":
-        out["data"]["pairs"] = []
-        for pair in d.get("pairs", []):
-            more = dict(out, data=dict(out["data"], pairs=[*out["data"]["pairs"], pair]))
-            if encoded(more) > ITEM_MAX_BYTES:
-                break
-            out = more
+def trimmed(item: dict, force: bool = False) -> dict:
+    """An item cut to fit within ITEM_MAX_BYTES, `trimmed: true`. Only free text and extras are cut: the item's own
+    fields and, in `data`, every field used for identity or matching (TRIM_NEVER: a 300-character `source` stays
+    whole, so the trimmed item still joins the same radio's alarm) are never touched. In this order, until it fits:
+    `ids` left out; `pairs` cut from the end; `unit` and each pair's `names` cut to 200 characters; any other key left
+    out. `force` (the hub said `too_large` for it alone): every step, whatever the size. The row keeps the full
+    `data`, and the finished transmission brings all its ids by the spool."""
+    out = dict(item, data=dict(copy.deepcopy(item["data"]), trimmed=True))
+
+    def fits():
+        return not force and encoded(out) <= ITEM_MAX_BYTES
+    out["data"].pop("ids", None)
+    if fits():
+        return out
+    while out["data"].get("pairs") and not fits():
+        out["data"]["pairs"] = out["data"]["pairs"][:-1]
+    if fits():
+        return out
+    if isinstance(out["data"].get("unit"), str):
+        out["data"]["unit"] = out["data"]["unit"][:TRIM_STRING]
+    for pair in out["data"].get("pairs") or []:
+        if isinstance(pair, dict) and isinstance(pair.get("names"), list):
+            pair["names"] = [n[:TRIM_STRING] if isinstance(n, str) else n for n in pair["names"]]
+    if fits():
+        return out
+    keep = {*TRIM_NEVER, "trimmed", "pairs", "unit"}
+    out["data"] = {k: v for k, v in out["data"].items() if k in keep}
     return out
 
 
 def fit(item: dict, force: bool = False) -> dict:
     """The item as framed or sent: itself while it is within ITEM_MAX_BYTES, else trimmed (and trimmed when forced:
     the hub said `too_large` for it alone)."""
-    return trimmed(item) if force or encoded(item) > ITEM_MAX_BYTES else item
+    return trimmed(item, force) if force or encoded(item) > ITEM_MAX_BYTES else item
 
 
 def hub_shaped(code: int, body) -> bool:
@@ -730,7 +742,16 @@ def checked(item: dict) -> bool:
 
 
 HELD = ("key", "rev", "kind", "at", "event_at", "event_boot", "boot", "data")
-LOST_KEEP_S = 86_400.0       # a lost-alarm warning stays on Health this long (from the row's `sent_at`)
+LOST_KEEP_S = 86_400.0       # a lost-alarm warning stays on Health this long (from the row's `lost_at`)
+DELIVERY = ("raised", "joined", "duplicate", "suppressed")       # the events answer's outcomes that are delivery
+
+
+def delivers(outcome) -> bool:
+    """Does the app send capture `urgent_delivered` for this outcome of its take-over event: only when the hub has
+    the alarm (`raised`, `joined`, `duplicate`) or will never raise one by a deliberate setting (`suppressed`). For
+    `seen`, `stale`, a word it does not know or no outcome (an older hub) it sends nothing, and capture sends the
+    alarm as usual."""
+    return outcome in DELIVERY
 
 
 class Lane:
@@ -739,8 +760,9 @@ class Lane:
     Time is passed in (wall, boottime): there is no clock here. `disk`: `ok` | `full` (inserts fail) | `stalled`
     (inserts do not return); `tick` writes what it can."""
 
-    def __init__(self, station: str = "st-north", boot: str = "boot-1", epoch: str = "9c2d7e10a4b35f68"):
-        self.station, self.boot, self.epoch = station, boot, epoch
+    def __init__(self, station: str = "st-north", boot: str = "boot-1", epoch: str = "9c2d7e10a4b35f68",
+                 mode: str = "send"):
+        self.station, self.boot, self.epoch, self.mode = station, boot, epoch, mode      # mode: `send` | `write`
         self.rows: dict[tuple[str, int], dict] = {}        # the `urgent` table
         self.meta: dict = {}                               # the `meta` table: gen, gen_seen_at, gen_seen_boot, gen_seen_boot_id
         self.log: list[str] = []                           # CRITICAL lines (the journal: they outlive the process too)
@@ -755,7 +777,6 @@ class Lane:
         self.flight_trimmed: set = set()                   # ... and which of them went trimmed
         self.alone: set = set()                            # items of a refused batch: each goes in a request of its own
         self.tries: dict[tuple[str, int], int] = {}        # answers that could not be read, per item
-        self.requested: set = set()                        # items ever put in a request by this process
         self.resend: list = []                             # the gen rule's resends, newest first
         self.trim: set = set()                             # items the hub said `too_large` for alone: sent trimmed
         self.m = 0                                         # the memory counter of this process (its pid)
@@ -789,7 +810,7 @@ class Lane:
                 got = self.answers.pop(ident, None) or {"state": "new", "hub": None, "hub_gen": None, "sent_at": None,
                                                         "sent_boot": None, "sent_boot_id": None}
                 self.rows[ident] = {**{k: v for k, v in item.items() if k not in ("order", "m")}, "n": self.n,
-                                    "tries": self.tries.get(ident, 0), "last_error": None, "lost_gen": None, **got}
+                                    "tries": self.tries.get(ident, 0), "last_error": None, "lost_gen": None, "lost_at": None, **got}
 
     def _bound(self) -> None:
         """The memory's bound is on page items and on the copies of items that have a row (those are read back from
@@ -875,7 +896,7 @@ class Lane:
         """The alarms the hub may have lost that the resend cap left out: rows with `lost_gen`, for 24 h. Read from
         the rows, so a restart rebuilds the warning."""
         return [i[0] for i, r in sorted(self.rows.items(), key=lambda x: x[1]["n"])
-                if r.get("lost_gen") is not None and not outside(self.wall - (r.get("sent_at") or self.wall), LOST_KEEP_S)]
+                if r.get("lost_at") is not None and not outside(self.wall - r["lost_at"], LOST_KEEP_S)]
 
     def health(self) -> list[str]:
         """The critical Health items: an alarm that ended `rejected` names its key; so do the alarms the resend cap
@@ -897,6 +918,7 @@ class Lane:
         self.wall = wall
         if ident not in self.memory and ident not in self.rows:
             return
+        self._gen(gen, wall=wall, boottime=boottime)          # (in `write` mode the only way capture learns the gen)
         if self._rec(ident)["state"] not in ("new", "rejected"):
             return
         value = gen_value(gen)
@@ -920,9 +942,9 @@ class Lane:
 
     def request(self, kind: str, *, wall: float, boottime: float) -> dict | None:
         """The next request of one connection (`alarm` or `page`: never both in one); None when it has nothing to
-        send. Alarms in this order: fresh (never yet put in a request and under 120 s old, in `n` order), then the gen
-        rule's resends (newest first), then the backlog (oldest first); items that are alone or had an unknown word
-        after these, each in a request of its own. So a fresh alarm waits at most for the one request already in
+        send. Alarms in this order: 0. an alarm made alone by a batch refused whole, in a request of its own; 1. fresh
+        (`_fresh_alarm`, in `n` order); 2. the gen rule's resends (newest first); 3. the backlog (oldest first); items
+        that had an unknown word after these, each in a request of its own. So a fresh alarm waits at most for the one request already in
         flight. Never expired by any clock. A page's clock runs per revision: one unsent 120 s after capture made it
         (the larger of its two ages) is `expired`, an `ended` one after 10 min; only the highest unsent revision of a
         key goes. Each item is checked first (`checked`): one that fails is `rejected` as `invalid` and never in a
@@ -947,12 +969,18 @@ class Lane:
                 self._mark(ident, "rejected", None, wall, boottime, error="invalid")
                 todo.remove(ident)
         if kind == "alarm":
-            fresh = [i for i in todo if i not in self.requested and i not in self.resend
-                     and not outside(self._wire(i, wall=wall, boottime=boottime)["age_s"], FRESH_S)]
-            resends = [i for i in self.resend if i in todo and i not in fresh]
-            todo = fresh + resends + [i for i in todo if i not in fresh and i not in resends]
-        healthy = [i for i in todo if not self.tries.get(i) and i not in self.alone]
-        batch = healthy[:REQUEST_MAX_ITEMS] or [i for i in todo if not self.tries.get(i)][:1] or todo[:1]
+            head = [i for i in todo if i in self.alone and not self.tries.get(i)]        # 0. alone, at the head
+            fresh = [i for i in todo if self._fresh_alarm(i, wall=wall, boottime=boottime) and i not in head]
+            resends = [i for i in self.resend if i in todo and i not in fresh and i not in head]
+            rest = [i for i in todo if i not in head and i not in fresh and i not in resends]
+            if head:
+                batch = head[:1]
+            else:
+                healthy = [i for i in fresh + resends + rest if not self.tries.get(i)]
+                batch = healthy[:REQUEST_MAX_ITEMS] or [i for i in fresh + resends + rest if self.tries.get(i)][:1]
+        else:
+            healthy = [i for i in todo if not self.tries.get(i) and i not in self.alone]
+            batch = healthy[:REQUEST_MAX_ITEMS] or [i for i in todo if not self.tries.get(i)][:1] or todo[:1]
         if not batch:
             return None
         body = {"v": 1, "station": self.station, "urgent_epoch": self.epoch, "sent_at": wall, "items": []}
@@ -966,8 +994,17 @@ class Lane:
             if item["data"].get("trimmed"):
                 cut.add(ident)
         self.flight[kind], self.flight_trimmed = sent, cut
-        self.requested.update(sent)
         return body
+
+    def _fresh_alarm(self, ident, *, wall: float, boottime: float) -> bool:
+        """Fresh, read from the row (not from the process's memory): the hub never answered for it (`hub` and
+        `sent_at` null) and it was made under 120 s ago, on the boot clock (`at_boot`), or by wall age from another
+        boot. So an alarm whose own request got no answer stays fresh across a `gen` change and a restart."""
+        rec, it = self._rec(ident), self._item(ident)
+        if rec.get("hub") is not None or rec.get("sent_at") is not None:
+            return False
+        made = boottime - it["at_boot"] if it["boot"] == self.boot else wall - it["at"]
+        return not outside(made, FRESH_S)
 
     def _mark(self, ident, state: str, hub: str | None, wall: float, boottime: float, error: str | None = None) -> None:
         got = {"state": state, "hub": hub, "hub_gen": self.meta.get("gen"), "sent_at": wall, "sent_boot": boottime,
@@ -1018,6 +1055,8 @@ class Lane:
             if body["reason"] == "too_large" and len(flight) == 1 and flight[0] not in self.flight_trimmed:
                 self.trim.add(flight[0])                       # not a refusal: trimmed, and alone, next time
                 self.alone.add(flight[0])
+            elif body["reason"] == "too_large" and len(flight) == 1:
+                self._mark(flight[0], "rejected", "413 too_large for the item trimmed: final", wall, boottime)
             elif len(flight) == 1 and flight[0] in self.alone:
                 self._mark(flight[0], "rejected", f"{code} {body['reason']} for the item alone, twice", wall, boottime)
             else:
@@ -1055,13 +1094,17 @@ class Lane:
         old = gen_value(self.meta.get("gen"))
         if old is not None and value != old:
             hits = [i for i in self._idents("alarm", "sent", "app")
-                    if self._rec(i).get("hub_gen") is not None and gen_value(self._rec(i)["hub_gen"]) != value
-                    and self._since_sighting(self._rec(i), wall)]
+                    if gen_value(self._rec(i).get("hub_gen")) != value and self._since_sighting(self._rec(i), wall)]
+            # (an `app` row with no gen is in doubt: a duplicate is harmless)
+            if self.mode != "send":                        # `write`: nothing can resend; a warning names them, 24 h
+                for ident in hits:
+                    self._rec(ident).update(lost_gen=str(value), lost_at=wall)
+                hits = []
             one_boot = len({self._rec(i).get("sent_boot_id") for i in hits}) == 1
             hits.sort(key=lambda i: (self._rec(i)["sent_boot" if one_boot else "sent_at"] or 0.0,
                                      self.rows[i]["n"] if i in self.rows else -1), reverse=True)
             for ident in hits[RESEND_MAX:]:
-                self._rec(ident)["lost_gen"] = str(value)
+                self._rec(ident).update(lost_gen=str(value), lost_at=wall)
             for ident in hits[:RESEND_MAX]:
                 self._rec(ident)["state"] = "new"          # in the file: a restart before the resend does not lose it
                 self.m += 1
@@ -1195,14 +1238,14 @@ def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str, ste
 
 # -- the urgent lane: the hub's side --------------------------------------------------------------------------------------
 
-RAISED, STALE, SEEN = "raised", "stale", "seen"       # an alarm key's state in the dedupe store; raised > stale > seen
-_RANK = {SEEN: 0, STALE: 1, RAISED: 2}
+RAISED, SUPPRESSED, STALE, SEEN = "raised", "suppressed", "stale", "seen"    # a key's state: raised > suppressed > stale > seen
+_RANK = {SEEN: 0, STALE: 1, SUPPRESSED: 2, RAISED: 3}
 PAGE_LIVE_MAX_S = 300.0      # the hub ends a live page entry itself this long after its last revision
 AGE_MARGIN = 1.1             # every age cutoff on an emergency: MAX_AGE_S x 1.1 (a boot clock over-counts by up to 5 %)
 REFUSALS = ("bad_json", "too_large", "bad_batch")     # the `reason`s of the hub's 400, 413, 422: a request refused whole
 AFTER_CLEAR = "emergency still set after All clear"
 BEFORE_CLEAR = "emergency flag on a call from before the All clear"
-SKEW_FRESH_S = 60.0          # a skew measured this recently (and no wall step since the call started) may place a start
+SKEW_FRESH_S = 60.0          # the newest skew sample must be younger than this for the skew path
 
 
 class Hub:
@@ -1245,7 +1288,8 @@ class Hub:
         self.notices: list[dict] = []
         self.log: list[str] = []
         self._ids = 0
-        self.skew: dict | None = None                         # hub.skew: {value, spread, at, step_at}
+        self.samples: list[dict] = []                         # hub.skew samples: {hub_at, station_at, value, boot, wall_steps}
+        self.outcome: str | None = None                       # the last event's outcome (the events answer)
         self.history: list[tuple[float, dict]] = [(float("-inf"), self._state())]
 
     @property
@@ -1311,7 +1355,7 @@ class Hub:
         key, d = item["key"], item["data"]
         radio = self._radio(d.get("system") if d.get("emergency_via") == "P25" else None, d.get("radio_id"))
         have = self.store.get((station, key))
-        if have is not None and have["state"] in (RAISED, STALE):     # this lane again, or the app's lane raised it
+        if have is not None and have["state"] in (RAISED, SUPPRESSED, STALE):     # this lane again, or the other
             if have["state"] == RAISED and radio:
                 self._arm(radio, self._alarm(id=have["alarm"]))
             return "duplicate", ""
@@ -1328,6 +1372,9 @@ class Hub:
             self._set(station, key, STALE, src="boot" if item.get("age_src") == "boot" else "wall")
             self.notices.append({"station": station, "key": key, "age_s": age_s})
             return "stale", ""                                # (and the press window is not armed)
+        if str(d.get("source") or "") in self.off_channels:   # the admin's settings: no alarm. Recorded, final
+            self._set(station, key, SUPPRESSED)
+            return "applied", ""
         at = self.now - age_s
         cur = self._open(d, at) or self._raise(station, key, d, at=at, age_s=age_s,
                                                approx=item.get("age_src") != "boot", live_p25=bool(radio),
@@ -1356,10 +1403,12 @@ class Hub:
             return AFTER_CLEAR
         return ""
 
-    def measure_skew(self, value: float, spread: float, step_at: float | None = None) -> None:
-        """`hub.skew` as the state post measures it now: the station's clock minus the hub's (`value`), how much it
-        varied (`spread`), and the station time of the last wall step the station reported (`step_at`)."""
-        self.skew = {"value": value, "spread": spread, "at": self.now, "step_at": step_at}
+    def skew_sample(self, station_at: float, *, boot: str | None = None, wall_steps: int | None = None) -> None:
+        """A state post received now: its `at` (the station's wall clock), and the `boot` and `wall_steps` it carries
+        (capture-station-state; None for a station that does not send them yet). The sample's skew is the station's
+        clock minus the hub's."""
+        self.samples.append({"hub_at": self.now, "station_at": station_at, "value": station_at - self.now, "boot": boot,
+                             "wall_steps": wall_steps})
 
     @staticmethod
     def _boot_age(ev: dict, field: str) -> float | None:
@@ -1371,18 +1420,31 @@ class Hub:
         return None
 
     def _placed_start(self, ev: dict) -> tuple[float, float] | None:
-        """(a call's start on the hub's clock, its uncertainty U), or None when the hub cannot place it. (i) H1m's boot
-        age of `start_boot`: placed at receipt minus that age, U = 10 s + 10 % of the age. (ii) Else the station's
-        `start` corrected by `hub.skew`, only when the skew was measured in the last 60 s and no wall step came
-        since the call started: U = 5 s + 2 x the skew's spread."""
+        """(a call's start on the hub's clock, its uncertainty U), or None when the hub cannot place it.
+        (i) H1m's boot age of `start_boot`, only when the request and the event are of one boot: placed at receipt
+        minus that age, U = 10 s + 10 % of the age.
+        (ii) Else the station's `start` corrected by the skew, only when ALL hold: the samples carry `boot` and
+        `wall_steps`; the samples used are of the call's own boot; one is at or before the start and one at or
+        after it (by the station's own clock); every sample from the last one at or before the start to the newest
+        has the same `wall_steps` (a reboot always counts as a step); and the newest is under 60 s old. U = 5 s +
+        2 x the spread of the skew over those samples. A station that sends no `boot` or `wall_steps` never qualifies.
+        Otherwise the hub is unsure, and the call alarms with the label."""
         start_age = self._boot_age(ev, "start_boot")
         if start_age is not None:
             return self.now - start_age, 10.0 + 0.1 * start_age
-        k, start = self.skew, ev.get("start")
-        if k is not None and start is not None and not outside(self.now - k["at"], SKEW_FRESH_S) \
-                and (k["step_at"] is None or k["step_at"] < float(start)):
-            return float(start) - k["value"], 5.0 + 2.0 * k["spread"]
-        return None
+        start, boot, S = ev.get("start"), ev.get("boot"), self.samples
+        if start is None or boot is None or not S or outside(self.now - S[-1]["hub_at"], SKEW_FRESH_S):
+            return None
+        before = [i for i, x in enumerate(S) if x["station_at"] <= float(start)]
+        if not before:
+            return None
+        tail = S[before[-1]:]
+        if any(x["boot"] != boot or x["wall_steps"] is None or x["wall_steps"] != tail[0]["wall_steps"] for x in tail):
+            return None
+        if not any(x["station_at"] >= float(start) for x in tail):
+            return None
+        values = [x["value"] for x in tail]
+        return float(start) - tail[-1]["value"], 5.0 + 2.0 * (max(values) - min(values))
 
     def _before_clear(self, radio, ev: dict) -> dict | None:
         """A call from before the All clear (after the join step, before "judged on its own"): the cleared alarm a
@@ -1471,11 +1533,19 @@ class Hub:
         self._keep()
         return out
 
-    def events_answer(self, station: str, ev: dict) -> tuple[int, dict]:
-        """`/api/station/events` for one event, with its answer: it carries `gen` (H1a), so the app's
-        `urgent_delivered` can carry it."""
-        code = self.event(station, ev)
-        return code, ({"ok": True, "gen": self.gen} if code == 200 else {"error": "the hub is updating", "updating": True})
+    def events_answer(self, station: str, events: list[dict]) -> tuple[int, dict]:
+        """`/api/station/events` for one post, with its answer: `gen` (H1a), so the app's `urgent_delivered` can carry
+        it, and `outcomes: [{id, outcome}]` for each alarm-carrying event (an `alarm` event, or one with an emergency
+        flag or an `alarm_key`): `raised`, `joined`, `duplicate`, `suppressed`, `stale`, `seen`. Given only after the
+        event is durably written (here: after `_keep`)."""
+        if not self.leader:
+            return 503, {"error": "the hub is updating", "updating": True}
+        outcomes = []
+        for ev in events:
+            self.event(station, ev)
+            if is_alarm_event(ev) or ev.get("type") == "alarm":
+                outcomes.append({"id": str(ev.get("id")), "outcome": self.outcome})
+        return 200, {"ok": True, "gen": self.gen, "outcomes": outcomes}
 
     def _event(self, station: str, ev: dict) -> int:
         """One event of the app's lane: `alarm` (the take-over, `id` = the urgent key; or a finished P25 call's alarm,
@@ -1487,6 +1557,7 @@ class Hub:
         after its last flag; else it is judged on its own."""
         if not self.leader:
             return 503
+        self.outcome = None
         tid, key = str(ev.get("id") or ""), str(ev.get("alarm_key") or "")
         if ev.get("type") == "page":
             page = self.pages.get((station, str(ev.get("live_key") or "")))
@@ -1499,7 +1570,8 @@ class Hub:
         span = (float(ev["start"]), float(ev["end"])) if p25 else None
         radio = self._radio(ev.get("system"), ev.get("radio_id")) if p25 and emergency else None
 
-        def done(state: str, alarm: dict | None = None, taken: bool = True) -> int:
+        def done(state: str, alarm: dict | None = None, taken: bool = True, outcome: str = "") -> int:
+            self.outcome = outcome or {SEEN: "seen", SUPPRESSED: "suppressed"}.get(state, "raised")
             for k in mine:
                 self._set(station, k, state, alarm["id"] if alarm else None)
             if alarm is not None and span is not None and taken:          # the call's row is the alarm's now
@@ -1516,10 +1588,14 @@ class Hub:
             known = [self.store[(station, k)] for k in mine if (station, k) in self.store]
             hit = next((h for h in known if h["state"] == RAISED and h["alarm"]), None)
             cur = self._alarm(id=hit["alarm"]) if hit else None
+            if cur is None and any(h["state"] == SUPPRESSED for h in known):
+                self.outcome = "suppressed"                   # the admin's setting, already recorded: nothing raised
+                return 200
             if cur is None and any(h["state"] == STALE and h.get("stale_src") == "boot" for h in known):
-                return 200                                    # too old on a boot-clock age: the row joins the late notice
+                self.outcome = "stale"                        # too old on a boot-clock age: the row joins the late notice
+                return 200
         if cur is not None:
-            return done(RAISED, cur)
+            return done(RAISED, cur, outcome="duplicate")
         if not emergency:
             return done(SEEN)                                 # (a traffic event that carried the key and no emergency)
         if p25 and not key:                                   # an older capture: no alarm_key. Its live alarm, if any:
@@ -1529,18 +1605,19 @@ class Hub:
                          and within(float(a["start"]), span[0] - self.p25_slack_s, span[1] + self.p25_slack_s)), None)
             if live is not None:
                 live["traffic_id"] = tid
-                return done(RAISED, live)
+                return done(RAISED, live, outcome="duplicate")
         # 2. the press window: the radio's open alarm, under 600 s of the hub's clock since its last flag
         joined = self._still_set(radio)
         if joined is not None:
             joined["still_set"] += 1                          # the row says "emergency still set"; no alarm, no push
-            return done(RAISED, joined, taken=False)
+            return done(RAISED, joined, taken=False, outcome="joined")
         # a call from before the All clear: attached to the cleared alarm, no push, the window left as it was
         cleared = self._before_clear(radio, ev) if p25 else None
         if cleared is not None:
             cleared["before_clear"] += 1                      # the row: "emergency flag on a call from before the All clear"
             for k in mine:
                 self._set(station, k, RAISED, cleared["id"])
+            self.outcome = "joined"
             return 200
         # 3. judged on its own. The age: H1m's boot age when the event has one, else the hub's now minus the
         # station's end, and then the push says it is approximate
@@ -1552,11 +1629,12 @@ class Hub:
         if outside(age_s, self.cutoff):                       # the alarm code's own age gate, with the same margin
             self.log.append(f"{tid}: too old to raise now (logged only)")
             return done(SEEN)
-        if str(ev.get("source") or "") in self.off_channels:  # notices are off for it
-            return done(SEEN)
-        cur = self._open(ev, self.now) or self._raise(station, tid, ev, at=self.now - age_s, age_s=age_s, span=span,
-                                                      approx=boot_age is None, label=self._label(radio))
-        return done(RAISED, cur)
+        if str(ev.get("source") or "") in self.off_channels:  # notices are off for it: a deliberate setting, final
+            return done(SUPPRESSED)
+        joined = self._open(ev, self.now)
+        cur = joined or self._raise(station, tid, ev, at=self.now - age_s, age_s=age_s, span=span,
+                                    approx=boot_age is None, label=self._label(radio))
+        return done(RAISED, cur, outcome="joined" if joined else "raised")
 
     def state(self, station: str, paging: list[dict]) -> None:
         """The app's state post, its `paging` list: merged with the urgent lane's entries by `key`; the newer of the
@@ -1611,9 +1689,9 @@ BATCH_TIMEOUTS_S = {"events": 60.0, "probe": 30.0, "stt": 60.0, "state": 10.0, "
 
 
 def is_alarm_event(ev: dict) -> bool:
-    """The events that travel alone: the take-over `alarm` event, and a call event that carries an emergency flag or
-    an `alarm_key`."""
-    return ev.get("type") == "alarm" or (bool(ev.get("system")) and (ev.get("emergency") is True or bool(ev.get("alarm_key"))))
+    """The events that travel alone: the take-over `alarm` event, and any `traffic` event (analog or a P25 call) that
+    carries an emergency flag or an `alarm_key`, even when it is the only copy of the alarm."""
+    return ev.get("type") == "alarm" or ev.get("emergency") is True or bool(ev.get("alarm_key"))
 
 
 def posts(events: list[dict]) -> list[dict]:
@@ -1646,6 +1724,7 @@ def alarm_post(operations_s: list[float]) -> tuple[bool, float]:
 # -- the socket's requests (docs/native/capture-split.md 4.2 "Rule") -----------------------------------------------------
 
 REQUEST_IDS, REQUEST_IDS_S = 256, 600.0
+EFFECT_OPS = ("pick", "squelch_apply", "reception_start", "reception_stop", "probe", "airband_ab")   # recorded
 REASONS = ("stale", "expired", "unsupported", "forbidden", "parked", "taken", "held", "busy", "invalid", "interrupted",
            "confirm")
 
@@ -1696,6 +1775,8 @@ class Requests:
             return run() if uid == 0 else reply(False, "forbidden", "not allowed")
         if role != "reader":
             return reply(False, "forbidden", "not allowed")
+        if req["op"] not in EFFECT_OPS:                       # a read (check, urgent_since, snapshot) or an unknown op:
+            return run()                                      # not recorded, a repeat is simply answered again
         if req["id"] in self.db:
             first = self.db[req["id"]]["reply"]
             if first is None:

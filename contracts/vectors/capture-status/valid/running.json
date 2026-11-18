@@ -8,6 +8,7 @@
   "build": "0123abc",
   "contract": 1,
   "started": 1899990000.0,
+  "wall_steps": 0,
   "wish_seq": 214,
   "wish_problem": "",
   "refusals": [],

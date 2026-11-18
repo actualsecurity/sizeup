@@ -65,12 +65,12 @@ def test_the_schemas_the_harness_skips_for_unknown_keys_are_covered_here():
                        *cc.EXTENSIONS}
     for name in cc.NAMES:
         assert any(FUTURE.search(json.dumps(inst)) for _, inst in c.vectors(name, "valid")), name
-    for name in cc.EXTENSIONS:                                 # an extension: the schema it extends, plus optional keys
+    for name, base in cc.EXTENSIONS.items():                   # an extension: the schema it extends, plus optional keys
         doc = c.load(name)
-        assert doc["allOf"] == [{"$ref": "station-hello-answer.schema.json"}] and "required" not in doc
-        for file, inst in c.vectors("station-hello-answer", "valid"):
-            assert c.errors(name, inst) == [], file            # every answer valid today stays valid
-        for file, inst in c.vectors("station-hello-answer", "invalid"):
+        assert doc["allOf"] == [{"$ref": f"{base}.schema.json"}] and "required" not in doc
+        for file, inst in c.vectors(base, "valid"):
+            assert c.errors(name, inst) == [], file            # every body valid today stays valid
+        for file, inst in c.vectors(base, "invalid"):
             assert c.errors(name, inst), file
 
 
@@ -827,8 +827,9 @@ def run(sc: dict, **params) -> cc.Hub:
             hub.ack(step["ack"])
         elif "all_clear" in step:
             hub.all_clear(step["all_clear"])
-        elif "skew" in step:
-            hub.measure_skew(step["skew"]["value"], step["skew"]["spread"], step["skew"].get("step_at"))
+        elif "skew" in step:                                   # a state post: a skew sample
+            hub.skew_sample(step["skew"]["station_at"], boot=step["skew"].get("boot"),
+                            wall_steps=step["skew"].get("wall_steps"))
         elif "state_paging" in step:
             hub.state(station, step["state_paging"])
         elif "holds" in step:
@@ -1591,7 +1592,7 @@ def test_the_urgent_file_is_the_designs_ddl_and_keeps_its_promises(tmp_path):
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2                     # FULL
         cols = [r[1] for r in db.execute("PRAGMA table_info(urgent)")]
         assert cols == ["n", "key", "rev", "kind", "at", "at_boot", "event_at", "event_boot", "boot", "data", "state",
-                        "sent_at", "sent_boot", "sent_boot_id", "hub", "hub_gen", "tries", "last_error", "lost_gen"]
+                        "sent_at", "sent_boot", "sent_boot_id", "hub", "hub_gen", "tries", "last_error", "lost_gen", "lost_at"]
         assert [r[1] for r in db.execute("PRAGMA table_info(requests)")] == ["id", "op", "reply", "at", "at_boot", "boot"]
         db.execute("INSERT INTO requests (id, op, at, at_boot, boot) VALUES ('r-1', 'reception_start', 1.0, 2.0, 'b')")
         assert db.execute("SELECT reply FROM requests WHERE id = 'r-1'").fetchone() == (None,)       # recorded first
@@ -1832,7 +1833,7 @@ def test_the_wish_is_desired_state_only_and_the_status_observed_state_only():
     wish, status = c.load("capture-wish")["properties"], c.load("capture-status")["properties"]
     assert list(wish) == ["v", "seq", "at", "pid", "build", "mode", "paths", "hub", "channels", "airband", "squelch",
                           "tones", "aliases", "dongles", "p25", "metrics", "spool"]    # the design's field table, in order
-    assert list(status) == ["v", "at", "at_boot", "boot", "pid", "impl", "build", "contract", "started", "wish_seq",
+    assert list(status) == ["v", "at", "at_boot", "boot", "pid", "impl", "build", "contract", "started", "wall_steps", "wish_seq",
                             "wish_problem", "refusals", "reader", "channels", "sdrs", "groups", "groups_problem", "no_park",
                             "duplicates", "adsb", "p25", "reception", "spool", "urgent"]
     observed = {"run", "state", "open", "open_s", "last_heard", "restarts", "queued", "refusals", "reader", "urgent"}
@@ -2037,7 +2038,7 @@ def test_the_readme_maps_every_schema_to_its_design_section_and_says_what_is_sti
     assert still == [f"S{i}" for i in range(1, len(still) + 1)] and 5 <= len(still) <= 15
     found = re.findall(r"^\| (Y\d+) \|", section, re.M)                        # where the design is still ambiguous
     assert found == [f"Y{i}" for i in range(1, len(found) + 1)] and len(found) >= 5
-    assert "Still to confirm" in section and "radio maintainers" in section and "5f143a80" in section
+    assert "Still to confirm" in section and "radio maintainers" in section and "e6bfc5f6" in section
     assert "A7" in section and "not decided" in section
     for word in ("specification aid", "not production code"):
         assert word in section or word in (ROOT / "tests" / "contracts_capture.py").read_text(encoding="utf-8").lower()
@@ -2085,8 +2086,9 @@ def test_the_press_window_is_on_the_hubs_receive_time_and_a_negative_gap_is_a_ne
 
 def test_an_alarm_over_the_byte_limit_alone_is_sent_trimmed_and_never_dropped():
     """The 65,536 bytes are enforced before sending: items are added while the body fits; one over the limit on its
-    own goes with its `data` cut to the essentials and `trimmed: true` (no `ids`, each string at most 200
-    characters; a page: as many pairs as fit). The row keeps the full `data`."""
+    own goes trimmed (`trimmed: true`): only free text and extras are cut, in order until it fits (`ids` left out,
+    `pairs` cut from the end, `unit` and `names` to 200 characters, any other key left out); identity and matching
+    fields are never touched. The row keeps the full `data`."""
     lane, hub = cc.Lane(), cc.Hub()
     garbled = [{"id": str(10000 + i), "system": "mdc", "emergency": True, "from": "live"} for i in range(1500)]
     press(lane, t=0.0, data=dict(ALARM_DATA, ids=garbled, unit="U" * 900))
@@ -2095,7 +2097,7 @@ def test_an_alarm_over_the_byte_limit_alone_is_sent_trimmed_and_never_dropped():
     assert [i["key"] for i in body["items"]] == [KEY, "CHA-live-1900000000500"] and cc.encoded(body) <= cc.REQUEST_MAX_BYTES
     assert "trimmed" not in body["items"][1]["data"]          # (the next item still fits beside the trimmed one)
     d = body["items"][0]["data"]
-    assert d["trimmed"] is True and "ids" not in d and len(d["unit"]) == 200 and d["radio_id"] == "7001"
+    assert d["trimmed"] is True and "ids" not in d and len(d["unit"]) == 900 and d["radio_id"] == "7001"   # ids sufficed
     assert c.errors("capture-urgent-request", body) == []
     assert len(lane.rows[(KEY, 0)]["data"]["ids"]) == 1500     # the row keeps it whole
     hub.now = W0 + 1.0
@@ -2140,7 +2142,7 @@ def test_the_resend_cap_keeps_the_newest_32_by_answer_time_then_n_and_names_the_
     assert len(lane.lost()) == 8
     health = lane.health()
     assert len(health) == 1 and health[0].startswith("critical") and "CHA-live-1900000000000" in health[0]
-    lane.wall = W0 + 41.0 + cc.LOST_KEEP_S                     # ... and kept 24 h (from the answer's time)
+    lane.wall = W0 + 60.0 + cc.LOST_KEEP_S                     # ... and kept 24 h, from `lost_at` (the new gen's sighting)
     assert lane.lost() == [] and lane.health() == []
 
 
@@ -2338,7 +2340,7 @@ def test_an_item_that_fails_the_check_is_rejected_as_invalid_and_never_splits_a_
     assert [r["key"] for r in got[1]["results"]] == ["CHA-live-1900000000100", "CHA-live-1900000000300"]
     assert lane.rows[(p25["key"], 0)]["state"] == "rejected" and lane.rows[(p25["key"], 0)]["last_error"] == "invalid"
     assert lane.not_delivered() == [p25["key"]] and "invalid" in lane.health()[0]
-    lane.delivered(p25["key"], 0, 7, wall=W0 + 3.0, boottime=B0 + 3.0)   # the app's lane has it
+    lane.delivered(p25["key"], 0, hub.gen, wall=W0 + 3.0, boottime=B0 + 3.0)   # the app's lane has it
     assert lane.not_delivered() == [] and lane.health() == []
 
 
@@ -2350,9 +2352,10 @@ def test_urgent_delivered_clears_the_banner_and_capture_never_sends_that_alarm()
     press(lane, t=0.0)
     assert lane.not_delivered() == [KEY]
     hub.now = W0 + 0.6                                         # the app's take-over event; the hub's answer carries gen
-    code, answer = hub.events_answer("st-north", {"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
-                                                  "start": W0 + 0.12, "end": W0 + 0.39})
-    assert code == 200 and answer["gen"] == hub.gen
+    code, answer = hub.events_answer("st-north", [{"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
+                                                   "start": W0 + 0.12, "end": W0 + 0.39}])
+    assert code == 200 and answer["gen"] == hub.gen and c.errors("capture-events-answer", answer) == []
+    assert answer["outcomes"] == [{"id": KEY, "outcome": "raised"}] and cc.delivers(answer["outcomes"][0]["outcome"])
     note = {"v": 1, "t": "urgent_delivered", "key": KEY, "rev": 0, "gen": answer["gen"]}
     assert c.errors("capture-socket-request", note) == []
     lane.delivered("CHA-live-1899999999999", 0, wall=W0 + 0.7, boottime=B0 + 0.7)            # not held: nothing
@@ -2384,7 +2387,20 @@ def test_urgent_delivered_clears_the_banner_and_capture_never_sends_that_alarm()
     lane.delivered("CHA-live-1900000000001", 0, 5, wall=W0 + 1.0, boottime=B0 + 1.0)
     lane.delivered("CHA-live-1900000000002", 0, None, wall=W0 + 1.0, boottime=B0 + 1.0)
     lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 50.0, boottime=B0 + 50.0)
-    assert lane.unsent() == ["CHA-live-1900000000001"]         # re-sent under the gen rule; the gen-less one is not
+    assert lane.unsent() == ["CHA-live-1900000000001", "CHA-live-1900000000002"]  # both: the gen-less one is in doubt
+    # `write` mode: nothing can resend; an `app` row in the window of a gen change (learnt from the next
+    # urgent_delivered) gets a Health warning naming it for 24 h
+    lane = cc.Lane(mode="write")
+    press(lane, "CHA-live-1900000000001", t=0.0)
+    lane.delivered("CHA-live-1900000000001", 0, None, wall=W0 + 1.0, boottime=B0 + 1.0)
+    press(lane, "CHA-live-1900000000002", t=2.0, data=dict(ALARM_DATA, radio_id="7002"))
+    lane.delivered("CHA-live-1900000000002", 0, 5, wall=W0 + 3.0, boottime=B0 + 3.0)
+    press(lane, "CHA-live-1900000000003", t=4.0, data=dict(ALARM_DATA, radio_id="7003"))
+    lane.delivered("CHA-live-1900000000003", 0, 6, wall=W0 + 5.0, boottime=B0 + 5.0)     # a gen change: a restore
+    assert lane.unsent() == [] and lane.lost() == ["CHA-live-1900000000001", "CHA-live-1900000000002"]
+    assert "CHA-live-1900000000001" in lane.health()[0]
+    lane.wall = W0 + 5.0 + cc.LOST_KEEP_S
+    assert lane.health() == []
 
 
 def test_in_every_request_fresh_alarms_go_first_then_resends_then_the_backlog():
@@ -2398,7 +2414,6 @@ def test_in_every_request_fresh_alarms_go_first_then_resends_then_the_backlog():
                 wall=W0 + 2.0, boottime=B0 + 2.0)
     for i in range(40):                                        # 40 old alarms never sent (the uplink was down)
         press(lane, f"CHA-live-{1899990000000 + i}", t=-3000.0 + i, data=dict(ALARM_DATA, radio_id=str(8000 + i)))
-    lane.requested |= set(lane.memory)                         # (each was tried before)
     lane.hello(200, {"ok": True, "station": "st-north", "token": "own", "gen": 6}, wall=W0 + 30.0, boottime=B0 + 30.0)
     press(lane, "CHA-live-1900000030000", t=30.0, data=dict(ALARM_DATA, radio_id="7999"))      # the fresh one
     body = lane.request("alarm", wall=W0 + 30.1, boottime=B0 + 30.1)
@@ -2488,3 +2503,159 @@ def test_the_alarm_travels_in_a_small_post_of_its_own_with_a_total_deadline():
     assert cc.alarm_post([0.5, 0.2, 1.0]) == (True, pytest.approx(1.7))
     assert cc.alarm_post([3.0, 3.0, 3.0]) == (False, cc.ALARM_POST_S)      # each under 8 s, the total is not
     assert cc.alarm_post([2.0, 6.0])[0] is False                           # exactly 8 s: aborted
+
+
+# -- the final verification (docs/native/capture-split.md at e6bfc5f6) -----------------------------------------------------
+
+def test_a_seen_outcome_is_not_delivery_and_capture_sends_the_alarm():
+    """Loss sequence (iii): capture's first send gets a 503; the app's take-over is answered 200, but its outcome is
+    `seen` (the station's wall clock stepped back 40 min, no boot age: it looked old). That is not delivery: no
+    `urgent_delivered`, the row stays `new`, capture's retry is `applied`: one alarm, one push. The same with an
+    older hub that gives no outcome."""
+    for outcomes in (True, False):
+        lane, hub = cc.Lane(), cc.Hub()
+        press(lane, t=0.0)
+        hub.handoff()
+        assert send(lane, hub, t=0.4)[0] == 503 and lane.unsent() == [KEY]
+        hub.lead()
+        hub.now = W0 + 1.0
+        code, answer = hub.events_answer("st-north", [{"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
+                                                       "start": W0 - 2400.0, "end": W0 - 2399.6}])
+        if not outcomes:
+            answer = {"ok": True}                              # an older hub
+        got = {o["id"]: o["outcome"] for o in answer.get("outcomes", [])}
+        assert got.get(KEY) == ("seen" if outcomes else None) and not cc.delivers(got.get(KEY))
+        assert hub.alarms == [] and lane.not_delivered() == [KEY]          # the banner stays up
+        assert statuses(send(lane, hub, t=1.5)) == ["applied"]
+        assert len(hub.alarms) == len(hub.pushes) == 1 and lane.not_delivered() == []
+
+
+def test_suppressed_is_delivery_and_ends_the_alarm_with_no_resend_loop():
+    """`suppressed`: received and recorded, but the admin's settings say no alarm (notices off on that channel). It is
+    final, so the app sends `urgent_delivered` for it, and capture stops: no resend loop against a deliberate
+    setting."""
+    lane, hub = cc.Lane(mode="write"), cc.Hub(off_channels=("CH A",))
+    press(lane, t=0.0)
+    hub.now = W0 + 0.5
+    code, answer = hub.events_answer("st-north", [{"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
+                                                   "start": W0 + 0.12, "end": W0 + 0.39}])
+    assert answer["outcomes"] == [{"id": KEY, "outcome": "suppressed"}] and cc.delivers("suppressed")
+    lane.delivered(KEY, 0, answer["gen"], wall=W0 + 0.6, boottime=B0 + 0.6)
+    lane.mode = "send"                                         # switched to send: nothing goes, nothing loops
+    assert lane.not_delivered() == [] and lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0) is None
+    assert hub.alarms == [] and hub.store[("st-north", KEY)]["state"] == "suppressed"
+
+
+def test_a_trimmed_item_keeps_its_matching_fields_and_joins_the_same_radios_alarm():
+    """Loss sequence (iv): a 300-character channel label. One alarm is sent whole, the next of the same radio within
+    `REPEAT_S` is over 48 KB and goes trimmed. `source` is never cut, so the trimmed one joins the first: one push.
+    And a trimmed item refused `too_large` again is final: `rejected`, a critical Health item, the app's lane
+    carries it."""
+    label = "Fire Dispatch " + "x" * 286
+    lane, hub = cc.Lane(), cc.Hub()
+    data = dict(ALARM_DATA, source=label)
+    press(lane, cc.live_key(label, 1900000000.123), t=0.0, data=data)
+    assert statuses(send(lane, hub, t=0.3)) == ["applied"]
+    garbled = [{"id": str(10000 + i), "system": "mdc", "emergency": True, "from": "live"} for i in range(1500)]
+    press(lane, cc.live_key(label, 1900000005.0), t=5.0, data=dict(data, ids=garbled, unit="U" * 900))
+    body = lane.request("alarm", wall=W0 + 5.3, boottime=B0 + 5.3)
+    d = body["items"][0]["data"]
+    assert d["trimmed"] is True and d["source"] == label and len(label) == 300 and "ids" not in d
+    hub.now = W0 + 5.3
+    lane.answer(*hub.urgent(body), wall=W0 + 5.3, boottime=B0 + 5.3)
+    assert len(hub.alarms) == len(hub.pushes) == 1             # (cut to 200 it would have been a second channel)
+    lane = cc.Lane()
+    press(lane, t=0.0, data=dict(ALARM_DATA, ids=garbled))
+    assert lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0)["items"][0]["data"]["trimmed"] is True
+    lane.answer(413, {"error": "body over 65536 bytes", "reason": "too_large"}, wall=W0 + 1.1, boottime=B0 + 1.1)
+    assert lane.rows[(KEY, 0)]["state"] == "rejected" and lane.not_delivered() == [KEY] and len(lane.health()) == 1
+
+
+def test_a_fresh_alarm_is_read_from_the_row_and_stays_first_across_a_gen_change_and_a_restart():
+    """Loss sequence (v): an alarm whose request got no answer, then the hub's `gen` changes. Fresh is read from the
+    row (no hub answer recorded, made under 120 s ago on the boot clock), not from the process's memory: it is still
+    first in the next request, ahead of the resends; and still after a restart, ahead of the reloaded backlog."""
+    lane, hub = cc.Lane(), cc.Hub()
+    for i in range(3):
+        press(lane, f"CHA-live-{1900000000000 + i}", t=float(i) / 10, data=dict(ALARM_DATA, radio_id=str(7100 + i)))
+    assert statuses(send(lane, hub, t=1.0)) == ["applied"] * 3
+    press(lane, "CHA-live-1900000010000", t=10.0, data=dict(ALARM_DATA, radio_id="7999"))
+    assert send(lane, hub, t=10.1, lost=True) is not None      # its request went; no answer came
+    hub.now = W0 + 15.0
+    hub.restore(30.0)
+    hello(lane, hub, t=20.0)                                   # a new gen: three resends
+    keys = [i["key"] for i in lane.request("alarm", wall=W0 + 20.1, boottime=B0 + 20.1)["items"]]
+    assert keys[0] == "CHA-live-1900000010000" and len(keys) == 4
+    lane.answer(0, None, wall=W0 + 20.1, boottime=B0 + 20.1)
+    lane.crash()
+    lane.start(wall=W0 + 25.0, boottime=B0 + 25.0)
+    assert lane.request("alarm", wall=W0 + 25.1, boottime=B0 + 25.1)["items"][0]["key"] == "CHA-live-1900000010000"
+
+
+def test_an_app_row_with_no_gen_is_sent_again_after_a_restore_in_send_mode():
+    """Loss sequence (vi): the app delivered the alarm, but its hub's answer carried no gen. The hub then restores
+    from an older replica and loses it. In `send` mode such an `app` row is in doubt and is sent again: one alarm."""
+    lane, hub = cc.Lane(), cc.Hub()
+    press(lane, t=0.0)
+    hello(lane, hub, t=0.1)
+    hub.now = W0 + 0.5
+    code, answer = hub.events_answer("st-north", [{"type": "alarm", "id": KEY, "radio_id": "7001", "source": "CH A",
+                                                   "start": W0 + 0.12, "end": W0 + 0.39}])
+    assert answer["outcomes"][0]["outcome"] == "raised" and len(hub.alarms) == 1
+    lane.delivered(KEY, 0, None, wall=W0 + 0.6, boottime=B0 + 0.6)          # an answer without a gen
+    assert lane.rows[(KEY, 0)]["state"] == "app" and lane.request("alarm", wall=W0 + 1.0, boottime=B0 + 1.0) is None
+    hub.now = W0 + 10.0
+    hub.restore(30.0)
+    assert hub.alarms == []
+    hello(lane, hub, t=40.0)
+    assert lane.unsent() == [KEY] and statuses(send(lane, hub, t=40.1)) == ["applied"] and len(hub.alarms) == 1
+
+
+def test_an_alarm_of_a_batch_refused_whole_goes_alone_at_the_head():
+    """The first refusal of a batch marks its alarms alone: each is sent in a request of its own at the head of the
+    queue (item 0), before fresh alarms, resends and the backlog."""
+    lane = lane_with(3)
+    lane.request("alarm", wall=W0 + 3.0, boottime=B0 + 3.0)
+    lane.answer(422, {"error": "x", "reason": "bad_batch"}, wall=W0 + 3.1, boottime=B0 + 3.1)
+    press(lane, "CHA-live-1900000004000", t=4.0, data=dict(ALARM_DATA, radio_id="7444"))   # a fresh one
+    firsts = []
+    for t in (5.0, 6.0, 7.0, 8.0):
+        body = lane.request("alarm", wall=W0 + t, boottime=B0 + t)
+        firsts.append([i["key"] for i in body["items"]])
+        lane.answer(200, named(*[(k, "applied") for k in firsts[-1]]), wall=W0 + t, boottime=B0 + t)
+    assert firsts == [[A], [B_], ["CHA-live-1900000000125"], ["CHA-live-1900000004000"]]
+
+
+def test_only_requests_with_effects_are_recorded_and_a_read_is_answered_again():
+    """The requests table records ops with effects (pick, squelch_apply, reception_start, reception_stop, probe,
+    airband_ab). Reads (check, urgent_since, snapshot) are not recorded: a repeat is simply answered again."""
+    calls = []
+
+    def apply(op, args):
+        calls.append(op)
+        return True, "", "", False, {"n": len(calls)}
+    table: dict = {}
+    rq = cc.Requests(apply, table)
+    since = valid("capture-socket-request")["urgent-since.json"]
+    first = rq.handle(since, role="reader", uid=1000, boottime=5329.0, wall=1900000200.0)
+    again = rq.handle(since, role="reader", uid=1000, boottime=5329.1, wall=1900000200.1)
+    assert first["result"] == {"n": 1} and again["result"] == {"n": 2} and table == {}
+    pick = dict(valid("capture-socket-request")["pick.json"], expires_boot=5330.0)
+    rq.handle(pick, role="reader", uid=1000, boottime=5329.2, wall=1900000200.2)
+    rq.handle(pick, role="reader", uid=1000, boottime=5329.3, wall=1900000200.3)
+    assert calls == ["urgent_since", "urgent_since", "pick"] and list(table) == [pick["id"]]
+    assert set(cc.EFFECT_OPS) == {"pick", "squelch_apply", "reception_start", "reception_stop", "probe", "airband_ab"}
+    assert "MUST" in (cc.CAPTURE / "socket.md").read_text(encoding="utf-8")       # memory_after: 0 after a new pid
+
+
+def test_any_traffic_event_with_an_emergency_flag_or_alarm_key_travels_in_the_alarm_post():
+    """Analog or P25: a `traffic` event with an emergency flag or an `alarm_key` goes alone in the small alarm post,
+    even when it is the only copy of the alarm; its clip follows in a normal batch."""
+    out = cc.posts([{"type": "traffic", "id": "CHB-1900000001000", "clip": b"x"},
+                    {"type": "traffic", "id": "CHA-1900000000123", "alarm_key": KEY, "emergency": True, "clip": b"y"},
+                    {"type": "traffic", "id": "CHC-1900000002000", "emergency": True, "clip": b"z"}])
+    assert [p["events"][0]["id"] for p in out if p["kind"] == "alarm"] == ["CHA-1900000000123", "CHC-1900000002000"]
+    batch = out[-1]
+    assert batch["kind"] == "batch" and {e["id"] for e in batch["events"]} == {
+        "CHB-1900000001000", "CHA-1900000000123", "CHC-1900000002000"}
+    assert all(e.get("type") == "clip" for e in batch["events"] if e["id"] != "CHB-1900000001000")

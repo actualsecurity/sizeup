@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-events-answer.schema.json",
+  "title": "The events route's answer with the generation and each alarm event's outcome",
+  "description": "Designed (docs/native/capture-split.md 4.2 `urgent_delivered`, 11 H1a, #773), not implemented. The 200 answer of POST /api/station/events with two keys the hub does not send yet: `gen`, the hub's fencing generation, and `outcomes`, what each alarm-carrying event became on the hub. An outcome is given only after the event is durably written. The app sends capture `urgent_delivered` only for `raised`, `joined`, `duplicate` or `suppressed`; for `seen`, `stale`, a word it does not know, or no outcome at all (an older hub), it sends nothing and capture sends the alarm as usual. Both keys are optional: today's answer is valid here.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["ok"],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {"const": true, "description": "Always true on a 200."},
+    "gen": {"$ref": "lease.schema.json#/$defs/counter", "description": "The hub's fencing generation, as in the urgent route's answer: an integer up to 2^53 - 1 or a string of decimal digits, compared by value. `urgent_delivered` carries it."},
+    "outcomes": {
+      "type": "array",
+      "description": "One entry per alarm-carrying event of the post (an `alarm` event, or a `traffic` event with an emergency flag or an `alarm_key`).",
+      "maxItems": 10000,
+      "items": {
+        "title": "One alarm event's outcome",
+        "description": "What the hub did with one alarm-carrying event.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["id", "outcome"],
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "The event's `id`."},
+          "outcome": {"type": "string", "description": "`raised`: it raised an alarm. `joined`: it joined or attached to one (the same radio, still set, a call from before the All clear). `duplicate`: the key's alarm was raised already. `suppressed`: received and recorded, but the admin's settings say no alarm for it (notices off on that channel): final, resending would only loop. `stale`: too old, a late notice and no alarm. `seen`: nothing raised for a reason that can change (its age gate, a clock, no emergency). The first four are delivery; a word the app does not know is not.", "x-known": ["raised", "joined", "duplicate", "suppressed", "stale", "seen"]}
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # The live socket: framing and rules (designed)
 
-**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.2, 4.3 "Credentials" and 7.5 (#773, as of `5f143a80`).
+**Status: designed, not implemented.** From `docs/native/capture-split.md` 4.2, 4.3 "Credentials" and 7.5 (#773, as of `e6bfc5f6`).
 `/run/sizeup-radio/live.sock` is a Unix stream socket that capture listens on: mode 0660 in a 0750 directory, the
 peer's uid checked on every connection (`SO_PEERCRED`: the `sizeup` user or root, nobody else). Frames out are
 [`capture-socket-event`](../schemas/capture-socket-event.schema.json), frames in are
@@ -57,7 +57,10 @@ Each one's own fields are required; `at` is optional on a client's frame. `hello
 `poke` (`what: "wish"`), `cursor` (the spool cursor moved), `urgent_taken` (`urgent_epoch` and `n`, both: capture
 ignores a notice for another epoch, so an `n` from before a reset can never mark new rows as taken),
 `urgent_delivered` (`key`, `rev` required, `gen` optional: the hub answered 200 for the app's take-over event that
-carries that key, and `gen` is the generation in that answer; all-in-one, the app's `cad.alarms` took it. It is the
+carries that key **with the outcome `raised`, `joined`, `duplicate` or `suppressed`** for it
+([`capture-events-answer`](../schemas/capture-events-answer.schema.json)), and `gen` is the generation in that answer;
+all-in-one, the app's `cad.alarms` took it. For `seen` or `stale`, or a hub that gives no outcome, the app sends
+nothing, and capture sends the item as usual. It is the
 only way capture learns what the app's lane delivered; `urgent_taken` only says the app took an item over. The row
 becomes `app`: the banner clears and capture never sends it. A key capture does not hold is ignored),
 `paging_finished` (`ch`, `page_id`, `end`).
@@ -71,7 +74,7 @@ there are two fields, as the station routes' answers have: **`reason`**, one wor
 
 | Rule | |
 |---|---|
-| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each id once. It records the id in `urgent.sqlite` (table `requests`, fsync'd) **before** it applies the request, and the reply after; it keeps the last 256 for 10 min (on the boot clock; one from another boot by its wall time). So a repeat gets the first reply again and changes nothing, even after its deadline and **even after capture restarted**. A repeat that finds the id recorded with no reply (capture stopped while applying it) gets `ok: false, reason: "interrupted"`: the person looks at the state and asks again under a new id. `credentials` is never recorded |
+| Ids | chosen by the client, unique, 1 to 64 characters. Capture applies each id once. For an op with effects (`pick`, `squelch_apply`, `reception_start`, `reception_stop`, `probe`, `airband_ab`) it records the id in `urgent.sqlite` (table `requests`, fsync'd) **before** it applies the request, and the reply after; it keeps the last 256 for 10 min (on the boot clock; one from another boot by its wall time). So a repeat gets the first reply again and changes nothing, even after its deadline and **even after capture restarted**. A repeat that finds the id recorded with no reply (capture stopped while applying it) gets `ok: false, reason: "interrupted"`: the person looks at the state and asks again under a new id. Reads (`check`, `urgent_since`, `snapshot`) are not recorded: a repeat is simply answered again. `credentials` is never recorded |
 | `expires_boot` | a deadline on `CLOCK_BOOTTIME` (both ends are on one host). A request that reaches capture at or after it is answered `reason: "expired"` and not applied. A stepped wall clock expires nothing |
 | No reply in time (capture restarting) | the client sends the same id again when it reconnects, or gives up and tells the person. Either is safe, because the id outlives capture's restart (row above): an op that is not idempotent by itself, such as `reception_start`, is never applied twice |
 | `ok: true` | capture has applied it. The app then records it in the wish file, which is what makes it outlive a restart of capture |
@@ -89,7 +92,7 @@ there are two fields, as the station routes' answers have: **`reason`**, one wor
 | `probe` | `sdr` | not idle; held; `result`: `audio` or `none` |
 | `airband_ab` | `label`, `minutes`, `phase_s` | not an airband channel; not running |
 | `check` | `what` (`groups`, `adsb`), `value`, `confirm` | `invalid`; `confirm`; `held`. Advisory only: it changes nothing, and capture validates again when it applies the wish |
-| `urgent_since` | `urgent_epoch`, `n` (both needed), `limit` (200, at most 500), `memory_after` (0) | `result`: `{urgent_epoch, rows, memory, memory_last, more}`. `memory`: the items that have no row (yet), after `memory_after`, in the order capture made them (each with its `m`; a new `pid` in `hello` starts the counter again, and the app then asks from 0). `rows`: the rows above the cursor in `n` order, at most `limit`. **The reply is filled only while its encoded frame stays within 65,536 bytes**: memory first (the items at risk), then rows, each at most 48 KB. `memory_last`: the `m` of the last memory item given. `more: true` when anything was left out: ask again from the last `n` given, with `memory_after: memory_last`. 200 rows of a few hundred bytes are about 76 KB, so the default page is often cut short: that is normal |
+| `urgent_since` | `urgent_epoch`, `n` (both needed), `limit` (200, at most 500), `memory_after` (0) | `result`: `{urgent_epoch, rows, memory, memory_last, more}`. `memory`: the items that have no row (yet), after `memory_after`, in the order capture made them (each with its `m`; a new `pid` in `hello` starts the counter again: after a capture restart, seen as a new `pid`, the app **MUST** ask from `memory_after: 0`, or it would skip the new process's first items). `rows`: the rows above the cursor in `n` order, at most `limit`. **The reply is filled only while its encoded frame stays within 65,536 bytes**: memory first (the items at risk), then rows, each at most 48 KB. `memory_last`: the `m` of the last memory item given. `more: true` when anything was left out: ask again from the last `n` given, with `memory_after: memory_last`. 200 rows of a few hundred bytes are about 76 KB, so the default page is often cut short: that is normal |
 | `credentials` | `token`, `access_id`, `access_secret` (all three, `""` for none) | **uid 0 only**, below |
 | `snapshot` | none (`{}`) | `result`: the snapshot |
 

@@ -19,6 +19,7 @@
     "build": {"type": "string", "description": "Capture's build."},
     "contract": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "The capture contract's major version capture speaks, 1."},
     "started": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When this capture process started, Unix seconds."},
+    "wall_steps": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "The wall steps capture counted since boot `boot` (a change of wall - boot clock by more than 5 s between samples at most 5 s apart), a count. The app puts it and `boot` on its state post (capture-station-state) for the hub's skew path. Optional until capture counts them."},
     "wish_seq": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The `seq` of the wish capture runs; 0 while it has accepted none (it idles)."},
     "wish_problem": {"type": "string", "description": "Why a newer wish file could not be read at all (capture keeps running the last one it accepted); \"\" when fine."},
     "refusals": {
