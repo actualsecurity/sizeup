@@ -334,10 +334,11 @@ def test_a_deferred_row_or_a_category_whose_mode_is_off_is_the_rules_call():
 
 def test_only_the_police_packs_scope_is_sent():
     e, sink, b = setup(packs=full())
-    e.feed(row("o1", MACHETE, 1000, source="p25:mrrs:9220"))                       # another PD's talkgroup
-    e.feed(row("o2", MACHETE, 1000, source="p25:mrrs:9211", service="fire"))      # not police
+    left = "Caller reports a man yelling at people walking by outside the deli at 100 Example Ave"   # no rule takes it
+    e.feed(row("o1", left, 1000, source="p25:mrrs:9220"))                         # another PD's talkgroup
+    e.feed(row("o2", left, 1000, source="p25:mrrs:9211", service="fire"))        # not police
     assert b.asked == []
-    e.feed(row("p1", MACHETE, 1000, source="p25:mrrs:9213"))
+    e.feed(row("p1", left, 1000, source="p25:mrrs:9213"))
     assert len(b.asked) == 1
     src = (rules_mod.DATA.parents[1] / "sizeup" / "intel" / "backing.py").read_text()
     assert "9211" not in src and "9212" not in src and "9213" not in src          # read from the pack's scope

@@ -58,7 +58,7 @@ window.IntelCard = (() => {
       sug.title = "The model's reading, not the rules': on the map only, never pushed";
       li.append(sug);
     }
-    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
+    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened", "de-escalated"
     if (e.fd_shown) {                    // the FD already there (sizeup/intel/engine.py _fire): "FD on scene · #26-000123"
       const fd = el("div", "aa-loc", e.fd_shown);
       fd.title = e.fd === "cleared" ? `${e.fd_shown.split(" · ")[0]} (cleared): pre-alert`
