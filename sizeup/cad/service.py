@@ -362,6 +362,12 @@ class Cad:
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
+        # the local model behind the police rules (sizeup/intel/backing.py): the hub's GPU worker when one is there,
+        # else rules only; its answers applied on its own thread, never the one that resolves them
+        from sizeup.intel.backing import ModelBacking
+        self.intel.backing = ModelBacking(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log,
+                                          tz=TZ, worker=True)
+        self.intel.backing.history = self.intel_site_lines
         self.intel_admin = IntelAdmin(self, self.intel)
         self.intel.incidents = self.intel_incidents             # an event at one of ours: linked, never a new lead
         self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
@@ -714,6 +720,12 @@ class Cad:
             self.airport_alerts.match(inc)          # an aircraft emergency's pre-alert joins an Airport event (#235)
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
+
+    def intel_site_lines(self, place, at: float) -> list[str]:
+        """Up to three short lines of the calls at an intel place before `at` (context_bundle.site_lines): the local
+        model's site history (sizeup/intel/backing.py). A read on the intel thread."""
+        from sizeup.context_bundle import site_lines
+        return site_lines(self, place.label, place.lat, place.lon, at, precision=place.precision)
 
     def intel_incidents(self, now: float) -> list[dict]:
         """Our incidents that a county-wide pack's event may be (sizeup/intel/engine.py near_incident): emergency ones

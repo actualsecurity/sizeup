@@ -6,6 +6,7 @@ address, an id or anything of the county CAD's.
     python tools/intel_replay.py --db RESTORED.sqlite [--since 2026-11-01] [--until ...] [--services police,fire]
                                  [--rules PACK.json] [--labels [MAP.json]] [--json OUT]
     python tools/intel_replay.py --db RESTORED.sqlite --diff A.json B.json [--labels]      the same rows, two rule sets
+    python tools/intel_replay.py --set mrrs-intel/NAME --model fake|pc   with the local model behind the police rules
     python tools/intel_replay.py --db RESTORED.sqlite --since ... --until ... --capture NAME
                                  a private `mrrs-intel` replay set (tests/replay.py): LOCAL ONLY, never pushed
     python tools/intel_replay.py --set mrrs-intel/NAME [--pin]          replay a captured set (--pin: its expected.json)
@@ -26,6 +27,10 @@ classes: {"types": {"fire": ["STRU", ...]}, "categories": {"fire_report": "fire"
 --stt-delay: the lead time is printed two ways: from the start of the row that raised the event (optimistic), and
 once transcribed: that row's end + the clip's length + the rows' median speech-to-text latency (as stored), or with
 --stt-delay S its end + S seconds.
+--model fake|pc: the local model behind the police rules (sizeup/intel/backing.py) on the rows the rules leave alone,
+to measure what it adds: "fake" (no model: a category whose label's words are in the row; the plumbing only) or "pc"
+(the hub's GPU worker through sizeup.cloud.infer, only where it is available; each answer waited for). Its events are
+rule "model.<backend>" in the per-rule table; one more line says what it was asked and answered.
 --db never takes the live database (a state directory's file is refused): a restored copy somewhere else.
 Rows stored before the radio log carried a service (an empty one) take it from the talkgroups files
 (deploy/trunk-recorder/talkgroups.csv and systems/*/talkgroups.csv), so --services and the packs scope them as live.
@@ -218,12 +223,45 @@ def main(argv=None) -> int:
     ap.add_argument("--capture", metavar="NAME")
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--json", type=Path, help="also write the aggregates here (never into the repo)")
+    ap.add_argument("--model", choices=("fake", "pc"), help="the local model behind the police rules (backing.py)")
     a = ap.parse_args(argv)
     try:
         return run(a)
     except rp.LiveDatabase as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
+
+
+def model_factory(kind: str | None, settings: dict, locate):
+    """The replay's engine with the local model behind it (None: the rules alone, as before)."""
+    if not kind:
+        return None
+    from sizeup.intel import backing as bk
+    if kind == "pc":
+        pc = bk.PCWorkerBackend()
+        if not pc.available():
+            raise SystemExit("--model pc: no PC worker available (sizeup.cloud.infer): nothing run")
+
+    def factory(sink, r, clock):
+        e = rp.core_pipeline(sink, r, clock, settings, locate)
+        pack = e.pack(str(bk.defaults()["infer_pd_pack"]))
+        cats = {k: v.get("label") or k for k, v in (pack.categories if pack else {}).items()}
+        backend = bk.FakeBackend(bk.keyword_answer(cats)) if kind == "fake" else bk.PCWorkerBackend()
+        e.backing = bk.ModelBacking(lambda: e.policy.cfg, clock=clock, log=lambda m: None, tz=TZ, backend=backend,
+                                    wait=kind == "pc")
+        return e
+    return factory
+
+
+def show_model(run_) -> dict | None:
+    """What the model was asked and answered (counts only; never a prompt or an answer)."""
+    from sizeup.intel.backing import COUNTS
+    b = getattr(getattr(run_, "engine", None), "backing", None)
+    if b is None:
+        return None
+    t = dict(b.total)
+    print(f"model {b.backend().name}: " + " · ".join(f"{t[k]} {k}" for k in COUNTS))
+    return t
 
 
 def run(a) -> int:
@@ -255,9 +293,10 @@ def run(a) -> int:
         d = capture(rows, incidents or [], a.capture, settings)
         print(f"captured {len(rows)} rows, {len(incidents or [])} labels: {d} (local only)")
         return 0
+    factory = model_factory(getattr(a, "model", None), settings, locate)
     if a.diff:
-        ra = rp.replay(rows, rules=a.diff[0], settings=settings, locate=locate)
-        rb = rp.replay(rows, rules=a.diff[1], settings=settings, locate=locate)
+        ra = rp.replay(rows, factory, rules=a.diff[0], settings=settings, locate=locate)
+        rb = rp.replay(rows, factory, rules=a.diff[1], settings=settings, locate=locate)
         ma, mb = rp.metrics(ra, incidents, cats, a.stt_delay), rp.metrics(rb, incidents, cats, a.stt_delay)
         out = rp.diff(ra, rb, ma, mb)
         print(f"B against A over {len(rows)} rows: events +{out['events_gained']} -{out['events_lost']} · pushes "
@@ -265,8 +304,11 @@ def run(a) -> int:
         for k in out["a"]:
             print(f"  {k}: {out['a'][k]} -> {out['b'][k]}")
     else:
-        out = rp.metrics(rp.replay(rows, rules=a.rules, settings=settings, locate=locate), incidents, cats, a.stt_delay)
+        ran = rp.replay(rows, factory, rules=a.rules, settings=settings, locate=locate)
+        out = rp.metrics(ran, incidents, cats, a.stt_delay)
         show(out)
+        if (m := show_model(ran)) is not None:
+            out["model"] = m
         if a.pin and s is not None:
             pin(s, out)
             print(f"pinned: {s.path / 'expected.json'}")

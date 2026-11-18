@@ -38,6 +38,8 @@ def site(tmp_path):
     reg.claim(reg.resolve(SHARED), "st-hq")            # the existing station, on the shared token
     reg.touch(reg.resolve(SHARED))
     cad.stations = reg
+    from sizeup.cloud.sttworkers import WorkerRegistry
+    cad.stt_workers = WorkerRegistry(reg.mdb, log=lambda m: None)    # (each station's whisper in the STT pool, #639)
     cad.cloud = lambda: {"role": "hub", "state": "ok", "word": "", "detail": "connected"}
     ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, lambda: {"time": 0}, lambda cid: None,
                    lambda iid: False, cad=CadApi(cad), access=Access(), role="hub")
@@ -119,6 +121,25 @@ def test_a_dispatcher_never_sees_the_tab(site):
         pg.wait_for_function("typeof cad !== 'undefined' && !!cad.state && !!cad.who")
         pg.wait_for_timeout(1000)
         assert not pg.locator("#s-station-stations .card").is_visible()
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_an_admin_puts_a_stations_whisper_in_the_stt_pool_from_its_row(site):
+    """#639 phase 2: off by default, per station; the button flips it and the Settings audit says so."""
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        site.reg.add("st-north", "North")
+        pg.goto(site.base + "/cad#settings/station/stations")
+        card = pg.locator("#s-station-stations .card")
+        card.wait_for()
+        row = card.locator("tr", has_text="North")
+        row.get_by_role("button", name="Whisper in pool: off").click()
+        row.get_by_role("button", name="Whisper in pool: on").wait_for()
+        assert site.cad.stt_workers.stations_on("st-north")
+        shot(pg, "stations-whisper-in-pool")
         assert pg.errors == []
     finally:
         browser.close()

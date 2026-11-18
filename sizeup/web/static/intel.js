@@ -225,7 +225,9 @@ window.IntelSettings = (() => {
     ], lst));
     // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
     const inf = d.infer || {};
-    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
+    const owned = !!(d.model || {}).on && ((d.model || {}).cfg || {}).infer_pd !== false;     // backing.py owns the police pack
+    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data"
+      + (owned ? ". Not for the police pack while Local model is on (one model per row)" : ""));
     icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
     const inum = (key, min, max, step, label, tip) => num(s[key] ?? "", min, max, step, set(key), label, tip);
     const model = sInput(s.infer_model || "", 120, "Model id", set("infer_model"), "mono");
@@ -241,6 +243,30 @@ window.IntelSettings = (() => {
       field("$/month", inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)", "Budget, US dollars a month (from the tokens each call reports)")),
       field("sample %", inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)", "Percent of rows with a hit: asked and recorded only (evaluation)")),
     ], used, ist));
+    // the local model behind the police rules (sizeup/intel/backing.py): the PC worker when it is there, else rules only
+    const mo = d.model || {};
+    const mt = mo.today || {};
+    const mc = mo.cfg || {};
+    const mnum = (key, min, max, step, label, tip) => num(mc[key] ?? s[key] ?? "", min, max, step, set(key), label, tip);
+    const [mlab, mcb] = sCheck("Local model", (mc.infer_pd ?? s.infer_pd) !== false, "The PC worker's model classifies police rows the rules left alone; none available: rules only");
+    mcb.addEventListener("change", () => post({ action: "set", key: "infer_pd", value: mcb.checked }, mcb.checked ? "Local model on" : "Local model off"));
+    const mused = el("span", "dim small", `${mt.asked || 0} asked · ${mt.events || 0} events today`);
+    mused.title = "Today: " + ["asked", "ok", "no_worker", "gaming", "deadline", "invalid", "events", "evidence", "capped", "unavailable"]
+      .map((k) => `${mt[k] || 0} ${k}`).join(" · ") + (mo.model ? `\nModel ${mo.model} ${mo.model_version || ""}` : "");
+    const mst = el("span", mo.ready ? "chip s-state default" : "chip s-state edited", mo.ready ? "ready" : (mo.on ? "rules only" : "off"));
+    mst.title = mo.ready ? `Backend: ${mo.backend}` : `PC worker: ${mo.pc || "unavailable"}`;
+    top.append(line(mlab, [
+      field("min conf", mnum("infer_pd_threshold", 0, 1, 0.05, "Confidence at least this makes an event")),
+      field("/h", mnum("infer_pd_hour_cap", 0, 1000, 1, "Questions an hour at most")),
+      field("/day", mnum("infer_pd_day_cap", 0, 20000, 1, "Questions a day at most")),
+      field("wait s", mnum("infer_pd_after_s", 0, 60, 1, "Seconds to wait for the transmissions after it (0: ask at once)")),
+    ], mused, mst));
+    // its events push only when the transmission backs them (backing.py infer_pd_corroborate): else card and map
+    const [clab, ccb] = sCheck("Corroborate", (mc.infer_pd_corroborate ?? s.infer_pd_corroborate) !== false,
+      "On: a local model's event pushes only when its transmission also has a dispatch cue, a rule word of its category or a confirmed address; otherwise card and map only");
+    ccb.addEventListener("change", () => post({ action: "set", key: "infer_pd_corroborate", value: ccb.checked }, ccb.checked ? "Model events need corroboration" : "Model events push alone"));
+    top.append(line(clab, []));
+    // (Bedrock for it: a stub, off by default; no control here until it is built: backing.py BedrockBackend)
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
     ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
