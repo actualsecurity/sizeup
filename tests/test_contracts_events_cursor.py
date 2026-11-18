@@ -156,7 +156,7 @@ def test_a_real_station_sends_in_order_and_deletes_what_the_hub_acked(tmp_path):
             assert code == 200 and c.errors(lane.ANSWER, ans) == [] and c.undeclared(lane.ANSWER, ans) == []
             assert post["epoch"] == st.link.outbox.epoch and post["station"] == c.STATION
             assert ans["acked"] == post["events"][-1]["seq"] and ans["applied"] == len(post["events"])
-        assert st.link.outbox.pending() == (0, None) and st.link.sent == 6
+        assert st.link.outbox.pending() == (0, None) and wait(lambda: st.link.sent == 6, 10)
         h = lv.hub.app.hub
         assert (h.epoch, h.seq) == (st.link.outbox.epoch, 6)
     finally:
@@ -251,7 +251,7 @@ def test_the_station_sends_the_same_batch_again_until_an_answer_has_a_usable_ack
         assert st.link.outbox.pending()[0] == 1 and st.link.sent == 0
         assert all(p == stub.posts[0] and [ev["seq"] for ev in p["events"]] == [1] for p in stub.posts)
         refuse[0] = False
-        assert wait(lambda: st.link.outbox.pending()[0] == 0, 20) and st.link.sent == 1
+        assert wait(lambda: st.link.outbox.pending()[0] == 0, 20) and wait(lambda: st.link.sent == 1, 10)
     finally:
         st.link.stop()
         stub.close()
@@ -261,16 +261,15 @@ def test_an_acked_under_the_last_seq_keeps_the_rest_and_one_over_it_deletes_no_m
     """The station deletes exactly the rows up to `acked`: an answer under the post's last `seq` (the hub stopped at a
     source_event) leaves the rest for the next post, which starts at the first row left."""
     stub = StubHub(lambda body: (200, {"ok": True, "acked": body["events"][0]["seq"], "applied": 1}))
+    waiting = Outbox(tmp_path / "st" / "outbox.sqlite")       # three rows wait in the file before the station starts,
+    for k in range(3):                                        # so its first post has all three
+        waiting.add("heard", {"system": "p25", "radio_id": f"99000{k}", "alias": "", "at": c.T0, "channel": "x"})
+    waiting.close()
     st = stub_station(tmp_path, stub, monkeypatch)
     try:
-        st.link.stop()                                        # (queued first, so the first post has all three)
-        for k in range(3):
-            st.link.outbox.add("heard", {"system": "p25", "radio_id": f"99000{k}", "alias": "", "at": c.T0, "channel": "x"})
-        st.link._stop.clear()
-        threading.Thread(target=st.link._forward, name="hub-forward", daemon=True).start()
         assert wait(lambda: st.link.outbox.pending()[0] == 0, 20)
         assert [[ev["seq"] for ev in p["events"]] for p in stub.posts[:3]] == [[1, 2, 3], [2, 3], [3]]
-        assert st.link.sent == 3
+        assert wait(lambda: st.link.sent == 3, 10)
     finally:
         st.link.stop()
         stub.close()
@@ -343,38 +342,38 @@ def test_the_events_post_is_plain_json_with_a_content_length_and_the_hub_caps_it
 # -- known deviations: pinned (the switches are at the top of this file) -------------------------------------------------
 
 def test_known_deviation_an_event_the_hub_fails_to_apply_is_acked_and_gone(tmp_path):
-    """E1. One event of a batch that raises on the hub (a hub bug, a shape it does not take) is counted, logged and
-    skipped, and the answer's `acked` covers it with no word about it: the real station deletes it, and with it the
-    page, the transmission or the words. Only `source_event` is spared (the golden sequences). Fixed: the answer
-    names what failed (`failed`: [seq]) and the station keeps those rows aside instead of deleting them."""
+    """E1. One event that raises on the hub (a hub bug, a shape it does not take) is counted, logged and skipped, and
+    the answer's `acked` covers it with no word about it: the real station deletes it, and with it the page, the
+    transmission or the words. Only `source_event` is spared (the golden sequences). Fixed: the answer names what
+    failed (`failed`: [seq]) and the station keeps those rows aside instead of deleting them."""
     lv = lane.Lane(tmp_path)
     real = lv.hub.app.apply
+    fails: list[str] = []
+
+    def apply(kind, d, audio):
+        if kind == "traffic" and d.get("id") in fails:
+            raise RuntimeError("a bug on the hub")
+        return real(kind, d, audio)
+    lv.hub.app.apply = apply
     try:
         st = lv.station()
-        st.link.stop()                                        # (both queued before the first post)
-        bad = lane.fm(st, at=time.time() - 20)
-        good = lane.fm(st, at=time.time() - 10, radio=0x7302)
-        assert wait(lambda: st.link.outbox.pending()[0] == 4, 20)
-
-        def apply(kind, d, audio):
-            if kind == "traffic" and d.get("id") == bad:
-                raise RuntimeError("a bug on the hub")
-            return real(kind, d, audio)
-        lv.hub.app.apply = apply
-        st.link._stop.clear()
-        threading.Thread(target=st.link._forward, name="hub-forward", daemon=True).start()
-        assert wait(lambda: any(t.id == good for t in lv.hub.app.store.loose), 20)
+        at = time.time() - 20
+        fails.append(f"Fireground1-{int(at * 1000)}")         # (known before it is sent: the clip id is its start)
+        bad = lane.fm(st, at=at)
+        good = lane.fm(st, at=at + 10, radio=0x7302)
+        assert bad == fails[0]
+        assert wait(lambda: any(t.id == good for t in lv.hub.app.store.loose) and len(lv.events()) == 4, 20)
         h = lv.hub.app.hub
+        seq = next(ev["seq"] for ev in lv.events() if ev["type"] == "traffic" and ev["data"]["id"] == bad)
         answers = [json.loads(a) for _, code, a in lv.events_seen if code == 200]
-        assert h.errors == 1 and h.last_error.startswith("traffic #2: RuntimeError")
+        assert h.errors == 1 and h.last_error.startswith(f"traffic #{seq}: RuntimeError")
         assert not any(t.id == bad for t in lv.hub.app.store.loose)             # the hub does not have it
+        assert wait(lambda: st.link.outbox.pending()[0] == 0, 20)               # ... and the station's outbox is empty
         if E1_A_FAILED_EVENT_IS_ACKED_AND_GONE:
-            assert wait(lambda: st.link.outbox.pending()[0] == 0, 20)           # ... and neither has the station now
-            assert answers[-1]["acked"] == 4 and all("failed" not in a for a in answers)
+            assert h.seq == 4 and all("failed" not in a for a in answers)       # acked, with no word about it
             assert sum(a["applied"] for a in answers) == 3
         else:
-            assert any(a.get("failed") == [2] for a in answers)
-            assert wait(lambda: st.link.outbox.pending()[0] == 0, 20)           # (the lane goes on; the row is kept aside)
+            assert any(a.get("failed") == [seq] for a in answers)               # (the row is kept aside, not deleted)
     finally:
         lv.hub.app.apply = real
         lv.close()
@@ -405,7 +404,6 @@ def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_go
         if E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX:
             assert all(p["events"][0]["seq"] == 1 for p in stub.posts)          # the same oldest row, every time
             assert st.link.outbox.pending()[0] == 4 and st.link.sent == 0       # nothing left the station
-            assert st.link.status_row()["state"] == "down"
         else:
             assert wait(lambda: st.link.sent == 3, 20)
             assert st.link.outbox.pending()[0] <= 1

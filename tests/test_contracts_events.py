@@ -475,7 +475,7 @@ def test_the_station_ignores_the_keys_it_does_not_know_in_the_answer(tmp_path):
     try:
         st = lv.station()
         lane.fm(st)
-        assert lv.drained(st, 2) and st.link.sent == 2 and st.link.last_error == ""
+        assert lv.drained(st, 2) and wait(lambda: st.link.sent == 2, 10) and st.link.last_error == ""
         assert all(json.loads(a)["from_the_future"] == {"x": [1, 2]} for _, _, a in lv.events_seen)
         ans = json.loads(lv.events_seen[0][2])
         assert c.errors(lane.ANSWER, ans) == [] and len(c.undeclared(lane.ANSWER, ans)) == 3

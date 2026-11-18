@@ -342,7 +342,10 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     context_call(st, name="7002-1794990000_770181250.0-call_4", tg=7002, at=t + 195)   # record only: status off
     ids["context_record_only"] = "7002-1794990000_770181250.0-call_4"
     st._p25_activity("p25:east:7003", int((t + 200) // 60), 3, ["880001", "880002"])
-    assert lv.drained(st, 20), "the first events did not reach the hub"
+    def all_there() -> bool:                 # every transmission so far is on the hub, with its words or without
+        got = {ev["data"]["id"] for ev in lv.events("traffic")}
+        return all(v in got for k, v in ids.items() if k != "fm_live_alarm") and st.link.outbox.pending()[0] == 0
+    assert wait(all_there, 60), "the first events did not reach the hub"
     # the hub transcribes: Amazon Transcribe for one channel (as the hub's set_channel_prefs job says), the pool for a
     # context clip while this station's whisper is behind
     st.set_channel_prefs({"Fireground 1": {"engine": "aws"}}, {"ok": True, "why": "", "reserve": []})
@@ -358,7 +361,7 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     context_call(st, name="7001-1794990100_770181250.0-call_6", at=t + 230)     # transcript_pending pool, stt_class
     ids["context_pool"] = "7001-1794990100_770181250.0-call_6"
     monkeypatch.setattr(st.stt, "stats", real_stats)
-    assert lv.drained(st, 26), "the hub-transcribed events did not reach the hub"
+    assert wait(all_there, 60), "the hub-transcribed events did not reach the hub"
     # new words: a re-run that changes the text, one for the alternative, and the forms App._retext's callers send
     lv.whisper.again = True
     assert st.retranscribe([ids["fm"]]) == 1                                    # retext, rerun
@@ -374,6 +377,6 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
              unit_times={"E5": {"dispatched": now - 20, "responding": now - 5}},
              comments=((now - 10, "caller reports smoke"),), extra={"jurisdiction": "Northfield"}, aliases=("S0",))
     st.sources_runner.step(st.sources_runner.runs[0])                           # source_event, source_seen, source_health
-    assert wait(lambda: all(lv.events(k) for k in ("source_event", "source_seen", "source_health", "retext")), 30)
-    assert lv.drained(st)
+    assert wait(lambda: all(lv.events(k) for k in ("source_event", "source_seen", "source_health")), 30)
+    assert wait(lambda: len(lv.events("retext")) >= 2 and all_there(), 30)
     return ids
