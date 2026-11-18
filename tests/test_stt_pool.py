@@ -520,7 +520,7 @@ def test_a_worker_that_vanishes_mid_job_costs_seconds_and_aws_gives_the_text(tmp
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, pending_event("FG1-3"))
@@ -579,7 +579,7 @@ def test_with_aws_out_too_a_lost_job_goes_to_the_stations_whisper_never_dropped(
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     st = None
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
         assert wait(lambda: st._hub_aws["ok"], 10)              # the station forwards FG1's clips to the hub
@@ -742,7 +742,7 @@ def test_a_shed_clip_a_worker_loses_is_a_failed_try_and_one_nobody_takes_burns_n
     from tests.test_stt_catchup import PD, pd_alert, pd_event
     hub = HubRun(hub_cfg(tmp_path))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         app, now, tid = hub.app, time.time(), "9211-1794-call_10"
         pd_alert(app)
@@ -906,7 +906,7 @@ def test_a_hub_restart_with_a_job_out_sends_it_the_aws_way(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token, mode="vanish").start()
+    w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, pending_event("FG1-77"))
