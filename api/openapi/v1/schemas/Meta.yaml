@@ -13,7 +13,7 @@ properties:
       android: {type: string}
   features:
     type: object
-    description: Feature flags set on the hub. A flag the app does not know is ignored.
+    description: Feature flags set on the hub (auth, reads, stream, writes, push, media, responders), all false while the hub's mobile switch is off. A flag the app does not know is ignored.
     additionalProperties: {type: boolean}
   server_time:
     type: number

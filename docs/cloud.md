@@ -1151,6 +1151,27 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
   python -m sizeup --config deploy/hub/config.hub.toml        # http://localhost:8090/cad, /healthz
 ```
 
+### The app's API switches (`[mobile]`, #619)
+
+The mobile API (`/api/v1`, [mobile-api.md](mobile-api.md)) is built on this hub, so it is inert until switched on:
+
+```toml
+[mobile]
+enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelope beside GET /api/v1/meta
+# max_requests = 8   # v1's share of concurrent requests (1 to 64): over it, 503 busy + Retry-After
+# max_streams = 16   # v1's share of open streams (0 to 64; 2 a device; no stream is built yet)
+```
+
+- A hub (or all-in-one) key, never a station's: a station's config refuses the section, and an older release refuses
+  a key it doesn't know. Unknown keys are refused. The config is read once at start: a change is one line and a restart.
+- Off: nothing reads a token key, creates a table or sends a push, and `meta.features` reports every flag false.
+- Per-feature flags (auth, reads, stream, writes, push, media, responders) are in `meta.features`, each off until its
+  pull request is proven (code-driven until a feature wires a source, e.g. `[mobile] features` or a settings
+  policy); a route whose flag is off answers as if it did not exist.
+- Rate limits are in memory per device (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`), and per
+  address for requests with no device token.
+- The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.
+
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
 
 > "lets try it [AWS Transcribe], but lets make it configurable, which channel in the settings gets
@@ -1293,6 +1314,74 @@ Radios > Channels says otherwise. The hub ships `[383, 3127]` (WCPD Ch 1, LLT Su
 folds it into the channel map of the `set_channel_prefs` job (`channels.for_station()`, as
 `{"transcribe": false}` per channel unless a Settings choice says otherwise), so any station,
 including one on an older build, applies it as a plain choice and reports the same signature.
+
+### GPU speech-to-text workers (#639)
+
+GPU workers connect **out** to the hub, never the other way: a long poll for jobs, then the clip's audio, then the
+text. The admin's gaming PC is the first worker, a dedicated box later. Each worker comes and goes as it likes, so a
+clip waits for one only as long as its class allows. After that the clip goes the way it went before.
+
+| file | what it does |
+|---|---|
+| `sizeup/sttpool.py` | the queue, with the whisper queue's strict classes; leases; the per-class budgets; the numbers |
+| `sizeup/cloud/sttworkers.py` | the workers' tokens (`sw1.<id>.<secret>`, hash only, made on first use); the pool's switches; the API under `/api/station/stt/` |
+| `sizeup/cloud/hub.py` | the routing (`_pool_first`, `_pool_done`, `_pool_fallback`, the catch-up's `pool` route) |
+| `sizeup/sttruns.py` | every transcript as written, plus the latency per channel |
+
+- **Which clips:**
+  - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
+  - Shed clips go to a ready worker first, before the station's whisper idles. Fire work doesn't pause them; they stay quiet (old words alert nothing). A clip the pool hands back is routed again next tick, with no try burnt.
+- **When the pool is off:** with no worker added, or the pool switched off, nothing changes. A clip also skips the pool when its estimated wait (work ahead × the median service time) is over the class's budget.
+- **Pre-alert clips** (pages, Fire/EMS 15, firegrounds, airband, police alert talkgroups) go to the pool only when all of these hold:
+  - a worker is idle now: in a claim, with no job;
+  - no other pre-alert clip waits;
+  - the workers' recent time from claim to text on these classes is under 3 s.
+
+  Otherwise they go to AWS, as before.
+- **Catch-up:** fire work pauses it, on the pool too, so a worker busy on old clips never stands between a pre-alert and the pool.
+- **Budgets per class:** `sttpool.BUDGETS` sets three limits for each class: how long a clip waits for a claim, the first lease, and the lease cap.
+  - The pre-alert classes wait 2.5 s and get a 4 s first lease, renewable to an absolute 8 s from the claim. The deadline doesn't grow with the clip's length, and the job is decoded in one greedy pass (`fast`).
+  - The pre-alert target is p50 ≤ 5 s and p95 ≤ 15 s, from the end of the transmission to its text.
+- **Leases:**
+  - Any of these sends the job to the next engine at once:
+    - a lease that runs out;
+    - a worker unheard for 12 s;
+    - a job handed back (`release`);
+    - a worker that starts gaming or pauses (its pre-alert jobs);
+    - a revoked worker.
+  - A worker holds at most 2 jobs at once, and a pre-alert job only when it holds none.
+  - The heartbeat contract: a worker sends a request (state, extend or claim) at least every 6 s, during a decode too.
+  - A pre-alert lease that is lost or handed back counts in the "quick" gate as its whole cap.
+  - Repeated cooldowns double, up to 30 min, until a job is done.
+  - A late `complete` gets 409 and is counted. It is never applied.
+  - The queue lives in memory on the leader. After a restart, an AWS-channel clip is still `pending` on its row, and `_aws_recover` routes it.
+- **States:**
+  - `online`: takes jobs.
+  - `gaming` and `paused`: no new jobs. A clip waiting with no other worker ready falls back at once.
+  - `offline`: no word for 30 s.
+  - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
+- **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
+- **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
+- **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
+  - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
+  - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme, every hour. They are not made at the hub's stop, because a deploy's drain has no seconds to spare.
+  - A new task restores the same way the metrics store does (a shared helper): the newest copy, or the next readable one, merged column by column. Until that works it uploads nothing; Health shows "Transcript copies" and warns after 6 h.
+  - A deploy can lose at most the last hour of run records. The transcripts themselves are in cad.sqlite.
+  - Runbook, when Health keeps saying "not restored" because every copy is unreadable: delete the bad copies with an admin's credentials (`aws s3 rm s3://<backups>/<path>/stt/copy-<n>.sqlite.gz`; for the metrics, `.../metrics/copy-<n>.sqlite.gz`). With no copy left, the next turn settles empty and copies start again.
+  - A run goes with its radio log row (that channel's transcript retention), and is kept 90 days at most.
+
+  Each row holds:
+  - the engine, model, worker and prompt hash;
+  - the role (`text`, `alt`, `late`, `rerun` or `catchup`);
+  - the raw text, the confidence and the words;
+  - the class;
+  - the clip's end, when it was queued, when the engine started and when it finished;
+  - the wait and the run time;
+  - the P25 `call_id` and `turn`, and the radio's `keyup` split.
+
+  The station's whisper measures its own wait and run (`Transcriber._timing`) and sends them with the transmission. `radio_traffic.text_at` is when a row's first text landed (`updated_at` moves with every edit).
+- **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
+- **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
 
 ## Phone pre-alert (Tapout)
 
@@ -3557,8 +3646,8 @@ the Settings audit, per-transmission detail, several stations, and nothing to pa
 |---|---|
 | Graphs | Settings > Radios > **Signal** (`signal-panel.js`, `signal-chart.js`: small SVG charts, no library). One row above them: 6 h / 24 h / 7 d / 30 d, Raw (up to 7 d) or Hourly, a channel. FM: idle quieting p50–p90 band and max, Open / Close as running, the suggested Open, each transmission (paging: at open, and at close on the hourly view); noise opens a minute; transmissions by kind (voice, page, ID burst, noise); the 7-day distribution the suggestion comes from. AM: floor and each carrier (SNR on hover). P25: decode rate with its low–high band, control channel lost shaded, grants on uncovered frequencies. Each event (sdr, gain, squelch, unplug, back, stall, start, a Settings squelch change) a tick on top; ticks closer than 8 px are one, with the count; hover gives the detail. One y axis a chart (two measures: two charts over the same time axis) |
 | Health | Settings > Station > Health: a 24 h spark (idle q90 and noise opens; AM: floor) on each channel's row and the decode rate under P25 trunk (`?view=spark`, half hours, kept 5 min); each links to its charts |
-| Suggested squelch | `?view=squelch` (kept 10 min; again at once after a newer event), on the Squelch card beside Open / Close. **It never makes a channel worse: when in doubt the running Open stays and Apply isn't offered.** Window: the last 7 days, or from the channel's last SDR / gain / unplug / back event (under 24 h since: "not enough data since <event>"). noise = p90 of the idle minutes' q90; Open = ceil(noise + margin), margin 3 dB. No real transmission (voice, ID burst, page; at its quieting at open) may be under it by default: when the weakest are under noise + margin, "weak traffic overlaps the noise" and the running Open stays. A raise needs 20 real transmissions and leaves none under it; a raised Close stays under the real tails' quieting at close. A lower one stays over the idle max and moves at most 2 dB a step. Chattering (noise opens' median since the last squelch change ≥ 2/min): never lower, +1 dB. 6 h after a squelch change: settling, no Apply. Close keeps the running hysteresis. Apply (admins, traffic channels) sends the Open / Close it was worked out for, and the hub refuses it if another runs now; audited like an edit on the card. Paging (read-only) and AM: the numbers only; paging never above its running Open |
-| Shift warnings | Every 10 min (the hub janitor), for each event of the last 48 h (sdr, gain, squelch, unplug, back, on, start, a Settings squelch change; within 10 min: one): the 6 h after it (from 5 min after, at least 30 min of data) against the 24 h before it; neither window crosses another event, and a shift must still show from the newest event on (a dongle moved back: no warning). An SDR change with a squelch edit minutes later is still checked. FM idle q90 median up > 3 dB, noise opens a minute ×3 and ≥ 0.5 (the median of half-hour means; neither after a squelch change alone), kept voice quieting down > 3 dB (a cable or splitter's loss), transmissions an hour ÷3 from ≥ 4/h or noise key-ups ×3 to ≥ 4/h (medians of half-hour counts, against the same clock hours the day before), AM floor up > 3 dB, pages at open down > 3 dB (≥ 3 pages; windows 7 d / 72 h), P25 decode rate down > 30%. Without an event, once a day: the last 7 days' hourly medians against the 21 before. A Health hint ("FG1: idle quieting +4.2 dB since 14:05 (SDR change)", with a Chart link), never a push; "Signal shift warnings" can be muted like an alert (muted: not shown) |
+| Suggested squelch | `?view=squelch` (kept 10 min; again at once after a newer event), on the Squelch card beside Open / Close. **It never makes a channel worse: when in doubt the running Open stays and Apply isn't offered.** Window: the last 7 days, or from the channel's last SDR or gain change, or a station restart after which its dongle or gain differs from before it (a change made while the station was down sends no event of its own); back from Off (a shared dongle handed over) or plugged back in only counts on another dongle than before (or when either has no serial), so a channel handed over every few hours on the same dongle still gets one (under 24 h since: "not enough data since <event>"). A station with no floor data of the channel in the window (an old or renamed id) is left out. noise = p90 of the idle minutes' q90; Open = ceil(noise + margin), margin 3 dB. No real transmission (voice, ID burst, page; at its quieting at open) may be under it by default: when the weakest are under noise + margin, "weak traffic overlaps the noise" and the running Open stays. A raise needs 20 real transmissions and leaves none under it; a raised Close stays under the real tails' quieting at close. A lower one stays over the idle max and moves at most 2 dB a step. Chattering (noise opens' median since the last squelch change ≥ 2/min): never lower, +1 dB. 6 h after a squelch change: settling, no Apply. Close keeps the running hysteresis. Apply (admins, traffic channels) sends the Open / Close the suggestion was worked out for (its own, not what the card shows), and the hub refuses it if another runs now, if the channel's suggestion no longer offers Apply, or if it now suggests another Open / Close than the one being set; audited like an edit on the card. A station squelch event within 5 min of its restart that only puts back what ran before it is no squelch change (the station keeps the hub's squelch and runs it from its first look, so a normal restart logs none). Paging (read-only) and AM: the numbers only; paging never above its running Open |
+| Shift warnings | Every 10 min (the hub janitor), for each event of the last 48 h (sdr, gain, squelch, unplug, back, on, start, a Settings squelch change; within 10 min: one): the 6 h after it (from 5 min after, at least 30 min of data) against the 24 h before it; neither window crosses another event, and a shift must still show from the newest event on (a dongle moved back: no warning). An SDR change with a squelch edit minutes later is still checked. FM idle q90 median up > 3 dB, noise opens a minute ×3 and ≥ 0.5 (the median of half-hour means; neither after a squelch change alone), kept voice quieting down > 3 dB (the median of half-hour medians, ≥ 3 half hours each side: a fire's hour of portables never moves it; a cable or splitter's loss, also after a restart alone: what changed while the station was down shows only as its restart; too few half hours with traffic: an info hint "level not checked: too little traffic", why on hover), transmissions an hour ÷3 from ≥ 4/h or noise key-ups ×3 to ≥ 4/h (medians of half-hour counts, against the same clock hours the day before), AM floor up > 3 dB, pages at open down > 3 dB (≥ 3 pages; windows 7 d / 72 h), P25 decode rate down > 30%. Without an event, once a day: the last 7 days' hourly medians against the 21 before. A Health hint ("FG1: idle quieting +4.2 dB since 14:05 (SDR change)", with a Chart link), never a push; "Signal shift warnings" can be muted like an alert (muted: not shown) |
 | Limit | The quieting is measured against the receiver's own hiss reference, which follows the floor (`radio/fm.py`): a uniform rise of the noise moves both, so the idle quieting can read a shift as smaller than it is. The AM floor (dBFS) and the transmissions' own level (the kept voice quieting check) don't have that limit |
 | Thresholds | Settings > Radios > Signal > Thresholds (`signal_metrics`, audited as Radios): margin, % real allowed under (default 0), shift dB, noise opens ×, transmissions ×, decode drop % |
 | Reading | `GET /api/cad/metrics?view=squelch\|spark\|shifts` (the same admin check as the rest); `metric=` takes several, comma-separated. The rollups gained `sq_open` / `sq_close` (the squelch as running, for the hourly view's steps) |

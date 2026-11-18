@@ -61,6 +61,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
@@ -716,7 +717,7 @@ class App:
         self.roads.gis = self.gis
         self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
-        self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
+        self.roads.wall_settings = lambda: self.cad.settings.section("camera_wall")
         self.cad.camera_area = self.roads.settings_rows
         self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
@@ -914,7 +915,7 @@ class App:
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
         # for the slow ones, the schedule the registry keeps (the admins' choices in the CAD settings).
         from sizeup import datasources
-        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.overrides().get(datasources.SECTION) or {})
+        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.section(datasources.SECTION))
         self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()
@@ -1594,11 +1595,12 @@ class App:
         if call.audio is not None:
             # One row per key-up (issue #62): 60 Control and the unit it's talking to, a unit keying
             # twice, a radio with no ID; each piece is transcribed with only its own talker as the hint.
-            for pc in split_turns(call):
+            for k, pc in enumerate(split_turns(call)):
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig=self.radios.rig_p25(pc.pairs),
                             radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
+                t.call_id, t.turn = call.id, k  # the whole call it is a key-up of (= cad/comms.py split_call)  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -1641,10 +1643,11 @@ class App:
         eng = "off" if tier == tiers.RECORD else channels.effective(
             dict(self.channel_pref(key), transcribe=True), self.aws_ok(key)[0])
         if call.audio is not None:
-            for pc in split_turns(call):
+            for k, pc in enumerate(split_turns(call)):
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
+                t.call_id, t.turn = call.id, k  # type: ignore[attr-defined]
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
@@ -2393,7 +2396,12 @@ class App:
                                   caught=lambda since: comms.caught_up(since, since - oldest),
                                   route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
                                   aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
-                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log,
+                                  to_pool=self._catchup_pool)
+
+    def _catchup_pool(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to the GPU worker pool (the hub's, sizeup/sttpool.py): none here."""
+        return False, ""
 
     def _catchup_may_run(self) -> bool:
         """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call). Under a lease
@@ -4917,7 +4925,9 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
-                       adapter_password=adapter_password(cfg))
+                       adapter_password=adapter_password(cfg),
+                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                                       max_streams=cfg.mobile_max_streams))
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 
