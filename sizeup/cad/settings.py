@@ -14,7 +14,8 @@ Reset to default = drop the override (one item, or a whole section).
     status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
-                                   response, station, retired}); key "_boards" -> the boards' layout
+                                   response, station, status_set (another agency's: its statuses, third party
+                                   or not), retired}); key "_boards" -> the boards' layout
     dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
@@ -401,7 +402,12 @@ def overlay(d: dict, ov: dict) -> dict:
                 units.pop(code, None)
                 off.add(code)
                 continue
+            was = units.get(code)
             units[code] = {k: x for k, x in v.items() if k != "board"}
+            # A unit's statuses from the data file (status_set: the Other board's fire and EMS codes keep the agency set)
+            # stay when a saved edit doesn't say: one saved before the key existed, or an older export imported.
+            if "status_set" not in v and isinstance(was, dict) and was.get("status_set"):
+                units[code]["status_set"] = was["status_set"]
             if v.get("retired"):
                 off.add(code)
         for b in boards:
@@ -425,9 +431,13 @@ def overlay(d: dict, ov: dict) -> dict:
     if isinstance(ag, dict) and isinstance(ag.get("sets"), dict):   # a status deleted, a board gone: out of the sets (#219)
         ids = {b.get("id") for b in d.get("unit_boards") or [] if isinstance(b, dict)}
         sets = {k: dict(v, statuses=[c for c in v.get("statuses") or [] if c not in gone_st],
-                        labels={c: t for c, t in (v.get("labels") or {}).items() if c not in gone_st})
+                        labels={c: t for c, t in (v.get("labels") or {}).items() if c not in gone_st},
+                        **({"flow": {c: [x for x in n if x not in gone_st] for c, n in v["flow"].items() if c not in gone_st}}
+                           if isinstance(v.get("flow"), dict) else {}))
                 for k, v in ag["sets"].items() if isinstance(v, dict)}
-        d["agency_status_sets"] = dict(ag, sets=sets, boards={b: x for b, x in (ag.get("boards") or {}).items() if b in ids})
+        d["agency_status_sets"] = dict(ag, sets=sets, boards={b: x for b, x in (ag.get("boards") or {}).items() if b in ids},
+                                       **({"third_party_only": [c for c in ag["third_party_only"] if c not in gone_st]}
+                                          if isinstance(ag.get("third_party_only"), list) else {}))
     return d
 
 
@@ -524,6 +534,19 @@ class Editor:
                 return None
             return db.total_changes, db.execute("PRAGMA data_version").fetchone()[0]
 
+    MADE_FIRE_KEYS = {"kind", "response", "title", "spoken", "department"}
+
+    def made_fire(self, units_ov: dict | None = None) -> list[str]:
+        """Codes an old edit turned into one of our engines: a saved units edit of only kind engine (response fire or
+        none) and a name, title or department, for a code the data file makes another agency's (a board-only code like
+        CONED-G, or an agency kind). Before the fix, editing one field of a board-only code saved it so (_units_op).
+        Shown in Settings > Units to reset, logged once at start; never rewritten here."""
+        o = self.overrides().get("units", {}) if units_ov is None else units_ov
+        on = {c for c, _, _ in self.base.board_units()}
+        return sorted(c for c, v in o.items() if isinstance(v, dict) and not c.startswith("_") and c in on
+                      and v.get("kind") == "engine" and v.get("response", "fire") == "fire"
+                      and set(v) <= self.MADE_FIRE_KEYS and self.base.response(c) == "agency")
+
     def build(self, ov: dict) -> lists_mod.Lists:
         try:
             return lists_mod.build(overlay(self.defaults, ov), "settings", self.path)
@@ -537,6 +560,10 @@ class Editor:
         self._use_services(ov)                  # (whatever the lists make of the rest: a source's tag never waits)
         if not ov:
             return
+        bad = self.made_fire(ov.get("units") or {})
+        if bad:                                 # said once, left as they are: Settings > Units offers Reset on each
+            self.cad.log(f"CAD: settings: {len(bad)} other agencies' units saved as our engines by an old edit "
+                         f"({', '.join(bad)}): Settings > Units, Reset")
         try:
             L = self.build(ov)
         except CadError as e:
@@ -564,6 +591,8 @@ class Editor:
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
         self._use_services(ov)
         self.cad._state = None
+        if getattr(self.cad, "intel", None) is not None:
+            self.cad.intel.sources_changed()      # a source's service, the intel topic: intel's push sources again
 
     def _use_services(self, ov: dict) -> None:
         """The admins' service per source: the CAD's copy (the pages) and the process's (every row tagged from now)."""
@@ -1262,15 +1291,21 @@ class Editor:
         for code, v in o.items():
             if isinstance(v, dict) and v.get("deleted"):
                 rows.append(dict(self._unit_row(self.base, code, "", 0, {}, used, base_on, live), state="deleted"))
+        bad = set(self.made_fire(o))            # another agency's unit an old edit made our engine: Reset offered
+        for r in rows:
+            r["made_fire"] = r["code"] in bad and r.get("state") != "deleted"
         return {"rows": rows, "edited": bool(o), "layout_edited": "_boards" in o,
-                "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])]}
+                "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])],
+                "status_sets": [{"id": k, "title": v.get("title") or k, "third_party": bool(v.get("third_party")),
+                                 "statuses": list(L.agency_codes(k))} for k, v in L.agency_status_sets["sets"].items()]}
 
     def _unit_row(self, L, code, board, pos, o, used, base_on, live) -> dict:
         u, info = L.units.get(code, {}), L.unit(code)
         lv = live.get(code) or {}
         return {"code": code, "board": board, "pos": pos, "spoken": u.get("spoken") or "", "title": info["title"],
                 "kind": info["kind"], "department": info["department"], "spare": info["spare"], "response": info["response"],
-                "station": L.station(code),
+                "station": L.station(code), "status_set": L.agency_set(code, board or None),
+                "third_party": L.third_party(code, board or None),
                 "retired": bool(u.get("retired")), "used": used.get(code, 0), "named": info["named"],
                 "state": "added" if code not in base_on and code not in self.base.units else "edited" if code in o else "default",
                 "status": lv.get("status", ""), "incident_number": lv.get("incident_number")}
@@ -1903,6 +1938,12 @@ class Editor:
         if r not in RESPONSES:
             raise CadError(f"response: one of {', '.join(RESPONSES)}")
         out["response"] = r
+        ss = _text(g("status_set"), "status_set", 40, required=False)   # another agency's: its statuses (third party ...)
+        if ss and r == "agency":
+            sets = L.agency_status_sets["sets"]
+            if ss not in sets:
+                raise CadError(f"status_set: one of {', '.join(sets)}")
+            out["status_set"] = ss
         return out
 
     def _same_unit(self, a: dict | None, b: dict | None, code: str) -> bool:
@@ -1911,7 +1952,7 @@ class Editor:
             u = u or {}
             return (u.get("kind", "agency"), (u.get("spoken") or code) if u.get("spoken") != code else code,
                     u.get("title") or "", u.get("department") or "", bool(u.get("spare")), bool(u.get("retired")),
-                    u.get("station") or "",
+                    u.get("station") or "", u.get("status_set") or "",
                     lists_mod.unit_response(u, self.cad.lists.attach_kinds))
         return k(a) == k(b)
 
@@ -1949,7 +1990,9 @@ class Editor:
                                 [("units", code, None, dict(u, board=board))])
         if cur is None and not on_board and not (action == "reset" and code in o):
             raise CadError(f"no unit {code!r}")
-        cur = dict(cur or {})
+        # A board-only code (CONED-G, KEYHOLDER1, BAT10 ...: no units entry) is what the lists make of it, another agency's:
+        # an edit that sends one field never makes it an engine (_clean_unit's default for a new unit), so never ours.
+        cur = dict(cur or ({"kind": L.unit(code)["kind"]} if on_board or code in live else {}))
         if action == "station":                         # home firehouse only (the maps' station picker)
             old = L.station(code)
             u = self._clean_unit({"station": body.get("station")}, cur)

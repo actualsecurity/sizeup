@@ -31,6 +31,20 @@ NOISE_LABEL = re.compile(r"^[\[(*].*[\])*]$")  # "(static)", "[MUSIC]" — not s
 HALLUCINATIONS = {"thank you", "thanks", "thank you very much", "yes", "you", "bye", "bye bye", "okay",
                   "ok", "thanks for watching", "thank you for watching", "so", "oh", "the end"}
 SHORT_S = 1.5
+# A prompt with a term list in it (sizeup/stt_terms.py; only then: the item's vocab_v says so) can be read back on dead
+# air or noise. prompt_noise(): no speech when the text is mostly a run of PROMPT_ECHO_TERMS or more of the prompt's
+# items in its order and the clip is short or holds more words than anyone says in that time (PROMPT_ECHO_WPS), or
+# the run is PROMPT_ECHO_LONG items and 90% of the text (no one recites the list in its order); or a
+# short clip's text is nothing but PROMPT_ONLY_ITEMS or more of the prompt's items, in any order; or, short or quiet
+# like HALLUCINATIONS, one of PROMPT_HALLUCINATIONS (large-v3-turbo with a term list, on dead air). Real traffic that
+# says a few of the same words with anything else keeps its text; so does any clip of SHORT_S or more at a speaking pace.
+PROMPT_ECHO_TERMS = 3
+PROMPT_ECHO_COVER = 0.7
+PROMPT_ECHO_WPS = 4.5
+PROMPT_ECHO_LONG = 6              # ... and a run this long that is nearly all the text, at any length or pace
+PROMPT_ONLY_ITEMS = 3            # (2 dropped a real "Engine 61, Port Chester." at 1.3 s: a talker and a town)
+PROMPT_ONLY_FILLER = {"and", "the", "a", "to", "on", "of", "uh", "um"}
+PROMPT_HALLUCINATIONS = {"well be right back", "and well see you next time", "well see you next time", "see you next time"}
 # Queue priority (SttQueue), strict: a class is served only when every class above it is empty (#300). Pages,
 # Fire/EMS 15 and the firegrounds first, the airband pre-alerts next, other live traffic, a person's re-run, then
 # the talkgroups heard only as context (not "main" in Settings > Radios: other towns' fire, county police). #195:
@@ -180,13 +194,81 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: b
 voice_band = radio_voice  # older name
 
 
-def judge(raw: str, seconds: float, low_energy: bool = False) -> tuple[str, str]:
+def _said_words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9' ]", " ", str(text or "").lower()).split()
+
+
+def prompt_echo(text: str, prompt: str, min_terms: int = PROMPT_ECHO_TERMS, cover: float = PROMPT_ECHO_COVER) -> bool:
+    """The text is the prompt read back: a run of at least min_terms of the prompt's items (split at , . ; :), one after
+    the other in the prompt's order, makes up at least `cover` of the text's words."""
+    items = [w for w in (_said_words(x) for x in re.split(r"[,.;:]", str(prompt or ""))) if w]
+    out = _said_words(text)
+    if len(items) < min_terms or not out:
+        return False
+    best = 0
+    for i, first in enumerate(items):
+        for p in range(len(out) - len(first) + 1):
+            if out[p:p + len(first)] != first:
+                continue
+            k, q = 1, p + len(first)
+            while i + k < len(items) and out[q:q + len(items[i + k])] == items[i + k]:
+                q += len(items[i + k])
+                k += 1
+            if k >= min_terms:
+                best = max(best, q - p)
+    return best >= cover * len(out)
+
+
+def prompt_only(text: str, prompt: str) -> int:
+    """How many of the prompt's items the text is made of, when it is nothing else (in any order; PROMPT_ONLY_FILLER
+    words aside); 0 when any other word is in it."""
+    items = sorted({tuple(w) for w in (_said_words(x) for x in re.split(r"[,.;:]", str(prompt or ""))) if w},
+                   key=len, reverse=True)
+    out = _said_words(text)
+    found, i = set(), 0
+    while i < len(out):
+        hit = next((it for it in items if tuple(out[i:i + len(it)]) == it), None)
+        if hit is not None:
+            found.add(hit)
+            i += len(hit)
+        elif out[i] in PROMPT_ONLY_FILLER:
+            i += 1
+        else:
+            return 0
+    return len(found)
+
+
+def prompt_noise(raw: str, prompt: str, seconds: float, low_energy: bool = False) -> bool:
+    """whisper read its prompt back (no speech). Only for a prompt that has a term list in it (the caller's say)."""
+    if not raw or not prompt:
+        return False
+    if re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip() in PROMPT_HALLUCINATIONS and (seconds < SHORT_S or low_energy):
+        return True
+    n = len(_said_words(raw))
+    if prompt_echo(raw, prompt) and (seconds < SHORT_S or n > PROMPT_ECHO_WPS * max(seconds, 0.5)):
+        return True
+    if prompt_echo(raw, prompt, PROMPT_ECHO_LONG, 0.9):
+        return True
+    if seconds < SHORT_S and prompt_only(raw, prompt) >= PROMPT_ONLY_ITEMS:   # short: nothing but the prompt's items
+        return True
+    # ... or, with no voice energy too, only a number, one of the prompt's or a piece of it (with a term list in front of
+    # it, large-v3-turbo wrote the talker's ID from the prompt, or part of it, on dead-air FG1 key-ups it otherwise
+    # called nothing; a short real "191 responding" can come back as "191." alone: never on the length alone)
+    digits = re.sub(r"\D", "", raw)
+    if not low_energy or not digits or re.search(r"[a-z]", raw.lower()):
+        return False
+    return any(digits in re.sub(r"\D", "", x) for x in re.split(r"[,.;:]", prompt))
+
+
+def judge(raw: str, seconds: float, low_energy: bool = False, prompt: str = "", vocab_v: str = "") -> tuple[str, str]:
     """whisper's words -> (text, status): "" and "no_speech" for a noise label, nothing said ("." = a squelch tail) or
-    a stock hallucination on a short or quiet clip; else (raw, "done"). The station's whisper and the GPU workers
+    a stock hallucination on a short or quiet clip, or (vocab_v: a term list went in its prompt, sizeup/stt_terms.py)
+    the prompt read back (prompt_noise); else (raw, "done"). The station's whisper and the GPU workers
     (sizeup/sttpool.py) judge alike."""
     said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
     if (not raw or NOISE_LABEL.match(raw) or not said
-            or (said in HALLUCINATIONS and (seconds < SHORT_S or low_energy))):
+            or (said in HALLUCINATIONS and (seconds < SHORT_S or low_energy))
+            or (vocab_v and prompt_noise(raw, prompt, seconds, low_energy))):
         return "", "no_speech"
     return raw, "done"
 
@@ -549,6 +631,10 @@ class Transcriber:
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
             fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
             tries = 3
+            try:
+                prompt = self.prompt(item)
+            except Exception as e:  # noqa: BLE001 - no prompt is better than no transcript
+                self.last_error, prompt = f"prompt: {type(e).__name__}: {e}"[:160], ""
             if prio == CATCHUP:
                 # a shed clip caught up: one greedy pass, one try, a short timeout, no backoff: never minutes of whisper
                 fast, tries = {"fast": True, "timeout_s": CATCHUP_TIMEOUT_S}, 1
@@ -558,7 +644,7 @@ class Transcriber:
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
                     # but changed 1 of 4 real transcripts ("Testing one two" -> "Nothing wanted").
                     raw, conf = self.client.transcribe(radio_voice(audio, deemph=getattr(item, "fm", True), nr=False),
-                                                      self.prompt(item), **fast)
+                                                      prompt, **fast)
                     self._took.append((time.time(), time.monotonic() - t0))
                     break
                 except Exception as e:
@@ -569,7 +655,8 @@ class Transcriber:
                 item.status = "error"
                 self.on_done(item)
                 continue
-            raw, status = judge(raw, len(audio) / 16000, getattr(item, "low_energy", False))
+            raw, status = judge(raw, len(audio) / 16000, getattr(item, "low_energy", False), prompt,
+                                getattr(item, "vocab_v", ""))   # (vocab_v: a term list went in its prompt)
             self._timing(item, prio, queued, began)
             item.raw, item.confidence = raw, conf
             item.status = status                # last: a reader that sees "done" sees its text (and read_twice)

@@ -155,29 +155,30 @@ def test_other_agency_units_cancelled_go_back_to_their_free_status(tmp_path):
     clock = Clock()
     c = cad(tmp_path, clock)
     a = _event_with(c, ["E60"], clock)
-    names = {"RBPD": "CE", "PCPD": "CN"}
+    names = {"BAT10": "CE", "BAT11": "CN"}
     for n in names:
         assert c.lists.agency_set(n) == "responder"
     ems = next(u["name"] for u in c.store.units() if u["status_set"] == "full")
-    key = next(u["name"] for u in c.store.units() if u["status_set"] == "contact")
+    key = next(u["name"] for u in c.store.units() if u["status_set"] == "keyholder")
     names[ems] = "CE"
-    c.attach(a["id"], {"unit_ids": [uid(c, n) for n in [*names, key]], "operator": "JD"})
+    c.attach(a["id"], {"unit_ids": [uid(c, n) for n in [*names, key, "PCPD"]], "operator": "JD"})
     for n, st in names.items():
         c.unit_status(uid(c, n), {"status": "RS", "operator": "JD"})
         c.unit_status(uid(c, n), {"status": st, "operator": "JD"})
-    c.unit_status(uid(c, key), {"status": "AV", "operator": "JD"})          # the keyholder: Done (AV)
+    c.unit_status(uid(c, "PCPD"), {"status": "CN", "operator": "JD"})        # a third party: cancelled straight from Dispatched
+    c.unit_status(uid(c, key), {"status": "NR", "operator": "JD"})           # the keyholder: notified, not responding
     close(c, a["id"])
-    for n in names:
+    for n in [*names, "PCPD", key]:
         assert status(c, n) == "AV", n
         assert history(c, n)[-1]["incident_id"] == a["id"]
-    assert status(c, key) == "AV" and [r["new_status"] for r in history(c, key)] == ["DP", "AV"]   # Done: left as is
+    assert [r["new_status"] for r in history(c, key)] == ["DP", "NR", "AV"]
 
 
 def test_free_for_an_agency_set_without_available(tmp_path):
     """A set whose free status isn't AV: its own free one."""
     d = lists_mod.load()
     sets = dict(d.agency_status_sets)
-    sets["sets"] = dict(sets["sets"], contact={"statuses": ("DP", "RS", "OL", "AQ"), "labels": {}})
+    sets["sets"] = dict(sets["sets"], keyholder={"statuses": ("DP", "RS", "OL", "AQ"), "labels": {}})
     d.agency_status_sets = sets
     key = next(c for c, b in d._board_of.items() if b == "res-keyholder")
     assert d.free_for(key) == "AQ" and d.free_for("E63") == "AV"

@@ -1,0 +1,100 @@
+type: object
+description: >
+  One incident with its chronology, dispatches and, for the person's role, the notes and points on its building and
+  the call's radio rows. `premise` and `preplan` hold only what the console shows that person (a category or kind
+  kept to dispatchers or admins is not here for a viewer); `radio` leaves out another P25 system's rows unless the
+  person may see them (the console's rule) and names a talker only as the row's alias, never a radio ID. The chronology
+  sends free text only for the kinds the CAD words itself or an operator wrote (never the caller's name, address or
+  phone; any other kind has an empty `text`). At most 300
+  events, 50 dispatches, 100 radio rows. The rev is per role (what a role may not see is not in its hash).
+allOf:
+  - $ref: ./Incident.yaml
+  - type: object
+    required: [type_note, place_address, geo_label, town, aircraft, events, dispatches, premise, preplan, radio, server_time]
+    properties:
+      server_time: {type: number}
+      type_note: {type: string}
+      place_address: {type: string}
+      geo_label: {type: string}
+      town: {type: string}
+      aircraft:
+        type: [object, "null"]
+        description: An Airport event's details; null on any other.
+        required: [type, nature, eta_min, runway, souls, level, fuel, cargo]
+        properties:
+          type: {type: string}
+          nature: {type: string}
+          eta_min: {type: [integer, "null"]}
+          runway: {type: string}
+          souls: {type: [integer, "null"]}
+          level: {type: [integer, "null"]}
+          fuel: {type: string}
+          cargo: {type: string}
+      events:
+        type: array
+        items:
+          type: object
+          required: [id, at, kind, text, operator, unit_id]
+          properties:
+            id: {type: string}
+            at: {type: number}
+            kind: {type: string}
+            text: {type: string, description: "Empty for a kind whose text is not sent (the caller's details are never sent)."}
+            operator: {type: string, description: "A name, never a sign-in email."}
+            unit_id: {type: [string, "null"]}
+      dispatches:
+        type: array
+        items:
+          type: object
+          required: [id, at, kind, text, operator, unit_ids]
+          properties:
+            id: {type: string}
+            at: {type: number}
+            kind: {type: string}
+            text: {type: string}
+            operator: {type: string}
+            unit_ids: {type: array, items: {type: string}}
+      premise:
+        type: array
+        items:
+          type: object
+          required: [id, category, priority, text, label, review_due, expires_at, updated_at, nearby]
+          properties:
+            id: {type: string}
+            category: {type: string}
+            priority: {type: [integer, "null"]}
+            text: {type: string}
+            label: {type: string}
+            review_due: {type: boolean}
+            expires_at: {type: [number, "null"]}
+            updated_at: {type: [number, "null"]}
+            nearby: {type: boolean}
+      preplan:
+        type: array
+        items:
+          type: object
+          required: [id, kind, label, note, lat, lon, level, priority, review_due, nearby]
+          properties:
+            id: {type: string}
+            kind: {type: string}
+            label: {type: string}
+            note: {type: string}
+            lat: {type: [number, "null"]}
+            lon: {type: [number, "null"]}
+            level: {type: [string, integer, "null"]}
+            priority: {type: [integer, "null"]}
+            review_due: {type: boolean}
+            nearby: {type: boolean}
+      radio:
+        type: array
+        items:
+          type: object
+          required: [id, at, channel, text, unit, emergency, has_audio]
+          properties:
+            id: {type: string}
+            at: {type: number}
+            channel: {type: string}
+            text: {type: string}
+            unit: {type: string, description: "The talker's alias as the row says it; no radio ID."}
+            emergency: {type: boolean}
+            has_audio: {type: boolean}

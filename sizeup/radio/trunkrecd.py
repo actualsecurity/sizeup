@@ -51,7 +51,8 @@ ABSENT_S without counting a restart. Another system's trunk-recorder (SystemSupe
 are unplugged (it stayed up, silent), so its dongles are looked for on USB every UNPLUGGED_S while it runs: one gone
 stops it ("absent"), and it starts again, never as one of the watchdog's capped restarts, once every one is back and
 USB has settled, after the county's trunk-recorder (which may want the same hub's dongles) is up; a flapping dongle is
-held back longer each time, each a restart counted (#592).
+held back longer each time, each a restart counted (#592), its status saying until when ("hold_until", #637). An
+antenna group's move (sizeup/radio/groups.py) waits for the county's trunk-recorder the same way (#637).
 
 The watchdog (#547: a trunk-recorder that stayed up recorded nothing for 22 h): one that runs but has stopped working is
 restarted (Watchdog). Faults, each judged from trunk-recorder's start at the earliest:
@@ -115,7 +116,8 @@ ABSENT_S = 15.0                   # trunk-recorder said its dongle is gone: star
 RETURN_STABLE_S = 5.0             # back: the same (index, serial) list at two looks this far apart before it starts
 RETURN_SETTLE_MAX_S = 60.0        # ... settling at most this long (a flapping dongle elsewhere): then the latest look
 COUNTY_SETTLE_S = 5.0             # ... and the county's trunk-recorder, if it should run, up this long first
-COUNTY_WAIT_S = 60.0              # ... waited for at most this long (the county down for its own reasons)
+COUNTY_WAIT_S = 60.0              # ... waited for at most this long (the county down for its own reasons); the same
+                                  # for an antenna group's move (#637: the county's dongle given back in the same step)
 FLAP_S = 600.0                    # gone again this soon after a return: a flapping dongle (a restart counted)
 FLAP_HOLD_S = (30.0, 120.0, 300.0, 600.0)   # ... then started no sooner than this after it went, per flap in a row
 LONG_ABSENCE_S = 60.0             # gone longer than this: the watchdog's hour of restarts is forgotten at the return
@@ -319,6 +321,11 @@ def capture_dir(argv: list[str], workdir: str | Path) -> str:
 def _dur(s: float) -> str:
     s = max(0, int(s))
     return f"{s} s" if s < 120 else f"{s // 60} min" if s < 7200 else f"{s // 3600} h {s % 3600 // 60} min"
+
+
+def _hhmm(t: float) -> str:
+    """The station's clock time of t ("14:32"): when a held start may go (#637)."""
+    return time.strftime("%H:%M", time.localtime(t))
 
 
 def _mmss(s: float) -> str:
@@ -1332,9 +1339,13 @@ class SystemSupervisor(Supervisor):
         self.back_list: tuple | None = None          # the (index, serial) list since back_since, while it comes back
         self.back_since = 0.0
         self.back_first: float | None = None         # its first look with every dongle back
+        self.back_first_m: float | None = None       # ... on the monotonic clock (the county's wait: a clock step
+                                                     # never lengthens it)
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
+        self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when, monotonic)
+        self.county_done = None                      # ... the wish seq it has waited for (once per move, never again)
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
@@ -1506,8 +1517,7 @@ class SystemSupervisor(Supervisor):
         if self.gone_since is None and now < self.hold_until:
             # a flapping dongle's hold (_went) holds a start on other dongles too (an antenna group's stand-in)
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
-            self._set(now, "absent", f"held back {_dur(self.hold_until - now)} more: a dongle of it went soon after it "
-                                     "came back", **dict(base, restarts=self.restarts))
+            self._set(now, "absent", self._held(), hold_until=self.hold_until, **dict(base, restarts=self.restarts))
             return
         if now < self.next_start:
             self.status.update(base)
@@ -1534,8 +1544,11 @@ class SystemSupervisor(Supervisor):
                               else f"SDR '{s['name']}' not plugged in" + went, **dict(base, restarts=self.restarts))
                 return
             devs[i] = idx
-        if self.gone_since is not None and self._coming_back(now, w, found, base):
-            return
+        if self.gone_since is not None:
+            if self._coming_back(now, w, found, base):     # (its own wait for the county: never both)
+                return
+        elif w.get("group") and self._county_first(now, w, base):
+            return                                         # (#637) a group move: the county first, once per move
         try:
             argv = system_runtime_argv(r["argv"], r["workdir"], devs)
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1559,6 +1572,7 @@ class SystemSupervisor(Supervisor):
         self.lines.clear()
         self.said = ""
         self.ran_key = key
+        self.county_wait, self.county_done = None, w["seq"]   # (#637) this move's wait is over: never again for it
         if self.gone_since is not None:
             # (#592) as an rtl_fm channel's "dongle '…' back after m:ss"; never one of the watchdog's capped restarts
             self.log(f"{self.tag}: dongles back after {_mmss(now - self.gone_since)}: restarting trunk-recorder")
@@ -1577,6 +1591,39 @@ class SystemSupervisor(Supervisor):
         self._set(now, "ok", "trunk-recorder starting", tr_pid=self.proc.pid, index=devs[min(devs)], argv=argv,
                   started=now, **base)
 
+    def _held(self) -> str:
+        """(#637) A flapping dongle's hold, said as the time it ends: a held start is no fault (Receivers, Health)."""
+        return f"held back until {_hhmm(self.hold_until)} after dropouts"
+
+    def _county_first(self, now: float, w: dict, base: dict) -> bool:
+        """(#637) An antenna group's move (the wish says "group"): when the county's trunk-recorder should run, it
+        starts first, as at a return (_coming_back): this system's start waits until the county's status is "ok" on
+        the dongle its wish names and it has run COUNTY_SETTLE_S, at most COUNTY_WAIT_S from the move (the county
+        down for its own reasons). A group restore that gives the county its dongle back in the same step as this
+        system's therefore opens the county's first. A county already up waits for nothing. Once per move (its wish's
+        seq): a crash restart or a dongle's return later on the same wish never waits for it again (a return has its own
+        wait, _coming_back), and a later restore of the same dongles (a new seq) waits again. Looked at only once its
+        dongles are found (one not plugged in says so first). The cap on the monotonic clock. True while it waits."""
+        county = wanted(self.county_state)
+        if w["seq"] is not None and w["seq"] == self.county_done:
+            return False
+        if not county["on"] or not county["sdr"]:
+            self.county_wait = None
+            return False
+        if self.county_wait is None or self.county_wait[0] != w["seq"]:
+            self.county_wait = (w["seq"], self._m)
+        if self._m - self.county_wait[1] >= COUNTY_WAIT_S:
+            self.county_done = w["seq"]
+            return False
+        st = read_status(self.county_status, now) or {}
+        started = st.get("started")
+        if st.get("state") == "ok" and st.get("sdr") == county["sdr"] and isinstance(started, (int, float)) \
+                and now - started >= COUNTY_SETTLE_S:
+            return False
+        self.next_start = now + 1.0
+        self._set(now, "absent", f"not started yet ({MODE} starts first)", **dict(base, restarts=self.restarts))
+        return True
+
     def _coming_back(self, now: float, w: dict, found: list, base: dict) -> bool:
         """(#592) Every dongle it ran on is back: True while it must still wait. USB settles first (the same (index,
         serial) list at looks RETURN_STABLE_S apart: indexes shift as dongles come back one by one); a flapping dongle
@@ -1591,7 +1638,7 @@ class SystemSupervisor(Supervisor):
         top = max((i for i, x in found if x in ours), default=-1)
         listed = tuple(sorted(e for e in found if e[0] <= top))
         if self.back_first is None:
-            self.back_first = now
+            self.back_first, self.back_first_m = now, self._m
         if listed != self.back_list:
             self.back_list, self.back_since = listed, now
         names = ", ".join(f"'{s['name']}'" for _k, s in sorted(w["sources"].items()))
@@ -1600,10 +1647,11 @@ class SystemSupervisor(Supervisor):
             why = "USB settling"
             self.next_start = min(self.back_since + RETURN_STABLE_S, self.back_first + RETURN_SETTLE_MAX_S)
         elif now < self.hold_until:
-            why = f"held back {_dur(self.hold_until - now)} more: it went soon after it came back"
+            why = self._held()
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
         else:
-            if county["on"] and now - self.back_first < COUNTY_WAIT_S:
+            since = self.back_first_m if self.back_first_m is not None else self._m
+            if county["on"] and self._m - since < COUNTY_WAIT_S:
                 st = read_status(self.county_status, now) or {}
                 started = st.get("started")
                 up = st.get("state") == "ok" and isinstance(started, (int, float)) and now - started >= COUNTY_SETTLE_S
@@ -1611,7 +1659,9 @@ class SystemSupervisor(Supervisor):
                     why, self.next_start = f"{MODE} starts first", now + 1.0
         if not why:
             return False
-        self._set(now, "absent", f"SDR {names} back: not started yet ({why})", **dict(base, restarts=self.restarts))
+        held = {"hold_until": self.hold_until} if why == self._held() else {}
+        self._set(now, "absent", f"SDR {names} back: not started yet ({why})", **held,
+                  **dict(base, restarts=self.restarts))
         return True
 
     def shutdown(self, why: str = "the service is stopping") -> None:

@@ -502,8 +502,12 @@ class UnitRecorder(TrunkRecorder):
         started = st.get("started") if st else None
         started = float(started) if isinstance(started, (int, float)) and not isinstance(started, bool) else 0.0
         self.cc.running(started if self.state == "ok" else None)
-        return {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
-                "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
+        out = {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
+               "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
+        hold = st.get("hold_until") if st and not st.get("stale") and self.state == "absent" else None
+        if isinstance(hold, (int, float)) and not isinstance(hold, bool):
+            out["hold_until"] = float(hold)   # (#637) another system held back after dropouts: until then, no fault
+        return out
 
     # -- its output -----------------------------------------------------------------------------------------------------
 

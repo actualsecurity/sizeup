@@ -59,9 +59,11 @@ const StationHealth = (() => {
 
   function dl(pairs) {
     const d = el("dl", "admin");
-    for (const [k, v, cls] of pairs) {
+    for (const [k, v, cls, hover] of pairs) {
       const w = el("div");
-      w.append(el("dt", "", k), el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v)));
+      const dd = el("dd", cls || "", v === null || v === undefined || v === "" ? "—" : String(v));
+      if (hover) dd.title = hover;
+      w.append(el("dt", "", k), dd);
       d.append(w);
     }
     return d;
@@ -224,7 +226,7 @@ const StationHealth = (() => {
     ]));
     kids.push(el("h3", "hl-sub", "Version"), dl([
       ["Station build", short(b.station)], ["Hub build", short(b.hub)],
-      ["State", b.text, stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
+      ["State", b.text, b.state === "deferred" ? "hl-warn" : stateCls(b.state === "ok" ? "ok" : b.state === "unknown" ? null : "bad")],
       ["Behind since", b.behind_since ? when(b.behind_since) : ""],
       ["Last update", last ? `${when(last.at)} ${short(last.from)} → ${short(last.to)}: ${last.result || "?"}${last.why ? ` (${last.why})` : ""}` : ""],
       ["Timings", last && last.seconds !== undefined && last.seconds !== null ? [`${last.seconds} s total`,
@@ -243,7 +245,14 @@ const StationHealth = (() => {
       ["Events waiting", ob.pending || 0, ob.age_s >= (th.outbox_min || 5) * 60 ? "hl-bad" : ""],
       ["Oldest waiting", ob.oldest ? `${when(ob.oldest)} · ${longDur(ob.age_s)}` : ""],
       ["Clips dropped", ob.dropped_audio || 0],
-      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")],
+      ["STT inputs dropped", (ob.dropped_stt || 0) + (ob.dropped_stt ? ` (${Object.entries(ob.dropped_stt_why || {}).map(([k, v]) => `${k.replace("_", " ")} ${v}`).join(" · ")})` : "")
+        + (ob.dropped_stt_pre ? ` · ${ob.dropped_stt_pre} pre-alert` : "") + (ob.dropped_stt_fire ? ` · ${ob.dropped_stt_fire} fire` : ""),
+        ob.dropped_stt_pre || ob.dropped_stt_fire ? "hl-warn" : ""],
+      // (#677) where the station's STT inputs are made, and the encoder service's state (a wedged one is seen here)
+      ...(ob.stt_worker ? [["STT encoder", [ob.stt_worker.where.split(" (")[0], ob.stt_worker.state,
+        ob.stt_worker.held ? "held" : ""].filter((x, i, a) => x && a.indexOf(x) === i).join(" · "),
+        ["unhealthy", "slow", "dead"].includes(ob.stt_worker.state) ? "hl-warn" : "",
+        [ob.stt_worker.where, ob.stt_worker.detail].filter(Boolean).join("\n")]] : []),
       ["CPU", sys.cpu_pct !== null && sys.cpu_pct !== undefined ? `${sys.cpu_pct}%` : (sys.load1 !== null && sys.load1 !== undefined ? `load ${sys.load1}` : "")],
       ["Load (1 min)", sys.load1 !== null && sys.load1 !== undefined ? `${sys.load1}${sys.cpus ? ` / ${sys.cpus} CPUs` : ""}` : ""],
       ["Memory", pct(sys.mem_pct)],
@@ -310,6 +319,18 @@ const StationHealth = (() => {
       ]));
       if ((tr.recent || []).length) kids.push(table(["When", "Channel", "Reason", "AWS said"],
         tr.recent.map((r) => [when(r.at), r.channel, r.reason, r.why]), ""));
+    }
+    const sa = h.stt_arrival;
+    if (sa) {             // #677: each STT input's arrival on the hub after its event (sizeup/cloud/sttarrival.py)
+      const q = (w) => (w ? `${w.p50} / ${w.p95} s` : "");
+      const n = (w) => [String(w ? w.n : 0), "", w && w.early ? `${w.early} before their event` : ""];
+      const hd = el("h3", "hl-sub", "STT input arrival (hub)");
+      hd.title = "Event applied → its STT input stored, p50 / p95. Negative: the STT input came first";
+      kids.push(hd, table(["Channel", "Kind", "1 h", "24 h", "n 24 h"], [
+        ...Object.entries(sa.kinds || {}).map(([k, w]) => [["All", "dim"], k, q(w.h1), q(w.d1), n(w.d1)]),
+        ...(sa.channels || []).map((c) => [c.channel, c.kind, q(c.h1), q(c.d1), n(c.d1)]),
+      ], ""));
+      if (sa.more) kids.push(el("p", "dim small", `+${sa.more} more channels`));
     }
     const sp = h.stt_pool;
     if (sp && !sp.error) {  // the GPU worker pool (#639, sizeup/sttpool.py): workers, queue, fallbacks, latency by channel
@@ -405,12 +426,20 @@ const StationHealth = (() => {
     kids.push(table(["SDR", "Serial", "Plugged in", "Group", "Job", "Running", "Restarts", "Detail"],
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
         x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
-        [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
-        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
+        // (#637) a P25 system held back after dropouts: no fault, until when
+        // (#703) out: it opens but streams no audio
+        x.noaudio ? ["no audio", "hl-bad", `Opens but streams no audio since ${fmtTime(x.noaudio.since)} (${x.noaudio.job}); replug it, or pick its job once fixed`]
+          : x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
+          : [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
+        x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})`
+          : x.hold_until && !x.running ? `held back until ${fmtTime(x.hold_until)} after dropouts` : x.detail), x.ambiguous ? "hl-bad" : ""]]),
       h.shared ? "No dongles" : "One per channel (see Channels)"));
     if ((h.groups || []).length) {       // antenna groups (sizeup/radio/groups.py): short of dongles, what doesn't run
       kids.push(table(["Antenna group", "SDRs", "Jobs (priority)", "Not running"], h.groups.map((g) => [g.name,
-        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""], g.jobs.join(" › "),
+        [`${g.usable}/${g.sdrs.length}`, g.usable < g.sdrs.length ? "hl-bad" : ""],
+        // (#637) a parked job: off on purpose, never "not running"
+        [g.jobs.map((j) => ((g.parked || []).includes(j) ? `${j} (parked)` : j)).join(" › "), "",
+         (g.parked || []).length ? `Parked (off on purpose): ${g.parked.join(", ")}` : ""],
         [g.short.join(", ") || "—", g.short.length ? "hl-bad" : "dim"]]), ""));
     }
     if ((h.usb || []).length) {
