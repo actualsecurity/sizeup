@@ -3281,6 +3281,22 @@ class Editor:
         return {**p, "role": r["role"], "active": active, "may": may, "bootstrap": not admins,
                 "admins": [a["name"] for a in admins]}
 
+    def standing_readonly(self, email: str) -> dict:
+        """standing() for a reader that must not write (the mobile app's reads, #560): the same role, active, may and
+        bootstrap, but never person()'s side effects. An email not on the list is NOT added (no operators row, no
+        settings audit row, no store.rev bump): it is a viewer, never a dispatcher. A bad email raises CadError, as
+        person() does. {email, role, active, may, bootstrap}."""
+        email = email.strip().lower()
+        if not EMAIL.fullmatch(email):
+            raise CadError("not an email address")
+        r = (self.store.one("SELECT role, active FROM operators WHERE email = ?", (email,))
+             or self._unlinked(email)                       # entered by hand with this email as its name: as it is
+             or {"role": "viewer", "active": 1})            # not known: the least
+        admins = self.admins()
+        active = bool(r["active"])
+        may = "admin" if not admins else r["role"] if active and r["role"] in OPERATOR_ROLES else "viewer"
+        return {"email": email, "role": r["role"], "active": active, "may": may, "bootstrap": not admins}
+
     def whoami(self, email: str) -> dict:
         """GET /api/cad/whoami: the signed-in person ("access", roles enforced), or nobody known
         ("none": the Operator field is typed, as before, and roles are recorded, not enforced)."""

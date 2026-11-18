@@ -18,6 +18,21 @@ Contents: [how to work on this](#how-to-work-on-this) · [1 current state](#1-cu
 [9 alignment](#9-alignment-with-other-work) · [10 plan](#10-phased-plan) · [11 decisions](#11-decisions) ·
 [12 risks](#12-risks) · [could not verify](#could-not-verify) · [sources](#sources)
 
+## Scope: read-only situational awareness
+
+**The owner's rule: the mobile app is a situational-awareness tool only.** It must not create or expose any way to
+modify data in the hub or the Computer-Aided Dispatch (CAD) system.
+
+- **The app may:** read incidents, units and alarms (`/api/v1`, read-only), and later receive notifications.
+- **Out of scope until the owner says otherwise:** writes of any kind: unit status, acknowledgements, notes,
+  dispatches and incident edits. There is no `writes` feature flag, so nothing can turn them on. The sections below that
+  describe writes (idempotency, offline queues, `If-Match`, the writes pull request, issue #562) are **DEFERRED**, kept
+  as design notes, not deleted.
+- **The only thing that may be written** is the app's own device bookkeeping (sign-in sessions and push registration, in
+  `hub.sqlite`); the exact boundary is still the owner's to decide.
+- A read must not write either: `tests/test_api_v1_readonly.py` fingerprints every table of `cad.sqlite` around every
+  read route and fails if one changes (for example, a person not yet on the user list is never added by a read).
+
 **In one paragraph.** Do **not** break the API out into its own service. The hub is a single writer on SQLite with a
 leader fence and 30 s Litestream replicas; a separate API task would either proxy every request to the leader (one more
 hop, one more thing to hand over) or read data up to 30 s stale (unacceptable for dispatch). A volunteer department's
@@ -219,9 +234,9 @@ The web console is not migrated to `/api/v1`. It may adopt v1 endpoints where us
   handoff carries `Retry-After` as today.
 - Ids are stable strings. Times are **unix seconds (float)**, with `server_time` in `meta` and in every SSE event for
   skew.
-- Every mutable resource has a `rev` (per object, not the global `store.rev`), an `ETag` on GET, and `If-Match` on edits.
+- Every mutable resource has a `rev` (per object, not the global `store.rev`), an `ETag` on GET, and `If-Match` on edits (the edits part is DEFERRED: writes are out of scope, see Scope).
 - Lists use cursor pagination (`?after=<opaque>&limit=`, response `{items, next}`). No page numbers in v1.
-- Writes take an `Idempotency-Key` (UUID) header, stored 24 h per principal, the first response replayed
+- **DEFERRED (writes are out of scope, see Scope):** Writes take an `Idempotency-Key` (UUID) header, stored 24 h per principal, the first response replayed
   ([§8](#8-everything-else-a-second-consumer-needs)).
 - Every request carries `X-Client: <app>/<version> (<platform>/<os>; build)` for metrics and min-version enforcement.
 
@@ -620,10 +635,10 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Rate limiting | Per principal (device, station, feed token), an in-memory token bucket: reads 10/s burst 30, writes 2/s burst 10, 2 concurrent streams per device. 429 + `Retry-After`. Plus the Cloudflare WAF rule on the bypassed paths. The existing `ResetLimit` is the per-action pattern |
 | CORS | None for v1 (native apps don't need it). A future third-party web consumer gets an explicit allow-list, never `*`. The console's same-origin model is unchanged (#447) |
 | Pagination | Cursor (`after`, `limit`, `next`) everywhere in v1. `/api/cad/search` keeps page numbers for the web |
-| Idempotency | `Idempotency-Key` on every v1 POST; table `(principal, key) → (status, body, at)` kept 24 h. "I'm responding", status and ack retried on a flaky network never apply twice. The same key with a different body gets 422 |
-| Offline / queued actions | The app queues writes with the key and its own `at`. On replay the server orders by receive time, records `client_at` in the chronology, and refuses actions that no longer make sense (incident closed, unit moved on) with 409 + the current object. The app shows "not applied: …". A dispatch is never auto-merged |
+| Idempotency (DEFERRED: writes are out of scope, see Scope) | `Idempotency-Key` on every v1 POST; table `(principal, key) → (status, body, at)` kept 24 h. "I'm responding", status and ack retried on a flaky network never apply twice. The same key with a different body gets 422 |
+| Offline / queued actions (DEFERRED: writes are out of scope, see Scope) | The app queues writes with the key and its own `at`. On replay the server orders by receive time, records `client_at` in the chronology, and refuses actions that no longer make sense (incident closed, unit moved on) with 409 + the current object. The app shows "not applied: …". A dispatch is never auto-merged |
 | Clock skew | `server_time` in `meta` and every SSE event; the app computes its offset. A `client_at` more than 5 min in the future is clamped and flagged |
-| Concurrency | `If-Match: <rev>` on incident edits (notes are append-only and need none); 412 with the current object. Needs a per-incident `rev` (today only the global `store.rev`) |
+| Concurrency (DEFERRED: writes are out of scope, see Scope) | `If-Match: <rev>` on incident edits (notes are append-only and need none); 412 with the current object. Needs a per-incident `rev` (today only the global `store.rev`) |
 | Machine API keys | Not end-user tokens. Service token + bearer + scopes, one key per consumer in SSM, listed on Settings > System with last use, rotated by script. One token per station |
 | Audit | `activity.py` gains `device_id`, `app_version` and `via` (web, ios, android). Every v1 write goes through `CadApi.did` as today |
 | Observability | `perf.py` path families gain a client dimension `(via, app_version)`. Health tile: active devices, versions in the wild, push success and failure (SNS delivery logs), stream count |
@@ -643,7 +658,7 @@ the dispatchers use. Every change stays inert or harmless to the browser console
 | Safeguard | Where |
 |---|---|
 | Master switch, off by default | `[mobile] enabled = false` ([cloud.md](cloud.md#the-apps-api-switches-mobile-619)). Off: every `/api/v1/*` path but `GET /api/v1/meta` is a 404 in v1's envelope; no database, token key or push is touched. Read once at start from the config: a change needs a restart (a Settings-backed switch, like intel's policy, is the planned follow-up) |
-| Per-feature flags | `meta.features`: auth, reads, stream, writes, push, media, responders, each off until proven, and code-driven until a feature's pull request wires a source (for example `[mobile] features = [...]` or a settings policy). A route names its flag (`routes.py`); flag off = as if absent. A test enforces that every route declares its flag and who may call it |
+| Per-feature flags | `meta.features`: auth, reads, stream, push, media, responders (there is no writes flag: see Scope), each off until proven, and code-driven until a feature's pull request wires a source (for example `[mobile] features = [...]` or a settings policy). A route names its flag (`routes.py`); flag off = as if absent. A test enforces that every route declares its flag and who may call it |
 | A v1 failure stays in v1 | `handler.respond` runs every route inside one try/except: the exception class is logged (never a token, header or body) and the answer is a 500 in v1's envelope |
 | Caps | v1's share of concurrent requests (503 busy), per-principal token buckets (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`; no principal: per address), 2 streams per device and a cap on all (enforced when streaming lands; none yet); in memory, no thread, no database work |
 | Console unchanged | `tests/test_console_pin.py` pins the `/api/cad`, `/api/station` and `/healthz` route tables and sample responses |
@@ -705,7 +720,7 @@ native client (private repo). **Both** = needs work or inputs from each side.
 | 3 | Staging hub: task, hostname, Access app, synthetic seed, review account | Platform | TestFlight / Play internal | #559 |
 | 4 | Read resources: `/api/v1/snapshot`, `/incidents` (active + recent, cursor), `/incidents/{id}`, `/units`, `/alarms`, `/me`; per-object `rev` + ETag; role and sourcekeys filtering | Platform | the main screens | #560 |
 | 5 | Change log (shared with the machine feed) + `/api/v1/changes` + `/api/v1/stream` (SSE, `Last-Event-ID`) | Platform | a live app, resume after background | #561 |
-| 6 | Writes: unit status, alarm ack, incident note; Idempotency-Key table; `If-Match`; activity with device and version | Platform | crew actions | #562 |
+| 6 | **DEFERRED** (out of scope, see Scope; #562 is on hold) Writes: unit status, alarm ack, incident note; Idempotency-Key table; `If-Match`; activity with device and version | Platform | crew actions | #562 |
 | 7 | Push: `/api/v1/devices/{id}/push` registration, SNS platform apps, `Pushes` fan-out by kind and role, preferences, caps, the shared scrub, outbound-guard tests | Both (App: APNs key / FCM project, token registration, notification handling) | background alerts | #563 |
 | 8 | Media: signed media URLs, clip and Listen endpoints, HLS token rewriting for live, DVR and attachments; ffmpeg in the image for AAC | Platform | audio and cameras | #564 |
 | 9 | Map: server-side `style.json` shared with the web, `/api/v1/layers/*` | Platform | matching maps | #565 |
