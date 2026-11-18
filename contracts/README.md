@@ -17,7 +17,9 @@ are skipped, others raise (D5, D6 below). A writer must send the types the schem
    same holds for a word: a state, a kind, a class it does not know is taken as unknown (that item is left out or
    keeps its last value), never as an error. A writer may add an optional key or a new word at any time.
 2. **New behaviour is switched on by a named capability string, both ways.** Adding a key changes nothing by itself:
-   the other side must have said it understands. Hub to station this is `caps` in the state answer.
+   the other side must have said it understands. Hub to station this is `caps` in the state answer. (So a station
+   must tolerate `refused` and `reason` in a state answer, which arrive with #782: a station from before them
+   ignores them, as the unknown-keys test shows.)
 3. **A version field means something.** If a body carries one, its reader reads it and acts on it. No version field
    is added for show.
 4. **An older build must read what a newer one wrote.** A station switches back to its previous release in seconds,
@@ -149,8 +151,9 @@ A key that went away, or changed its type, is the same four steps; a key that is
 - Objects take unknown keys (`additionalProperties: true`). None of the code under these schemas refuses one; a place
   that does would be modelled as it is and listed under Known deviations.
 - A word (a state, a kind, a class) is an open string, never a closed `enum`. `x-known` lists the values the code
-  sends today, and the tests compare it with the code's own list. `x-known-from` lists values that a change in
-  review adds, by its number, until it is on main.
+  sends today, and the tests compare it with the code's own list. A key or a word that a change in review adds is
+  declared optional ahead of it, with "From #<number> on" in its description, so that the same schema holds before
+  and after that change is on main.
 - `x-status`: `as-built` or `designed`. `x-version`: goes up by one with every change to the schema once it is on
   main. Only additions of optional keys keep the name; see the rule above.
 - `x-complete: true` on an object: the schema names every key the code sends there. The tests fail on a key it does
@@ -195,7 +198,7 @@ main, its switch goes from `True` to `False` (one line) and its row here is mark
 | D2 | medium | `sizeup/cloud/hub.py:1975-1979`, `1936`, `2285`, `1993`, `372`, `1349`, `2391` | No capability strings from station to hub: the hub infers what a station can do from the presence of status keys (`channels.squelch_ok`, `channels.deny_ok`, `p25_systems`, `stt_alert_rev`, `version`) and from the text `not allowed` in a job's error. Found by reading | main session, with native (the registry step) |
 | D3 | medium | `sizeup/web/server.py:911` | `HEAD` is answered as `GET` without the body on `/api/station/` too. A `HEAD` on the job poll takes the waiting jobs, which are handed out only once. Fix in review: #779 | main session |
 | D4 | low | `docs/nodes.md:245-254` against `sizeup/cloud/hub.py:574`, `576` | The design's route table has no row for `POST /api/station/stt` (each clip's speech-to-text input) and names only the long poll of the jobs, not `POST /api/station/jobs/<id>`. `routes.json` has `radio-receive` and `always`. Fix in review: #779. Found by reading | main session (the document's owner) |
-| D5 | high | `sizeup/cloud/hub.py:642` (kept), `644`-`645` (raises: `sizeup/cloud/health.py:612`, `hub.py:392`, `1942`, `1976`, `342`); read again at `health.py:673`, `hub.py:411`, `267`, `277` | The hub does not handle a wrong type in a state post. `status.radios` that is no list of objects, a row's `label` that is no string, `status.channels` or `status.outbox` that is no object: the status is kept first, then the handler raises (the connection is dropped with no answer). Until the next good post `GET /api/station/status` and `GET /api/cad/health` (after `radios: 5`) or `GET /api/cad/state` (after `outbox: 5`) drop their connections too. A talker or a page with `ended` and an `until` that is no number is answered 200 and then drops `GET /api/cad/state` the same way. Fix in review: #782 (400 `bad_status` / `bad_live`, nothing of the post taken) | main session |
+| D5 | high | `sizeup/cloud/hub.py:642` (kept), `644`-`645` (raises: `sizeup/cloud/health.py:612`, `hub.py:392`, `1942`, `1976`, `342`); read again at `health.py:673`, `hub.py:411`, `267`, `277` | The hub does not handle a wrong type in a state post. `status.radios` that is no list of objects, a row's `label` that is no string, `status.channels` or `status.outbox` that is no object: the status is kept first, then the handler raises (the connection is dropped with no answer). Until the next good post `GET /api/station/status` and `GET /api/cad/health` (after `radios: 5`) or `GET /api/cad/state` (after `outbox: 5`) drop their connections too. A talker or a page with `ended` and an `until` that is no number is answered 200 and then drops `GET /api/cad/state` the same way. Fix in review: #782 (the normal 200 with `refused: ["status"]` or `["live"]` and a `reason`; the bad part is left out, the rest of the post is taken) | main session |
 | D6 | high | `sizeup/cloud/station.py:222` (called at `582`), `274`-`280` | The station does not handle a wrong type in the state answer. `caps` that is a number or a boolean raises in `_set_caps` outside the thread's error handling: the hub-state thread ends, and with it the heartbeat, talking now, the status and the hub's build, until the station restarts. `caps` as a string becomes one capability per character. A `pool.ready` or `pool.max_s` that is no number makes `pool_has_room` raise in its caller. Fix in review: #782 (the field is ignored, its last good value kept) | main session |
 
 As built and worth knowing:

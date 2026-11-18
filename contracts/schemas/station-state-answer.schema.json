@@ -52,6 +52,16 @@
       "type": "string",
       "minLength": 1,
       "description": "The station id the hub took this post as: the id the bearer token proves. Left out only for a shared token that has not been given an id yet. The station adopts it (memory only) when it is at most 64 printable characters and differs from the id it used."
+    },
+    "refused": {
+      "type": "array",
+      "description": "From #782 on, and only when the hub left a part of this post out for its shape (a known key of the wrong type): which parts. `status`: the status was not taken, the one the hub had stays. `live`: a talker or a page going out was left out, the others were taken. The rest of the post, the heartbeat first, is taken as always, and the answer is the normal 200. Absent: nothing was left out. Not sent by the code before #782. A station must ignore a word it does not know here, and an older station ignores the key.",
+      "items": {"type": "string", "description": "A part of the post that was left out.", "x-known": ["status", "live"]},
+      "minItems": 1
+    },
+    "reason": {
+      "type": "string",
+      "description": "From #782 on, with `refused`: where the shape was wrong and what it must be, for the station's log (`status.radios: a list`, `talking[0].until: a number or null`; several joined with `; `). Not sent by the code before #782."
     }
   }
 }

@@ -30,7 +30,7 @@ FINE = {p: 200 for p in (*c.PEOPLE_ROUTES, "/api/station/status")}
 # flipped, and with #782 merged in and D5 / D6 flipped, every contract test passes.
 D1_NAN_GOES_ON_THE_WIRE = True                  # #779: a NaN is sent as null and the hub's skew stays finite
 D3_HEAD_ON_THE_JOB_POLL_TAKES_THE_JOBS = True   # #779: HEAD under /api/station/ is 405 and no handler runs
-D5_HUB_RAISES_ON_A_WRONG_TYPE = True            # #782: 400 bad_status / bad_live, nothing of the post taken
+D5_HUB_RAISES_ON_A_WRONG_TYPE = True            # #782: 200 with `refused`; the bad part left out, the rest taken
 D6_STATION_RAISES_ON_A_WRONG_TYPE = True        # #782: the field is ignored, its last good value kept, no thread ends
 
 
@@ -271,6 +271,7 @@ def test_the_station_ignores_the_keys_it_does_not_know_in_the_answer(tmp_path):
     newer = dict(c.vectors("node-state-answer", "valid"))["roles-in-full-and-a-lease.json"]
     extra = {k: newer[k] for k in ("roles_rev", "roles", "leases")}
     extra.update(capabilities_wanted=True, from_the_future={"x": [1, 2]}, caps=[*CAPS, "from_the_future"],
+                 refused=["status", "from_the_future"], reason="status.radios: a list",     # (#782's: ignored here)
                  pool={"on": True, "worker": False, "ready": 1, "max_s": 45.0, "gpu_idle": False, "gpu_idle_n": 0,
                        "from_the_future": {"x": 1}},
                  services={"fm:Fireground 1": "fire", "fm:Paging 1": "a_service_from_the_future"})
@@ -351,13 +352,10 @@ def test_hello_answers_what_its_schema_says(live, tmp_path):
 
 
 def test_refusals_and_bad_bodies_are_the_error_envelope(live):
-    reason = c.load("station-error")["properties"]["reason"]
-    known = reason["x-known"]
+    known = c.load("station-error")["properties"]["reason"]["x-known"]
     # the code's own list of reasons, and the three it gives outside that list (the last two: the workers' routes,
-    # tests/test_contracts_routes.py); the two that exist from #782 on are listed apart until it is in (D5 below)
-    later = {"bad_status", "bad_live"}                 # (the same test holds before and after #782)
-    assert set(known) - later == (set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}) - later
-    assert later <= set(known) | set(reason.get("x-known-from", {}).get("#782", []))
+    # tests/test_contracts_routes.py)
+    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}
     reg = live.hub.app.hub.stations
     other = reg.add("st-south", "South firehouse")
     state = dict(c.vectors("station-state", "valid"))["with-status.json"]
@@ -435,7 +433,7 @@ def test_known_deviation_head_on_the_job_poll_takes_the_jobs_and_sends_none(live
         assert head == 405 and [j["id"] for j in got["jobs"]] == [job["id"]]
 
 
-# D5: the invalid vector posted -> (the path the hub's 400 names once fixed, the people's routes that drop their
+# D5: the invalid vector posted -> (the path the fixed hub's `reason` names, the people's routes that drop their
 # connection today, with no answer at all, until the next good post). Today every one of them drops the POST's own
 # connection too, AFTER the hub has kept the bad status.
 D5_STATUS = {
@@ -445,21 +443,25 @@ D5_STATUS = {
     "channels-not-an-object.json": ("status.channels", []),
     "outbox-not-an-object.json": ("status.outbox", ["/api/cad/state"]),
 }
-# ... and a talker or a page with `ended` and an `until` that is no number: today the POST is answered 200
-D5_LIVE = {"talker-until-as-a-string.json": ("talking[0].until", ["/api/cad/state"]),
-           "page-until-as-a-string.json": ("paging[0].until", ["/api/cad/state"])}
+# ... and a talker or a page with `ended` and an `until` that is no number -> (the path, the routes that drop today,
+# how many talkers and pages of that post a fixed hub keeps: the bad entry alone is left out)
+D5_LIVE = {"talker-until-as-a-string.json": ("talking[0].until", ["/api/cad/state"], 1, 1),
+           "page-until-as-a-string.json": ("paging[0].until", ["/api/cad/state"], 2, 0)}
 
 
 @pytest.mark.parametrize("file", list(D5_STATUS))
 def test_known_deviation_the_hub_raises_on_a_wrong_type_in_the_status(live, file):
     """D5. The hub ignores a key it does not know, but a known key of the wrong type is not handled: Hub._state keeps
     the status first and then reads it, raising in the handler (the connection is dropped with no answer), and the
-    routes that read the kept status drop theirs until the next good post. Fixed (#782): 400 {error: "bad status:
-    status.<path>: <what it must be>", reason: bad_status}; nothing of the post is taken; every read answers."""
+    routes that read the kept status drop theirs until the next good post. Fixed (#782): the normal 200 with
+    `refused: ["status"]` and `reason: "status.<path>: <what it must be>"`; the status the hub had stays, the
+    heartbeat and the talkers and pages of the same post are taken, and every read answers."""
     path, down = D5_STATUS[file]
     hub = live.hub.app.hub
     good = dict(c.vectors("station-state", "valid"))["with-status.json"]
-    bad = dict(c.vectors("station-state", "invalid"))[file]
+    talk = dict(c.vectors("station-state", "valid"))["talking-only.json"]
+    bad = dict(dict(c.vectors("station-state", "invalid"))[file], talking=talk["talking"], paging=talk["paging"])
+    assert len(c.errors("station-state", bad)) == 1
     assert live.call("POST", "/api/station/state", dict(good, at=time.time()))[0] == 200 and live.people() == FINE
     kept, kept_at, last = hub.status, hub.status_at, hub.last_state
     code, body = live.call("POST", "/api/station/state", dict(bad, at=time.time()))
@@ -471,41 +473,54 @@ def test_known_deviation_the_hub_raises_on_a_wrong_type_in_the_status(live, file
             assert hub.status is not kept and hub.status_at > kept_at         # ... and the bad status was kept
             assert c.errors("station-state", {"at": T0, "talking": [], "paging": [], "status": hub.status})
         else:
-            assert code == 400 and body["reason"] == "bad_status" and body["error"].startswith(f"bad status: {path}: ")
-            conforms("station-error", body)
-            assert hub.status is kept and hub.status_at == kept_at and hub.last_state == last     # nothing of it taken
+            assert code == 200 and body["refused"] == ["status"] and body["reason"].startswith(f"{path}: "), body
+            conforms("station-state-answer", body)                            # the normal answer, with the two keys
+            assert body["caps"] == CAPS and body["station"] == c.STATION
+            assert hub.status is kept and hub.status_at == kept_at            # the status it had stays
+            assert hub.last_state > last                                      # the heartbeat is taken
+            assert len(live.hub.app.live.state()) == 2 and len(live.hub.app.live.paging_state()) == 1   # ... and these
             assert after == FINE
     finally:                                         # the next good post is taken (and puts the hub right today)
-        assert live.call("POST", "/api/station/state", dict(good, at=time.time()))[0] == 200
+        code, body = live.call("POST", "/api/station/state", dict(good, at=time.time()))
+        assert code == 200 and "refused" not in body and "reason" not in body
         assert live.people() == FINE and hub.status_at > kept_at and hub.status["id"] == c.STATION
 
 
 @pytest.mark.parametrize("file", list(D5_LIVE))
 def test_known_deviation_the_hub_raises_on_a_wrong_type_in_a_talker_or_a_page(live, file):
     """D5. A talker or a page that has ended, with an `until` that is no number: the post is answered 200 and the
-    snapshot kept, and the console's state route then drops its connection until the next post. Fixed (#782): 400
-    {error: "bad state: talking[0].until: a number or null", reason: bad_live}; the talkers and pages it had stay."""
-    path, down = D5_LIVE[file]
-    before = dict(c.vectors("station-state", "valid"))["talking-only.json"]
+    snapshot kept, and the console's state route then drops its connection until the next post. Fixed (#782): the
+    normal 200 with `refused: ["live"]` and `reason: "talking[0].until: a number or null"`; that entry alone is left
+    out, the other talkers and pages of the post are taken."""
+    path, down, talkers, pages = D5_LIVE[file]
     bad = dict(c.vectors("station-state", "invalid"))[file]
-    assert live.call("POST", "/api/station/state", dict(before, at=time.time()))[0] == 200 and live.people() == FINE
-    talkers = [t["key"] for t in live.hub.app.live.state()]
-    pages = [p["key"] for p in live.hub.app.live.paging_state()]
-    assert len(talkers) == 2 and len(pages) == 1
+    assert len(bad["talking"]) == 2 and len(bad["paging"]) == 1 and live.people() == FINE
     code, body = live.call("POST", "/api/station/state", dict(bad, at=time.time()))
     after = live.people()
     try:
         if D5_HUB_RAISES_ON_A_WRONG_TYPE:
-            assert code == 200 and after == {**FINE, **{p: 0 for p in down}}, (file, code, after)
+            assert code == 200 and "refused" not in body and after == {**FINE, **{p: 0 for p in down}}, (file, code, after)
         else:
-            assert (code, body) == (400, {"error": f"bad state: {path}: a number or null", "reason": "bad_live"})
-            conforms("station-error", body)
+            assert code == 200 and (body["refused"], body["reason"]) == (["live"], f"{path}: a number or null"), body
+            conforms("station-state-answer", body)
             assert after == FINE
-            assert [t["key"] for t in live.hub.app.live.state()] == talkers          # what it had is kept
-            assert [p["key"] for p in live.hub.app.live.paging_state()] == pages
+            assert (len(live.hub.app.live.state()), len(live.hub.app.live.paging_state())) == (talkers, pages)
     finally:
-        assert live.call("POST", "/api/station/state", dict(before, at=time.time()))[0] == 200
-        assert live.people() == FINE
+        good = dict(c.vectors("station-state", "valid"))["talking-only.json"]
+        code, body = live.call("POST", "/api/station/state", dict(good, at=time.time()))
+        assert code == 200 and "refused" not in body and live.people() == FINE
+
+
+def test_shapes_the_hub_always_dropped_are_dropped_without_a_word(live):
+    """As built, and unchanged by #782: `talking` or `paging` that is no list, an entry that is no object, a page
+    without `pairs`: left out, answered the normal 200, and never named in `refused`."""
+    talk = dict(c.vectors("station-state", "valid"))["talking-only.json"]
+    for post in ({"talking": "x", "paging": talk["paging"]}, {"talking": [], "paging": "x"},
+                 {"talking": [5, None, "x", *talk["talking"]], "paging": [5, {"key": "k"}, *talk["paging"]]}):
+        code, body = live.call("POST", "/api/station/state", dict(post, at=time.time()))
+        assert code == 200 and "refused" not in body and "reason" not in body and live.people() == FINE, post
+        conforms("station-state-answer", body)
+    assert len(live.hub.app.live.state()) == 2 and len(live.hub.app.live.paging_state()) == 1
 
 
 # D6: a field of the hub's answer with the wrong type -> what the station does with it today.
