@@ -37,7 +37,11 @@ from the hub over whatever hub-to-station channel speech-to-text uses (nothing h
           the talkgroups files' talkgroups with their service as tagged live, the admins' radio_services choices over
           it, and the configured FM and airband channels). So the set never disagrees with what the engine reads.
           Quiet hours and the rate caps are left out: they hold a push for a while, the source stays one that pushes.
-    rev   bumped only when the set changes (0: never computed; the first set is 1). Recomputed after reload() (the
+    rev   a content hash of the set (push_rev(): the first 8 bytes of sha256 over the sorted keys, one per line,
+          masked to 53 bits so JSON and JavaScript keep it exact; never 0). The same set always has the same rev, in
+          any process and after a restart, so a hub that restarts can never hand a station a rev it already holds with
+          other keys; a different set has another one. The empty set has its own (non-zero) rev; 0 is only "no engine
+          here / not computed" (sizeup.intel.push_sources() on a station). The set is recomputed after reload() (the
           packs, intel's Settings) and sources_changed() (any Settings change: radio_services, the notify topics), and
           at most PUSH_REFRESH_S after the last (a station's talkgroups list arriving at the hub); otherwise cached.
 
@@ -156,6 +160,7 @@ SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
 PUSH_REFRESH_S = 60.0                  # push_sources(): recomputed at least this often (sources nothing tells us of)
+PUSH_REV_BITS = 53                     # push_rev(): exact as a JSON number in JavaScript too (2^53)
 
 
 @dataclass
@@ -266,7 +271,7 @@ class IntelEngine:
         self.sources = None
         self._push_lock = threading.Lock()    # its own: never waits on a row being read (self._lock)
         self._push: frozenset | None = None
-        self._push_rev = 0
+        self._push_rev = 0                    # push_rev(self._push); 0 until computed
         self._push_at = 0.0
         self._push_dirty = True
         self.reload()
@@ -330,8 +335,9 @@ class IntelEngine:
         self._push_dirty = True
 
     def push_sources(self) -> tuple[frozenset[str], int]:
-        """(the source keys intel could push from right now, a revision bumped only when that set changes). Cached;
-        recomputed after sources_changed() / reload(), else at most PUSH_REFRESH_S after the last time."""
+        """(the source keys intel could push from right now, push_rev() of them: a content hash, the same for the same
+        set in any process). Cached; recomputed after sources_changed() / reload(), else at most PUSH_REFRESH_S after
+        the last time."""
         with self._push_lock:
             now = time.monotonic()
             if self._push is None or self._push_dirty or now - self._push_at >= PUSH_REFRESH_S:
@@ -339,8 +345,7 @@ class IntelEngine:
                 self._push_at = now
                 keys = self._push_keys()
                 if keys != self._push:
-                    self._push = keys
-                    self._push_rev += 1
+                    self._push, self._push_rev = keys, push_rev(keys)
             return self._push, self._push_rev
 
     def _push_keys(self) -> frozenset[str]:
@@ -1357,6 +1362,13 @@ class IntelEngine:
     def _span(self, name: str) -> float:
         p = self.pack(name)
         return p.window_s if p is not None else 120.0
+
+
+def push_rev(keys) -> int:
+    """The revision of a set of push sources: a content hash of its sorted keys (sha256, the first 8 bytes, big-endian,
+    masked to PUSH_REV_BITS), never 0 (that is "no engine / not computed"): the same set, the same rev, in any process."""
+    h = int.from_bytes(hashlib.sha256("\n".join(sorted(keys)).encode()).digest()[:8], "big") & ((1 << PUSH_REV_BITS) - 1)
+    return h or 1
 
 
 def can_push(pack) -> bool:

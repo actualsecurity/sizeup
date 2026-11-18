@@ -4,8 +4,11 @@
 
 Held here, over the public talkgroups files (the county's and MRRS's) and the packs as shipped:
   - the police pack gives exactly its three talkgroups; Area PD (neighbor_police) at log gives nothing; raised to push
-    in Settings it adds every other MRRS police talkgroup, and the revision goes up;
-  - intel off, the kill switch off, no intel topic in effect: nothing, revision up; no change: the same revision;
+    in Settings it adds every other MRRS police talkgroup, under another revision;
+  - intel off, the kill switch off, no intel topic in effect: nothing (the empty set's revision, never 0); no change:
+    the same revision;
+  - the revision is a content hash of the set: the same set has the same one in another engine (a hub restarted),
+    another set another one;
   - an admin's radio_services choice moves a source in or out (the service as rows are tagged live);
   - the set is what feed() reads: the same Pack.in_scope over the same rows;
   - no engine here (a station): (frozenset(), 0).
@@ -15,6 +18,8 @@ Synthetic only (this repository is public): invented topics, no transcripts. Tal
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +29,7 @@ import sizeup.intel
 from sizeup import notify, sourcekeys
 from sizeup.intel import engine as engine_mod
 from sizeup.intel import rules as rules_mod
-from sizeup.intel.engine import IntelEngine, RecordingSink, source_rows
+from sizeup.intel.engine import IntelEngine, RecordingSink, push_rev, source_rows
 from sizeup.intel.events import MemoryEvents
 from sizeup.radio.systems import read_talkgroups
 from sizeup.talkgroups import TalkgroupPrefs
@@ -52,6 +57,11 @@ def mrrs_police() -> set[str]:
         return {f"p25:mrrs:{r['Decimal']}" for r in csv.DictReader(f) if r["Service"] == "police"}
 
 
+def got(keys) -> tuple[frozenset, int]:
+    """What push_sources() answers for this set: the keys and their content hash."""
+    return frozenset(keys), push_rev(keys)
+
+
 class Topic:
     """The INTEL kind's notifier as LiveSink reads it: enabled while a topic is in effect."""
     enabled = True
@@ -72,8 +82,8 @@ def test_the_police_pack_gives_exactly_its_three_talkgroups_area_pd_at_log_none(
     e, _cfg = engine()
     keys, rev = e.push_sources()
     assert keys == OURS
-    assert rev == 1
-    assert e.push_sources() == (OURS, 1)                       # no change: the same revision (cached)
+    assert rev == push_rev(OURS) and 0 < rev < 2 ** 53          # a content hash, JSON-safe, never 0
+    assert e.push_sources() == got(OURS)                       # no change: the same revision (cached)
     # every pack's sources are known here: Area PD reads the other MRRS police talkgroups, at log
     assert e.pack("neighbor_police").mode == "log"
     known = {r["source"] for r in e.sources()}
@@ -82,20 +92,20 @@ def test_the_police_pack_gives_exactly_its_three_talkgroups_area_pd_at_log_none(
 
 def test_area_pd_raised_to_push_in_settings_adds_the_other_mrrs_police_talkgroups():
     e, cfg = engine()
-    assert e.push_sources() == (OURS, 1)
+    assert e.push_sources() == got(OURS)
     cfg["intel_packs"] = {"neighbor_police": {"mode": "push"}}
     e.reload()                                                  # (the Settings op reloads: test_settings_ops_*)
     keys, rev = e.push_sources()
-    assert keys == mrrs_police() and rev == 2
+    assert keys == mrrs_police() and rev == push_rev(keys) != push_rev(OURS)
     assert keys - OURS >= {"p25:mrrs:9563", "p25:mrrs:9564", "p25:mrrs:9000", "p25:mrrs:8000", "p25:mrrs:8002"}
     assert "p25:mrrs:9570" not in keys                          # PC-Rye EMS: neither pack's service
     e.reload()                                                  # a reload that changes nothing: the same revision
-    assert e.push_sources() == (keys, 2)
+    assert e.push_sources() == got(keys)
     # its every category at log again: nothing of Area PD's (its rules, from police.json, stay at push)
     cfg["intel_packs"] = {"neighbor_police": {"mode": "push", "categories": {
         c: {"mode": "log"} for c in e.pack("neighbor_police").categories}}}
     e.reload()
-    assert e.push_sources() == (OURS, 3)
+    assert e.push_sources() == got(OURS)
 
 
 def test_a_rule_or_category_at_push_is_needed_with_the_pack():
@@ -103,20 +113,20 @@ def test_a_rule_or_category_at_push_is_needed_with_the_pack():
     e, cfg = engine({"intel_packs": {"police": {"categories": {c: {"mode": "log"} for c in cats}}}})
     pol = e.pack("police")
     assert pol.mode == "push" and not engine_mod.can_push(pol)
-    assert e.push_sources() == (frozenset(), 1)
+    assert e.push_sources() == got(frozenset())
     cfg["intel_packs"] = {}
     cfg["intel_rules"] = {r.id: {"mode": "log"} for r in pol.rules}          # every rule at log
     e.reload()
-    assert e.push_sources() == (frozenset(), 1)                 # still none: the same revision
+    assert e.push_sources() == got(frozenset())                 # still none: the same revision
     cfg["intel_rules"] = {r.id: {"mode": "log"} for r in pol.rules if r.id != "pd.shots"}
     e.reload()
-    assert e.push_sources() == (OURS, 2)                        # one rule at push in a category at push: the pack's
+    assert e.push_sources() == got(OURS)                        # one rule at push in a category at push: the pack's
 
 
 @pytest.mark.parametrize("off", ["enabled", "push", "topic", "notifier"])
-def test_intel_off_the_kill_switch_or_no_topic_empties_it_and_bumps_the_revision(off):
+def test_intel_off_the_kill_switch_or_no_topic_empties_it_and_changes_the_revision(off):
     e, cfg = engine()
-    assert e.push_sources() == (OURS, 1)
+    assert e.push_sources() == got(OURS)
     if off == "topic":
         e.notifier.enabled = False
         e.sources_changed()                                     # (Settings' notify section: settings._use)
@@ -126,8 +136,8 @@ def test_intel_off_the_kill_switch_or_no_topic_empties_it_and_bumps_the_revision
     else:
         cfg["intel"] = {off: False}
         e.reload()
-    assert e.push_sources() == (frozenset(), 2)
-    assert e.push_sources() == (frozenset(), 2)
+    assert e.push_sources() == got(frozenset())
+    assert e.push_sources() == got(frozenset())
     if off == "topic":
         e.notifier.enabled = True
         e.sources_changed()
@@ -137,28 +147,28 @@ def test_intel_off_the_kill_switch_or_no_topic_empties_it_and_bumps_the_revision
     else:
         cfg["intel"] = {}
         e.reload()
-    assert e.push_sources() == (OURS, 3)
+    assert e.push_sources() == got(OURS)
 
 
 def test_an_admins_service_choice_moves_a_source_in_or_out():
     e, _cfg = engine()
-    assert e.push_sources() == (OURS, 1)
+    assert e.push_sources() == got(OURS)
     sourcekeys.set_service_overrides({"p25:mrrs:9212": "ems"})     # (conftest puts the process's map back)
     e.sources_changed()
-    assert e.push_sources() == (OURS - {"p25:mrrs:9212"}, 2)
+    assert e.push_sources() == got(OURS - {"p25:mrrs:9212"})
     sourcekeys.set_service_overrides({})
     e.sources_changed()
-    assert e.push_sources() == (OURS, 3)
+    assert e.push_sources() == got(OURS)
 
 
 def test_recomputed_at_most_push_refresh_s_after_the_last_without_a_change_told(monkeypatch):
     e, _cfg = engine()
-    assert e.push_sources() == (OURS, 1)
+    assert e.push_sources() == got(OURS)
     sourcekeys.set_service_overrides({"p25:mrrs:9213": "other"})   # nothing told
-    assert e.push_sources() == (OURS, 1)                        # cached
+    assert e.push_sources() == got(OURS)                        # cached
     t = engine_mod.time.monotonic() + engine_mod.PUSH_REFRESH_S + 1
     monkeypatch.setattr(engine_mod.time, "monotonic", lambda: t)
-    assert e.push_sources() == (OURS - {"p25:mrrs:9213"}, 2)
+    assert e.push_sources() == got(OURS - {"p25:mrrs:9213"})
 
 
 def test_the_set_is_what_feed_reads_one_predicate():
@@ -189,7 +199,7 @@ def test_no_engine_here_is_none_and_a_station_forwarding_is_none(monkeypatch):
     assert sizeup.intel.push_sources() == (frozenset(), 0)
     e, _cfg = engine()
     engine_mod.set_live(e)
-    assert sizeup.intel.push_sources() == (OURS, 1)
+    assert sizeup.intel.push_sources() == got(OURS)
     e.active = lambda: False                                    # a station forwarding to its hub
     assert sizeup.intel.push_sources() == (frozenset(), 0)
 
@@ -205,26 +215,26 @@ def test_settings_ops_recompute_it(tmp_path):
     tg = prefs()
     e.sources = lambda: source_rows(tg.state(), CHANNELS)
     post = lambda sec, **b: cad.settings_post(sec, {"operator": "Lt. Test", **b})      # noqa: E731
-    assert e.push_sources() == (OURS, 1)
+    assert e.push_sources() == got(OURS)
     post("intel", action="pack", pack="neighbor_police", mode="push")
-    assert e.push_sources() == (mrrs_police(), 2)
+    assert e.push_sources() == got(mrrs_police())
     post("intel", action="pack", pack="neighbor_police", mode="log")
-    assert e.push_sources() == (OURS, 3)
+    assert e.push_sources() == got(OURS)
     post("radio_services", action="set", key="p25:mrrs:9211", service="ems")
     cad.retag_thread.join(10)
-    assert e.push_sources() == (OURS - {"p25:mrrs:9211"}, 4)
+    assert e.push_sources() == got(OURS - {"p25:mrrs:9211"})
     post("radio_services", action="set", key="p25:mrrs:9211", service="automatic")
     cad.retag_thread.join(10)
-    assert e.push_sources() == (OURS, 5)
+    assert e.push_sources() == got(OURS)
     post("intel", action="set", key="push", value=False)
-    assert e.push_sources() == (frozenset(), 6)
+    assert e.push_sources() == got(frozenset())
     post("intel", action="set", key="push", value=True)
-    assert e.push_sources() == (OURS, 7)
+    assert e.push_sources() == got(OURS)
     post("notify", action="off", key=notify.INTEL)
-    assert e.push_sources() == (frozenset(), 8)
+    assert e.push_sources() == got(frozenset())
     post("notify", action="reset", key=notify.INTEL)
-    assert e.push_sources() == (OURS, 9)
-    assert e.push_sources() == (OURS, 9)
+    assert e.push_sources() == got(OURS)
+    assert e.push_sources() == got(OURS)
 
 
 def test_the_hub_wires_it_its_files_then_the_stations_list(tmp_path, monkeypatch):
@@ -236,11 +246,38 @@ def test_the_hub_wires_it_its_files_then_the_stations_list(tmp_path, monkeypatch
     monkeypatch.setattr(engine_mod, "_live", None)              # (put back after: the process's engine is the app's)
     app = HubApp(hub_cfg(tmp_path, alerts_intel_topic=TOPIC, p25_systems=(load(TR / "systems" / "mrrs"),)))
     assert engine_mod._live is app.cad.intel
-    keys, rev = sizeup.intel.push_sources()
-    assert keys == OURS and rev >= 1
+    assert sizeup.intel.push_sources() == got(OURS)
     assert {"fm:South 2", "fm:FG1"} <= {r["source"] for r in app.cad.intel.sources()}
     # the station's list (its talkgroups file says EMS for 9212, say): the station's row first
     app.hub.talkgroups = [{"source": "p25:mrrs:9212", "system": "mrrs", "tg": 9212, "service_auto": "ems",
                            "service": "ems", "tier": "text"}]
     app.cad.intel.sources_changed()
-    assert sizeup.intel.push_sources() == (OURS - {"p25:mrrs:9212"}, rev + 1)
+    assert sizeup.intel.push_sources() == got(OURS - {"p25:mrrs:9212"})
+
+
+def test_the_revision_is_a_content_hash_the_same_after_a_restart():
+    """A hub restarted (another engine, another process's counters) gives the same set the same rev, so a station
+    holding that rev holds those keys; another set never shares it (#716 review: no in-memory counter)."""
+    a, _ = engine()
+    b, cfg = engine()
+    assert a.push_sources() == b.push_sources() == got(OURS)
+    cfg["intel_packs"] = {"neighbor_police": {"mode": "push"}}
+    b.reload()
+    assert b.push_sources()[1] != a.push_sources()[1]
+    cfg["intel_packs"] = {}
+    b.reload()
+    assert b.push_sources() == a.push_sources()                # back to the same set: the same rev again
+    # the hash itself: the sorted keys, one per line; order never matters; 53 bits; the empty set's is not 0
+    want = int.from_bytes(hashlib.sha256("\n".join(sorted(OURS)).encode()).digest()[:8], "big") & ((1 << 53) - 1)
+    assert push_rev(OURS) == want == push_rev(list(reversed(sorted(OURS))))
+    assert push_rev(frozenset()) == (int.from_bytes(hashlib.sha256(b"").digest()[:8], "big") & ((1 << 53) - 1) or 1)
+    assert push_rev(frozenset()) not in (0, push_rev(OURS))
+    assert json.loads(json.dumps(push_rev(OURS))) == push_rev(OURS) < 2 ** 53
+
+
+def test_a_hash_of_zero_is_one(monkeypatch):
+    class Zero:
+        def digest(self):
+            return bytes(32)
+    monkeypatch.setattr(engine_mod.hashlib, "sha256", lambda b=b"": Zero())
+    assert push_rev({"p25:mrrs:9211"}) == 1
