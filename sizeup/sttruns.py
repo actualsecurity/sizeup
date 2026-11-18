@@ -42,11 +42,12 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS stt_runs (
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', confidence REAL, words TEXT NOT NULL DEFAULT '',
   channel TEXT NOT NULL DEFAULT '', class TEXT NOT NULL DEFAULT '', clip_end REAL, queued_at REAL, engine_start REAL,
   done_at REAL NOT NULL, wait_s REAL, run_s REAL, keyup TEXT NOT NULL DEFAULT '', call_id TEXT NOT NULL DEFAULT '',
-  turn INTEGER);
+  turn INTEGER, vocab_v TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS stt_runs_clip ON stt_runs (clip_id);
 CREATE INDEX IF NOT EXISTS stt_runs_done ON stt_runs (done_at);"""
 COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "status", "confidence", "words",
-           "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn")
+           "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn",
+           "vocab_v")
 ENGINES = ("gpu-worker", "aws", "station-whisper")
 ROLES = ("text", "alt", "late", "rerun", "catchup")
 KEEP_DAYS = 90.0
@@ -135,6 +136,8 @@ class Runs:
             db.execute("PRAGMA synchronous = NORMAL")
             db.execute("PRAGMA busy_timeout = 5000")
             db.executescript(SCHEMA)
+            if "vocab_v" not in {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}:   # a file from before it
+                db.execute("ALTER TABLE stt_runs ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")
             self._db = db
         return self._db
 
@@ -145,15 +148,18 @@ class Runs:
             prompt_v: str = "", role: str = "text", confidence: float | None = None, words: list | None = None,
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
-            run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None) -> bool:
-        """One transcript. True when it was written."""
+            run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
+            vocab_v: str = "") -> bool:
+        """One transcript. True when it was written. vocab_v: the term list or vocabulary that biased it
+        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash)."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], _fin(confidence),
                json.dumps(words[:WORDS_MAX], separators=(",", ":")) if words else "", str(channel or "")[:60],
                str(cls or "")[:20], _fin(clip_end), _fin(queued_at), _fin(engine_start),
                self.clock() if done_at is None else done_at, _sec(wait_s), _sec(run_s), _keyup(keyup),
-               str(call_id or "")[:128], int(turn) if isinstance(turn, int) and not isinstance(turn, bool) else None)
+               str(call_id or "")[:128], int(turn) if isinstance(turn, int) and not isinstance(turn, bool) else None,
+               str(vocab_v or "")[:80])
         if not self.may_write():
             return False
         try:

@@ -313,12 +313,14 @@ class Notifier:
         return bool(self.topic)
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None, actions=()) -> bool:
-        """Queued for sending: True; off or the queue full: False. who: a Who / dict (compose())."""
+             who=None, actions=(), done: Callable[[dict], None] | None = None) -> bool:
+        """Queued for sending: True; off or the queue full: False. who: a Who / dict (compose()). done: called once on
+        the notify thread with the outcome, {ok, at, status, id} when ntfy took it, {ok: False, at, status (0: none),
+        error} when given up on (an intel event's delivery, sizeup/intel/engine.py)."""
         if not self.enabled:
             return False
         try:
-            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ())))
+            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ()), done))
         except queue.Full:
             self.log("notify: too many waiting: dropped " + repr(title[:80]))
             return False
@@ -348,17 +350,20 @@ class Notifier:
             finally:
                 self._q.task_done()
 
-    def _deliver(self, title, body, priority, tags, click, who=None, actions=()) -> None:
+    def _deliver(self, title, body, priority, tags, click, who=None, actions=(), done=None) -> None:
+        status = 0
         for attempt in range(len(self.retries) + 1):
             try:
                 prot = self._protected()
                 # protected since this Notifier was made (or, the static backstop, always)
                 if UNKNOWN in prot or always_protected(self.topic) or topic_problem(self.topic, prot):
                     raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
-                publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
+                out = publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
                 self.sent += 1
                 self.last_error = ""
                 self.last_at, self.last_ok = time.time(), True
+                # urlopen raises on anything but 2xx; ntfy answers 200 with the message's JSON
+                _done(done, {"ok": True, "at": self.last_at, "status": 200, "id": str((out or {}).get("id") or "")[:64]})
                 return
             except NotifyError as e:
                 self.last_error = str(e)
@@ -370,6 +375,16 @@ class Notifier:
         self.failed += 1
         self.last_at, self.last_ok = time.time(), False
         self.log(f"notify: not sent ({self.last_error}): {title[:80]}")
+        _done(done, {"ok": False, "at": self.last_at, "status": status, "error": self.last_error[:200]})
+
+
+def _done(done, outcome: dict) -> None:
+    """A send()'s done callback: never in the way of the next push."""
+    if done is not None:
+        try:
+            done(outcome)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # -- the topics in effect, live (Settings over env / SSM over the config file) ----------------------------------------
@@ -438,9 +453,11 @@ class KindNotifier:
     last_error = property(lambda self: self._of("last_error", ""))
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None, actions=()) -> bool:
+             who=None, actions=(), done=None) -> bool:
         n = self.current()
-        return n.send(title, body, priority, tags, click, who=who, actions=actions) if n is not None else False
+        if n is None:
+            return False
+        return n.send(title, body, priority, tags, click, who=who, actions=actions, **({"done": done} if done else {}))
 
     def flush(self, timeout: float = 10.0) -> bool:
         return all(n.flush(timeout) for n in self.pushes.made(lane(self.kind)))
