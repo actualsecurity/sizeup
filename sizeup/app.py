@@ -3072,6 +3072,7 @@ class App:
                 service = str(info.get("service") or "")
             key = sources.p25(system, tg)
         elif kind:
+            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
             service = sources.service(kind=kind)
         return stt_terms.own_for(key, service, kind)
 

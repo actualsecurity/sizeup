@@ -75,6 +75,23 @@ def test_which_list_each_source_takes():
     assert own_for("p25:mrrs:9001", "transit") is None and own_for("p25:mrrs:9002", "other") is None
 
 
+def test_an_admins_service_choice_picks_the_list():
+    """Settings > Radios' service override (sourcekeys.set_service_overrides) is the source's service here too."""
+    from sizeup import sourcekeys
+    before = sourcekeys.service_overrides()
+    try:
+        sourcekeys.set_service_overrides({"p25:westchester:333": "police", "p25:mrrs:9001": "ems",
+                                          "tg:4242": "fire"})
+        assert own_for("p25:westchester:333", "ems") == "pd_dispatch"     # the admin's police over the file's EMS
+        assert own_for("tg:333", "ems") == "pd_dispatch"                   # (the county's older key the same)
+        assert own_for("p25:mrrs:9001", "transit") == "ems"
+        assert own_for("p25:westchester:4242", "other") == "county_fire"
+        assert own_for("p25:mrrs:9211", "fire") == "pd_dispatch"          # the plan's own keys first
+        assert own_for("p25:westchester:5", "police") == "pd_dispatch"     # no choice: as given
+    finally:
+        sourcekeys.set_service_overrides(before)
+
+
 def test_places_are_woven_into_the_top_of_each_list():
     own = [f"own {i}" for i in range(20)]
     places = [f"place {i}" for i in range(20)]

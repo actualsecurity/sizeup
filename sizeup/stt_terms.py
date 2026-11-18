@@ -93,8 +93,11 @@ BY_SERVICE = {"fire": "county_fire", "police": "pd_dispatch", "ems": "ems", "air
 
 def own_for(key: str = "", service: str = "", kind: str = "") -> str | None:
     """The list a source takes ("county_fire" ...; places goes with it), None for none (transit, other). key: its source
-    key (p25:mrrs:9211, fm:South 2, air:HPN Tower) or the older form (tg:307, South 2); kind: the channel's kind."""
-    key, service, kind = str(key or ""), str(service or "").lower(), str(kind or "")
+    key (p25:mrrs:9211, fm:South 2, air:HPN Tower) or the older form (tg:307); kind: the channel's kind. "Else by its
+    service": an admin's service choice for the key (Settings > Radios, sourcekeys.overridden) over the one given."""
+    from sizeup import sourcekeys
+    key, kind = str(key or ""), str(kind or "")
+    service = sourcekeys.overridden(key, str(service or "").lower()) if key else str(service or "").lower()
     if kind == "airband" or key.startswith("air:"):
         return "airband"
     if key in BY_KEY:
