@@ -340,8 +340,8 @@ def rf_events(evs: list[dict], before: Callable[[float], str | None] | None = No
     restart marked "rf" (Insight._restarts(): its dongle or gain differs from before it; the station's first look
     after a restart is never an event, so that is the only trace of a change made while it was down); "on" (back from
     Off: a shared dongle handed over, every few hours) and "back" (plugged in again) only on another dongle than the
-    one before, or when either is unknown (no serial: a device index) (#686: a channel handed over every day on the
-    same dongle still gets one). before(t): the dongle the floor records name before t, for the first of them in the
+    one before, or when either is unknown (no serial: a device index), or marked "rf" (Insight._restarts(): its gain
+    moved) (#686: a channel handed over every day on the same dongle still gets one). before(t): the dongle the floor records name before t, for the first of them in the
     window. "unplug" never on its own: the dongle that comes back says whether anything changed."""
     out: list[dict] = []
     cur: str | None = None
@@ -351,7 +351,7 @@ def rf_events(evs: list[dict], before: Callable[[float], str | None] | None = No
             s = _sdr_of(e)
             if cur is None and before is not None and isinstance(e.get("at"), (int, float)):
                 cur = _serial(before(e["at"]))
-            if s is None or cur is None or s != cur:
+            if s is None or cur is None or s != cur or e.get("rf"):
                 out.append(e)
             cur = s
         elif ev == "start":
@@ -566,7 +566,7 @@ class Insight:
         worked out again at once when a newer event arrives (the key has the newest event's time)."""
         now = self.clock() if now is None else now
         t0 = now - SUGGEST_DAYS * 86400.0
-        evs = self._restarts(station, subject, self._events(station, subject, t0, now + 60))
+        evs = self._restarts(station, subject, self._events(station, subject, t0, now + 60), now)
         evs = [e for e in evs if e.get("subject") == subject or e.get("source") == "audit" or e.get("rf")]
         sb = getattr(self.store, "settings_before", None)
         rf = rf_events(evs, (lambda t: sb(station, subject, t).get("sdr")) if sb is not None else None)
@@ -595,20 +595,33 @@ class Insight:
             return evs
         return restart_echoes(evs, lambda t: before(station, subject, t))
 
-    def _restarts(self, station: str, subject: str, evs: list[dict]) -> list[dict]:
-        """evs with each station restart marked "rf" when the channel's dongle or gain after it (its first floor
-        settings, within the hour) differs from before it (settings_before): a dongle swapped, a gain changed in the
-        config or a splitter added while the station was down never sends "sdr" or "gain" (#686). "sdr": the dongle
-        after it."""
+    def _restarts(self, station: str, subject: str, evs: list[dict], now: float) -> list[dict]:
+        """evs with each station restart marked "rf" when the channel's dongle or gain after it differs from before it:
+        a dongle swapped, a gain changed in the config or a splitter added while the station was down never sends
+        "sdr" or "gain" (#686). After: its first floor settings up to the next restart (a channel that runs hours
+        later: a shared dongle held elsewhere, absent, auto-assign); before: the last ones in the SUGGEST_DAYS before
+        (a long outage); none before but some after: marked too (a day's wait after it, never the old dongle's days).
+        "sdr": the dongle after it. An "on" / "back" is marked "rf" when only the gain moved (rf_events() compares the
+        dongles)."""
         sb = getattr(self.store, "settings_before", None)
+        if sb is None:
+            return evs
+        starts = sorted(e["at"] for e in evs if e.get("ev") == "start" and isinstance(e.get("at"), (int, float)))
         out = []
         for e in evs:
-            if e.get("ev") == "start" and sb is not None and isinstance(e.get("at"), (int, float)):
-                was = sb(station, subject, e["at"])
-                now = next((d for d in self.store.docs(station, subject, "floor", e["at"], e["at"] + 3600.0, 60)
-                            if "sdr" in d or "gain" in d), {})
-                moved = [k for k in ("sdr", "gain") if k in was and k in now and was[k] != now[k]]
-                e = dict(e, rf=bool(moved), sdr=now.get("sdr"))
+            ev, at = e.get("ev"), e.get("at")
+            if ev in ("start", "on", "back") and isinstance(at, (int, float)):
+                t1 = min([t for t in starts if t > at] + [now + 60])
+                after = next((d for d in self.store.docs(station, subject, "floor", at, t1, 60)
+                              if "sdr" in d or "gain" in d), {})
+                was = sb(station, subject, at, SUGGEST_DAYS * 86400.0)
+                keys = ("sdr", "gain") if ev == "start" else ("gain",)
+                moved = any(k in was and k in after and was[k] != after[k] for k in keys)
+                if ev == "start":
+                    unknown = not any(k in was for k in keys) and any(k in after for k in keys)
+                    e = dict(e, rf=moved or unknown, sdr=after.get("sdr"))
+                elif moved:
+                    e = dict(e, rf=True)
             out.append(e)
         return out
 

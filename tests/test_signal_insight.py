@@ -811,3 +811,47 @@ def test_a_squelch_event_more_than_five_minutes_after_the_restart_is_kept(tmp_pa
     ins = mi.Insight(s, clock=lambda: NOW, log=lambda m: None)
     assert [e["ev"] for e in ins._events("pcfd-hq", "FG1", t - 60, NOW)] == ["start", "squelch"]
     assert ins.suggestion("pcfd-hq", "FG1")["warn"].startswith("settling: squelch changed")
+
+
+BASE = {"kind": "traffic", "open": 10.0, "close": 6.0, "min": 0.3, "sdr": "00000102", "gain": 36.4, "state": "ok"}
+
+
+def test_a_restart_whose_channel_runs_hours_later_is_still_compared_with_what_ran_before(tmp_path):
+    # the gain changed in the config, the station restarted, and FG1 came up 2 h later (its shared dongle held
+    # elsewhere, absent, auto-assign): its first floor settings after the restart are what it is compared with
+    t = NOW - 20 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, int((t - 1800 - NOW + 7 * DAY) // 60), settings=BASE))
+    put(s, "FG1", floor_minutes(t + 2 * 3600, int((NOW - t - 2 * 3600) // 60), settings=dict(BASE, gain=42.1), seed=4))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+    assert out["since"] == {"at": t, "ev": "start"} and out["state"] == "short"
+
+
+def test_back_from_off_on_the_same_dongle_with_another_gain_starts_the_window(tmp_path):
+    t = NOW - 20 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, int((t - 1800 - NOW + 7 * DAY) // 60), settings=BASE))
+    put(s, "FG1", floor_minutes(t + 60, int((NOW - t - 60) // 60), settings=dict(BASE, gain=42.1), seed=4))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212))
+    put(s, "FG1", [ev("FG1", t - 1800, "off", ""), ev("FG1", t, "on", "SDR 00000102")])
+    out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+    assert out["since"] == {"at": t, "ev": "on"}
+
+
+def test_a_restart_after_a_long_outage_on_a_new_dongle_never_mixes_in_the_old_dongles_days(tmp_path):
+    t = NOW - 30 * 3600                                  # down 3 days, back on another dongle
+    s, _ = store(tmp_path)
+    put(s, "FG1", floor_minutes(NOW - 7 * DAY, int((t - 3 * DAY - NOW + 7 * DAY) // 60), settings=BASE))
+    put(s, "FG1", floor_minutes(t + 60, int((NOW - t - 60) // 60), settings=dict(BASE, sdr="00000105"), seed=4))
+    put(s, "FG1", transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212))
+    put(s, "station", [ev("station", t, "start", "sizeup started")])
+    out = mi.Insight(s, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")
+    assert out["since"] == {"at": t, "ev": "start"} and out["days"] == 1.2
+    # nothing known before it at all (down longer than the window), settings after: counted too
+    s2, _ = store(tmp_path / "none")
+    put(s2, "FG1", floor_minutes(t + 60, int((NOW - t - 60) // 60), settings=dict(BASE, sdr="00000105"), seed=4))
+    put(s2, "station", [ev("station", t, "start", "sizeup started")])
+    assert mi.Insight(s2, clock=lambda: NOW, log=lambda m: None).suggestion("pcfd-hq", "FG1")["since"] == \
+        {"at": t, "ev": "start"}

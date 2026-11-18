@@ -802,10 +802,10 @@ class MetricStore:
                 return {f: d[f] for f in SETTINGS if f in d}
         return {}
 
-    def settings_before(self, station: str, subject: str, t0: float) -> dict:
-        """What ran before t0 (a restart: the day before it at most), from the floor records (metricsinsight.py's
-        restart echo, #686)."""
-        return self._settings_before(station, subject, t0, 86400.0)
+    def settings_before(self, station: str, subject: str, t0: float, back_s: float = 86400.0) -> dict:
+        """What ran before t0 (back_s before it at most: a day by default), from the floor records (metricsinsight.py's
+        restart echo and restarts, #686)."""
+        return self._settings_before(station, subject, t0, back_s)
 
     def events(self, station: str, subject: str, t0: float, t1: float) -> list[dict]:
         """The subject's events and the station's own (a restart, records dropped), and the Settings audit's changes to
