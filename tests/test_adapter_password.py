@@ -521,7 +521,7 @@ def test_the_card_is_write_only_and_keeps_nothing():
     # its own tab, Settings > Station > Adapter (an admin's, on the hub: sStationTabs), not a card under Health
     static = ROOT / "sizeup" / "web" / "static"
     settings = (static / "settings.js").read_text()
-    assert '["logs", "Logs"], ["adapter", "Adapter"],' in settings and '["link", "Hub link"]' in settings
+    assert '["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]' in settings
     assert 'AdapterPasswordCard.mount($("#s-station-adapter"))' in settings
     assert '<div id="s-station-adapter" class="s-station-part" data-stab="adapter" hidden></div>' in html
     assert "AdapterPasswordCard" not in (static / "health.js").read_text()

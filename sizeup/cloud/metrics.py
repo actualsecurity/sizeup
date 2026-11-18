@@ -19,10 +19,6 @@ Records (one small JSON object each; "k" its kind, "s" its subject, "at" its tim
     cc      each P25 system's control channel, each minute ("s": "p25" the county's, "p25:<system>" another's): the
             decode rate as trunk-recorder logs it every 3 s (avg "rate", "lo", "hi", lines "n"), retunes, voice grants
             on a frequency no dongle covers ("unc": {MHz: count}), state, the dongle(s)
-    stt     the speech-to-text queue (whisper on the station, sizeup/stt.py), each minute ("s": "whisper", #639): waiting
-            in all ("queued") and by class (urgent, high, live, rerun, context, low, catchup), the oldest live clip's and
-            the oldest context clip's wait ("oldest", "oldest_low"), clips shed / dropped / skipped in the minute, done in
-            the minute ("done"), their wait in the queue p50 / p95 ("wait50", "wait95") and run p50 ("run50")
     ev      what explains a shift on a graph: start (this station started), sdr (the dongle a channel runs on changed),
             squelch, gain, unplug, back, stall, down, up, off, on, cc_lost, cc_back, dropped (records lost while the hub
             was away). The hub adds the Settings audit's squelch and channel changes itself.
@@ -171,7 +167,6 @@ class Sampler:
         self._prev: dict[str, dict] = {}           # subject -> what it was at the last diff
         self._sent: dict[str, tuple] = {}          # label -> its SETTINGS as last sent in a floor record
         self._diff_at = 0.0
-        self._stt_prev: dict[str, int] | None = None   # the queue's shed / dropped / skipped counts at the last minute
 
     # -- what runs ---------------------------------------------------------------------------------------------------
 
@@ -258,33 +253,6 @@ class Sampler:
                 self._cc(minute, subject, rec_, off)
             except Exception as e:  # noqa: BLE001 - that system's minute only
                 self._said(f"cc {subject}", e)
-        try:
-            self._stt(minute)
-        except Exception as e:  # noqa: BLE001 - that minute only
-            self._said("stt", e)
-
-    def _stt(self, minute: int) -> None:
-        """The whisper queue's minute (#639): depth by class, the oldest waits, what was shed, and each transcript's wait
-        and run (Transcriber.timed)."""
-        stt = getattr(self.app, "stt", None)
-        if stt is None or not hasattr(stt, "stats"):
-            return
-        st = stt.stats()
-        t0 = minute * 60.0
-        timed = [x for x in list(getattr(stt, "timed", ())) if t0 <= x[0] < t0 + 60.0]
-        waits = [x[2] for x in timed if x[2] is not None]
-        runs = [x[3] for x in timed]
-        counts = {k: int(st.get(k) or 0) for k in ("shed", "dropped", "skipped")}
-        prev, self._stt_prev = self._stt_prev, counts
-        rec: dict = {"k": "stt", "s": "whisper", "at": t0, "queued": int(st.get("queued") or 0), "done": len(timed),
-                     "oldest": _r1(st.get("oldest_s")), "oldest_low": _r1(st.get("oldest_low_s")),
-                     "wait50": _r1(_pct(waits, 50)), "wait95": _r1(_pct(waits, 95)), "run50": _r1(_pct(runs, 50))}
-        for k in ("urgent", "high", "rerun", "context", "low", "catchup"):
-            rec[k] = int(st.get(k) or 0)
-        rec["live"] = max(0, int(st.get("live") or 0) - rec["urgent"] - rec["high"])     # (stats' live counts all three)
-        for k, v in counts.items():
-            rec[k] = max(0, v - prev[k]) if prev is not None else 0
-        self.c.add({k: v for k, v in rec.items() if v is not None})
 
     def _said(self, what: str, e: Exception) -> None:
         """A record that couldn't be made: logged once per (what, error type)."""
