@@ -569,7 +569,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             holds nothing for long). None: over the limit (413). BodyRefused: no Content-Length or a chunked body
             (411: the bytes would be left on a kept-alive connection), a bad or repeated Content-Length (400), a
             client that is too slow (408) or stops short (400). Every refusal closes the connection. DELETE may have
-            no body at all."""
+            no body at all. A whole body read keeps the connection only if the client wanted it kept (not an HTTP/1.0
+            client, not `Connection: close`: http.server's own decision, made before this ran)."""
+            wanted = not self.close_connection        # http.server's choice from the request line and headers
             self.close_connection = True              # until the whole body has been read, nothing is kept alive
             if self.headers.get("Transfer-Encoding"):
                 raise BodyRefused(411, "length_required", "send Content-Length: chunked bodies are not accepted")
@@ -578,7 +580,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             raw_len = self.headers.get("Content-Length")
             if raw_len is None:
                 if self.command == "DELETE":
-                    self.close_connection = False
+                    self.close_connection = not wanted
                     return b""
                 raise BodyRefused(411, "length_required", "send a Content-Length header")
             if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):    # not "1_0", "+5", " 7"
@@ -610,7 +612,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             data = b"".join(parts)
             if len(data) != n:
                 raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
-            self.close_connection = False
+            self.close_connection = not wanted
             return data
 
         def _doc_file(self, path: str, query: str) -> None:

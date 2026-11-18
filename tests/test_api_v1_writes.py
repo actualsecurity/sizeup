@@ -1084,3 +1084,18 @@ def test_a_retry_after_a_412_with_the_same_key_replays_the_412_and_a_new_key_app
     assert rig.unit("E60")["status"] == "RS"
     assert rig.post(status_path(), {"status": "OL"}, headers=fresh, key="retry-412-0002")[0] == 200
     assert rig.unit("E60")["status"] == "OL"
+
+
+def test_a_client_asking_to_close_is_closed_after_a_write_that_succeeds(served):
+    """A whole body read keeps the connection alive only when the client wanted that: `Connection: close` (or
+    HTTP/1.0) is honoured after a 201 too, not only after a refusal."""
+    r, url = served
+    body = json.dumps({"text": "closing"}).encode()
+    request = (f"POST {note_path(r.open['id'])} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer jordan\r\n"
+               f"Idempotency-Key: close-after-0001\r\nContent-Type: application/json\r\n"
+               f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body
+    out = raw_http(url, request, wait=5)              # fails unless the server closes the connection
+    assert out.startswith(b"HTTP/1.1 201") and r.notes()[-1] == "closing"
+    old = (f"POST {note_path(r.open['id'])} HTTP/1.0\r\nAuthorization: Bearer jordan\r\n"
+           f"Idempotency-Key: close-after-0002\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+    assert raw_http(url, old, wait=5).startswith(b"HTTP/1.1 201")      # (the server's own version on the status line)
