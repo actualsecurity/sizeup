@@ -220,11 +220,14 @@ def scrub(name: str, body: dict, tmp: Path | str = "") -> dict:
         body["load"]["cpu_pct"] = 27.5
     if name.startswith("stt-worker-") and "model" in body:
         body["model"] = "large-v3-turbo-q5_0" if "version" in body else "small.en-q5_1"
-    import getpass
-    import socket
     text = json.dumps(body)
-    for mine in (socket.gethostname(), getpass.getuser(), str(tmp), "pytest", "/private/", "/Users/", "/home/"):
-        assert not mine or len(mine) < 3 or mine not in text, f"the recording still names this machine or run: {mine!r}"
+    mine = [str(tmp), "pytest", "/private/", "/Users/", "/home/"]
+    if os.environ.get(RECORD_ENV, "") not in ("", "0"):      # (written to the repo: this machine's and this user's name
+        import getpass                                      # too; not in every run, where a user may be called "east")
+        import socket
+        mine += [socket.gethostname(), getpass.getuser()]
+    for word in mine:
+        assert len(word) < 3 or word not in text, f"the recording still names this machine or run: {word!r}"
     return body
 
 
