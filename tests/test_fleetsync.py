@@ -81,3 +81,83 @@ def test_mdc_emergency_and_its_acknowledge():
     [e] = mdc1200.decode(np.concatenate([np.zeros(2000), mdc1200.encode(0x00, 0x80, 0x6401), np.zeros(2000)]))
     [a] = mdc1200.decode(np.concatenate([np.zeros(2000), mdc1200.encode(0x20, 0x00, 0x6401), np.zeros(2000)]))
     assert (e.kind, e.unit_hex) == ("emergency", "6401") and a.kind == "emergency-ack"
+
+
+# -- the decoder's bits as bytes (#706's profile: the bit string was built one character at a time) -------------------
+
+def _old_energy(x, rate, f, n):
+    z = x * np.exp(-2j * np.pi * f * np.arange(len(x)) / rate)
+    c = np.concatenate([[0], np.cumsum(z)])
+    out = np.zeros(len(x))
+    h = n // 2
+    lo = np.clip(np.arange(len(x)) - h, 0, len(x))
+    hi = np.clip(np.arange(len(x)) - h + n, 0, len(x))
+    out[:] = np.abs(c[hi] - c[lo])
+    return out
+
+
+def old_decode(audio, rate=16000):
+    """fleetsync.decode as it was (a str of "0" / "1" per bit, the mixers made afresh): the parity reference."""
+    x = np.asarray(audio, dtype=np.float64)
+    if len(x) < rate * (len(fs.SYNC) + fs.BLOCK) / 2400:
+        return []
+    x = x - x.mean()
+    spec = np.fft.rfft(x)
+    fr = np.fft.rfftfreq(len(x), 1 / rate)
+    spec[(fr < 700) | (fr > 3200)] = 0
+    x = np.fft.irfft(spec, len(x))
+    out = []
+    sync = "".join(map(str, fs.SYNC))
+    for baud, one, zero in fs.SPEEDS:
+        spb = rate / baud
+        n = max(2, int(round(spb)))
+        d = _old_energy(x, rate, one, n) - _old_energy(x, rate, zero, n)
+        for ph in range(fs.GRID):
+            pos = ph * spb / fs.GRID + np.arange(int((len(d) - ph * spb / fs.GRID) / spb)) * spb
+            idx = pos.astype(int)
+            idx = idx[idx < len(d)]
+            bits_ = (d[idx] > 0).astype(np.int8)
+            s = "".join("1" if b else "0" for b in bits_)
+            k = s.find(sync)
+            while k >= 0:
+                blk = [int(c) for c in s[k + len(fs.SYNC):k + len(fs.SYNC) + fs.BLOCK]]
+                if fs.check_ok(blk):
+                    p = fs.FleetSyncPacket(fs._num(blk[:16]), fs._num(blk[16:24]) + 99, fs._num(blk[24:36]) + 999,
+                                           fs._num(blk[16:24]) + 99, fs._num(blk[36:48]) + 999, baud,
+                                           float(idx[k + len(fs.SYNC)] / rate))
+                    if not any(q.id == p.id and q.flags == p.flags and abs(q.start_s - p.start_s) < 0.03 for q in out):
+                        out.append(p)
+                k = s.find(sync, k + 1)
+    return sorted(out, key=lambda p: p.start_s)
+
+
+def _random_buffer(g, k):
+    """Synthetic: hiss, sometimes a burst (either speed, any kind, any level, invented IDs), voice-ish noise, hiss."""
+    parts = [g.uniform(0.02, 0.4) * g.standard_normal(int(RATE * g.uniform(0.05, 0.6)))]
+    if k % 4:
+        kind = ("pre-id", "post-id", "emergency")[k % 3]
+        a = fs.encode(int(g.integers(100, 355)), int(g.integers(1000, 5095)), kind, (1200, 2400)[k % 2],
+                      level=float(g.uniform(0.05, 0.6)))
+        parts.append(a + g.uniform(0.0, 0.2) * g.standard_normal(len(a)))
+    parts.append(g.uniform(0.0, 0.3) * g.standard_normal(int(RATE * g.uniform(0.0, 1.5))))
+    if k % 7 == 0:          # a second burst, or the same twice
+        parts.append(fs.encode(167, 1002, "post-id", 1200, level=0.4))
+    return np.concatenate(parts).astype(np.float32 if k % 2 else np.float64)
+
+
+def test_the_bytes_decoder_finds_exactly_what_the_bit_string_one_did():
+    g = np.random.default_rng(706)
+    found = 0
+    for k in range(150):
+        a = _random_buffer(g, k)
+        new, old = fs.decode(a, RATE), old_decode(a, RATE)
+        assert [str(p) for p in new] == [str(p) for p in old], k
+        assert [(p.flags, p.fleet, p.unit, p.to_fleet, p.to_unit, p.baud, p.start_s) for p in new] == \
+               [(p.flags, p.fleet, p.unit, p.to_fleet, p.to_unit, p.baud, p.start_s) for p in old], k
+        found += bool(new)
+    assert found >= 60                  # (most of them hold a packet: the parity is of decodes, not of empties)
+    # longer than the kept mixers (computed afresh), and at another rate
+    a = np.concatenate([_random_buffer(g, 1), 0.1 * g.standard_normal(RATE * 7), _random_buffer(g, 2)])
+    assert [str(p) for p in fs.decode(a, RATE)] == [str(p) for p in old_decode(a, RATE)]
+    b = fs.encode(200, 3000, "emergency", 1200, rate=8000, level=0.4)
+    assert [str(p) for p in fs.decode(b, 8000)] == [str(p) for p in old_decode(b, 8000)] != []

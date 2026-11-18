@@ -1062,6 +1062,29 @@ def test_every_re_expression_runs_fast_on_hostile_texts():
             assert took < BUDGET_S, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
 
 
+def test_the_timing_guard_leaves_no_alarm_armed_however_the_match_ends(monkeypatch):
+    """#740: a worker that dies silently could be a SIGALRM landing after found_within put the default handler back
+    (its default action ends the process). Whether the match returns, runs past the stop or raises, the timer is
+    disarmed and the handler is the one from before."""
+    import signal
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("no setitimer here: found_within uses a child process")
+    before = signal.getsignal(signal.SIGALRM)
+    found_within(r"re:\bdryer\b", "the dryer is smoking", HARD_STOP_S)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0) and signal.getsignal(signal.SIGALRM) is before
+    with pytest.raises(AssertionError, match="still running"):
+        found_within(r"re:\b(dryer|stove)(\W+(?!(no|not)\b)[\w']+){0,3}\W+(smoking|sparking)\b",
+                     "dryer" + "'" * 4000 + " x", 0.2)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0) and signal.getsignal(signal.SIGALRM) is before
+
+    def boom(self, text, ws):
+        raise ValueError("boom")
+    monkeypatch.setattr(rules_mod.Phrase, "found", boom)
+    with pytest.raises(ValueError):
+        found_within(r"re:\bdryer\b", "the dryer", HARD_STOP_S)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0) and signal.getsignal(signal.SIGALRM) is before
+
+
 def test_a_hung_expression_fails_the_timing_test_instead_of_hanging_it():
     """The pattern #670's review found: "\\W+" beside "[\\w']+" backtracks without bound on a run of apostrophes. It
     must still fail the budget: it runs past the hard stop (four times the budget), so the budget stays meaningful."""

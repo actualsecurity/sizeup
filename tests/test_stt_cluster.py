@@ -261,13 +261,17 @@ def test_a_restarting_station_hands_everything_waiting_to_the_pool_and_nothing_i
     hub = HubRun(hub_cfg(tmp_path))
     st = None
     token = hub.app.hub.workers.add("gpu-1")
-    gpu = FakeWorker(hub.url, token, text="the pool heard this").start()
+    # (a long poll: the worker is always in a claim, so the hub's word and the hand-over never fall in the moment
+    # between two of its polls, when it isn't "idle" to the pool: that gap, under load, was this test's flake)
+    gpu = FakeWorker(hub.url, token, text="the pool heard this", wait_s=20.0).start()
     try:
         st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
         hold = Hold()
         st.stt.client = hold
         st._hub_aws = {"ok": False}                         # (FG1 on the station's whisper: AWS can't)
-        assert wait(lambda: st.link.pool_has_room(), 15)    # (the hub's word: a worker elsewhere could take one)
+        # the station has heard the hub's word that one GPU worker is idle and quick (the hand-over's budget is that
+        # word, not the room for context clips: waiting for the room alone let it hand over none)
+        assert wait(lambda: st.link.pool_has_room() and st.link.pool_gpu_idle_n() == 1, 15)
         ids = []
         for i in range(3):
             ids.append(fm_segment(st))
@@ -783,6 +787,19 @@ def test_a_stopping_station_hands_one_pre_alert_clip_per_idle_gpu_worker_and_sav
     handed = [d["id"] for k, d in sent if k == "traffic" and d.get("transcript_pending") == "pool"]
     saved = __import__("json").loads((tmp_path / "stt-queue.json").read_text())
     assert len(handed) == 1 and sorted([handed[0]] + [e["id"] for e in saved]) == ["FG1-0", "FG1-1", "FG1-2"]
+    # the hub's last word caught its GPU worker between two polls (not idle then): none handed over, all saved, none
+    # lost (the restart test's flake under load, #715 follow-up: what the test saw was this, not a lost clip)
+    idle_n["n"] = 0
+    (tmp_path / "stt-queue.json").unlink()
+    sent.clear()
+    again = [Traffic(f"FG1-{i}", "FG1", 9.0 + i, 12.0 + i, "", status="pending") for i in range(3)]
+    for t in again:
+        app.stt._stopping = False
+        app.stt.submit(t, np.zeros(1600, np.float32), URGENT, "FG1")
+    n = app._stt_handoff(wait_s=0.0)
+    assert (n["pool"], n["saved"]) == (0, 3) and not [d for k, d in sent if d.get("transcript_pending")]
+    assert sorted(e["id"] for e in __import__("json").loads((tmp_path / "stt-queue.json").read_text())) == [
+        "FG1-0", "FG1-1", "FG1-2"]
 
 
 def test_a_saved_clip_whisper_finished_during_the_stop_is_never_transcribed_twice(tmp_path):

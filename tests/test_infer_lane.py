@@ -530,3 +530,194 @@ def wait_until(pred, timeout=2.0):
     while time.monotonic() < end and not pred():
         time.sleep(0.01)
     assert pred()
+
+
+# -- re-review follow-ups (#733) -------------------------------------------------------------------------------------
+
+def test_a_slow_hub_sqlite_never_holds_submit_or_a_claim():
+    """The switches are read outside the lane's lock (tick, a new worker, an admin's change): with hub.sqlite stuck for
+    3 s, submit() and available() answer from what was read last, at once."""
+    gate = threading.Event()
+    gate.set()
+
+    def slow_on():
+        gate.wait()
+        return True
+
+    ln = Lane(log=lambda s: None, enabled=slow_on, llm_on=lambda wid: True)
+    ln._thread = threading.current_thread()
+    llm_online(ln)
+    gate.clear()                                             # hub.sqlite's lock held from here
+    ticker = threading.Thread(target=lambda: ln.tick(now=ln.clock()), daemon=True)
+    ln._switch_at = -1e9
+    ticker.start()                                           # the tick waits on it, outside the lane's lock
+    time.sleep(0.1)
+    t0 = time.monotonic()
+    f = ln.submit("t", MSGS, PD)
+    assert ln.available() and not f.done()
+    assert ln.claim("gpu-1", 0) is not None
+    assert time.monotonic() - t0 < 0.2
+    gate.set()
+    ticker.join(5)
+
+
+def test_an_admins_switch_holds_at_once_through_the_registry(tmp_path):
+    from sizeup.cloud.hubstore import MonitorDb
+    from sizeup.cloud.sttworkers import WorkerRegistry
+    reg = WorkerRegistry(MonitorDb(tmp_path / "hub.sqlite"), log=lambda s: None)
+    reg.add("gpu-1")
+    ln = Lane(log=lambda s: None, enabled=lambda: bool(reg.pool_settings()["on"]), llm_on=reg.llm_on)
+    ln._thread = threading.current_thread()
+    reg.listeners.append(ln.switched)
+    llm_online(ln)
+    assert ln.available()
+    reg.act({"action": "llm", "id": "gpu-1", "on": False})
+    assert not ln.available()                                # no second's wait
+    reg.act({"action": "llm", "id": "gpu-1", "on": True})
+    assert ln.available()
+    reg.act({"action": "pool", "on": False})
+    assert not ln.available()
+
+
+def test_an_oversized_answer_is_refused_by_its_size_without_a_look_inside():
+    ln = lane()
+    llm_online(ln)
+    f = ln.submit("t", MSGS, PD, meta=True)
+    j = ln.claim("gpu-1", 0)
+    looked = []
+    real = infer.valid
+    try:
+        infer.valid = lambda *a: looked.append(1) or real(*a)
+        assert ln.handle("gpu-1", f"/api/station/stt/infer/{j.lease}/complete", {"output": GOOD},
+                         size=infer.OUTPUT_MAX + 5000) == (200, {"ok": True})
+    finally:
+        infer.valid = real
+    assert f.result(2)[1]["why"] == "invalid" and looked == []
+
+
+def test_the_answer_is_checked_outside_the_lanes_lock():
+    ln = lane()
+    llm_online(ln)
+    f = ln.submit("t", MSGS, PD)
+    j = ln.claim("gpu-1", 0)
+    free = []
+    real = infer.valid
+
+    def check(*a):
+        t = threading.Thread(target=lambda: free.append(ln._cv.acquire(timeout=1) and (ln._cv.release() or True)))
+        t.start()
+        t.join(2)
+        return real(*a)
+
+    try:
+        infer.valid = check
+        ln.complete("gpu-1", j.lease, {"output": GOOD})
+    finally:
+        infer.valid = real
+    assert free and all(free) and f.result(2) == GOOD
+
+
+def test_available_and_submit_never_wait_on_the_pools_lock_or_hub_sqlite():
+    """The intel engine's calls: with the STT pool's lock and hub.sqlite each held for 3 s (a claim and a tick in
+    flight meanwhile), available() and submit() answer in under 50 ms."""
+    p = pool(Clock())
+    gate = threading.Event()
+    gate.set()
+
+    def slow_db():
+        gate.wait()
+        return True
+
+    ln = Lane(stt_busy=p.holds_prealert, log=lambda s: None, enabled=slow_db, llm_on=lambda wid: slow_db())
+    ln.start()
+    try:
+        ln.seen("gpu-1", "online", MODELS)
+        assert ln.available()
+        gate.clear()                                         # hub.sqlite held ...
+        held = threading.Event()
+
+        def hold_pool():
+            with p._cv:                                      # ... and the pool's lock, 3 s each
+                held.set()
+                time.sleep(3.0)
+
+        threading.Thread(target=hold_pool, daemon=True).start()
+        held.wait(2)
+        ln._switch_at = -1e9                                 # (the tick now waits on hub.sqlite, outside the lane's lock)
+        claimer = threading.Thread(target=lambda: ln.claim("gpu-1", 2), daemon=True)
+        claimer.start()                                      # (its STT check waits on the pool's lock)
+        time.sleep(0.2)
+        for _ in range(5):
+            t0 = time.monotonic()
+            ok = ln.available()
+            f = ln.submit("pd_classify", MSGS, PD, deadline_s=15)
+            took = time.monotonic() - t0
+            assert ok and not f.done() and took < 0.05, took
+        gate.set()
+        claimer.join(5)
+    finally:
+        gate.set()
+        ln.stop()
+
+
+# -- #755 review -----------------------------------------------------------------------------------------------------
+
+def test_a_slow_read_begun_before_an_admins_change_never_writes_over_it():
+    on = {"gpu-1": True}
+    gate = threading.Event()
+
+    def llm_on(wid):
+        if threading.current_thread().name == "slow-read":
+            gate.wait(5)
+            return True                                      # what it read before the change
+        return on[wid]
+
+    ln = Lane(log=lambda s: None, llm_on=llm_on)
+    ln._thread = threading.current_thread()
+    gate.set()
+    llm_online(ln)
+    gate.clear()
+    slow = threading.Thread(target=ln._refresh, name="slow-read", daemon=True)
+    slow.start()
+    time.sleep(0.1)
+    on["gpu-1"] = False                                      # the admin switches it off meanwhile
+    ln.switched()
+    assert not ln.available()
+    gate.set()
+    slow.join(5)
+    assert not ln.available() and ln._switch["gpu-1"] is False
+
+
+def test_an_infer_body_over_32_kb_is_refused_before_it_is_parsed(tmp_path):
+    ln = lane()
+    reg, wa = api(tmp_path, ln)
+    token = reg.add("gpu-1")
+    raw = json.dumps({"output": {"reason": "r" * 40000}}).encode()
+    asked = []
+
+    def body(n):
+        asked.append(n)
+        return None if len(raw) > n else raw
+
+    code, data, _ = wa.handle("POST", "/api/station/stt/infer/0123456789abcdef/complete",
+                              {"Authorization": f"Bearer {token}"}, body)
+    assert code == 413 and asked == [32 * 1024]
+
+
+def test_deadlines_hold_while_hub_sqlite_is_stuck():
+    """The switches are read on their own thread: a stuck hub.sqlite never holds the lane's (its deadlines)."""
+    gate = threading.Event()
+    gate.set()
+    ln = Lane(log=lambda s: None, enabled=lambda: gate.wait(10) or True).start()
+    try:
+        ln.seen("gpu-1", "online", MODELS)
+        gate.clear()                                         # hub.sqlite stuck from here
+        time.sleep(1.2)                                      # (the switch thread is waiting on it now)
+        f = ln.submit("t", MSGS, PD, deadline_s=1.5, meta=True)
+        t0 = time.monotonic()
+        assert ln.claim("gpu-1", 0) is not None
+        res, meta = f.result(5)
+        assert meta["why"] == "deadline" and time.monotonic() - t0 < 1.65
+    finally:
+        gate.set()
+        ln.stop()

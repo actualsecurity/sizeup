@@ -247,7 +247,9 @@ so a role removed or a node revoked counts from its next request.
 | `/api/station/hello`, `state`, `logs`, `metrics`; `GET status` (status token) | yes | | never |
 | `/api/station/events` (pages, transmissions, re-runs, alarms) | | radio-receive | never |
 | `/api/station/events` `source_*` | | feed-adapter (`gen` checked for health) | never |
-| `/api/station/jobs` (long poll) | yes (the jobs for that node and its roles only) | | never |
+| `GET /api/station/jobs` (long poll) | yes (the jobs for that node and its roles only) | | never |
+| `POST /api/station/jobs/<id>` (a job's answer) | yes (once jobs are targeted: only a job handed to that node) | | never |
+| `POST /api/station/stt` (each captured clip's STT input, beside its event) | | radio-receive | never |
 | `/api/station/aircraft` / `vessels` | | adsb / ais | never |
 | `/api/station/stt/hello`, `state`, `claim`, `jobs/<lease>/{audio, extend, complete, release}`: exactly #715's list, no others | | stt-light with whisper in pool on (off: **403**, as today, so the station backs off instead of retrying; never 404) | stt-heavy |
 | `/api/station/stt/infer/*` | **never** (403, #733) | never | infer, LLM jobs on |
@@ -269,6 +271,8 @@ Invariants (each one gets a test):
 - A test lists every `/api/station/*` route and fails when one has no row in the table (fail closed, like #581's
   `need`).
 - The payload's id must be the token's (`id_mismatch`, as today).
+- No `HEAD` under `/api/station/`: 405 and no handler runs (a `GET` there does things: the long poll hands each job
+  out once). Bodies both ways are strict JSON: no `NaN` or `Infinity` (sent as `null`, read as `null`).
 
 ### Tokens, Access, rotation
 
