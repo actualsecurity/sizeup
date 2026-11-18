@@ -778,6 +778,7 @@ class StationHealth:
                                                    "last_drop", "last_error", "max", "working")} if sq else None
         out["stt_catchup"] = self._catchup()
         out["stt_pool"] = self._stt_pool()
+        out["stt_time"] = self._stt_time()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -881,6 +882,16 @@ class StationHealth:
         """The GPU worker pool (#639, HubApp.pool_health()): its workers, queue, fallbacks, and every channel's latency
         (transmission end -> text). None when there is nothing to show. A worker offline is never an alert."""
         fn = getattr(getattr(self.hub, "app", None), "pool_health", None)
+        if fn is None:
+            return None
+        try:
+            return fn()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _stt_time(self) -> dict | None:
+        """The dispatcher's trailing-time match rate (#727, HubApp.stt_time_health()), None with nothing checked."""
+        fn = getattr(getattr(self.hub, "app", None), "stt_time_health", None)
         if fn is None:
             return None
         try:
