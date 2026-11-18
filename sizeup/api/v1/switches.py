@@ -10,7 +10,9 @@ DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS = 8, 16      # v1's share of concurren
 
 # The app's feature flags, as `meta.features` reports them. Each stays off until its pull request is proven: the
 # route table names the one a route needs (routes.Route.flag).
-FEATURES = ("auth", "reads", "stream", "writes", "push", "media", "responders")
+# There is no "writes" flag on purpose: the app is a situational-awareness tool and nothing can turn writes on (the owner's
+# rule, docs/mobile-api.md "Scope"; tests/test_api_v1_readonly.py).
+FEATURES = ("auth", "reads", "stream", "push", "media", "responders")
 
 
 class Switches:

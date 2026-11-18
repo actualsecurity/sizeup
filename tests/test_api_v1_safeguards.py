@@ -52,7 +52,7 @@ def table(seen: list, boom: Exception | None = None):
         return 200, {"ok": True, "features": ctx.features}
     return [Route("GET", "/api/v1/meta", h, "public"),
             Route("GET", "/api/v1/things", h, "device", "reads"),
-            Route("POST", "/api/v1/things", h, "device", "writes"),
+            Route("POST", "/api/v1/things", h, "device", "push"),
             Route("GET", "/api/v1/open", h, "public", "reads"),
             Route("GET", "/api/v1/bare", h, "device")]               # no flag: only the master switch gates it
 
@@ -100,7 +100,7 @@ def test_the_switch_is_read_on_every_request_and_meta_reports_every_flag_off_whe
 
 
 def test_a_flag_off_route_behaves_like_the_switch_off_and_a_flag_on_one_is_served():
-    box, seen = Box(reads=False, writes=False), []
+    box, seen = Box(reads=False, push=False), []
     v1 = V1(table(seen), switches=box.switches(), resolver=lambda h: DEVICE)
     for method, path in [("GET", "/api/v1/things"), ("POST", "/api/v1/things"), ("GET", "/api/v1/open")]:
         assert err(v1.respond(method, path, "", {}))[:2] == (404, "not_found")
@@ -109,7 +109,7 @@ def test_a_flag_off_route_behaves_like_the_switch_off_and_a_flag_on_one_is_serve
     assert v1.respond("POST", "/api/v1/things", "", {})[0] == 404         # its own flag, still off
     assert v1.respond("GET", "/api/v1/meta", "", {})[0] == 200
     flags = json.loads(v1.respond("GET", "/api/v1/meta", "", {})[1])["features"]
-    assert list(flags) == list(FEATURES) and flags["reads"] and not flags["writes"]
+    assert list(flags) == list(FEATURES) and flags["reads"] and not flags["push"]
 
 
 def test_a_route_with_no_flag_is_gated_by_the_master_switch_alone():
@@ -137,7 +137,7 @@ def test_every_route_declares_its_flag_its_role_and_who_may_call_it():
         else:
             assert r.need == "device" and r.flag in FEATURES, (r.method, r.path)   # the flag it needs
             assert r.role in ROLES, (r.method, r.path)                              # and the least role
-    assert set(FEATURES) == {"auth", "reads", "stream", "writes", "push", "media", "responders"}
+    assert set(FEATURES) == {"auth", "reads", "stream", "push", "media", "responders"}
 
 
 # -- the catch-all ----------------------------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def test_the_token_buckets_are_the_designs_reads_10_a_second_burst_30_writes_2_b
 
 
 def test_a_head_is_limited_as_a_read_like_a_get():
-    v1 = V1(table([]), switches=Box(reads=True, writes=True).switches(), resolver=lambda h: DEVICE,
+    v1 = V1(table([]), switches=Box(reads=True, push=True).switches(), resolver=lambda h: DEVICE,
             limits=Limits(clock=Clock()))
     assert all(v1.respond("GET", "/api/v1/things", "", {})[0] == 200 for _ in range(30))     # the read burst, used up
     assert v1.respond("GET", "/api/v1/things", "", {})[0] == 429
@@ -266,7 +266,7 @@ def test_a_head_is_limited_as_a_read_like_a_get():
 
 def test_the_limit_is_a_429_with_retry_after_and_the_envelopes_retry_after_s():
     clock = Clock()
-    v1 = V1(table([]), switches=Box(reads=True, writes=True).switches(), resolver=lambda h: DEVICE,
+    v1 = V1(table([]), switches=Box(reads=True, push=True).switches(), resolver=lambda h: DEVICE,
             limits=Limits(clock=clock))
     assert all(v1.respond("POST", "/api/v1/things", "", {})[0] == 200 for _ in range(10))
     status, body, _, headers = v1.respond("POST", "/api/v1/things", "", {})
@@ -363,7 +363,7 @@ def test_at_most_two_streams_per_device_and_a_cap_on_all():
 
 def test_a_device_route_is_a_401_until_there_are_devices():
     seen = []
-    v1 = V1(table(seen), switches=Box(reads=True, writes=True).switches())
+    v1 = V1(table(seen), switches=Box(reads=True, push=True).switches())
     for method in ("GET", "POST"):
         r = v1.respond(method, "/api/v1/things", "", {"Authorization": "Bearer abc.def.ghi"})
         assert err(r)[:2] == (401, "unauthorized")
