@@ -1790,6 +1790,7 @@ class Updater:
         urgent, urgent_at = "", None
         spent: dict[str, float] = {}
         noted: set[str] = set()
+        ahead: set[str] = set()          # newer hub builds after the staged one, not chased once late
         phase, why, prev, hold = "", "", t0, {"hard": [], "stt": 0, "text": ""}
         saved_ph, saved, said = "", -1e18, -1e18
         while True:
@@ -1805,12 +1806,24 @@ class Updater:
                 self.save(st, state="paused", current=build, paused=paused, hold=None, pending=None)
                 return False, {"waited": now - t0}
             late = now - behind >= self.ceiling_s
-            # the hub moved on: wait for the newer one instead; once late, the staged one goes (no chasing)
-            if not only and not late:
-                w = self.read_want()
-                if w and not same_build(w, want):
-                    self.note(f"auto-update: {tag}: the hub moved on to {short(w)} while this waited: "
-                              f"{short(want)} skipped, one switch to the newer one")
+            # the hub moved on: wait for the newer one instead. Once late, a newer build AFTER the staged one isn't
+            # chased (the staged one goes first); the hub going back (to this station's build) or elsewhere still
+            # stops this switch
+            w = self.read_want() if not only else ""
+            if w and not same_build(w, want) and not (late and w in ahead):
+                if late and not same_build(w, build) and self.descends(w, sha):
+                    ahead.add(w)
+                    self.note(f"auto-update: {tag}: the hub moved on to {short(w)}: {_mins(now - behind)} behind, "
+                              f"so {short(sha)} (staged) goes first")
+                else:
+                    if same_build(w, build):
+                        said = f"the hub went back to {short(w)}, the build this station runs: not switching"
+                    elif late:
+                        said = f"the hub moved to {short(w)}, not a build after {short(sha)}: not switching to it"
+                    else:
+                        said = (f"the hub moved on to {short(w)} while this waited: {short(want)} skipped, "
+                                "one switch to the newer one")
+                    self.note(f"auto-update: {tag}: {said}")
                     self.save(st, state="behind", current=build, hold=None)
                     return False, {"waited": now - t0}
             if urgent_at is None:
@@ -1845,6 +1858,16 @@ class Updater:
                   + (f"; {len(skipped)} hub build(s) in between skipped: {', '.join(skipped)}" if skipped else ""))
         return True, {"waited": waited, "held": held, "why": why, "busy": hold.get("text") or "",
                       "stt": hold.get("stt", 0), "skipped": skipped}
+
+    def descends(self, w: str, sha: str) -> bool:
+        """The hub's build w comes after sha on main (fetched first when this clone doesn't have it yet)."""
+        if not self.git("rev-parse", "--verify", "--quiet", f"{w}^{{commit}}", check=False):
+            try:
+                self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
+            except StepError:
+                return False
+        full = self.git("rev-parse", "--verify", "--quiet", f"{w}^{{commit}}", check=False)
+        return bool(full) and self.is_ancestor(sha, full)
 
     def _interrupted(self, st: dict) -> None:
         """A run that stopped half-way (reboot, killed): keep the new release only if it is healthy."""
@@ -1991,6 +2014,12 @@ class Updater:
         if not go:
             return 0                     # the hub moved on while this waited: run() goes on to the newer build
         waited = how["waited"]
+        self._settings = None
+        paused = paused_reason(self.settings())
+        if paused:                       # (sizeup-station autoupdate off at the last moment: nothing switches)
+            self.note(f"auto-update: {tag}: not switching: {paused}")
+            self.save(st, state="paused", current=build, paused=paused, hold=None, pending=None)
+            return 0
         before = self.radios_ok()
         self.save(st, state="updating", hold=None)
         t1 = self.clock()

@@ -330,10 +330,16 @@ case "$cmd" in
         # stopped here if it hasn't by then, and only while it still waits (never mid-build or mid-switch)
         if updater_running && [ "$(updater_state)" = deferred ]; then
           for _ in $(seq 1 30); do updater_running || break; sleep 1; done
+          stopped=""
           if updater_running && [ "$(updater_state)" = deferred ]; then
-            systemctl stop sizeup-update.service
+            systemctl stop sizeup-update.service && stopped=1
           fi
-          echo "the update that was waiting for its moment won't switch"
+          # said only when it is so: it stopped waiting by itself (paused), or was stopped while still waiting
+          if [ -n "$stopped" ] || [ "$(updater_state)" = paused ]; then
+            echo "the waiting update won't switch"
+          else
+            echo "the waiting update had already gone ahead: sudo sizeup-station autoupdate status" >&2
+          fi
         fi
         exit 0 ;;
       now)

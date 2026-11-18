@@ -1067,3 +1067,56 @@ def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip
     assert 0.5 <= time.monotonic() - t0 < 5
     assert n["pages"] == 1 and n["waiting"] == 1 and app.stt.busy() == 0
     assert page.status == "skipped" and f"({SHED}: the station stopped" in page.model
+
+
+def _late(u, sha):
+    t0 = u.t[0]
+    u.save({}, pending={"sha": sha, "seen": t0 - au.CEILING_S - 10, "behind": t0 - au.CEILING_S - 10, "skipped": []})
+    u.busy_for = 4                                           # a carrier for 20 s: the want is read meanwhile
+    return t0
+
+
+def test_once_late_the_hub_going_back_or_elsewhere_still_stops_the_switch(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    old, new = repo.shas[0], repo.commit("two")
+    t0 = _late(u, new)
+    u.on_sleep = lambda now: u.want(old) if now - t0 >= 5 else None      # the hub rolled back to what runs here
+    u.want(new)
+    assert u.run() == 0 and ("activate", new) not in u.calls and u.current()[1] == old
+    assert f"the hub went back to {old[:7]}, the build this station runs: not switching" in "\n".join(u.lines)
+    # ... or to a build that isn't after the staged one (a side branch the hub runs)
+    u.calls.clear()
+    side = repo.commit("elsewhere", branch="other")
+    git(repo.origin, "checkout", "-q", "main")
+    git(repo.origin, "merge", "-q", "--no-ff", "-m", "merge other", "other")
+    elsewhere = git(repo.origin, "rev-parse", "other")                    # on main (merged), not after `new`
+    newest = repo.commit("three")
+    t1 = _late(u, newest)
+    u.on_sleep = lambda now: u.want(elsewhere) if now - t1 >= 5 else None
+    u.want(newest)
+    u.run()
+    assert u.calls[0] == ("stage", newest) and ("activate", newest) not in u.calls
+    assert f"the hub moved to {elsewhere[:7]}, not a build after {newest[:7]}: not switching to it" in "\n".join(u.lines)
+    assert side == elsewhere
+
+
+def test_autoupdate_off_at_the_last_moment_switches_nothing(station, monkeypatch):
+    repo, u = station
+    new = repo.commit("two")
+    real = u.pick_moment
+
+    def then_off(*a, **k):
+        got = real(*a, **k)
+        u.p.install_conf.write_text("SIZEUP_REF=main\nSIZEUP_AUTO_UPDATE=off\n")
+        return got
+    monkeypatch.setattr(u, "pick_moment", then_off)
+    u.want(new)
+    assert u.run() == 0 and u.calls == [("stage", new)] and u.load()["state"] == "paused"
+
+
+def test_the_off_command_only_says_it_stopped_the_switch_when_it_did():
+    text = (Path(__file__).parent.parent / "deploy" / "station" / "sizeup-station").read_text()
+    off = text[text.index("      on|off)"):text.index("      now)")]
+    assert 'if [ -n "$stopped" ] || [ "$(updater_state)" = paused ]; then' in off
+    assert off.index('systemctl stop sizeup-update.service && stopped=1') < off.index("the waiting update won't switch")

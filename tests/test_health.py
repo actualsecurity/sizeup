@@ -197,9 +197,23 @@ def test_a_deferred_switch_is_no_alert_until_its_deadline_then_one_at_once():
     for m in (0, 20, 49):
         r.at(m * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
         assert r.keys() == []
+    r.at(51 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))   # within the 2 min slack
+    assert r.keys() == []
     r.at(53 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))   # past it: the updater died
     (a,) = r.h.alerts()
     assert a["key"] == "behind" and "overdue" in a["text"]
+
+
+def test_a_hub_moving_on_mid_deferral_is_the_usual_behind_not_overdue():
+    r = Rig()
+    # deferred to a build the hub has since moved past (a burst; a late station switching to what it staged)
+    upd = {"state": "deferred", "to": "e" * 40, "since": T0, "hold": {"phase": "settle", "why": "", "until": T0 + 60}}
+    r.at(0, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
+    r.at(10 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
+    assert r.keys() == []                                                  # behind_s (15 min) as usual, never at once
+    r.at(15 * 60, status=station_status(build=OLD, version={"build": OLD, "update": upd}))
+    (a,) = r.h.alerts()
+    assert a["key"] == "behind" and "overdue" not in a["text"]
 
 
 def test_a_failed_or_rolled_back_update_alerts_at_once_with_the_update_line():

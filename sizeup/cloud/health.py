@@ -264,6 +264,13 @@ def _read(path: str) -> str:
         return ""
 
 
+def _hold_until(upd: dict) -> dict:
+    """A deferred switch's deadline (autoupdate.py "hold".until, the station's clock): {"hold_until": t} or {}."""
+    h = upd.get("hold") if isinstance(upd.get("hold"), dict) else {}
+    t = h.get("until")
+    return {"hold_until": float(t)} if isinstance(t, (int, float)) and not isinstance(t, bool) else {}
+
+
 def station_adapter(a) -> dict | None:
     """The station's incident-source adapter as it reported it (#301): state, short repo name, commit, text, and each
     source's health. Only these keys pass (the station sends no URL or credential; nothing else is shown either)."""
@@ -634,7 +641,8 @@ class StationHealth:
         desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
-                        "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                        "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                                       **_hold_until(upd)),
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
                         "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
@@ -938,7 +946,11 @@ class StationHealth:
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
             # a deferred switch past its "by HH:MM" (autoupdate.py describe() says "behind" then): the updater died or
             # hangs, so at once, not behind_s later
-            overdue = isinstance(b["update"], dict) and b["update"].get("state") == "deferred"
+            # (only its own deferral, to the hub's build, past "by HH:MM" + 2 min: a burst moving the hub on while it
+            # waits, or a late station switching to the build it staged, is the usual behind_s)
+            u = b["update"] if isinstance(b["update"], dict) else {}
+            overdue = (u.get("state") == "deferred" and same_build(u.get("to"), b["hub"])
+                       and isinstance(u.get("hold_until"), (int, float)) and self._station_now(now) > u["hold_until"] + 120)
             held("behind", 0 if overdue else self.behind_s,
                  {"severity": "warning", "title": "Station behind the hub",
                   "text": f"{b['text']} (the hub runs {short(b['hub'])})"
