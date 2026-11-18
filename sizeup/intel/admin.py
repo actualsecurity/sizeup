@@ -72,14 +72,17 @@ def clean_value(key: str, v, section: dict):
     from sizeup.intel import infer as infer_mod
     if key not in infer_mod.DEFAULTS:
         raise CadError(f"{key}: not an intel setting")
-    if key in ("infer", "infer_agree_push"):
+    if key in infer_mod.BOOLS:
         if not isinstance(v, bool):
             raise CadError(f"{key}: true or false")
     elif key == "infer_provider":
         if v not in infer_mod.PROVIDERS:
             raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
-    elif key in ("infer_mode", "infer_alone_mode"):
+    elif key in ("infer_mode", "infer_alone_mode", "infer_pd_mode"):
         v = _mode(v, key)
+    elif key == "infer_pd_pack":
+        if not isinstance(v, str) or not re.fullmatch(r"[a-z0-9_]{1,40}", v):
+            raise CadError(f"{key}: a pack's name")
     elif key in ("infer_model", "infer_region"):
         if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
             raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
@@ -91,6 +94,17 @@ def clean_value(key: str, v, section: dict):
         lo, hi = infer_mod.LIMITS[key]
         v = _f(v, lo, hi, key)
     return v
+
+
+def _model_status(eng) -> dict:
+    """The local model behind the police rules (sizeup/intel/backing.py): its status, never a prompt or an answer."""
+    b = getattr(eng, "backing", None)
+    if b is None:
+        return {"on": False, "ready": False, "backend": "none", "pc": "not here"}
+    try:
+        return b.status()
+    except Exception as e:  # noqa: BLE001 - never keeps the card from showing
+        return {"on": False, "ready": False, "backend": "none", "pc": type(e).__name__}
 
 
 class IntelAdmin:
@@ -135,6 +149,7 @@ class IntelAdmin:
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
+                "model": _model_status(eng),
                 "push_topic": self._push_topic(), "may_edit": True}
 
     def _push_topic(self) -> dict | None:

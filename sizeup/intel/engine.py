@@ -125,6 +125,8 @@ How a row becomes an event, per pack whose scope it is in:
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
+  7. last, the local model behind the rules (backing.ModelBacking, engine.backing): a row of the police pack the rules
+     raised nothing with may be asked about off this thread; its answer comes back through _raise like a rule's.
 Intel never writes incidents, radio_links, incoming or alarms.
 """
 
@@ -281,6 +283,7 @@ class IntelEngine:
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
         self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
+        self.backing = None                   # backing.ModelBacking: the local model behind the police rules (rows they left)
         # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
         # sets it; replay may), for near_incident. None: no incidents, nothing linked.
         self.incidents = None
@@ -736,7 +739,8 @@ class IntelEngine:
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
-        if self.infer is not None and hits and not suppressed and pack.src.get("infer", True):   # ("infer": false: rules only)
+        if (self.infer is not None and hits and not suppressed and pack.src.get("infer", True)   # ("infer": false: rules only)
+                and not (self.backing is not None and self.backing.owns(pack))):     # one model per row (backing.py)
             try:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
             except Exception as e:  # noqa: BLE001 - the model never stops the rules
@@ -749,6 +753,12 @@ class IntelEngine:
             if ev is None and r.category in (rules_mod.WILD, "routine") and len(event_of) == 1:
                 ev = next(iter(event_of.values()))
             self.sink.hit(Hit(tid, r.id, r.v, round(float(w), 4), r.category, pack.name, at, ev.id if ev else None))
+        if self.backing is not None:          # last: only a row the rules raised nothing with is asked (backing.py)
+            try:
+                changed += self.backing.consider(self, pack, row, key, tid, win, at, suppressed, hits, changed,
+                                                 ruled=over)
+            except Exception as e:  # noqa: BLE001 - the model never stops the rules
+                self.log(f"intel: model: {type(e).__name__}")
         return changed
 
     def _could_reach(self, pack, win: Window, tid: str, hits: list) -> bool:
@@ -1508,6 +1518,11 @@ class IntelEngine:
             for k in [k for k, w in self.windows.items()
                       if not w.entries or max(e.at for e in w.entries.values()) < now - 2 * self._span(k[0])]:
                 del self.windows[k]
+            if self.backing is not None and self.enabled:
+                try:
+                    out += self.backing.tick(self, now)       # held questions due, deadlines passed (backing.py)
+                except Exception as e:  # noqa: BLE001 - the model never stops the tick
+                    self.log(f"intel: model: {type(e).__name__}")
             held = self.policy.digest_due(now) if self.enabled else []     # obeys enabled, push, quiet (M3)
             if held and hasattr(self.sink, "digest"):
                 evs = [e for e in (self.events.get(i) for i in held) if e is not None]

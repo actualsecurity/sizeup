@@ -49,6 +49,9 @@ words, or a read-back by the call's talker or units within minutes). "words": th
 to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
 category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
 
+"describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
+rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone.
+
 A category with "fire_related": true (the police pack's fire_report, fire_call, hazmat, alarm) is checked for the FD
 already being there before it pushes (engine.py _fire): one of our fire incidents at its place (dispatched: held at
 log, an FYI only when the police words add something; on scene: held, an FYI only for a safety change; cleared: a
@@ -94,6 +97,7 @@ GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
 RE_MAX = 300
+DESCRIBE_MAX = 200              # a category's "describe": its one-line definition for the local model (backing.py)
 RE_TEXT_MAX = 4000              # a "re:" expression reads at most this many characters of a transmission (minutes of
                                 # speech): bounds the time an expression with backtracking can take on a freak text
 PHRASE_MAX = 120
@@ -453,6 +457,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
         cd = dict(cd or {})
         cd.update({k: v for k, v in ((po.get("categories") or {}).get(c) or {}).items() if k in ("mode", "priority", "ttl_min")})
         cats[c] = {"label": str(cd.get("label") or c.replace("_", " ").capitalize()),
+                   "describe": str(cd.get("describe") or "")[:DESCRIBE_MAX],     # one line for a model (backing.py)
                    "ttl_min": _num(cd.get("ttl_min", 45), 1, 24 * 60, f"{name}.{c}.ttl_min"),
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
