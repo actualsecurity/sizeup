@@ -84,7 +84,8 @@ caffeinate -i perl -e 'alarm 1800; exec @ARGV' .venv/bin/python -m pytest -n aut
 - **Worktrees have no `.venv`.** Use the main checkout's venv from inside the worktree, e.g.
   `../../../.venv/bin/python -m pytest -q` from `.claude/worktrees/<name>`. First check that it imports **your**
   code: `../../../.venv/bin/python -c 'import sizeup; print(sizeup.__file__)'` must print the worktree's path.
-- CI (`.github/workflows/test.yml`) runs pytest on Python 3.14 and builds the hub image, then checks `/healthz`.
+- CI (`.github/workflows/test.yml`) runs pytest on Python 3.14 in three parallel shards (`tools/ci_shard.py`; the
+  `pytest` check is green only when all three are) and builds the hub image, then checks `/healthz`.
 - Changes to `deploy/station/**`, `deploy/trunk-recorder/**`, `autoupdate.py`, `configupdate.py`, `adsbd.py` or
   `trunkrecd.py` also run **station-install** (`.github/workflows/station-install.yml`). It runs a real install on
   Ubuntu 24.04, shellcheck and a PowerShell parse check. Then it runs the auto-update end to end

@@ -19,9 +19,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pytest:
+  shard:
+    # The suite in parallel shards (tools/ci_shard.py): whole test files, balanced by recorded durations, so the
+    # same tests run under the same `--dist loadfile`. The shard count is the matrix's own size (strategy.job-total),
+    # and the `pytest` job below fails unless every shard passed.
+    name: pytest (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,9 +47,24 @@ jobs:
           echo "${LITESTREAM_SHA256_AMD64}  /tmp/litestream.tgz" | sha256sum -c -
           sudo tar -xzf /tmp/litestream.tgz -C /usr/local/bin litestream
           litestream version
+      - name: "This shard's test files (its own step: a failure here must stop the job, not run every test)"
+        run: |
+          set -eu
+          python tools/ci_shard.py "${{ strategy.job-index }}" "${{ strategy.job-total }}" > /tmp/shard-files.txt 2>/tmp/shard-err.txt \
+            || { cat /tmp/shard-err.txt; exit 1; }
+          echo "shard $(( ${{ strategy.job-index }} + 1 )) of ${{ strategy.job-total }}: $(wc -l < /tmp/shard-files.txt) test files"
       # Tests marked @pytest.mark.flaky (known flakes, each with its issue) get one retry on failure: "R" in the
       # progress, "N rerun" in the totals and a warning annotation (tests/conftest.py). Any other failure is final.
-      - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile
+      - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile $(cat /tmp/shard-files.txt)
+
+  pytest:
+    # One check named `pytest`, as before: green only when every shard is.
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "${{ needs.shard.result }}" = "success"
 
   image:
     # The hub image (docs/cloud.md): build it and check it serves /healthz with no radios, no
