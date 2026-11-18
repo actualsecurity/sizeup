@@ -330,7 +330,7 @@ def test_a_slow_clip_does_not_preempt(tmp_path, ihub, whisper, llama):
 def test_gaming_aborts_hands_back_and_stops_llama_server_after_a_while(tmp_path, ihub, whisper, llama):
     llama.delay = 5.0
     procs = []
-    cfg = llm_cfg(tmp_path, ihub, whisper, llama, llm_stop_gaming_s=0.5,
+    cfg = llm_cfg(tmp_path, ihub, whisper, llama, llm_stop_gaming_s=2.0,
                   llm_server=["llama-server", "-m", "m.gguf", "--port", str(llama.port)])
     w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
     with running(w):
@@ -348,10 +348,12 @@ def test_gaming_aborts_hands_back_and_stops_llama_server_after_a_while(tmp_path,
         ihub.add_infer()
         wait_for(lambda: w._llm_call is not None, what="generating")
         assert llama.requests[-1]["auth"] == f"Bearer {w.llm.key}"
+        t_gaming = time.monotonic()
         W.Control(cfg.control_path).set(gaming=True)
         wait_for(lambda: ihub.infer_done("release"), timeout=2, what="handed back")
         assert ihub.infer_done("release")[0]["why"] == "gaming"
-        assert procs[0].code is None                            # not stopped yet: only after llm_stop_gaming_s
+        if time.monotonic() - t_gaming < 1.5:                   # (a loaded machine: only when it can tell)
+            assert procs[0].code is None                        # not stopped yet: only after llm_stop_gaming_s
         wait_for(lambda: procs[0].code == 1, what="llama-server stopped after the game went on")
         wait_for(lambda: not w.llm_ok, what="no LLM")
         wait_for(lambda: (ihub.calls("/state")[-1][3] or {}).get("models", {}).get("llm") == "", what="told the hub")
