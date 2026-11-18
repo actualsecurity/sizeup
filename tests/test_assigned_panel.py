@@ -46,7 +46,7 @@ def test_a_chief_added_responding_to_an_emergency_event(quiet):
     before = len(c.full(iid)["dispatches"])
     c.clock_.t += 90
     r = c.attach(iid, {"unit_ids": [uid(c, "2395")], "status": "RS", "operator": "Lt. Ruiz"})
-    assert r == {"ok": True, "moved": [], "status": "RS"}
+    assert r == {"ok": True, "moved": [], "status": "RS", "as": {"2395": "RS"}}
     a = row(c, iid, "2395")
     assert a["status"] == "RS" and a["enroute_at"] == c.clock_.t
     assert a["dispatched_at"] is None and a["onscene_at"] is None              # no Disp: there was no dispatch

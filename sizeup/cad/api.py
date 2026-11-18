@@ -547,7 +547,8 @@ def _on_incident(m, b, o, c):
         what = [x for x in (_type(b.get("type", ""), b.get("subtype", "")) if b.get("type") else "",
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
-    if act == "attach" and isinstance(o.get("as"), dict) and o["as"]:      # each unit as it went on (a third party: Dispatched)
+    if act == "attach" and isinstance(o.get("as"), dict) and o["as"] and set(o["as"].values()) != {b.get("status")}:
+        # each unit as it went on, when not all as asked (a third party: Dispatched)
         groups: dict[str, list[str]] = {}
         for name, st in o["as"].items():
             groups.setdefault(str(st), []).append(str(name))

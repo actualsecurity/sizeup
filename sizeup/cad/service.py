@@ -1554,8 +1554,8 @@ class Cad:
             raise CadError("Accept first" if inc["status"] == "queued" else f"event is {inc['status']}")
         units = self._units_for(body, dispatching=False)
         status = _text(body, "status", 40) if body.get("status") is not None else ""
-        if status and status not in self.lists.status_ids:
-            raise CadError(f"status: {status!r} is not a unit status")
+        if body.get("status") is not None and status not in self.lists.status_ids:   # '' or unknown
+            self._add_check(iid, [], status)                     # "status: RS (Responding) or OL (On location)"
         here = [u["name"] for u in units if iid in u["incident_ids"]]
         if status and here:
             raise CadError(f"Already on this event: {', '.join(here)}")
