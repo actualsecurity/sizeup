@@ -19,9 +19,8 @@ Rules (sizeup/app.py applies them):
     - a dongle in no group, and a job in no group, behave as they always did;
     - within a group, the admin's own mapping (which dongle runs which job) is kept while every dongle is there. When
       fewer of them can run (one unplugged, failed, streaming no audio (#703), held by another app, its serial shared
-      by two), the ones left run
-      the highest-priority jobs of that mapping (plan()): the lowest-priority job gives its dongle up to a higher
-      one whose dongle went. When the dongle is back, the mapping is put back as the admin left it.
+      by two), the ones left run the highest-priority jobs of that mapping (plan()): the lowest-priority job gives
+      its dongle up to a higher one whose dongle went. When the dongle is back, the mapping is put back as the admin left it.
 
 What a fallback may never do (plan()):
     - turn on a dongle a person switched Off (that is how a dongle is handed to another app, shortfinal);
