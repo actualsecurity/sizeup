@@ -141,7 +141,7 @@ frequencies and the voice channels heard (771.13–773.22 MHz) with at least 150
 
 | File | What |
 |---|---|
-| `config.json` | trunk-recorder's config for the system, plus a `"sizeup"` block trunk-recorder never sees: `label`, `name`, `jobs` (one dongle job per source, in order: `MRRS 770`, `MRRS 773`), `site` (the site as listed) and `reception` (the reception test's: `watch`, `antenna`, `caveat`). |
+| `config.json` | trunk-recorder's config for the system, plus a `"sizeup"` block trunk-recorder never sees: `label`, `name`, `jobs` (one dongle job per source, in order: `MRRS 770`, `MRRS 773`), `site` (the site as listed) and `reception` (the reception test's: `watch`, `antenna`, `caveat`; a `watch` talkgroup's grant that isn't recorded (encrypted, no recorder, off, no source) is said in the station log, at most a line a talkgroup a minute, and every grant is counted in Settings > Radios). |
 | `talkgroups.csv` | trunk-recorder's columns plus `Tier`, `Service` and `Department`, which sizeup leaves out of the copy it hands trunk-recorder. |
 
 Adding a talkgroup is one line in the csv; adding a system is one directory (`sizeup/radio/systems.py`).
