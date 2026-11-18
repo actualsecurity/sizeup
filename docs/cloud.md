@@ -244,15 +244,38 @@ also keyed by their ids.
 its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
 
 - `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
-  thread never waits. Its queue is bounded (200 items, 600 s of audio); when it is full the input is dropped and
-  counted.
+  thread never waits. Its queue is bounded (200 items, 600 s of audio, about 77 MB: the frames are float64 and are kept
+  as they are, since the FLAC must be whisper's input bit for bit); when it is full the input is dropped and counted.
+- **Where it is made** (#677): about 40 ms of CPU an audio-second on the station's i5, so never at the station's own
+  weight. A thread (or child) of sizeup-station competes at its `CPUWeight=500`, above whisper's 100, whatever its
+  niceness. So by default (`SIZEUP_STT_ENCODER=auto`) the station hands each clip to the `sizeup-stt-encode` service
+  (`python -m sizeup.cloud.sttinput --serve /run/sizeup-stt-encode/encode.sock`: same user, no privilege, its own
+  cgroup at `CPUWeight=1`, `Nice=19`, `SCHED_IDLE`) over that socket. Where that socket isn't there (the service not
+  installed yet, restarting, macOS, the tests) the station's own thread makes them, as before, and looks for it again
+  every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or `thread (<why>)`). The
+  bytes are the same either way. A worker that fails 3 times in a row leaves it to the thread for 5 min; a clip it
+  failed is made on the thread. **The unit isn't in the release yet**: the installer installs exactly the units in
+  `deploy/station/systemd/` and is under #647, so the unit and its line there come in a follow-up (#709).
+- **Held while whisper is behind** (its oldest live clip waiting `stt.BEHIND_S`, 120 s): nothing is encoded. The
+  queue waits, bounded and with its priorities (a full queue still drops the lowest first), and drains highest
+  first once whisper has caught up (`stt_input.held`).
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
-  before any clip.
-- **Priority** (#677, `App._stt_lane`). The pre-alert channels go first: pages, the airband, and another system's
-  talkgroups of the `alert` tier (PD dispatch). Then other traffic. Last, a context talkgroup of another tier. The
-  encoder makes the highest first, and the lane sends the highest first, oldest first within it. Under pressure (a
-  full encoder queue, the lane over its budget) the lowest goes first; a pre-alert one goes only when nothing lower
-  is left, counted as `dropped_pre` ("· N pre-alert" on Health). The wire is unchanged.
+  before any clip. Its order is an index (`stt_inputs_order`): a batch picks its rows from the index and reads each
+  FLAC on its own, so an event's `add()` (the emergency button's too) never waits on the lane.
+- **Priority** (#677, `App._stt_lane`, from whisper's own classes in `_stt_priority`):
+
+  | | what | whisper's class |
+  |---|---|---|
+  | `PRE` | pages; another system's talkgroups of the `alert` tier (PD dispatch) | a page; `CONTEXT` / `CONTEXT_FALLBACK` |
+  | `FIRE` | our fire traffic: Fire/EMS 15 (`tg:307`), the firegrounds | `URGENT` |
+  | `NORMAL` | the airband and other live traffic | `HIGH`, `LIVE` |
+  | `LOW` | a context talkgroup of another tier, one not on Main | `LOW` |
+
+  The encoder makes the highest first. The lane sends the highest first; within `PRE` and `FIRE` the fresh ones
+  (queued within 5 min) go before the stale, so a fresh page isn't behind an outage's backlog; otherwise oldest first.
+  Under pressure (a full encoder queue, the lane over its budget) the lowest goes first, the oldest within it: the
+  airband never costs a fireground clip. A pre-alert one goes only when nothing lower is left, counted as
+  `dropped_pre` ("· N pre-alert" on Health; a too long or failed one isn't counted there). The wire is unchanged.
 - The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
   event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
   `stt_input` in its caps; an older hub never gets them.

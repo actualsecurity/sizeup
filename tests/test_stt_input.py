@@ -696,15 +696,18 @@ def test_station_to_hub_the_engines_get_exactly_what_the_station_whisper_got(tmp
     st.stt.start()
     st.link.start()
     try:
+        # the station queues STT inputs only for a hub it has heard take them (its first state answer): under load
+        # the segment could beat that answer and go without one (the hub then has listening-8k only)
+        assert wait(lambda: sttinput.CAP in st.link.hub_caps, 30)
         now = time.time()
         a = voice(3.0, seed=21)
         st._segment(Channel(453.0375, "FG1"), Segment(now, now + 3.0, a, 20.0, []))
         tid = f"FG1-{int(now * 1000)}"
         assert wait(lambda: any(t["id"] == tid for t in all_traffic(hub.get("/api/state"))), 15)
-        got = hub.app.read_stt_audio(tid, wait_s=15.0)
+        assert wait(lambda: st.link.stt_stats()["sent"] == 1 and not st.link.outbox.stt_pending()[0], 30)
+        got = hub.app.read_stt_audio(tid)                       # (here already: no wait)
         assert got.input == "stt-src"
         assert np.array_equal(got.pcm, whisper_input(st.stt.client.got[0]))
-        assert wait(lambda: st.link.stt_stats()["sent"] == 1 and not st.link.outbox.stt_pending()[0], 10)
         # the station's .src.wav is the audio before radio_voice; its whisper input, made again from it, matches
         # the hub's to within the .src.wav's own int16 rounding
         with wave.open(str(tmp_path / "st" / "clips" / f"{tid}.src.wav")) as w:

@@ -17,15 +17,20 @@ here, so a page or a transmission never queues behind one. They are not events (
 the hub keeps each one by its clip id, whenever it comes, so the order doesn't matter and a resend is harmless).
 
     add_stt(data, flac, meta, prio)  one, committed at once
-    stt_batch()                the highest priority first, the oldest first within it, up to a size; stt_ack(ns) deletes
-                               the ones the hub answered for
+    stt_batch()                the highest priority first, up to a size (the order below); stt_ack(ns) deletes the ones
+                               the hub answered for
 
-Each has a priority (#677, sttinput.PRE / NORMAL / LOW): the pre-alert channels' (pages, the airband, a talkgroup of
-the alert tier) go up before other traffic, and a context talkgroup's last. They have their own budget (STT_SHARE of
-max_audio_bytes) and count toward the limit with the clips, and go before any of them: over their budget, or the whole
-over the limit, STT inputs are dropped first, the lowest priority first and the oldest first within it (dropped_stt
-counts them, dropped_stt_pre the pre-alert ones), only then context audio, then our clips. The hub then transcribes the
-listening clip and says so.
+Each has a priority (#677, sttinput.PRE / FIRE / NORMAL / LOW, App._stt_lane): PRE the pre-alerts (pages, a talkgroup of
+the alert tier), FIRE our fire traffic (whisper's URGENT: Fire/EMS 15, the firegrounds), NORMAL the airband and other
+traffic, LOW a context talkgroup. Sent: the highest priority first; within PRE and FIRE the fresh ones (queued within
+FRESH_S) before the stale, so a fresh page isn't behind an outage's backlog; else the oldest first. They have their own
+budget (STT_SHARE of max_audio_bytes) and count toward the limit with the clips, and go before any of them: over their
+budget, or the whole over the limit, STT inputs are dropped first, the lowest priority first and the oldest first within
+it (dropped_stt counts them, dropped_stt_pre the pre-alert ones), only then context audio, then our clips. The hub then
+transcribes the listening clip and says so.
+
+The events never wait on the lane: its order is an index (stt_inputs_order), the batch picks its rows from the index
+alone and reads each FLAC on its own, so the lock add() needs is only ever held for one small read.
 """
 
 from __future__ import annotations
@@ -39,8 +44,10 @@ from pathlib import Path
 
 CONTEXT_SHARE = 0.2
 STT_SHARE = 0.3
-STT_PRE = 2                     # an STT input's priority (sizeup/cloud/sttinput.py PRE / NORMAL / LOW): pre-alert ...
+STT_PRE = 3                     # an STT input's priority (sizeup/cloud/sttinput.py PRE / FIRE / NORMAL / LOW): ...
+STT_FIRE = 2                    # ... pre-alert, fire traffic,
 STT_NORMAL = 1                  # ... other traffic (and every row from before #677)
+FRESH_S = 300.0                 # PRE / FIRE: queued within this long goes before the older (an outage's backlog)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -83,6 +90,7 @@ class Outbox:
             self.db.execute("ALTER TABLE outbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0")
         if "prio" not in {r[1] for r in self.db.execute("PRAGMA table_info(stt_inputs)")}:    # (a lane before #677)
             self.db.execute(f"ALTER TABLE stt_inputs ADD COLUMN prio INTEGER NOT NULL DEFAULT {STT_NORMAL}")
+        self.db.execute("CREATE INDEX IF NOT EXISTS stt_inputs_order ON stt_inputs (prio, n, at)")
         row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
         if row is None:
             self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?)", (secrets.token_hex(8),))
@@ -100,11 +108,13 @@ class Outbox:
         and the whole is inside the limit."""
         limit = int(self.max_audio_bytes * STT_SHARE)
         while self.stt_bytes > limit or (self.stt_bytes > 0 and self.audio_bytes + self.stt_bytes > self.max_audio_bytes):
-            old = self.db.execute("SELECT n, LENGTH(flac), prio FROM stt_inputs ORDER BY prio, n LIMIT 20").fetchall()
+            old = self.db.execute("SELECT n, prio FROM stt_inputs INDEXED BY stt_inputs_order ORDER BY prio, n "
+                                  "LIMIT 20").fetchall()
             if not old:
                 self.stt_bytes = 0
                 return
-            for n, size, prio in old:
+            for n, prio in old:
+                size = self.db.execute("SELECT LENGTH(flac) FROM stt_inputs WHERE n = ?", (n,)).fetchone()[0]
                 self.db.execute("DELETE FROM stt_inputs WHERE n = ?", (n,))
                 self.stt_bytes -= size
                 self.dropped_stt += 1
@@ -123,15 +133,17 @@ class Outbox:
             self._drop_stt()
             return int(cur.lastrowid)
 
-    def stt_batch(self, max_bytes: int = 256 * 1024, max_items: int = 50) -> list[dict]:
+    def stt_batch(self, max_bytes: int = 256 * 1024, max_items: int = 50, now: float | None = None) -> list[dict]:
         """The STT inputs to send next, at least one, up to max_bytes of FLAC (small: a post already on its way when a
-        page starts shares the uplink with it): the highest priority first (the pre-alert channels'), the oldest first
-        within it."""
+        page starts shares the uplink with it), in the lane's order (the module doc). Picked from the index alone, then
+        each read on its own: the lock is never held over the lane's FLAC."""
         out, size = [], 0
-        with self._lock:
-            rows = self.db.execute("SELECT n, at, data, flac, meta, prio FROM stt_inputs ORDER BY prio DESC, n LIMIT ?",
-                                   (max_items,)).fetchall()
-        for n, at, data, flac, meta, prio in rows:
+        for n in self._stt_order(max_items, now):
+            with self._lock:
+                row = self.db.execute("SELECT at, data, flac, meta, prio FROM stt_inputs WHERE n = ?", (n,)).fetchone()
+            if row is None:                         # (dropped meanwhile)
+                continue
+            at, data, flac, meta, prio = row
             if out and size + len(flac) > max_bytes:
                 break
             out.append({"n": n, "at": at, "data": json.loads(data), "flac": bytes(flac), "meta": json.loads(meta),
@@ -139,21 +151,41 @@ class Outbox:
             size += len(flac)
         return out
 
+    def _stt_order(self, k: int, now: float | None = None) -> list[int]:
+        """The next k rows' n, from the index (stt_inputs_order) alone."""
+        fresh = (time.time() if now is None else now) - FRESH_S
+        out: list[int] = []
+        with self._lock:
+            prios = [p for (p,) in self.db.execute("SELECT DISTINCT prio FROM stt_inputs INDEXED BY stt_inputs_order "
+                                                   "ORDER BY prio DESC")]
+            for p in prios:
+                parts = (("AND at >= ?", (fresh,)), ("AND at < ?", (fresh,))) if p >= STT_FIRE else (("", ()),)
+                for cond, arg in parts:
+                    if len(out) >= k:
+                        return out
+                    out += [n for (n,) in self.db.execute(
+                        f"SELECT n FROM stt_inputs INDEXED BY stt_inputs_order WHERE prio = ? {cond} ORDER BY n LIMIT ?",
+                        (p, *arg, k - len(out)))]
+        return out[:k]
+
     def stt_ack(self, ns) -> int:
         """The hub has answered for these (kept, or refused for good): gone from here."""
         ns = [int(n) for n in ns]
         if not ns:
             return 0
-        with self._lock:
-            k = self.db.execute(f"DELETE FROM stt_inputs WHERE n IN ({','.join('?' * len(ns))})", ns).rowcount
-            self.stt_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()[0])
+        marks = ",".join("?" * len(ns))
+        with self._lock:                            # (those rows only: never a pass over the lane's FLAC)
+            gone = self.db.execute(f"SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs WHERE n IN ({marks})",
+                                   ns).fetchone()[0]
+            k = self.db.execute(f"DELETE FROM stt_inputs WHERE n IN ({marks})", ns).rowcount
+            self.stt_bytes = max(0, self.stt_bytes - int(gone))
             return k
 
     def stt_pending(self) -> tuple[int, int]:
-        """(STT inputs waiting, their bytes)."""
+        """(STT inputs waiting, their bytes): the count from the index, the bytes as kept."""
         with self._lock:
-            n, b = self.db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()
-        return int(n), int(b)
+            n = self.db.execute("SELECT COUNT(*) FROM stt_inputs INDEXED BY stt_inputs_order").fetchone()[0]
+            return int(n), self.stt_bytes
 
     def _drop_context(self, limit: int, whole: bool) -> None:
         """Context audio, oldest first, until it is inside its own budget (whole: until the whole outbox is too)."""

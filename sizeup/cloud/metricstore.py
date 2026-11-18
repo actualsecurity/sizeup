@@ -375,7 +375,7 @@ class MetricStore:
         n = 0
         for table, key, rest in (("raw", ("subject", "kind", "at"), ("doc",)),
                                  ("events", ("subject", "at", "ev"), ("detail",)),
-                                 ("hourly", ("subject", "metric", "hour"), ("n", "lo", "p50", "p90", "hi"))):
+                                 ("hourly", ("subject", "metric", "hour"), ("n", "lo", "p50", "p90", "hi", "p95"))):
             k, cols = ", ".join(key), ", ".join(key + rest)
             cond = f"station = ? AND {when[table][0]}"
             while True:

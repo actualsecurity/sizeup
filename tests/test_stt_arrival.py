@@ -6,13 +6,14 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+import sys
 import threading
 import time
 
 import numpy as np
 import pytest
 
-from sizeup.cloud import sttarrival, sttinput
+from sizeup.cloud import flac, sttarrival, sttinput
 from sizeup.cloud.metricstore import MetricStore
 from sizeup.cloud.outbox import Outbox
 from sizeup.incidents import Traffic
@@ -21,7 +22,7 @@ from tests.test_app import voice, wait
 from tests.test_cloud import HubRun, call, hub_cfg
 from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, stt_rows
 
-PRE, NORMAL, LOW = sttinput.PRE, sttinput.NORMAL, sttinput.LOW
+PRE, FIRE, NORMAL, LOW = sttinput.PRE, sttinput.FIRE, sttinput.NORMAL, sttinput.LOW
 
 
 # -- the station: priority in the lane --------------------------------------------------------------------------------
@@ -116,7 +117,7 @@ def station(tmp_path):
     st.link.stop()
 
 
-def test_the_station_ranks_pages_airband_and_alert_tier_talkgroups_first(station, monkeypatch):
+def test_the_station_ranks_pre_alerts_then_fire_then_the_airband_and_other_traffic(station, monkeypatch):
     from sizeup import app as app_mod
     from sizeup.radio.page import Page
     st = station
@@ -124,9 +125,10 @@ def test_the_station_ranks_pages_airband_and_alert_tier_talkgroups_first(station
     t = lambda src: Traffic(f"{src}-1", src, 0.0, 1.0, "")     # noqa: E731
     page = Page("South2-1790000000000", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
     assert st._stt_lane(page, "South 2") == PRE                                  # a page
-    assert st._stt_lane(t("HPN ATC"), "HPN ATC") == PRE                          # the airband
-    assert st._stt_lane(t("FG1"), "FG1") == NORMAL                               # our traffic
-    assert st._stt_lane(t("Fire/EMS 15"), "tg:307") == NORMAL                    # (first for whisper; no pre-alert)
+    assert st._stt_lane(t("FG1"), "FG1") == FIRE                                 # whisper's URGENT: fire traffic
+    assert st._stt_lane(t("Fire/EMS 15"), "tg:307") == FIRE
+    assert st._stt_lane(t("HPN ATC"), "HPN ATC") == NORMAL                       # the airband: never above fire
+    assert st._stt_lane(t("Ops 3"), "Ops 3") == NORMAL                           # other live traffic
     # another P25 system's talkgroups (#409): by their tier
     tiers = {1001: "alert", 1002: "record", 1003: "text"}
     monkeypatch.setattr(st.tg, "tier", lambda tg, system="": tiers.get(tg) if system else None)
@@ -135,30 +137,302 @@ def test_the_station_ranks_pages_airband_and_alert_tier_talkgroups_first(station
     assert st._stt_lane(t("PD admin"), "p25:mrrs:1003") == LOW
 
 
-def test_a_pre_alert_transmission_goes_up_ahead_of_older_traffic(tmp_path, monkeypatch):
+def test_fire_traffic_goes_up_ahead_of_older_airband(tmp_path, monkeypatch):
     from sizeup import app as app_mod
     monkeypatch.setattr(app_mod, "AIRBAND_FIRST", {"HPN ATC"})
     hub = FakeHub(["p25_systems", "stt_input"])           # (down: the events wait, and the STT inputs behind them)
     st = offline_station(tmp_path, client=hub)
     try:
-        _pre_alert_first(st, hub)
+        _fire_first(st, hub)
     finally:
         st.link.stop()
 
 
-def _pre_alert_first(st, hub):
-    first = _transmission(st, "FG1-1790000000100", "FG1", voice(1.0, seed=1), True)
+def _fire_first(st, hub):
+    first = _transmission(st, "HPNATC-1790000000100", "HPN ATC", voice(1.0, seed=1), False)
     assert wait(lambda: stt_rows(st, first.id), 10)
-    later = _transmission(st, "HPNATC-1790000000200", "HPN ATC", voice(1.0, seed=2), False)
+    later = _transmission(st, "FG1-1790000000200", "FG1", voice(1.0, seed=2), True)
     assert wait(lambda: stt_rows(st, later.id), 10)
     rows = st.link.outbox.stt_batch(max_bytes=1 << 30)
-    assert [(r["data"]["id"], r["prio"]) for r in rows] == [(later.id, PRE), (first.id, NORMAL)]
+    assert [(r["data"]["id"], r["prio"]) for r in rows] == [(later.id, FIRE), (first.id, NORMAL)]
     hub.down = False
     assert wait(lambda: hub.stt_posts and not st.link.outbox.stt_pending()[0], 15)
     ids = [it["id"] for body, _gz in hub.stt_posts for it in body["items"]]
     assert ids == [later.id, first.id]
     assert "prio" not in hub.stt_posts[0][0]["items"][0]                          # (the wire is as before)
     assert st.link.stt_stats()["dropped_pre"] == 0
+
+
+def test_the_airband_never_costs_a_fireground_clip(tmp_path):
+    """FG1 and HPN ATC alternating over a pressed lane: the airband's go, never the fireground's (#677 review)."""
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000)                 # the lane's budget: 3000 (6 inputs)
+    for k in range(30):
+        ob.add_stt({"id": f"FG1-{k}"}, b"f" * 500, {}, prio=FIRE)
+        ob.add_stt({"id": f"ATC-{k}"}, b"a" * 500, {}, prio=NORMAL)
+    kept = [r["data"]["id"] for r in ob.stt_batch(max_bytes=1 << 30)]
+    assert kept == [f"FG1-{k}" for k in range(24, 30)] and ob.dropped_stt == 54 and ob.dropped_stt_pre == 0
+    # the encoder: an airband clip never takes a fireground clip's place in a full queue
+    gate = threading.Event()
+    enc = sttinput.Encoder(lambda *a, **k: gate.wait(10), log=lambda m: None, max_items=2, max_s=100.0)
+    a = voice(0.5)
+    assert enc.submit(Traffic("busy", "FG1", 0, 1, ""), a)
+    assert wait(lambda: enc.stats()["queued"] == 0, 5)
+    assert enc.submit(Traffic("FG1-a", "FG1", 0, 1, ""), a, FIRE) and enc.submit(Traffic("FG1-b", "FG1", 0, 1, ""), a, FIRE)
+    assert not enc.submit(Traffic("ATC-a", "HPN ATC", 0, 1, ""), a, NORMAL)
+    assert enc.stats()["queued"] == 2 and enc.dropped["queue"] == 1
+    gate.set()
+    enc.stop()
+
+
+def test_fresh_pre_alerts_and_fire_go_before_an_outages_backlog(tmp_path):
+    now = 1_800_000_000.0
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000_000)
+    for k in range(40):                                                         # an hour's backlog (an outage)
+        ob.add_stt({"id": f"South2-old{k}"}, b"p" * 100, {}, prio=PRE, at=now - 3600 + k)
+        ob.add_stt({"id": f"FG1-old{k}"}, b"f" * 100, {}, prio=FIRE, at=now - 3600 + k)
+        ob.add_stt({"id": f"Ops-old{k}"}, b"o" * 100, {}, prio=NORMAL, at=now - 3600 + k)
+    ob.add_stt({"id": "Ops-new"}, b"o" * 100, {}, prio=NORMAL, at=now - 5)
+    ob.add_stt({"id": "FG1-new"}, b"f" * 100, {}, prio=FIRE, at=now - 10)
+    ob.add_stt({"id": "South2-new1"}, b"p" * 100, {}, prio=PRE, at=now - 60)
+    ob.add_stt({"id": "South2-new2"}, b"p" * 100, {}, prio=PRE, at=now - 1)
+    ids = [r["data"]["id"] for r in ob.stt_batch(max_bytes=1 << 30, max_items=200, now=now)]
+    # PRE: fresh (in order), then the stale; FIRE the same; then the rest oldest first
+    assert ids[:3] == ["South2-new1", "South2-new2", "South2-old0"]
+    assert ids[42:45] == ["FG1-new", "FG1-old0", "FG1-old1"]
+    assert ids[83:] == [f"Ops-old{k}" for k in range(40)] + ["Ops-new"]
+    assert [r["data"]["id"] for r in ob.stt_batch(max_items=1, now=now)] == ["South2-new1"]   # the first post
+
+
+def test_the_lane_order_is_an_index_and_never_a_pass_over_the_flac(tmp_path):
+    ob = Outbox(tmp_path / "o.sqlite")
+    plans = []
+    for sql, args in (("SELECT n, prio FROM stt_inputs INDEXED BY stt_inputs_order ORDER BY prio, n LIMIT 20", ()),
+                      ("SELECT DISTINCT prio FROM stt_inputs INDEXED BY stt_inputs_order ORDER BY prio DESC", ()),
+                      ("SELECT n FROM stt_inputs INDEXED BY stt_inputs_order WHERE prio = ? AND at >= ? ORDER BY n "
+                       "LIMIT ?", (3, 0.0, 5)),
+                      ("SELECT COUNT(*) FROM stt_inputs INDEXED BY stt_inputs_order", ())):
+        plans.append(" ".join(r[-1] for r in ob.db.execute("EXPLAIN QUERY PLAN " + sql, args)))
+    assert all("USE TEMP B-TREE FOR ORDER BY" not in p for p in plans), plans
+    assert all("COVERING INDEX" in p for p in plans), plans
+
+
+def test_an_event_never_waits_on_a_full_stt_lane(tmp_path):
+    """The emergency button's add() while the lane's sender picks its batch over ~86 MB of FLAC: the outbox's lock is
+    only ever held for one small read. Medians (robust under a loaded CI): the old sort of the whole lane under the
+    lock held it ~20 ms each time here (p95 add() ~21 ms; 105 ms on the station's i5)."""
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=300 * 1024 * 1024)
+    blob = np.random.default_rng(1).integers(0, 256, 48_000, dtype=np.uint8).tobytes()
+    for k in range(1800):                                                       # every priority, fresh and stale
+        ob.add_stt({"id": f"X-{k}"}, blob, {}, prio=k % 4, at=time.time() - 3600 + k)
+
+    class Timed:
+        def __init__(self, lock):
+            self.lock, self.holds, self.t0 = lock, [], 0.0
+
+        def __enter__(self):
+            self.lock.acquire()
+            self.t0 = time.perf_counter()
+
+        def __exit__(self, *exc):
+            if threading.current_thread().name == "lane":
+                self.holds.append(time.perf_counter() - self.t0)
+            self.lock.release()
+    ob._lock = timed = Timed(ob._lock)
+    stop, batches = threading.Event(), [0]
+
+    def sender():
+        while not stop.is_set():
+            assert len(ob.stt_batch()) >= 1
+            ob.stt_pending()
+            batches[0] += 1
+    t = threading.Thread(target=sender, name="lane", daemon=True)
+    t.start()
+    lat = []
+    try:
+        for k in range(200):
+            t0 = time.perf_counter()
+            ob.add("alarm", {"id": f"FG1-{k}", "emergency": True})
+            lat.append(time.perf_counter() - t0)
+            time.sleep(0.002)
+    finally:
+        stop.set()
+        t.join(10)
+    holds, lat = sorted(timed.holds), sorted(lat)
+    assert batches[0] >= 5 and len(holds) > 50
+    assert holds[len(holds) // 2] < 0.003, holds[len(holds) // 2]
+    assert lat[len(lat) // 2] < 0.005, lat[len(lat) // 2]
+
+
+def test_too_long_or_failed_pre_alerts_arent_pressure_drops():
+    def boom(*a, **k):
+        raise OSError("disk full")
+    enc = sttinput.Encoder(boom, log=lambda m: None)
+    assert not enc.submit(Traffic("South2-long", "South 2", 0, 1, ""), np.zeros(sttinput.MAX_SECONDS * RATE + 1,
+                                                                                np.float32), PRE)
+    assert enc.submit(Traffic("South2-1", "South 2", 0, 1, ""), voice(0.5), PRE)
+    assert wait(lambda: enc.dropped["failed"] == 1, 5)
+    assert enc.dropped["too_big"] == 1 and enc.dropped_pre == 0
+    enc.stop()
+
+
+def test_a_renamed_station_keeps_its_hourly_p95(tmp_path):
+    now = 1_800_000_000.0
+    store = MetricStore(tmp_path / "metrics.sqlite", log=lambda m: None, clock=lambda: now)
+    store.ingest("st-old", [{"k": "stt", "s": "FG1", "at": now - 7200 + k, "delay": k / 10, "kind": "traffic"}
+                            for k in range(1, 21)], tell=False)
+    store.maintain(now)
+    before = store.hours("st-old", "FG1", "stt_delay", now - 86400, now)
+    assert before and before[0]["p95"] is not None
+    assert store.rename_station("st-old", "st-new") > 0
+    assert store.hours("st-new", "FG1", "stt_delay", now - 86400, now) == before
+
+
+# -- where the FLAC is made, and held while whisper is behind -------------------------------------------------------
+
+
+def _made_by(mode, items, monkeypatch=None, **kw):
+    out, done = [], threading.Event()
+
+    def sink(d, data, meta, prio):
+        out.append((d["id"], data, meta, prio))
+        if len(out) == len(items):
+            done.set()
+    enc = sttinput.Encoder(sink, log=lambda m: None, mode=mode, **kw)
+    try:
+        for tid, a, fm, prio in items:
+            t = Traffic(tid, "FG1", 0.0, len(a) / RATE, "")
+            t.fm = fm                                                       # type: ignore[attr-defined]
+            assert enc.submit(t, a, prio)
+        assert done.wait(60), (enc.where, enc.dropped)
+        return out, enc.where, enc
+    finally:
+        enc.stop()
+
+
+def _items():
+    return [(f"FG1-{k}", voice(1.0 + k / 2, seed=40 + k), k % 2 == 0, FIRE) for k in range(4)]
+
+
+def test_the_worker_process_makes_the_very_same_flac_as_the_thread():
+    items = _items()
+    by_thread, where_t, _ = _made_by("thread", items)
+    by_worker, where_w, enc = _made_by("process", items)
+    assert (where_t, where_w) == ("thread", "process")
+    assert by_worker == by_thread                                           # every byte, the metadata, the order
+    assert enc._worker is None                                              # (stopped with the encoder)
+    assert np.array_equal(flac.decode(by_worker[0][1])[0], sttinput.stt_pcm(items[0][1], True))
+
+
+@pytest.fixture
+def encode_service(monkeypatch):
+    """The sizeup-stt-encode service (its ExecStart's `--serve <socket>`), as a child of this test's own."""
+    import os
+    import subprocess
+    import tempfile
+    d = tempfile.mkdtemp(dir="/tmp", prefix="sz-enc-")                 # (a Unix socket's path: short)
+    path = f"{d}/encode.sock"
+    proc = subprocess.Popen([sys.executable, "-m", "sizeup.cloud.sttinput", "--serve", path])
+    try:
+        assert wait(lambda: os.path.exists(path), 20)
+        monkeypatch.setenv(sttinput.SOCKET_ENV, path)
+        yield proc, path
+    finally:
+        proc.kill()                                                         # (our own child)
+        proc.wait(5)
+        if os.path.exists(path):
+            os.unlink(path)
+        os.rmdir(d)
+
+
+def test_auto_sends_them_to_the_encode_service_and_gets_the_very_same_flac(encode_service):
+    items = _items()
+    out, where, _ = _made_by("auto", items)
+    assert where == "service" and out == _made_by("thread", items)[0]
+
+
+def test_without_the_encode_service_the_thread_makes_them_and_says_why(monkeypatch, tmp_path):
+    monkeypatch.setenv(sttinput.SOCKET_ENV, str(tmp_path / "none.sock"))
+    items = _items()[:2]
+    out, where, _ = _made_by("auto", items)
+    assert where == "thread (no sizeup-stt-encode service)" and out == _made_by("thread", items)[0]
+
+
+def test_a_worker_that_cannot_start_or_dies_falls_back_to_the_thread(monkeypatch):
+    items = _items()
+    want = _made_by("thread", items)[0]
+    # a worker that can't start (its program gone): three tries, then the thread; nothing lost
+    monkeypatch.setattr(sttinput.sys, "executable", "/nonexistent/python")
+    logs = []
+    out, done = [], threading.Event()
+    enc = sttinput.Encoder(lambda d, data, meta, prio: (out.append((d["id"], data, meta, prio)),
+                                                        len(out) == len(items) and done.set()),
+                           log=logs.append, mode="process")
+    try:
+        for tid, a, fm, prio in items:
+            t = Traffic(tid, "FG1", 0.0, 1.0, "")
+            t.fm = fm                                                       # type: ignore[attr-defined]
+            enc.submit(t, a, prio)
+        assert done.wait(60)
+    finally:
+        enc.stop()
+    assert out == want and enc.where.startswith("thread (the worker failed 3 times") and enc.dropped["failed"] == 0
+    assert any("made on the thread for 300 s" in m for m in logs)
+    monkeypatch.undo()                                                      # (the worker's program back)
+    # a worker killed between two clips: started again, the clip made all the same
+    out, done = [], threading.Event()
+    enc = sttinput.Encoder(lambda d, data, meta, prio: (out.append((d["id"], data, meta, prio)),
+                                                        len(out) == 2 and done.set()), log=lambda m: None, mode="process")
+    try:
+        t = Traffic(items[0][0], "FG1", 0.0, 1.0, "")
+        t.fm = items[0][2]                                                  # type: ignore[attr-defined]
+        enc.submit(t, items[0][1], FIRE)
+        assert wait(lambda: len(out) == 1, 30)
+        enc._worker.proc.kill()                                             # (our own child)
+        enc._worker.proc.wait(5)
+        t = Traffic(items[1][0], "FG1", 0.0, 1.0, "")
+        t.fm = items[1][2]                                                  # type: ignore[attr-defined]
+        enc.submit(t, items[1][1], FIRE)
+        assert done.wait(30)
+        assert out == want[:2] and enc.where == "process" and enc._worker is None and enc._fails == 1   # (the thread)
+        t = Traffic(items[2][0], "FG1", 0.0, 1.0, "")
+        t.fm = items[2][2]                                                  # type: ignore[attr-defined]
+        enc.submit(t, items[2][1], FIRE)
+        assert wait(lambda: len(out) == 3, 30)
+        assert out == want[:3] and enc._worker is not None and enc._fails == 0       # a new worker took it
+    finally:
+        enc.stop()
+
+
+def test_nothing_is_made_while_whisper_is_behind_and_the_queue_drains_highest_first():
+    behind = threading.Event()
+    behind.set()
+    made = []
+    enc = sttinput.Encoder(lambda d, data, meta, prio: made.append((d["id"], prio)), log=lambda m: None,
+                           max_items=4, max_s=100.0, held=behind.is_set, mode="thread")
+    try:
+        a = voice(0.5)
+        for tid, prio in (("ctx-1", LOW), ("Ops-1", NORMAL), ("FG1-1", FIRE), ("South2-1", PRE), ("South2-2", PRE)):
+            assert enc.submit(Traffic(tid, "FG1", 0, 0.5, ""), a, prio)        # (full at 4: ctx-1 gave its place)
+        time.sleep(1.5)
+        assert made == [] and enc.holding and enc.stats()["queued"] == 4 and enc.dropped["queue"] == 1
+        behind.clear()                                                         # whisper caught up
+        assert wait(lambda: len(made) == 4, 10)
+        assert made == [("South2-1", PRE), ("South2-2", PRE), ("FG1-1", FIRE), ("Ops-1", NORMAL)]
+        assert not enc.holding and enc.held_s >= 1.0
+    finally:
+        enc.stop()
+
+
+def test_the_station_holds_its_stt_inputs_while_its_whisper_is_behind(station, monkeypatch):
+    st = station
+    behind = [True]
+    monkeypatch.setattr(st.stt._q, "behind", lambda: behind[0])
+    t = _transmission(st, "FG1-1790000000300", "FG1", voice(1.0, seed=5), True, eng="aws")   # (no whisper run here)
+    time.sleep(1.5)
+    assert stt_rows(st, t.id) == [] and st.link.stt_stats()["held"] is True
+    behind[0] = False
+    assert wait(lambda: stt_rows(st, t.id), 10)
+    assert st.link.stt_stats()["held"] is False and st.link.stt_stats()["encoder"]
 
 
 # -- the hub: the arrival delay -------------------------------------------------------------------------------------

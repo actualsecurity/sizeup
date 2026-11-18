@@ -2726,17 +2726,19 @@ class App:
             log(f"hub link: speech-to-text input for {getattr(item, 'id', '?')}: {type(e).__name__}: {e}")
 
     def _stt_lane(self, item, key: str) -> int:
-        """Its priority in the STT input lane to the hub (#677, sizeup/cloud/sttinput.py PRE / NORMAL / LOW): the
-        pre-alert channels first, so the hub's engines get them soonest (pages, the airband, another system's talkgroup
-        of the alert tier: PD dispatch), then other traffic, and last a talkgroup heard only as context (whisper's LOW:
-        dropped first when the outbox is pressed)."""
-        from sizeup.cloud.sttinput import LOW as LANE_LOW, NORMAL as LANE_NORMAL, PRE as LANE_PRE
+        """Its priority in the STT input lane to the hub (#677, sizeup/cloud/sttinput.py), from whisper's own classes
+        (_stt_priority): PRE the pre-alerts (a page; another system's talkgroup of the alert tier: PD dispatch), FIRE our
+        fire traffic (URGENT: Fire/EMS 15, the firegrounds), NORMAL the airband (HIGH) and other live traffic, LOW a
+        talkgroup heard only as context (dropped first when the outbox is pressed). The airband never outranks fire."""
+        from sizeup.cloud import sttinput
         if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page":
-            return LANE_PRE
+            return sttinput.PRE
         p = self._stt_priority(item, key)
-        if p in (HIGH, CONTEXT, CONTEXT_FALLBACK):             # the airband; an alert-tier talkgroup
-            return LANE_PRE
-        return LANE_LOW if p == LOW else LANE_NORMAL
+        if p in (CONTEXT, CONTEXT_FALLBACK):                    # an alert-tier talkgroup
+            return sttinput.PRE
+        if p == URGENT:
+            return sttinput.FIRE
+        return sttinput.LOW if p == LOW else sttinput.NORMAL
 
     def _stt_priority(self, item, key: str) -> int:
         """The whisper queue's class (strict, sizeup/stt.py, #300): pages, Fire/EMS 15 and the firegrounds first

@@ -50,7 +50,7 @@ halving the rate halves the upload and changes nothing you can hear.
                        transcribes, FLAC at 16 kHz, sizeup/cloud/sttinput.py): made by one low-priority thread
                        ("hub-stt-input") off the radio path, kept in the outbox's own lane, and sent by "hub-stt"
                        to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them;
-                       the pre-alert channels' first (pages, the airband, alert-tier talkgroups: #677)
+                       the pre-alerts first (pages, alert-tier talkgroups), then fire traffic (#677)
 """
 
 from __future__ import annotations
@@ -184,7 +184,8 @@ class StationLink:
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
         self.metrics_link = MetricsLink(app, cfg, self._client, log)
         # each transmission's / page's speech-to-text input: made off the radio path, into the outbox's own lane
-        self.stt_encoder = sttinput.Encoder(self._stt_made, log)
+        # (held while whisper is behind: the FLAC is made once it caught up, #677)
+        self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
         self._stt_wake = threading.Event()
         self.stt_refused = 0                    # the hub refused them for good (a bad one: never sent again)
         self.stt_sent = 0
@@ -255,6 +256,12 @@ class StationLink:
         if sttinput.CAP in self.hub_caps:
             self.stt_encoder.submit(item, audio, prio)
 
+    def _whisper_behind(self) -> bool:
+        """The station's whisper is behind (its oldest live clip waiting stt.BEHIND_S): the STT inputs wait. (Its
+        queue's own behind(): Transcriber has no public one.)"""
+        q = getattr(getattr(self.app, "stt", None), "_q", None)
+        return bool(q is not None and hasattr(q, "behind") and q.behind())
+
     def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
         self.outbox.add_stt(data, flac, meta, prio=prio)
         self._stt_wake.set()
@@ -267,7 +274,9 @@ class StationLink:
         return {"queued": enc["queued"], "waiting": n, "bytes": b, "made": enc["made"], "sent": self.stt_sent,
                 "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps,
                 # (#677) of the dropped, the pre-alert channels' (only once nothing of a lower priority was left)
-                "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre}
+                "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre,
+                # (#677) where the FLAC is made (scope | process | thread (why)), and held now for whisper
+                "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding}
 
     def live_changed(self) -> None:
         self._live_wake.set()

@@ -15,10 +15,12 @@ Station (StationLink):
                               radio threads never wait); ONE low-priority thread makes the FLAC (sizeup/cloud/flac.py)
                               and puts it in the outbox's own lane (outbox.py add_stt). Bounded (QUEUE_ITEMS, QUEUE_S
                               of audio): when full it drops and counts. Never part of the page / traffic event.
-    priority (#677)           each has its channel's (App._stt_lane): PRE for the pre-alert channels (pages, the
-                              airband, a talkgroup of the alert tier: PD dispatch), NORMAL for other traffic, LOW for a
-                              context talkgroup of no alert tier. The encoder makes the highest first; the outbox
-                              sends the highest first; under pressure both drop the lowest first (the oldest within it)
+    priority (#677)           each has its channel's (App._stt_lane, from whisper's own classes): PRE the pre-alerts
+                              (pages, a talkgroup of the alert tier: PD dispatch), FIRE our fire traffic (whisper's
+                              URGENT: Fire/EMS 15, the firegrounds), NORMAL the airband and other traffic, LOW a context
+                              talkgroup of another tier. The encoder makes the highest first; the outbox sends the
+                              highest first (PRE / FIRE: fresh before stale); under pressure both drop the lowest first
+                              (the oldest within it): the airband never costs a fireground clip
     StationLink._stt_forward  POST /api/station/stt, gzipped, only while no event waits in the outbox and only to a
                               hub that says it takes them ("stt_input" in its caps)
 
@@ -52,7 +54,13 @@ import binascii
 import io
 import json
 import os
+import pickle
+import socket
+import struct
+import subprocess
+import sys
 import threading
+import time
 import wave
 from collections import deque
 from dataclasses import dataclass
@@ -72,11 +80,12 @@ PATH = "/api/station/stt"
 MAX_SECONDS = 300               # one STT input at most this long (a longer transmission goes without one, counted)
 MAX_BLOB = 8 * 1024 * 1024      # ... and this big (300 s of noisy P25 is ~7 MB)
 QUEUE_ITEMS = 200               # the encoder's queue: at most this many waiting ...
-QUEUE_S = 600.0                 # ... and this much audio (~38 MB of float32): over either, dropped and counted
+QUEUE_S = 600.0                 # ... and this much audio (~77 MB: the frames are float64, kept as they are because
+                                # whisper's input is made from them bit for bit): over either, dropped and counted
 NICE = 10                       # the encoder thread's niceness (Linux: per thread), under the radio threads
 WHISPER_PAD = 8000              # WhisperClient's silence each side (0.5 s at 16 kHz)
 DROP_REASONS = ("queue", "too_big", "failed", "outbox", "refused")
-PRE, NORMAL, LOW = 2, 1, 0      # an STT input's priority in the lane (#677; outbox.py STT_PRE / STT_NORMAL)
+PRE, FIRE, NORMAL, LOW = 3, 2, 1, 0   # an STT input's priority in the lane (#677, App._stt_lane; outbox.py STT_*)
 
 
 def stt_pcm(audio: np.ndarray, fm: bool) -> np.ndarray:
@@ -115,6 +124,19 @@ def _blob(desc: dict, fm: bool, voice_offset_s: float, audio: np.ndarray) -> tup
     return data, meta
 
 
+ENCODER_ENV = "SIZEUP_STT_ENCODER"   # auto (default) | thread | process: where the FLAC is made (Encoder below)
+# auto: the sizeup-stt-encode service's socket (`--serve SOCKET`, a unit of its own: its own cgroup at CPUWeight=1,
+# beside sizeup-station's, never above whisper's 100; docs/cloud.md); a thread or a child of sizeup-station competes
+# at the station's CPUWeight=500, whatever its niceness
+SOCKET_ENV = "SIZEUP_STT_ENCODER_SOCKET"
+SOCKET = "/run/sizeup-stt-encode/encode.sock"
+WORKER_ARGS = ("-m", "sizeup.cloud.sttinput", "--encode-worker")
+WORKER_FAILS = 3                # the worker failed this often in a row: the thread, until WORKER_RETRY_S later
+WORKER_RETRY_S = 300.0          # ... (and auto without the service's socket: looked for again this often)
+PROTO = 1                       # the worker's requests: (PROTO, desc, fm, voice_offset_s, audio)
+HELD_LOOK_S = 1.0               # held (whisper behind): looked at again this often
+
+
 def _lower_priority() -> None:
     try:
         os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), NICE)    # Linux: this thread only
@@ -123,22 +145,42 @@ def _lower_priority() -> None:
 
 
 class Encoder:
-    """The station's STT inputs, made off the radio path: submit() only queues a reference to the audio; one
-    low-priority thread makes each FLAC and hands it to sink(data, flac, meta, prio) (the outbox's lane). The highest
-    priority is made first; when the queue is full a new one takes the place of lower-priority ones (the oldest of the
-    lowest first), else it is dropped."""
+    """The station's STT inputs, made off the radio path: submit() only queues a reference to the audio; one thread
+    ("hub-stt-input") takes them in turn and hands each FLAC to sink(data, flac, meta, prio) (the outbox's lane). The
+    highest priority is made first; when the queue is full a new one takes the place of lower-priority ones (the oldest
+    of the lowest first), else it is dropped.
+
+    Where the FLAC is made (about 40 ms of CPU an audio-second on the station's i5), so that it never takes whisper's
+    CPU: mode (ENCODER_ENV) "auto" sends it to the sizeup-stt-encode service (SOCKET: its own cgroup at the lowest CPU
+    weight) when its socket is there, else makes it on the thread itself (niceness NICE: below the radio threads, though
+    not below whisper); "process" a plain child process (the tests: the same bytes either way); "thread" always the
+    thread. A worker that fails WORKER_FAILS times in a row leaves it to the thread for WORKER_RETRY_S; meanwhile, and
+    for a clip a worker failed, the thread makes it (nothing is lost).
+
+    held(): whisper is behind (its oldest live clip waiting stt.BEHIND_S): nothing is made meanwhile; the queue waits
+    (bounded as above, the priorities kept) and drains, highest first, once it caught up."""
 
     def __init__(self, sink: Callable[..., None], log: Callable[[str], None] = print,
-                 max_items: int = QUEUE_ITEMS, max_s: float = QUEUE_S):
+                 max_items: int = QUEUE_ITEMS, max_s: float = QUEUE_S, held: Callable[[], bool] | None = None,
+                 mode: str | None = None):
         self.sink, self.log, self.max_items, self.max_s = sink, log, max_items, max_s
+        self.held = held
+        self.mode = (mode or os.environ.get(ENCODER_ENV) or "auto").strip().lower()
         self._cond = threading.Condition()
-        self._q: dict[int, deque] = {PRE: deque(), NORMAL: deque(), LOW: deque()}
+        self._q: dict[int, deque] = {PRE: deque(), FIRE: deque(), NORMAL: deque(), LOW: deque()}
         self._queued_s = 0.0
         self._thread: threading.Thread | None = None
         self._stop = False
         self.made = 0
         self.dropped = {"queue": 0, "too_big": 0, "failed": 0}
-        self.dropped_pre = 0            # ... of them, the pre-alert channels'
+        self.dropped_pre = 0            # ... of them, the pre-alert channels' for want of room ("queue" only)
+        self.holding = False            # held now (whisper behind)
+        self.held_s = 0.0               # ... for this long in all
+        self.where = ""                 # "service" | "process" | "thread (why)": where the last one was made
+        self._worker: _Worker | None = None
+        self._target: tuple | None = None   # ("sock", path) | ("argv", [...]) | None: the thread
+        self._look_at = 0.0             # (monotonic) the target looked at again then
+        self._fails = 0
         self._said = ""
 
     def _queued(self) -> int:
@@ -146,7 +188,7 @@ class Encoder:
 
     def _drop(self, why: str, prio: int) -> None:
         self.dropped[why] += 1
-        self.dropped_pre += int(prio >= PRE)
+        self.dropped_pre += int(prio >= PRE and why == "queue")      # (pressure: never a too long / failed one)
 
     def _room(self, prio: int, secs: float) -> bool:
         """(under the lock) Room for one more of this priority: lower-priority ones queued give it their place, the
@@ -194,6 +236,12 @@ class Encoder:
             self._cond.notify()
         return True
 
+    def _held(self) -> bool:
+        try:
+            return bool(self.held is not None and self.held())
+        except Exception:  # noqa: BLE001 - never stops the lane
+            return False
+
     def _run(self) -> None:
         _lower_priority()
         while True:
@@ -201,11 +249,22 @@ class Encoder:
                 self._cond.wait_for(lambda: self._stop or bool(self._queued()))
                 if self._stop:
                     return
+            if self._held():                                    # whisper behind: wait, the queue as it is
+                t0 = time.monotonic()
+                self.holding = True
+                with self._cond:
+                    self._cond.wait_for(lambda: self._stop, timeout=HELD_LOOK_S)
+                self.held_s += time.monotonic() - t0
+                continue
+            self.holding = False
+            with self._cond:
+                if self._stop or not self._queued():
+                    continue
                 prio = max(p for p, q in self._q.items() if q)
                 (desc, fm, offset), audio, secs = self._q[prio].popleft()
                 self._queued_s -= secs
             try:
-                got = _blob(desc, fm, offset, audio)
+                got = self._make(desc, fm, offset, audio)
                 if got is None:
                     with self._cond:
                         self._drop("too_big", prio)
@@ -219,6 +278,51 @@ class Encoder:
                     self._said = type(e).__name__
                     self.log(f"hub link: speech-to-text input not made: {type(e).__name__}: {e}")
 
+    # -- where the FLAC is made -----------------------------------------------------------------------------------
+
+    def _look(self) -> None:
+        """Where the next ones are made, for this mode (auto: the service when its socket is there)."""
+        self._look_at = time.monotonic() + WORKER_RETRY_S
+        if self.mode == "thread":
+            self._target, self.where = None, "thread"
+        elif self.mode == "process":
+            self._target, self.where = ("argv", [sys.executable, *WORKER_ARGS]), "process"
+        else:
+            path = os.environ.get(SOCKET_ENV) or SOCKET
+            if os.path.exists(path):
+                self._target, self.where = ("sock", path), "service"
+            else:
+                self._target, self.where = None, "thread (no sizeup-stt-encode service)"
+
+    def _make(self, desc: dict, fm: bool, offset: float, audio) -> tuple[bytes, dict] | None:
+        """_blob, in the worker when there is one (the same bytes: the same code on the same samples)."""
+        if self._target is None and self.mode != "thread" and time.monotonic() >= self._look_at:
+            self._look()
+        elif not self.where:
+            self._look()
+        if self._target is not None:
+            try:
+                if self._worker is None:
+                    self._worker = _Worker(*self._target)
+                got = self._worker.encode(desc, fm, offset, audio)
+                self._fails = 0
+                return got
+            except WorkerError as e:
+                self._close_worker()
+                self._fails += 1
+                if self._fails >= WORKER_FAILS:
+                    self._target, self._look_at = None, time.monotonic() + WORKER_RETRY_S
+                    self.where = f"thread (the worker failed {self._fails} times: {e})"
+                    self._fails = 0
+                    self.log(f"hub link: speech-to-text input worker: {e}: made on the thread for "
+                             f"{WORKER_RETRY_S:.0f} s")
+        return _blob(desc, fm, offset, audio)                   # (and this one, the worker gone)
+
+    def _close_worker(self) -> None:
+        w, self._worker = self._worker, None
+        if w is not None:
+            w.close()
+
     def idle(self) -> bool:
         with self._cond:
             return not self._queued()
@@ -230,10 +334,153 @@ class Encoder:
                 q.clear()
             self._queued_s = 0.0
             self._cond.notify_all()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(5.0)                                         # (a FLAC in the making: done first)
+        self._close_worker()
 
     def stats(self) -> dict:
         with self._cond:
             return {"queued": self._queued(), "made": self.made, "dropped": dict(self.dropped)}
+
+
+class WorkerError(RuntimeError):
+    """The worker process is gone or answered nonsense (the thread makes this one)."""
+
+
+def _send(f, obj) -> None:
+    data = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+    f.write(struct.pack(">I", len(data)) + data)
+    f.flush()
+
+
+def _recv(f):
+    head = f.read(4)
+    if len(head) < 4:
+        raise EOFError
+    (n,) = struct.unpack(">I", head)
+    data = f.read(n)
+    if len(data) < n:
+        raise EOFError
+    return pickle.loads(data)       # (our own child's answer, on its own pipe: never anyone else's bytes)
+
+
+class _Worker:
+    """A worker: the sizeup-stt-encode service over its socket ("sock", path), or a child process of our own
+    ("argv", [...], `python -m sizeup.cloud.sttinput --encode-worker`): _blob() over the connection."""
+
+    def __init__(self, how: str, where):
+        self.proc: subprocess.Popen | None = None
+        self.sock: socket.socket | None = None
+        try:
+            if how == "sock":
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(60.0)                      # (a stuck worker: the thread makes it)
+                self.sock.connect(where)
+                self.fin = self.sock.makefile("rb")
+                self.fout = self.sock.makefile("wb")
+            else:
+                self.proc = subprocess.Popen(where, stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True)
+                self.fin, self.fout = self.proc.stdout, self.proc.stdin
+        except OSError as e:
+            self.close()
+            raise WorkerError(f"not reached: {type(e).__name__}: {e}") from None
+
+    def encode(self, desc: dict, fm: bool, offset: float, audio) -> tuple[bytes, dict] | None:
+        try:
+            _send(self.fout, (PROTO, desc, bool(fm), float(offset), np.asarray(audio)))
+            got = _recv(self.fin)
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError) as e:
+            raise WorkerError(f"{type(e).__name__}: {e}" if str(e) else type(e).__name__) from None
+        if not isinstance(got, tuple) or not got or got[0] not in ("ok", "none", "error", "proto"):
+            raise WorkerError("a bad answer")
+        if got[0] == "proto":
+            raise WorkerError(f"another release's worker (protocol {got[1]})")
+        if got[0] == "error":
+            raise RuntimeError(got[1])                          # (this clip: counted "failed", the worker goes on)
+        return (got[1], got[2]) if got[0] == "ok" else None
+
+    def close(self) -> None:
+        for f in (getattr(self, "fout", None), getattr(self, "fin", None), self.sock):
+            try:
+                if f is not None:
+                    f.close()                                   # (the worker's loop ends at EOF)
+            except OSError:
+                pass
+        if self.proc is not None:
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()                                # (our own child only)
+                try:
+                    self.proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    pass
+
+
+def _lowest() -> None:
+    """This process at the lowest priority it may take (the service's cgroup weight does the rest)."""
+    try:
+        os.nice(19)
+    except OSError:
+        pass
+    try:
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))   # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+
+
+def _serve_one(fin, fout) -> None:
+    """One connection's requests, until it closes."""
+    while True:
+        try:
+            req = _recv(fin)
+        except (EOFError, OSError):
+            return
+        try:
+            if not isinstance(req, tuple) or len(req) != 5 or req[0] != PROTO:
+                _send(fout, ("proto", PROTO))
+                continue
+            _p, desc, fm, offset, audio = req
+            got = _blob(desc, fm, offset, audio)
+            _send(fout, ("ok", *got) if got is not None else ("none",))
+        except OSError:
+            return
+        except Exception as e:  # noqa: BLE001 - this clip only
+            try:
+                _send(fout, ("error", f"{type(e).__name__}: {e}"[:300]))
+            except OSError:
+                return
+
+
+def worker_main(argv: list[str]) -> int:
+    """`--encode-worker`: requests on stdin, answers on stdout (a child of the station's), until stdin closes.
+    `--serve <socket>`: the sizeup-stt-encode service, each connection on its own thread (only the sizeup user reaches
+    the socket: its directory is the service's, mode 0750; a connection's requests are unpickled, so never anyone
+    else's)."""
+    _lowest()
+    if argv[:1] == ["--serve"] and len(argv) == 2:
+        path = argv[1]
+        try:
+            os.unlink(path)                                     # (a stale one from the last run)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o117)
+        try:
+            srv.bind(path)
+        finally:
+            os.umask(old)
+        srv.listen(4)
+        print(f"sizeup-stt-encode: serving on {path}", file=sys.stderr, flush=True)
+        while True:
+            conn, _ = srv.accept()
+            threading.Thread(target=lambda c=conn: (_serve_one(c.makefile("rb"), c.makefile("wb")), c.close()),
+                             name="stt-encode", daemon=True).start()
+    fin, fout = sys.stdin.buffer, sys.stdout.buffer
+    sys.stdout = sys.stderr                                     # (nothing else ever writes to the answers' pipe)
+    _serve_one(fin, fout)
+    return 0
 
 
 # -- the wire ---------------------------------------------------------------------------------------------------------
@@ -365,3 +612,7 @@ def read(audio_db, cid: str, voice_offset_s: float = 0.0, log=None) -> SttAudio 
     pcm, rate = got
     off = max(0.0, float(voice_offset_s or 0.0))
     return SttAudio(pcm[int(off * rate):], rate, INPUT_LISTENING, off)
+
+
+if __name__ == "__main__" and sys.argv[1:2] in (["--encode-worker"], ["--serve"]):
+    sys.exit(worker_main(sys.argv[1:]))
