@@ -1,0 +1,817 @@
+{
+ "why": "60 Control's alert level 2 for the aircraft of an open tower pre-alert: attached to it (its title the alert's), pushed again at priority 5, the county feed polled now and a QUEUED Airport incident (never dispatched); the readback adds nothing; an upgrade to 3 escalates (push, poll, subtype); the cancel ends it and is a line on the incident, which stays open.",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "a0b1c2",
+      "flight": "N123AB",
+      "type": "C68A",
+      "lat": 41.04,
+      "lon": -73.69,
+      "alt": 1400,
+      "gs": 130,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 3.1,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 10,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, November one two three alfa bravo, declaring an emergency, unsafe gear indication"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 10.0,
+     "title": "HPN ATC: emergency declared: N123AB",
+     "detail": "aircraft emergency · heard: declaring an emergency, unsafe gear · HPN Tower",
+     "confidence": 0.99,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, declaring an emergency, unsafe gear indication",
+        "hits": [
+         "declaring an emergency",
+         "unsafe gear"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Status",
+        "possible incoming"
+       ],
+       [
+        "Heard",
+        "gear · emergency"
+       ],
+       [
+        "Track",
+        "1,400 ft · 3.1 NM · arriving"
+       ]
+      ]
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 10.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: emergency declared: N123AB (alert high 99%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: emergency declared: N123AB",
+     "message": "“Westchester Tower, N123AB, declaring an emergency, unsafe gear indication” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 60,
+    "id": "fire-1",
+    "tg": 307,
+    "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "alert_level",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 60.0,
+     "title": "HPN Alert 2 · Citation · gear · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, declaring an emergency, unsafe gear indication",
+        "hits": [
+         "declaring an emergency",
+         "unsafe gear"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-1",
+        "at": 56.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Heard",
+        "gear · emergency"
+       ],
+       [
+        "Track",
+        "1,400 ft · 3.1 NM · arriving"
+       ],
+       [
+        "Alert",
+        "declared 12:00 · Fire/EMS 15"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "Citation",
+       "problem": "gear",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 60.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-2",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (HPN ATC, 12:00:10): HPN Alert 2 · Citation · gear · RWY 34 (alert high 100%)\n12:00:10 HPN Tower: “Westchester Tower, N123AB, declaring an emergency, unsafe gear indication”\n12:00:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34”\nAircraft: N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100%\nAircraft: N123AB · C68A\nHeard: gear · emergency\nTrack: 1,400 ft · 3.1 NM · arriving\nAlert: declared 12:00 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "gear",
+     "acft_runway": "34",
+     "created_at": 60.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 60.0,
+     "kind": "created",
+     "text": "From 60 Control radio, waiting to be accepted: Airport / Alert 2 (full emergency) at 240 Airport Rd; received via Radio",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 56.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 2 · Citation · gear · RWY 34: “60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34” · queued, not dispatched",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 60.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:10 on this event: HPN Alert 2 · Citation · gear · RWY 34",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 2 · Citation · gear · RWY 34",
+     "message": "“Westchester Tower, N123AB, declaring an emergency, unsafe gear indication” · “60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 2"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 120,
+    "id": "fire-2",
+    "tg": 307,
+    "text": "60 Control copies, alert level two for the Citation, runway 34"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "alert_level",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 120.0,
+     "title": "HPN Alert 2 · Citation · gear · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "HPN Tower",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, declaring an emergency, unsafe gear indication",
+        "hits": [
+         "declaring an emergency",
+         "unsafe gear"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-1",
+        "at": 56.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 116.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control copies, alert level two for the Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": true
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Heard",
+        "gear · emergency"
+       ],
+       [
+        "Track",
+        "1,400 ft · 3.1 NM · arriving"
+       ],
+       [
+        "Alert",
+        "declared 12:00 · Fire/EMS 15"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "Citation",
+       "problem": "gear",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 60.0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 200,
+    "id": "fire-3",
+    "tg": 307,
+    "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "alert_level",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 200.0,
+     "title": "HPN Alert 3 · Citation · smoke · RWY 34",
+     "detail": "60 Control: alert level 3",
+     "confidence": 1.0,
+     "channel": "HPN Tower",
+     "count": 5,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, declaring an emergency, unsafe gear indication",
+        "hits": [
+         "declaring an emergency",
+         "unsafe gear"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-1",
+        "at": 56.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 116.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control copies, alert level two for the Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": true
+       },
+       {
+        "id": "fire-3",
+        "at": 196.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke",
+        "hits": [
+         "alert level 3"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-3"
+      },
+      "rank": 7,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Heard",
+        "gear · emergency"
+       ],
+       [
+        "Track",
+        "1,400 ft · 3.1 NM · arriving"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 2 → 3 12:03 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 3,
+       "type": "Citation",
+       "problem": "smoke",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 3,
+       "pushed_at": 200.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-3",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (HPN ATC, 12:00:10): HPN Alert 2 · Citation · gear · RWY 34 (alert high 100%)\n12:00:10 HPN Tower: “Westchester Tower, N123AB, declaring an emergency, unsafe gear indication”\n12:00:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34”\nAircraft: N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100%\nAircraft: N123AB · C68A\nHeard: gear · emergency\nTrack: 1,400 ft · 3.1 NM · arriving\nAlert: declared 12:00 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "gear",
+     "acft_runway": "34",
+     "created_at": 60.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 200.0,
+     "kind": "edit",
+     "text": "Edited type: Airport / Alert 3 (aircraft accident)",
+     "operator": "60 Control radio"
+    },
+    {
+     "incident": "I1",
+     "at": 196.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 3 · Citation · smoke · RWY 34: “60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke”",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 3 · Citation · smoke · RWY 34",
+     "message": "“60 Control copies, alert level two for the Citation, runway 34” · “60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 3"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 900,
+    "id": "fire-4",
+    "tg": 307,
+    "text": "60 Control, car 9901, cancel the alert, aircraft landed without incident"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "alert_level",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 10.0,
+     "updated_at": 900.0,
+     "title": "HPN Alert 3 · Citation · smoke · RWY 34",
+     "detail": "60 Control: alert level 3",
+     "confidence": 1.0,
+     "channel": "HPN Tower",
+     "count": 6,
+     "status": "ended",
+     "outcome_at": 900.0,
+     "incident": "I1",
+     "operator": "",
+     "note": "60 Control: 60 Control, car 9901, cancel the alert, aircraft landed without incident",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 10.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, declaring an emergency, unsafe gear indication",
+        "hits": [
+         "declaring an emergency",
+         "unsafe gear"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-1",
+        "at": 56.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, gear problem, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 116.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control copies, alert level two for the Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": true
+       },
+       {
+        "id": "fire-3",
+        "at": 196.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke",
+        "hits": [
+         "alert level 3"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-4",
+        "at": 896.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, cancel the alert, aircraft landed without incident",
+        "hits": [
+         "canceled"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency",
+       "abnormal",
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-3"
+      },
+      "rank": 7,
+      "pushed": 0.99,
+      "lines": [
+       [
+        "Aircraft",
+        "N123AB · C68A"
+       ],
+       [
+        "Heard",
+        "gear · emergency"
+       ],
+       [
+        "Track",
+        "1,400 ft · 3.1 NM · arriving"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 2 → 3 12:03 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 3,
+       "type": "Citation",
+       "problem": "smoke",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 3,
+       "pushed_at": 200.0
+      }
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 900.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 12:00:10 ended: 60 Control: 60 Control, car 9901, cancel the alert, aircraft landed without incident",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 896.0,
+     "kind": "prealert",
+     "text": "60 Control: “60 Control, car 9901, cancel the alert, aircraft landed without incident” · not closed by this",
+     "operator": ""
+    }
+   ]
+  }
+ ]
+}

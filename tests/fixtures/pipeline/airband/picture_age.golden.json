@@ -1,0 +1,228 @@
+{
+ "why": "The Aircraft picture is the App's for 60 s (App._atc_aircraft): a transmission 60 s after it is matched to ADS-B, one 61 s after is heard only.",
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0,
+    "planes": [
+     {
+      "hex": "a0b1c2",
+      "flight": "N123AB",
+      "type": "C68A",
+      "lat": 41.04,
+      "lon": -73.69,
+      "alt": 1400,
+      "gs": 130,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 3.1,
+      "age": 1.0
+     },
+     {
+      "hex": "b0b0b0",
+      "flight": "N456CD",
+      "type": "C68A",
+      "lat": 41.1,
+      "lon": -73.72,
+      "alt": 1400,
+      "gs": 130,
+      "trk": 340,
+      "vr": -700,
+      "phase": "arriving",
+      "rwy": "34",
+      "dist": 3.5,
+      "age": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 60,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "mayday mayday mayday, November one two three alfa bravo"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 60.0,
+     "updated_at": 60.0,
+     "title": "HPN ATC: MAYDAY: N123AB",
+     "detail": "aircraft emergency · heard: mayday · HPN Tower",
+     "confidence": 0.95,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 60.0,
+        "channel": "HPN Tower",
+        "text": "Mayday mayday mayday, N123AB",
+        "hits": [
+         "mayday"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": "a0b1c2",
+        "spoken": "N123AB",
+        "match": 1.0,
+        "type": "C68A",
+        "lat": 41.04,
+        "lon": -73.69,
+        "alt": 1400,
+        "gs": 130,
+        "trk": 340,
+        "phase": "arriving",
+        "rwy": "34",
+        "dist": 3.1,
+        "pos_at": -1.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.95
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 60.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: MAYDAY: N123AB (alert high 95%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: MAYDAY: N123AB",
+     "message": "“Mayday mayday mayday, N123AB” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 61,
+    "id": "app-1",
+    "ch": "NY App 126.4/120.8",
+    "dur": 4,
+    "text": "mayday mayday mayday, November four five six charlie delta"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "emergency",
+     "subject": "acft:N456CD",
+     "group": "NY App 126.4/120.8",
+     "at": 61.0,
+     "updated_at": 61.0,
+     "title": "HPN ATC: MAYDAY: N456CD",
+     "detail": "aircraft emergency · heard: mayday · NY App 126.4/120.8",
+     "confidence": 0.95,
+     "channel": "NY App 126.4/120.8",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-1",
+        "at": 61.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "Mayday mayday mayday, N456CD",
+        "hits": [
+         "mayday"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N456CD",
+        "hex": null,
+        "spoken": "N456CD",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "emergency"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 3,
+      "pushed": 0.95
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 61.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: MAYDAY: N456CD (alert high 95%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: MAYDAY: N456CD",
+     "message": "“Mayday mayday mayday, N456CD” · N456CD · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "aircraft_widened_nm": [
+    40.0
+   ]
+  }
+ ]
+}

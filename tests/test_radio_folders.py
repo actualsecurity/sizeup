@@ -309,6 +309,34 @@ const fold = (rows, custom) => N.folders(rows, custom).map((g) => [g.id, g.name,
   out.resetField = chname("p25:metro:9001").value;
   click(btn("save")); await drain();
   out.namesReset = posted.slice(-1)[0][1];
+  // a name set meanwhile from Settings > Radios > Channels (the folders as they were): merged, saved once more
+  const mergeRun = async (folders2) => {
+    current = { rev: "m1", folders: [], names: { "fm:FG1": "Ground" } };
+    let first = true;
+    global.api = (method, path, body) => {
+      if (method === "POST") {
+        posted.push([path, body]);
+        if (first) { first = false; current = { rev: "m2", folders: folders2, names: { "fm:FG1": "Ground", "air:Tower": "Cab" } };
+                     return Promise.reject(new Error("the folders were changed meanwhile")); }
+        current = { rev: "m3", folders: body.folders, names: body.names };
+        return Promise.resolve({ ok: true, radio_folders: current });
+      }
+      if (path.startsWith("/api/cad/comms/sources")) { calls.push(path); return Promise.resolve({ rev: "z" + calls.length, now: NOW, minutes: 60, live: [], sources: SRC, folders: current }); }
+      return real(method, path, body);
+    };
+    T.sources(true); await drain();
+    $("#rn-edit").fire("click");
+    typed("p25:metro:9001", "North"); typed("fm:FG1", "Ground 1");
+    const n = posted.length;
+    click(btn("save")); await drain();
+    return { posts: posted.slice(n).map(([, b]) => [b.base, b.names]), editing: !!st.edit,
+             error: st.edit ? editTree().find((c) => c.className === "error").textContent : "" };
+  };
+  out.merged = await mergeRun([]);
+  if (st.edit) click(btn("cancel"));
+  // the folders changed meanwhile too: refused as before, nothing merged
+  out.notMerged = await mergeRun([{ id: "u:zz99", name: "Theirs", section: "", items: ["fm:FG1"] }]);
+  if (st.edit) click(btn("cancel"));
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e.stack); process.exit(1); });
 """
@@ -404,12 +432,23 @@ def test_a_channels_name_on_the_rail_is_display_only(nav):
     assert p["action"] == "set" and p["names"] == {"p25:metro:9001": "Dispatch North"}       # trimmed; blank: its own
     n = nav["named"]
     assert "Dispatch North" in n["rail"] and "PD Dispatch" not in n["rail"]
-    assert n["title"].startswith("PD Dispatch (TG 9001)") and n["fgTitle"].startswith("FG1 (154.1 MHz)")
+    # the hover: the name in full (a narrow rail cuts it short), the channel's own name and number beside it
+    assert n["title"].startswith("Dispatch North (PD Dispatch, TG 9001) · ") and n["fgTitle"].startswith("FG1 (154.1 MHz) · ")
     # the list's channel chip: the name shown, the real one in the hover; the row itself (filters, links) untouched
     assert n["chips"] and all(c == ["Dispatch North", "p25:metro:9001"] for c in n["chips"])
     assert n["kept"] == "p25:metro:9001" and n["asked"] == "police"
     assert nav["crumb"].endswith("› Dispatch North") and nav["sourceAsked"] == "p25:metro:9001"    # the hub asked by key
     assert nav["resetField"] == "" and nav["namesReset"]["action"] == "reset"
+
+
+def test_a_save_refused_for_a_name_set_meanwhile_merges_the_names_and_saves_again(nav):
+    # this edit: 9001 -> North, FG1 Ground -> Ground 1; meanwhile Settings named air:Tower; the folders unchanged
+    assert nav["merged"] == {"posts": [["m1", {"fm:FG1": "Ground 1", "p25:metro:9001": "North"}],
+                                       ["m2", {"fm:FG1": "Ground 1", "air:Tower": "Cab", "p25:metro:9001": "North"}]],
+                             "editing": False, "error": ""}
+    # the folders changed too: no merge, the refusal shown, the draft kept
+    assert nav["notMerged"]["editing"] and "changed meanwhile" in nav["notMerged"]["error"]
+    assert [b for b, _ in nav["notMerged"]["posts"]] == ["m1"]
 
 
 def test_a_channels_frequency_and_talkgroup_number_come_with_the_tree(tmp_path):

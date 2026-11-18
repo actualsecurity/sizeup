@@ -60,6 +60,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [What each Health row means](#what-each-health-row-means)
   - [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy)
   - [A deploy that checks itself](#a-deploy-that-checks-itself)
+  - [Back-to-back merges](#back-to-back-merges)
 - [Auth and security](#auth-and-security)
 - [How station authentication works](#how-station-authentication-works)
   - [The tokens and where each lives](#the-tokens-and-where-each-lives)
@@ -101,9 +102,11 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [Tiers](#tiers)
   - [Who sees it](#who-sees-it)
   - [Source keys (#415)](#source-keys-415)
+  - [Settings > Radios > Channels by system](#settings--radios--channels-by-system)
   - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
   - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
   - [The rail's folders (#607)](#the-rails-folders-607)
+  - [A source's service, chosen by the admins](#a-sources-service-chosen-by-the-admins)
 - [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
   - [Feeds and their terms](#feeds-and-their-terms)
   - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
@@ -142,7 +145,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 
 | When | Go to |
 |---|---|
-| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
+| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Back-to-back merges](#back-to-back-merges) (which commit a deploy picks), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
 | A deploy with a migration | [Writing a migration](#writing-a-migration), [After a takeover: let the first snapshot finish](#after-a-takeover-let-the-first-snapshot-finish) |
 | The deploy's SSM step is red | [A deploy that checks itself](#a-deploy-that-checks-itself): create the parameter (sizeup-aws), then deploy again |
 | The deploy's replica step is red | [Replica checks](#replica-checks): "corrupt" or "not verifiable" is real; "not verified within 10 min" may be a slow first restore |
@@ -236,6 +239,39 @@ the upload). Each event has a `seq` from the station's outbox; the hub remembers
 per outbox `epoch` (in `hub.sqlite`), so a retried batch is applied once, and pages / transmissions are
 also keyed by their ids.
 
+**The speech-to-text input** (`sizeup/cloud/sttinput.py`). Each transmission's and page's exact whisper input
+(`radio_voice(audio, deemph=<FM>, nr=False)` at 16 kHz, int16; FM de-emphasis already applied; a page's voice without
+its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy only), on a lane of its own:
+
+- `App._stt` only queues a reference to the audio. One low-priority thread (`hub-stt-input`) makes the FLAC, so a radio
+  thread never waits. Its queue is bounded (200 items, 600 s of audio); when it is full the input is dropped and
+  counted.
+- The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
+  before any clip.
+- The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
+  event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
+  `stt_input` in its caps; an older hub never gets them.
+
+```json
+{"v": 1, "station": "st-hq", "items": [{"n": 12, "id": "<clip id>", "kind": "traffic",
+  "source": "FG1", "talkgroup": null, "system": "", "end": 1790000000.5,
+  "stt": {"v": 1, "format": "flac", "input": "stt-src", "kind": "traffic", "rate": 16000, "samples": 48000,
+          "audio": "<base64 FLAC>"}}]}
+-> {"ok": true, "stored": [12], "refused": []}
+```
+
+- A page's item has `label` in place of `source` / `talkgroup` / `system`, and `voice_offset_s` in its `stt`: where the
+  voice starts in its listening clip.
+- The hub checks each one before keeping it. Its FLAC header must match the metadata's rate and sample count. It must
+  be at most 300 s long and carry its MD5.
+- The hub stores it as clip `<id>.src`, whenever it comes, before or after its event. The S3 key is
+  `audio/clip/<yyyy>/<mm>/<dd>/<id>.src.flac`, with the clip's channel and retention. It is never served by
+  `/api/audio`.
+- The hub's engines read it with `HubApp.read_stt_audio(id, wait_s=...)`. `input` is `stt-src`, or `listening-8k` when
+  only the listening clip is there.
+- Drops are counted by reason (`queue`, `too_big`, `failed`, `outbox`, `refused`). Health shows them under Outbox:
+  "STT inputs dropped".
+
 **Station → hub, latest wins** (`POST /api/station/state`): who is talking now and a page going out now
 on South 2 (`paging`: each tone pair as it decodes, then "voice", then ended for 4 s once the page is
 built; sizeup/radio/livepage.py), pushed the moment it changes (sub-second; re-sent every 2 s while
@@ -309,7 +345,7 @@ pages of its own ([the station page](#the-station-page)).
 | what fails | what happens |
 |---|---|
 | Internet / hub down | The station runs on as all-in-one. Events wait in `state/outbox.sqlite` (committed as they happen) and go up in order when the hub is back, also after either side restarts. The hub shows "Station offline since ...". |
-| Outbox grows huge | Over `outbox_max_mb` of queued audio, the oldest clips are dropped (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
+| Outbox grows huge | Over `outbox_max_mb` of queued audio, the speech-to-text inputs go first (the hub transcribes the listening clip instead), then the oldest clips (the event stays, marked); transcripts, pages and radio IDs are never dropped. |
 | A batch is delivered twice | Applied once (seq per epoch, ids). |
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
@@ -464,6 +500,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
 | Feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime) and the phone pre-alert (Tapout; "not configured" until its topic is set): ok / fallback and why, last read | the trains look coarse |
+| Intel | each rule pack's in scope / considered (24 h), and a warning row "Intel pushes: no intel topic set" (or "refused: same as the alerts or status topic") while pre-alerts have no topic of their own: never pushed | pre-alerts reach nobody's phone |
 | Station | connected or offline, last state post, clock skew, sizeup and machine up since, host | "Station offline" |
 | Version | station and hub builds, the update state, the last update with its timings and log line, failed builds, the adapter (with Reset when a source is failing) | after a deploy; "Station behind" |
 | Outbox and system | events waiting and the oldest, clips dropped, CPU, load, memory, disk, temperature | "events backing up", "disk full" |
@@ -510,10 +547,16 @@ Three kinds (`sizeup/notify.py` `route()`):
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices; the airport pre-alerts (HPN ATC, #233), once each |
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), the replica and task-failure pushes ([Replica checks](#replica-checks)), and every recovery notice |
-| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. A channel of its own only (admin, 2026-11-17): no intel topic, no intel pushes |
 
-Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
-("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
+Only one of alerts / status set: both kinds go to it. Intel never falls back: with no topic of its own its pushes are
+not sent (each event counted "held", unsent), the startup line says "intel → off (no intel topic set)", and
+Settings > Station > Health shows a warning row "Intel pushes: no intel topic set" (never a push about it). An intel
+topic equal to the alerts or status topic (trimmed, case aside) is refused: Settings won't save it ("the intel topic
+must differ from the alerts and status topics"), nor an alerts / status topic equal to the intel one; one from SSM /
+env / the config file is dropped at startup with a log line ("notify: config: ... refused"), and the sender refuses
+the pair again at every push. The app logs at startup where each kind goes
+("notify: alerts → topic set (SSM), status → topic set (SSM), intel → off (no intel topic set)"), never the names.
 
 **Settings > System > Push notifications** (admins only) changes each topic, and the ntfy server, without a
 restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
@@ -562,16 +605,65 @@ uses it too.
 
 ### A deploy that checks itself
 
-`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time:
+`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time.
+First it picks the commit: the newest one on main that passed `test` ([Back-to-back merges](#back-to-back-merges)).
 
 | Step | What | Fails when |
 |---|---|---|
+| 0. Pick and guard | `tools/deploy_check.py pick`: the newest commit on main that passed `test`, or nothing if it (or a newer one) was the last deploy; the deploy job is named `deploy <sha>`. Then, with the AWS credentials, `pick --guard`: what ECS runs (the PRIMARY deployment's hub image tag) must be this commit or an ancestor of it | GitHub or ECS can't be read, or a commit is unknown: nothing is deployed (red). The guard: ECS runs something newer, or a commit off main |
 | 1. SSM guard (#469) | `tools/taskdef_params.py` lists every SSM parameter `deploy/aws/taskdef.json` names (each a full ARN in the deploy's region and account); `aws ssm describe-parameters` must find them all. Names only, never a value (`ssm:DescribeParameters`: sizeup-aws `23-deploy-ssm-describe.sh`) | one is missing ("Missing SSM parameter"), or AWS couldn't be asked ("Could not check SSM"): nothing is built or deployed. A task whose secret is missing never starts |
 | 2. Build and roll | the arm64 image to ECR with `SIZEUP_BUILD` = the full sha, both containers rendered, the service updated, waiting for stability | ECS's circuit breaker rolls back |
 | 3. Replicas | `tools/deploy_check.py replicas --build <sha> --timeout 600` ([Replica checks](#replica-checks)) | a replica is corrupt or not verifiable, or nothing was verified in 10 min |
 | 4. Station | `tools/deploy_check.py --url <hub> --build <sha> --timeout 900` (below) | the station's update failed, was rolled back or is paused; the token is refused; 15 min pass |
 
 Tests: `tests/test_deploy_ssm_guard.py`, `tests/test_deploy_check.py`.
+
+### Back-to-back merges
+
+PRs can be merged one after another without waiting for each deploy (about 9 min, plus up to 15 for the station):
+
+* **Every merge is tested to the end.** `test` runs on main are never cancelled or queued behind each other
+  (`.github/workflows/test.yml`: each has its own concurrency group). A PR's own runs still cancel each other.
+* **Deploys queue, one at a time.** Each `test` run that passes on main starts a `deploy` run. They share the `deploy`
+  concurrency group, and GitHub keeps only the newest waiting run: an older waiting one shows as cancelled. That loses
+  nothing, because of the next point. A run for a failed or cancelled `test` run is skipped in a group of its own, so
+  it never pushes a waiting deploy out.
+* **A deploy deploys the newest tested commit, when it starts.** Its first job, `pick`, takes main from the commit
+  that started it up to the tip and chooses the newest commit whose `test` push run passed (`tools/deploy_check.py
+  pick`, GitHub API reads only). Nothing, when that commit or a newer one was the last deploy: the last deploy run whose
+  `deploy <sha>` job got past "Roll the ECS service" (even if its replica or station check failed after). Automatic
+  deploys come only from a push run on main.
+* **The guard reads ECS, not the run history.** Before anything is built, `pick --guard` reads what ECS runs (the
+  service's PRIMARY deployment → task definition → the hub image's sha tag) and lets the deploy go on only if the
+  picked commit is that one or a descendant of it, by git ancestry (GitHub's compare API). So an older commit never
+  goes over a newer one, whatever order runs, re-runs or attempts happen in ("Re-run failed jobs" on an old run keeps
+  its old pick: the guard stops it; re-run all jobs to pick again). It fails closed: if ECS or GitHub can't be read,
+  or the image isn't tagged with a sha, nothing is deployed and the run is red.
+* **By hand** (Actions → deploy → Run workflow, on main): deploys main's tip now, with no pick (the guard doesn't
+  run either). The deploy role trusts only `refs/heads/main`, so this can't deploy an older commit: it is not a
+  rollback.
+* **Pause.** The repository variable `DEPLOY_PAUSED` = `true` (Settings → Secrets and variables → Actions →
+  Variables) stops automatic deploys. Each passing merge still starts `pick`, outside the deploy queue, which warns
+  "Deploys paused" and deploys nothing, so a forgotten pause shows on every merge. A deploy by hand still works.
+  Delete the variable (or set it to `false`) to resume: nothing deploys at once; the next merge that passes deploys
+  the newest tested commit (or run deploy by hand).
+* **Rollback.** Set the `DEPLOY_PAUSED` variable to `true`, then either merge a revert PR (tested, deploys normally)
+  or have an admin run `aws ecs update-service --task-definition <previous revision>`; unpause once main is good. A
+  deploy run already past pick when you pause still deploys: cancel it in Actions.
+
+Three merges a minute apart: the first deploys; the second's run waits; the third's run replaces it in the queue and,
+when the first is done, deploys the third. If the third's tests are still running then, the second's run deploys the
+second and the third's deploys it after. A merge whose test failed (a flake, then re-run): when the re-run passes, its
+deploy picks the newest tested commit; if something newer is already on ECS it does nothing.
+
+**Flaky tests.** Known flakes are marked `@pytest.mark.flaky(issue=NNN)` and retried once when they fail
+(`tests/conftest.py`; docs/development.md "Known failures and flakes"), so one doesn't hold back a deploy. Any other
+failure is final.
+
+**The merge queue (not enabled).** `test.yml` already has the `merge_group` trigger (inert without a ruleset). To
+turn it on: Settings → Rules → Rulesets (or Branches → the rule for `main`): "Require merge queue" (merge method,
+build concurrency, "Only merge non-failing pull requests"), with `pytest` and `image` as required status checks. The
+queue then tests each PR on top of the ones ahead of it before merging; the deploy still starts from the push to main.
 
 **The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
@@ -683,8 +775,11 @@ accepted until the multi-station work lands; Add is for the existing station's o
    - else a status token, on `GET /api/station/status` only.
    Anything else: `401 {"error", "reason"}`.
 3. The body is read. The id the payload names (`station` on events and logs, the status `id` on state) must be the
-   token's, or be absent (an older station leaves it out of some posts): another id is a `401` with reason
-   `id_mismatch`, logged once an hour per station (never the token).
+   token's, or be absent (an older station leaves it out of some posts), or, on the shared token, one of its former
+   ids (a renamed station's: [Renaming the shared token's station](#renaming-the-shared-tokens-station)). Another id
+   is a `401` with reason `id_mismatch`, logged at most once a minute with both ids (never the token), and Health
+   raises **Station rejected: id mismatch (station says X, token is Y)** (critical) while it goes on (from the second
+   refusal; pushed once it has gone on 45 s).
 4. What follows uses the **authenticated** id: the CloudWatch log stream (`<id>-<date>`, `cwlogs.py`), the station
    id Health shows. A claimed id alone is never trusted.
 5. Last used: kept in memory and written to `hub.sqlite` at most every 5 minutes.
@@ -723,7 +818,7 @@ token state, last seen) and the shared token's row.
 | Revoke | refused from the station's next request, its previous token and status token too. New token (Rotate) brings it back with a fresh token |
 | Retire (shared token) | the shared token is refused from now on. It asks again if the shared token was used in the last 2 minutes (a station still runs on it) |
 | Restore (shared token) | undoes Retire (a station put back on the shared token, a rollback) |
-| Set id (shared token) | which station the shared token is; empty: back to the config's ([above](#the-tokens-and-where-each-lives)) |
+| Set id (shared token) | renames the shared token's station; empty: back to the config's ([above](#the-tokens-and-where-each-lives)). Never a lockout: [below](#renaming-the-shared-tokens-station). While its station is connected (seen in the last 10 minutes) it asks first; the audit says it was confirmed |
 
 Each one is in the Settings audit (System, key `stations/<id>`) and the person's activity: who, what, which station;
 never a token. The answer carrying a new token is sent `Cache-Control: no-store`.
@@ -742,7 +837,8 @@ python -m sizeup.cloud.stations rotate st-hq
 python -m sizeup.cloud.stations revoke st-hq
 python -m sizeup.cloud.stations rename st-hq "Headquarters"
 python -m sizeup.cloud.stations retire-shared [--force] | restore-shared
-python -m sizeup.cloud.stations reset-shared-id [--id <id>]     # the shared token's station: set, or back to the config's
+python -m sizeup.cloud.stations reset-shared-id [--id <id>] [--force]   # the shared token's station: set, or back to
+                                                                         # the config's; --force while it's connected
 ```
 
 `--state` defaults to `SIZEUP_STATE_DIR` (`/data` in the task). The running hub reads the table on each request,
@@ -756,6 +852,50 @@ deploy is done and redo anything that isn't there.
 **Revoking a station's own token doesn't stop the shared token.** While the shared token isn't retired, it still
 works as that same station id. To shut a station out completely, revoke its own token **and** retire the shared
 token (and revoke its Access service token).
+
+### Renaming the shared token's station
+
+The hub is the source of truth for a station's id. Renaming the shared token's station (e.g. naming the station for
+where it is: `station-a` to `station-b`) is one step and never refuses it:
+
+1. **Settings > Station > Stations > Set id** on the shared token's row: the new id, Save. If the station is
+   connected the card asks: "station-a is connected with this token right now. It becomes station-b: the hub keeps
+   taking station-a from it and moves its history. Change anyway?" Change.
+2. That's it. From the station's next state post (seconds) the hub answers with `station: station-b` and the station
+   adopts it (`StationLink.adopt`): its events, status, logs and metrics say `station-b`, and log batches spooled
+   before are stamped `station-b` when they go up. Health and the card show `station-b`; the row says "was
+   station-a". The station's own page shows `station-b (config station-a)`.
+3. **Optional, any time later:** set `[station] id = "station-b"` in the station's `/etc/sizeup/config.toml` and restart
+   it. The station reports its config's id (`config_id`); once it has posted as `station-b` with its config saying
+   so for an hour, the hub stops taking `station-a` (logged). Until then anything still stamped `station-a` (in
+   flight, spooled) is taken.
+
+The card also asks first when the new id has **its own token** (the shared token's station becomes that station; its
+history isn't moved into it, and the shared token takes no former id any more, so a shared-token machine still saying
+the old id is rejected rather than becoming that station), and when a rename would forget a former id (at most 8 are kept). Renaming to the id of
+an own-token station that is connected while the shared token's station is connected too is refused: two machines
+can't share an id. Each confirmed change says why in the Settings audit.
+
+What moves with the id, and how:
+
+| keyed by the id | after a rename |
+|---|---|
+| who the shared token is (`hub.sqlite` meta `station_legacy_id`) | the new id; the old one kept as an alias (`station_legacy_aliases`): still taken from the shared token, as the new id. They were that token's ids already, so nothing new can use it; an id it never had is still refused |
+| the station's status (Health) | the new id at once |
+| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved by the hub in the background, in chunks (`MetricStore.rename_station`), from the renames kept in `hub.sqlite` (meta `station_renames`, replicated): after the rename, at each janitor turn and once a takeover has restored its copy (`metrics.sqlite` isn't replicated, so a copy from before the rename is moved again); a copy goes up soon after. Only rows from **before** the rename move: after it the station's posts are filed under the new id, so a later row under the old id is another station's (an own token reusing the id) and stays. Never from the current id or an id with its own token; none once the id is cleared to learned. An hour both ids had, and the rename's hour, are rolled up again; rollups wait while a move runs. Not when the new id is an own-token station's |
+| CloudWatch log streams (`<id>-<date>`) | new streams get the new id; the old ones stay in `/sizeup/station`, which the Logs view reads whole |
+| the station's own token (`sz1.<id>.…`) | can't be renamed (the id is in the token). A station on its own token under the old id is refused (`multi_station_off`) after the rename until it has a token for the new id: the confirm says so ("... will be rejected until it's reconfigured to station-b") |
+
+Why aliases and adoption, not a station config change: a station's `/etc/sizeup/config.toml` is never rewritten,
+and an older release after a switch back still starts with the config's id. The adopted id is memory only; a
+restart starts with the config's, which the alias still takes, and is told again. Clearing the id (empty: learned
+from the next post) drops the aliases. The CLI (`reset-shared-id --id ... [--force]`) does the same; it never writes
+`metrics.sqlite` (the hub moves them at its next turn).
+
+A station only adopts an id from a post the hub **took**. One refused as another id (`id_mismatch`) is never told
+the id to post as: otherwise a second machine given the shared token would quietly become the station. Health raises
+**Station rejected: id mismatch (station says X, token is Y)** instead (from the second refusal, pushed once it has
+gone on 45 s): Set id to the one the station says, or fix its `[station] id`.
 
 ### Moving the existing station to its own token
 
@@ -1415,6 +1555,27 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **A person wins:** a unit a person touches on an incident (marked before the change), and an incident a person reopens,
   are left alone by automation from then on (`manual_edits`, `unit:<code>` / `close`).
 - **PCFD dispatching:** feed incidents are queued only. A switch affects only what comes after it.
+- **Out of service is a person's to end (`sizeup/cad/oos.py`).** Every unit status write and every put-on-a-call goes
+  through the store's gate (`set_unit_status`, `set_unit_status_on`, `assign`, `return_to_incident`), which says who
+  is writing: `by=PERSON` for a person's own action through the API, otherwise the automation's name (`radio`,
+  `county`, `page`). Leaving `by` out counts as automation. While a unit is out of service (a status with role `oos`:
+  Out of service, Unmanned), an automated write is refused and nothing about the unit changes. This covers the radio's
+  status hints taken in 60 Control mode, the feed's listed units and unit times, and a page's named units. The refusal
+  is kept as a notice instead: one line in the unit log, one on the call's timeline when it was about a call, and a
+  chip under the unit's board row ("Radio heard “responding” · In service?"). ✓ puts the unit in service (its free status) and
+  ✕ keeps it out (`POST /api/cad/oos-notice/<id>/service | dismiss`, dispatchers and admins, in the person's
+  activity). The chip shows for 5 minutes after its last repeat (`NOTICE_S`), and only while the call it was about is
+  open. Then it lapses, and the unit stays exactly as it was. There is one notice per unit and reason within that
+  window; a repeat is only counted. Only notices from the unit's current out-of-service spell count. ✓ or ✕ ends every
+  open notice of that unit, and after ✕ the unit stays quiet for 5 minutes (while that notice's call is open). Notices
+  are never pushed. The radio's status suggestion for an out-of-service unit is never taken by automation. A person's
+  ✓ on it asks first ("E62 is out of service: put it on the call anyway?", `confirm: true`). Left alone, it expires
+  and the unit stays as it was. A transmission from a radio on an out-of-service rig is still that rig's (radio log,
+  transcript, suggestion). A radio a person moves to another unit (Settings > Radios) works as that unit's from then
+  on. Another agency's unit that a person attached to a call while it was out of service stays on it: the feed's in
+  service can't release it, so the automatic close becomes "close?" for a person (fail-safe). Close, the startup
+  repair and placeholder release already left out-of-service units alone; an undo refuses a unit put out of service
+  since.
 - **Radio log (both modes):** a transmission goes on an open incident when it names one of its board units, its address or
   its place, or is on its fireground channel when the feed names one. Only our dispatch and fire channels count, with the
   guards listed in `radiolog.py`. One click removes it. These links don't extend the audio's retention until a person
@@ -1669,7 +1830,8 @@ whole (temp file, rename); the index is the file names (an app restart finds the
 The viewer: ● Rec (why, in the tooltip), the timeline, the time showing, **Live**, **Keep**.
 
 A segment's time is when it first appears in the chunklist, less the durations listed after it; after the first,
-each begins where the one before ended. It can be off by up to a segment (4-8 s) from the camera's own clock.
+each begins where the one before ended, as long as that lies between the earliest and the latest it can have begun
+(#597). It can be off by up to a round (4-8 s) from the camera's own clock, never more.
 
 **Network**: the service runs in the default VPC's subnets with a public IP (sizeup-aws `9-service.sh`:
 `assignPublicIp=ENABLED`), so the recording's ~1.6 GB a day per camera comes in through the internet gateway, not a
@@ -1705,11 +1867,18 @@ With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto
   for the area;
 - only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`), and a camera merge's folder rename
   (`follow()`, #324) only on it and never while a clip of either camera is being saved (`may_move`); the standby's
-  warm app never makes a DVR. A new leader reads the index in the background (the file names carry the size,
-  `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read; recording waits for it),
-  then appends after each camera's last segment. For 5 min after the start it lists the folders again every 30 s,
-  taking in what the draining leader wrote after the first look and dropping what it evicted; another writer's temp
-  file is left alone unless it is 10 min old;
+  warm app never makes a DVR. The leader keeps each camera's last key, end and sequence offset in a small state
+  file beside the recordings (`.dvr-state.json`, `sizeup/dvrstate.py`, #596: written whole every 5 s and on a clean
+  stop). The offset outlives the task (#597): with it a restart or a short handover neither says "started over" again
+  nor records the chunklist's segments a second time; with no state at all, only the entries that begin after the
+  recording's end are taken as new. A new leader resumes from it and records at once; it reads the index in the background (the file names
+  carry the size, `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read). Until that
+  is done a camera's own folder is read when its recording is asked for (playback, a clip, Keep), nothing is evicted
+  and the cap is weighed against the bytes the state counted (2 % over at most). No state, or one over 10 min old:
+  the index is read first, as before (measured on EFS: ~11-20 s for ~128,000 files). For 5 min after the start it
+  lists the folders again every 30 s, off the recording's thread, taking in what the draining leader wrote after
+  the first look and dropping what it evicted; another writer's temp file (temp names carry the writer's token) is
+  left alone until it is 60 s old;
 - without shared storage nothing changes: local disk, 2 h, the on-demand cameras only.
 
 The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, **Bursting** throughput, no lifecycle,
@@ -2397,7 +2566,26 @@ Merged into the GTFS-realtime trains by **train number and run date**: the posit
 gains its cars (actual / scheduled, fleet), occupancy and per-car load and passengers, speed, heading,
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
-is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+is good: Amtrak's trains on the New Haven Line (TrainTime's branch `AM`; never in Metro-North's GTFS-realtime), whose
+box says *Amtrak*, not *Metro-North*, and whose next stop and its limit are TrainTime's own.
+
+**SIGNAL locations.** TrainTime's `SIGNAL` location (Amtrak's trains, or a Metro-North train whose GPS is out) is
+where Metro-North's signal system has the train: the block it entered, timed when it entered it, unchanged until it
+enters the next one 1 to 3 km on (a minute or more; minutes at a red signal). It is taken as it is, not filtered (the
+GPS filter drew it halfway between two signals); the same signal again is the train still in that block (its time
+stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
+allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
+just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on at that speed with no "no news" ease, to the end
+of its block (as long as the block it just ran, plus 10 s of its travel for the next fix's lateness; 1.5 km before a
+block is known), never past its next stop, and not braked for the block's end: the next signal's fix normally comes as
+it gets there, and is closed smoothly, never snapped back. Held at a red signal, it is drawn on through the block's end
+by about that slack and a hard stop, then glided back. After 3 min with no new signal it is drawn dimmed, *At signal ·
+4 min ago* (not the feed's *Stale*). A train TrainTime alone has keeps its signal location 10 min from when it first
+had that signal (however often TrainTime re-stamps it; a GPS location: 40 s, as before), so it no longer drops off the
+map 40 s after each signal. A Metro-North train reporting SIGNAL takes the same path while its TrainTime position is
+used (under 40 s old and as new as GTFS-realtime's), which is rare. #589's GPS rules are unchanged; signal fixes add
+nothing to the prediction residuals. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
@@ -2607,6 +2795,27 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
 - Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
   transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
 
+### Settings > Radios > Channels by system
+
+`static/radio-controls.js`, `sizeup/talkgroups.py`, `sizeup/cloud/hub.py`.
+
+The Channels tab lists **Analog FM** (FG1, FG2, South 2...), **Airband**, **County P25**, then each other P25 system
+by its label (**MRRS P25**), each with its groups (the talkgroups file's `Tag`) under it.
+
+| | |
+|---|---|
+| A talkgroup's switches | sent and kept by its source: `POST /api/talkgroup {source: "p25:mrrs:9211", ...}`. The county's are still saved under the bare number (`talkgroups.json`, `tg:307`), so switching back is safe. Another system's talkgroup has its **tier**, never Record / Main / Transcribe |
+| A bare number | always the county's. One the county neither lists nor has heard, but another system lists, is refused (`App.set_talkgroup`). Sent as the county's source (`p25:westchester:<n>`), it is the county's whatever another system lists |
+| Old orphans | a county choice saved under another system's number (the bug below) is dropped **once per station**, after it has loaded its history. Only a number the county neither lists nor has heard is dropped, and only when the county's talkgroups file gave rows. `talkgroups_migrated.json` is the marker and holds what was dropped. It is written first (temp file, then replaced); if it can't be written, nothing is dropped. One that can't be read is moved aside (`.corrupt-<time>`) and counts as done. Later starts never drop anything. Numbers can repeat across systems: config load refuses only a number the county lists |
+| Record for several at once | (`channels` `set_many`) each talkgroup's Record is applied in turn and audited. If one is refused, the ones before it stay applied and audited, and the error names that key |
+| A section's Record switch | the county's section only, never another system's section with the same name |
+| The hub's rows | the station's `TalkgroupPrefs.state()`. The hub adds `tier_set` from each row's tier as they arrive |
+| **Rename** (pencil, admins) | the channel's display name, up to 40 characters, blank for its own. Stored with the rail's names (`radio_folders`, `layout.names`, `POST /api/cad/settings/radio_folders {action: name, key, name}`), audited as Radios (`radio_folders/names/<key>`). A name set here shows on the rail and the other way round. Display only, like the rail's. The hover shows the real name and its TG number or frequency. Not on the station's own page |
+
+The bug this fixed: the hub's rows had no `tier_set`, so the page showed MRRS "PD Dispatch" (TG 9211) with the
+county's switches. Main sent `{"tg": 9211}`, which wrote a county talkgroup 9211 that doesn't exist. That showed up as
+an "Unknown — TG 9211 · MAIN" card, and PD Dispatch stayed as it was. Tests: `tests/test_channels_by_system.py`.
+
 ### The Radio page's views and its change log (#415, #441, #484)
 
 `sizeup/cad/comms.py` (`Cad.comms_query`, `Cad.comms_sources`), `static/radio-nav.js`, `static/radio-view.js`.
@@ -2659,8 +2868,8 @@ order (ours first, then by name). A heading with one folder of its own name (Ana
 | | |
 |---|---|
 | **Edit** (on the rail, admins) | rename, add (**+ Folder**), delete an empty folder, the **heading** over a folder (folders in a row with the same heading share it; blank: none), drag a folder or a channel by its ⠿ (desktop), or ▲ ▼ and **Move to** (touch, keyboard). **Reset**: the automatic grouping. Nothing changes until **Save**; **Cancel** drops the draft |
-| Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written |
-| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept |
+| Saved | for the whole department: settings section `radio_folders`, key `layout` (`POST /api/cad/settings/radio_folders {action: set, folders, base} \| {action: reset, base}`), audited as Radios (each folder's name and channel count, before and after), exported and imported with the rest. `base`: the rev the edit started from; someone else saved meanwhile: refused, nothing written. If only names changed meanwhile (the folders are the same), the rail merges them (its own name changes win) and saves once more |
+| **Channel names** (Edit) | each channel's row is a text box: the name the rail shows for it (up to 40 characters; blank: its own). Shown on the rail's rows, the crumb, the emergency line and the channel chip of the rail's list; the real name with its talkgroup number or frequency (`mhz`, from the config's channels) in the hover. **Display only:** source keys, the radio log, recordings, the station's config, alarms, pre-alert / intel rules, exports and every match keep the real label and number. Reset restores them; saved, audited and version-checked with the folders; a name for a key that isn't a channel is dropped, one for a talkgroup not heard lately kept. Also set one at a time from Settings > Radios > Channels (`{action: name}`, [above](#settings--radios--channels-by-system)) |
 | Stored | `{folders: [{id, name, section, items: [source keys]}], names?: {source key: name}}`. `id`: `d:<system>:<group>` (a default folder, renamed or moved) or `u:<random>` (made by an admin) |
 | A channel in no folder | a talkgroup heard for the first time, one never placed: its default folder (`d:<system>:<group>`) if listed, else that folder made again after the last folder under its heading. **Nothing ever drops off the rail** |
 | A key with no source now | kept, not shown (a talkgroup not heard lately comes back where it was); one that isn't a source key, or a channel listed twice: dropped (the first folder wins), not an error |
@@ -2669,6 +2878,30 @@ order (ours first, then by name). A heading with one folder of its own name (Ana
 
 Pinned (on top), mutes, the views, selection, Live (Our calls) and the emergency marks work as before, whatever the
 folders. Tests: `tests/test_radio_folders.py` (the setting, and the rail in node), `tests/test_radio_nav.py`.
+
+### A source's service, chosen by the admins
+
+`sizeup/sourcekeys.py` (`set_service_overrides`, `overridden`), settings section `radio_services`
+(`sizeup/cad/settings.py`), `Cad.retag_services` / `Comms.retag`, `static/radio-controls.js`, `static/radio-nav.js`.
+
+A source's service (fire, police, EMS, transit, air, other) puts it in a view (Police, EMS, Transit, Air), the filters,
+the emergency prominence and intel's scopes. Automatic: the talkgroups file's `Service` column, else the group's words
+(`SERVICE_WORDS`); an FM channel is fire, an airband one air. An admin can choose it per source instead.
+
+| | |
+|---|---|
+| Where | a small select beside the rename pencil in Settings > Radios > Channels (one at a time), and on each channel's row in the rail's Edit (sent with Save, before the folders). **Auto (Transit)** names what automatic gives. Admins only; never on the station's own page |
+| Stored | settings section `radio_services`: `{qualified source key: service}` (`p25:<system>:<tg>`, `fm:<label>`, `air:<label>`; `tg:307` is kept as `p25:westchester:307`). The same number on two systems is two keys. `POST /api/cad/settings/radio_services {action: set, key, service} \| {action: set_many, services}`; `automatic` removes the choice. Audited as Radios (`radio_services/<key>`, old → new), exported and imported with the rest |
+| Wins over | the file's column and the words, wherever a service is worked out: `Comms.record` (every row written), `App._row_source`, `App._call_system` (another system's rows, and so its speech-to-text profile), `TalkgroupPrefs.state()` (`service`, with `service_auto` beside it), `Cad.comms_sources` (`service`, `service_auto`; `services`: the choices this reader may know of) |
+| The station | the hub's answer to `POST /api/station/state` carries `services`. The station tags its rows and picks its speech-to-text profile by them, keeps them in `hub_services.json` beside the outbox (a start while the hub is away tags as before), and from then on never takes its own CAD's. A hub before this sends none (kept as they were); a station before this ignores them, and the hub applies them to its rows anyway |
+| Re-tag | a change (or an import) marks that source in `radio_retag_pending`, in the setting's own transaction. Off the request's thread, one source at a time, only on the CAD of record, its rows of the last 30 days (`RETAG_DAYS`) are re-tagged, 500 a transaction along `(start, rowid)`; then the mark is taken off and the count audited (`radio_services/<key>/retag`: `{service, rows, days}`). A start of the CAD of record (a restart, a task that took over) runs what is still marked; a fenced task leaves the marks. Back to automatic recomputes them (the station's row: the file's column, else the words). A talkgroup whose automatic service isn't known yet (no station has said what it lists: a hub just started) waits, marked and logged, until the station's talkgroups arrive. The Radio page's readers are told to ask afresh once (another system's: only those who may see it). Older rows keep their tag |
+| On the wire | the station sends each row's `service_auto` (the file's) beside its `service` (with its choice, for its speech-to-text profile and its own page). The hub records the choice it has then over `service_auto`, so a row queued under a choice since put back to automatic is recorded automatic |
+| Import | an export always has `radio_services` (`{}` with no choices): its choices replace these and re-tag what moved. Only a file from before them (no section) keeps the ones here |
+| Waiting | a re-tag waiting for the station's talkgroups is listed in the tree's `retag_waiting`; the select's hover says "Re-tag waits for the station", and its Auto has no label until the service is known |
+| Mute | a source of ours (county, analog, airband) set to Fire can't be muted on the rail (the existing rule for fire channels of ours); the hover says so |
+| Who sees it | the choices come with the tree; another system's only for a reader who may see it. The state push carries their rev (`radio_services`): the rail and the Channels tab ask again when it moves |
+
+Tests: `tests/test_service_override.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 
@@ -3113,12 +3346,12 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 12 categories, 19 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
-| Push | `push.py` | composed from an allow-list of fields, then scrubbed, failing closed |
+| Push | `push.py` | composed from an allow-list of fields; with `push_pii` off, then scrubbed, failing closed |
 | Listen | `listen.py` | a link in the push to the audio around it ([below](#listen-links-and-inference-intel)) |
 | Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
@@ -3157,7 +3390,7 @@ category's, and the rules' rung. The rung is the highest mode M at which the rul
   carry it.
 
 **Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
-`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+`ems` and `fire`; and a `"place": true` category of any pack (the `police` pack's `fire_call`), which is held while it has no address. The `police` pack's events are never linked. An event already pushed is never held (its mode
 never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
 event gets back the mode its rules give.
 
@@ -3165,6 +3398,7 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
 [...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
@@ -3196,6 +3430,7 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 |---|---|---|
 | `enabled` | on | the whole pipeline |
 | `push` | on | the kill switch: off, detection goes on, nothing is pushed |
+| `push_pii` | on | "PII": intel pushes skip the PII scrub (admin decision, 2026-11-17: access to the output is limited instead). Off: the scrub withholds a push as before. The INTEL kind only; ntfy topics are readable by anyone who knows the name |
 | `per_hour` / `per_day` / `per_category_hour` | 30 / 200 / 10 | push caps. Over one: the event is kept with suppressed "rate"; a digest (counts only, priority 2) goes every `digest_min` (15) |
 | `repush_min`, `max_repush` | 10, 2 | an escalation (a higher level, a place found or confirmed) pushes again at most this often, this many times |
 | `place_repush_min` | 5 | the place first heard this soon after the first push pushes once more |
@@ -3204,11 +3439,14 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 | `move_min` | 5 | a moving incident pushes its new place at most this often |
 | `quiet_from`, `quiet_to` | none | local "HH:MM": no pushes in between |
 
-**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic, else the
-alerts'): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
+**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
+no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
-high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
-fails the scrub is not sent (suppressed "scrub", logged without the text). It opens
+high). Not among its fields: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With
+`push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
+fails the scrub is not sent (suppressed "scrub", logged without the text). Nothing scrubs what is stored or shown:
+transcripts are kept and shown as heard; only the model's input (`infer.py` `clean_text`) has plates and IDs taken out.
+It opens
 `<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
 `Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
 
@@ -3330,6 +3568,20 @@ stay exactly as they were (they still go to CloudWatch); this adds numbers besid
 
 Why the hub and not CloudWatch metrics: the graphs and the suggested squelch (#606) need fast range queries joined with
 the Settings audit, per-transmission detail, several stations, and nothing to pay.
+
+### Graphs, suggested squelch, shift warnings (#606)
+
+`sizeup/cloud/metricsinsight.py` reads the store back; the hub's, admins only, nothing on the alert path.
+
+| | |
+|---|---|
+| Graphs | Settings > Radios > **Signal** (`signal-panel.js`, `signal-chart.js`: small SVG charts, no library). One row above them: 6 h / 24 h / 7 d / 30 d, Raw (up to 7 d) or Hourly, a channel. FM: idle quieting p50–p90 band and max, Open / Close as running, the suggested Open, each transmission (paging: at open, and at close on the hourly view); noise opens a minute; transmissions by kind (voice, page, ID burst, noise); the 7-day distribution the suggestion comes from. AM: floor and each carrier (SNR on hover). P25: decode rate with its low–high band, control channel lost shaded, grants on uncovered frequencies. Each event (sdr, gain, squelch, unplug, back, stall, start, a Settings squelch change) a tick on top; ticks closer than 8 px are one, with the count; hover gives the detail. One y axis a chart (two measures: two charts over the same time axis) |
+| Health | Settings > Station > Health: a 24 h spark (idle q90 and noise opens; AM: floor) on each channel's row and the decode rate under P25 trunk (`?view=spark`, half hours, kept 5 min); each links to its charts |
+| Suggested squelch | `?view=squelch` (kept 10 min; again at once after a newer event), on the Squelch card beside Open / Close. **It never makes a channel worse: when in doubt the running Open stays and Apply isn't offered.** Window: the last 7 days, or from the channel's last SDR or gain change, or a station restart after which its dongle or gain differs from before it (a change made while the station was down sends no event of its own); back from Off (a shared dongle handed over) or plugged back in only counts on another dongle than before (or when either has no serial), so a channel handed over every few hours on the same dongle still gets one (under 24 h since: "not enough data since <event>"). A station with no floor data of the channel in the window (an old or renamed id) is left out. noise = p90 of the idle minutes' q90; Open = ceil(noise + margin), margin 3 dB. No real transmission (voice, ID burst, page; at its quieting at open) may be under it by default: when the weakest are under noise + margin, "weak traffic overlaps the noise" and the running Open stays. A raise needs 20 real transmissions and leaves none under it; a raised Close stays under the real tails' quieting at close. A lower one stays over the idle max and moves at most 2 dB a step. Chattering (noise opens' median since the last squelch change ≥ 2/min): never lower, +1 dB. 6 h after a squelch change: settling, no Apply. Close keeps the running hysteresis. Apply (admins, traffic channels) sends the Open / Close the suggestion was worked out for (its own, not what the card shows), and the hub refuses it if another runs now, if the channel's suggestion no longer offers Apply, or if it now suggests another Open / Close than the one being set; audited like an edit on the card. A station squelch event within 5 min of its restart that only puts back what ran before it is no squelch change (the station keeps the hub's squelch and runs it from its first look, so a normal restart logs none). Paging (read-only) and AM: the numbers only; paging never above its running Open |
+| Shift warnings | Every 10 min (the hub janitor), for each event of the last 48 h (sdr, gain, squelch, unplug, back, on, start, a Settings squelch change; within 10 min: one): the 6 h after it (from 5 min after, at least 30 min of data) against the 24 h before it; neither window crosses another event, and a shift must still show from the newest event on (a dongle moved back: no warning). An SDR change with a squelch edit minutes later is still checked. FM idle q90 median up > 3 dB, noise opens a minute ×3 and ≥ 0.5 (the median of half-hour means; neither after a squelch change alone), kept voice quieting down > 3 dB (the median of half-hour medians, ≥ 3 half hours each side: a fire's hour of portables never moves it; a cable or splitter's loss, also after a restart alone: what changed while the station was down shows only as its restart; too few half hours with traffic: an info hint "level not checked: too little traffic", why on hover), transmissions an hour ÷3 from ≥ 4/h or noise key-ups ×3 to ≥ 4/h (medians of half-hour counts, against the same clock hours the day before), AM floor up > 3 dB, pages at open down > 3 dB (≥ 3 pages; windows 7 d / 72 h), P25 decode rate down > 30%. Without an event, once a day: the last 7 days' hourly medians against the 21 before. A Health hint ("FG1: idle quieting +4.2 dB since 14:05 (SDR change)", with a Chart link), never a push; "Signal shift warnings" can be muted like an alert (muted: not shown) |
+| Limit | The quieting is measured against the receiver's own hiss reference, which follows the floor (`radio/fm.py`): a uniform rise of the noise moves both, so the idle quieting can read a shift as smaller than it is. The AM floor (dBFS) and the transmissions' own level (the kept voice quieting check) don't have that limit |
+| Thresholds | Settings > Radios > Signal > Thresholds (`signal_metrics`, audited as Radios): margin, % real allowed under (default 0), shift dB, noise opens ×, transmissions ×, decode drop % |
+| Reading | `GET /api/cad/metrics?view=squelch\|spark\|shifts` (the same admin check as the rest); `metric=` takes several, comma-separated. The rollups gained `sq_open` / `sq_close` (the squelch as running, for the hourly view's steps) |
 
 ## Where the hub's CPU goes (#425)
 

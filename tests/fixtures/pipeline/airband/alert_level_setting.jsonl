@@ -1,0 +1,3 @@
+{"do": "scenario", "t0": "day", "why": "[atc] alert_level_incident = [3]: an alert level 2 is a pre-alert pushed at priority 5 but makes no incident; the upgrade to 3 makes the queued incident.", "levels": [3]}
+{"do": "radio", "t": 0, "id": "fire-1", "tg": 307, "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34"}
+{"do": "radio", "t": 120, "id": "fire-2", "tg": 307, "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke"}

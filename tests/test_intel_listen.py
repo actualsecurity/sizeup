@@ -244,7 +244,7 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
         r = Radio()
         r.add("t1", now, 1.0, 500)
         b = FakeBucket()
-        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", log=lambda m: None)
+        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", intel_topic="pcfd-xmpl-intel-thread", log=lambda m: None)
         e = cad.intel
         e.notifier, e.locate = p.notifier(notify.INTEL), example_locate
         e.listen = listen(r, b, Clock(now + 1))
@@ -259,7 +259,43 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
         body = m["body"]
         [act] = body["actions"]
         assert act["action"] == "view" and act["label"] == "Listen" and act["url"].startswith("https://bucket.example/listen/")
-        assert body["message"].endswith(f"Listen: {act['url']}") and body["topic"] == "pcfd-xmpl-alerts"
+        assert body["message"].endswith(f"Listen: {act['url']}") and body["topic"] == "pcfd-xmpl-intel-thread"
+    finally:
+        ntfy.close()
+
+
+def test_no_intel_topic_holds_the_push_and_makes_no_listen_clip(tmp_path):
+    """Intel's own topic only (sizeup/notify.py): with none in effect the event is held (unsent) before any Listen link,
+    so no clip is stitched, uploaded or presigned for a push that never goes."""
+    from tests.test_notify import FakeNtfy
+    ntfy = FakeNtfy()
+    try:
+        from tests.test_cad import make_cad
+        cad = make_cad(tmp_path)
+        now = cad.clock()
+        r = Radio()
+        r.add("t1", now, 1.0, 500)
+        b = FakeBucket()
+        logs = []
+        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "pcfd-xmpl-status", log=lambda m: None)    # no intel topic
+        cad.pushes = p
+        e = cad.intel
+        e.notifier, e.locate, e.log = p.notifier(notify.INTEL), example_locate, logs.append
+        e.listen = listen(r, b, Clock(now + 1))
+        e.listen.worker = True
+        cad.comms.record({"id": "t1", "start": now, "end": now + 1, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
+                          "source_key": "p25:mrrs:9211", "service": "police", "tier": "alert", "unit": "",
+                          "text": "shots fired at Sample St and Test Rd", "status": "done", "model": "whisper"})
+        e.consider("t1")
+        e.drain()
+        [ev] = e.events.open_events()
+        assert ev.suppressed == "unsent" and not ev.pushed_at
+        assert b.puts == [] and b.signed == [] and ntfy.got == []
+        assert any("no pre-alert topic in effect" in m for m in logs)
+        assert cad.intel_admin.page(gate=False)["push_topic"] == {"set": False, "source": "none"}
+        p.defaults[notify.INTEL] = ("pcfd-xmpl-intel-thread", "settings")
+        assert cad.intel_admin.page(gate=False)["push_topic"] == {"set": True, "source": "settings"}
+        assert "pcfd-xmpl" not in json.dumps(cad.intel_admin.page(gate=False)["push_topic"])
     finally:
         ntfy.close()
 

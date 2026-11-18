@@ -31,10 +31,13 @@ Where a segment came from: the camera's own HLS session (fetched, checked and re
 viewers' cache), or the live stream's when one is open (Roads._streams: the same segments, fetched once). A few
 workers record the cameras side by side. Segments are keyed by the stream's media sequence (Wowza's counter runs on
 across sessions), so neither a new session nor the two sources ever double one; a counter that starts over
-(the origin restarted) is carried on from the last key. A chunklist that fails is asked again at once with a new
+(the origin restarted) is carried on from the last key, and that offset is kept in the state (#597, below), so a restart
+or a handover carries on with it. A chunklist that fails is asked again at once with a new
 session; only after repeated failures does the camera wait (15 s doubling to SESSION_RETRY_S). Its time: when it first appears in the
 chunklist (Wowza lists a segment once it is whole), less the durations of those after it, carried on from the one
-before when they follow each other.
+before when they follow each other, as far as that is possible (#597: between the earliest and the latest it can have
+begun, so the timeline stays within a round of the clock). A segment whose time span is recorded already is never
+written again.
 
 Parked (#550): a camera dead upstream (no answer, or its master playlist 404) is not retried forever. Failing without
 a success (its own chunklist, the live viewers' copy or a segment kept) for PARK_AFTER_S (1 h; PARK_404_S, 15 min,
@@ -66,11 +69,15 @@ empty and there's a gap of the handoff's length. The pins are in the CAD store (
 Shared storage (#322): dvr_dir on a mount shared between tasks (EFS, NFS: shared_mount(), or [roads] dvr_shared) keeps
 the recording across deploys, so the window is 12 h (dvr_shared_window_min) and the area's cameras are recorded 24/7.
 Only the lease-holding leader writes or deletes (may_write: the app's fence, sizeup/fence.py); the standby's warm app
-(sizeup/app.py prewarm) never makes a Dvr at all. A new leader reads the index from the file names in the background
-(_scan, the recording waits for it), then appends after each camera's last key. The old leader may still be draining
-meanwhile: a file that vanishes under the scan is skipped, another writer's temp file is left alone unless it is stale
-(STALE_TMP_S), and for RESCAN_FOR_S after the start the folder is read again every RESCAN_S, taking in what the old
-leader wrote after the first look and dropping what it evicted. A segment's size is in its file name
+(sizeup/app.py prewarm) never makes a Dvr at all. A new leader (#596) records at once from the state the leader before
+left (sizeup/dvrstate.py: each camera's last key, end and offset, written every few seconds and on a clean stop) and
+reads the index from the file names in the background (_scan); until that is done a camera's own folder is read when
+its recording is asked for (playback, a clip, Keep), nothing is evicted and the cap is weighed against the bytes the
+state counted (INDEXING_SLACK over it at most). No state, or a stale one: the index is read first, as before. The old
+leader may still be draining meanwhile: a file that vanishes under the scan is skipped, another writer's temp file is
+left alone unless it is stale (STALE_TMP_S: its name carries the writer's token), and for RESCAN_FOR_S after the start
+the folder is read again every RESCAN_S (off the recording's thread), taking in what the old leader wrote after the
+first look, dropping what it evicted and its temp files cut short. A segment's size is in its file name
 (key_start_duration_bytes.ts), so reading the index never stats a file over NFS. Without shared storage: as before.
 """
 
@@ -91,6 +98,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
 
 from sizeup import hlsseg, httpkeep
+from sizeup.dvrstate import STATE_FILE, TOKEN, DvrState
 
 WINDOW_S = 7200.0
 MAX_BYTES = 6 * 1024 ** 3
@@ -113,7 +121,8 @@ DVR_PATH = re.compile(rf"/api/cad/cameras/({CAM_ID})/dvr(?:/(index\.m3u8|\d{{1,1
 JSON = "application/json"
 REASONS = ("always", "incident", "pinned", "open")
 SHARED_FS = ("nfs", "nfs4", "efs")    # a mount of these types: shared between tasks (EFS)
-STALE_TMP_S = 600.0                   # shared storage: another writer's temp file this old is a write cut short
+STALE_TMP_S = 60.0                    # shared storage: another writer's temp file this old is a write cut short (a
+#   segment takes a second or two to write, and a fenced writer exits at once)
 RESCAN_S = 30.0                       # shared storage: the folder read again this often ...
 RESCAN_FOR_S = 300.0                  # ... for this long after the start (the old leader draining)
 MAX_WORKERS = 24
@@ -130,6 +139,11 @@ PROBE_TIMEOUT_S = 5.0                 # ... each of its two requests
 PARKED_FILE = ".parked.json"          # next to the recordings (never a camera's folder: CAM_ID starts with no dot)
 FREE_EVERY_S = 30.0                   # the disk's free space (statvfs: on EFS a call over the network) read this often ...
 FREE_SLACK = 512 * 1024 ** 2          # ... and at once when what was written since may bring it this near the floor
+SNAP_AHEAD_S = 0.5                    # a segment's start carried on from the one before at most this past its latest
+SNAP_BACK_S = 1.0                     # ... and at most this before the one before ends (under GAP_S: no discontinuity)
+STATE_LAG_KEYS = 8                    # the state's last key at most this far behind the folder's: its offset holds
+INDEXING_SLACK = 0.02                 # before the index is whole: the cap may be overshot this much (evicted after)
+STOP_WAIT_S = 3.0                     # a clean stop: rounds under way get this long before the last checkpoint
 
 
 def shared_mount(path: str | Path, mounts: str = "/proc/self/mounts") -> str:
@@ -279,6 +293,17 @@ def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
 
 
 class Dvr:
+    """Lock order (#644): every path takes them in this order, never the other way round, and lets go of a later one
+    before it takes an earlier one again:
+        _ensuring[cid] (a camera's on-demand read) -> _scanning -> _disk -> _lock -> the state's _lock
+        _parked_lock -> _lock
+        the state's _wlock -> the state's _lock
+    _scanning is waited for by _scan (a pool worker's round via record_once -> _ensure, the rescan thread, index_rest,
+    scan_now) and only tried by follow() (it never waits for it: a folder being read, the move comes later). So nothing
+    that holds _lock calls what takes _disk (wanted(): follow() moves a folder under _disk; _room, _write, evict): it
+    runs with no lock held, and its answer is kept under _lock only when no later one was kept already (_set_wanted:
+    pin and tick)."""
+
     def __init__(self, roads, root: str | Path, window_s: float = WINDOW_S, max_bytes: int = MAX_BYTES,
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
                  max_cameras: int = MAX_CAMERAS, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
@@ -295,9 +320,21 @@ class Dvr:
         self._area_at, self._area_ids = -1e18, []
         self._inc_cache: tuple = (None, {})       # (open events, cameras with video, near_m) -> _incident_cams
         self.may_write = may_write or (lambda: True)
-        self._scanned = threading.Event()
+        self._scanned = threading.Event()         # recording may go on: the index read, or resumed from the state
+        self._indexed = threading.Event()         # the whole index read (until then: no eviction; _ensure)
+        self._indexed_cams: set[str] = set()      # cameras whose folder has been read since the start
+        self._resumed: set[str] = set()           # cameras resumed from the state (their last key known)
+        self._rescan: threading.Thread | None = None
+        self._scanning = threading.Lock()         # a folder's listing and merge (_scan_dir) vs follow()'s moves
+        self._ensuring: dict[str, threading.Lock] = {}   # cid -> its folder being read on demand (_ensure)
+        self._twin_logged: set[tuple[str, int]] = set()   # (camera, key): "two segments under key" said once
+        self._folders: set[str] | None = None     # the camera folders at resume() (what the state's bytes may count)
+        self._checked_at = -1e18                  # the state last brought up to date (checkpoint)
+        self._state_read = False                  # the state file read (resume, _offsets)
         self._started_at: float | None = None
         self._rescanned_at = 0.0
+        # each camera's last key, end, offset ... (#596): the next leader resumes from it
+        self.state = DvrState(self.root / STATE_FILE, clock=clock, may_write=lambda: self.may_write(), log=log)
         # the app hands in: open CAD events [{lat, lon, address, label}], and where the pins are kept
         self.incidents: Callable[[], list[dict]] = list
         self.load_pins: Callable[[], object] = list
@@ -311,6 +348,7 @@ class Dvr:
         self._cams: dict[str, dict] = {}          # cid -> {segs: _Segs {key: (t0, dur, bytes)}, last, end, offset, ...}
         self._opened: dict[str, float] = {}       # cid -> last time someone watched it live
         self._wanted: dict[str, list[str]] = {}
+        self._wanted_gen = self._wanted_kept = 0  # wanted() asked / the newest one kept (_set_wanted, #644)
         self.stopped = ""                         # why recording stopped (the disk), "" when it records
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -327,7 +365,10 @@ class Dvr:
         self._free_read: tuple[float, int, int] | None = None   # (when, free bytes, total_bytes() then): _free_after
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
+            self._clean_parked_tmp()
+            self._offsets()
             self._scanned.set()
+            self._indexed.set()
 
     # -- the disk ----------------------------------------------------------------------------------------------------
 
@@ -359,7 +400,8 @@ class Dvr:
                     size = int(m.group(4)) if m.group(4) else f.stat().st_size
                     segs.setdefault(int(m.group(1)), []).append(
                         (int(m.group(2)) / 1000, int(m.group(3)) / 1000, size, f.name, bool(m.group(5))))
-                elif f.name.endswith(".tmp") and (not self.shared or now - f.stat().st_mtime > STALE_TMP_S):
+                elif f.name.endswith(".tmp") and (not self.shared or (TOKEN not in f.name
+                                                                       and now - f.stat().st_mtime > STALE_TMP_S)):
                     if self.may_write():
                         Path(f.path).unlink(missing_ok=True)
             except FileNotFoundError:
@@ -376,60 +418,94 @@ class Dvr:
                 return -1.0
         return max(files, key=lambda x: (mtime(x), x[3]))
 
-    def _scan(self) -> None:
+    def _scan(self, only: str | None = None, first: bool = False) -> None:
         """What is already on disk (the app restarted within the same task, or on shared storage the leader before
-        this one): the index from the file names. Taken in alongside what is already indexed (rescans): a segment
-        not indexed is added, an indexed one whose file is gone is dropped. A segment both leaders wrote: the indexed
-        file stays (else the newest), only the other is deleted, whatever order the folder lists them in."""
+        this one): the index from the file names. Taken in alongside what is already indexed (rescans, and what was
+        recorded meanwhile): a segment not indexed is added, an indexed one whose file is gone is dropped. A segment
+        both leaders wrote: the indexed file stays (else the newest), only the other is deleted, whatever order the
+        folder lists them in. only: that camera's folder alone; first: the folders not read since the start only."""
         if not self.root.is_dir():
             return
         try:
-            dirs = [d for d in os.scandir(self.root) if CAM_RE.fullmatch(d.name) and d.is_dir()]
+            dirs = [d for d in os.scandir(self.root) if CAM_RE.fullmatch(d.name) and (only is None or d.name == only)
+                    and d.is_dir()]
         except OSError:
             return
         for d in dirs:
-            with self._lock:                          # what was indexed before the listing (not what we write meanwhile)
-                known = set(self._cams[d.name]["segs"]) if d.name in self._cams else set()
-            found = self._read_dir(Path(d.path))
-            if found is None:
-                continue                              # not listable now: its index stays as it is
-            twins = []
-            with self._lock:
-                c = self._cams.get(d.name)
-                if c is None:
-                    if not found:
-                        continue
-                    c = self._cams.setdefault(d.name, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "names": {},
-                                                        "breaks": set()})
-                names = c.setdefault("names", {})
-                breaks = c.setdefault("breaks", set())
-                for key in [k for k in known if k not in found]:
-                    c["segs"].pop(key, None)          # gone from the disk (evicted by the other writer)
-                    names.pop(key, None)
-                    breaks.discard(key)
-                for key, files in found.items():
-                    have = (names.get(key) or _name(key, *c["segs"][key], key in breaks)) if key in c["segs"] else None
-                    keep = next((x for x in files if x[3] == have), None)
-                    if keep is None:                  # not indexed (or its indexed file is gone): the newest one
-                        keep = files[0] if len(files) == 1 else self._newest(Path(d.path), files)
-                        t0, dur, size, name, brk = keep
-                        c["segs"][key] = (t0, dur, size)
-                        names[key] = name
-                        if brk:
-                            breaks.add(key)
-                        else:
-                            breaks.discard(key)
-                    twins += [x[3] for x in files if x[3] != keep[3]]   # the same segment twice: one is enough
-                if c["segs"]:
-                    last = max(c["segs"])
-                    if c["last"] is None or last > c["last"]:
-                        c["last"], c["end"] = last, c["segs"][last][0] + c["segs"][last][1]
-            if twins and self.may_write():
-                for name in twins:
-                    (Path(d.path) / name).unlink(missing_ok=True)
+            if first and d.name in self._indexed_cams:
+                continue                              # (read already: asked for meanwhile, _ensure)
+            with self._scanning:                      # its listing and its merge as one: never a folder follow() moved
+                self._scan_dir(d.name, Path(d.path))  # between them (an index for the old id)
+
+    def _scan_dir(self, name: str, path: Path) -> None:
+        """One camera's folder into the index (_scan, under _scanning)."""
+        with self._lock:                          # what was indexed before the listing (not what we write meanwhile)
+            known = set(self._cams[name]["segs"]) if name in self._cams else set()
+        found = self._read_dir(path)
+        if found is None:
+            return                                # not listable now: its index stays as it is
+        twins = []
+        with self._lock:
+            self._indexed_cams.add(name)          # (read: its index whole once this lock is let go)
+            c = self._cams.get(name)
+            if c is None:
+                if not found:
+                    return
+                c = self._cams.setdefault(name, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "names": {},
+                                                    "breaks": set()})
+            names = c.setdefault("names", {})
+            breaks = c.setdefault("breaks", set())
+            for key in [k for k in known if k not in found]:
+                c["segs"].pop(key, None)          # gone from the disk (evicted by the other writer)
+                names.pop(key, None)
+                breaks.discard(key)
+            for key, files in found.items():
+                have = (names.get(key) or _name(key, *c["segs"][key], key in breaks)) if key in c["segs"] else None
+                keep = next((x for x in files if x[3] == have), None)
+                if keep is None:                  # not indexed (or its indexed file is gone): the newest one
+                    keep = files[0] if len(files) == 1 else self._newest(path, files)
+                    t0, dur, size, fname, brk = keep
+                    c["segs"][key] = (t0, dur, size)
+                    names[key] = fname
+                    if brk:
+                        breaks.add(key)
+                    else:
+                        breaks.discard(key)
+                # the same segment twice (both leaders wrote it, their starts a segment apart at most): one is
+                # enough. Another start under the same key is other video (the keys started over in between,
+                # #596): never deleted, left beside it (indexed again at the next start, once this one has gone)
+                other = [x for x in files if x[3] != keep[3]]
+                same = [x[3] for x in other if abs(x[0] - keep[0]) <= max(keep[1], 1.0)]
+                twins += same
+                if len(same) < len(other) and (name, key) not in self._twin_logged:
+                    self._twin_logged.add((name, key))
+                    self.log(f"dvr: {name}: two segments under key {key} at different times: both kept")
+            if c["segs"]:
+                last = max(c["segs"])
+                if c["last"] is None or last > c["last"]:
+                    c["last"], c["end"] = last, c["segs"][last][0] + c["segs"][last][1]
+        if twins and self.may_write():
+            for x in twins:
+                (path / x).unlink(missing_ok=True)
 
     def scanned(self) -> bool:
         return self._scanned.is_set()
+
+    def _ensure(self, cid: str) -> None:
+        """Before the whole index is read (a new leader resumed from the state): this camera's own folder read now,
+        once, so its older recording plays, clips and is kept at once."""
+        if (self._indexed.is_set() or not self._scanned.is_set() or cid in self._indexed_cams
+                or not CAM_RE.fullmatch(cid)):
+            return
+        with self._lock:
+            gate = self._ensuring.setdefault(cid, threading.Lock())
+        with gate:                                        # (many viewers at once: the folder listed once)
+            if cid in self._indexed_cams or self._indexed.is_set():
+                return
+            self._scan(only=cid)
+            if cid not in self._indexed_cams and not self._dir(cid).exists():
+                self._indexed_cams.add(cid)               # (no folder: nothing to read; one that couldn't be listed:
+                                                          # asked again next time)
 
     def _file(self, cid: str, key: int) -> Path | None:
         with self._lock:
@@ -476,6 +552,8 @@ class Dvr:
         """Room for need more bytes: under max_bytes, and the disk's free floor kept after it, the oldest going
         first (whichever camera) until there is. False when nothing more can go and there still isn't."""
         with self._disk:
+            if not self._indexed.is_set():
+                return self._room_indexing(need)
             while True:
                 if self.total_bytes() + need <= self.max_bytes and self._free_after(need) >= self.free_floor:
                     return True
@@ -486,19 +564,30 @@ class Dvr:
                 _, cid, key = min(heads)
                 self._remove(cid, key)
 
+    def _room_indexing(self, need: int) -> bool:
+        """Room while the index isn't whole yet: nothing deleted (what isn't indexed can't be weighed); the free floor
+        as ever, and the cap against the bytes the state counted for the cameras not read yet plus those indexed,
+        INDEXING_SLACK over it at most (the eviction makes it good once the index is whole)."""
+        have = self.total_bytes() + sum(int(self.state.get(cid).get("bytes") or 0) for cid in self.state.cameras()
+                                        if cid not in self._indexed_cams
+                                        and (self._folders is None or cid in self._folders))
+        return have + need <= self.max_bytes * (1 + INDEXING_SLACK) and self._free_after(need) >= self.free_floor
+
     def _write(self, cid: str, key: int, t0: float, dur: float, body: bytes, brk: bool = False) -> bool:
         """One segment onto the disk, whole or not at all (a temp file renamed; gone on any error), after making room
         for it. False when there is no room: recording stops (self.stopped) until there is. brk: the first of a new
         stream (another stream, a new session, the origin's counter started over): a discontinuity in the playlist,
         kept in its file name ("_n") so a restart knows it too."""
         with self._disk:
+            if self._stop.is_set():
+                return False                              # (stopped: its last checkpoint is or will be written)
             if not self._room(len(body)):
                 self._stopped(f"Disk full: under {self.free_floor / 1024 ** 3:.1f} GB free"
                               if self._free() - len(body) < self.free_floor else "Over the recording cap")
                 return False
             d = self._dir(cid)
             f = d / _name(key, t0, dur, len(body), brk)
-            tmp = d / f".{f.stem}.{os.getpid()}.tmp" if self.shared else f.with_suffix(".tmp")
+            tmp = d / f".{f.stem}.{TOKEN}.tmp" if self.shared else f.with_suffix(".tmp")
             try:
                 d.mkdir(parents=True, exist_ok=True)
                 tmp.write_bytes(body)
@@ -546,6 +635,8 @@ class Dvr:
 
     def evict(self) -> int:
         """Older than the window: gone; then over max_bytes or under the free floor: the oldest first (_room)."""
+        if not self._indexed.is_set():
+            return 0                                  # (what isn't indexed yet is never weighed or deleted)
         now = self.clock()
         freed = 0
         with self._disk:
@@ -603,6 +694,16 @@ class Dvr:
         moved."""
         fn = getattr(self.roads, "aliases", None)
         moved = []
+        if not self._indexed.is_set():
+            return moved                                  # (the folders not all read yet: after)
+        if not self._scanning.acquire(blocking=False):
+            return moved                                  # (a folder being read: after, never under it)
+        try:
+            return self._follow(fn, moved)
+        finally:
+            self._scanning.release()
+
+    def _follow(self, fn, moved: list[str]) -> list[str]:
         for old, new in (fn() if fn is not None else {}).items():
             if not (CAM_RE.fullmatch(old) and CAM_RE.fullmatch(new)) or old == new:
                 continue
@@ -625,6 +726,7 @@ class Dvr:
                 c["restarted"] = True                     # (and a discontinuity before its first)
                 self._cams[new] = c
                 self._cams.pop(old)
+                self.state.drop(old)                      # (its keys and bytes are the new id's now)
                 for d in (self._opened, self._next):
                     if old in d:
                         d[new] = max(d.pop(old), d.get(new, 0))
@@ -647,10 +749,23 @@ class Dvr:
             pins = dict(self.pins)
         self.save_pins(pins)
         self.log(f"dvr: {cid} {'kept' if on else 'no longer kept'}")
-        with self._lock:
-            self._wanted = self.wanted()
+        self._set_wanted()
         self.roads._changed()
         return self.status(cid)
+
+    def _set_wanted(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """wanted() worked out with no lock held (follow() takes _disk, then _lock: #644), kept as _wanted unless a
+        later one (a Keep's, a tick's, begun after this one) was kept meanwhile: then that one stands. (what was
+        wanted before, what is wanted now)."""
+        with self._lock:
+            self._wanted_gen += 1
+            gen = self._wanted_gen
+        wanted = self.wanted()
+        with self._lock:
+            before = self._wanted
+            if gen > self._wanted_kept:
+                self._wanted, self._wanted_kept = wanted, gen
+            return before, self._wanted
 
     def _incident_cams(self) -> dict[str, float]:
         """Camera id -> metres from the nearest open CAD event, for the cameras an event wants. Worked out again only
@@ -875,6 +990,8 @@ class Dvr:
             return 0
         if cid in self.parked and not trial:              # (#550) only its check asks it
             return 0
+        if cid not in self._resumed:
+            self._ensure(cid)                                  # not in the state: its last key from its folder first
         c = self._cam(cid)
         got = self._list(cid, cam, c)
         if got is None:
@@ -891,22 +1008,35 @@ class Dvr:
         for k, (name, _) in enumerate(items):
             m = SEQ_RE.search(name)
             seqs.append(int(m.group(1)) if m else first + k)
+        # (#597) this task's first round of the camera (a takeover, a restart); the last own chunklist and its newest
+        fresh, polled, top = "top" not in c, c.get("polled"), c.get("top")
+        c["polled"], c["top"] = (None if live else now), seqs[-1]
+        # each one's end: when the chunklist was read (a live viewer's: the pump's copy, up to 10 s old), less the
+        # durations of those after it (a segment is listed once it is whole)
+        listed = now
+        if live:
+            at = (self.roads._streams.get(cid) or {}).get("list_at")
+            if isinstance(at, (int, float)) and now - 10 <= at <= now:
+                listed = at
+        ends, t = [], listed
+        for _, dur in reversed(items):
+            ends.append(t)
+            t -= dur
+        ends.reverse()
         with self._lock:
-            last, offset = c["last"], c.get("offset", 0)
+            last, offset, end = c["last"], c.get("offset", 0), c["end"]
         if last is not None and seqs[-1] + offset + 3 < last:
-            # the origin's counter started over (a restart): carry the keys on from the last one
-            offset = last + 1 - seqs[0]
+            # the origin's counter started over (a restart): carry the keys on from the last one. A camera's first round
+            # here (its offset not known: no state) may list what the leader before wrote: only what can have begun
+            # at its end or after is new (#597; SNAP_AHEAD_S: how far the recording's end may run ahead)
+            new = next((k for k in range(len(items))
+                        if not fresh or end is None or ends[k] - items[k][1] >= end - SNAP_AHEAD_S - 1e-3), len(items))
+            offset = last + 1 - (seqs[new] if new < len(items) else seqs[-1] + 1)
             with self._lock:
                 c["offset"] = offset
             c["restarted"] = True                              # a discontinuity before the next one kept
             c.pop("hstate", None)
             self.log(f"dvr: {cid}: the stream's sequence started over (now {seqs[-1]}); carried on from {last}")
-        # each one's end: now, less the durations of those after it (a segment is listed once it is whole)
-        ends, t = [], now
-        for _, dur in reversed(items):
-            ends.append(t)
-            t -= dur
-        ends.reverse()
         n = 0
         for k, (name, dur) in enumerate(items):
             key = seqs[k] + offset
@@ -917,9 +1047,17 @@ class Dvr:
                 continue
             if self._stop.is_set() or (self.stopped and not self._room(1 << 20)) or not self.may_write():
                 break
-            t0 = ends[k] - dur
-            if last is not None and key == last + 1 and end is not None and abs(end - t0) < 3 * dur + 2:
-                t0 = end                                       # the one before ends where this begins
+            t0 = ends[k] - dur                                 # (the latest it can have begun)
+            if last is not None and key == last + 1 and end is not None:
+                # the one before ends where this begins, as far as that is possible (#597): never after the latest it
+                # can have begun, never before the earliest (the newest, new since our last chunklist: it was listed
+                # since then; else a segment before), so the timeline stays within a round of the clock; and never
+                # more than SNAP_BACK_S before the one before ends (the playlist's dates only go on, no discontinuity)
+                newest = polled is not None and k == len(items) - 1 and top is not None and seqs[k] > top
+                earliest = t0 - (listed - polled if newest else dur)
+                t0 = max(min(max(end, earliest), t0 + SNAP_AHEAD_S), end - min(dur / 2, SNAP_BACK_S))
+            elif end is not None and t0 + dur <= end:
+                continue                                       # its whole span is recorded already: never twice
             if live:
                 try:
                     hit = self.roads._segment(cid, base, name)    # the viewers' copy: fetched once for both
@@ -936,7 +1074,7 @@ class Dvr:
             # started over, a jump in the sequence, or nothing known of the one before (a restart, a recording moved)
             brk = last is not None and (c.get("restarted") or c.get("src") != base or key != last + 1)
             if self._write(cid, key, t0, dur, body, brk):
-                c["src"] = base
+                c["src"], c["seq"] = base, seqs[k]
                 c.pop("restarted", None)
                 n += 1
                 self._good(c)                                  # (#550) a segment kept: not failing, and recording
@@ -954,15 +1092,17 @@ class Dvr:
             return 0
         if not self._scanned.is_set():
             return 0
-        if self.shared and self._started_at is not None:
+        self.checkpoint()
+        if self.shared and self._started_at is not None and self._indexed.is_set():
             now = self.clock()
-            if now - self._started_at <= RESCAN_FOR_S and now - self._rescanned_at >= RESCAN_S:
-                self._rescanned_at = now
-                self._scan()                                   # what the old leader wrote (or evicted) since
-        wanted = self.wanted()
-        with self._lock:
-            before = self._wanted
-            self._wanted = wanted
+            if (now - self._started_at <= RESCAN_FOR_S and now - self._rescanned_at >= RESCAN_S
+                    and not (self._rescan is not None and self._rescan.is_alive())):
+                self._rescanned_at = now                       # what the old leader wrote (or evicted) since: off
+                self._rescan = threading.Thread(target=self._scan_safe, name="dvr-rescan", daemon=True)
+                self._rescan.start()                           # this thread, the rounds go on meanwhile
+                if wait_all:
+                    self._rescan.join()
+        before, wanted = self._set_wanted()
         self._parked_tick()                                    # (#550) the parked cameras' checks, when due
         if set(wanted) != set(before):
             added, gone = set(wanted) - set(before), set(before) - set(wanted)
@@ -1037,25 +1177,135 @@ class Dvr:
             return
         t = time.monotonic()
         self._scan()
+        self._offsets()
+        self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
         self._rescanned_at = self.clock()
         self._scanned.set()
+        self._indexed.set()
         with self._lock:
             n, cams = sum(len(c["segs"]) for c in self._cams.values()), len(self._cams)
         self.log(f"dvr: {n} segments of {cams} cameras found on shared storage in {time.monotonic() - t:.1f} s: appending")
+
+    def _offsets(self) -> int:
+        """(#597) The file names give each camera's last key, not the offset its keys carry on from the origin's
+        sequence with (it started over): that from the state, even an old one, when it describes the same recording's
+        end (its last key the folder's, or up to STATE_LAG_KEYS before it: written after the state). The cameras."""
+        if not self._state_read:                          # (resume() read it already: once is enough)
+            self._state_read = True
+            self.state.load()
+        n = 0
+        with self._lock:
+            for cid in self.state.cameras():
+                s, c = self.state.get(cid), self._cams.get(cid)
+                if c is None or c["last"] is None or type(s.get("last")) is not int or type(s.get("offset")) is not int:
+                    continue
+                if 0 <= c["last"] - s["last"] <= STATE_LAG_KEYS:
+                    c["offset"] = s["offset"]
+                    n += 1
+        return n
+
+    def resume(self) -> bool:
+        """Shared storage, a new leader (#596): each camera's last key, end and offset from the state the leader before
+        left, so recording goes on at once; the whole index is then read in the background (index_rest). False (and
+        nothing taken in) when there is no state or it is stale: scan_now first, as before."""
+        if self._scanned.is_set():
+            return False
+        t = time.monotonic()
+        self._state_read = True
+        if not self.state.load():
+            return False
+        try:                                              # (one listing of the top folder: a few dozen names)
+            self._folders = {d.name for d in os.scandir(self.root) if CAM_RE.fullmatch(d.name)}
+        except OSError:
+            self._folders = set()
+        n = 0
+        with self._lock:
+            for cid in self.state.cameras():
+                s = self.state.get(cid)
+                last, end, offset = s.get("last"), s.get("end"), s.get("offset", 0)
+                if not (CAM_RE.fullmatch(cid) and type(last) is int and isinstance(end, (int, float))
+                        and type(offset) is int):
+                    continue
+                c = self._cams.setdefault(cid, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "breaks": set()})
+                c["last"], c["end"], c["offset"] = last, float(end), offset
+                if isinstance(s.get("src"), str):
+                    c["src"] = s["src"]                   # (#597: the same stream after a handover, no discontinuity)
+                self._resumed.add(cid)
+                n += 1
+        self._scanned.set()
+        self.log(f"dvr: resumed {n} cameras from the state in {time.monotonic() - t:.2f} s: appending; "
+                 "the index read in the background")
+        return True
+
+    def index_rest(self) -> None:
+        """After resume(): the whole index from the folders, merged with what was recorded meanwhile."""
+        t = time.monotonic()
+        self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
+        try:
+            self._scan(first=True)
+        except Exception as e:  # pragma: no cover - an unreadable folder: what was read stands
+            self.log(f"dvr: the shared index not read whole ({type(e).__name__}: {e})")
+        self._rescanned_at = self.clock()
+        self._indexed.set()
+        with self._lock:
+            n, cams = sum(len(c["segs"]) for c in self._cams.values()), len(self._cams)
+        self.log(f"dvr: {n} segments of {cams} cameras indexed in the background in {time.monotonic() - t:.1f} s")
+
+    def _scan_safe(self) -> None:
+        try:
+            self._scan()
+        except Exception as e:  # pragma: no cover - the next rescan tries again
+            self.log(f"dvr: the folders not read again ({type(e).__name__}: {e})")
+
+    def checkpoint(self, force: bool = False) -> bool:
+        """Each camera's last key, end, offset, the stream's last media sequence and source, and its bytes on disk
+        (once the index is whole) into the state (sizeup/dvrstate.py): written every few seconds, and at once with
+        force (a clean stop). Only the leader (the state's may_write), only once recording may go on."""
+        if not self._scanned.is_set() or not (force or self.clock() - self._checked_at >= self.state.every_s):
+            return False
+        self._checked_at = self.clock()
+        whole = self._indexed.is_set()
+        with self._lock:
+            recs = {cid: {"last": c["last"], "end": round(c["end"], 3), "offset": int(c.get("offset", 0)),
+                          "seq": c.get("seq"), "src": c.get("src"),
+                          **({"bytes": self._segs(c).bytes} if whole else {})}
+                    for cid, c in self._cams.items() if c["last"] is not None and c["end"] is not None}
+        for cid, rec in recs.items():
+            self.state.update(cid, **{k: v for k, v in rec.items() if v is not None})
+        if whole:
+            for cid in set(self.state.cameras()) - set(recs):
+                self.state.update(cid, bytes=0)           # (nothing of it indexed: evicted, moved)
+        return self.state.checkpoint(force)
 
     def stop(self) -> None:
         self._stop.set()
         if self._pool is not None:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._pool = None
+        until = time.monotonic() + STOP_WAIT_S
+        while self._busy and time.monotonic() < until:  # the rounds under way: their segments in the last checkpoint
+            time.sleep(0.05)
+        with self._disk:                                  # (a write under way finishes first; none after: _write)
+            self.checkpoint(force=True)
 
     def _run(self) -> None:
+        if not self._scanned.is_set():
+            try:
+                resumed = self.resume()
+            except Exception as e:  # pragma: no cover - a state that can't be taken in: the index first
+                self.log(f"dvr: the state not taken in ({type(e).__name__}: {e})")
+                resumed = False
+            if resumed:
+                threading.Thread(target=self.index_rest, name="dvr-index", daemon=True).start()
         if not self._scanned.is_set():
             try:
                 self.scan_now()
             except Exception as e:  # pragma: no cover - an unreadable folder: recorded afresh
                 self.log(f"dvr: the shared index not read ({type(e).__name__}: {e})")
                 self._scanned.set()
+                self._indexed.set()
         while not self._stop.is_set():
             t = self.clock()
             try:
@@ -1255,6 +1505,25 @@ class Dvr:
             except (KeyError, TypeError, ValueError):
                 continue
 
+    def _clean_parked_tmp(self, stale_s: float = STALE_TMP_S) -> None:
+        """(#603) A temp file of PARKED_FILE left by a writer killed while writing it (.parked.<pid>.tmp at the root):
+        gone once stale_s old, only by a task that may write. Never PARKED_FILE itself, never a fresh one (a write
+        under way: ours under _parked_lock, or another task's)."""
+        if not self.may_write():
+            return
+        stem = Path(PARKED_FILE).stem
+        with self._parked_lock:
+            try:
+                found = [f for f in os.scandir(self.root) if f.name.startswith(f"{stem}.") and f.name.endswith(".tmp")]
+            except OSError:
+                return
+            for f in found:
+                try:
+                    if time.time() - f.stat().st_mtime > stale_s:
+                        Path(f.path).unlink(missing_ok=True)
+                except OSError:
+                    continue
+
     def _save_parked(self) -> None:
         """PARKED_FILE written whole (a temp file renamed), only by the leader (may_write); the list copied under the
         file's own lock, so the last written is the newest. Wall-clock times only (the monotonic ones are this task's)."""
@@ -1290,6 +1559,7 @@ class Dvr:
             return [] if self.stopped else list(self._wanted.get(cid, []))
 
     def status(self, cid: str) -> dict:
+        self._ensure(cid)
         with self._lock:
             c = self._cams.get(cid)
             segs = sorted(c["segs"].items()) if c else []
@@ -1309,6 +1579,7 @@ class Dvr:
                 "parked": {k: parked[k] for k in ("why", "since", "next")} if parked else None}
 
     def playlist(self, cid: str) -> bytes | None:
+        self._ensure(cid)
         with self._lock:
             c = self._cams.get(cid)
             segs = sorted(c["segs"].items()) if c else []
@@ -1372,6 +1643,7 @@ class Dvr:
     def segments(self, cid: str, t_from: float, t_to: float) -> list[dict]:
         """The recorded segments that overlap [t_from, t_to], oldest first: {key, t0, dur, bytes, path} (a saved clip,
         sizeup/attachments.py: copied as they are)."""
+        self._ensure(cid)
         with self._lock:
             c = self._cams.get(cid)
             segs = sorted(c["segs"].items()) if c else []
@@ -1414,6 +1686,7 @@ class Dvr:
             if body is None:
                 return 404, b'{"error":"nothing recorded"}', JSON, hdr
             return 200, body, "application/vnd.apple.mpegurl", hdr
+        self._ensure(cid)
         f = self._file(cid, int(what[:-3]))
         want = parse_qs(query).get("s", [""])[0]
         if f is not None and want and f.name.split("_")[1] != want:      # that key, but another segment now

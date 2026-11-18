@@ -8,11 +8,13 @@
 if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentElement.classList.add("board");</script>
 <link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
+<!-- bundle css cad -->
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/cadmap.css">
 <link rel="stylesheet" href="/static/health.css">
+<!-- /bundle -->
 </head>
 <body class="cad">
 <!-- One header for the console and the wall board (style.css "header"): the board hides .console-only, the console .board-only -->
@@ -82,7 +84,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <ol id="q-active" class="list q"></ol>
     </section>
     <section>
-      <h2 title="Logged, no dispatch, open until closed">Non-emergency</h2>
+      <h2 title="Logged, no dispatch, open until closed or its Until passes">Non-emergency</h2>
       <ol id="q-nonemerg" class="list q"></ol>
     </section>
     <!-- folded to start, with the count (#89); the choice is remembered per browser (cad.js closedFold) -->
@@ -157,6 +159,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div class="rn-tree-head"><button id="rn-folds" class="quiet sm icon" type="button" hidden>⊟</button><button id="rn-edit" class="quiet sm" type="button" title="Edit the folders (for everyone)" hidden>Edit</button></div>
           <div id="rn-tree" class="rn-tree"></div>
         </aside>
+        <div id="rn-size" class="rn-size"></div>
         <div class="rn-main">
           <div class="rn-tools">
             <button id="rn-open" class="sm rn-phone" type="button" title="Views and channels" aria-haspopup="dialog">Sources</button>
@@ -260,6 +263,36 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </div>
     </div>
 
+    <!-- A pre-alert's More info (prealert-info.js, /cad#prealert/<kind>/<id>): its context bundle (sizeup/context_bundle.py):
+         why, the transmissions and their audio, the channels around it, the place, site history, now, the outcome.
+         #pi-updates (hidden) is where a later PR puts the event's timeline of updates, above the bundle -->
+    <div id="prealert-view" class="pi-view" hidden>
+      <div class="view-head">
+        <h2 class="view-title">Pre-alert</h2>
+        <b id="pi-title" class="pi-title"></b>
+        <span id="pi-chips" class="chips"></span>
+        <span class="spacer"></span>
+        <span id="pi-gen" class="dim small"></span>
+        <button id="pi-reload" class="sm" type="button" title="Read it again">Refresh</button>
+      </div>
+      <div id="pi-error" class="error" hidden></div>
+      <section id="pi-updates" class="pi-sec" hidden aria-label="Updates"></section>
+      <div class="pi-grid">
+        <div class="pi-main">
+          <section id="pi-why" class="pi-sec" hidden aria-label="Why"></section>
+          <section id="pi-trigger" class="pi-sec" hidden aria-label="Heard"></section>
+          <section id="pi-around" class="pi-sec" hidden aria-label="Timeline"></section>
+          <section id="pi-site" class="pi-sec" hidden aria-label="Site history"></section>
+        </div>
+        <aside class="pi-side">
+          <div id="pi-mapbox" class="pi-mapbox" hidden><div id="pi-map" class="pi-map"></div></div>
+          <section id="pi-place" class="pi-sec" hidden aria-label="Place"></section>
+          <section id="pi-now" class="pi-sec" hidden aria-label="Now"></section>
+          <section id="pi-outcome" class="pi-sec" hidden aria-label="Outcome"></section>
+        </aside>
+      </div>
+    </div>
+
     <!-- A new call (#204), in the order the dispatcher takes it: Location > Caller name > Caller address > Caller # >
          Event type > Event subtype > Comments. Tab / Shift+Tab go through exactly those (nothing else in between takes
          focus: tabindex -1); the rest come after Comments. On the right, a big map (newcall-map.js) plots the location
@@ -295,7 +328,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
             <span id="f-class" class="dim small"></span>
           </label>
-          <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
+          <label id="f-until-w" class="field span2" hidden title="Optional (closures, hydrants out of service): the event closes by itself then, as Expired">Until
             <input id="f-until" type="datetime-local">
           </label>
           <fieldset id="f-airport" class="span2 ap-fields" hidden>
@@ -341,6 +374,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="d-queued" class="warnbox notice" hidden>
           <div id="d-qhead">60 Control page: set type, then Accept or Dismiss</div>
           <div id="d-qnote" class="qnote"></div>
+          <div id="d-qmerge" class="qmerge" hidden></div>
           <div class="row">
             <label class="inline">Type <select id="d-acc-type"></select></label>
             <label class="inline">Subtype <select id="d-acc-sub"></select></label>
@@ -457,7 +491,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <label class="field span2">Caller address <input id="e-caddr" type="text" maxlength="200" spellcheck="false"></label>
           <label class="field">Received via <select id="e-via"></select></label>
           <label class="check"><input id="e-emergency" type="checkbox"> <span>Emergency</span></label>
-          <label class="field span2">Until <input id="e-until" type="datetime-local"></label>
+          <label id="e-until-w" class="field span2" title="Non-emergency only: the event closes by itself then, as Expired">Until <input id="e-until" type="datetime-local"></label>
           <fieldset id="e-airport" class="span2 ap-fields" hidden>
             <legend>Airport: what the tower passed <button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The ARFF notification (FAA AC 150/5200-31C): aircraft type, the nature of the emergency, minutes out, runway (16/34, 11/29), souls on board, fuel on board, dangerous goods. Filled from the 60 Control page when it says them; edit as the tower passes more. Level 1–5 is the Westchester souls-on-board scale (1–2 / 3–10 / 11–25 / 26–50 / 51+), set from the souls unless said; the Alert (1/2/3) is the FAA alert, a different scale: pick it as the subtype.">?</button></legend>
             <label class="field">Aircraft <input id="e-acft-type" type="text" maxlength="40" placeholder="Boeing 737" spellcheck="false"></label>
@@ -680,9 +714,13 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       <div id="settings-radio-controls" class="radio-controls"></div>
       <div class="radio-controls" data-rtab="squelch" hidden>
         <section class="card">
-          <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum).">?</button></div>
+          <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum). Suggested (admins): the Open 7 days of the channel's own idle quieting and real transmissions suggest, the numbers on hover; Apply sets Open and Close, audited like an edit. Charts: the Signal tab.">?</button></div>
           <div id="settings-squelch"></div>
         </section>
+      </div>
+      <div class="radio-controls" data-rtab="signal" hidden>
+        <div id="settings-signal" class="sg-panel"></div>
+        <div id="settings-signal-thresholds"></div>
       </div>
       <div id="settings-tones" class="radio-controls" data-rtab="tones" hidden></div>
       <div id="settings-emergencies" class="radio-controls" data-rtab="emergencies" hidden></div>
@@ -725,6 +763,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 </div>
 
 <script src="/static/vendor/maplibre-gl.js"></script>
+<!-- bundle js cad -->
 <script src="/static/map-style.js"></script>
 <script src="/static/airport.js"></script>
 <script src="/static/maplayers.js"></script>
@@ -752,6 +791,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/intel.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/status-hints.js"></script>
+<script src="/static/oos-notices.js"></script>
 <script src="/static/radio-ids.js"></script>
 <script src="/static/cadmap.js"></script>
 <script src="/static/newcall-map.js"></script>
@@ -759,10 +799,13 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-nav.js"></script>
 <script src="/static/addr-history.js"></script>
 <script src="/static/search-view.js"></script>
+<script src="/static/prealert-info.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/streetview.js"></script>
 <script src="/static/preplan-docs.js"></script>
 <script src="/static/radio-controls.js"></script>
+<script src="/static/signal-chart.js"></script>
+<script src="/static/signal-panel.js"></script>
 <script src="/static/squelch-panel.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/adapterpass.js"></script>
@@ -779,5 +822,6 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/camoverlay.js"></script>
 <script src="/static/styleguide.js"></script>
 <script src="/static/logs.js"></script>
+<!-- /bundle -->
 </body>
 </html>
