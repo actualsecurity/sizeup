@@ -330,10 +330,24 @@ How it goes, end to end:
    the system python3 (adsbd.py, aisd.py, trunkrecd.py, autoupdate.py, configupdate.py, logread.py and
    tools/stt_diag.py: stdlib only, Python 3.11+) load with it. A missing `rtl_sdr` is only a warning. A failure: no switch, the sha is recorded as failed and reported to the hub, with the
    error (for a script, the system Python's version and its exception).
-7. **A quiet moment**: no carrier open, nobody talking, no transcription queued or running, no re-run
-   pending (the station's `GET /api/station-mode`, `update.busy`). It looks every 5 s and waits up to 5 minutes
-   for one, then goes anyway. Shed clips being caught up ([below](#speech-to-text-and-cpu)) never count as busy:
-   the ones still waiting are taken back while an update waits.
+7. **The moment to switch** (the station's `GET /api/station-mode`, `update.hold`): one restart per burst of hub
+   deploys, never mid-page.
+   * **Settle**: the hub's build has held still 10 min. A newer one meanwhile is staged and waited for instead; the
+     older one is never switched to ("2 hub build(s) in between skipped" in the log line).
+   * **Busy**: nothing a restart would cut off: a page coming in or held for its continuation, an emergency event
+     of ours dispatched in the last 5 min, an emergency window open, a carrier open, someone talking, a page or
+     Fire/EMS clip waiting for speech-to-text.
+   * **A short queue**: at most 5 transcriptions waiting, 20 after 10 more minutes, 60 after 20.
+   * **Ceiling**: 45 min behind the hub (counted from when it first fell behind, whatever the hub deployed since),
+     neither settling nor the queue holds it; "busy" 5 min more at most, then it goes anyway.
+   * **Urgent**: `sudo sizeup-station autoupdate now`, or a commit since the running build with a line
+     `Station-Update: now` in its message: no settling, no queue, "busy" 5 min at most.
+   While it waits, the station's Hub row (and the hub's) say "staged, switching by HH:MM" and why; the journal says
+   each reason once, and the result line says what it waited for, why it went and what was in flight. Shed clips
+   being caught up ([below](#speech-to-text-and-cpu)) never count: the ones still waiting are taken back while an
+   update waits. Clips still waiting for speech-to-text when sizeup-station stops are not lost: pages and Fire/EMS
+   clips get 8 s more, the rest go up marked "skipped: busy" (row and recording, through the outbox) and the
+   hub's catch-up transcribes them later.
 8. **The switch**: `install-linux.sh --activate <sha>` swaps the build links and `/opt/sizeup/current`
    (each one rename), installs the release's units and commands, and restarts sizeup-station once.
    whisper-server is its own service now (`sizeup-whisper.service`) and keeps its model loaded; it is

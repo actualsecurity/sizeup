@@ -23,8 +23,22 @@ side by side: the new release is built and checked next to the running one, then
                   when a pin changed) and preflights it (imports, the config loads, the databases come
                   up in a scratch dir, the units parse, the programs run). The running station is not
                   touched; a failed preflight = no switch, the sha recorded as failed
-               4. a quiet moment: no carrier open, nobody talking, no transcription queued or running
-                  (the station's GET /api/station-mode, "update" -> "busy"); after QUIET_MAX_S it goes anyway
+               4. the moment to switch (moment(), pick_moment(); the station's GET /api/station-mode, "update" ->
+                  "hold"): one switch per burst of hub deploys, never mid-page. In order:
+                    settle  the hub's build held still SETTLE_S (a newer one meanwhile: that one is staged and
+                            waited for instead, the older one never switched to: "N hub builds in between skipped")
+                    busy    nothing the station would cut off: a page coming in or held for its continuation, an
+                            emergency event of ours dispatched in the last few minutes, an emergency window, a
+                            carrier open, someone talking, a page / Fire-EMS clip waiting for speech-to-text
+                    stt     few transcriptions waiting (STT_FEW: 5 at first, more the longer it has waited)
+                  CEILING_S behind the hub: no more settling or waiting for a short queue; "busy" then holds it
+                  QUIET_MAX_S more at most, then it goes anyway. Urgent (sizeup-station autoupdate now, or a commit
+                  since the running build with a "Station-Update: now" line): no settling, no queue, "busy" holds it
+                  QUIET_MAX_S at most. Each reason is said once in the journal, then every NOTE_S (state.json:
+                  state "deferred", "hold", shown as "staged, switching by HH:MM" on the station's Hub row and the
+                  hub, which the deploy check accepts); the result line says what it
+                  waited for, why it went and what was in flight at the switch. Clips still waiting for
+                  speech-to-text at the restart are handed over by the station itself (App._stt_handoff)
                5. activate: install-linux.sh --activate SHA: the build links and /opt/sizeup/current
                   are swapped by rename, one restart of sizeup-station (whisper-server and trunk-recorder
                   are services of their own: the model stays loaded, P25 stays on its control channel,
@@ -63,7 +77,7 @@ side by side: the new release is built and checked next to the running one, then
              station service from systemd's credstore only (ImportCredential= / LoadCredential=, sizeup/procenv.py),
              never in an environment.
 
-    python3 autoupdate.py run | status | doctor | on | off | prune | rollback
+    python3 autoupdate.py run | now | status | doctor | on | off | prune | rollback
     python3 autoupdate.py adapter setup | status | remove | stage RELEASE
 """
 
@@ -94,8 +108,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 STABLE_S = 30.0            # the hub says the same build this long before the station asks for it
 REFRESH_S = 600.0          # the want is rewritten this often while the hub answers
 WANT_MAX_AGE_S = 3600.0    # an older want (the hub out of reach): ignored
-QUIET_MAX_S = 300.0        # wait this long for a quiet moment, then update anyway
+QUIET_MAX_S = 300.0        # urgent or past the ceiling: a page / carrier / dispatch holds it this long at most
 QUIET_POLL_S = 5.0
+SETTLE_S = 600.0           # the hub's build held still this long before the switch: a burst of deploys, one restart
+SETTLE_POLL_S = 15.0       # (settling: the want file is looked at this often)
+CEILING_S = 2700.0         # behind the hub this long: no more settling, no more waiting for a short STT queue
+STT_FEW = ((0.0, 5), (600.0, 20), (1200.0, 60))   # (s since it settled, transcriptions waiting it switches with)
+HOLD_SAVE_S = 60.0         # the wait's reason in state.json this often (and at a change of phase, 15 s apart at most)
+NOTE_S = 600.0             # ... and in the journal: each reason once, then where it stands this often
+RUNS = 20                  # run(): the hub moved on while this ran, again at most this often (one switch: the newest)
+URGENT_LINE = re.compile(r"(?im)^station-update:[ \t]*now[ \t]*$")   # in a commit message: switch without waiting
 HEALTH_S = 90.0            # /healthz with the new build within this after the switch, or back
 RADIOS_S = 60.0            # how long to watch for the radios coming back (measured, not required)
 STALE_ATTEMPT_S = 3 * 3600.0
@@ -375,16 +397,53 @@ def plan(want: str, current: str, paused: str, failed: dict | None, upd: dict | 
     return "update", f"{short(current)} -> {short(want)}"
 
 
-def wait_quiet(busy: Callable[[], str], max_s: float, clock: Callable[[], float] = time.time,
-               sleep: Callable[[float], None] = time.sleep, poll_s: float = QUIET_POLL_S) -> tuple[float, str]:
-    """Wait until busy() says "" (quiet) or max_s passes: (seconds waited, what was still going on)."""
-    t0 = clock()
-    while True:
-        why = busy()
-        waited = clock() - t0
-        if not why or waited >= max_s:
-            return waited, why
-        sleep(min(poll_s, max(0.0, max_s - waited)))
+def _mins(s: float) -> str:
+    s = max(0.0, float(s))
+    return f"{s:.0f} s" if s < 90 else f"{s / 60:.0f} min"
+
+
+def hold_of(upd: dict | None) -> dict:
+    """What the station says a restart would cut off now (its GET /api/station-mode "update"): {hard: [what never to
+    switch during], stt: transcriptions waiting, text}. A station that says only "busy" (before "hold"): all of it holds,
+    as it always did. Nothing (it doesn't answer): quiet."""
+    upd = upd if isinstance(upd, dict) else {}
+    busy = str(upd.get("busy") or "")[:300]
+    h = upd.get("hold")
+    if not isinstance(h, dict):
+        return {"hard": [busy] if busy else [], "stt": 0, "text": busy}
+    n = h.get("stt")
+    return {"hard": [str(x)[:120] for x in (h.get("hard") or []) if x][:10],
+            "stt": int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 else 0, "text": busy}
+
+
+def moment(now: float, seen: float, behind: float, hold: dict, urgent_at: float | None = None, *,
+           settle_s: float = SETTLE_S, ceiling_s: float = CEILING_S, quiet_max_s: float = QUIET_MAX_S,
+           few: tuple = STT_FEW) -> tuple[str, str]:
+    """Switch now? ("", why it goes) or (phase, why it waits): "settle" (the hub's build, seen at `seen`, hasn't held
+    still settle_s), "busy" (hold["hard"]: a page, a dispatch, a carrier, someone talking), "stt" (more transcriptions
+    waiting than STT_FEW allows yet). behind: since when the station has been behind the hub; past ceiling_s neither
+    settling nor the queue holds it, and "busy" quiet_max_s more at most. urgent_at: since when it is urgent (no
+    settling, no queue, "busy" quiet_max_s at most)."""
+    hard = [h for h in hold.get("hard") or [] if h]
+    stt = int(hold.get("stt") or 0)
+    late = now - behind >= ceiling_s
+    if urgent_at is None and not late and now - seen < settle_s:
+        return "settle", f"the hub's build is {_mins(now - seen)} old: switching once it has held still {_mins(settle_s)}"
+    if hard:
+        since = urgent_at if urgent_at is not None else behind + ceiling_s if late else None
+        if since is None or now - since < quiet_max_s:
+            return "busy", ", ".join(hard)
+        return "", f"still {', '.join(hard)} after {_mins(now - since)}: switching anyway"
+    waiting = f", {stt} transcription(s) waiting" if stt else ""
+    if urgent_at is not None:
+        return "", f"urgent{waiting}"
+    if late:
+        return "", f"{_mins(now - behind)} behind the hub (the most it waits: {_mins(ceiling_s)}){waiting}"
+    after = now - (seen + settle_s)
+    allowed = max((n for at, n in few if after >= at), default=0)
+    if stt > allowed:
+        return "stt", f"{stt} transcription(s) waiting: switching at {allowed} or fewer"
+    return "", f"a quiet moment{waiting}"
 
 
 def paused_reason(s: dict) -> str:
@@ -402,7 +461,8 @@ def paused_reason(s: dict) -> str:
 
 def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -> dict:
     """{state, text}: this station's version against the hub's, for the station's Hub row and the
-    hub's Station row. state: ok | updating | failed | paused | behind | unknown."""
+    hub's Station row. state: ok | deferred (staged, the switch waiting for its moment, bounded) | updating | failed |
+    paused | behind | unknown."""
     upd = upd if isinstance(upd, dict) else {}
     now = time.time() if now is None else now
     win = f" · {upd['windows']}" if upd.get("windows") else ""
@@ -412,6 +472,13 @@ def describe(build: str, hub: str, upd: dict | None, now: float | None = None) -
         return {"state": "ok", "text": f"up to date ({short(build)}){win}"}
     if equivalent_to(upd, hub, build):
         return {"state": "ok", "text": f"up to date: {short(hub)} (no runtime change since {short(build)}){win}"}
+    hold = upd.get("hold") if isinstance(upd.get("hold"), dict) else {}
+    until = float(hold.get("until") or 0) if isinstance(hold.get("until"), (int, float)) else 0.0
+    if upd.get("state") == "deferred" and same_build(upd.get("to"), hub) and now < until + 120:
+        # built and checked, the switch waits for its moment (moment()): bounded, so not "behind"
+        why = str(hold.get("why") or "")[:100]
+        return {"state": "deferred", "text": f"updating {short(build)} -> {short(hub)}: staged, switching by "
+                                             f"{_clock(until)}" + (f" ({why})" if why else "") + win}
     if (upd.get("state") in ("waiting", "updating") and same_build(upd.get("to"), hub)
             and now - float(upd.get("since") or 0) < STALE_ATTEMPT_S):
         wait = " (waiting for a quiet moment)" if upd.get("state") == "waiting" else ""
@@ -506,8 +573,8 @@ class Watch:
         if mtime != self._read[0]:
             self._read = (mtime, read_state(self.state_path) if mtime else {})
         st = self._read[1]
-        out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry")
-               if k in st}
+        out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry",
+                                  "hold") if k in st}
         out["failed"] = _newest_failed(st.get("failed") if isinstance(st.get("failed"), dict) else {}, 5)
         return out
 
@@ -554,6 +621,11 @@ class Paths:
     credentials: Path = Path("/etc/credstore")                       # the adapter's: sizeup-adapter.<NAME>, root 0600
     sources_state: Path = Path("/var/lib/sizeup/sources")            # each adapter's state dir (its ssm.json)
     dropin: Path = Path("/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf")
+
+    @property
+    def now_mark(self) -> Path:
+        """sizeup-station autoupdate now: the update waiting for its moment goes now (root's runtime dir)."""
+        return self.work / "now"
 
     @property
     def adapter_wheels(self) -> Path:
@@ -632,10 +704,12 @@ def prune_plan(releases: list[str], history: list[str], current: str, keep: int 
 
 class Updater:
     def __init__(self, paths: Paths | None = None, *, quiet_max_s: float = QUIET_MAX_S, health_s: float = HEALTH_S,
-                 radios_s: float = RADIOS_S, clock: Callable[[], float] = time.time,
+                 radios_s: float = RADIOS_S, settle_s: float = SETTLE_S, ceiling_s: float = CEILING_S,
+                 clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, out: Callable[[str], None] | None = None):
         self.p = paths or Paths()
         self.quiet_max_s, self.health_s, self.radios_s = quiet_max_s, health_s, radios_s
+        self.settle_s, self.ceiling_s = settle_s, ceiling_s
         self.clock, self.sleep = clock, sleep
         self.out = out or (lambda line: print(line, flush=True))
         self._settings: dict | None = None
@@ -727,11 +801,25 @@ class Updater:
         except (OSError, ValueError):
             return None
 
-    def busy(self) -> str:
-        """What the station is in the middle of ("" = quiet, or it doesn't answer / doesn't say)."""
+    def hold(self) -> dict:
+        """What the station is in the middle of (hold_of(): {hard, stt, text}; quiet when it doesn't answer)."""
         d = self._get("/api/station-mode") or {}
-        upd = d.get("update") if isinstance(d.get("update"), dict) else {}
-        return str(upd.get("busy") or "")
+        return hold_of(d.get("update") if isinstance(d.get("update"), dict) else {})
+
+    def asked_now(self) -> str:
+        """sizeup-station autoupdate now (looked at each poll)."""
+        return "asked for now (sizeup-station autoupdate now)" if self.p.now_mark.exists() else ""
+
+    def urgent(self, build: str, sha: str) -> str:
+        """Why this update may not wait ("" = it may): a commit since the running build (or sha itself, when that
+        isn't known) says "Station-Update: now" on a line of its own (looked at once per update), or asked_now()."""
+        rng = f"{build}..{sha}" if FULL_SHA.fullmatch(build or "") and self.is_ancestor(build, sha) else sha
+        args = ("log", "--format=%H%n%B%x00", rng) if ".." in rng else ("log", "-1", "--format=%H%n%B%x00", rng)
+        for msg in self.git(*args, check=False).split("\0"):
+            head, _, body = msg.strip().partition("\n")
+            if URGENT_LINE.search(body):
+                return f"urgent build (Station-Update: now in {short(head)})"
+        return self.asked_now()
 
     def radios_ok(self) -> set[str] | None:
         """The radio rows that are "ok" right now (None: the station doesn't answer)."""
@@ -1536,6 +1624,9 @@ class Updater:
             kw["last"] = dict(kw["last"], **({"line": self._line[:500]} if self._line else {}))
             if kw["last"].get("why"):
                 kw["last"]["why"] = public(kw["last"]["why"])
+        for k in [k for k, v in kw.items() if v is None]:      # (None: that key goes)
+            st.pop(k, None)
+            del kw[k]
         st.update(kw)
         if "state" in kw:
             st["since"] = self.clock()
@@ -1618,7 +1709,7 @@ class Updater:
 
     def run(self) -> int:
         rc = 0
-        for _ in range(3):              # the hub moved again while this ran: once more
+        for _ in range(RUNS):           # the hub moved again while this ran (or while it waited: update()): once more
             want_before = self.read_want()
             rc = self.locked(self._run)
             if self.read_want() == want_before:
@@ -1646,6 +1737,12 @@ class Updater:
             why = paused = f"the hub's build {want} isn't a full git sha: not updating"
         if action == "update" and self.retry_later(st, want):
             return 0
+        if action in ("current", "paused"):
+            self.p.now_mark.unlink(missing_ok=True)
+            if "pending" in st:
+                self.save(st, pending=None)
+        if action == "update":
+            self.pending(st, want)
         if action == "current":
             if st.get("state") != "current" or st.get("current") != build or st.get("paused") != paused:
                 self.save(st, state="current", current=build, hub=want, paused=paused)
@@ -1657,6 +1754,83 @@ class Updater:
             # staying on this build: its adapter still follows its ref (#301); paused: nothing moves
             return self.adapter_check(st, name, build) if action == "failed-before" else 0
         return self.update(st, name, build, want)
+
+    def pending(self, st: dict, want: str) -> dict:
+        """state.json "pending": the hub build this station is on its way to, since when (seen: what settling counts
+        from), since when it has been behind the hub at all (behind: the ceiling's start; kept while the hub moves on)
+        and the hub builds it has skipped in between (a burst of deploys: one switch, to the newest)."""
+        pend = st.get("pending") if isinstance(st.get("pending"), dict) else {}
+        if same_build(pend.get("sha"), want):
+            return pend
+        now = self.clock()
+        skipped = [x for x in (pend.get("skipped") or []) if isinstance(x, str)]
+        if pend.get("sha"):
+            skipped = (skipped + [str(pend["sha"])])[-20:]
+        behind = pend.get("behind")
+        pend = {"sha": want, "seen": now, "skipped": skipped,
+                "behind": float(behind) if isinstance(behind, (int, float)) and behind <= now else now}
+        self.save(st, pending=pend)
+        return pend
+
+    def pick_moment(self, st: dict, tag: str, build: str, want: str, sha: str, only: bool) -> tuple[bool, dict]:
+        """Wait for the moment to switch (moment()): (True, what it waited for) to switch now; (False, ...) when the
+        hub moved on meanwhile (the release staged for this one is left for prune; run() goes on to the newer build).
+        Each phase is said once in the journal and kept in state.json "hold" (its reason, by when at the latest)."""
+        t0 = self.clock()
+        pend = st.get("pending") if isinstance(st.get("pending"), dict) and not only else {}
+        seen = float(pend.get("seen") or t0) if not only else t0 - self.settle_s     # (an adapter rebuild: no settling)
+        behind = min(float(pend.get("behind") or seen), seen) if not only else t0
+        until = behind + self.ceiling_s + self.quiet_max_s
+        urgent, urgent_at = "", None
+        spent: dict[str, float] = {}
+        noted: set[str] = set()
+        phase, why, prev, hold = "", "", t0, {"hard": [], "stt": 0, "text": ""}
+        saved_ph, saved, said = "", -1e18, -1e18
+        while True:
+            now = self.clock()
+            if phase:
+                spent[phase] = spent.get(phase, 0.0) + now - prev
+            prev = now
+            if not only:
+                w = self.read_want()
+                if w and not same_build(w, want):
+                    self.note(f"auto-update: {tag}: the hub moved on to {short(w)} while this waited: "
+                              f"{short(want)} skipped, one switch to the newer one")
+                    self.save(st, state="behind", current=build, hold=None)
+                    return False, {"waited": now - t0}
+            if urgent_at is None:
+                urgent = self.asked_now() if phase else self.urgent(build, sha)    # (git: on the first look only)
+                if urgent:
+                    urgent_at = now
+                    self.note(f"auto-update: {tag}: {urgent}: no settling, no waiting for the queue")
+            late = now - behind >= self.ceiling_s
+            if urgent_at is not None or late or now - seen >= self.settle_s:
+                hold = self.hold()
+            ph, why = moment(now, seen, behind, hold, urgent_at, settle_s=self.settle_s, ceiling_s=self.ceiling_s,
+                             quiet_max_s=self.quiet_max_s)
+            if not ph:
+                break
+            # the journal: each reason the first time, then where it stands every NOTE_S (a carrier coming and going
+            # every few seconds is not a line each time); state.json: a change of reason, at most every 15 s
+            if ph not in noted or now - said >= NOTE_S:
+                self.note(f"auto-update: {tag}: {'still ' if ph in noted else ''}waiting ({ph}): {why}")
+                noted.add(ph)
+                said = now
+            if not saved_ph or (ph != saved_ph and now - saved >= 15) or now - saved >= HOLD_SAVE_S:
+                self.save(st, hold={"phase": ph, "why": public(why)[:200], "since": t0, "until": until})
+                saved_ph, saved = ph, now
+            phase = ph
+            self.sleep(SETTLE_POLL_S if ph == "settle" else QUIET_POLL_S)
+        self.p.now_mark.unlink(missing_ok=True)
+        waited = self.clock() - t0
+        held = ", ".join(f"{k} {_mins(v)}" for k, v in spent.items() if v >= 1)
+        skipped = [short(x) for x in pend.get("skipped") or []]
+        self.note(f"auto-update: {tag}: switching after {_mins(waited)}"
+                  + (f" ({held})" if held else "") + f": {why}"
+                  + (f"; at the switch: {hold['text']}" if hold.get("text") else "")
+                  + (f"; {len(skipped)} hub build(s) in between skipped: {', '.join(skipped)}" if skipped else ""))
+        return True, {"waited": waited, "held": held, "why": why, "busy": hold.get("text") or "",
+                      "stt": hold.get("stt", 0), "skipped": skipped}
 
     def _interrupted(self, st: dict) -> None:
         """A run that stopped half-way (reboot, killed): keep the new release only if it is healthy."""
@@ -1798,12 +1972,13 @@ class Updater:
             last["adapter_why"] = "; ".join(said)[:300]
         st.pop("retry", None)
         staged = self.clock() - t0
-        self.save(st, state="waiting", to_release=target)
-        waited, busy = wait_quiet(self.busy, self.quiet_max_s, self.clock, self.sleep)
-        if busy:
-            self.note(f"auto-update: still busy after {waited:.0f} s ({busy}): switching anyway")
+        self.save(st, state="deferred", to_release=target)
+        go, how = self.pick_moment(st, tag, build, want, sha, only)
+        if not go:
+            return 0                     # the hub moved on while this waited: run() goes on to the newer build
+        waited = how["waited"]
         before = self.radios_ok()
-        self.save(st, state="updating")
+        self.save(st, state="updating", hold=None)
         t1 = self.clock()
         try:
             self.activate(target, name)
@@ -1817,15 +1992,19 @@ class Updater:
             win = self.windows()
             secs = self.clock() - t0
             gap = f"web back {up:.0f} s after the switch" + (f", radios {radios:.0f} s" if radios is not None else "")
-            self.result(f"{tag}: ok in {secs:.0f} s (built {staged:.0f} s, waited {waited:.0f} s for a quiet moment, "
-                        f"{gap})" + (f" · {win}" if win else "")
+            self.result(f"{tag}: ok in {secs:.0f} s (built {staged:.0f} s, waited {_mins(waited)}"
+                        + (f": {how['held']}" if how.get("held") else "") + f"; went: {how['why']}"
+                        + (f"; at the switch: {how['busy']}" if how.get("busy") else "")
+                        + (f"; {len(how['skipped'])} hub build(s) in between skipped" if how.get("skipped") else "")
+                        + f"; {gap})" + (f" · {win}" if win else "")
                         + ((" · the adapter's newer commit didn't build; " + ("the one before runs" if got else
                                                                             "running without it"))
                            if last.get("adapter_why") else ""),
                         detail=f"{last['adapter_why']}; adapter {got[:7] or 'none'} runs" if last.get("adapter_why") else "")
-            self.save(st, state="current", current=sha, windows=win, **({} if only else {"hub": want}),
+            self.save(st, state="current", current=sha, windows=win, **({} if only else {"hub": want, "pending": None}),
                       last=dict(last, result="ok", why="", seconds=round(secs), staged_s=round(staged),
-                                waited_s=round(waited), up_s=round(up, 1),
+                                waited_s=round(waited), held=how.get("held") or "", went=public(how["why"])[:200],
+                                stt_at_switch=how.get("stt", 0), skipped=how.get("skipped") or [], up_s=round(up, 1),
                                 radios_s=None if radios is None else round(radios, 1)))
             return 0
         back = self._switch_back(name, target)
@@ -1839,7 +2018,7 @@ class Updater:
                 secs = self.clock() - t0
                 self.result(f"{tag}: ok in {secs:.0f} s without the adapter (with it: {public(why)})",
                             detail=f"adapter {c[:7]} not tried again until its ref moves")
-                self.save(st, state="current", current=sha, hub=want,
+                self.save(st, state="current", current=sha, hub=want, pending=None,
                           last=dict(last, result="ok", adapter="", adapter_why=f"adapter {c[:7]}: {why}"[:300],
                                     why="", seconds=round(secs)))
                 return 0
@@ -2421,9 +2600,10 @@ def adapter_cli(u: Updater, a) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="autoupdate.py", description="the station follows the hub's build")
-    ap.add_argument("cmd", choices=["run", "status", "doctor", "on", "off", "prune", "rollback", "adapter"])
+    ap.add_argument("cmd", choices=["run", "now", "status", "doctor", "on", "off", "prune", "rollback", "adapter"])
     ap.add_argument("sub", nargs="*", help="adapter: setup | status | remove | stage RELEASE")
-    ap.add_argument("--quiet-max", type=float, default=QUIET_MAX_S, help="seconds to wait for a quiet moment")
+    ap.add_argument("--quiet-max", type=float, default=QUIET_MAX_S,
+                    help="seconds a page / carrier / dispatch holds an urgent or overdue switch at most")
     ap.add_argument("--health-timeout", type=float, default=HEALTH_S, help="seconds for /healthz after the switch")
     ap.add_argument("--repo", default="", help="adapter setup: the adapter repo (SSH URL)")
     ap.add_argument("--ref", default="", help="adapter setup: its branch or tag (default main)")
@@ -2439,6 +2619,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"unexpected {' '.join(a.sub)}")
     if a.cmd == "run":
         return u.run()
+    if a.cmd == "now":                      # the update waiting for its moment goes now (sizeup-station autoupdate now)
+        u.p.work.mkdir(parents=True, exist_ok=True)
+        u.p.now_mark.touch()
+        return 0
     if a.cmd == "prune":
         def prune() -> int:
             u.prune()

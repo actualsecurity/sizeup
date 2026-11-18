@@ -10,7 +10,8 @@
 #                                switch, restart (config, state and secrets are kept); options pass to
 #                                install-linux.sh (--ref REF: run a branch; auto-update pauses)
 #   sizeup-station autoupdate on|off|status|now
-#                                follow the hub's build by itself (on by default; off = stay put)
+#                                follow the hub's build by itself (on by default; off = stay put); now: check now,
+#                                and an update waiting for its moment switches without waiting
 #   sizeup-station rollback      back to the release that ran before (a rename and a restart)
 #   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
 #   sizeup-station adapter setup|status|remove|reset [source]
@@ -302,6 +303,8 @@ case "$cmd" in
         exit 0 ;;
       now)
         need_root autoupdate "$@"
+        # an update waiting for its moment (a burst of hub deploys, the station busy) goes now: no settling, no queue
+        python3 -I "$UPDATER" now
         systemctl start sizeup-update.service
         python3 -I "$UPDATER" status ;;
       status)

@@ -92,8 +92,8 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT,
-                        Transcriber, WhisperClient, radio_voice, wav_bytes)
+from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
+                        RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -154,6 +154,8 @@ STT_FIRST = ("tg:307", "FG1", "FG2")
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
+STOP_URGENT_S = 8.0        # stopping: pages and Fire/EMS clips still waiting get this long with whisper (App._stt_handoff)
+STOP_MARK_S = 10.0         # ... and the clips still waiting then are marked within this long (TimeoutStopSec is 45 s)
 CATCHUP_QUEUED_S = 1800.0  # a page queued (nobody took it yet) this recently is an open event: the catch-up waits
 CATCHUP_PAUSE_MAX_S = 12 * 3600.0   # an open event or alarm created or updated longer ago than this no longer pauses it
 CATCHUP_AWS_PCT = 80.0     # the catch-up stops using the police AWS budget at this much of its month
@@ -4814,6 +4816,7 @@ class App:
         self.tg.save_unknown()
         for sd in list(self.assign):
             claims.release(sd)
+        self._stt_handoff()                    # (before the outbox closes: what whisper didn't get to goes up marked)
         self.whisper.stop()
         if self.aws is not None:
             self.aws.stop()
@@ -4831,6 +4834,59 @@ class App:
         self.cad.radiolog.stop()
         self.cad.addrs.stop()
         self.stop_layers()
+
+    def _stt_handoff(self, wait_s: float = STOP_URGENT_S, mark_s: float = STOP_MARK_S) -> dict:
+        """Stopping (an update's restart, a reboot): the whisper queue (sizeup/stt.py) lives in memory only, so a clip
+        still in it would be lost without a trace: no row here, nothing on the hub (a transmission's event goes up only
+        once it is transcribed), its recording orphaned on disk. The radios are stopped by now, so nothing new comes:
+        every clip waiting is taken out; pages and Fire/EMS clips (URGENT) first get wait_s with whisper (when it is
+        up), with the one in flight; then each transmission still waiting is marked "skipped: busy" (stt.SHED) like a
+        shed clip: its row and recording go up through the outbox, which outlives the restart, and the CAD of record's
+        catch-up (sizeup/sttcatchup.py) transcribes it later (or Re-transcribe can). A page is marked not transcribed
+        (re-runnable), a person's re-run failed, a catch-up clip forgotten (asked for again). Marking stops after mark_s
+        (the rest counted as lost), and the one in flight is lost unless whisper finishes it before the exit: both said
+        in the log.
+        -> the counts."""
+        q = getattr(self.stt, "_q", None)      # (stt.Transcriber has no public withdraw for every class yet)
+        if q is None or not hasattr(q, "withdraw"):
+            return {}
+        t0 = time.monotonic()
+        items = [it for p in CLASS_NAMES if p != URGENT for it in q.withdraw(p)]
+        if getattr(self.whisper, "state", "") == "ok":
+            while self.stt.busy() and time.monotonic() - t0 < wait_s:
+                time.sleep(0.1)
+        items += q.withdraw(URGENT)
+        n = {"waiting": len(items), "skipped": 0, "pages": 0, "reruns": 0, "catchup": 0, "unmarked": 0,
+             "in_flight": int(self.stt.busy())}
+        if not items and not n["in_flight"]:
+            return n
+        why = (f"{SHED}: the station stopped (an update or a restart) with {len(items)} clip(s) waiting "
+               "(Re-transcribe it if it matters)")
+        end = time.monotonic() + mark_s
+        for i, item in enumerate(items):
+            if time.monotonic() > end:
+                n["unmarked"] = len(items) - i
+                break
+            try:
+                if isinstance(item, Rerun) and item.catchup:
+                    self._catchup_forget(item.id)
+                    n["catchup"] += 1
+                elif isinstance(item, Rerun):
+                    self._stt_dropped(item, "the station stopped before it ran")
+                    n["reruns"] += 1
+                elif isinstance(item, Traffic):
+                    self._stt_dropped(item, why)
+                    n["skipped"] += 1
+                else:
+                    self._stt_dropped(item, "the station stopped before speech-to-text got to it")
+                    n["pages"] += 1
+            except Exception as e:  # noqa: BLE001 - one clip's trouble never keeps the others from going up
+                log(f"speech-to-text: {getattr(item, 'id', '?')} not handed over: {type(e).__name__}: {e}")
+        log(f"speech-to-text: stopping with {n['waiting']} clip(s) waiting: {n['skipped']} marked skipped (caught up "
+            f"later), {n['pages']} page(s) and {n['reruns']} re-run(s) not transcribed, {n['catchup']} catch-up "
+            f"clip(s) given back" + (f", {n['unmarked']} not marked in time (lost)" if n["unmarked"] else "")
+            + (f"; {n['in_flight']} in flight (lost unless whisper finishes it before the exit)" if n["in_flight"] else ""))
+        return n
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
         """A weather warning said by the dispatch voice, no tones (sizeup/weather.py Weather.speech): (its

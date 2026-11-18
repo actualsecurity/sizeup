@@ -370,8 +370,10 @@ The Linux station (deploy/station/README.md "Updating") runs exactly the commit 
 * The updater only takes a commit that is on `origin/main`; builds it **beside** the running one
   (`/opt/sizeup/releases/<sha>`: the code, its venv, as hard links when the requirements didn't
   change; trunk-recorder / whisper.cpp / rtl-sdr only when their pins changed); preflights it
-  (imports, the config, the databases in a scratch dir, the units, the programs); waits up to 5 min
-  for a quiet moment (no carrier open, nobody talking, no transcription running); swaps
+  (imports, the config, the databases in a scratch dir, the units, the programs); waits for the moment
+  to switch (the hub's build held still 10 min, so a burst of deploys is one restart; no page, dispatch,
+  carrier or talker; few transcriptions waiting; at most 45 min behind, or at once for an urgent build:
+  deploy/station/README.md "Updating"); swaps
   `/opt/sizeup/current` by rename and restarts once; and swaps back if `/healthz` doesn't answer with
   the new build within 90 s. A failed build is not tried again until the hub moves on. 3 releases kept.
 * A commit that changes nothing the station runs (docs, tests, CI, the hub's files) doesn't restart
@@ -667,8 +669,11 @@ queue then tests each PR on top of the ones ahead of it before merging; the depl
 
 **The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
-update log line ("update abc1234 -> def5678: ok in 74 s (built 40 s, waited 0 s for a quiet moment, web back
-6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime change".
+update log line ("update abc1234 -> def5678: ok in 674 s (built 40 s, waited 10 min: settle 10 min; went: a quiet
+moment; web back 6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime
+change", and a deferred one as soon as the station has built and preflighted it ("staged, switching by HH:MM": the
+switch waits for the hub to settle and for a quiet moment, 45 min at most; the hub's "behind" alert covers one that
+doesn't come).
 The step **fails** when the update failed or was rolled back, when auto-update is paused on the station, when
 the token is refused, or when 15 min pass; a failed workflow emails as usual, and the hub's own "behind"
 alert follows. Without the secrets the step is skipped with a warning.

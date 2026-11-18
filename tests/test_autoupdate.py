@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from sizeup.cloud import autoupdate as au
-from sizeup.cloud.autoupdate import Paths, StepError, Updater, Watch, describe, plan, same_build, wait_quiet
+from sizeup.cloud.autoupdate import Paths, StepError, Updater, Watch, describe, hold_of, moment, plan, same_build
 
 ROOT = Path(__file__).resolve().parent.parent
 A = "a" * 40
@@ -56,16 +56,46 @@ def test_paused_reasons():
     assert "folder" in au.paused_reason({"source": "dir"})
 
 
-def test_wait_quiet_waits_for_a_gap_then_goes_anyway():
-    t = [0.0]
-    clock, sleep = (lambda: t[0]), (lambda s: t.__setitem__(0, t[0] + s))
-    said = iter(["carrier open on FG1", "1 talking", ""])
-    assert wait_quiet(lambda: next(said), 300, clock, sleep) == (10.0, "")
-    t[0] = 0.0
-    waited, why = wait_quiet(lambda: "carrier open on South 2", 300, clock, sleep)
-    assert waited == 300 and why == "carrier open on South 2"
-    t[0] = 0.0
-    assert wait_quiet(lambda: "", 300, clock, sleep) == (0.0, "")
+def test_moment_settles_then_waits_for_quiet_then_a_short_queue():
+    quiet = {"hard": [], "stt": 0}
+    # a hub build 3 min old: settling (10 min), whatever the station says
+    assert moment(180, 0, 0, quiet)[0] == "settle"
+    assert moment(600, 0, 0, quiet) == ("", "a quiet moment")
+    # a page or a carrier: held, with no limit before the ceiling (45 min behind)
+    page = {"hard": ["page on South 2"], "stt": 0}
+    assert moment(2000, 0, 0, page) == ("busy", "page on South 2")
+    # the queue: 5 at first, 20 after 10 min of waiting, 60 after 20 min (counted from when it settled)
+    assert moment(600, 0, 0, {"hard": [], "stt": 6}) == ("stt", "6 transcription(s) waiting: switching at 5 or fewer")
+    assert moment(1199, 0, 0, {"hard": [], "stt": 19})[0] == "stt"
+    assert moment(1200, 0, 0, {"hard": [], "stt": 19}) == ("", "a quiet moment, 19 transcription(s) waiting")
+    assert moment(1800, 0, 0, {"hard": [], "stt": 61})[0] == "stt"
+    assert moment(1800, 0, 0, {"hard": [], "stt": 60})[0] == ""
+
+
+def test_moment_has_a_ceiling_and_an_urgent_path():
+    busy = {"hard": ["carrier open on FG1"], "stt": 400}
+    # behind 45 min (the hub kept deploying: seen just now): no settling, no queue; what's on the air 5 min more at most
+    assert moment(2700, 2690, 0, {"hard": [], "stt": 400}) == (
+        "", "45 min behind the hub (the most it waits: 45 min), 400 transcription(s) waiting")
+    assert moment(2700, 2690, 0, busy) == ("busy", "carrier open on FG1")
+    assert moment(2999, 2690, 0, busy)[0] == "busy"
+    ph, why = moment(3000, 2690, 0, busy)
+    assert ph == "" and why == "still carrier open on FG1 after 5 min: switching anyway"
+    # urgent: no settling, no queue; on the air 5 min at most from when it became urgent
+    assert moment(10, 5, 0, {"hard": [], "stt": 400}, urgent_at=5) == ("", "urgent, 400 transcription(s) waiting")
+    assert moment(200, 5, 0, busy, urgent_at=5)[0] == "busy"
+    assert moment(305, 5, 0, busy, urgent_at=5)[0] == ""
+
+
+def test_hold_of_reads_the_station_and_an_older_one():
+    assert hold_of({"busy": "page on South 2, 3 transcription(s) in flight",
+                    "hold": {"hard": ["page on South 2"], "stt": 3}}) == {
+        "hard": ["page on South 2"], "stt": 3, "text": "page on South 2, 3 transcription(s) in flight"}
+    # a station from before "hold": all of what it says holds, as before
+    assert hold_of({"busy": "1 transcription(s) in flight"}) == {
+        "hard": ["1 transcription(s) in flight"], "stt": 0, "text": "1 transcription(s) in flight"}
+    assert hold_of(None) == {"hard": [], "stt": 0, "text": ""}                # it doesn't answer: quiet
+    assert hold_of({"hold": {"hard": "x", "stt": True}})["stt"] == 0          # (nonsense: nothing)
 
 
 def test_describe_says_up_to_date_updating_failed_paused_behind():
@@ -163,13 +193,16 @@ class FakeUpdater(Updater):
         (tmp / "run").mkdir(exist_ok=True)
         self.t = [1000.0]
         self.lines: list[str] = []
-        super().__init__(paths, clock=lambda: self.t[0], sleep=lambda s: self.t.__setitem__(0, self.t[0] + s),
-                         out=self.lines.append, **kw)
+        self.on_sleep = None                # tests: called with the fake time after each sleep (a deploy, a page)
+        kw.setdefault("settle_s", 0.0)      # (the tests before coalescing: the hub's build counts as settled)
+        super().__init__(paths, clock=lambda: self.t[0], sleep=self._sleep, out=self.lines.append, **kw)
         self.calls: list[tuple] = []
         self.bad_preflight: set[str] = set()
         self.stage_errors: list[str] = []       # transient: apt lock, network, disk
         self.unhealthy: set[str] = set()
         self.busy_for = 0                   # polls that still see a carrier open
+        self.stt = 0                        # transcriptions waiting on the station
+        self.holds: list[dict] = []         # what each hold() said
         self.releases_dir = repo.opt / "releases"
         self.releases_dir.mkdir(exist_ok=True)
 
@@ -205,11 +238,20 @@ class FakeUpdater(Updater):
     def healthy(self, sha):
         return "/healthz didn't answer within 90 s of the switch" if sha in self.unhealthy else ""
 
-    def busy(self):
+    def _sleep(self, s):
+        self.t[0] += s
+        if self.on_sleep is not None:
+            self.on_sleep(self.t[0])
+
+    def hold(self):
+        hard = []
         if self.busy_for > 0:
             self.busy_for -= 1
-            return "carrier open on FG1"
-        return ""
+            hard.append("carrier open on FG1")
+        h = {"hard": hard, "stt": self.stt,
+             "text": ", ".join(hard + ([f"{self.stt} transcription(s) in flight"] if self.stt else []))}
+        self.holds.append(h)
+        return h
 
     def radios_ok(self):
         return {"South 2", "FG1"}
@@ -478,20 +520,62 @@ def test_a_hub_without_a_build_asks_for_nothing(tmp_path, monkeypatch):
 
 # -- the quiet moment, as the station sees it ---------------------------------------------------------------
 
-def test_station_busy_names_what_a_restart_would_cut_off():
+def _sm(app):
     from sizeup.cloud.stationmode import StationMode
+    return SimpleNamespace(app=app), StationMode
+
+
+def test_station_busy_names_what_a_restart_would_cut_off():
     from sizeup.stt import Transcriber
     stt = Transcriber(SimpleNamespace(), lambda item: None)
     app = SimpleNamespace(radio_status=lambda: [{"label": "FG1", "open": True}, {"label": "South 2", "open": False}],
                           live=SimpleNamespace(state=lambda: [{"rig": "E63"}]), stt=stt, _rerun_ids=set())
-    sm = SimpleNamespace(app=app)
+    sm, StationMode = _sm(app)
     assert StationMode.busy(sm) == "carrier open on FG1, 1 talking"
     import numpy as np
     stt.submit(object(), np.zeros(10, np.float32))
     app.radio_status, app.live = (lambda: []), SimpleNamespace(state=lambda: [])
     assert StationMode.busy(sm) == "1 transcription(s) in flight"
+    assert StationMode.update_hold(sm) == {"busy": "1 transcription(s) in flight", "hold": {"hard": [], "stt": 1}}
     stt._q.get_nowait()
     assert StationMode.busy(sm) == ""
+
+
+def test_station_hold_never_restarts_mid_page_or_dispatch(tmp_path):
+    import sqlite3
+    import numpy as np
+    from sizeup.stt import URGENT, Transcriber
+    stt = Transcriber(SimpleNamespace(), lambda item: None)
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE incidents (id INTEGER PRIMARY KEY, emergency INT, status TEXT, created_at REAL)")
+
+    def one(sql, args=()):
+        r = db.execute(sql, args).fetchone()
+        return dict(r) if r else None
+    windows = []
+    app = SimpleNamespace(radio_status=lambda: [], live=SimpleNamespace(state=lambda: []), stt=stt, _rerun_ids=set(),
+                          paging_state=lambda: [{"channel": "South 2", "ended": False}, {"channel": "FG1", "ended": True}],
+                          pagehold=SimpleNamespace(held={"South 2": (None, 0.0)}),
+                          cad=SimpleNamespace(store=SimpleNamespace(one=one),
+                                              alarms=SimpleNamespace(windows=SimpleNamespace(state=lambda now: windows))))
+    sm, StationMode = _sm(app)
+    assert StationMode.hold(sm)["hard"] == ["page on South 2"]          # going out now, or held for its continuation
+    app.paging_state, app.pagehold = (lambda: []), SimpleNamespace(held={})
+    db.execute("INSERT INTO incidents VALUES (1, 1, 'pending', ?)", (time.time() - 130,))
+    db.execute("INSERT INTO incidents VALUES (2, 0, 'pending', ?)", (time.time(),))       # not an emergency: no
+    windows.append("tg 1")
+    stt.submit(object(), np.zeros(10, np.float32), priority=URGENT)
+    stt.submit(object(), np.zeros(10, np.float32))
+    h = StationMode.hold(sm)
+    assert h["hard"] == ["event of ours dispatched 2 min ago", "emergency window open",
+                         "1 page / Fire-EMS clip(s) waiting for speech-to-text"] and h["stt"] == 2
+    db.execute("UPDATE incidents SET created_at = ?", (time.time() - 400,))              # dispatched a while ago
+    windows.clear()
+    stt._q.withdraw(URGENT)
+    assert StationMode.hold(sm) == {"hard": [], "stt": 1, "said": ["1 transcription(s) in flight"]}
+    app.cad = None                                                                      # no CAD here: nothing
+    assert StationMode.hold(sm)["hard"] == []
 
 
 def test_whisper_service_only_waits_for_an_external_server(monkeypatch):
@@ -702,3 +786,190 @@ def test_a_rollback_holds_while_the_hub_sits_on_a_docs_only_descendant(station):
     d = repo.commit("D: a fix", path="sizeup/a.py")                  # the hub moves to real new code
     u.want(d)
     assert u.run() == 0 and u.current()[1] == d
+
+
+# -- one switch per burst of hub deploys, never mid-page, with a ceiling -----------------------------------
+
+def test_a_burst_of_hub_deploys_is_one_switch_to_the_newest(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    b1, b2, b3 = repo.commit("two"), repo.commit("three"), repo.commit("four")
+    t0 = u.t[0]
+    deploys = {t0 + 300: b2, t0 + 700: b3}                   # the hub deploys again 5 and 12 min later
+
+    def deploy(now):
+        for at in sorted(deploys):
+            if now >= at:
+                u.want(deploys.pop(at))
+    u.on_sleep = deploy
+    u.want(b1)
+    assert u.run() == 0
+    assert u.calls == [("stage", b1), ("stage", b2), ("stage", b3), ("activate", b3)]   # one restart
+    assert u.current()[1] == b3
+    # b3 seen at +700 (the first poll after it): switched once it held still 10 min
+    assert t0 + 700 + au.SETTLE_S <= u.t[0] < t0 + 700 + au.SETTLE_S + au.SETTLE_POLL_S + 1
+    st = u.load()
+    assert st["state"] == "current" and "pending" not in st and "hold" not in st
+    assert st["last"]["skipped"] == [b1[:7], b2[:7]] and st["last"]["went"] == "a quiet moment"
+    line = st["last"]["line"]
+    assert f"-> {b3[:7]}: ok in " in line and "2 hub build(s) in between skipped" in line and "settle " in line
+    said = "\n".join(u.lines)
+    assert f"the hub moved on to {b2[:7]} while this waited: {b1[:7]} skipped" in said
+    assert "waiting (settle): the hub's build is 0 s old: switching once it has held still 10 min" in said
+    assert f"in between skipped: {b1[:7]}, {b2[:7]}" in said
+
+
+def test_it_waits_out_a_page_and_a_long_queue_and_says_why(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new = repo.commit("two")
+    t0 = u.t[0]
+    u.busy_for = 30                                          # a page / carrier for 30 polls (2.5 min) once settled
+    u.stt = 80                                               # whisper far behind
+
+    def drain(now):
+        if now - t0 >= au.SETTLE_S + 1500:
+            u.stt = 12                                       # then it catches up a little
+    u.on_sleep = drain
+    u.want(new)
+    assert u.run() == 0 and u.calls == [("stage", new), ("activate", new)]
+    st = u.load()
+    # settled at +600; carrier until ~+750; 80 waiting: more than 5, 20 (from +1200), 60 (from +1800); 12 at +2100
+    assert t0 + au.SETTLE_S + 1500 <= u.t[0] < t0 + au.SETTLE_S + 1500 + 10
+    assert st["last"]["stt_at_switch"] == 12 and st["last"]["went"] == "a quiet moment, 12 transcription(s) waiting"
+    assert st["last"]["held"].startswith("settle 10 min, busy ") and ", stt " in st["last"]["held"]
+    said = "\n".join(u.lines)
+    assert "waiting (busy): carrier open on FG1" in said
+    assert "waiting (stt): 80 transcription(s) waiting: switching at 5 or fewer" in said
+    assert "at the switch: 12 transcription(s) in flight" in said and "at the switch: 12" in st["last"]["line"]
+    # never a hold() poll while settling: the station isn't asked until the build has held still
+    assert len(u.holds) < 400
+
+
+def test_the_ceiling_switches_anyway_and_says_so(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new = repo.commit("two")
+    t0 = u.t[0]
+    u.stt = 500
+    u.busy_for = 10 ** 6                                     # someone on the air for ever
+    u.want(new)
+    assert u.run() == 0 and u.current()[1] == new
+    assert t0 + au.CEILING_S + au.QUIET_MAX_S <= u.t[0] < t0 + au.CEILING_S + au.QUIET_MAX_S + 10
+    st = u.load()
+    assert st["last"]["went"] == "still carrier open on FG1 after 5 min: switching anyway"
+    assert st["last"]["stt_at_switch"] == 500
+
+
+def test_the_ceiling_counts_from_when_it_first_fell_behind(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    builds = [repo.commit(f"b{i}") for i in range(8)]
+    t0 = u.t[0]
+    deploys = {t0 + 400 * (i + 1): b for i, b in enumerate(builds[1:])}   # a deploy every 6.7 min for 53 min
+
+    def deploy(now):
+        for at in sorted(deploys):
+            if now >= at:
+                u.want(deploys.pop(at))
+    u.on_sleep = deploy
+    u.want(builds[0])
+    assert u.run() == 0
+    acts = [c for c in u.calls if c[0] == "activate"]
+    assert len(acts) == 1                                    # never settled, but switched once at the ceiling
+    assert t0 + au.CEILING_S <= u.t[0] < t0 + au.CEILING_S + 20
+    assert "behind the hub (the most it waits: 45 min)" in u.load()["last"]["went"]
+
+
+def test_an_urgent_build_or_autoupdate_now_goes_without_waiting(station):
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    u.stt = 300
+    git(repo.origin, "commit", "-q", "--allow-empty", "-m", "Fix the radio\n\nStation-Update: now")
+    urgent = git(repo.origin, "rev-parse", "HEAD")
+    new = repo.commit("after it")                            # merged on top: still urgent (since the running build)
+    t0 = u.t[0]
+    u.want(new)
+    assert u.run() == 0 and u.current()[1] == new and u.t[0] - t0 < 5
+    assert u.load()["last"]["went"] == "urgent, 300 transcription(s) waiting"
+    assert f"urgent build (Station-Update: now in {urgent[:7]})" in "\n".join(u.lines)
+    # sizeup-station autoupdate now: the mark goes after the switch
+    later = repo.commit("five")
+    u.p.work.mkdir(parents=True, exist_ok=True)
+    u.p.now_mark.touch()                                     # (what the CLI writes: test_the_cli_marks_now)
+    t1 = u.t[0]
+    u.want(later)
+    assert u.run() == 0 and u.current()[1] == later and u.t[0] - t1 < 5 and not u.p.now_mark.exists()
+    # an ordinary build after that settles again
+    plain = repo.commit("six")
+    t2 = u.t[0]
+    u.want(plain)
+    assert u.run() == 0 and u.t[0] - t2 >= au.SETTLE_S
+
+
+def test_the_cli_marks_now(tmp_path, monkeypatch):
+    monkeypatch.setattr(au, "Paths", lambda: Paths(work=tmp_path / "work"))
+    assert au.main(["now"]) == 0 and (tmp_path / "work" / "now").is_file()
+
+
+def test_a_deferred_switch_is_shown_and_counts_for_the_deploy_check(station):
+    import importlib.util
+    repo, u = station
+    u.settle_s = au.SETTLE_S
+    new = repo.commit("two")
+    seen = []
+
+    def look(now):
+        if not seen:
+            seen.append(u.load())
+    u.on_sleep = look
+    u.want(new)
+    u.run()
+    st = seen[0]
+    assert st["state"] == "deferred" and st["hold"]["phase"] == "settle"
+    assert st["hold"]["until"] == st["pending"]["behind"] + au.CEILING_S + au.QUIET_MAX_S
+    old = repo.shas[0]
+    w = Watch(own=old, run_dir="", state_path=str(u.p.state), log=lambda m: None)
+    u.p.state.write_text(json.dumps(st))
+    v = w.state()
+    assert v["hold"]["phase"] == "settle"
+    d = describe(old, new, v, now=st["since"] + 10)
+    assert d["state"] == "deferred" and d["text"].startswith(f"updating {old[:7]} -> {new[:7]}: staged, switching by ")
+    assert "held still 10 min" in d["text"]
+    assert describe(old, new, v, now=st["hold"]["until"] + 600)["state"] == "behind"     # past it: something's wrong
+    spec = importlib.util.spec_from_file_location("deploy_check", Path(__file__).parent.parent / "tools" / "deploy_check.py")
+    dc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dc)
+    ok, msg = dc.verdict({"hub_build": new, "station": {"reported": True, "state": d["state"], "text": d["text"]}}, new)
+    assert ok == dc.OK and "staged, switching by" in msg
+
+
+def test_station_stop_hands_over_the_clips_still_waiting(tmp_path):
+    import numpy as np
+    from sizeup.app import App, Rerun
+    from sizeup.incidents import Traffic
+    from sizeup.stt import CATCHUP, LIVE, LOW, RERUN, SHED, URGENT
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    audio = np.zeros(1600, np.float32)
+    clips = [Traffic(f"P25-{i}", "Fire/EMS 15", 100.0 + i, 101.0 + i, "", status="pending") for i in range(3)]
+    app.stt.submit(clips[0], audio, URGENT, "tg:1")
+    app.stt.submit(clips[1], audio, LIVE, "tg:2")
+    app.stt.submit(clips[2], audio, LOW, "tg:3")
+    mine = Rerun("P25-9", "traffic", False)
+    app._rerun_ids.add(mine.id)
+    app.stt.submit(mine, audio, RERUN)
+    caught = Rerun("P25-8", "traffic", False, catchup=True)
+    app._rerun_ids.add(caught.id)
+    app._catchup_ids.add(caught.id)
+    app.stt.submit(caught, audio, CATCHUP)
+    n = app._stt_handoff()
+    assert n == {"waiting": 5, "skipped": 3, "pages": 0, "reruns": 1, "catchup": 1, "unmarked": 0, "in_flight": 0}
+    assert app.stt.busy() == 0
+    assert all(t.status == "skipped" and f"({SHED}: the station stopped" in t.model for t in clips)
+    assert caught.id not in app._rerun_ids and mine.id not in app._rerun_ids
+    # the rows are there, and the catch-up finds them (sizeup/sttcatchup.py: Comms.shed_clips)
+    rows, _ = app.cad.comms.shed_clips(0)
+    assert sorted(r["id"] for r in rows) == ["P25-0", "P25-1", "P25-2"]
+    assert app._stt_handoff() == {"waiting": 0, "skipped": 0, "pages": 0, "reruns": 0, "catchup": 0, "unmarked": 0,
+                                  "in_flight": 0}
