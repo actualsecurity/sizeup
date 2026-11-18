@@ -69,3 +69,50 @@ def test_health_shows_each_workers_stt_and_llm_and_the_lanes_numbers_by_task(sit
     finally:
         browser.close()
         pw.stop()
+
+
+@pytest.fixture
+def workers_site(tmp_path):
+    from sizeup.cloud.hubstore import MonitorDb
+    from sizeup.cloud.sttworkers import WorkerRegistry
+    cad = make_cad(tmp_path)
+    people(cad)
+    reg = WorkerRegistry(MonitorDb(tmp_path / "hub.sqlite"), log=lambda m: None)
+    reg.add("gpu-1", "Gaming PC")
+    reg.add("gpu-2", "Whisper only")
+    cad.stt_workers = reg
+    cad.stt_workers_live = lambda wid: {"state": "online", "model": "large-v3-turbo-q5_0", "seen": time.time(),
+                                        "llm": "qwen2.5-7b-instruct-q4_k_m" if wid == "gpu-1" else ""}
+    cad.cloud = lambda: {"role": "hub", "state": "ok", "word": "", "detail": "connected"}
+    ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, lambda: {"time": 0}, lambda cid: None,
+                   lambda iid: False, cad=CadApi(cad), access=Access(), role="hub", station_health=InferHealth())
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    yield type("Site", (), {"base": f"http://127.0.0.1:{ws.httpd.server_address[1]}", "cad": cad, "reg": reg})()
+    ws.shutdown()
+
+
+def test_an_admin_turns_a_workers_llm_jobs_off_and_it_is_audited(workers_site):
+    site = workers_site
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/station/workers")
+        card = pg.locator("#s-station-workers .card")
+        row = card.locator("tr", has_text="Gaming PC")
+        box = row.locator("label", has_text="qwen2.5-7b-instruct-q4_k_m").locator("input")
+        box.wait_for()
+        assert box.is_checked()                                  # on by default
+        assert card.locator("tr", has_text="Whisper only").locator("input[type=checkbox]").count() == 0
+        box.uncheck()
+        deadline = time.time() + 5
+        while site.reg.llm_on("gpu-1") and time.time() < deadline:
+            time.sleep(0.1)
+        assert site.reg.llm_on("gpu-1") is False and site.reg.llm_on("gpu-2") is True
+        import json as _json
+        assert "stt workers/gpu-1/llm jobs" in _json.dumps(site.cad.settings.audit_log("system"))
+        if SHOTS:
+            Path(SHOTS).mkdir(parents=True, exist_ok=True)
+            card.screenshot(path=str(Path(SHOTS) / "sttworkers-llm-jobs.png"))
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()

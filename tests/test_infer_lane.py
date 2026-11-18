@@ -74,7 +74,7 @@ def test_with_no_llm_worker_submit_is_none_at_once_and_never_raises():
     f = ln.submit("pd_classify", MSGS, PD, meta=True)
     assert f.done() and f.result()[0] is None and f.result()[1]["why"] == "no_worker"
     ln.seen("gpu-1", "online", {"stt": "ggml-large-v3-turbo-q5_0.bin"})      # whisper only: still off
-    assert not ln.available() and ln.submit("pd_classify", MSGS, PD).result(0) is None
+    assert not ln.available() and ln.submit("pd_classify", MSGS, PD).result(2) is None
     assert ln.stats()["workers"] == [] and not ln.any_llm()                # (and not on Health's LLM rows)
     for args in (("Bad Task", MSGS, PD), ("t", "text", PD), ("t", [{"role": "tool", "content": "x"}], PD),
                  ("t", MSGS, {"type": "object", "pattern": "x"}), ("t", MSGS, PD, "soon"), (None, None, None)):
@@ -90,7 +90,7 @@ def test_the_module_api_without_a_hub_answers_none_at_once():
     f = infer.submit("pd_classify", MSGS, PD, deadline_s=15, meta=True)
     assert f.done() and f.result()[0] is None and set(f.result()[1]) == {
         "model", "model_version", "worker", "latency_ms", "tokens_in", "tokens_out", "why"}
-    assert infer.submit("pd_classify", MSGS, PD).result(0) is None
+    assert infer.submit("pd_classify", MSGS, PD).result(2) is None
 
 
 def test_a_worker_claims_answers_and_the_future_has_the_dict_and_its_meta():
@@ -105,7 +105,7 @@ def test_a_worker_claims_answers_and_the_future_has_the_dict_and_its_meta():
     assert pub["max_tokens"] == 256 and pub["deadline_s"] == 15.0 and pub["temperature"] == 0
     assert ln.claim("gpu-1", 0) is None                      # one infer job at a time
     assert ln.complete("gpu-1", job.lease, {"output": GOOD, "tokens_in": 640, "tokens_out": 72, "infer_ms": 900})
-    out, meta = f.result(0)
+    out, meta = f.result(2)
     assert out == GOOD
     assert meta["why"] == "ok" and meta["worker"] == "gpu-1" and meta["model"] == "qwen2.5-7b-instruct-q4_k_m"
     assert meta["model_version"] == "a1b2c3d4e5f6" and meta["tokens_in"] == 640 and meta["tokens_out"] == 72
@@ -114,7 +114,7 @@ def test_a_worker_claims_answers_and_the_future_has_the_dict_and_its_meta():
     f2 = ln.submit("pd_classify", MSGS, PD)
     j2 = ln.claim("gpu-1", 0)
     ln.complete("gpu-1", j2.lease, {"output": json.dumps(dict(GOOD, address=None))})   # a JSON string is fine too
-    assert f2.result(0) == dict(GOOD, address=None)
+    assert f2.result(2) == dict(GOOD, address=None)
 
 
 def test_an_answer_that_does_not_validate_is_none_invalid_and_three_cool_the_worker_down():
@@ -126,7 +126,7 @@ def test_an_answer_that_does_not_validate_is_none_invalid_and_three_cool_the_wor
         job = ln.claim("gpu-1", 0)
         assert job is not None
         assert ln.complete("gpu-1", job.lease, {"output": dict(GOOD, category="robbery") if i else "not json"})
-        assert f.result(0) == (None, f.result(0)[1]) and f.result(0)[1]["why"] == "invalid"
+        assert f.result(2) == (None, f.result(2)[1]) and f.result(2)[1]["why"] == "invalid"
     assert not ln.available() and ln.stats()["workers"][0]["state"] == "cooling"
     clock.t += infer.COOLDOWN_S
     ln.seen("gpu-1")
@@ -190,13 +190,13 @@ def test_a_job_nobody_answers_by_its_deadline_is_none_deadline():
     clock.t += 2.5
     ln.seen("gpu-1")
     ln.tick()
-    assert f.result(0)[1]["why"] == "deadline"                # under MIN_LEFT_S left: not leased any more
+    assert f.result(2)[1]["why"] == "deadline"                # under MIN_LEFT_S left: not leased any more
     g = ln.submit("t", MSGS, PD, deadline_s=3, meta=True)
     job = ln.claim("gpu-1", 0)
     clock.t += 3
     ln.seen("gpu-1")
     ln.tick()
-    assert g.result(0)[1]["why"] == "deadline" and not ln._leases
+    assert g.result(2)[1]["why"] == "deadline" and not ln._leases
     assert ln.complete("gpu-1", job.lease, {"output": GOOD}) is False        # late: refused
 
 
@@ -209,8 +209,8 @@ def test_gaming_takes_the_job_back_and_with_no_one_else_it_is_none_gaming():
     ln.seen("gpu-1", "gaming", dict(MODELS, llm=""))          # gaming: its llama-server stops too
     assert not ln._leases and ln.complete("gpu-1", job.lease, {"output": GOOD}) is False
     ln.tick()
-    assert f.result(0)[1]["why"] == "gaming"
-    assert ln.submit("t", MSGS, PD, meta=True).result(0)[1]["why"] == "gaming"
+    assert f.result(2)[1]["why"] == "gaming"
+    assert ln.submit("t", MSGS, PD, meta=True).result(2)[1]["why"] == "gaming"
     llm_online(ln)
     assert ln.available()
 
@@ -226,7 +226,7 @@ def test_a_released_job_goes_to_another_worker_within_its_deadline():
     j2 = ln.claim("gpu-2", 0)
     assert j2 is not None and j2.future is f
     ln.complete("gpu-2", j2.lease, {"output": GOOD, "tokens_in": 10, "tokens_out": 5})
-    assert f.result(0)[0] == GOOD and f.result(0)[1]["worker"] == "gpu-2"
+    assert f.result(2)[0] == GOOD and f.result(2)[1]["worker"] == "gpu-2"
 
 
 def test_a_worker_unheard_loses_its_lease_and_the_job_is_leased_again():
@@ -241,7 +241,7 @@ def test_a_worker_unheard_loses_its_lease_and_the_job_is_leased_again():
     assert not ln._leases and ln._queue == [j]
     j2 = ln.claim("gpu-2", 0)
     ln.complete("gpu-2", j2.lease, {"output": GOOD})
-    assert f.result(0) == GOOD
+    assert f.result(2) == GOOD
     assert ln.complete("gpu-1", j.lease, {"output": GOOD}) is False
 
 
@@ -259,7 +259,7 @@ def test_a_long_poll_hands_a_job_submitted_meanwhile_and_stop_answers_what_is_op
         g = ln.submit("t", MSGS, PD, meta=True)
     finally:
         assert ln.stop() == 2
-    assert f.result(0) is None and g.result(0)[1]["why"] == "no_worker"
+    assert f.result(2) is None and g.result(2)[1]["why"] == "no_worker"
     assert not ln.available()
 
 
@@ -335,7 +335,7 @@ def test_a_revoked_workers_job_goes_back_to_the_queue(tmp_path):
     ln.forget("gpu-1")
     assert not ln._leases and len(ln._queue) == 1 and not ln.available()
     ln.tick()
-    assert f.result(0) is None
+    assert f.result(2) is None
 
 
 @pytest.mark.parametrize("why", ["preempted", "error", "stopping"])
@@ -347,7 +347,7 @@ def test_a_job_handed_back_with_no_time_left_is_none_deadline(why):
     j = ln.claim("gpu-1", 0)
     clock.t += 1.5
     ln.release("gpu-1", j.lease, why)
-    assert f.result(0)[1]["why"] == "deadline"
+    assert f.result(2)[1]["why"] == "deadline"
 
 
 def test_sttpool_holds_prealert_only_for_the_pre_alert_classes():
@@ -361,3 +361,172 @@ def test_sttpool_holds_prealert_only_for_the_pre_alert_classes():
     online(p, "gpu-2")
     assert p.submit(stt.job("B", URGENT)) and p.claim("gpu-2", 0)
     assert p.holds_prealert("gpu-2") and sttpool.FAST_CLASSES
+
+
+# -- review fixes (#733) ---------------------------------------------------------------------------------------------
+
+def api(tmp_path, ln):
+    from sizeup.cloud.hubstore import MonitorDb
+    from sizeup.cloud.sttworkers import WorkerApi, WorkerRegistry
+    reg = WorkerRegistry(MonitorDb(tmp_path / "hub.sqlite"), log=lambda s: None)
+    wa = WorkerApi(reg, pool(Clock()), log=lambda s: None)
+    wa.infer = ln
+    return reg, wa
+
+
+def post(wa, path, body, token):
+    raw = json.dumps(body).encode()
+    code, data, _ctype = wa.handle("POST", path, {"Authorization": f"Bearer {token}"}, lambda n: raw)
+    return code, json.loads(data)
+
+
+def test_only_a_gpu_workers_own_token_reaches_the_lane(tmp_path):
+    """A station's whisper in the pool (#715: "station:<id>", its station token) never claims a prompt, and its
+    requests never register it in the lane."""
+    ln = lane()
+    reg, wa = api(tmp_path, ln)
+    token = reg.add("gpu-1")
+    station_token = "st1.made-up-station-token"
+    real = reg.resolve
+    reg.resolve = lambda bearer: "station:st-north" if bearer == station_token else real(bearer)
+    llm_online(ln, "gpu-1")
+    ln.submit("pd_classify", MSGS, PD)
+    for path, body in (("/api/station/stt/infer/claim", {"wait": 0, "state": "online", "models": MODELS}),
+                       ("/api/station/stt/infer/0123456789abcdef/complete", {"output": GOOD})):
+        code, out = post(wa, path, body, station_token)
+        assert code == 403 and out["reason"] == "not_a_gpu_worker"
+    post(wa, "/api/station/stt/state", {"state": "online", "models": MODELS}, station_token)
+    assert "station:st-north" not in ln.workers and len(ln._queue) == 1
+    code, out = post(wa, "/api/station/stt/infer/claim", {"wait": 0, "state": "online", "models": MODELS}, token)
+    assert code == 200 and out["job"]["messages"] == MSGS and out["llm_on"] is True
+
+
+@pytest.mark.parametrize("output", [
+    "deep", "nan-string", "inf-string", "nan-float", "big-string", "big-dict", 7, None, ["x"]])
+def test_whatever_a_worker_sends_back_the_future_is_resolved_once(output):
+    ln = lane()
+    llm_online(ln)
+    f = ln.submit("pd_classify", MSGS, PD, meta=True)
+    j = ln.claim("gpu-1", 0)
+    if output == "deep":
+        d = {}
+        for _ in range(100000):
+            d = {"a": d}
+        output = d
+    elif output == "nan-string":
+        output = json.dumps(GOOD).replace("0.85", "NaN")
+    elif output == "inf-string":
+        output = json.dumps(GOOD).replace("0.85", "Infinity")
+    elif output == "nan-float":
+        output = dict(GOOD, confidence=float("nan"))
+    elif output == "big-string":
+        output = json.dumps(dict(GOOD, reason="r" * 20000))
+    elif output == "big-dict":
+        output = dict(GOOD, pad="p" * 20000)
+    assert ln.complete("gpu-1", j.lease, {"output": output})
+    res, meta = f.result(2)
+    assert res is None and meta["why"] == "invalid"
+    assert ln.complete("gpu-1", j.lease, {"output": GOOD}) is False and len(ln._done) == 1
+
+
+def test_the_pool_switch_stops_the_lane_and_a_workers_llm_switch_keeps_prompts_off_it(tmp_path):
+    on = {"pool": True, "gpu-1": True}
+    clock = Clock()
+    ln = Lane(clock=clock, log=lambda s: None, enabled=lambda: on["pool"], llm_on=lambda wid: on.get(wid, True))
+    ln._thread = threading.current_thread()
+    llm_online(ln, "gpu-1")
+    assert ln.available()
+    on["pool"] = False
+    ln.switched()
+    assert not ln.available() and ln.submit("t", MSGS, PD).result(2) is None
+    assert ln.handle("gpu-1", "/api/station/stt/infer/claim", {"wait": 0})[1] == {"job": None, "llm_on": False}
+    on["pool"] = True
+    ln.switched()
+    llm_online(ln, "gpu-2")
+    f = ln.submit("t", MSGS, PD)
+    j = ln.claim("gpu-1", 0)
+    on["gpu-1"] = False                                      # switched off while it holds a job: back to the queue
+    ln.switched()
+    ln.tick()
+    assert not ln._leases and ln._queue == [j]
+    assert ln.claim("gpu-1", 0) is None
+    j2 = ln.claim("gpu-2", 0)
+    ln.complete("gpu-2", j2.lease, {"output": GOOD})
+    assert f.result(2) == GOOD
+    assert {w["id"]: w["llm_on"] for w in ln.stats()["workers"]} == {"gpu-1": False, "gpu-2": True}
+    # the registry: on by default, the switch audited, shown in the panel
+    from sizeup.cloud.hubstore import MonitorDb
+    from sizeup.cloud.sttworkers import WorkerError, WorkerRegistry
+    reg = WorkerRegistry(MonitorDb(tmp_path / "hub.sqlite"), log=lambda s: None)
+    reg.add("gpu-1")
+    assert reg.llm_on("gpu-1") and reg.llm_on("never-added")
+    notes = []
+    assert reg.act({"action": "llm", "id": "gpu-1", "on": False}, "casey", lambda k, o, n: notes.append((k, o, n))) \
+        == {"ok": True, "id": "gpu-1", "llm_on": False}
+    assert notes == [("stt workers/gpu-1/llm jobs", "on", "off")] and not reg.llm_on("gpu-1")
+    assert reg.panel()["workers"][0]["llm_on"] is False
+    with pytest.raises(WorkerError):
+        reg.act({"action": "llm", "id": "gpu-9", "on": True})
+    with pytest.raises(WorkerError):
+        reg.act({"action": "llm", "id": "gpu-1", "on": "yes"})
+
+
+def test_a_submit_racing_stop_is_answered_never_left_waiting():
+    ln = lane()
+    llm_online(ln)
+    ln.available = lambda: True                              # (it was available a moment ago ...)
+    ln._stop.set()                                           # (... and stop() ran in between)
+    f = ln.submit("t", MSGS, PD, meta=True)
+    assert f.done() and f.result()[1]["why"] == "no_worker" and ln._queue == []
+
+
+def test_futures_resolve_on_the_lanes_result_thread_never_a_request_thread_or_under_a_lock():
+    ln = lane()
+    llm_online(ln)
+    f = ln.submit("t", MSGS, PD)
+    seen = []
+
+    def cb(_f):
+        free = ln._cv.acquire(blocking=False)                # (an RLock: only another thread holding it says no)
+        if free:
+            ln._cv.release()
+        seen.append((threading.current_thread().name, free))
+
+    f.add_done_callback(cb)
+    j = ln.claim("gpu-1", 0)
+    ln.complete("gpu-1", j.lease, {"output": GOOD})          # (this thread: a worker's request)
+    assert f.result(2) == GOOD
+    wait_until(lambda: seen)
+    name, got_lock = seen[0]
+    assert name.startswith("infer-results") and got_lock
+
+
+def test_models_without_a_key_leave_it_as_it_was():
+    ln = lane()
+    llm_online(ln)
+    ln.seen("gpu-1", "online", {"stt": "ggml-small.bin"})
+    w = ln.workers["gpu-1"]
+    assert w.llm == MODELS["llm"] and w.llm_version == MODELS["llm_version"] and w.stt == "ggml-small.bin"
+    ln.seen("gpu-1", "online", {"llm": ""})                  # said: no LLM now
+    assert w.llm == "" and w.llm_version == "" and not ln.available()
+
+
+def test_a_job_is_none_at_its_deadline_not_a_tick_later():
+    ln = Lane(log=lambda s: None).start()
+    try:
+        ln.seen("gpu-1", "online", MODELS)
+        f = ln.submit("t", MSGS, PD, deadline_s=1.5, meta=True)
+        t0 = time.monotonic()
+        assert ln.claim("gpu-1", 0) is not None              # leased, never answered
+        res, meta = f.result(5)
+        took = time.monotonic() - t0
+        assert res is None and meta["why"] == "deadline" and 1.45 <= took < 1.6, took
+    finally:
+        ln.stop()
+
+
+def wait_until(pred, timeout=2.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not pred():
+        time.sleep(0.01)
+    assert pred()

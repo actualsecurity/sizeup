@@ -926,7 +926,9 @@ class HubApp(App):
         self.stt_latency = sttruns.LatencyBook()
         # the LLM lane (sizeup/cloud/infer.py): a worker's local model for the intel engine's JSON classifications; its own
         # queue, after the pre-alert clips, off unless a worker advertises an LLM. Prompts and answers never kept
-        self.infer_lane = infer_mod.Lane(stt_busy=self.sttpool.holds_prealert, may_write=self._may_write_audio, log=log)
+        self.infer_lane = infer_mod.Lane(stt_busy=self.sttpool.holds_prealert, may_write=self._may_write_audio, log=log,
+                                         enabled=lambda: bool(self.hub.workers.pool_settings()["on"]),
+                                         llm_on=self.hub.workers.llm_on)
         self.stt_api.infer = self.infer_lane
         self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
         self.cad.stt_workers_live = self._worker_live
@@ -1683,8 +1685,9 @@ class HubApp(App):
         if w is None:
             return {"state": "offline"}
         now = self.sttpool.clock()
+        lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version}
+                "version": w.version, "llm": lw.llm if lw is not None else ""}
 
     def pool_health(self) -> dict | None:
         """Settings > Station > Health: the pool (its workers, queue, fallbacks, p50/p90) and every channel's latency.

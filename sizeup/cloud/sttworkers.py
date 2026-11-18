@@ -62,6 +62,7 @@ NAME_MAX = 60
 ROTATE_GRACE_S = 600.0
 TOUCH_S = 300.0
 META_POOL = "stt_pool"
+META_LLM = "stt_llm"            # per GPU worker: its "LLM jobs" switch (JSON {id: bool}; absent: on)
 API = "/api/station/stt/"
 LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
 MAX_BODY = 1024 * 1024                  # a result: the text and its words (a 2-minute clip's are ~100 KB)
@@ -195,6 +196,32 @@ class WorkerRegistry:
         self.mdb.put(META_POOL, json.dumps(new, sort_keys=True))
         return old, new
 
+    # -- each worker's "LLM jobs" switch (the infer lane, sizeup/cloud/infer.py) -------------------------------------
+
+    def llm_settings(self) -> dict:
+        """{worker id: bool}: the switches an admin changed (a worker not in it: on)."""
+        try:
+            saved = json.loads(self.mdb.get(META_LLM, "") or "{}")
+        except ValueError:
+            saved = {}
+        return {str(k): v for k, v in saved.items() if isinstance(v, bool)} if isinstance(saved, dict) else {}
+
+    def llm_on(self, wid: str) -> bool:
+        """May this worker be sent prompts (its LLM jobs on; on by default)."""
+        return bool(self.llm_settings().get(wid, True))
+
+    def set_llm(self, wid, on) -> tuple[bool, bool]:
+        wid = self._id(wid)
+        if self.row(wid) is None:
+            raise WorkerError(f"no worker {wid}")
+        if not isinstance(on, bool):
+            raise WorkerError("on: true or false")
+        saved = self.llm_settings()
+        old = saved.get(wid, True)
+        saved[wid] = on
+        self.mdb.put(META_LLM, json.dumps(saved, sort_keys=True))
+        return old, on
+
     # -- who a request is ------------------------------------------------------------------------------------------
 
     def resolve(self, bearer: str) -> str:
@@ -300,6 +327,7 @@ class WorkerRegistry:
             out.append({"id": r["id"], "name": r["name"], "created": r["created"], "created_by": r["created_by"],
                         "rotated": r["rotated"], "revoked": r["revoked"], "last_used": self.last_used(r["id"], r),
                         "grace_until": r["prev_until"] if (r["prev_until"] or 0) > now else None,
+                        "llm_on": self.llm_on(r["id"]),
                         **((live or (lambda _w: {}))(r["id"]))})
         return {"at": now, "workers": out, "pool": self.pool_settings(), "active": self.any(),
                 "grace_s": ROTATE_GRACE_S}
@@ -307,7 +335,7 @@ class WorkerRegistry:
     def act(self, body: dict, by: str = "", note: Callable[[str, object, object], None] | None = None,
             on_revoke: Callable[[str], None] | None = None) -> dict:
         """POST /api/cad/stt-workers {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-        pool {on?, classes?}}. The answer of add / rotate carries the token: the only time it exists outside the
+        llm {id, on} | pool {on?, classes?}}. The answer of add / rotate carries the token: the only time it exists outside the
         worker. note(key, old, new): the Settings audit (never a token)."""
         a = str(body.get("action") or "")
         note = note or (lambda k, o, n: None)
@@ -316,6 +344,12 @@ class WorkerRegistry:
             wid = self._id(body.get("id"))
             note(f"stt workers/{wid}", None, f"added ({self._name(body.get('name')) or 'no name'})")
             return {"ok": True, "id": wid, "token": token}
+        if a == "llm":                                 # a GPU worker's "LLM jobs" (the infer lane: its prompts)
+            wid = self._id(body.get("id"))
+            old, new = self.set_llm(wid, body.get("on"))
+            if old != new:
+                note(f"stt workers/{wid}/llm jobs", "on" if old else "off", "on" if new else "off")
+            return {"ok": True, "id": wid, "llm_on": new}
         if a == "rotate":
             wid = self._id(body.get("id"))
             was = self.row(wid)
@@ -344,7 +378,7 @@ class WorkerRegistry:
                 if old["classes"].get(k) != v:
                     note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
             return {"ok": True, "pool": new}
-        raise WorkerError("action: add, rename, rotate, revoke or pool")
+        raise WorkerError("action: add, rename, rotate, revoke, llm or pool")
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
@@ -430,10 +464,16 @@ class WorkerApi:
             d = json.loads(raw or b"{}")
             if not isinstance(d, dict):
                 return _json(400, {"error": "a JSON object"})
-            if self.infer is not None:                     # the LLM lane (sizeup/cloud/infer.py): its models, its routes
+            # the LLM lane (sizeup/cloud/infer.py): a GPU worker's own token (sw1) only, never a station's whisper
+            gpu = bearer.startswith(PREFIX + ".") and not wid.startswith("station:")
+            if path.startswith(API + "infer/"):
+                if not gpu:
+                    return _json(403, {"error": "GPU workers only", "reason": "not_a_gpu_worker"})
+                if self.infer is None:
+                    return _json(404, {"error": "not found"})
+                return _json(*self.infer.handle(wid, path, d))
+            if self.infer is not None and gpu:
                 self.infer.seen(wid, d.get("state"), d.get("models"))
-                if path.startswith(API + "infer/"):
-                    return _json(*self.infer.handle(wid, path, d))
             state, model = d.get("state"), d.get("model")
             state = state if state in sttpool.STATES else None
             model = str(model)[:80] if isinstance(model, str) else None

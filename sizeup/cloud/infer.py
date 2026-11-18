@@ -22,8 +22,13 @@ The lane, apart from the speech-to-text queue (sizeup/sttpool.py), which always 
     workers     hello / state / claims carry {state, models: {stt, llm, llm_version}}; llm "" (or none): no LLM now
                 (a worker stops its llama-server while gaming)
 
+Switches (Settings > Station > STT workers): the pool's On also turns this lane off (available() False, no claims);
+each GPU worker's "LLM jobs" (on by default) keeps prompts off that worker. Only GPU workers' own tokens (sw1) reach
+this lane: a station's whisper in the pool never sees a prompt (sizeup/cloud/sttworkers.py answers it 403).
+
 Privacy: the prompts and the answers exist only in memory, on the way to the worker and back to the future. Never logged,
-never in Health, stt_runs or a database: only the task, the latency, the token counts and ok / why (stats()).
+never in Health, stt_runs or a database: only the task, the latency, the token counts and ok / why (stats()). A caller's
+done-callback runs on the lane's result thread and must not log the answer either.
 
 The worker API (sizeup/cloud/sttworkers.py routes /api/station/stt/infer/* here, the same token):
     POST /api/station/stt/infer/claim                  {wait <= 25, state, models} -> {job: {lease, id, task, messages,
@@ -55,6 +60,7 @@ ROLES = ("system", "user", "assistant")
 DEADLINE_MIN_S, DEADLINE_MAX_S = 1.0, 120.0
 MIN_LEFT_S = 1.0           # a job with less than this left is not leased (again): it can't come back in time
 MAX_TOKENS = 256           # the answer's tokens at most (a classification: 40-120)
+OUTPUT_MAX = 16384         # an answer's JSON, characters at most (a bigger one is invalid)
 MESSAGES_MAX = 16
 PROMPT_MAX = 32000         # characters, all the messages
 SCHEMA_MAX = 8000          # characters, the schema as JSON
@@ -160,6 +166,10 @@ def _int(v, hi: int = 1_000_000) -> int:
 
 # -- the lane --------------------------------------------------------------------------------------------------------
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")       # NaN / Infinity in an answer: invalid
+
+
 @dataclass(eq=False)
 class Job:
     task: str
@@ -176,6 +186,7 @@ class Job:
     worker: str = ""
     claimed_at: float | None = None
     last_why: str = ""                      # why it came back last (gaming: what None says if it never gets done)
+    resolved: bool = False                  # (under the lock: resolved once, whichever path gets there first)
 
 
 @dataclass
@@ -195,19 +206,28 @@ class Worker:
 
 class Lane:
     """The infer queue, leases and numbers. stt_busy(worker id): it holds a pre-alert STT lease now (the pool's);
-    may_write(): this task is the leader (a standby answers nothing)."""
+    may_write(): this task is the leader (a standby answers nothing); enabled(): the admin's pool switch (Settings >
+    Station > STT workers: off stops this lane too); llm_on(worker id): that worker's "LLM jobs" switch.
+
+    Futures are resolved on the lane's own result thread (never a worker's request thread, never under a lock); a
+    caller's done-callback runs there and must not block or log a prompt or an answer."""
 
     def __init__(self, stt_busy: Callable[[str], bool] = lambda wid: False,
                  may_write: Callable[[], bool] = lambda: True, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, enabled: Callable[[], bool] = lambda: True,
+                 llm_on: Callable[[str], bool] = lambda wid: True):
         self.stt_busy, self.may_write, self.clock, self.log = stt_busy, may_write, clock, log
+        self.enabled, self.llm_on = enabled, llm_on
         self._cv = threading.Condition()
         self._queue: list[Job] = []
         self._leases: dict[str, Job] = {}
         self.workers: dict[str, Worker] = {}
         self._done: deque = deque()          # (at, task, worker, why, latency_ms, tokens_in, tokens_out)
+        self._said: list[str] = []           # log lines made under the lock, written after it
+        self._switch: dict = {}              # (the switches, read at most once a second: asked under the lock)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._results = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer-results")
 
     def start(self) -> Lane:
         if self._thread is None:
@@ -229,17 +249,59 @@ class Lane:
         return len(jobs)
 
     def _run(self) -> None:
-        while not self._stop.wait(TICK_S):
+        """The deadlines: woken at the earliest one (a 15 s job is None by 15 s), else every TICK_S."""
+        while not self._stop.is_set():
             try:
                 self.tick()
             except Exception as e:  # noqa: BLE001 - the lane's clock must never stop
                 self.log(f"infer: tick: {type(e).__name__}")
+            with self._cv:
+                if self._stop.is_set():
+                    return
+                now = self.clock()
+                due = min([j.deadline_at for j in self._leases.values()]
+                          + [j.deadline_at - MIN_LEFT_S for j in self._queue], default=now + TICK_S)
+                self._cv.wait(max(0.0, min(TICK_S, due - now)))
+
+    def _flush(self) -> None:
+        """The log lines made under the lock (never a prompt or an answer)."""
+        with self._cv:
+            said, self._said = self._said, []
+        for line in said:
+            self.log(line)
+
+    def _on(self, wid: str | None = None) -> bool:
+        """The admin's switches (the pool on; this worker's LLM jobs on), each read at most once a second."""
+        now = time.monotonic()
+        key = wid or ""
+        at, val = self._switch.get(key, (-1e9, False))
+        if now - at >= 1.0:
+            try:
+                val = bool(self.enabled()) and (wid is None or bool(self.llm_on(wid)))
+            except Exception:  # noqa: BLE001 - a switch that can't be read: off
+                val = False
+            self._switch[key] = (now, val)
+        return val
+
+    def _worker_on(self, wid: str) -> bool:
+        """This worker's own "LLM jobs" switch (whatever the pool's)."""
+        try:
+            return bool(self.llm_on(wid))
+        except Exception:  # noqa: BLE001 - can't be read: off
+            return False
+
+    def switched(self) -> None:
+        """An admin changed a switch: read them again now."""
+        self._switch.clear()
+        with self._cv:
+            self._cv.notify_all()
 
     # -- workers ---------------------------------------------------------------------------------------------------
 
     def seen(self, wid: str, state=None, models=None) -> Worker:
-        """Any request of a worker's (the same token as its STT ones): when it was last seen, its state, its models. No
-        longer online, or its LLM gone: the job it holds back to the queue at once."""
+        """Any request of a GPU worker's (the same token as its STT ones): when it was last seen, its state, its models
+        (a key it doesn't send is unchanged; llm "" says it has none now). No longer online, or its LLM gone: the job
+        it holds back to the queue at once."""
         back = []
         with self._cv:
             w = self.workers.get(wid)
@@ -249,10 +311,13 @@ class Lane:
             if state in STATES:
                 w.state = state
             if isinstance(models, dict):
-                w.stt = str(models.get("stt") or "")[:80] if isinstance(models.get("stt"), str) else ""
-                w.llm = str(models.get("llm") or "")[:80] if isinstance(models.get("llm"), str) else ""
-                v = models.get("llm_version")
-                w.llm_version = str(v)[:64] if isinstance(v, str) and w.llm else ""
+                if isinstance(models.get("stt"), str):
+                    w.stt = models["stt"][:80]
+                if isinstance(models.get("llm"), str):
+                    w.llm = models["llm"][:80]
+                    w.llm_version = ""
+                if isinstance(models.get("llm_version"), str) and w.llm:
+                    w.llm_version = models["llm_version"][:64]
                 w.had_llm = w.had_llm or bool(w.llm)
             if w.lease and (w.state != "online" or not w.llm):
                 job = self._leases.get(w.lease)
@@ -278,10 +343,10 @@ class Lane:
 
     def _ready(self, w: Worker, now: float) -> bool:
         return (w.state == "online" and bool(w.llm) and (w.polling > 0 or now - w.seen < READY_S)
-                and now >= w.cool_until)
+                and now >= w.cool_until and self._on(w.id))
 
     def available(self) -> bool:
-        """A worker advertising an LLM is ready now (and this task is the leader)."""
+        """A worker advertising an LLM is ready now (the pool and its LLM jobs on, this task the leader)."""
         if self._stop.is_set() or self._thread is None:
             return False
         try:
@@ -303,20 +368,26 @@ class Lane:
     # -- jobs ------------------------------------------------------------------------------------------------------
 
     def submit(self, task, messages, schema, deadline_s=20, priority=0, meta=False) -> concurrent.futures.Future:
+        """An ask it can't take (invalid, nobody ready, the lane stopped) is resolved before this returns, on the
+        caller's thread; anything else on the result thread."""
         fut: concurrent.futures.Future = concurrent.futures.Future()
         t0 = time.monotonic()
         try:
             job = self._job(task, messages, schema, deadline_s, priority, bool(meta), fut, t0)
         except Exception:  # noqa: BLE001 - never raises: an ask it can't make is None (invalid)
             self._resolve(Job(str(task)[:40] if isinstance(task, str) else "?", [], {}, 0.0, 0, fut, bool(meta),
-                              self.clock(), t0), None, "invalid")
+                              self.clock(), t0), None, "invalid", inline=True)
             return fut
         if not self.available():
-            self._resolve(job, None, self._nobody_why())
+            self._resolve(job, None, self._nobody_why(), inline=True)
             return fut
         with self._cv:
-            self._queue.append(job)
-            self._cv.notify_all()
+            stopped = self._stop.is_set()
+            if not stopped:
+                self._queue.append(job)
+                self._cv.notify_all()
+        if stopped:                                # (stop() ran in between: nothing would ever answer it)
+            self._resolve(job, None, "no_worker", inline=True)
         return fut
 
     def _job(self, task, messages, schema, deadline_s, priority, meta, fut, t0) -> Job:
@@ -346,7 +417,7 @@ class Lane:
 
     def claim(self, wid: str, wait: float = 0.0, state=None, models=None) -> Job | None:
         """A worker's long poll: the best job, leased to it until its deadline, or None after `wait`. Only a ready
-        worker holding no infer job and no pre-alert STT lease gets one."""
+        worker (the pool and its LLM jobs on) holding no infer job and no pre-alert STT lease gets one."""
         end = time.monotonic() + max(0.0, min(CLAIM_WAIT_MAX_S, _num(wait) or 0.0))
         w = self.seen(wid, state, models)
         with self._cv:
@@ -405,16 +476,34 @@ class Lane:
         return job, ("gaming" if job.last_why == "gaming" else "deadline")
 
     def _failed(self, wid: str, now: float) -> None:
+        """Called with the lock held (its log line written after it)."""
         w = self.workers.get(wid)
         if w is not None:
             w.fails += 1
             if w.fails >= FAIL_N:
                 w.fails, w.cool_until = 0, now + COOLDOWN_S
-                self.log(f"infer: GPU worker {wid}: {FAIL_N} failed in a row: no infer jobs for {COOLDOWN_S:.0f} s")
+                self._said.append(f"infer: GPU worker {wid}: {FAIL_N} failed in a row: no infer jobs for "
+                                  f"{COOLDOWN_S:.0f} s")
 
-    def complete(self, wid: str, lease: str, body: dict) -> bool | None:
-        """The worker's answer for a live lease it holds: validated, the future resolved (True); one that doesn't
-        validate: None (invalid) (True, the worker told so by its answer's ok); a lease gone: False."""
+    @staticmethod
+    def _answer(body: dict, schema: dict):
+        """The worker's output, if it is a JSON object of at most OUTPUT_MAX that validates; else None. Never raises
+        (a string that isn't JSON, NaN / Infinity, nested too deep, too big: None)."""
+        try:
+            out = body.get("output")
+            if isinstance(out, str):
+                if len(out) > OUTPUT_MAX:
+                    return None
+                out = json.loads(out, parse_constant=_no_constant)
+            if not isinstance(out, dict) or len(json.dumps(out, allow_nan=False)) > OUTPUT_MAX:
+                return None
+            return out if valid(out, schema) else None
+        except Exception:  # noqa: BLE001 - whatever a worker sends: invalid, never a stuck future
+            return None
+
+    def complete(self, wid: str, lease: str, body: dict) -> bool:
+        """The worker's answer for a live lease it holds: the future resolved, with the answer if it validates, else
+        None (invalid) (True); a lease gone: False."""
         with self._cv:
             job = self._held(wid, lease)
             if job is None:
@@ -423,21 +512,17 @@ class Lane:
             w = self.workers.get(wid)
             if w is not None and w.lease == lease:
                 w.lease = ""
-            out = body.get("output")
-            if isinstance(out, str):
-                try:
-                    out = json.loads(out)
-                except ValueError:
-                    out = None
-            ok = isinstance(out, dict) and valid(out, job.schema)
+            out = self._answer(body if isinstance(body, dict) else {}, job.schema)
             if w is not None:
-                if ok:
+                if out is not None:
                     w.fails = 0
                 else:
                     self._failed(wid, self.clock())
             self._cv.notify_all()
-        self._resolve(job, out if ok else None, "ok" if ok else "invalid", w,
-                      _int(body.get("tokens_in")), _int(body.get("tokens_out")))
+        self._flush()
+        self._resolve(job, out, "ok" if out is not None else "invalid", w,
+                      _int(body.get("tokens_in")) if isinstance(body, dict) else 0,
+                      _int(body.get("tokens_out")) if isinstance(body, dict) else 0)
         return True
 
     def release(self, wid: str, lease: str, why: str = "") -> bool:
@@ -450,12 +535,13 @@ class Lane:
             if why == "error":
                 self._failed(wid, self.clock())
             r = self._unlease(job, "gaming" if why == "gaming" else why)
+        self._flush()
         self._finish([r])
         return True
 
     def tick(self, now: float | None = None) -> int:
-        """Deadlines and lost leases. Nobody ready at all: what waits is None at once (no_worker / gaming). How many
-        were resolved."""
+        """Deadlines, lost leases, a worker switched off. Nobody ready at all: what waits is None at once (no_worker /
+        gaming). How many were resolved."""
         now = self.clock() if now is None else now
         out = []
         with self._cv:
@@ -470,6 +556,8 @@ class Lane:
                 elif w is None or now - w.seen >= LOST_S:
                     self._failed(job.worker, now)
                     out.append(self._unlease(job, "no_worker"))
+                elif not self._on(w.id):                  # the admin switched it (or the pool) off: no more prompts
+                    out.append(self._unlease(job, "no_worker"))
             anyone = any(self._ready(w, now) for w in self.workers.values())
             nobody = "" if anyone else self._nobody_why()
             for job in list(self._queue):
@@ -478,6 +566,7 @@ class Lane:
                     out.append((job, nobody or ("gaming" if job.last_why == "gaming" else "deadline")))
             if out:
                 self._cv.notify_all()
+        self._flush()
         out = [r for r in out if r is not None]
         self._finish(out)
         return len(out)
@@ -487,28 +576,36 @@ class Lane:
             if r is not None:
                 self._resolve(r[0], None, r[1])
 
-    def _resolve(self, job: Job, value, why: str, w: Worker | None = None, tin: int = 0, tout: int = 0) -> None:
-        """Outside the lock: the number kept (never the prompt or the answer), the future set (once)."""
+    def _resolve(self, job: Job, value, why: str, w: Worker | None = None, tin: int = 0, tout: int = 0,
+                 inline: bool = False) -> None:
+        """Called outside the lock: once per job (whichever path comes first), the number kept (never the prompt or the
+        answer), the future set on the result thread (inline: here, the caller's own thread in submit)."""
         ms = int(round((time.monotonic() - job.t0) * 1000))
         meta = {"model": w.llm if w else "", "model_version": w.llm_version if w else "", "worker": w.id if w else "",
                 "latency_ms": ms, "tokens_in": tin, "tokens_out": tout, "why": why if why in WHYS else "no_worker"}
         now = self.clock()
         with self._cv:
+            if job.resolved:
+                return
+            job.resolved = True
             self._done.append((now, job.task, meta["worker"], meta["why"], ms, tin, tout))
             while self._done and now - self._done[0][0] > WINDOW_S:
                 self._done.popleft()
+        result = (value, meta) if job.meta else value
+        if inline:
+            job.future.set_result(result)
+            return
         try:
-            if not job.future.done():
-                job.future.set_result((value, meta) if job.meta else value)
-        except Exception as e:  # noqa: BLE001 - a caller's callback: its own trouble
-            self.log(f"infer: {job.task}: a callback failed: {type(e).__name__}")
+            self._results.submit(job.future.set_result, result)
+        except RuntimeError:                       # (the interpreter shutting down: no thread to be had)
+            job.future.set_result(result)
 
-    # -- the worker API (sizeup/cloud/sttworkers.py hands /api/station/stt/infer/* here) ----------------------------
+    # -- the worker API (sizeup/cloud/sttworkers.py hands a GPU worker's /api/station/stt/infer/* here) --------------
 
     def handle(self, wid: str, path: str, d: dict) -> tuple[int, dict]:
         if path == API + "claim":
             job = self.claim(wid, d.get("wait"), d.get("state"), d.get("models"))
-            return 200, {"job": self.public(job, self.clock()) if job is not None else None}
+            return 200, {"job": self.public(job, self.clock()) if job is not None else None, "llm_on": self._on(wid)}
         m = LEASE_PATH.fullmatch(path)
         if m is None:
             return 404, {"error": "not found"}
@@ -530,6 +627,7 @@ class Lane:
             workers = [{"id": w.id, "state": ("offline" if now - w.seen >= OFFLINE_S and w.polling <= 0
                                               else "cooling" if w.state == "online" and now < w.cool_until else w.state),
                         "stt": w.stt, "llm": w.llm, "llm_version": w.llm_version, "busy": bool(w.lease),
+                        "llm_on": self._worker_on(w.id),
                         "jobs_h": sum(1 for x in hour if x[2] == w.id),
                         "fails_h": sum(1 for x in hour if x[2] == w.id and x[3] != "ok")}
                        for w in sorted(self.workers.values(), key=lambda x: x.id) if w.had_llm]
@@ -549,7 +647,7 @@ class Lane:
                 t["tout"] += x[6]
             else:
                 t["why"][x[3]] = t["why"].get(x[3], 0) + 1
-        return {"available": self.available(), "ready": ready, "queued": queued, "leased": leased,
+        return {"available": self.available(), "on": self._on(), "ready": ready, "queued": queued, "leased": leased,
                 "jobs_h": len(hour), "ok_h": len(ok), "p50_s": pct(ok, 50), "p95_s": pct(ok, 95), "why_h": whys,
                 "workers": workers,
                 "tasks": {k: {"n": t["n"], "ok": t["ok"], "p50_s": pct(t["lat"], 50), "p95_s": pct(t["lat"], 95),
