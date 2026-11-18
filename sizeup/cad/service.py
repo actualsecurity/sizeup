@@ -280,6 +280,7 @@ class Cad:
         self.comms.atc = self.atc_talkers.decorate
         # The 60 Control feed: the incident talkgroup(s) and every page on the paging channel(s) (#80).
         self.feed = Feed(self.store, lambda: self.lists, has_clip=lambda cid: self.has_clip(cid), paging=s.paging)
+        self.comms.in_state = self.feed.shows            # a transmission on no incident, not the feed's: no rebuild
         # Unit statuses suggested from what is heard on our fire channels (#37): a dispatcher accepts or dismisses each.
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
@@ -449,8 +450,10 @@ class Cad:
         """Pushed to /cad once a second; rebuilt only when something changed."""
         rev = self.store.rev
         # and the minute: what the build reads against the clock (the closed calls' 24 h, a premise note's expiry, the
-        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one)
-        key = (rev, int(self.clock() // STATE_CLOCK_S))
+        # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one).
+        # state_rev, not rev: a transmission on no incident and not in the feed moves rev (comms_rev) and rebuilds
+        # nothing (Comms.record: quiet_for_state)
+        key = (self.store.state_rev, int(self.clock() // STATE_CLOCK_S))
         if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)

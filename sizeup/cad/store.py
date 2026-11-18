@@ -486,6 +486,11 @@ class Store:
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self._closed = False
+        # state_rev: what the console's state is built from (Cad.state): it moves with rev (and with every `rev += 1`
+        # anywhere), except for a transaction that said its write is no part of that state (quiet_for_state(): a
+        # transmission on no incident and not in the 60 Control feed), so such a write rebuilds nothing
+        self.state_rev = 0
+        self._state_quiet = False
         self.rev = 0          # bumped on every committed change (a row written): the page refetches nothing, it's pushed
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
@@ -825,6 +830,23 @@ class Store:
     def may_write(self, fn) -> None:
         self._may_write = self.db.may_write = fn
 
+    @property
+    def rev(self) -> int:
+        return self._rev
+
+    @rev.setter
+    def rev(self, v: int) -> None:
+        """Any change of rev (a commit, or a module's own `store.rev += 1`) moves state_rev too: only tx() itself, for a
+        transaction that called quiet_for_state(), moves rev alone."""
+        self._rev = v
+        self.state_rev += 1
+
+    def quiet_for_state(self) -> None:
+        """In an open tx(), by its own thread: what this transaction writes is no part of the console's state (Cad.state
+        never reads it), so its commit moves rev (the Radio page, comms_rev, every per-rev cache) and not state_rev.
+        The caller vouches for every row the transaction wrote."""
+        self._state_quiet = True
+
     def tx(self):
         """`with store.tx() as db:` one transaction under the lock."""
         store = self
@@ -838,6 +860,7 @@ class Store:
                     # nothing new, an expiry with nothing due) is no CAD change, so no rev (#446: each bump rebuilds
                     # the whole console state and makes every open page ask again)
                     self.changes0 = store.db.total_changes
+                    store._state_quiet = False
                 except BaseException:
                     # Busy past the timeout, or a transaction already open: __exit__ never runs for a failed
                     # __enter__, so the lock is given back here (else every later write waits on it forever).
@@ -883,8 +906,12 @@ class Store:
                                 raise
                             done = not store.db.in_transaction       # (a COMMIT that took)
                     if done and store.db.total_changes != self.changes0:
-                        store.rev += 1
+                        if store._state_quiet:
+                            store._rev += 1             # rev alone: the console's state has nothing new
+                        else:
+                            store.rev += 1
                 finally:
+                    store._state_quiet = False
                     # What rides on a transaction without being part of it (the Radio page's change notes,
                     # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
                     # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
