@@ -34,7 +34,13 @@ class FakeHealth:
                 "fallbacks": {"unclaimed": 3, "lease": 1, "released": 0, "no_worker": 0, "error": 0}, "refused_late": 1,
                 "workers": [{"id": "gpu-1", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin",
                              "gpu": {"util_pct": 31, "mem_used_mb": 1650, "mem_total_mb": 12288}, "jobs_h": 412,
-                             "lost": 1, "seen": now - 2, "seen_s": 2}],
+                             "lost": 1, "seen": now - 2, "seen_s": 2},
+                            {"id": "station:st-north", "kind": "station", "state": "paused", "model": "small.en-q5_1",
+                             "load": {"own": 6, "cpu_pct": 91.0, "service_s": 14.2, "why": "its own clips first"},
+                             "gpu": {}, "jobs_h": 38, "lost": 0, "seen": now - 1, "seen_s": 1},
+                            {"id": "station:st-south", "kind": "station", "state": "online", "model": "small.en-q5_1",
+                             "load": {"own": 0, "cpu_pct": 22.0, "service_s": 12.8}, "gpu": {}, "jobs_h": 141, "lost": 0,
+                             "seen": now - 1, "seen_s": 1}],
                 "latency": [{"channel": "tg:307", "n": 61, "p50_s": 2.1, "p95_s": 6.0, "target": True, "over": False,
                              "engines": {"gpu-worker": 58, "aws": 3}},
                             {"channel": "p25:mrrs:9211", "n": 40, "p50_s": 6.2, "p95_s": 17.5, "target": True,
@@ -114,6 +120,8 @@ def test_health_shows_the_gpu_workers_and_the_latency_by_channel(site):
         assert panel.get_by_text("412/h · p50 0.7 s · p90 1.9 s").is_visible()
         assert panel.get_by_text("Speech-to-text latency").is_visible()
         assert panel.locator("td.hl-bad", has_text="17.5 s").is_visible()          # a pre-alert channel over target
+        assert panel.get_by_text("st-north (station)").is_visible()                # a station's whisper (#639 phase 2)
+        assert panel.get_by_text("6 own · CPU 91% · 14.2 s/clip").is_visible()
         if SHOTS:                                  # (the panel scrolls: from the GPU workers' heading down)
             head = panel.get_by_text("GPU workers (hub)")
             pg.evaluate("el => el.scrollIntoView({block: 'start'})", head.element_handle())

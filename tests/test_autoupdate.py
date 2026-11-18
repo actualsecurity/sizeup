@@ -964,15 +964,14 @@ def test_station_stop_hands_over_the_clips_still_waiting(tmp_path):
     app._catchup_ids.add(caught.id)
     app.stt.submit(caught, audio, CATCHUP)
     n = app._stt_handoff()
-    assert n == {"waiting": 5, "skipped": 3, "pages": 0, "reruns": 1, "catchup": 1, "unmarked": 0, "in_flight": 0}
+    # (#639 phase 2: saved for the next start, queued again at their class there; tests/test_stt_cluster.py)
+    assert n == {"waiting": 5, "skipped": 0, "pages": 0, "reruns": 1, "catchup": 1, "unmarked": 0, "in_flight": 0,
+                 "pool": 0, "saved": 3}
     assert app.stt.busy() == 0
-    assert all(t.status == "skipped" and f"({SHED}: the station stopped" in t.model for t in clips)
+    saved = json.loads((Path(app.cfg.clips_dir).parent / "stt-queue.json").read_text())
+    assert [(e["id"], e["class"]) for e in saved] == [("P25-0", URGENT), ("P25-1", LIVE), ("P25-2", LOW)]
     assert caught.id not in app._rerun_ids and mine.id not in app._rerun_ids
-    # the rows are there, and the catch-up finds them (sizeup/sttcatchup.py: Comms.shed_clips)
-    rows, _ = app.cad.comms.shed_clips(0)
-    assert sorted(r["id"] for r in rows) == ["P25-0", "P25-1", "P25-2"]
-    assert app._stt_handoff() == {"waiting": 0, "skipped": 0, "pages": 0, "reruns": 0, "catchup": 0, "unmarked": 0,
-                                  "in_flight": 0}
+    assert app._stt_handoff()["waiting"] == 0
 
 
 # -- review fixes (#712) -------------------------------------------------------------------------------------
@@ -1052,7 +1051,7 @@ def test_once_late_it_switches_to_the_staged_build_rather_than_chase_a_newer_one
     assert u.current()[1] == newer
 
 
-def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip(tmp_path):
+def test_a_page_waiting_at_stop_gets_its_seconds_then_is_saved_for_the_next_start(tmp_path):
     import numpy as np
     from sizeup.app import App
     from sizeup.radio.page import Page
@@ -1065,8 +1064,10 @@ def test_a_page_waiting_at_stop_gets_its_seconds_then_is_marked_like_a_shed_clip
     t0 = time.monotonic()
     n = app._stt_handoff(wait_s=0.5)
     assert 0.5 <= time.monotonic() - t0 < 5
-    assert n["pages"] == 1 and n["waiting"] == 1 and app.stt.busy() == 0
-    assert page.status == "skipped" and f"({SHED}: the station stopped" in page.model
+    assert n["waiting"] == 1 and app.stt.busy() == 0 and n["saved"] == 1 and n["pages"] == 0
+    # (#639 phase 2: saved for the next start, where it is transcribed first, at its class)
+    (entry,) = json.loads((Path(app.cfg.clips_dir).parent / "stt-queue.json").read_text())
+    assert (entry["kind"], entry["id"], entry["class"]) == ("page", "South2-1", URGENT)
 
 
 def _late(u, sha):

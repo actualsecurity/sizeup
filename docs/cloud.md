@@ -1456,6 +1456,68 @@ clip waits for one only as long as its class allows. After that the clip goes th
 - **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
 - **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
 
+### Whisper capacity across the cluster (#639 phase 2)
+
+A station's whisper can be a worker in the hub's pool, so a clip from one station can be transcribed on another.
+
+**Off by default, per station.** An admin turns it on per station: Settings > Station > Stations, "Whisper in pool" on that station's row, audited. Until then nothing changes.
+
+The order is:
+1. a GPU worker;
+2. an idle station's whisper;
+3. AWS, as its budget allows;
+4. the catch-up.
+
+#### A station's whisper as a worker
+
+`sizeup/cloud/stationworker.py`, under the station's own identity (#555, "station:<id>"). There is no extra token, and revoking the station ends its worker.
+
+Its own radios always come first, because whisper-server takes one request at a time. It claims only when all of these hold:
+- none of its own clips wait;
+- none of its own has been heard for 90 s;
+- its CPU is under 85 %, measured from `/proc/stat` (on WSL that is the Linux side).
+
+Limits on what it takes:
+- only clips it decodes in 8 s at its own measured pace. It tells the hub `max_s`, and the hub never hands it a longer one;
+- always one greedy pass;
+- never a pre-alert clip, an AWS channel's clip, or its own station's;
+- a GPU worker idle now gets each job first.
+
+It re-checks right after a claim, and hands the job back if its own work came. While it decodes, if one of its own urgent, high or live clips comes, it closes the decode's connection and hands the job back. whisper-server stops a request whose client went away: "client disconnected, aborted processing", checked on whisper.cpp 1.9.4. Its own page then gets its text within a second of its normal time.
+
+#### What a station hands to the hub's pool
+
+`transcript_pending: "pool"`:
+- A context clip, when its own queue is 60 s behind and the hub says a worker elsewhere could take a clip that long now.
+- A clip it would shed, under the same condition. Otherwise it is skipped here as before; there is never a round trip back to the sender.
+- What it stops with (`App._stt_handoff`, #712's stop path). Pre-alert classes go only when the hub said lately that a GPU worker is idle and quick, one clip per such worker. Anything else goes while there is room. The rest is saved to `stt-queue.json` (written with fsync, and an unreadable one is kept as `.bad`). The next start queues it again at its own class, alerts as ever; a saved clip that already has its text is skipped. **A clip saved at stop reaches the hub only after the station restarts.**
+
+  The clip whisper is on gets 3 s. If whisper finishes it before the exit, its text goes up first and the hub keeps that one: a transmission is applied once.
+
+On the hub, a handed-over clip the pool can't take:
+- a live class goes to AWS, else to the station's whisper;
+- a context class goes to the catch-up, which keeps its own AWS cap (`CATCHUP_AWS_PCT`).
+
+The pool's catch-up keeps the catch-up's bounds on any worker:
+- one greedy pass;
+- 20 s at most;
+- clips of 30 s at most;
+- paused by fire work;
+- a station's whisper never gets its own station's clips.
+
+#### Pre-alert sources
+
+The sources the radio pre-alerts push alerts from are HIGH at least, in the station's queue and the pool, whatever their tier. On the hub they come from `sizeup.intel.is_push_source` or `push_sources()`.
+- The hub's leader sends them to the station (`set_stt_alert_keys`) when the revision the station reports differs.
+- The station compares its channel keys normalised the same way (`sizeup.intel.engine.source_key`: "tg:<n>" becomes "p25:westchester:<n>", a label becomes "fm:" or "air:"). A test checks that the station and the hub agree on every kind of key.
+- The set is cached (5 s), never computed per clip under a lock.
+
+#### Public API and Health
+
+- `Transcriber.withdraw()`, `current()`, `stop(timeout)`, `behind_live()`.
+- The catch-up takes the rows a stopped station left before other shed clips.
+- Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
