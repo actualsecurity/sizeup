@@ -311,3 +311,105 @@ def test_a_late_transcript_with_no_rule_words_beside_an_open_event_is_no_error()
     e.feed(row("t3", "Car 6 on location.", clock() - 5))
     assert e.feed(row("t2", "Car 6 copy.", clock() - 200)) == []          # was a KeyError (engine._feed_pack)
     assert len(pushed(sink)) == 1
+
+
+# -- a cleared, negated or not-a-call barricade: no barricade from that transmission ----------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Not a hostage situation.",
+    "It is not a barricade situation, subject came out.",
+    "Subject is no longer barricaded, ESU clearing.",
+    "Unfounded, no hostage situation.",
+    "Barricade situation resolved, subject in custody.",
+    "Negative on the hostage, ESU can stand down.",
+    "ESU setting up a barricade on Example Road for the parade.",
+    "Barricade on Example Road, ESU on scene for the detail.",
+    "SWAT drill at the school, barricade scenario.",                      # suppressed like training
+    "Respond to 12 Example Road, caller says it is not a hostage situation.",  # a dispatch cue beside it: still nothing
+])
+def test_a_cleared_or_negated_barricade_does_not_push(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert not [ev for ev in e.events.all() if ev.category == "barricade"] and pushed(sink) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Respond to 12 Example Road, barricaded subject.",
+    "Respond to 12 Example Road, barricaded subject, no hostages.",        # "no hostages" is no clearing
+    "Male barricaded in the apartment at 12 Example Road.",
+    "Caller states her husband is holding the kids hostage.",
+    "Male barricaded inside 12 Example Road, ESU en route.",
+    "Hostage at 12 Example Road, subject is armed with a knife.",
+    "Subject refusing to come out at 12 Example Road.",
+    "Barricade at 12 Example Road, SWAT requested.",
+])
+def test_the_real_shapes_still_push_beside_the_not_phrases(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert [ev.category for ev, _d in pushed(sink) if ev.category == "barricade"] == ["barricade"]
+
+
+def test_only_a_drill_said_as_one_is_suppressed():
+    raw = json.loads((rules_mod.DATA / "police.json").read_text())
+    assert not any(x in raw["suppress"] for x in ("drill", "drills")) and not any(
+        "drill" in x and "only" not in x and "a drill" not in x for x in raw["suppress"])
+    for text in ("Shots fired at the school, drill only.", "Shots fired at the school, it's a drill.",
+                 "Shots fired at the school, just a drill."):
+        e, sink = engine()
+        assert e.feed(row("t1", text, e.clock())) == [] and pushed(sink) == [], text
+
+
+def test_not_a_drill_is_a_real_call():
+    e, sink = engine()
+    e.feed(row("t1", "This is not a drill, barricaded subject with a gun at 12 Example Road.", e.clock()))
+    assert {ev.category for ev, _d in pushed(sink)} == {"barricade", "weapons"}
+
+
+@pytest.mark.parametrize("opener, cat", [
+    ("Respond to 12 Example Road, unresponsive male, not breathing.", "aided"),
+    ("Respond to 12 Example Road, shots fired.", "weapons"),
+    ("Caller states they smell something burning, I'll be notifying the FD.", "fire_call"),     # held, unplaced
+])
+@pytest.mark.parametrize("drill", [
+    "Car 6, fire drill at the high school, I'll be on traffic.",
+    "Car 9, theft of a drill from the hardware store on Sample Street.",
+])
+def test_a_drill_said_in_passing_never_ends_or_cancels_another_call(opener, cat, drill):
+    clock = Clock()
+    e, _sink = engine(clock=clock)
+    e.feed(row("t1", opener, clock()))
+    [ev] = [x for x in e.events.open_events() if x.category == cat]
+    clock.t += 30
+    e.feed(row("t2", drill, clock()))
+    [now] = [x for x in e.events.open_events() if x.id == ev.id]
+    assert now.status == "open" and now.note == "" and now.suppressed == ev.suppressed
+
+
+@pytest.mark.parametrize("text", [
+    "We have a hostage situation over on Example Road.",
+    "Barricaded subject at 12 Example Road, Example Road closed at Main Street.",
+    "Barricaded male, ESU en route, road closure at Main Street.",
+    "Barricaded subject at 12 Example Road, detail car shut down Main Street.",
+    "Barricaded subject at 12 Example Road, units on the detail respond.",
+    "Barricaded subject at 12 Example Road, all other units stand down from the previous call.",
+    "Barricaded male, ESU en route, all other units stand down.",
+    "Barricaded subject at 12 Example Road, the parade detail is clear, all units respond.",
+])
+def test_a_road_closure_a_detail_or_a_stand_down_beside_a_real_call_still_pushes(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert [ev.category for ev, _d in pushed(sink) if ev.category == "barricade"] == ["barricade"]
+
+
+@pytest.mark.parametrize("text", [
+    "ESU can stand down, the subject is in custody, barricade is clear.",
+    "Standing down on the barricade, subject came out.",
+    "That call was unfounded, the hostage was a TV show.",
+    "Hostage situation is over, subject in custody.",
+    "Barricades for the street fair on Example Road.",
+    "ESU exercise at the school, hostage role players.",
+])
+def test_the_narrowed_negatives_still_hold(text):
+    e, sink = engine()
+    e.feed(row("t1", text, e.clock()))
+    assert not [ev for ev in e.events.all() if ev.category == "barricade"] and pushed(sink) == []
