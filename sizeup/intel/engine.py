@@ -58,9 +58,13 @@ How a row becomes an event, per pack whose scope it is in:
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
      A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
      (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
-     own words or a read-back of the held call place it (_may_place); placed more than RELEASE_S after the call-out it
-     stays at log ("placed_late"). A category with "defer_to" is never raised beside that category (_deferred), and an
-     event of that category takes its open event over: one pre-alert per call.
+     own words or a read-back of the held call (within RELEASE_S) place it (_may_place). RELEASE_S after the call-out,
+     still unplaced, the tick lets it go without a place (_release: on the timer, no later transmission needed). A
+     safety category is never held for a place. A category with "defer_to" is never raised beside that category
+     (_deferred), and an event of that category takes its open event over: one pre-alert per call.
+     A push can only be as early as the transcript: a row is read when its text lands (consider), so speech-to-text's
+     queue (sizeup/stt.py: another system's "text" talkgroups wait in the LOW class) is the delay before a push, never
+     the engine. A row transcribed after newer rows of its source is still read (Window.prune keeps it).
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -103,8 +107,8 @@ NEAR_INCIDENT_M = 150.0                # an event this close to one of our open 
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
-RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
-                                       # place found later than this updates the event at log ("placed_late"), unpushed
+RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it; this long
+                                       # after the call-out with no place, the tick lets it go without one (_release)
 # a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
 # house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
 # other content word ("suspicious", "vehicle", "also ... when you clear") makes the row another job's.
@@ -149,8 +153,10 @@ class Entry:
 class Window:
     entries: dict = field(default_factory=dict)      # tid -> Entry
 
-    def prune(self, newest: float, span: float) -> None:
-        for tid in [t for t, e in self.entries.items() if e.at < newest - span]:
+    def prune(self, newest: float, span: float, keep: str = "") -> None:
+        """Entries older than span before the newest go; never `keep` (the row being read: a transmission transcribed
+        late, after newer ones of its source, is still judged, with what the window holds, instead of dropped)."""
+        for tid in [t for t, e in self.entries.items() if e.at < newest - span and t != keep]:
             del self.entries[tid]
 
     def ordered(self) -> list[tuple[str, Entry]]:
@@ -228,6 +234,7 @@ class IntelEngine:
         self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
         self._catwords: dict[tuple[str, str], set] = {}
         self._who_of: dict = {}               # unplaced event id -> (talkers, units) of its own transmissions
+        self._released: dict = {}             # event ids let go unplaced by the timer (_release), never held again
         self.counters = counters_mod.Counters(self.clock)
         self._summed = self.clock()           # the hourly log line: the first an hour after start
         self._summed_at: dict = {}            # the overall totals at that line
@@ -555,7 +562,7 @@ class IntelEngine:
                        for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
-        win.prune(max(e.at for e in win.entries.values()), pack.window_s)
+        win.prune(max(e.at for e in win.entries.values()), pack.window_s, keep=tid)
         changed: list[Event] = []
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)
@@ -820,9 +827,6 @@ class IntelEngine:
         a hold ends (a moving event leaving our incident's place)."""
         if not pack.area and not pack.category(ev.category).get("place"):
             return
-        if ev.suppressed == "placed_late" and ev.pushed_at is None:
-            ev.mode = lowest(ev.mode, "log")  # placed too late to be a pre-alert: stays at log
-            return
         if pack.area:
             ev.near_incident = self._incident(ev)
         why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
@@ -832,14 +836,11 @@ class IntelEngine:
             ev.mode = lowest(ev.mode, "log")
             ev.suppressed = why
         elif ev.suppressed == "unplaced":
-            # placed: the mode its rules raised it at (the window may have let the call-out go: never None here),
-            # unless the place came too long after the call-out to be a pre-alert
-            if ev.last_at - ev.first_at > RELEASE_S:
-                ev.suppressed = "placed_late"
-                ev.mode = lowest(ev.mode, "log")
-            else:
-                ev.suppressed = ""
-                ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
+            # placed: the mode its rules raised it at (the window may have let the call-out go: never None here). A
+            # place after RELEASE_S (its own words; a read-back must be sooner, _may_place) lets it go too: the tick
+            # would have let it go without one by then (_release)
+            ev.suppressed = ""
+            ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
         elif ev.suppressed in ("out_of_area", "near_incident"):
             ev.suppressed = ""
             if mode is not None:
@@ -903,6 +904,26 @@ class IntelEngine:
         else:
             self._who_of.pop(ev.id, None)
 
+    def _release(self, ev: Event, now: float) -> bool:
+        """A call held "unplaced" (a "place": true category: the police pack's fire_call) RELEASE_S after its call-out
+        and still with no place (tick(), on the timer: no later transmission is needed): it goes at the mode its own
+        rules give it, without a place ("location not heard"). The read-back that would have placed it didn't come in
+        time, and a pre-alert with no address beats none. A place heard later updates it (policy: a place found)."""
+        pack = self.pack(ev.pack)
+        if pack is None or ev.id is None:
+            return False
+        before = copy.deepcopy(ev)
+        self._released[ev.id] = now
+        while len(self._released) > WHO_MAX:
+            self._released.pop(next(iter(self._released)))
+        ev.suppressed = ""
+        ev.mode = max(ev.mode, self._event_mode(pack, ev), key=mode_rank)
+        ev.updated_at = now
+        self.events.save(ev)
+        self._note_who(pack, ev)
+        self._after(pack, ev, "updated", now, before)
+        return True
+
     def _deferred(self, pack, cat: str, cats: dict, key: str, at: float, entry):
         """One pre-alert per call: a category that defers to another ("defer_to": fire_call to fire_report) is not
         raised while that one is over its threshold in this window, or has an open event on this source at this place
@@ -925,10 +946,11 @@ class IntelEngine:
     def _unplaced(self, pack, ev: Event) -> str:
         """A "place": true category (rules.py): "unplaced" until the event has a place a crew can drive to (PLACED),
         "out_of_area" when that place is outside the source's towns (else the pack's area); "" otherwise."""
-        if not pack.category(ev.category).get("place"):
-            return ""
+        cd = pack.category(ev.category)
+        if not cd.get("place") or cd.get("safety"):
+            return ""                         # a safety category is never held for a place: it pushes at once
         if ev.precision not in PLACED:
-            return "unplaced"
+            return "" if ev.id in self._released else "unplaced"      # let go by the timer: never held again
         towns = {t.lower() for t in (pack.towns_for(ev.source_key) or pack.area)}
         return "out_of_area" if towns and (ev.town or "").lower() not in towns else ""
 
@@ -983,8 +1005,10 @@ class IntelEngine:
                 continue                      # "new call": another place, or none said: a new incident
             elif rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
                 ev = e                        # no place said ("still smoke showing"): the open one (#492 re-check)
-            elif rp is not None and ep is None and (e.last_at >= at - pack.window_s or e.suppressed == "unplaced"):
-                ev = e                        # the place, right after a call-out that had none (or held for one)
+            elif rp is not None and ep is None and (e.last_at >= at - pack.window_s or e.suppressed == "unplaced"
+                                                    or e.id in self._released):
+                ev = e                        # the place, right after a call-out that had none (or held for one, or
+                                              # let go without one by the timer)
             elif (rp is not None and ep is not None and self._moving(pack, e, entry)
                   and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
                 ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
@@ -1255,7 +1279,9 @@ class IntelEngine:
         return out
 
     def tick(self, now: float | None = None) -> list[Event]:
-        """Events past their until: expired. A digest when due. Windows that have gone quiet: forgotten."""
+        """Events past their until: expired. A call held "unplaced" RELEASE_S after its call-out: released (_release).
+        A digest when due. Windows that have gone quiet: forgotten. Live it runs every TICK_S whether or not anything
+        is heard (_run waits on the queue at most that long)."""
         now = self.clock() if now is None else now
         out = []
         with self._lock:
@@ -1265,6 +1291,9 @@ class IntelEngine:
                     self.events.save(ev)
                     self.sink.event(ev, "expired")
                     out.append(ev)
+                elif ev.suppressed == "unplaced" and ev.pushed_at is None and now - ev.first_at >= RELEASE_S:
+                    if self._release(ev, now):
+                        out.append(ev)
             for k in [k for k, w in self.windows.items()
                       if not w.entries or max(e.at for e in w.entries.values()) < now - 2 * self._span(k[0])]:
                 del self.windows[k]

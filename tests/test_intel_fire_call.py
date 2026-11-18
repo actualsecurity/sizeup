@@ -258,17 +258,20 @@ def test_a_read_back_by_another_talker_or_too_late_does_not_place_it(gaz):
     assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
 
 
-def test_placed_late_by_its_own_words_updates_it_at_log_unpushed(gaz):
+def test_placed_late_by_its_own_words_pushes_it_at_the_place(gaz):
+    """More than RELEASE_S after the call-out the tick would have let it go without a place (test_intel_scope.py); its
+    own words placing it first let it go with the place (before the timer it was "placed_late", at log, unpushed)."""
     clock = Clock()
     e, sink = held(gaz, clock)
-    clock.t += 400                                        # more than 5 minutes after the call-out
+    clock.t += 400                                        # more than 5 minutes after the call-out, no tick in between
     e.feed(row("c1-t2", "That burning smell is at 40 Example Place, FD is en route.", clock(), **TALK))
     [ev] = e.events.open_events()
-    assert ev.label_full == "40 Example Pl, Port Chester" and ev.suppressed == "placed_late" and ev.mode == "log"
-    assert not any(d.would_push for _p, d in sink.pushes)
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.suppressed == "" and ev.mode == "push"
+    [d] = [d for _p, d in sink.pushes if d.would_push]
+    assert d.message["body"].startswith("Example Pl, ")
     clock.t += 20
     e.feed(row("c1-t3", "40 Example Place, still a smell of something burning, FD en route.", clock(), **TALK))
-    assert not any(d.would_push for _p, d in sink.pushes)                            # never pushed after that
+    assert len([d for _p, d in sink.pushes if d.would_push]) == 1                    # once
 
 
 # -- one pre-alert per call: fire_report wins over fire_call --------------------------------------------------------------

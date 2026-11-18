@@ -57,6 +57,14 @@ def row(tid, text, at, **kw):
     return r
 
 
+def wide_police():
+    """The police pack read over every MRRS source key (as it once was): tests that want several sources of one pack
+    ("p25:mrrs:920", "...:921", ...), not the pack's three talkgroups."""
+    raw = json.loads((rules_mod.DATA / "police.json").read_text())
+    raw["scope"] = dict(raw["scope"], sources=["p25:mrrs:*"])
+    return rules_mod.load_packs([raw])
+
+
 def engine(settings=None, clock=None, locate=example_locate, packs=None):
     sink = RecordingSink()
     e = IntelEngine(packs=packs, settings=settings or {}, events=MemoryEvents(), sink=sink, locate=locate,
@@ -90,7 +98,7 @@ def test_a_bad_phrase_says_why(bad):
 
 def test_packs_load_pure_with_overrides_and_the_hash_follows_them():
     base = rules_mod.load_packs()
-    assert [p.name for p in base] == ["police", "county_police", "ems", "fire"]     # by "order": the first pack first
+    assert [p.name for p in base] == ["police", "county_police", "ems", "fire", "neighbor_police"]   # by "order"
     pol = base[0]
     assert pol.accept is False and all(c["mode"] == "push" for c in pol.categories.values())    # user: push from day one
     h0 = rules_mod.ruleset_hash(base)
@@ -299,7 +307,7 @@ def test_the_kill_switch_stops_pushes_and_detection_goes_on():
 
 def test_rate_caps_hold_pushes_and_a_digest_counts_them():
     clock = Clock(10_000)
-    e, sink = engine({"intel": {"per_hour": 2, "digest_min": 15}}, clock=clock)
+    e, sink = engine({"intel": {"per_hour": 2, "digest_min": 15}}, clock=clock, packs=wide_police())
     for i in range(4):
         clock.t = 10_000 + i * 300
         e.feed(row(f"t{i}", "shots fired", clock.t, source=f"p25:mrrs:92{i}"))        # four sources: four events
