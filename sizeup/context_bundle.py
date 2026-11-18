@@ -48,10 +48,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 
 from sizeup import sourcekeys
 from sizeup.cad import addrkey
-from sizeup.cad.store import CadError
+from sizeup.cad.store import TZ, CadError
 from sizeup.intel.model import lowest
 
 SCHEMA_VERSION = 1
@@ -277,6 +278,22 @@ def _site_calls(cad, key: dict, lat, lon, airport: bool, place_name: str, at: fl
     return {"basis": basis, "total": total, "capped": total > len(items), **_empty(items, why)}
 
 
+def site_lines(cad, label: str, lat, lon, at: float, precision: str = "address", n: int = 3) -> list[str]:
+    """The site's history as at most n short lines, newest first ("2026-03-04 EMS / fall · transported"), for the local
+    model's prompt (sizeup/intel/backing.py): the same calls the More info page lists (_site_calls), only for a site
+    (SITE_PRECISIONS), and only the date, type, subtype and disposition (no remarks, comments or units)."""
+    if precision not in SITE_PRECISIONS or (not label and lat is None):
+        return []
+    key = _site(cad, label, lat, lon)
+    calls = _site_calls(cad, key, lat, lon, False, label if precision == "landmark" else "", at)["items"]
+    out = []
+    for c in calls[:n]:
+        day = datetime.fromtimestamp(float(c["created_at"]), TZ).strftime("%Y-%m-%d")
+        kind = " / ".join(str(x) for x in (c.get("type"), c.get("subtype")) if x)
+        out.append(" · ".join(x for x in (f"{day} {kind}".strip(), _clip(c.get("disposition"), 40)) if x))
+    return out
+
+
 def _notes(cad, key: dict, lat, lon, may: str) -> dict:
     pm = getattr(cad, "premise", None)
     if pm is None:
@@ -480,7 +497,9 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                 # the phrases are found again with the rules as they are now: the event may have fired under others
                 "matched_from": "current rules",
                 "rules_changed": bool(raw.get("ruleset_hash")) and raw.get("ruleset_hash") != now_hash,
-                "empty": "" if e["rules"] else "no rules recorded"},
+                "empty": "" if e["rules"] else "no rules recorded",
+                # the local model's answer when it raised (or noted) the event (sizeup/intel/backing.py)
+                "model": _model(cad, e["id"])},
         "trigger": _empty(trigger, why),
         "before_after": _window(cad, list(found.values()), float(windows.get("intel", 600.0)), set(ids)),
         "place": {"point": ({"lat": lat, "lon": lon, "radius_m": e["radius_m"], "approx": not e["confirmed"],
@@ -500,12 +519,23 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                 "aircraft": {"items": [], "empty": "not an airport pre-alert"}},
         "outcome": {"status": e["status"], "at": raw["updated_at"] if e["status"] != "open" else None, "by": status_by,
                     "note": e["note"], "acknowledged": None, "incident": _incident(cad, raw.get("incident_id")),
-                    "near_incident": _incident(cad, e.get("near_incident")),
+                    "near_incident": _incident(cad, e.get("near_incident")), "fd": e.get("fd_shown") or "",
+                    "fd_state": e.get("fd") or "",
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
                     "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery")},
     }
     rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or ""]
     return out, rev
+
+
+def _model(cad, eid) -> dict | None:
+    b = getattr(cad.intel, "backing", None)
+    if b is None:
+        return None
+    try:
+        return b.shown(int(eid))
+    except Exception:  # noqa: BLE001 - the bundle never fails on the model's record
+        return None
 
 
 def build(cad, kind: str, pid: int, *, admin: bool = False, may: str = "viewer", now: float | None = None,

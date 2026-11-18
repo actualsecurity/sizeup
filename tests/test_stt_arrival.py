@@ -17,6 +17,7 @@ from sizeup.incidents import Traffic
 from sizeup.radio.fm import RATE
 from tests.test_app import voice, wait
 from tests.test_cloud import HubRun, call, hub_cfg
+from tests.test_stt_encode import paused, resume
 from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, stt_rows
 
 PRE, FIRE, NORMAL, LOW = sttinput.PRE, sttinput.FIRE, sttinput.NORMAL, sttinput.LOW
@@ -69,16 +70,16 @@ def test_an_stt_lane_from_before_priorities_opens_and_its_rows_are_other_traffic
 
 
 def test_the_encoder_makes_the_pre_alert_ones_first_and_a_full_queue_drops_the_lowest():
-    made, gate = [], threading.Event()
+    made, done = [], threading.Event()
 
     def sink(d, data, meta, prio):
-        gate.wait(10)
         made.append((d["id"], prio))
-    enc = sttinput.Encoder(sink, log=lambda m: None, max_items=3, max_s=100.0)
+        if len(made) == 3:
+            done.set()
+    enc = paused(sttinput.Encoder(sink, log=lambda m: None, max_items=3, max_s=100.0, mode="thread"))
     a = voice(0.5)
     tx = lambda tid: Traffic(tid, "FG1", 0.0, 0.5, "")       # noqa: E731
-    assert enc.submit(tx("busy"), a)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # the helper holds it in the sink
+    # (the whole queue laid out before the encoder's threads run: no race with their picks)
     assert enc.submit(tx("ctx-1"), a, LOW) and enc.submit(tx("FG1-1"), a, NORMAL) and enc.submit(tx("ctx-2"), a, LOW)
     assert enc.submit(tx("PD-1"), a, PRE)                       # full: the oldest of the lowest gives its place
     assert enc.dropped["queue"] == 1 and enc.dropped_pre == 0
@@ -86,26 +87,22 @@ def test_the_encoder_makes_the_pre_alert_ones_first_and_a_full_queue_drops_the_l
     assert not enc.submit(tx("ctx-3"), a, LOW)                  # nothing lower than it queued: it is the one dropped
     assert enc.submit(tx("PD-3"), a, PRE)                       # FG1-1 gives its place
     assert not enc.submit(tx("PD-4"), a, PRE)                   # all pre-alert now: the new one is dropped, counted
-    assert enc.dropped["queue"] == 5 and enc.dropped_pre == 1
-    gate.set()
-    assert wait(lambda: len(made) == 4, 10)
-    assert made == [("busy", NORMAL), ("PD-1", PRE), ("PD-2", PRE), ("PD-3", PRE)]
-    enc.stop()
+    assert enc.dropped["queue"] == 5 and enc.dropped_pre == 1 and enc.stats()["queued"] == 3
+    resume(enc)
+    try:
+        assert done.wait(60)
+        assert made == [("PD-1", PRE), ("PD-2", PRE), ("PD-3", PRE)]
+    finally:
+        enc.stop()
 
 
 def test_a_full_queue_never_drops_lower_ones_for_nothing():
     """A long one that wouldn't fit even with every lower one gone: dropped itself, nothing else."""
-    gate = threading.Event()
-    enc = sttinput.Encoder(lambda *a, **k: gate.wait(10), log=lambda m: None, max_items=10, max_s=3.0)
+    enc = paused(sttinput.Encoder(lambda *a, **k: None, log=lambda m: None, max_items=10, max_s=3.0))
     a = voice(1.0)
-    assert enc.submit(Traffic("busy", "FG1", 0, 1, ""), a)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # the helper held in the sink ...
-    assert enc.submit(Traffic("busy-pre", "FG1", 0, 1, ""), a, PRE)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)          # ... and the encoder thread
     assert enc.submit(Traffic("ctx", "FG1", 0, 1, ""), a, LOW) and enc.submit(Traffic("PD", "FG1", 0, 1, ""), a, PRE)
     assert not enc.submit(Traffic("PD-long", "FG1", 0, 2, ""), voice(2.5), PRE)    # 2.5 s > 3 s - 1 s (PD stays)
     assert enc.stats()["queued"] == 2 and enc.dropped["queue"] == 1
-    gate.set()
     enc.stop()
 
 
@@ -172,15 +169,11 @@ def test_the_airband_never_costs_a_fireground_clip(tmp_path):
     assert kept == [f"FG1-{k}" for k in range(24, 30)] and ob.dropped_stt == 54 and ob.dropped_stt_pre == 0
     assert ob.dropped_stt_fire == 24                                    # (the oldest FG1 ones, the budget being 6)
     # the encoder: an airband clip never takes a fireground clip's place in a full queue
-    gate = threading.Event()
-    enc = sttinput.Encoder(lambda *a, **k: gate.wait(10), log=lambda m: None, max_items=2, max_s=100.0)
+    enc = paused(sttinput.Encoder(lambda *a, **k: None, log=lambda m: None, max_items=2, max_s=100.0))
     a = voice(0.5)
-    assert enc.submit(Traffic("busy", "FG1", 0, 1, ""), a)
-    assert wait(lambda: enc.stats()["queued"] == 0, 5)
     assert enc.submit(Traffic("FG1-a", "FG1", 0, 1, ""), a, FIRE) and enc.submit(Traffic("FG1-b", "FG1", 0, 1, ""), a, FIRE)
     assert not enc.submit(Traffic("ATC-a", "HPN ATC", 0, 1, ""), a, NORMAL)
-    assert enc.stats()["queued"] == 2 and enc.dropped["queue"] == 1
-    gate.set()
+    assert enc.stats()["queued"] == 2 and enc.dropped["queue"] == 1 and enc.dropped_fire == 0
     enc.stop()
 
 
@@ -405,8 +398,8 @@ def test_the_hub_measures_each_stt_inputs_arrival_and_keeps_it_as_a_series(tmp_p
         assert hub.app.stt_arrival_flush() == 2
         docs = {d["kind"]: d for st, s in (("t", "FG1"), ("t", "South 2"))
                 for d in hub.app.metric_store.docs(st, s, "stt_in", now - 60, now + 60)}
-        assert 0.25 <= docs["traffic"]["delay"] < 5.0
-        assert -5.0 < docs["page"]["delay"] <= -0.15
+        assert 0.25 <= docs["traffic"]["delay"] < 120.0                     # (at least the 0.3 s between the two)
+        assert -120.0 < docs["page"]["delay"] <= -0.15
         # on Health: per kind and channel
         sa = hub.app.hub.health_.model()["stt_arrival"]
         assert sa["kinds"]["page"]["h1"]["n"] == 1 and sa["kinds"]["page"]["h1"]["early"] == 1

@@ -349,6 +349,7 @@ def test_the_card_shows_the_models_suggestion(tmp_path):
     eng.infer = I.Inference(lambda: {**eng.policy.cfg, "infer": True}, clock=cad.clock, log=lambda m: None,
                             provider=FakeProvider(I.Result("mva_injury", 1.0, "none", "", "x")))
     eng.locate = example_locate
+    eng.backing = None                    # this stage alone (with the local model on, it owns the police pack's rows)
     eng.feed(row("t1", "report of an MVA on Example Ave", cad.clock()))
     cad.comms.context_broadcast = True
     [shown] = cad.intel_state()["open"]

@@ -114,6 +114,21 @@ class HubClient:
                 pass
         self._conn = None
 
+    def get_bytes(self, path: str, timeout: float | None = None) -> bytes:
+        """GET, the answer's bytes as they are (a pool job's audio, #639 phase 2). HubError on anything but a 2xx."""
+        conn = self._connect(timeout or self.timeout)
+        try:
+            conn.request("GET", self.prefix + path, headers=dict(self.headers))
+            r = conn.getresponse()
+            raw = r.read()
+        except (OSError, http.client.HTTPException) as e:
+            self.close()
+            raise HubError(f"can't reach the hub: {type(e).__name__}: {e}") from e
+        if not 200 <= r.status < 300:
+            self.close()
+            raise HubError(f"hub said {r.status}", r.status, retry_after(r.getheader("Retry-After")))
+        return raw
+
     def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
                 gzip_body: bool = False, raw_gzip: bytes | None = None) -> dict:
         """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped). gzip_body:

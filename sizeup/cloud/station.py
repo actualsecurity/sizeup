@@ -100,6 +100,7 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
+         "set_stt_alert_keys",        # the sources the hub's pre-alerts push from: HIGH at least in whisper (#639 ph. 2)
          "set_stt_terms")             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
 
 
@@ -135,6 +136,18 @@ def source_rows(runner) -> list[dict]:
         out.append({"source": a.source, "label": a.label, "state": h[0] if h else "starting",
                     "reason": (h[1] if h else "") or ""})
     return out
+
+
+POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
+
+
+def _cpu_pct() -> float | None:
+    """The machine's load as a CPU %: the 1-minute load average over the CPUs (None where there is none)."""
+    import os
+    try:
+        return 100.0 * os.getloadavg()[0] / max(1, os.cpu_count() or 1)
+    except (OSError, AttributeError):
+        return None
 
 
 class StationLink:
@@ -192,6 +205,11 @@ class StationLink:
         # (held while whisper is behind: the FLAC is made once it caught up, #677)
         self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
         self._stt_wake = threading.Event()
+        # the hub's speech-to-text pool (#639 phase 2): its word (on, may this station's whisper claim, how many others
+        # could take a clip now: its state answer's "pool"), and this station's whisper as one of its workers
+        self.pool: dict = {}
+        from sizeup.cloud.stationworker import StationWorker
+        self.pool_worker = StationWorker(app, self, self._client, log, cpu=_cpu_pct)
         self.stt_refused = 0                    # the hub refused them for good (a bad one: never sent again)
         self.stt_sent = 0
         app.events, app.link = self.emit, self
@@ -253,6 +271,31 @@ class StationLink:
         self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
+    def pool_takes(self) -> bool:
+        """The hub takes clips this station hands to its pool (#639 phase 2): it knows them, and its pool is on."""
+        return POOL_CAP in self.hub_caps and bool(self.pool.get("on"))
+
+    def pool_has_room(self, seconds: float | None = None) -> bool:
+        """The hub's last word, heard lately: a worker other than this station's whisper could take a context clip (this
+        long) now. Never a round trip: a clip no worker elsewhere could take stays here; nor to a hub not heard lately
+        (its last word may be stale: a hub deploying), which keeps it here (saved, or queued) instead."""
+        if not self.pool_takes() or int(self.pool.get("ready") or 0) <= 0 or not self.connected():
+            return False
+        return seconds is None or seconds <= float(self.pool.get("max_s") or 0.0)
+
+    def pool_gpu_idle(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker idle and quick on pre-alert clips now (a stopping station
+        hands those over only then; else they are saved here and transcribed first at the next start)."""
+        return self.pool_gpu_idle_n() > 0
+
+    def pool_gpu_idle_n(self) -> int:
+        """How many: a stopping station hands over one pre-alert clip per idle quick GPU worker at most (a second one
+        would wait behind the first, or fall to this station's own whisper, which is stopping)."""
+        if not self.pool_takes() or not self.connected():
+            return 0
+        n = self.pool.get("gpu_idle_n")
+        return int(n) if isinstance(n, int) and not isinstance(n, bool) else int(bool(self.pool.get("gpu_idle")))
+
     def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
         made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own.
@@ -312,6 +355,7 @@ class StationLink:
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         self.logs.start()
         self.metrics_link.start()
+        self.pool_worker.start()              # (idle until the hub says its pool takes stations)
         return self
 
     @property
@@ -333,6 +377,7 @@ class StationLink:
         self.vessels.stop()
         self.logs.stop()
         self.metrics_link.stop()
+        self.pool_worker.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -621,6 +666,8 @@ class StationLink:
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio,
                           "quarantine": self.outbox.summary()},     # (the events the hub refused: health.py "rejected")
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
+               "pool_worker": dict(self.pool_worker.stats),  # (its whisper as a pool worker, #639 phase 2)
+               "stt_alert_rev": app.stt_alert_rev,           # (the alert sources' revision it has: the hub resends on a change)
                "version": self.version()}
         try:
             out["logship"] = self.logs.stats()
@@ -659,6 +706,7 @@ class StationLink:
                 if isinstance(r, dict):
                     self._set_caps(r.get("caps"))
                     self._set_services(r.get("services"))      # (a hub before this sends none: kept as they were)
+                    self.pool = r["pool"] if isinstance(r.get("pool"), dict) else {}   # (#639 phase 2; older: none)
                     self.adopt(r.get("station"))
                 if "status" in body:
                     last_status, self._status_now = now, False
