@@ -102,6 +102,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -476,14 +477,28 @@ class Editor:
         self.unknown_log: Path | None = None
         self._heard_cache: tuple = ((), [])
         self._sections: dict[str, tuple] = {}        # section() -> (_written() then, its overrides)
+        self._usage_cache: dict[str, tuple] = {}     # _page_usage(): section -> (what it counts' marks, when, the counts)
 
     # -- overrides ------------------------------------------------------------------------------------
 
-    def overrides(self) -> dict[str, dict]:
+    def overrides(self, skip: tuple[str, ...] = ()) -> dict[str, dict]:
+        """Every section's overrides; skip: sections left out (the page: "places", thousands of imported names it reads
+        through local_places, never here)."""
         out: dict[str, dict] = {}
-        for r in self.store.q("SELECT section, key, value FROM settings_overrides ORDER BY section, key"):
+        where = f" WHERE section NOT IN ({','.join('?' * len(skip))})" if skip else ""
+        for r in self.store.q(f"SELECT section, key, value FROM settings_overrides{where} ORDER BY section, key", skip):
             out.setdefault(r["section"], {})[r["key"]] = json.loads(r["value"])
         return out
+
+    def settings_rev(self) -> str:
+        """What moves with every change the Settings page shows as a setting: any override written or removed, any
+        audited change (every Settings write is audited), a user added or edited. The page reloads at once when it
+        moves (settings.js sHook); what moves with the calls and the radio ("used 3×", a unit's status, the audio kept)
+        it reads again on its own, slower. The state carries it (Cad.state, built only when the rev moves)."""
+        a = self.store.one("SELECT MAX(id) AS id FROM settings_audit")
+        o = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at, TOTAL(LENGTH(value)) AS size FROM settings_overrides")
+        u = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM operators")
+        return json.dumps([a["id"] if a else None, *(o.values() if o else ()), *(u.values() if u else ())], separators=(",", ":"))
 
     def section(self, name: str) -> dict:
         """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes; the alarms'
@@ -641,6 +656,20 @@ class Editor:
             add(q("SELECT u.name AS k, COUNT(*) AS n FROM events e JOIN units u ON u.id = e.unit_id GROUP BY u.name"))
         return out
 
+    PAGE_USAGE_S = 30.0          # the page's "used N×" at most this old (a delete still asks usage() itself)
+
+    def _page_usage(self, sec: str) -> dict[str, int]:
+        """usage() for the page: kept until a record is added to what it counts, at most PAGE_USAGE_S (its GROUP BYs
+        over every incident, event and unit history row were most of a page read; the counts only say "in use")."""
+        mark = tuple(self.store.one("SELECT (SELECT MAX(id) FROM incidents) AS i, (SELECT MAX(id) FROM events) AS e, "
+                                    "(SELECT MAX(id) FROM unit_history) AS h, (SELECT COUNT(*) FROM assignments) AS a, "
+                                    "(SELECT COUNT(*) FROM run_cards) AS c").values())
+        now = time.monotonic()
+        got = self._usage_cache.get(sec)
+        if got is None or got[0] != mark or now - got[1] > self.PAGE_USAGE_S:
+            got = self._usage_cache[sec] = (mark, now, self.usage(sec))
+        return dict(got[2])
+
     def _used_why(self, sec: str, code: str) -> str:
         q = self.store.q
         parts = []
@@ -665,19 +694,20 @@ class Editor:
     # -- the page ---------------------------------------------------------------------------------------
 
     def page(self) -> dict:
-        L, ov = self.cad.lists, self.overrides()
+        L, ov = self.cad.lists, self.overrides(skip=("places",))      # (the place names: _place_names_page)
         out: dict = {"rev": self.store.rev, "lists": {}, "titles": LIST_TITLES, "roles": list(ROLES),
                      "audit_sections": list(AUDIT_SECTIONS)}
+        live = self.store.units()
         for sec in LIST_SECTIONS:
             base = {x["code"]: x for x in getattr(self.base, sec)}
-            o, used = ov.get(sec, {}), self.usage(sec)
+            o, used = ov.get(sec, {}), self._page_usage(sec)
             rows = [dict(x, state="added" if x["code"] not in base else "edited" if x["code"] in o else "default",
                          used=used.get(x["code"], 0), default=base.get(x["code"])) for x in getattr(L, sec)]
             rows += [dict(base[c], state="deleted", used=0, default=base[c]) for c, v in o.items()
                      if isinstance(v, dict) and v.get("deleted") and c in base]
             out["lists"][sec] = {"items": rows, "ordered": "_order" in o, "edited": bool(o)}
         now_in = {}
-        for u in self.store.units():
+        for u in live:
             now_in[u["status"]] = now_in.get(u["status"], 0) + 1
         for r in out["lists"]["unit_statuses"]["items"]:
             r["now"] = now_in.get(r["code"], 0)
@@ -698,13 +728,13 @@ class Editor:
                                  "edited": "_list" in ov.get("geo_town_order", {})}
         out["place_names"] = self._place_names_page()
         out["local_addresses"] = self._addresses_page()
-        out["units"] = self._unit_rows(L, ov)
+        out["units"] = self._unit_rows(L, ov, live)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
         out["type_subtypes"] = self._map_page(L, ov)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
-        out["system"] = self._system(ov)
+        out["system"] = self._system(ov, places=len(self._places_cached()[2]))      # (ov is without them)
         out["tones"] = self.tones_page()
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
@@ -1213,10 +1243,10 @@ class Editor:
             return {"ok": True}
         return self._commit([(DEPT_SECTION, key, v)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur.get(key, "unset"), v)])
 
-    def _unit_rows(self, L, ov: dict) -> dict:
-        o, used = ov.get("units", {}), self.usage("units")
+    def _unit_rows(self, L, ov: dict, units: list[dict] | None = None) -> dict:
+        o, used = ov.get("units", {}), self._page_usage("units")
         base_on = {c for c, _, _ in self.base.board_units()}
-        live = {u["name"]: u for u in self.store.units()}
+        live = {u["name"]: u for u in (self.store.units() if units is None else units)}
         rows, on = [], set()
         for b in L.unit_boards:
             pos = 0
@@ -1285,14 +1315,23 @@ class Editor:
                         "factor, closures in effect avoided), else straight-line distance × road factor at an average "
                         "speed; plus turnout from quarters. No traffic. Shown as “~3 min est.”."}
 
-    def _system(self, ov: dict) -> dict:
+    def _system(self, ov: dict, places: int | None = None) -> dict:
         try:
             raw = self.path.read_bytes()
         except OSError:
             raw = b""
         return {"data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 "sha256": hashlib.sha256(raw).hexdigest()[:12], "schema": SCHEMA_VERSION,
-                "overrides": {k: len(v) for k, v in ov.items()}, "db": self.store.path}
+                "overrides": self._counts(ov, places), "db": self.store.path}
+
+    @staticmethod
+    def _counts(ov: dict, places: int | None) -> dict[str, int]:
+        """System > Edits: how many overrides each section holds; places: the place names' count when ov was read
+        without them (page(): overrides(skip=("places",)))."""
+        out = {k: len(v) for k, v in ov.items()}
+        if places:
+            out["places"] = places
+        return dict(sorted(out.items()))
 
     # -- edits ------------------------------------------------------------------------------------------
 
@@ -1376,6 +1415,9 @@ class Editor:
         if code not in items and not (action == "reset" and code in o):
             raise CadError(f"no {code!r} in {title}")
         cur = items.get(code)
+        if sec == "dispositions" and code in lists_mod.SYSTEM_DISPOSITIONS and action in ("edit", "retire", "restore", "delete"):
+            raise CadError(f"{code} is the hub's own (a passed Until closes an event with it): "
+                           "it can't be edited, retired or deleted")
         if action == "edit":
             raw = body.get("item")
             if isinstance(raw, dict) and raw.get("code") not in (None, code):
@@ -3137,7 +3179,8 @@ class Editor:
                                 {"email": email, "seen": "signed in through Cloudflare Access (not named yet)"})
                     self.store.rev += 1
                 elif not row["email"]:      # an operator named by the email itself, entered by hand
-                    db.execute("UPDATE operators SET email = ? WHERE id = ?", (email, row["id"]))
+                    # (updated_at: settings_rev moves, so an open Users page shows the email at once)
+                    db.execute("UPDATE operators SET email = ?, updated_at = ? WHERE id = ?", (email, self.store.clock(), row["id"]))
             r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,)) or {"name": email, "callsign": ""}
         return {"email": email, "name": r["name"], "callsign": r["callsign"], "operator": self.recorded(r["name"], email)}
 
