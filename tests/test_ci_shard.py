@@ -1,8 +1,10 @@
 """tools/ci_shard.py: the split of the test files into parallel CI shards must never drop or repeat a file."""
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +17,30 @@ ci = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ci)
 
 
+@functools.cache
+def _real_files() -> tuple[str, ...]:
+    return tuple(ci.test_files())
+
+
 def real_files() -> list[str]:
-    return ci.test_files()
+    return list(_real_files())
+
+
+def pytest_collects(root: Path) -> set[str]:
+    """The files a real `pytest --collect-only` in `root` collects tests from (its `-qq` lines are "path: count")."""
+    r = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-qq", "-p", "no:cacheprovider"], cwd=root,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return {line.rsplit(":", 1)[0] for line in r.stdout.splitlines() if re.fullmatch(r"\S+\.py: \d+", line)}
+
+
+def write_project(root: Path, files: dict[str, str]) -> None:
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+A_TEST = "def test_it():\n    assert True\n"
 
 
 @pytest.mark.parametrize("total", [1, 2, 3, 4, 5, 7])
@@ -28,11 +52,63 @@ def test_every_test_file_is_in_exactly_one_shard(total):
     assert sorted(flat) == files and len(flat) == len(set(flat))          # none dropped, none twice
 
 
-def test_the_files_are_what_pytest_collects():
-    # pytest's default python_files is test_*.py under testpaths = ["tests"]: helpers beside them are not test files
-    on_disk = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").glob("test_*.py"))
-    assert real_files() == on_disk and "tests/test_ci_shard.py" in on_disk
-    assert "tests/conftest.py" not in on_disk
+def test_the_shards_hold_every_file_pytest_itself_collects():
+    """#751: a file pytest collects that no shard runs would never run in CI. The real collection is the reference,
+    whatever the config says (testpaths, python_files, subdirectories, *_test.py)."""
+    collected = pytest_collects(ROOT)
+    assert "tests/test_ci_shard.py" in collected and "tests/conftest.py" not in collected
+    flat = [f for b in ci.shards(real_files(), ci.load_durations(), 3) for f in b]
+    assert not collected - set(flat), "collected by pytest but in no shard"
+    assert len(flat) == len(set(flat))
+    assert all((ROOT / f).is_file() for f in flat)                         # an extra is only ever a real file
+
+
+def test_nested_and_star_test_files_are_found_like_pytest_finds_them(tmp_path):
+    write_project(tmp_path, {
+        "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+        "tests/conftest.py": "",
+        "tests/helpers.py": A_TEST,                          # not a test file name: pytest skips it
+        "tests/test_flat.py": A_TEST,
+        "tests/sub/test_nested.py": A_TEST,
+        "tests/sub/deeper/thing_test.py": A_TEST,            # pytest's other default pattern
+        "tests/node_modules/test_skipped.py": A_TEST,        # norecursedirs
+        "scripts/test_outside.py": A_TEST,                   # outside testpaths
+    })
+    expected = {"tests/test_flat.py", "tests/sub/test_nested.py", "tests/sub/deeper/thing_test.py"}
+    assert pytest_collects(tmp_path) == expected
+    files = ci.test_files(tmp_path)
+    assert set(files) == expected and len(files) == len(expected)
+    for total in (1, 2, 3, 4):
+        flat = [f for b in ci.shards(files, {}, total) for f in b]
+        assert sorted(flat) == sorted(expected)
+
+
+def test_the_configured_python_files_patterns_are_followed(tmp_path):
+    write_project(tmp_path, {
+        "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["checks"]\npython_files = ["check_*.py"]\n',
+        "checks/check_one.py": A_TEST,
+        "checks/more/check_two.py": A_TEST,
+        "checks/test_not_matched.py": A_TEST,
+    })
+    expected = {"checks/check_one.py", "checks/more/check_two.py"}
+    assert pytest_collects(tmp_path) == expected == set(ci.test_files(tmp_path))
+
+
+def test_a_file_that_fails_to_import_is_still_given_to_a_shard(tmp_path):
+    # the tool never imports a test module, so a broken one still goes to a shard, whose pytest run reports it
+    write_project(tmp_path, {
+        "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+        "tests/test_ok.py": A_TEST,
+        "tests/test_broken.py": "import a_module_that_does_not_exist\n" + A_TEST,
+    })
+    assert ci.test_files(tmp_path) == ["tests/test_broken.py", "tests/test_ok.py"]
+
+
+def test_no_test_files_at_all_is_an_error_not_an_empty_split(tmp_path):
+    write_project(tmp_path, {"pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+                             "tests/helpers.py": ""})
+    with pytest.raises(RuntimeError, match="no test files"):
+        ci.test_files(tmp_path)
 
 
 def test_the_split_is_the_same_every_time():
