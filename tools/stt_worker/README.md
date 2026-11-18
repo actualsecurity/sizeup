@@ -113,23 +113,37 @@ Remove-Item "$d\llama-cuda.zip", "$d\llama-cudart.zip"
 The zip has llama.cpp's other tools too; the worker runs only `llama-server.exe` (which loads
 `llama-server-impl.dll` and the `ggml*.dll` beside it).
 
-The model is **Qwen3-8B, Q4_K_M** (Apache-2.0), pinned to one revision of the official Qwen/Qwen3-8B-GGUF repo
-(5,027,783,488 bytes). Why this one: the PR that added the LLM compares it with Qwen2.5-7B, Llama-3.1-8B and
-Gemma-3-12B on synthetic dispatch traffic (`llm_eval/`).
+**The model is a choice in `worker.toml`:** two are pinned, and switching is config only (download the other one,
+change three keys, restart the worker). Qwen3-8B is the default. Why these two: the PR that added the LLM compares
+them with Qwen2.5-7B and Llama-3.1-8B on synthetic dispatch traffic (`llm_eval/`).
+
+| | Qwen3-8B Q4_K_M (default) | Gemma-3-12B-it Q4_K_M |
+|---|---|---|
+| repo, revision | `Qwen/Qwen3-8B-GGUF`, `7c41481f57cb95916b40956ab2f0b139b296d974` | `bartowski/google_gemma-3-12b-it-GGUF`, `648e3a36a77c8a9f12d86e741f9dcb9089c769c4` |
+| file, bytes | `Qwen3-8B-Q4_K_M.gguf`, 5,027,783,488 | `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 |
+| SHA256 | `D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785` | `FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B` |
+| license | Apache-2.0 | Gemma Terms of Use |
+| VRAM (4k context) | about 6 GB | about 8.3 GB |
+| `llm_model` | `qwen3-8b-q4_k_m` | `gemma-3-12b-it-q4_k_m` |
+| `llm_server` | `-m models\Qwen3-8B-Q4_K_M.gguf ... --reasoning off` | `-m models\google_gemma-3-12b-it-Q4_K_M.gguf ...` (no `--reasoning off`: Qwen3's) |
 
 ```powershell
+# Qwen3-8B (the default)
 Invoke-WebRequest https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf `
   -OutFile "$d\models\Qwen3-8B-Q4_K_M.gguf"
 (Get-FileHash "$d\models\Qwen3-8B-Q4_K_M.gguf").Hash -eq 'D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785'   # True
+# Gemma-3-12B (the other choice)
+Invoke-WebRequest https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf `
+  -OutFile "$d\models\google_gemma-3-12b-it-Q4_K_M.gguf"
+(Get-FileHash "$d\models\google_gemma-3-12b-it-Q4_K_M.gguf").Hash -eq 'FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B'   # True
 ```
 
-The worker checks the same hash (`llm_model_sha256`) before it first starts llama-server.
-
-**Fallback, if Qwen3 isn't accurate enough on real traffic:** Gemma-3-12B-it Q4_K_M (Gemma Terms of Use), more
-accurate in the comparison but about 8.3 GB of VRAM (see the budget): bartowski/google_gemma-3-12b-it-GGUF at
-`648e3a36a77c8a9f12d86e741f9dcb9089c769c4`, `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 bytes, SHA256
-`FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B`. Change `-m`, `llm_model` and `llm_model_sha256`
-(and drop `--reasoning off`, which is for Qwen3's thinking).
+To switch, set `llm_model`, `llm_model_sha256` (the SHA256 above, lower or upper case) and the `-m` file in
+`llm_server` (Gemma: without `--reasoning off`), then restart the worker. It checks the new file's hash before it
+starts llama-server, and the hub's Health shows the model and its version (the hash's first 12 digits) per worker.
+Qwen3 is the smaller and the quicker (about 1.0-1.35 s against 1.5-1.9 s on a 3080 Ti); Gemma was the more accurate
+in the comparison, and the only one that mended garbled numbers ("for tea" for 40), at about 2.3 GB more VRAM (see
+the budget).
 
 Try it (Ctrl+C to stop):
 
@@ -318,9 +332,14 @@ the worker starts, checks and stops. Nothing goes to a cloud model.
 | **together** | **7.5-8 GB of 12 GB** (about 4 GB free) |
 
 `-np 1` (one slot: the worker sends one job at a time) keeps the KV cache to one context; `-c 4096` covers the system
-prompt, the transmission and the answer with room to spare (`-c 2048` saves about 0.3 GB). The fallback Gemma-3-12B
-needs about 8.3 GB instead of 6: about 10-11 GB together, tight but it fits. A game needs the GPU more than either:
-the worker gives it all back (below).
+prompt, the transmission and the answer with room to spare (`-c 2048` saves about 0.3 GB).
+
+**With Gemma-3-12B instead:** about 8.3 GB for llama-server, plus whisper turbo (about 1 GB) and the Windows reserve,
+comes to about 10.5-11 GB of 12. It fits, but it leaves no room for a second speech-to-text model next to them (a
+challenger being compared with whisper turbo): with Gemma, a challenger has to run swap-per-job (loaded for its job,
+unloaded after), never resident. With Qwen3 there are about 4 GB free.
+
+A game needs the GPU more than either: the worker gives it all back (below).
 
 ### Gaming and the LLM
 

@@ -6,6 +6,7 @@ while), and that no prompt or answer ever reaches a log. Every prompt and answer
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 import json
 import logging
 import secrets
@@ -460,3 +461,21 @@ def test_llm_jobs_switched_off_on_the_hub_the_worker_asks_again_a_minute_later(t
         ihub.add_job("FG1-4", tone_wav(1.0))
         wait_for(lambda: ihub.accepted(), what="the clip's text")       # clips as ever
     assert 55 < w._llm_until - w.clock() <= 60
+
+
+def test_the_readme_pins_both_model_choices_and_the_example_config_uses_the_default():
+    """Switching the model is config only: both GGUFs are pinned (revision, size, SHA256) in the README, and the
+    example worker.toml loads Qwen3-8B with its own hash."""
+    import re
+    readme = (Path(W.__file__).parent / "README.md").read_text()
+    pins = {"Qwen3-8B-Q4_K_M.gguf": ("Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974",
+                                     "5,027,783,488", "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785"),
+            "google_gemma-3-12b-it-Q4_K_M.gguf": (
+                "bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4",
+                "7,300,575,264", "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B")}
+    for name, (url, size, sha) in pins.items():
+        assert f"{url}/{name}" in readme and size in readme
+        assert f'(Get-FileHash "$d\\models\\{name}").Hash -eq \'{sha}\'' in readme
+    (example,) = re.findall(r"```toml\n(.*?)```", readme, re.S)
+    assert 'llm_model_sha256 = "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"' in example
+    assert "models\\Qwen3-8B-Q4_K_M.gguf" in example and "'--reasoning', 'off'" in example
