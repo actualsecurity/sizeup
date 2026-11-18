@@ -1206,10 +1206,13 @@ class SystemSupervisor(Supervisor):
         self.back_list: tuple | None = None          # the (index, serial) list since back_since, while it comes back
         self.back_since = 0.0
         self.back_first: float | None = None         # its first look with every dongle back
+        self.back_first_m: float | None = None       # ... on the monotonic clock (the county's wait: a clock step
+                                                     # never lengthens it)
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
-        self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when): the county first
+        self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when, monotonic)
+        self.county_done = None                      # ... the wish seq it has waited for (once per move, never again)
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
@@ -1386,8 +1389,6 @@ class SystemSupervisor(Supervisor):
         if now < self.next_start:
             self.status.update(base)
             return
-        if w.get("group") and self._county_first(now, w, base):
-            return
         try:
             found = self.found()
         except Exception as e:  # noqa: BLE001 - librtlsdr in a bad way: like not plugged in
@@ -1410,8 +1411,11 @@ class SystemSupervisor(Supervisor):
                               else f"SDR '{s['name']}' not plugged in" + went, **dict(base, restarts=self.restarts))
                 return
             devs[i] = idx
-        if self.gone_since is not None and self._coming_back(now, w, found, base):
-            return
+        if self.gone_since is not None:
+            if self._coming_back(now, w, found, base):     # (its own wait for the county: never both)
+                return
+        elif w.get("group") and self._county_first(now, w, base):
+            return                                         # (#637) a group move: the county first, once per move
         try:
             argv = system_runtime_argv(r["argv"], r["workdir"], devs)
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1434,7 +1438,7 @@ class SystemSupervisor(Supervisor):
         self.lines.clear()
         self.said = ""
         self.ran_key = key
-        self.county_wait = None                      # (#637) the next group move waits for the county again
+        self.county_wait, self.county_done = None, w["seq"]   # (#637) this move's wait is over: never again for it
         if self.gone_since is not None:
             # (#592) as an rtl_fm channel's "dongle '…' back after m:ss"; never one of the watchdog's capped restarts
             self.log(f"{self.tag}: dongles back after {_mmss(now - self.gone_since)}: restarting trunk-recorder")
@@ -1462,15 +1466,20 @@ class SystemSupervisor(Supervisor):
         starts first, as at a return (_coming_back): this system's start waits until the county's status is "ok" on
         the dongle its wish names and it has run COUNTY_SETTLE_S, at most COUNTY_WAIT_S from the move (the county
         down for its own reasons). A group restore that gives the county its dongle back in the same step as this
-        system's therefore opens the county's first. A county already up waits for nothing. Each move (its wish's seq)
-        waits on its own: a later restore of the same dongles waits again. True while it waits."""
+        system's therefore opens the county's first. A county already up waits for nothing. Once per move (its wish's
+        seq): a crash restart or a dongle's return later on the same wish never waits for it again (a return has its own
+        wait, _coming_back), and a later restore of the same dongles (a new seq) waits again. Looked at only once its
+        dongles are found (one not plugged in says so first). The cap on the monotonic clock. True while it waits."""
         county = wanted(self.county_state)
+        if w["seq"] is not None and w["seq"] == self.county_done:
+            return False
         if not county["on"] or not county["sdr"]:
             self.county_wait = None
             return False
         if self.county_wait is None or self.county_wait[0] != w["seq"]:
-            self.county_wait = (w["seq"], now)
-        if now - self.county_wait[1] >= COUNTY_WAIT_S:
+            self.county_wait = (w["seq"], self._m)
+        if self._m - self.county_wait[1] >= COUNTY_WAIT_S:
+            self.county_done = w["seq"]
             return False
         st = read_status(self.county_status, now) or {}
         started = st.get("started")
@@ -1495,7 +1504,7 @@ class SystemSupervisor(Supervisor):
         top = max((i for i, x in found if x in ours), default=-1)
         listed = tuple(sorted(e for e in found if e[0] <= top))
         if self.back_first is None:
-            self.back_first = now
+            self.back_first, self.back_first_m = now, self._m
         if listed != self.back_list:
             self.back_list, self.back_since = listed, now
         names = ", ".join(f"'{s['name']}'" for _k, s in sorted(w["sources"].items()))
@@ -1507,7 +1516,8 @@ class SystemSupervisor(Supervisor):
             why = self._held()
             self.next_start = min(self.hold_until, now + UNPLUGGED_S)
         else:
-            if county["on"] and now - self.back_first < COUNTY_WAIT_S:
+            since = self.back_first_m if self.back_first_m is not None else self._m
+            if county["on"] and self._m - since < COUNTY_WAIT_S:
                 st = read_status(self.county_status, now) or {}
                 started = st.get("started")
                 up = st.get("state") == "ok" and isinstance(started, (int, float)) and now - started >= COUNTY_SETTLE_S
