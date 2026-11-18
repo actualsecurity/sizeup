@@ -1,6 +1,6 @@
 # Capture as its own service: `sizeup-radio` behind a spool contract (design)
 
-**Status: boundary and details confirmed by the radio maintainers on 2026-11-18 (#773). Ready to merge after #765.
+**Status: boundary and details confirmed by the radio maintainers on 2026-11-18 (#773), and again after the alarm-safety revision (6a777c98, with their answers on the P25 key and on what a wall step is). #765 is merged.
 Implementation has not started. Pending: the hub-side route and the measurement of its handoff window (§11, #776),
 and A7, the admin's decision on a late emergency (a recommended answer is recorded).**
 
@@ -547,7 +547,7 @@ What goes in the lane:
 |---|---|---|---|
 | `alarm`, analog | the live tap decodes an emergency packet (`tap.on_emergency`) | `<label without spaces>-live-<int(carrier start * 1000)>`, today's `_fm_emergency` key | 0 |
 | `alarm`, analog, at close | the whole-clip decode finds an emergency the tap did not raise (sent at release, or missed) | the transmission's own `id` | 0 |
-| `alarm`, P25 live | the emergency bit on a grant, on a **transition** only (below). **Not live until #775 lands** | `p25-<system>-<talkgroup>-<radio id>-<int(at * 1000)>` | 0 |
+| `alarm`, P25 live | the emergency bit on a grant, on a **transition** only (below). **Not live until #775 lands** | `p25-<system>-<talkgroup>-<radio id>-<int(event_at * 1000)>`, where `event_at` is the grant's own time as trunk-recorder stamps it (decided by the radio maintainers, 2026-11-18): the same grant on the same station always gives the same key, so a capture restart or a replay that reads it again is a `duplicate`. Only when the grant carries no time is capture's `at` used instead, and `data.key_time` says which (`grant` \| `capture`). Two stations' copies never share a key (their clocks differ); the hub's same-radio rule joins them | 0 |
 | `page` | `LivePaging` shows a page, **every page**, not only ours (decided: mutual-aid pages matter to pre-alerts; the hub filters): the first pair that is certain, then each change (a pair added or settled, `phase` to `voice`, ended) | `LivePaging`'s own key, `page:<channel>:<started, 2 decimals>` | 0, 1, 2, ... one per change |
 
 **P25 today: an emergency reaches the hub when its call ends.** Nothing sizeup reads from trunk-recorder while a
@@ -585,6 +585,8 @@ the wall clock alone:
 | Where it applies | `late` (§4.1: `closed_boot` in the sidecar); a page item's 120 s; a request's `expires_boot` (§4.2); the status file's 15 s staleness (`at_boot`, §4.5); the spool's `max_age_h` |
 | Towards the hub | each item is sent with `age_s` and `age_src`. `age_src: "boot"`: the item's age on the boot clock at the moment of sending. The hub places the item at its own `now - age_s` and never at the station's `event_at`. `sent_at` only lets the hub note how far the station's clock is from its own (as `hub.skew` does from the state post's `at`), for Health |
 | An item sent after a reboot | its `event_boot` belongs to another boot, so the boot clock says nothing about it. It is sent all the same, with `age_src: "wall"` and `age_s` = the wall-clock age (`now - event_at`), clamped at 0. `age_s` is never null and an item is never held back for want of a good clock. A wall-sourced age cannot be checked or corrected by the hub: it is two readings of the station's one clock, so a constant offset cancels, and a step of that clock across the reboot is invisible. The hub takes it as given, bounded as every `age_s` is (§7.5), and labels the alarm's age as approximate. An `age_src` the hub does not know is taken as `wall` |
+| A wall step (decided by the radio maintainers, 2026-11-18) | capture samples the offset wall − `CLOCK_BOOTTIME` on its existing tick. A step is a change of that offset by more than 2 s between two samples at most 5 s apart, and only that: slow drift is never a step. Each step is logged once, with its size. A step is what lets the P25 match fall back to the boot clock ("One alarm per press") |
+| Drift (measured) | on the production station the boot clock and the wall clock disagree by about 4 to 5 %, about 45 ms a second: an hourly line timed on the monotonic clock arrives every 57.3 min by wall time (#770). That never trips the 2 s step rule, but the offset grows by minutes over hours. So nothing compares wall times over hours: every age is on the boot clock, as above. It also means a boot-clock age is itself off by up to 5 %: 3 s on the 60 s `late` limit, 6 s on a page's 120 s. Which clock is right is not known; the rules do not depend on it |
 | Not verified | whether `CLOCK_BOOTTIME` keeps counting under WSL2 while the Windows host sleeps. The rules above are chosen so that either answer is safe. The stepped-clock tests of §6 run on fake clocks |
 
 #### The file
@@ -1100,6 +1102,7 @@ The radio maintainers' decisions (their two comments on #773). The boundary is a
 | Q-I | Which window dedupes a live P25 alarm against the end-of-call flag | **System + talkgroup + unit, the live grant inside the finished call's span ±10 s.** A live bit with no matching call within 10 min stands alone; #775's per-unit 10 min transition rule covers a stuck bit | §4.3, §11 |
 | Q-J | Capture's children and the credentials | **`child_env()` without `CREDENTIALS_DIRECTORY` or any token variable; the token in memory only, never in a command line.** The same-uid residual risk is accepted and noted | §4.3, §7.5 |
 | - | The eight changes after the second read | All confirmed by the radio maintainers at `2e9e8b10` | §4.3, §4.7, §3.3 |
+| - | The rules for the sequences that lost or doubled an alarm (6a777c98), the P25 key from the grant's own time, the wall-step rule | All confirmed by the radio maintainers on 2026-11-18, with no disagreement | §4.3 |
 | - | The restart count | About 12 with the dongles is accepted; the sender's client makes it about 14 | §3.3 |
 | - | `SegmentWorkers` on both sides | Agreed: per label, shared across receiver instances, drained on stop, in capture | §3.6 |
 
