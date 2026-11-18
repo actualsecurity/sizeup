@@ -3732,7 +3732,13 @@ class App:
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
                 "reserve": [str(k) for k in (d.get("reserve") or [])],
                 **({"deny": [str(k) for k in d["deny"]], "deny_why": str(d.get("deny_why") or "")}
-                   if d.get("deny") else {})}
+                   if d.get("deny") else {}),
+                # the promoted talkgroups (sizeup/cad/opchannel.py) as last sent: a restart keeps them (the same sig, and
+                # nothing raised again when the hub's next push agrees)
+                **({"promote": [str(k) for k in d["promote"]],
+                    "promote_since": {str(k): float(v) for k, v in (d.get("promote_since") or {}).items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)}}
+                   if d.get("promote") else {})}
 
     def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None,
                           squelch: dict | None = None) -> dict:
@@ -3755,8 +3761,9 @@ class App:
             if new != self._hub_aws:
                 up = set(new.get("promote") or ()) - set(self._hub_aws.get("promote") or ())
                 self._hub_aws = new
-                for k in sorted(up):                   # promoted: what already waits as context goes with it
-                    n = self.stt.raise_channel(k, URGENT) if hasattr(self.stt, "raise_channel") else 0
+                for k in sorted(up):                   # promoted: what waits as context since the move goes with it
+                    n = self.stt.raise_channel(k, URGENT, (new.get("promote_since") or {}).get(k)) \
+                        if hasattr(self.stt, "raise_channel") else 0
                     log(f"speech-to-text: {k} transcribed like ours (an incident is worked on it)"
                         + (f"; {n} waiting clip(s) raised" if n else ""))
                 self.cad.store.meta_put("hub_aws", json.dumps(new))

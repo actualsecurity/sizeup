@@ -140,6 +140,9 @@ def hub_aws(aws: dict) -> dict:
         out.update(deny=[str(k)[:40] for k in aws["deny"]][:AWS_KEYS_MAX], deny_why=str(aws.get("deny_why") or "")[:300])
     if aws.get("promote"):
         out["promote"] = [str(k)[:40] for k in aws["promote"] if isinstance(k, str) and k.startswith("tg:")][:AWS_KEYS_MAX]
+        since = aws.get("promote_since") if isinstance(aws.get("promote_since"), dict) else {}
+        out["promote_since"] = {k: float(v) for k, v in since.items() if k in out["promote"]
+                                and isinstance(v, (int, float)) and not isinstance(v, bool)}     # (not in the sig)
     return out
 
 

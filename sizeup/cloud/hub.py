@@ -2101,8 +2101,9 @@ class HubApp(App):
         # takes them (one from before would never echo them in its signature: a push every 10 s)
         promote = sorted(self.promoted_keys())[:channels.AWS_KEYS_MAX] \
             if (_part(self.hub.status, "channels") or {}).get("promote_ok") else []
+        since = self.cad.opchan.promoted_since() if promote else {}
         aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {}),
-               **({"promote": promote} if promote else {})}
+               **({"promote": promote, "promote_since": {k: since[k] for k in promote if k in since}} if promote else {})}
         return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),
                 "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny, promote)}
 

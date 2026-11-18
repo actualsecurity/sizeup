@@ -301,6 +301,13 @@ class OpChannels:
                             (*OPEN, now - TAIL_S, now - QUIET_S, now - QUIET_S, now - QUIET_S))
         return {r["talkgroup"] for r in rows} - self.ours()
 
+    def promoted_since(self) -> dict[str, float]:
+        """{"tg:N": since} for the channels on now (not removed, not dismissed): when the move to each was (its earliest),
+        for the station to raise only what was heard after it."""
+        rows = self.store.q("SELECT c.talkgroup, MIN(c.since) AS since FROM incident_channels c JOIN incidents i ON "
+                            "i.id = c.incident_id WHERE c.removed_at IS NULL AND i.status != 'dismissed' GROUP BY c.talkgroup")
+        return {f"tg:{r['talkgroup']}": float(r["since"]) for r in rows}
+
     # -- writing ----------------------------------------------------------------------------------------------------------
 
     def assign(self, iid: int, tg: int, source: str, since: float, evidence: str = "", operator: str = "") -> bool:

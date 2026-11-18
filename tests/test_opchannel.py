@@ -14,7 +14,7 @@ from sizeup.cad.api import needs
 from sizeup.cad.opchannel import LEAD_S, TAIL_S, parse
 from sizeup.cad.store import CadError
 from sizeup.incidents import Traffic
-from sizeup.stt import LIVE, LOW, SttQueue
+from sizeup.stt import LIVE, LOW, RERUN, SttQueue
 from tests.test_dispatch_modes import AutoRig
 from tests.test_incident_sources import T0
 
@@ -224,6 +224,8 @@ def test_the_hub_sends_the_promoted_talkgroups_only_to_a_station_that_takes_them
         hub.hub.status = {"channels": {"promote_ok": True}}
         want = hub.channel_desired()
         assert want["aws"]["promote"] == ["tg:4031"]
+        since = hub.cad.store.one("SELECT since FROM incident_channels")["since"]
+        assert want["aws"]["promote_since"] == {"tg:4031": since}             # the move: what the station raises from
         assert want["sig"] == channels.sig(want["prefs"], want["aws"]["ok"], want["tones"], want["aws"]["reserve"],
                                            want["squelch"], None, ["tg:4031"]) != channels.sig(
             want["prefs"], want["aws"]["ok"], want["tones"], want["aws"]["reserve"], want["squelch"])
@@ -242,12 +244,20 @@ def test_the_station_transcribes_a_promoted_talkgroup_like_ours_and_raises_what_
         assert st._stt_class(t, "tg:4031") == LOW and st._stt_lane(t, "tg:4031") == sttinput.LOW
         assert st.stt_engine("tg:4031") == "local"
         raised = []
-        st.stt.raise_channel = lambda key, prio: raised.append((key, prio)) or 1       # (SttQueue's own: below)
-        st.set_channel_prefs({}, {"ok": True, "why": "", "reserve": [], "promote": ["tg:4031"]})
+        st.stt.raise_channel = lambda key, prio, since: raised.append((key, prio, since)) or 1   # (SttQueue's own: below)
+        word = {"ok": True, "why": "", "reserve": [], "promote": ["tg:4031"], "promote_since": {"tg:4031": 1000.0}}
+        st.set_channel_prefs({}, word)
         assert st._stt_class(t, "tg:4031") == URGENT and st._stt_lane(t, "tg:4031") == sttinput.FIRE
         assert st.stt_engine("tg:4031") == "aws"                          # AWS can take it: like Fire/EMS 15
-        assert raised == [("tg:4031", URGENT)]                            # what already waits goes with it
-        assert st.channels_applied()["promote_ok"] is True
+        assert raised == [("tg:4031", URGENT, 1000.0)]                    # what waits since the move goes with it
+        assert App._late_prio(st._stt_class(t, "tg:4031"), True) == RERUN  # a late call: after every live one (#753)
+        applied = st.channels_applied()
+        assert applied["promote_ok"] is True
+        # a restart keeps the hub's word: the same signature, and the hub's next push (the same) raises nothing again
+        st._hub_aws = st._load_hub_aws()
+        assert st._hub_aws["promote"] == ["tg:4031"] and st.channels_applied()["sig"] == applied["sig"]
+        st.set_channel_prefs({}, word)
+        assert raised == [("tg:4031", URGENT, 1000.0)]
         st.set_channel_prefs({}, {"ok": False, "why": "the monthly limit", "reserve": ["tg:307"], "promote": ["tg:4031"]})
         assert st.stt_engine("tg:4031") == "local" and st._stt_class(t, "tg:4031") == URGENT   # never the reserve
         st.set_channel_prefs({}, {"ok": True, "why": "", "reserve": []})                     # the tail over: demoted
@@ -256,13 +266,24 @@ def test_the_station_transcribes_a_promoted_talkgroup_like_ours_and_raises_what_
         st.link.stop()
 
 
-def test_raise_channel_leaves_reruns_and_other_channels():
-    from sizeup.stt import RERUN
+def test_raise_channel_raises_only_what_came_since_the_move_behind_fire_ems_15_never_a_late_call():
+    def clip(name, start, late=False):
+        t = Traffic(name, "x", start, start + 1.0, "")
+        if late:
+            t.late = True                                                  # (#747/#753: from while sizeup was down)
+        return t
     q = SttQueue()
-    for prio, item, ch in ((LOW, "a", "tg:4031"), (LIVE, "b", "tg:4031"), (RERUN, "c", "tg:4031"), (LOW, "d", "tg:4100")):
+    for prio, item, ch in ((LOW, clip("old", 900.0), "tg:4031"), (URGENT, clip("fe15-a", 1100.0), "tg:307"),
+                           (LOW, clip("a", 1050.0), "tg:4031"), (LIVE, clip("b", 1060.0), "tg:4031"),
+                           (RERUN, clip("c", 1070.0), "tg:4031"), (LOW, clip("late", 1080.0, late=True), "tg:4031"),
+                           (LOW, clip("d", 1090.0), "tg:4100"), (URGENT, clip("fe15-b", 1110.0), "tg:307")):
         q.put((prio, None, item, None, ch))
-    assert q.raise_channel("tg:4031") == 2
-    assert sorted((e[2], e[0]) for e in q._items) == [("a", URGENT), ("b", URGENT), ("c", RERUN), ("d", LOW)]
+    assert q.raise_channel("tg:4031", URGENT, None) == 0                    # the move's time not known: nothing
+    assert q.raise_channel("tg:4031", URGENT, 1000.0) == 2
+    assert {e[2].id: e[0] for e in q._items} == {"old": LOW, "fe15-a": URGENT, "a": URGENT, "b": URGENT, "c": RERUN,
+                                                 "late": LOW, "d": LOW, "fe15-b": URGENT}
+    order = [q.get_nowait()[2].id for _ in range(4)]
+    assert order == ["fe15-a", "fe15-b", "a", "b"]                          # behind Fire/EMS 15's that already waited
 
 
 def test_a_stand_in_app_without_the_promoted_set_keeps_its_class():
