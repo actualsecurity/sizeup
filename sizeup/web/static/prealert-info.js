@@ -249,6 +249,8 @@ window.PrealertInfo = (() => {
       ["Ack", o.acknowledged ? `${o.acknowledged.by || ""} · ${tm(o.acknowledged.at)}` : ""],
       ["Event", o.incident ? incLink(o.incident) : ""],
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
+      ["FD", o.fd || "", o.fd_state === "cleared" ? `${(o.fd || "").split(" · ")[0]} (cleared): pre-alert`
+        : "The FD was already there: no pre-alert (an FYI only when the words added something)"],
       ["Push", o.pushed_at ? tm(o.pushed_at) : o.suppressed ? `held: ${o.suppressed}` : o.pushed ? "pushed" : "",
         o.suppressed ? "Not pushed, and why" : ""],
       // the last push at ntfy: "sent 16:21:27" / "not sent: 429" (sizeup/intel/events.py delivery)
