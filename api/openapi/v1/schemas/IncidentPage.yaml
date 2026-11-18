@@ -1,0 +1,12 @@
+type: object
+description: A page of incidents, newest first (open ones however old, closed ones of the last day).
+required: [items, next, server_time, rev]
+properties:
+  items:
+    type: array
+    items:
+      $ref: ./Incident.yaml
+  next: {type: [string, "null"], description: "Pass as `after` for the next page; null on the last."}
+  server_time: {type: number}
+  rev:
+    $ref: ./Rev.yaml
