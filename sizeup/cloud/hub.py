@@ -654,6 +654,9 @@ class Hub:
             self._refused("status", bad, who)
             refused.append("status")
             why.append(bad)
+            tgs = d["status"].get("talkgroups") if isinstance(d["status"], dict) else None
+            if isinstance(tgs, list) and statusshape.problem({"talkgroups": tgs}) is None:
+                self._take_talkgroups(tgs)          # (they ride in the status: a good list is still taken)
             d["status"] = None
         talking, paging, bad = statusshape.live_clean(d.get("talking"), d.get("paging"))
         if bad:
@@ -672,12 +675,7 @@ class Hub:
                 self.stations.reconfigured(claimed, st.get("config_id"))   # posting as the current id from its config
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
-                # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
-                # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
-                self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
-                                   else r for r in tgs]
-                if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
-                    getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
+                self._take_talkgroups(tgs)
             self.status, self.status_at, self.status_refused = st, now, None
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
@@ -699,6 +697,14 @@ class Hub:
                            "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
                            **({"station": sid or p.id} if p is not None and (sid or p.id) else {}),
                            **({"refused": refused, "reason": "; ".join(why)} if refused else {})})
+
+    def _take_talkgroups(self, tgs: list) -> None:
+        # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
+        # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
+        self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
+                           else r for r in tgs]
+        if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
+            getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
 
     def _refused(self, part: str, why: str, sid: str = "") -> None:
         """A part of a state post left out for its shape ("status": the last good one stays; "live": that talker /

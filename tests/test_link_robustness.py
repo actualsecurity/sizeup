@@ -570,3 +570,43 @@ def test_an_older_updaters_state_file_never_gets_the_status_refused(tmp_path):
     st = Watch(own="1234567", run_dir="", state_path=str(p), log=lambda m: None).state()
     assert st == {"last": {}, "retry": {}, "equivalent": {}, "hold": {}, "failed": {}}
     assert statusshape.problem(dict(GOOD, version={"build": "1234567", "update": st})) is None
+
+
+def test_a_left_out_status_still_gives_its_good_talkgroups_and_the_station_sends_them_again(hub, tmp_path, monkeypatch):
+    rows = [{"tg": 307, "record": True, "main": True, "system": "county", "tier": None, "name": "Test TG"}]
+    assert post(hub, dict(GOOD))[0] == 200
+    code, body = post(hub, dict(GOOD, outbox=5, talkgroups=rows))
+    assert code == 200 and body["refused"] == ["status"]
+    assert [r["tg"] for r in hub.app.hub.talkgroups] == [307] and hub.app.hub.talkgroups[0]["tier_set"] is False
+    code, body = post(hub, dict(GOOD, outbox=5, talkgroups=[{"tg": "x"}]))     # (a bad list: not taken either)
+    assert body["refused"] == ["status"] and [r["tg"] for r in hub.app.hub.talkgroups] == [307]
+    # the station: a status the hub left out never counts its talkgroups as sent (they go again with the next status)
+    app = make_app(station_cfg(tmp_path, hub.url))
+    sent = []
+    real = app.link._client
+
+    def client(timeout):
+        c = real(timeout)
+        req = c.request
+
+        def request(method, path, body=None, **kw):
+            if path == "/api/station/state" and isinstance(body, dict) and "status" in body:
+                sent.append("talkgroups" in body["status"])
+            return req(method, path, body, **kw)
+        c.request = request
+        return c
+    app.link._client = client
+    monkeypatch.setattr("sizeup.cloud.station.STATUS_S", 0.2)
+    # (a station without P25 sends its talkgroups as [] the same way: the first status, then on a change or 30 s)
+    real_status = app.link.status
+    monkeypatch.setattr(app.link, "status", lambda talkgroups=True: dict(real_status(talkgroups), outbox=5))
+    app.link.start()
+    try:
+        assert wait(lambda: len(sent) >= 4, 10), (sent, app.link.last_error)
+        assert all(sent[:4])                         # each status went with its talkgroups (none counted as sent)
+        monkeypatch.setattr(app.link, "status", real_status)
+        n = len(sent)
+        assert wait(lambda: len(sent) >= n + 3, 10)
+        assert not all(sent[n + 1:n + 3])            # taken once: not sent again until they change or 30 s
+    finally:
+        app.link.stop()

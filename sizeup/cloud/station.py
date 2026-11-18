@@ -784,9 +784,10 @@ class StationLink:
                 self._ok()
                 self.apply_answer(r)
                 self._left_out(r, "status" in body)
+                left_out = r.get("refused") if isinstance(r, dict) and isinstance(r.get("refused"), list) else []
                 if "status" in body:
                     last_status, self._status_now = now, False
-                    if "talkgroups" in body["status"]:
+                    if "talkgroups" in body["status"] and "status" not in left_out:   # (left out: sent again next)
                         last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
                                                 for r in body["status"]["talkgroups"]]
                 backoff.ok()
