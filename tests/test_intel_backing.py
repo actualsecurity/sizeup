@@ -664,3 +664,74 @@ def test_the_record_in_the_store_the_more_info_bundle_and_the_prune(tmp_path):
     fresh = B.ModelBacking(lambda: {}, store=cad.store, clock=clock, log=lambda m: None)
     fresh.prune(t + B.KEEP_S + 1)
     assert cad.store.one("SELECT COUNT(*) AS n FROM intel_model")["n"] == 0
+
+
+# -- with the FD already there (engine._fire): the model's fire events are held the same ------------------------------
+
+def test_a_model_fire_event_at_a_place_the_fd_is_working_is_held_like_a_rules_one():
+    from tests.test_intel_fd_present import NOW, engine as fd_engine, inc, locate as fd_locate
+    text = "Car 3, check on a dumpster behind 20 Example Road, the caller says it is glowing and crackling"
+    for incs, pushes in (((inc(fd="dispatched"),), False), ((), True)):
+        e, sink = fd_engine(*incs)
+        b = B.FakeBackend(answer("fire_report", 0.9, weapon="none"))
+        e.backing = B.ModelBacking(lambda: e.policy.cfg, clock=e.clock, log=lambda m: None, backend=b)
+        [ev] = e.feed(row("t1", text, NOW))
+        assert len(b.asked) == 1 and ev.category == "fire_report" and any(r[0] == "model.fake" for r in ev.rules)
+        assert bool([d for _e, d in sink.pushes if d.would_push]) is pushes, incs
+        if incs:
+            assert ev.suppressed == "fd_dispatched" and ev.near_incident == 41 and ev.fd == "dispatched"
+    assert fd_locate(text, {}) is not None
+
+
+# -- the real sizeup.cloud.infer (#733) --------------------------------------------------------------------------------
+
+def test_the_real_hub_module_with_no_worker_is_no_worker_at_once_counted_never_raising():
+    from sizeup.cloud import infer as hub_infer
+    if hub_infer._lane is not None:
+        hub_infer.uninstall(hub_infer._lane)
+    pc = B.PCWorkerBackend()
+    assert pc.mod() is hub_infer and pc.available() is False and pc.state() == "unavailable"
+    f = pc.classify(B.messages({"weapons": "W"}, {"at": 0, "text": MACHETE}, [], []), B.schema(["weapons"]))
+    assert f.done() and f.result()[0] is None and f.result()[1]["why"] == "no_worker"
+
+    class Asking(B.PCWorkerBackend):                 # as if a worker had just gone: the hub says no_worker at once
+        def available(self):
+            return True
+    clock = Clock(1050)
+    e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=example_locate, thread=False,
+                    clock=clock, packs=police())
+    e.backing = B.ModelBacking(lambda: e.policy.cfg, clock=clock, log=lambda m: None, backend=Asking())
+    t0 = time.monotonic()
+    assert e.feed(row("t1", MACHETE, 1000)) == []
+    assert time.monotonic() - t0 < 1.0 and e.events.all() == []
+    assert e.backing.today["no_worker"] == 1 and "1 no_worker" in e.backing.health_row()["title"]
+    e.backing._fixed = None                          # the real one: no worker, rules only
+    assert "rules only" in e.backing.health_row()["text"]
+
+
+def test_the_real_hub_module_with_a_worker_answers_through_its_lane():
+    from sizeup.cloud import infer as hub_infer
+    from tests.test_infer_lane import MODELS, lane
+    ln = lane()
+    ln.seen("gpu-1", "online", MODELS)
+    hub_infer.install(ln)
+    try:
+        assert B.PCWorkerBackend().available() is True
+        clock = Clock(1050)
+        e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=example_locate, thread=False,
+                        clock=clock, packs=police())
+        e.backing = B.ModelBacking(lambda: e.policy.cfg, clock=clock, log=lambda m: None)
+        assert e.feed(row("t1", MACHETE, 1000)) == []             # asked: the worker hasn't claimed it yet
+        job = ln.claim("gpu-1", 0, "online", MODELS)
+        pub = ln.public(job, ln.clock())
+        assert pub["task"] == "pd_classify" and pub["deadline_s"] == 15.0 and len(pub["messages"]) == 2
+        assert ln.complete("gpu-1", job.lease, {"output": answer(), "tokens_in": 700, "tokens_out": 60, "infer_ms": 800})
+        end = time.time() + 5
+        while not e.events.all() and time.time() < end:
+            time.sleep(0.01)
+        [ev] = e.events.all()
+        assert ev.category == "weapons" and any(r[0] == "model.pc" for r in ev.rules)
+        assert e.backing.shown(ev.id)["model"] == MODELS["llm"] and e.backing.shown(ev.id)["model_version"] == MODELS["llm_version"]
+    finally:
+        hub_infer.uninstall(ln)
+        ln._results.shutdown(wait=False)
