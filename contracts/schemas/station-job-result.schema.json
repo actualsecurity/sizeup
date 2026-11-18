@@ -186,6 +186,11 @@
     "result.set_stt_terms": {
       "$ref": "station-state.schema.json#/$defs/status/properties/stt_terms"
     },
+    "result.quarantine_dismiss": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many of the station's stuck and late quarantined events of that type were dropped; 0 when none (or no hub link). The hub logs it, audits it with who asked and answers the admin {ok: true, dismissed: n}."
+    },
     "result.sources_reset": {
       "type": "string",
       "description": "What was asked of each source, for people: `<source>: reset asked (runs before its next poll)`; the hub keeps 300 characters."

@@ -21,7 +21,7 @@ CREATE TABLE outbox (
     data TEXT NOT NULL,
     audio BLOB,
     audio_dropped INTEGER NOT NULL DEFAULT 0
-, context INTEGER NOT NULL DEFAULT 0);
+, context INTEGER NOT NULL DEFAULT 0, qid INTEGER);
 -- SQLite's own, made with the first AUTOINCREMENT table. The next seq and the next n are kept in it: never MAX + 1.
 --   CREATE TABLE sqlite_sequence(name,seq);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -34,6 +34,27 @@ CREATE TABLE stt_inputs (
     meta TEXT NOT NULL,
     prio INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE quarantine (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    seq INTEGER NOT NULL,
+    at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL,
+    audio BLOB,
+    audio_dropped INTEGER NOT NULL DEFAULT 0,
+    context INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL,
+    error TEXT NOT NULL,
+    first_at REAL NOT NULL,
+    last_at REAL NOT NULL,
+    tries INTEGER NOT NULL DEFAULT 1,
+    critical INTEGER NOT NULL DEFAULT 0,
+    next_at REAL,
+    state TEXT NOT NULL DEFAULT 'held'
+);
+CREATE TABLE source_latest (key TEXT PRIMARY KEY, seq INTEGER NOT NULL, at REAL NOT NULL);
+-- SQLite's own index for source_latest's primary key: sqlite_autoindex_source_latest_1
+CREATE INDEX outbox_qid ON outbox (qid) WHERE qid IS NOT NULL;
 CREATE INDEX stt_inputs_order ON stt_inputs (prio, n, at);
 
 -- A new file's one row of meta, made when it is first opened: the epoch, 16 hex characters of its own

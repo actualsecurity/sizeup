@@ -28,8 +28,8 @@ REASONS = c.load(lane.ANSWER)["properties"]["rejected"]["items"]["properties"]["
 # (nothing else) and mark the row in contracts/README.md fixed. E1 and E2 are #762's: their fixed branches, and the
 # `from_762` forms of the seven golden sequences it changes (replayed instead once E1 is flipped), are what #762 does
 # at 9542d08f, checked with it merged in and both switches flipped.
-E1_A_FAILED_EVENT_IS_ACKED_AND_GONE = True        # #762: the answer lists it under `rejected`, the station keeps it aside
-E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX = True       # #762: the station splits the batch, sets that event aside and goes on
+E1_A_FAILED_EVENT_IS_ACKED_AND_GONE = False       # #762: the answer lists it under `rejected`, the station keeps it aside
+E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX = False      # #762: the station splits the batch, sets that event aside and goes on
 E3_ONE_CURSOR_FOR_EVERY_SENDER = True             # fixed: a cursor per (station, epoch): a retry is skipped whoever posted between
 E5_NO_READABLE_ANSWER_TO_A_POST_OVER_THE_LIMIT = True   # fixed: the station's client gets the 413 and its reason
 

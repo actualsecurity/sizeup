@@ -11,7 +11,31 @@
       {"name": "data", "type": "TEXT", "notnull": true, "default": null, "pk": false},
       {"name": "audio", "type": "BLOB", "notnull": false, "default": null, "pk": false},
       {"name": "audio_dropped", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
-      {"name": "context", "type": "INTEGER", "notnull": true, "default": "0", "pk": false}
+      {"name": "context", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
+      {"name": "qid", "type": "INTEGER", "notnull": false, "default": null, "pk": false}
+    ],
+    "quarantine": [
+      {"name": "id", "type": "INTEGER", "notnull": false, "default": null, "pk": true},
+      {"name": "seq", "type": "INTEGER", "notnull": true, "default": null, "pk": false},
+      {"name": "at", "type": "REAL", "notnull": true, "default": null, "pk": false},
+      {"name": "kind", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "data", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "audio", "type": "BLOB", "notnull": false, "default": null, "pk": false},
+      {"name": "audio_dropped", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
+      {"name": "context", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
+      {"name": "reason", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "error", "type": "TEXT", "notnull": true, "default": null, "pk": false},
+      {"name": "first_at", "type": "REAL", "notnull": true, "default": null, "pk": false},
+      {"name": "last_at", "type": "REAL", "notnull": true, "default": null, "pk": false},
+      {"name": "tries", "type": "INTEGER", "notnull": true, "default": "1", "pk": false},
+      {"name": "critical", "type": "INTEGER", "notnull": true, "default": "0", "pk": false},
+      {"name": "next_at", "type": "REAL", "notnull": false, "default": null, "pk": false},
+      {"name": "state", "type": "TEXT", "notnull": true, "default": "'held'", "pk": false}
+    ],
+    "source_latest": [
+      {"name": "key", "type": "TEXT", "notnull": false, "default": null, "pk": true},
+      {"name": "seq", "type": "INTEGER", "notnull": true, "default": null, "pk": false},
+      {"name": "at", "type": "REAL", "notnull": true, "default": null, "pk": false}
     ],
     "stt_inputs": [
       {"name": "n", "type": "INTEGER", "notnull": false, "default": null, "pk": true},
@@ -22,7 +46,10 @@
       {"name": "prio", "type": "INTEGER", "notnull": true, "default": "1", "pk": false}
     ]
   },
-  "autoincrement": ["outbox", "stt_inputs"],
-  "indexes": [{"name": "stt_inputs_order", "table": "stt_inputs", "unique": false, "columns": ["prio", "n", "at"]}],
+  "autoincrement": ["outbox", "quarantine", "stt_inputs"],
+  "indexes": [
+    {"name": "outbox_qid", "table": "outbox", "unique": false, "columns": ["qid"]},
+    {"name": "stt_inputs_order", "table": "stt_inputs", "unique": false, "columns": ["prio", "n", "at"]}
+  ],
   "file": {"journal_mode": "wal", "encoding": "UTF-8", "auto_vacuum": 0, "application_id": 0, "user_version": 0}
 }

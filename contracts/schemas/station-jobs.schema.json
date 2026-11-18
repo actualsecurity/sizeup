@@ -262,7 +262,8 @@
             "reception_post",
             "reception_sample_b64",
             "set_stt_alert_keys",
-            "set_stt_terms"
+            "set_stt_terms",
+            "quarantine_dismiss"
           ]
         },
         "args": {
@@ -567,6 +568,26 @@
             "properties": {
               "args": {
                 "$ref": "#/$defs/call.set_stt_terms"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "quarantine_dismiss",
+                "description": "The job calls quarantine_dismiss."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.quarantine_dismiss"
               }
             }
           }
@@ -1241,6 +1262,24 @@
               }
             }
           }
+        }
+      ]
+    },
+    "call.quarantine_dismiss": {
+      "description": "App.quarantine_dismiss(kind): an admin's Dismiss on Settings > Station > Health (Hub.dismiss_rejected, POST /api/cad/health/dismiss) for the alert \"Station event rejected by hub: <kind>\": the station drops the events of that type the hub refused that it no longer sends again (state `stuck` or `late` in its quarantine, sizeup/cloud/outbox.py dismiss); one still being sent again stays. Result: how many went (0 on a station without a hub link).",
+      "x-names": [
+        "kind"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$",
+          "description": "kind: an event `type` (station-events), as the quarantine's status lists it under `kinds`. The hub sends only a word of this pattern (else 400 before any job); the station takes any string and matches it exactly."
         }
       ]
     }

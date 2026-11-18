@@ -6,9 +6,10 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
-        "outbox": [], "stt_inputs": [], "sqlite_sequence": {}
+        "outbox": [], "stt_inputs": [], "quarantine": [], "source_latest": [], "sqlite_sequence": {}
       }
     },
     {
@@ -18,13 +19,14 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            {"bytes": 60, "fill": "a1"}, 0, 0
+            {"bytes": 60, "fill": "a1"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 1}
@@ -37,18 +39,19 @@
       "after": {
         "totals": {
           "pending": 2, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 1, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 1, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            null, 1, 0
+            null, 1, 0, null
           ],
           [
             2, 1794990001.0, "traffic",
             "{\"id\":\"Fireground1-1794990001000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
-            {"bytes": 60, "fill": "a2"}, 0, 0
+            {"bytes": 60, "fill": "a2"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 2}
@@ -71,7 +74,8 @@
       "after": {
         "totals": {
           "pending": 2, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 1, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 1, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -81,7 +85,8 @@
       "after": {
         "totals": {
           "pending": 2, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -102,7 +107,8 @@
       "after": {
         "totals": {
           "pending": 2, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -112,7 +118,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "outbox": [], "sqlite_sequence": {}
       }
@@ -124,13 +131,14 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794990002.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990002.0, "traffic",
             "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 20, "fill": "b1"}, 0, 0
+            {"bytes": 20, "fill": "b1"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 1}
@@ -142,18 +150,19 @@
       "after": {
         "totals": {
           "pending": 2, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            null, 1, 0
+            null, 1, 0, null
           ],
           [
             2, 1794990001.0, "traffic",
             "{\"id\":\"Fireground1-1794990001000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
-            {"bytes": 60, "fill": "a2"}, 0, 0
+            {"bytes": 60, "fill": "a2"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 2}
@@ -166,23 +175,24 @@
       "after": {
         "totals": {
           "pending": 3, "oldest": 1794990000.0, "audio_bytes": 120, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            null, 1, 0
+            null, 1, 0, null
           ],
           [
             2, 1794990001.0, "traffic",
             "{\"id\":\"Fireground1-1794990001000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
-            {"bytes": 60, "fill": "a2"}, 0, 0
+            {"bytes": 60, "fill": "a2"}, 0, 0, null
           ],
           [
             3, 1794990003.0, "traffic",
             "{\"id\":\"Fireground1-1794990003000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 60, "fill": "a3"}, 0, 0
+            {"bytes": 60, "fill": "a3"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 3}
@@ -195,28 +205,29 @@
       "after": {
         "totals": {
           "pending": 4, "oldest": 1794990000.0, "audio_bytes": 180, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            null, 1, 0
+            null, 1, 0, null
           ],
           [
             2, 1794990001.0, "traffic",
             "{\"id\":\"Fireground1-1794990001000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}",
-            {"bytes": 60, "fill": "a2"}, 0, 0
+            {"bytes": 60, "fill": "a2"}, 0, 0, null
           ],
           [
             3, 1794990003.0, "traffic",
             "{\"id\":\"Fireground1-1794990003000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 60, "fill": "a3"}, 0, 0
+            {"bytes": 60, "fill": "a3"}, 0, 0, null
           ],
           [
             4, 1794990004.0, "traffic",
             "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 60, "fill": "a4"}, 0, 0
+            {"bytes": 60, "fill": "a4"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 4}
@@ -228,7 +239,8 @@
       "after": {
         "totals": {
           "pending": 4, "oldest": 1794990000.0, "audio_bytes": 180, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -239,47 +251,54 @@
       "after": {
         "totals": {
           "pending": 5, "oldest": 1794990000.0, "audio_bytes": 60, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 2, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 2, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990000.0, "traffic",
             "{\"id\":\"Fireground1-1794990000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 responding\"}",
-            null, 1, 0
+            null, 1, 0, null
           ],
           [
             2, 1794990001.0, "traffic",
             "{\"id\":\"Fireground1-1794990001000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 on scene\"}", null,
-            1, 0
+            1, 0, null
           ],
           [
             3, 1794990003.0, "traffic",
-            "{\"id\":\"Fireground1-1794990003000\",\"source\":\"Fireground 1\",\"text\":\"\"}", null, 1, 0
+            "{\"id\":\"Fireground1-1794990003000\",\"source\":\"Fireground 1\",\"text\":\"\"}", null, 1, 0, null
           ],
           [
             4, 1794990004.0, "traffic",
             "{\"id\":\"Fireground1-1794990004000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 60, "fill": "a4"}, 0, 0
+            {"bytes": 60, "fill": "a4"}, 0, 0, null
           ],
           [
             5, 1794990005.0, "page_text",
             "{\"id\":\"a1b2c3d4e5\",\"raw\":\"Northfield Fire, a reported kitchen fire\",\"status\":\"done\"}", null,
-            0, 0
+            0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 5}
       }
     },
     {"op": "close", "after": {}},
-    {"op": "remove", "file": "a", "after": {"outbox": null, "stt_inputs": null, "sqlite_sequence": null}},
+    {
+      "op": "remove", "file": "a",
+      "after": {
+        "outbox": null, "stt_inputs": null, "quarantine": null, "source_latest": null, "sqlite_sequence": null
+      }
+    },
     {
       "op": "open", "file": "a", "max_audio_bytes": 100, "returns": {"epoch": "epoch-3"},
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
-        "outbox": [], "stt_inputs": [], "sqlite_sequence": {}
+        "outbox": [], "stt_inputs": [], "quarantine": [], "source_latest": [], "sqlite_sequence": {}
       }
     },
     {
@@ -289,13 +308,14 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794990006.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794990006.0, "traffic",
             "{\"id\":\"Fireground1-1794990006000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
-            {"bytes": 20, "fill": "a6"}, 0, 0
+            {"bytes": 20, "fill": "a6"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 1}

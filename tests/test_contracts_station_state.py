@@ -353,9 +353,10 @@ def test_hello_answers_what_its_schema_says(live, tmp_path):
 
 def test_refusals_and_bad_bodies_are_the_error_envelope(live):
     known = c.load("station-error")["properties"]["reason"]["x-known"]
-    # the code's own list of reasons, and the three it gives outside that list (the last two: the workers' routes,
-    # tests/test_contracts_routes.py)
-    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}
+    # the code's own list of reasons, and the six it gives outside that list (the workers' routes:
+    # tests/test_contracts_routes.py; the events post's: tests/test_contracts_events_cursor.py)
+    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only", "bad_json", "bad_batch",
+                                                "too_large"}
     reg = live.hub.app.hub.stations
     other = reg.add("st-south", "South firehouse")
     state = dict(c.vectors("station-state", "valid"))["with-status.json"]

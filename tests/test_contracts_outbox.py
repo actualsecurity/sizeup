@@ -32,7 +32,7 @@ DDL, COLUMNS, SEQUENCES, HISTORY = HERE / "ddl.sql", HERE / "columns.json", HERE
 RECORDING = os.environ.get(c.RECORD_ENV, "") not in ("", "0")
 T0 = c.T0
 HEX16 = re.compile(r"[0-9a-f]{16}")
-TABLES = ("outbox", "meta", "stt_inputs")
+TABLES = ("outbox", "meta", "stt_inputs", "quarantine", "source_latest")
 
 # -- known deviations (contracts/README.md "Known deviations"), pinned as the code is today ------------------------------
 # Each test below states today's behaviour and the fixed one. When a fix lands, flip its line here from True to False
@@ -93,7 +93,8 @@ PRAGMA synchronous = {synchronous};             -- NORMAL: in WAL mode a commit 
 """
 DDL_OWN = {"sqlite_sequence": "-- SQLite's own, made with the first AUTOINCREMENT table. The next seq and the next n are "
                               "kept in it: never MAX + 1.\n--   {sql};\n",
-           "sqlite_autoindex_meta_1": "-- SQLite's own index for meta's primary key: {name}\n"}
+           "sqlite_autoindex_meta_1": "-- SQLite's own index for meta's primary key: {name}\n",
+           "sqlite_autoindex_source_latest_1": "-- SQLite's own index for source_latest's primary key: {name}\n"}
 DDL_TAIL = """
 -- A new file's one row of meta, made when it is first opened: the epoch, 16 hex characters of its own
 -- (secrets.token_hex(8)). Never this value, and never copied from another file:
@@ -130,22 +131,31 @@ def test_the_recorded_ddl_and_columns_are_what_a_new_outbox_file_is(tmp_path):
         COLUMNS.write_text(c.dump(cols) + "\n", encoding="utf-8")
     assert DDL.read_text(encoding="utf-8") == ddl
     assert c.loads_strict(COLUMNS.read_text(encoding="utf-8")) == cols
-    # ... and what the recording says, in words: three tables, two of them counting with AUTOINCREMENT, one index,
+    # ... and what the recording says, in words: five tables, three of them counting with AUTOINCREMENT, two indexes,
     # WAL, no version of any kind
-    assert set(cols["tables"]) == set(TABLES) and cols["autoincrement"] == ["outbox", "stt_inputs"]
+    assert set(cols["tables"]) == set(TABLES) and cols["autoincrement"] == ["outbox", "quarantine", "stt_inputs"]
     assert [x["name"] for x in cols["tables"]["outbox"]] == ["seq", "at", "kind", "data", "audio", "audio_dropped",
-                                                             "context"]
+                                                             "context", "qid"]
     assert [x["name"] for x in cols["tables"]["stt_inputs"]] == ["n", "at", "data", "flac", "meta", "prio"]
-    assert cols["indexes"] == [{"name": "stt_inputs_order", "table": "stt_inputs", "unique": False,
+    assert [x["name"] for x in cols["tables"]["quarantine"]] == [
+        "id", "seq", "at", "kind", "data", "audio", "audio_dropped", "context", "reason", "error", "first_at", "last_at",
+        "tries", "critical", "next_at", "state"]
+    assert [x["name"] for x in cols["tables"]["source_latest"]] == ["key", "seq", "at"]
+    assert cols["indexes"] == [{"name": "outbox_qid", "table": "outbox", "unique": False, "columns": ["qid"]},
+                               {"name": "stt_inputs_order", "table": "stt_inputs", "unique": False,
                                 "columns": ["prio", "n", "at"]}]
+    assert "CREATE INDEX outbox_qid ON outbox (qid) WHERE qid IS NOT NULL;" in ddl      # (only the requeued copies)
     assert cols["file"] == {"journal_mode": "wal", "encoding": "UTF-8", "auto_vacuum": 0, "application_id": 0,
                             "user_version": 0}
     assert "PRAGMA synchronous = 1;" in ddl
-    for t, rows in cols["tables"].items():               # only `audio` may be NULL; every added column has a default
-        assert [x["name"] for x in rows if not x["notnull"] and not x["pk"]] == (["audio"] if t == "outbox" else [])
+    nullable = {"outbox": ["audio", "qid"], "quarantine": ["audio", "next_at"]}
+    for t, rows in cols["tables"].items():               # what may be NULL; every column added to a table has a default
+        assert [x["name"] for x in rows if not x["notnull"] and not x["pk"]] == nullable.get(t, [])
     assert {(t, x["name"]): x["default"] for t, rows in cols["tables"].items() for x in rows if x["default"] is not None} \
         == {("outbox", "audio_dropped"): "0", ("outbox", "context"): "0",
-            ("stt_inputs", "prio"): str(outbox_mod.STT_NORMAL)}
+            ("stt_inputs", "prio"): str(outbox_mod.STT_NORMAL), ("quarantine", "audio_dropped"): "0",
+            ("quarantine", "context"): "0", ("quarantine", "tries"): "1", ("quarantine", "critical"): "0",
+            ("quarantine", "state"): "'held'"}
 
 
 def test_a_file_made_by_running_ddl_sql_is_one_the_station_opens_as_its_own(tmp_path):
@@ -235,6 +245,7 @@ class Run:
     def __init__(self, tmp: Path):
         self.tmp, self.ob, self.file = tmp, None, ""
         self.epochs: list[str] = []
+        self.sent: list[dict] = []        # the last batch's rows, as the forwarder holds them while the hub answers
 
     def path(self, name: str) -> Path:
         assert re.fullmatch(r"[a-z]", name), name
@@ -266,8 +277,29 @@ class Run:
             assert set(a) <= {"kind", "data", "audio", "at", "context"} and "at" in a, s
             return ob.add(a["kind"], a["data"], blob(a.get("audio")), at=a["at"], context=a.get("context", False))
         if op == "batch":
-            assert set(a) <= {"max_bytes", "max_events"}, s
-            return [dict(r, audio=unblob(r["audio"])) for r in ob.batch(**a)]
+            assert set(a) <= {"max_bytes", "max_events", "meta"}, s
+            self.sent = ob.batch(**a)
+            return [dict(r, audio=unblob(r["audio"])) for r in self.sent]
+        if op == "quarantine":                            # the hub refused a row of the last batch (station.py _quarantined)
+            assert set(a) == {"seq", "reason", "error", "now"}, s
+            return ob.quarantine(next(r for r in self.sent if r["seq"] == a["seq"]), a["reason"], a["error"], now=a["now"])
+        if op == "requeue_due":
+            assert set(a) == {"now"}, s
+            return ob.requeue_due(now=a["now"])
+        if op == "released":
+            return ob.released(a["qids"])
+        if op == "late":
+            assert set(a) == {"qid", "why", "now"}, s
+            return ob.late(a["qid"], a["why"], now=a["now"])
+        if op == "drop":                                  # qid null: all of them
+            return ob.drop(a["qid"])
+        if op == "dismiss":
+            return ob.dismiss(a["kind"])
+        if op == "strip_audio":
+            return ob.strip_audio(a["seq"])
+        if op == "summary":
+            assert set(a) <= {"limit"}, s
+            return ob.summary(**a)
         if op == "ack":
             return ob.ack(a["upto"])
         if op == "add_stt":
@@ -298,17 +330,22 @@ class Run:
                              "context_bytes": ob.context_bytes, "stt_pending": stt_n, "stt_bytes": stt_bytes,
                              "dropped_audio": ob.dropped_audio,
                              "dropped_stt": ob.dropped_stt, "dropped_stt_pre": ob.dropped_stt_pre,
-                             "dropped_stt_fire": ob.dropped_stt_fire}
+                             "dropped_stt_fire": ob.dropped_stt_fire, "quarantine_evicted": ob.quarantine_evicted,
+                             "too_large_audio": ob.too_large_audio}
         path = self.path(self.file)
         if not path.is_file():
-            return dict(out, outbox=None, stt_inputs=None, sqlite_sequence=None)
+            return dict(out, **dict.fromkeys(FILE_KEYS))
         db = connect(path)
         try:
-            out["outbox"] = [[seq, at, kind, data, unblob(audio), dropped, context] for seq, at, kind, data, audio, dropped,
-                             context in db.execute("SELECT seq, at, kind, data, audio, audio_dropped, context FROM outbox "
-                                                   "ORDER BY seq")]
+            out["outbox"] = [[seq, at, kind, data, unblob(audio), dropped, context, qid] for seq, at, kind, data, audio,
+                             dropped, context, qid in db.execute("SELECT seq, at, kind, data, audio, audio_dropped, context, "
+                                                                 "qid FROM outbox ORDER BY seq")]
             out["stt_inputs"] = [[n, at, data, unblob(flac), meta, prio] for n, at, data, flac, meta, prio in
                                  db.execute("SELECT n, at, data, flac, meta, prio FROM stt_inputs ORDER BY n")]
+            out["quarantine"] = [[r[0], *r[1:5], unblob(r[5]), *r[6:]] for r in db.execute(
+                "SELECT id, seq, at, kind, data, audio, audio_dropped, context, reason, error, first_at, last_at, tries, "
+                "critical, next_at, state FROM quarantine ORDER BY id")]
+            out["source_latest"] = [list(r) for r in db.execute("SELECT key, seq, at FROM source_latest ORDER BY key")]
             out["sqlite_sequence"] = dict(db.execute("SELECT name, seq FROM sqlite_sequence ORDER BY name"))
         finally:
             db.close()
@@ -319,7 +356,8 @@ class Run:
             self.ob.close()
 
 
-FILE_KEYS = ("outbox", "stt_inputs", "sqlite_sequence")          # `after`: written only when the step changed them
+# what can be seen of the file; `after` names one only when the step changed it
+FILE_KEYS = ("outbox", "stt_inputs", "quarantine", "source_latest", "sqlite_sequence")
 
 
 def run_sequence(doc: dict, tmp: Path, record: bool = False) -> list[dict]:
@@ -380,9 +418,11 @@ def test_the_sequences_cover_every_operation_and_the_checks_on_them_fail_when_th
     and a sequence run against an Outbox that behaves otherwise (here: one that would reuse a seq, one that would
     drop the oldest audio before the context audio) fails."""
     ops = {s["op"] for n in SEQUENCE_NAMES for s in sequence(n)["steps"]}
-    assert ops == {"open", "close", "remove", "add", "batch", "ack", "add_stt", "stt_batch", "stt_ack", "sql"}
+    quarantine = {"quarantine", "requeue_due", "released", "late", "drop", "dismiss", "strip_audio", "summary"}
+    assert ops == {"open", "close", "remove", "add", "batch", "ack", "add_stt", "stt_batch", "stt_ack", "sql"} | quarantine
     public = {n for n, f in vars(Outbox).items() if callable(f) and not n.startswith("_")}
-    assert public == {"add", "batch", "ack", "pending", "add_stt", "stt_batch", "stt_ack", "stt_pending", "close"}
+    assert public == {"add", "batch", "ack", "pending", "add_stt", "stt_batch", "stt_ack", "stt_pending", "close"} \
+        | quarantine
     doc = sequence("add-batch-ack")
     doc["steps"][-1]["returns"] = 1                       # "after everything was acked, seq starts again"
     with pytest.raises(AssertionError, match="step 21: add"):
@@ -427,9 +467,9 @@ def test_seq_is_never_handed_out_twice_and_ack_deletes_up_to_it():
     assert [r[1:5] for r in types_] == [["real", "text", "text", "blob"], ["real", "text", "text", "null"],
                                         ["real", "text", "text", "blob"]]
     rows = next(v for s, v in ev if s["op"] == "sql")["outbox"]
-    for (seq, at, kind, data, audio, dropped, context), r, t in zip(rows, whole, types_):
+    for (seq, at, kind, data, audio, dropped, context, qid), r, t in zip(rows, whole, types_):
         assert data == json.dumps(r["data"], separators=(",", ":")) and data.isascii() and len(data) == t[5]
-        assert (seq, at, kind, audio, dropped, context) == (r["seq"], r["at"], r["type"], r["audio"], 0, 0)
+        assert (seq, at, kind, audio, dropped, context, qid) == (r["seq"], r["at"], r["type"], r["audio"], 0, 0, None)
     assert "caf\\u00e9" in rows[2][3] and whole[2]["data"]["text"].endswith("café side")
     # max_bytes: the stored data's length plus the audio's bytes; a batch that fits exactly is taken, one byte less is not
     two = len(rows[0][3]) + 40 + len(rows[1][3])
@@ -527,6 +567,56 @@ def test_the_speech_to_text_lane_goes_by_priority_and_fresh_first():
     assert reopened["totals"]["stt_bytes"] == 150 and reopened["totals"]["stt_pending"] == 5
     # the lane and the events share the file and nothing else: an event's seq and an input's n count apart
     assert next(s["returns"] for s, _ in ev if s["op"] == "add") == 1
+
+
+def test_the_quarantine_keeps_what_the_hub_refused_and_sends_the_critical_ones_again():
+    """quarantine.json, in words (#762)."""
+    ev = events("quarantine")
+    assert (outbox_mod.CRITICAL_KINDS, outbox_mod.RETRY_S, outbox_mod.CRITICAL_TRIES, outbox_mod.CRITICAL_FOR_S) \
+        == (("page", "page_text", "alarm", "source_event"), (600.0, 1800.0, 3600.0), 8, 86400.0)
+    q = lambda s: {k: s["returns"][k] for k in ("kind", "critical", "state")}      # noqa: E731
+    put = [s for s, _ in ev if s["op"] == "quarantine"]
+    # moved out of the outbox: critical only for those four kinds, and never a malformed one
+    assert [q(s) for s in put[:4]] == [{"kind": "traffic", "critical": False, "state": "held"},
+                                       {"kind": "page", "critical": True, "state": "held"},
+                                       {"kind": "page_text", "critical": False, "state": "held"},
+                                       {"kind": "source_event", "critical": True, "state": "held"}]
+    moved = [v for s, v in ev if s["op"] == "quarantine"][3]
+    assert moved["outbox"] == [] and [r[1] for r in moved["quarantine"]] == [3, 1, 2, 4]   # (each row's seq kept)
+    assert next(s for s, _ in ev if s["op"] == "ack")["returns"] == 0                 # (the ack after: nothing left)
+    # sent again: a new event at the end of the outbox carrying qid, after 600 s, then 1800 s; never while a copy waits
+    requeued = [(s["now"] - T0, s["returns"]) for s, _ in ev if s["op"] == "requeue_due"]
+    assert [(t, [(x["kind"], x["superseded"]) for x in r]) for t, r in requeued[:6]] == [
+        (300, []), (700, [("page", False), ("source_event", True)]), (800, []), (2600, []), (2700, [("page", False)]),
+        (640, [("alarm", False)])]
+    copies = [v["outbox"] for s, v in ev if s["op"] == "requeue_due" and s["returns"]
+              and not all(x["superseded"] for x in s["returns"])]
+    assert [r[0] for r in copies[0]] == [6] and copies[0][0][7] == 2 and copies[0][0][1] == T0 + 700
+    assert [s["returns"]["tries"] for s in put if s["seq"] == 6] == [2]
+    # a source_event the feed has a newer snapshot of is dropped, never sent again over it
+    latest = next(v for s, v in ev if s["op"] == "add" and s["kind"] == "source_event" and s["at"] == T0 + 20)
+    assert latest["source_latest"] == [["east-cad\u001fE-1001", 5, T0 + 20]]
+    # the hub took the copy: gone; an alarm taken too late: kept as late until dismissed
+    assert next(s for s, _ in ev if s["op"] == "released")["returns"] == 1
+    late = next(v for s, v in ev if s["op"] == "late")["quarantine"][-1]
+    assert (late[3], late[8], late[14], late[15]) == ("alarm", "late", None, "late")
+    summary = next(s for s, _ in ev if s["op"] == "summary")["returns"]
+    assert (summary["n"], summary["critical"], summary["kinds"]["alarm"]["late"]) == (3, 1, 1)
+    assert all(set(r) == {"id", "kind", "reason", "error", "first_at", "last_at", "tries", "critical", "next_at", "state"}
+               for r in summary["rows"])                                         # (never an event's data)
+    assert next(s for s, _ in ev if s["op"] == "dismiss")["returns"] == 1
+    # the rows survive a restart, the counters are per run
+    reopened = [v for s, v in ev if s["op"] == "open"][1]
+    assert len(reopened["quarantine"]) == 3 and reopened["totals"]["too_large_audio"] == 0
+    # a clip too large for the hub: left off, the event stays
+    stripped = [(s["returns"], v) for s, v in ev if s["op"] == "strip_audio"]
+    assert [r for r, _ in stripped] == [True, False]
+    assert stripped[0][1]["outbox"][0][4:6] == [None, 1] and stripped[0][1]["totals"]["too_large_audio"] == 1
+    # refused for longer than a day: stuck, never sent again
+    assert put[-3]["returns"]["state"] == "stuck" and requeued[-2][1] == []
+    # a person drops one while its copy is on the way: the copy goes too, the hub's refusal of it is nothing
+    assert put[-1]["returns"]["state"] == "dropped" and [v for s, v in ev if s["op"] == "drop"][1]["outbox"] == []
+    assert [s["returns"] for s, _ in ev if s["op"] == "drop"] == [1, 1, 2] and ev[-1][1]["quarantine"] == []
 
 
 # -- as built and worth knowing ------------------------------------------------------------------------------------------
@@ -684,9 +774,9 @@ def old_file(path: Path, shape: Shape, events_n: int = 3) -> None:
     db.close()
 
 
-def test_the_history_is_the_three_shapes_before_todays():
-    assert [s.name for s in SHAPES] == ["1-events", "2-context", "3-stt-inputs"]
-    assert [s.commit for s in SHAPES] == ["1c49db24", "7707058c", "606b2225"]
+def test_the_history_is_the_four_shapes_before_todays():
+    assert [s.name for s in SHAPES] == ["1-events", "2-context", "3-stt-inputs", "4-stt-priority"]
+    assert [s.commit for s in SHAPES] == ["1c49db24", "7707058c", "606b2225", "93c7658c"]
     made = {}
     for s in SHAPES:
         db = sqlite3.connect(":memory:")
@@ -694,12 +784,14 @@ def test_the_history_is_the_three_shapes_before_todays():
         made[s.name] = {t: [r[1] for r in db.execute(f"PRAGMA table_info({t})")] for t in TABLES}
         db.close()
     assert made["1-events"] == {"outbox": ["seq", "at", "kind", "data", "audio", "audio_dropped"], "meta": ["key", "value"],
-                                "stt_inputs": []}
+                                "stt_inputs": [], "quarantine": [], "source_latest": []}
     assert made["2-context"] == dict(made["1-events"], outbox=made["1-events"]["outbox"] + ["context"])
     assert made["3-stt-inputs"] == dict(made["2-context"], stt_inputs=["n", "at", "data", "flac", "meta"])
-    today = c.loads_strict(COLUMNS.read_text(encoding="utf-8"))["tables"]
+    assert made["4-stt-priority"] == dict(made["3-stt-inputs"], stt_inputs=made["3-stt-inputs"]["stt_inputs"] + ["prio"])
+    today = c.loads_strict(COLUMNS.read_text(encoding="utf-8"))["tables"]      # (#762: the quarantine)
     assert {t: [x["name"] for x in rows] for t, rows in today.items()} \
-        == dict(made["3-stt-inputs"], stt_inputs=made["3-stt-inputs"]["stt_inputs"] + ["prio"])
+        == dict(made["4-stt-priority"], outbox=made["4-stt-priority"]["outbox"] + ["qid"],
+                quarantine=[x["name"] for x in today["quarantine"]], source_latest=["key", "seq", "at"])
 
 
 @pytest.mark.parametrize("shape", SHAPES, ids=lambda s: s.name)
@@ -711,10 +803,10 @@ def test_an_older_builds_file_opens_under_todays_code_and_keeps_everything(tmp_p
     old_file(path, shape)
     before = connect(path)
     rows = before.execute("SELECT seq, at, kind, data, audio, audio_dropped FROM outbox ORDER BY seq").fetchall()
-    stt = before.execute("SELECT n, at, data, flac, meta FROM stt_inputs ORDER BY n").fetchall() \
-        if shape.name == "3-stt-inputs" else []
+    lane = shape.name not in ("1-events", "2-context")                       # (a build with the speech-to-text lane)
+    stt = before.execute("SELECT n, at, data, flac, meta FROM stt_inputs ORDER BY n").fetchall() if lane else []
     before.close()
-    assert [r[0] for r in rows] == [2, 3] and len(stt) == (3 if shape.name == "3-stt-inputs" else 0)
+    assert [r[0] for r in rows] == [2, 3] and len(stt) == (3 if lane else 0)
     ob = Outbox(path)
     try:
         assert columns(path) == c.loads_strict(COLUMNS.read_text(encoding="utf-8"))
@@ -725,11 +817,15 @@ def test_an_older_builds_file_opens_under_todays_code_and_keeps_everything(tmp_p
         assert [(r["seq"], r["type"], bool(r["audio"])) for r in got] == [(2, rows[0][2], True), (3, rows[1][2], True)]
         assert got[0]["data"] == json.loads(rows[0][3]) and ob.audio_bytes == 2 * len(rows[0][4])
         # what the older build could not say gets the column's default: its context clips keep their mark (from #419
-        # on), its speech-to-text inputs are "other traffic"
+        # on), its speech-to-text inputs are "other traffic" (from #701 on: their own priority); no event of it is a
+        # quarantined one sent again, and nothing is in the quarantine
         marks = [r[0] for r in ob.db.execute("SELECT context FROM outbox ORDER BY seq")]
         assert marks == ([0, 0] if shape.name == "1-events" else [1, 1])
         assert ob.context_bytes == sum(marks) * len(rows[0][4])
-        assert [r["prio"] for r in ob.stt_batch(now=T0)] == [outbox_mod.STT_NORMAL] * len(stt)
+        prio = outbox_mod.STT_PRE if shape.name == "4-stt-priority" else outbox_mod.STT_NORMAL
+        assert [r["prio"] for r in ob.stt_batch(now=T0)] == [prio] * len(stt)
+        assert [r["qid"] for r in ob.batch(meta=True)] == [None, None] and ob.summary()["n"] == 0
+        assert ob.requeue_due(now=T0 + 86400) == []
         assert ob.add("heard", {"radio_id": "990001"}, at=T0) == 4
         assert ob.add_stt({"id": "a1b2c3d4e5"}, b"\xc3" * 12, {"v": 1}, at=T0, prio=3) == len(stt) + 1
     finally:
@@ -765,7 +861,9 @@ def test_a_file_with_the_columns_of_a_commit_that_was_never_on_main_opens_too(tm
 
 def todays_file(path: Path) -> dict:
     """A file today's code made and wrote everything it can into: events with and without audio, a context clip, one
-    whose audio was dropped, speech-to-text inputs of every priority. What it then holds."""
+    whose audio was dropped, speech-to-text inputs of every priority, and the quarantine (#762): a page the hub refused
+    whose copy waits to go again (carrying qid), a transmission kept aside, an incident source's event the feed knows
+    (source_latest). What it then holds."""
     ob = Outbox(path, 100)
     try:
         ob.add("traffic", {"id": "Fireground1-1794990000000", "source": "Fireground 1"}, b"\xa1" * 30, at=T0)
@@ -778,8 +876,20 @@ def todays_file(path: Path) -> dict:
         for i, prio in enumerate((0, 3, 1, 2)):
             ob.add_stt({"id": f"clip-{i}", "kind": "traffic"}, bytes([0xc0 + prio]) * 5, {"v": 1, "format": "flac"},
                        at=T0 + i, prio=prio)
-        return {"epoch": ob.epoch, "seqs": [r["seq"] for r in ob.batch()], "next": 6, "stt": ob.stt_pending(),
-                "audio_bytes": ob.audio_bytes}
+        ob.add("page", {"id": "f6a7b8c9d0", "label": "Paging 1"}, at=T0 + 5)
+        ob.add("traffic", {"id": "Fireground1-1794990006000", "source": "Fireground 1"}, at=T0 + 6)
+        for row in ob.batch(meta=True)[-2:]:
+            ob.quarantine(row, "apply_failed", "RuntimeError: a bug on the hub", now=T0 + 10)
+        assert [x["kind"] for x in ob.requeue_due(now=T0 + 700)] == ["page"]
+        ob.add("source_event", {"source": "east-cad", "event": {"event_id": "E-1001", "kind": "Fire alarm"}}, at=T0 + 8)
+        side = connect(path)
+        try:
+            kept = {t: side.execute(f"SELECT * FROM {t}").fetchall() for t in ("quarantine", "source_latest")}
+        finally:
+            side.close()
+        return {"epoch": ob.epoch, "seqs": [r["seq"] for r in ob.batch()], "next": 10, "stt": ob.stt_pending(),
+                "audio_bytes": ob.audio_bytes, "qids": {r["seq"]: r["qid"] for r in ob.batch(meta=True) if r["qid"]},
+                "kept": kept}
     finally:
         ob.close()
 
@@ -792,7 +902,8 @@ def test_every_statement_an_older_build_ran_works_on_todays_file(tmp_path, shape
     event, and what it adds and acks is there for today's code afterwards."""
     path = tmp_path / "st" / "outbox.sqlite"
     was = todays_file(path)
-    assert was["seqs"] == [2, 3, 4, 5] and was["stt"][0] >= 1
+    assert was["seqs"] == [2, 3, 4, 5, 8, 9] and was["stt"][0] >= 1 and was["qids"] == {8: 1}
+    assert [len(rows) for rows in was["kept"].values()] == [2, 1]
     shape_before = columns(path)
     db = connect(path, ro=False)
     try:
@@ -806,11 +917,14 @@ def test_every_statement_an_older_build_ran_works_on_todays_file(tmp_path, shape
         assert len(done) == len(shape.parts["statements"]) >= 7
         added = db.execute("SELECT seq, context FROM outbox ORDER BY seq DESC LIMIT 1").fetchone()
         assert added == (was["next"], 0 if shape.name == "1-events" else 1)  # its own add: the next seq, never an old one
-        if shape.name == "3-stt-inputs":                                     # its input: "other traffic", after today's
+        if shape.name in ("3-stt-inputs", "4-stt-priority"):                # its input: after today's, "other traffic"
             assert db.execute("SELECT n, prio FROM stt_inputs ORDER BY n DESC LIMIT 1").fetchone() \
-                == (5, outbox_mod.STT_NORMAL)
+                == (5, outbox_mod.STT_PRE if shape.name == "4-stt-priority" else outbox_mod.STT_NORMAL)  # (or its own)
         else:                                                                # a build without the lane: the rows stay
             assert db.execute("SELECT COUNT(*) FROM stt_inputs").fetchone()[0] == was["stt"][0]
+        # a build before the quarantine leaves it alone: its tables as they were, the copy's qid on its row
+        assert {t: db.execute(f"SELECT * FROM {t}").fetchall() for t in was["kept"]} == was["kept"]
+        assert db.execute("SELECT seq, qid FROM outbox WHERE qid IS NOT NULL").fetchall() == [(8, 1)]
     finally:
         db.close()
     ob = Outbox(path, 100)                                # ... and forward again
@@ -818,6 +932,7 @@ def test_every_statement_an_older_build_ran_works_on_todays_file(tmp_path, shape
         assert ob.epoch == was["epoch"] and columns(path) == shape_before
         assert [r["seq"] for r in ob.batch()] == [s for s in was["seqs"] if s > 1] + [was["next"]]
         assert ob.add("heard", {"radio_id": "990001"}, at=T0 + 9) == was["next"] + 1
+        assert {r["seq"]: r["qid"] for r in ob.batch(meta=True) if r["qid"]} == was["qids"] and ob.summary()["n"] == 2
     finally:
         ob.close()
 
@@ -854,6 +969,17 @@ def norm(sql: str) -> str:
     return re.sub(r"\((\?,?)+\)|\(\{\}\)", "(?)", re.sub(r"\s+", " ", sql)).strip()
 
 
+def same_statements(ours: set[str], theirs: set[str]) -> list[str]:
+    """What differs between the history file's statements and the source's, both as norm() gives them. A value the
+    source puts into its text ({}: an f-string's {STT_NORMAL}, or a condition it adds or leaves out) stands for any
+    text there, so the history file has each form that build ran."""
+    pattern = {s: re.compile(re.escape(s).replace(re.escape(" {} "), " (?:.+ )?").replace(re.escape("{}"), ".+") + "$")
+               for s in theirs if "{}" in s}
+    left = {s for s in ours if s not in theirs and not any(p.match(s) for p in pattern.values())}
+    unused = {s for s in theirs if s not in ours and not (s in pattern and any(pattern[s].match(o) for o in ours))}
+    return sorted(left | unused)
+
+
 @pytest.mark.parametrize("shape", SHAPES, ids=lambda s: s.name)
 def test_the_older_build_itself_runs_on_todays_file(tmp_path, shape):
     """The switch back with the older build's own code, where this checkout has the history (else skipped: the test
@@ -866,7 +992,7 @@ def test_the_older_build_itself_runs_on_todays_file(tmp_path, shape):
     old, src = got
     theirs = {norm(x) for x in statements_of(src)}
     ours = {norm(sql) for part in shape.parts.values() for sql, _, _ in part}
-    assert ours == theirs, sorted(ours ^ theirs)
+    assert same_statements(ours, theirs) == []
     path = tmp_path / "st" / "outbox.sqlite"
     was = todays_file(path)
     shape_before = columns(path)
@@ -875,21 +1001,28 @@ def test_the_older_build_itself_runs_on_todays_file(tmp_path, shape):
         assert ob.epoch == was["epoch"] and columns(path) == shape_before
         assert [r["seq"] for r in ob.batch()] == was["seqs"]
         assert ob.add("traffic", {"id": "Fireground1-1794990009000"}, b"\xa9" * 10, at=T0 + 9) == was["next"]
-        assert ob.ack(3) == 2 and ob.pending()[0] == 3
+        assert ob.ack(3) == 2 and ob.pending()[0] == len(was["seqs"]) - 1
         if shape.name == "3-stt-inputs":
             assert ob.add_stt({"id": "clip-9"}, b"\xc9" * 5, {"v": 1}, at=T0 + 9) == 5
             # before #701: oldest first whatever the priority, and the oldest dropped first (here the context one)
             assert [r["n"] for r in ob.stt_batch()] == sorted(r["n"] for r in ob.stt_batch())
+        elif shape.name == "4-stt-priority":
+            assert ob.add_stt({"id": "clip-9"}, b"\xc9" * 5, {"v": 1}, at=T0 + 9) == 5
+            prios = [r["prio"] for r in ob.stt_batch(now=T0 + 9)]                # (by priority, as today)
+            assert prios == sorted(prios, reverse=True) and outbox_mod.STT_NORMAL in prios
         else:
             assert not hasattr(ob, "add_stt")
+        assert not hasattr(ob, "quarantine")              # (every one of them is from before #762)
     finally:
         ob.close()
     ob = Outbox(path, 100)
     try:
-        assert ob.epoch == was["epoch"] and [r["seq"] for r in ob.batch()] == [4, 5, was["next"]]
+        assert ob.epoch == was["epoch"] and [r["seq"] for r in ob.batch()] == [s for s in was["seqs"] if s > 3] + [
+            was["next"]]
         assert ob.add("heard", {"radio_id": "990001"}, at=T0 + 10) == was["next"] + 1
-        if shape.name == "3-stt-inputs":
+        if shape.name in ("3-stt-inputs", "4-stt-priority"):
             assert ob.db.execute("SELECT prio FROM stt_inputs WHERE n = 5").fetchone() == (outbox_mod.STT_NORMAL,)
+        assert ob.summary()["n"] == 2 and {r["seq"]: r["qid"] for r in ob.batch(meta=True) if r["qid"]} == was["qids"]
     finally:
         ob.close()
 
@@ -922,6 +1055,48 @@ def test_what_a_build_from_before_the_lane_leaves_behind_after_a_switch_back(tmp
     try:
         assert ob.stt_pending() == (1, 12) and [r["n"] for r in ob.stt_batch(now=T0)] == [1]
         assert [(r["seq"], bool(r["audio"])) for r in ob.batch()] == [(2, True), (3, True)]
+    finally:
+        ob.close()
+
+
+def test_what_a_build_from_before_the_quarantine_does_with_it_after_a_switch_back(tmp_path):
+    """As built, and the cost of a switch back to a build from before #762 (4-stt-priority.sql): it does not know the
+    quarantine. It sends a refused page's copy that waits in the outbox as any event and deletes it on the ack, but
+    the quarantine row stays: once today's code is back it sends the page again (twice in all: the hub keys a page by
+    its id). It notes no newer snapshot of an incident source's event in source_latest, so today's code then sends a
+    quarantined older snapshot again after the newer one: the hub ignores it only when it was seen more than 2 min
+    (SNAPSHOT_SKEW_S) before the one it applied (sizeup/cad/sources.py on_event), else it puts back what the feed had
+    changed. What was held stays held; nothing is lost either way."""
+    path = tmp_path / "st" / "outbox.sqlite"
+    feed = {"source": "east-cad", "event": {"event_id": "E-1001", "kind": "Fire alarm"}}
+    ob = Outbox(path)
+    try:
+        ob.add("source_event", feed, at=T0)
+        ob.quarantine(ob.batch(meta=True)[0], "apply_failed", "RuntimeError", now=T0 + 200)      # (again at +800)
+        ob.add("page", {"id": "f6a7b8c9d0", "label": "Paging 1"}, at=T0 + 1)
+        ob.quarantine(ob.batch(meta=True)[0], "apply_failed", "RuntimeError", now=T0 + 10)       # (again at +610)
+        assert [(x["kind"], x["superseded"]) for x in ob.requeue_due(now=T0 + 700)] == [("page", False)]
+        assert [(r["seq"], r["qid"]) for r in ob.batch(meta=True)] == [(3, 2)]
+    finally:
+        ob.close()
+    older = BY_NAME["4-stt-priority"]
+    db = connect(path, ro=False)
+    try:
+        older.run(db, "open")
+        newer = json.dumps(dict(feed, event=dict(feed["event"], closed=True)), separators=(",", ":"))
+        db.execute(older.one("INSERT INTO outbox")[0], (T0 + 300, "source_event", newer, None, 0))
+        assert [r[0] for r in db.execute(*older.one("SELECT seq, at, kind, data, audio, audio_dropped FROM outbox"))] \
+            == [3, 4]                                     # the copy goes up as any event, the newer snapshot after it
+        db.execute(older.one("DELETE FROM outbox WHERE seq <=")[0], (4,))         # the hub took both
+    finally:
+        db.close()
+    ob = Outbox(path)
+    try:
+        assert ob.summary()["n"] == 2 and ob.pending()[0] == 0
+        assert ob.db.execute("SELECT seq FROM source_latest").fetchall() == [(1,)]   # (the newer one is not noted)
+        assert [(x["kind"], x["superseded"]) for x in ob.requeue_due(now=T0 + 900)] \
+            == [("source_event", False), ("page", False)]                     # both again: the page twice in all
+        assert [(r["seq"], r["type"], r["qid"]) for r in ob.batch(meta=True)] == [(5, "source_event", 1), (6, "page", 2)]
     finally:
         ob.close()
 
@@ -989,24 +1164,28 @@ def test_known_deviation_nan_is_stored_as_a_token_that_is_not_json(tmp_path):
         ob.close()
 
 
-O3_ROWS = {
+O3_ROWS = {    # the row; what it raises; where: outside the forwarder's error handling (the loop is started again) or
+               # inside it (since #762: taken as a failed post, the same batch again after the backoff)
     "data that is not JSON": ("INSERT INTO outbox (at, kind, data) VALUES (1794990000.0, 'heard', 'not json')",
-                              "JSONDecodeError"),
+                              "JSONDecodeError", "restarted"),
     "audio stored as text": ("INSERT INTO outbox (at, kind, data, audio) VALUES (1794990000.0, 'heard', '{}', 'RIFF')",
-                             "TypeError"),
+                             "TypeError", "retried"),
 }
 
 
 @pytest.mark.parametrize("case", list(O3_ROWS))
 def test_known_deviation_a_row_the_station_cannot_read_blocks_the_forwarder(tmp_path, monkeypatch, case):
     """O3. The station as the reader of its own file does not handle a row of the wrong type. `data` that is not JSON
-    raises in Outbox.batch(); `audio` stored as text (a writer that bound a string) comes back as a str and raises in
-    the forwarder's base64. Both are outside the forwarder's own error handling. Since #782 the thread no longer ends:
-    the link starts its loop again and counts it (the Hub row, Health), and the loop raises again on the same row,
-    which is still the oldest. So no event goes to the hub, across restarts of the station too. Only a second writer
-    of the file (or a damaged row) can make one: today's add() cannot. Fixed: the row is set aside (said once in the
-    log), and the events behind it go up."""
-    sql, error = O3_ROWS[case]
+    raises in Outbox.batch(), outside the forwarder's own error handling: since #782 the thread no longer ends, the
+    link starts its loop again and counts it (the Hub row, Health), and the loop raises again on the same row, which is
+    still the oldest. `audio` stored as text (a writer that bound a string) comes back as a str and raises TypeError in
+    the base64 of the post; since #762 that is inside the forwarder's error handling (StationLink._post_events), which
+    takes it as a failed post: the hub link says "a bytes-like object is required" as its error and the same batch
+    goes again after the backoff (no restart, no quarantine: the quarantine is for what the hub refuses). Either way
+    no event goes to the hub, across restarts of the station too. Only a second writer of the file (or a damaged row)
+    can make one: today's add() cannot. Fixed: the row is set aside (said once in the log), and the events behind it
+    go up."""
+    sql, error, how = O3_ROWS[case]
     died: list[tuple[str, str]] = []
     monkeypatch.setattr(threading, "excepthook", lambda a: died.append((a.thread.name, type(a.exc_value).__name__)))
     monkeypatch.setattr(stationmod, "RESTART_S", (0.05, 0.2))                            # (the loop's restart delays)
@@ -1016,17 +1195,23 @@ def test_known_deviation_a_row_the_station_cannot_read_blocks_the_forwarder(tmp_
         link = st.link
         forward = next(t for t in link._threads if t.name == "hub-forward")
         hub = lv.hub.app.hub
+        failed: list[str] = []
+        fail = link._fail
+        link._fail = lambda e: (failed.append(type(e).__name__), fail(e))[1]          # the link's error handling
         link.emit("heard", {"system": "p25", "radio_id": "990001", "alias": "", "at": None, "channel": ""})
         assert wait(lambda: link.outbox.pending()[0] == 0 and hub.seq == 1, 30)          # the lane works
         link.outbox.db.execute(sql)                                                      # another writer's row: seq 2
         link.emit("heard", {"system": "p25", "radio_id": "990002", "alias": "", "at": None, "channel": ""})
-        if O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER:
+        if O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER and how == "restarted":
             assert wait(lambda: link.restarts.get("hub-forward", {}).get("n", 0) >= 2, 30)   # started again, raised again
             assert link.restarts["hub-forward"]["why"] == error and forward.is_alive() and not died
             assert link.outbox.pending()[0] == 2 and hub.seq == 1                        # nothing more goes up
-            if error == "JSONDecodeError":
-                with pytest.raises(ValueError):
-                    link.outbox.batch()                                                  # ... nor would it next time
+            with pytest.raises(ValueError):
+                link.outbox.batch()                                                      # ... nor would it next time
+        elif O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER:
+            assert wait(lambda: failed.count(error) >= 2, 30)                            # a failed post, and again
+            assert "hub-forward" not in link.restarts and forward.is_alive() and not died
+            assert link.outbox.pending()[0] == 2 and hub.seq == 1 and link.outbox.summary()["n"] == 0
         else:
             assert wait(lambda: hub.seq == 3, 30) and forward.is_alive() and not died
             assert link.outbox.pending()[0] == 0

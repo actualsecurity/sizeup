@@ -293,13 +293,23 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
     one("tts", lambda: app.cad._render_remote("Engine 1 respond to 12 Example Street for a reported alarm",
                                               [[716.1, 1.0], [600.9, 3.0]]))
     one("sources_reset", lambda: h.reset_source("", "admin@example.org"))
+    # Health's Dismiss on an alarm the hub took too late (#762): the station drops its late one, the one it still sends
+    # again stays
+    ob = st.link.outbox
+    for k in range(2):
+        q = ob.quarantine({"seq": 900001 + k, "at": c.T0, "type": "alarm", "audio": None, "audio_dropped": False,
+                           "data": {"id": f"Fireground1-179499000{k}000"}}, "apply_failed", "RuntimeError")
+    ob.late(q["id"], "alarm delivered late, not raised (40 min after it ended)")
+    one("quarantine_dismiss", lambda: h.dismiss_rejected("alarm", "admin@example.org"))
+    assert [(r["kind"], r["state"]) for r in ob.summary()["rows"]] == [("alarm", "held")]
     return out
 
 
 FORMS = ("catch_up", "retranscribe", "retranscribe-all", "retranscribe-as-alt", "transcribe_now", "set_mode",
          "set_mode-confirmed", "set_talkgroup", "set_talkgroup-tier", "set_talkgroup_group", "emergency_all_clear",
          "set_adsb_receiver", "set_antenna_groups", "set_antenna_groups-confirmed", "sources_poll_now", "reception_post",
-         "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts", "sources_reset")
+         "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts", "sources_reset",
+         "quarantine_dismiss")
 
 
 def scrub(doc, tmp=""):
@@ -387,6 +397,7 @@ def test_the_recorded_jobs_and_results_are_what_the_hub_and_the_station_send_now
     assert r["set_stt_alert_keys"]["result"] == {"ok": True, "rev": 4242} == {"ok": True, "rev": st.stt_alert_rev}
     assert r["set_stt_terms"]["result"]["v"] == live.hub.app.stt_terms.v != ""
     assert r["tts"]["label"].startswith("Voice: ") and r["sources_reset"]["result"].startswith("east-cad: reset asked")
+    assert r["quarantine_dismiss"]["result"] == 1
     # the hub puts the channels' result in the status it has (and the station's next status says the same)
     assert wait(lambda: live.hub.app.hub.status["channels"] == r["set_channel_prefs"]["result"], 20)
 
@@ -479,7 +490,7 @@ def test_the_functions_and_their_argument_names_are_the_codes():
     the signatures: every parameter, in order; the list is closed at the last one; `minItems` is the number of
     parameters without a default."""
     defs = c.load(JOBS)["$defs"]
-    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 15
+    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 16
     assert [b["if"]["properties"]["fn"]["const"] for b in defs["call"]["allOf"]] == list(station_mod.CALLS)
     assert {k for k in defs if k.startswith("call.")} == {f"call.{fn}" for fn in station_mod.CALLS}
     results = c.load(RESULT)["$defs"]

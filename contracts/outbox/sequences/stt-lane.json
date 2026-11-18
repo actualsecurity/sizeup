@@ -6,9 +6,10 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
-        "outbox": [], "stt_inputs": [], "sqlite_sequence": {}
+        "outbox": [], "stt_inputs": [], "quarantine": [], "source_latest": [], "sqlite_sequence": {}
       }
     },
     {
@@ -18,7 +19,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 1, "stt_bytes": 30,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -36,7 +38,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 2, "stt_bytes": 60,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -58,7 +61,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 3, "stt_bytes": 90,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -84,7 +88,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 4, "stt_bytes": 120,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -114,7 +119,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 5, "stt_bytes": 150,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -148,7 +154,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 6, "stt_bytes": 180,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -186,7 +193,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -259,7 +267,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -283,7 +292,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -298,7 +308,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -317,7 +328,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -359,7 +371,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 7, "stt_bytes": 210,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -368,7 +381,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 5, "stt_bytes": 150,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -399,7 +413,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 5, "stt_bytes": 150,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -408,7 +423,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 5, "stt_bytes": 150,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -442,7 +458,8 @@
       "after": {
         "totals": {
           "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 5, "stt_bytes": 150,
-          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
         }
       }
     },
@@ -453,13 +470,14 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 5,
-          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "outbox": [
           [
             1, 1794991000.0, "traffic",
             "{\"id\":\"Fireground1-1794991000000\",\"source\":\"Fireground 1\",\"text\":\"Engine 1 is clear\"}",
-            {"bytes": 40, "fill": "a1"}, 0, 0
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
           ]
         ],
         "sqlite_sequence": {"outbox": 1, "stt_inputs": 7}
@@ -471,7 +489,8 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 5,
-          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -505,7 +524,8 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 5,
-          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 150, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         }
       }
     },
@@ -516,7 +536,8 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 6,
-          "stt_bytes": 180, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 180, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "stt_inputs": [
           [
@@ -552,7 +573,8 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
-          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "stt_inputs": []
       }
@@ -564,7 +586,8 @@
       "after": {
         "totals": {
           "pending": 1, "oldest": 1794991000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 1,
-          "stt_bytes": 30, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0
+          "stt_bytes": 30, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
         },
         "stt_inputs": [
           [
