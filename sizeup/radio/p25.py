@@ -51,11 +51,23 @@ there; read anyway, for a later trunk-recorder that fills it). Call.emergency / 
 split_call() marks the piece the button belongs to (Piece.emergency). The unit script gets no emergency
 flag in 5.2.0 (plugins/unit_script passes only the system, radio ID, talkgroup and patches), so the
 button is known when the call's JSON is written, not at the key-up.
+
+Calls written while sizeup was down (#747). trunk-recorder keeps recording through a restart of sizeup (the station
+service restarts for every auto-update, about a dozen times a day), so a call can conclude while nothing reads the
+capture dir. CallIngest keeps a high-water mark per capture dir (mark_path, beside the station's state): the newest
+sidecar it handed on, (mtime, path), and the few at or before it still waiting for their WAV. At start a sidecar newer
+than the mark (or one of those waiting) and no older than REPLAY_S is ingested late (Call.late: the radio log, speech-
+to-text and the hub take it; nothing that alerts does, sizeup/app.py); anything older is primed as seen, as before.
+With no mark (the first start, a new capture dir) or one that can't be read, every sidecar on disk is primed, as
+before. The mark moves only once on_call has taken a call, and is written (tmp + rename, no fsync) at most every
+MARK_SAVE_S and at stop. Taken calls' files are removed by the app (App._drop_recorder_files), so a crash between two
+writes can at most hand on a call the app has already taken: the app drops such a late call by its id.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import wave
@@ -103,6 +115,7 @@ class Call:
     signal: float | None = None   # the call JSON's "signal" / "noise" (dB; 5.x), None when it has none (0 / 0)
     noise: float | None = None
     freq: float | None = None     # its voice channel, Hz
+    late: bool = False         # written while sizeup was down, ingested at the next start (#747): never a live alert
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]
@@ -110,6 +123,12 @@ class Call:
 
 WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
 SETTLE_GIVE_UP_S = 60.0
+# Calls written while sizeup was down (#747): ingested late at start back this far (older ones are primed as seen)
+REPLAY_S = 600.0
+MARK_SAVE_S = 5.0          # the high-water mark is written at most this often (and at stop)
+MARK_WAITING_MAX = 200     # sidecars at or before the mark still waiting for their WAV, kept in the mark
+STOP_JOIN_S = 3.0          # stop(): the poll thread finishes the call in hand, then the mark is written
+LATE_REPORT_S = SETTLE_GIVE_UP_S + 5.0     # the start's "ingested late" line, at the latest this long after start
 
 
 def _levels(d: dict) -> tuple[float | None, float | None]:
@@ -455,11 +474,14 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
 
 
 class CallIngest:
-    """Poll a trunk-recorder capture dir; on_call(Call) for each new call on our talkgroups."""
+    """Poll a trunk-recorder capture dir; on_call(Call) for each new call on our talkgroups. mark_path: where the
+    high-water mark is kept (#747, the module's doc: calls written while sizeup was down); None: none kept, every
+    start primes what is on disk."""
 
     def __init__(self, capture_dir: str | Path, labels: dict[int, str], on_call: Callable[[Call], None],
                  aliases: dict[str, str] | None = None, poll_s: float = 1.0,
-                 on_event: Callable[[str], None] = lambda m: None, name: str = "P25"):
+                 on_event: Callable[[str], None] = lambda m: None, name: str = "P25",
+                 mark_path: str | Path | None = None):
         self.name = name  # status label (the header pill), not every talkgroup's name
         self.record_all = True  # every talkgroup trunk-recorder writes (sizeup decides what to keep)
         self.dir, self.labels, self.on_call = Path(capture_dir), labels, on_call
@@ -467,59 +489,137 @@ class CallIngest:
         self._seen: set[str] = set()
         self._pending: dict[str, tuple[float, int]] = {}   # json path -> (first seen, last WAV size)
         self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
         self.state, self.detail, self.last_call = "starting", "", 0.0
         # Live grants (radio/live.py LiveTalk.grants): (system, talkgroup, t0, t1) -> [(time, radio ID)],
         # and the alias trunk-recorder logged for a radio ID. Set by the app; without them the call
         # JSON alone says who talked.
         self.grants: Callable[[str, int, float, float], list[tuple[float, str]]] | None = None
         self.alias_of: Callable[[str], str] = lambda src: ""
+        # The high-water mark (#747): (mtime, path under the capture dir) of the newest sidecar on_call took, and the
+        # sidecars at or before it not taken yet (their WAV still coming) as the last scan found them
+        self.mark_path = Path(mark_path) if mark_path else None
+        self._mark: tuple[float, str] | None = None
+        self._behind: list[tuple[float, str]] | None = None    # None: not scanned yet (the loaded mark's are kept)
+        self._waiting: list[str] = []                           # the loaded mark's
+        self._mark_lock = threading.Lock()
+        self._saved: tuple | None = None                        # what was written last, and when
+        self._saved_at = 0.0
+        self._mark_err = False
+        self._keys: dict[str, tuple[float, str]] = {}           # wav path of a call scan() returned -> its sidecar key
+        # Calls written while sizeup was down, ingested late at this start, and the start's line about them
+        self._late: set[str] = set()
+        self._late_n = self._late_skipped = 0
+        self._late_say_by: float | None = None
 
     def prime(self) -> CallIngest:
         """Mark calls already on disk as seen: don't replay old calls as if they were live."""
         self._seen = {str(p) for p in self.dir.rglob("*.json")} if self.dir.exists() else set()
         return self
 
+    def resume(self) -> CallIngest:
+        """At start, with a mark kept (#747): sidecars newer than the mark (or waiting for their WAV at it), written in
+        the last REPLAY_S, are ingested late; every other one on disk is primed as seen. No mark, or one that can't be
+        read: everything is primed (as prime()), and the mark starts at the newest sidecar on disk."""
+        loaded, why = self._load_mark()
+        listing = self._listing()
+        if loaded is None:
+            self._seen = {str(p) for _k, p in listing}
+            with self._mark_lock:
+                self._mark, self._behind, self._waiting = (listing[-1][0] if listing else (0.0, "")), None, []
+            self._save_mark(force=True)
+            self.on_event(f"p25 {self.name}: {why}: the {len(listing)} call(s) on disk not replayed")
+            return self
+        mark, waiting = loaded
+        now = time.time()
+        seen, late, skipped = set(), set(), 0
+        for key, p in listing:
+            if key <= mark and key[1] not in waiting:
+                seen.add(str(p))                     # taken before the restart (or primed then)
+            elif now - key[0] > REPLAY_S:
+                seen.add(str(p))                     # from while it was down, but too old to be worth it now
+                skipped += 1
+            else:
+                late.add(str(p))
+        self._seen, self._late, self._late_n, self._late_skipped = seen, late, 0, skipped
+        with self._mark_lock:
+            self._mark, self._behind, self._waiting = mark, None, sorted(waiting)
+        self._late_say_by = now + LATE_REPORT_S
+        self._say_late()
+        return self
+
     def start(self, skip_existing: bool = True) -> CallIngest:
         if skip_existing:
-            self.prime()
+            if self.mark_path is not None:
+                self.resume()
+            else:
+                self.prime()
         self._look()          # its state from the first look, not "starting" until the thread's first poll (#282)
-        threading.Thread(target=self._run, name="p25-ingest", daemon=True).start()
+        self._thread = threading.Thread(target=self._run, name="p25-ingest", daemon=True)
+        self._thread.start()
         return self
 
     def stop(self) -> None:
+        """The poll thread finishes the call in hand (STOP_JOIN_S at most), then the mark is written."""
         self._stop.set()
+        t = self._thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(STOP_JOIN_S)
+        self._save_mark(force=True)
 
     def status(self) -> dict:
         return {"label": self.name, "mhz": None, "state": self.state,
                 "detail": self.detail, "open": False, "quieting_db": None, "restarts": 0,
                 "last_heard": self.last_call or None}
 
+    def _rel(self, p: Path) -> str:
+        try:
+            return p.relative_to(self.dir).as_posix()
+        except ValueError:
+            return str(p)
+
+    def _listing(self) -> list[tuple[tuple[float, str], Path]]:
+        """Every sidecar in the capture dir, oldest first: ((mtime, path under the dir), path)."""
+        if not self.dir.exists():
+            return []
+        out = [((_mtime(p), self._rel(p)), p) for p in self.dir.rglob("*.json") if p != self.mark_path]   # (a mark kept in it)
+        out.sort(key=lambda x: x[0])
+        return out
+
     def scan(self) -> list[Call]:
         """New finished calls. trunk-recorder can publish the JSON before the WAV is fully written
         (we've read 0-byte WAVs that were 190 KB a moment later), so a call is taken only once its
-        WAV is non-empty and the same size on two polls in a row; give up after SETTLE_GIVE_UP_S."""
+        WAV is non-empty and the same size on two polls in a row; give up after SETTLE_GIVE_UP_S.
+        A call written while sizeup was down (resume()) comes back with late set."""
         calls = []
         now = time.time()
-        for meta in sorted(self.dir.rglob("*.json"), key=_mtime):
-            key = str(meta)
-            if key in self._seen:
+        behind: list[tuple[float, str]] = []                 # not taken yet: for the mark (_save_mark)
+        for key, meta in self._listing():
+            k = str(meta)
+            if k in self._seen:
                 continue
             wav = meta.with_suffix(".wav")
             try:
                 size = wav.stat().st_size
             except OSError:
+                behind.append(key)
                 continue  # audio not there yet: pick it up next poll
-            first, last_size = self._pending.get(key, (now, -1))
+            first, last_size = self._pending.get(k, (now, -1))
             settled = size > WAV_HEADER and size == last_size
             if not settled and now - first < SETTLE_GIVE_UP_S:
-                self._pending[key] = (first, size)
+                self._pending[k] = (first, size)
+                behind.append(key)
                 continue
-            self._pending.pop(key, None)
-            self._seen.add(key)
+            self._pending.pop(k, None)
+            self._seen.add(k)
+            late = k in self._late
+            self._late.discard(k)
             call = parse_call(meta, self.labels, self.aliases, record_all=self.record_all)
             if call is None:
                 continue
-            if self.grants is not None and call.turns:
+            call.late = late
+            # (a late call's grants were never heard: the live ones held now came after the restart, another call's)
+            if self.grants is not None and call.turns and not late:
                 try:
                     got = self.grants(call.system, call.talkgroup, call.start - GRANT_LEAD_S - GRANT_SLACK_S,
                                       call.end + GRANT_SLACK_S)
@@ -533,8 +633,105 @@ class CallIngest:
             except (OSError, ValueError, EOFError, wave.Error) as e:   # EOFError: empty/truncated WAV
                 self.on_event(f"p25: skipped {wav.name}: {type(e).__name__} {e}")
                 continue
+            if len(self._keys) > 1000:                       # (scan() called without poll(): nothing to keep)
+                self._keys.clear()
+            self._keys[call.wav_path] = key
             calls.append(call)
+        self._behind = behind
         return calls
+
+    def poll(self) -> list[Call]:
+        """One look: each new call to on_call, the mark moved past each one it took (never one it raised on), the
+        start's "ingested late" line once those are in, the mark written when due. The calls on_call took."""
+        if not self._look():
+            return []
+        try:
+            calls = self.scan()
+        except Exception as e:                               # never let one bad file stop ingest
+            self.on_event(f"p25 scan error: {type(e).__name__}: {e}")
+            calls = []
+        took = []
+        for call in calls:
+            self.last_call = call.end or time.time()
+            key = self._keys.pop(call.wav_path, None)
+            try:
+                self.on_call(call)
+            except Exception as e:
+                self.on_event(f"p25 call handler error: {type(e).__name__}: {e}")
+                continue
+            took.append(call)
+            self._late_n += call.late
+            if key is not None:
+                with self._mark_lock:
+                    if self._mark is None or key > self._mark:
+                        self._mark = key
+        self._say_late()
+        self._save_mark()
+        return took
+
+    def _say_late(self) -> None:
+        """The start's one line (#747), once every call from while it was down is in, or LATE_REPORT_S after start."""
+        by = self._late_say_by
+        if by is None or (self._late and time.time() < by):
+            return
+        self._late_say_by = None
+        left = len(self._late)
+        self.on_event(f"p25 {self.name}: {self._late_n} calls from while it was down ingested late "
+                      f"({self._late_skipped} older skipped)" + (f"; {left} not ready yet" if left else ""))
+
+    def _load_mark(self) -> tuple[tuple[tuple[float, str], set[str]] | None, str]:
+        """((mtime, name), waiting names) from mark_path, or (None, why not)."""
+        try:
+            d = json.loads(self.mark_path.read_text())
+        except FileNotFoundError:
+            return None, "no ingest mark yet (first start here)"
+        except (OSError, ValueError):
+            return None, "ingest mark unreadable"
+        try:
+            if not isinstance(d, dict) or d.get("v") != 1:
+                raise ValueError("not a mark")
+            if d.get("dir") != str(self.dir):
+                return None, "ingest mark is another capture dir's"
+            mt, name, waiting = d["mtime"], d["name"], d.get("waiting") or []
+            if isinstance(mt, bool) or not isinstance(mt, (int, float)) or not 0 <= mt < float("inf"):
+                raise ValueError("mtime")
+            if not isinstance(name, str) or not isinstance(waiting, list) or \
+                    not all(isinstance(w, str) for w in waiting):
+                raise ValueError("name")
+        except (KeyError, ValueError):
+            return None, "ingest mark unreadable"
+        return ((float(mt), name), set(waiting)), ""
+
+    def _save_mark(self, force: bool = False) -> None:
+        """The mark to mark_path (tmp + rename, no fsync) when it changed: at most every MARK_SAVE_S, or now (force)."""
+        if self.mark_path is None:
+            return
+        with self._mark_lock:
+            mark = self._mark
+            if mark is None:
+                return
+            now = time.time()
+            if self._behind is None:
+                waiting = list(self._waiting)
+            else:                                            # (older than REPLAY_S: never replayed anyway)
+                waiting = [n for mt, n in self._behind if (mt, n) <= mark and now - mt <= REPLAY_S]
+            waiting = waiting[-MARK_WAITING_MAX:]
+            state = (mark, tuple(waiting))
+            if state == self._saved or (not force and now - self._saved_at < MARK_SAVE_S):
+                return
+            self._saved_at = now
+            tmp = self.mark_path.with_name(self.mark_path.name + ".tmp")
+            try:
+                self.mark_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(json.dumps({"v": 1, "dir": str(self.dir), "mtime": mark[0], "name": mark[1],
+                                           "waiting": waiting}))
+                os.replace(tmp, self.mark_path)
+            except OSError as e:
+                if not self._mark_err:                       # (said once: it is tried again every MARK_SAVE_S)
+                    self.on_event(f"p25 {self.name}: ingest mark not written: {type(e).__name__}: {e}")
+                self._mark_err = True
+                return
+            self._saved, self._mark_err = state, False
 
     def _look(self) -> bool:
         """state / detail from whether trunk-recorder's capture dir is there; True when it is."""
@@ -548,16 +745,6 @@ class CallIngest:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            if self._look():
-                try:
-                    calls = self.scan()
-                except Exception as e:                       # never let one bad file stop ingest
-                    self.on_event(f"p25 scan error: {type(e).__name__}: {e}")
-                    calls = []
-                for call in calls:
-                    self.last_call = call.end or time.time()
-                    try:
-                        self.on_call(call)
-                    except Exception as e:
-                        self.on_event(f"p25 call handler error: {type(e).__name__}: {e}")
+            self.poll()
             self._stop.wait(self.poll_s)
+        self._save_mark(force=True)

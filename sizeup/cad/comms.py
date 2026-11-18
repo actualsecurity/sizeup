@@ -229,6 +229,10 @@ class Comms:
         # May fire again for the same tid (replace re-records, the startup backfill of old rows): a consumer dedupes
         # by tid + text, ignores a stale `start`, and queues rather than blocks (it runs on the writer's thread).
         self.on_context_text = None
+        # traffic id -> None: a transcript on one of our rows from a P25 call written while sizeup was down (#747,
+        # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
+        # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
+        self.on_late_text = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
         self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
@@ -262,10 +266,11 @@ class Comms:
 
     def record(self, t: dict, replace: bool = True) -> list[int]:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
-        text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
+        text, status, model, emergency?, evidence?, late?}. Returns the event ids it is linked to. replace=False: skip
         one already logged (the startup backfill). An emergency once logged stays (a later write without the
-        flag never clears it), and so does its evidence. Must not be called with store.lock held: the hooks
-        (on_text, on_context_text) run on the caller's thread after commit."""
+        flag never clears it), and so does its evidence. late (#747: a P25 call from while sizeup was down): logged
+        and linked by its rules like any, told only to on_late_text. Must not be called with store.lock held: the
+        hooks (on_text, on_context_text, on_late_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
         call_id, turn = split_call(tid, p25)
@@ -333,8 +338,9 @@ class Comms:
                 self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+        late = bool(t.get("late"))
         if other:
-            if (t.get("text") or "").strip():
+            if (t.get("text") or "").strip() and not late:
                 self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
             return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
@@ -342,7 +348,10 @@ class Comms:
         if self._logged[kind] >= CHANGES_TRIM_EVERY:
             self._logged[kind] = 0
             self._trim_changes(kind)
-        self._heard(tid)
+        if late:
+            self._heard_late(tid)
+        else:
+            self._heard(tid)
         return out
 
     def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
@@ -485,6 +494,14 @@ class Comms:
                 self.on_text(tid)
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
+
+    def _heard_late(self, tid: str) -> None:
+        """on_late_text (#747), once the write has committed."""
+        if self.on_late_text is not None:
+            try:
+                self.on_late_text(tid)
+            except Exception as e:  # noqa: BLE001 - the radio log never stops the write
+                self.log(f"CAD: late transcript {tid}: {type(e).__name__}: {e}")
 
     def _heard_context(self, tid: str) -> None:
         """on_context_text, once the write has committed: whatever it does or raises never reaches the write."""
@@ -668,14 +685,15 @@ class Comms:
         return {"unlinked": True, "why": old["why"], "excluded": auto}
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
-               notify: bool = True) -> bool:
+               notify: bool = True, late: bool = False) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
         run on the caller's thread after commit. notify=False: a shed clip caught up hours later
         (sizeup/sttcatchup.py): stored and in the change log like any text, but neither hook is told, so nothing
         that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's step, the
-        context pre-alerts) acts on old words."""
+        context pre-alerts) acts on old words. late (#747: a P25 call from while sizeup was down): on_late_text only
+        (another system's row: neither)."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -689,7 +707,10 @@ class Comms:
                 self.rev += 1
         if n and notify:
             if row is not None and sources.other_p25(row):
-                self._heard_context(tid)
+                if not late:
+                    self._heard_context(tid)
+            elif late:
+                self._heard_late(tid)
             else:
                 self._heard(tid)
         return bool(n)
