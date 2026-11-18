@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
   pushed_at REAL, push_count INTEGER NOT NULL DEFAULT 0, suppressed TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
+  fd TEXT NOT NULL DEFAULT '',                       -- the FD at a fire-related event's place: on_scene | dispatched | there | cleared
   updated_at REAL NOT NULL,
   dismissed_by TEXT NOT NULL DEFAULT ''
 );
@@ -123,6 +124,9 @@ class SqlEvents:
         self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
         with store.lock:
             store.db.executescript(SCHEMA)
+            cols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_events)").fetchall()}
+            if "fd" not in cols:               # a table from before the FD check (engine._fire)
+                store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _w(self):
