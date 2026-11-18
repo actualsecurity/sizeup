@@ -52,8 +52,8 @@ post:
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
     default:
       description: >
-        An error: 400 (invalid, bad `client_at` (not a number, negative, older than 7 days), idempotency_key_required,
-        invalid_idempotency_key), 401, 403 forbidden, 404 (no_such_unit, no_such_incident), 408 request_timeout, 411
+        An error: 400 (bad_request: a bad body, or a bad `client_at` (not a number, negative, older than 7 days), idempotency_key_required,
+        invalid_idempotency_key), 401, 403 forbidden, 404 not_found (no such unit, or no such incident), 408 request_timeout, 411
         length_required, 413 body_too_large, 428 precondition_required (a queued action, one with `client_at`, needs
         If-Match), 429, 503.
       headers:

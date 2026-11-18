@@ -1,7 +1,6 @@
 """/api/v1 writes (#562): a unit's status, an alarm acknowledged, a note on an incident; Idempotency-Key, If-Match,
-queued
-(offline) actions, the audit. Against a real CAD seeded the way tools/dev_seed.py seeds one (an invented call near the
-map's home, its units, an emergency alarm in the radio log's shape). Every person and device is invented."""
+queued (offline) actions, the audit. Against a real CAD seeded the way tools/dev_seed.py seeds one (an invented call
+near the map's home, its units, an emergency alarm in the radio log's shape). Every person and device is invented."""
 from __future__ import annotations
 
 import json
@@ -22,6 +21,7 @@ from sizeup.api.v1.idempotency import (KEEP_S, MAX_PER_PRINCIPAL, MAX_STORED_BOD
                                        fingerprint)
 from sizeup.api.v1.principal import Principal
 from sizeup.api.v1.rev import rev_of
+from sizeup.api.v1.routes import ROUTES
 from sizeup.api.v1.serialize import with_rev
 from sizeup.api.v1.switches import Switches
 from sizeup.cad.api import CadApi
@@ -155,7 +155,7 @@ def test_the_consoles_validation_still_applies(rig):
                                       (note_path(rig.open["id"]), {"text": "x", "units": ["E99"]}),
                                       (note_path(rig.open["id"]), {"text": "x" * 2001}))):
         status, out, _ = rig.post(path, body, key=f"bad-input-{i:04d}")
-        assert status == 400 and out["error"]["code"] == "invalid" and out["error"]["message"], (path, body)
+        assert status == 400 and out["error"]["code"] == "bad_request" and out["error"]["message"], (path, body)
 
 
 # -- roles: the console's, never who=None ----------------------------------------------------------------------------
@@ -211,22 +211,23 @@ def test_the_token_and_the_flag_gate_everything(rig):
 
 def test_the_route_table_names_the_consoles_least_role():
     from sizeup.cad.api import needs
-    assert [(r.need, r.flag, r.role) for r in writes.ROUTES] == [("device", "writes", "dispatch")] * 3
+    posts = [r for r in ROUTES if r.method == "POST"]
+    assert [(r.need, r.flag, r.role) for r in posts] == [("device", "writes", "dispatch")] * 3
     assert needs("/api/cad/unit/3/status") == needs("/api/cad/alarm/3/ack") == "dispatch"
     assert needs("/api/cad/incident/3/note") == "dispatch"
 
 
 # -- not found, closed ----------------------------------------------------------------------------------------------
 
-def test_unknown_things_are_404(rig):
-    for path, body, code in ((status_path("X99"), {"status": "OL"}, "no_such_unit"),
-                             (note_path(999), {"text": "x"}, "no_such_incident"),
-                             (note_path("abc"), {"text": "x"}, "no_such_incident"),
-                             ("/api/v1/alarms/999/ack", {}, "no_such_alarm"),
-                             ("/api/v1/alarms/zero/ack", {}, "no_such_alarm"),
-                             (status_path(), {"status": "OL", "incident_id": 999}, "no_such_incident")):
+def test_unknown_things_are_404_not_found_as_on_the_reads_with_the_kind_in_the_message(rig):
+    for path, body, kind in ((status_path("X99"), {"status": "OL"}, "unit"),
+                             (note_path(999), {"text": "x"}, "incident"),
+                             (note_path("abc"), {"text": "x"}, "incident"),
+                             ("/api/v1/alarms/999/ack", {}, "alarm"),
+                             ("/api/v1/alarms/zero/ack", {}, "alarm"),
+                             (status_path(), {"status": "OL", "incident_id": 999}, "incident")):
         status, out, _ = rig.post(path, body)
-        assert (status, out["error"]["code"]) == (404, code), path
+        assert (status, out["error"]["code"], out["error"]["message"]) == (404, "not_found", f"no such {kind}"), path
 
 
 def test_a_note_on_a_closed_incident_is_a_409_with_the_current_incident(rig):
@@ -434,7 +435,7 @@ def test_a_late_queued_note_says_when_it_was_written(rig):
 def test_a_bad_client_at_is_a_400(rig, bad):
     raw = json.dumps({"text": "x", "client_at": bad}).replace("Infinity", "1e999").encode()
     status, out, _ = rig.post(note_path(rig.open["id"]), raw=raw)
-    assert status == 400 and out["error"]["code"] == "invalid"
+    assert status == 400 and out["error"]["code"] == "bad_request"
 
 
 @pytest.mark.parametrize("header, via, app", [
@@ -476,7 +477,7 @@ def test_over_the_wire_a_retry_replays_and_an_oversize_body_is_refused(served):
     assert status == 413 and out["error"]["code"] == "body_too_large"
     assert http(url, note_path(r.open["id"]), body, {"Idempotency-Key": UUID})[0] == 401          # no device token
     assert http(url, note_path(r.open["id"]), b"[1]", {**h, "Idempotency-Key": "list-key-0001"}) == (
-        400, {"error": {"code": "invalid", "message": "the body must be a JSON object"}})
+        400, {"error": {"code": "bad_request", "message": "the body must be a JSON object"}})
 
 
 def test_a_fenced_hub_answers_503_and_writes_nothing(served):
@@ -647,7 +648,7 @@ def test_the_ack_race_is_a_409_not_a_400(rig, monkeypatch):
 
 def test_client_at_nan_and_the_300_second_boundary(rig):
     status, out, _ = rig.post(note_path(rig.open["id"]), raw=b'{"text": "x", "client_at": NaN}')
-    assert status == 400 and out["error"]["code"] == "invalid"
+    assert status == 400 and out["error"]["code"] == "bad_request"
     at300 = rig.post(note_path(rig.open["id"]), {"text": "a", "client_at": rig.clock.t + 300}, key="edge-300-0001")
     at301 = rig.post(note_path(rig.open["id"]), {"text": "b", "client_at": rig.clock.t + 301}, key="edge-301-0001")
     assert at300[1]["client_at_clamped"] is False and at301[1]["client_at_clamped"] is True
@@ -972,3 +973,114 @@ def test_an_incident_summary_in_a_write_answer_carries_last_event_id_like_the_li
     assert write(url, note_path(r.open["id"]), {"text": "one more line"}, key="last-event-001")[0] == 201
     after = item(get(r, url, "/api/v1/incidents"), id=str(r.open["id"]))["last_event_id"]
     assert after > before
+
+
+# -- a refusal before the body is read closes the connection (the unread body never becomes the next request) ----------
+
+@pytest.fixture
+def switchable(tmp_path, monkeypatch):
+    """A served hub whose `writes` flag a test can turn off, with a write burst of one."""
+    from sizeup.api.v1 import limits
+    monkeypatch.setattr(limits, "WRITE_BURST", 1.0)
+    monkeypatch.setattr(limits, "WRITE_RATE", 0.001)
+    features = {"writes": True}
+    r = Rig(tmp_path)
+    srv, url = serve(cad=r.api, role="hub", mobile=Switches(lambda: True, lambda: dict(features)),
+                     mobile_resolver=r.v1.resolver)
+    yield r, url, features
+    srv.shutdown()
+
+
+def smuggling_post(path: str, token: str, key: str) -> bytes:
+    """A POST with NO `Connection: close` whose body is itself a whole HTTP request: if the server kept the connection
+    after refusing without reading the body, it would read the body as a second request and answer it too."""
+    inner = b"GET /api/v1/meta HTTP/1.1\r\nHost: x\r\n\r\n"
+    return (f"POST {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nIdempotency-Key: {key}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(inner)}\r\n\r\n").encode() + inner
+
+
+def test_a_refusal_before_the_body_is_read_closes_the_connection(switchable):
+    r, url, features = switchable
+    path = note_path(r.open["id"])
+
+    def refused(request: bytes, want: int) -> None:
+        out = raw_http(url, request, wait=5)          # raw_http fails unless the server closes the connection
+        assert out.startswith(f"HTTP/1.1 {want}".encode()), out[:80]
+        assert out.count(b"HTTP/1.1 ") == 1, out      # the body was never answered as a request of its own
+    refused(smuggling_post(path, "nobody", "refuse-401-0001"), 401)             # no such device
+    features["writes"] = False
+    refused(smuggling_post(path, "jordan", "refuse-404-0001"), 404)             # the flag off
+    features["writes"] = True
+    h = {"Authorization": "Bearer jordan", "Idempotency-Key": "refuse-ok-0001", "Content-Type": "application/json"}
+    assert http(url, path, json.dumps({"text": "first"}).encode(), h)[0] == 201     # the burst of one, used
+    refused(smuggling_post(path, "jordan", "refuse-429-0001"), 429)             # rate limited
+    assert r.notes() == ["first"]
+
+
+# -- every answer is the spec's ---------------------------------------------------------------------------------------
+
+STATUS_T, ACK_T, NOTE_T = "/api/v1/units/{code}/status", "/api/v1/alarms/{id}/ack", "/api/v1/incidents/{id}/notes"
+
+
+def conforms(template: str, status: int, obj) -> None:
+    from jsonschema import Draft202012Validator
+
+    from tests import openapi_spec as oas
+    schema = oas.response_schema(oas.spec(), "POST", template, status)
+    assert schema is not None, (template, status)
+    errs = list(Draft202012Validator(schema).iter_errors(obj))
+    assert not errs, (template, status, [e.message for e in errs][:3])
+
+
+def test_every_kind_of_write_answer_validates_against_the_spec(tmp_path):
+    seen = []
+
+    def check(template, answer, want, reason=None):
+        status, out, _ = answer
+        assert status == want, (template, status, out)
+        if reason:
+            assert out["error"]["reason"] == reason
+        conforms(template, status, out)
+        seen.append((template, status, reason))
+
+    rig = Rig(tmp_path)
+    o = rig.open["id"]
+    # the successes
+    check(STATUS_T, rig.post(status_path(), {"status": "OL", "client_at": rig.clock.t - 5},
+                             headers=if_match(rig, "E60"), key="ok-status-0001"), 200)
+    check(ACK_T, rig.post(f"/api/v1/alarms/{rig.alarm['id']}/ack", {}, key="ok-ack-00001"), 200)
+    check(NOTE_T, rig.post(note_path(o), {"text": "Water supply established"}, key="ok-note-0001"), 201)
+    # the 409s, one per reason
+    check(ACK_T, rig.post(f"/api/v1/alarms/{rig.alarm['id']}/ack", {}, key="again-ack-01"), 409,
+          "already_acknowledged")
+    check(NOTE_T, rig.post(note_path(rig.shut["id"]), {"text": "late"}, key="closed-note-1"), 409, "incident_closed")
+    rev = get_unit(rig, "E63")["rev"]
+    rig.cad.unit_status(uid(rig.cad, "E63"), {"status": "AV", "operator": "Lt. Ruiz"})
+    check(STATUS_T, rig.post(status_path("E63"), {"status": "OL", "client_at": rig.clock.t - 90},
+                             headers={"If-Match": rev}, key="moved-on-0001"), 409, "unit_changed")
+    rig.v1.gateway.idempotency().claim(DISPATCHER.device, "running-0001",
+                                       fingerprint("POST", f"/api/cad/incident/{o}/note", {"text": "x"}))
+    check(NOTE_T, rig.post(note_path(o), {"text": "x"}, key="running-0001"), 409, "in_progress")
+    # 412, 428, 422, 400, 404, 403
+    check(STATUS_T, rig.post(status_path("E63"), {"status": "OL"}, headers={"If-Match": rev}, key="stale-0001"), 412)
+    check(STATUS_T, rig.post(status_path(), {"status": "OS", "client_at": rig.clock.t - 30}, key="no-match-01"), 428)
+    check(NOTE_T, rig.post(note_path(o), {"text": "another"}, key="ok-note-0001"), 422)
+    check(NOTE_T, rig.post(note_path(o), {}, key="no-text-0001"), 400)
+    check(NOTE_T, rig.post(note_path(999), {"text": "x"}, key="no-call-0001"), 404)
+    check(STATUS_T, rig.post(status_path(), {"status": "OL"}, token="val", key="viewer-0001"), 403)
+    assert {s for _, s, _ in seen} == {200, 201, 400, 403, 404, 409, 412, 422, 428}
+
+
+def test_a_retry_after_a_412_with_the_same_key_replays_the_412_and_a_new_key_applies(rig):
+    """A 412 (and a 409) is a decision, kept under its key: the fresh attempt is a new action with a new key
+    (IdempotencyKey.yaml says so). The fingerprint is the method, path and body, never If-Match."""
+    stale = get_unit(rig, "E60")["rev"]
+    rig.cad.unit_status(uid(rig.cad, "E60"), {"status": "RS", "operator": "Lt. Ruiz"})
+    first = rig.post(status_path(), {"status": "OL"}, headers={"If-Match": stale}, key="retry-412-0001")
+    assert first[0] == 412
+    fresh = {"If-Match": first[1]["current"]["rev"]}
+    again = rig.post(status_path(), {"status": "OL"}, headers=fresh, key="retry-412-0001")
+    assert again[0] == 412 and again[2].get("Idempotent-Replayed") == "true" and again[1] == first[1]
+    assert rig.unit("E60")["status"] == "RS"
+    assert rig.post(status_path(), {"status": "OL"}, headers=fresh, key="retry-412-0002")[0] == 200
+    assert rig.unit("E60")["status"] == "OL"

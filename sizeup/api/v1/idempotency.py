@@ -16,8 +16,7 @@ older release ignores it). Per principal, so one device's key can never replay a
 
 Bounds: rows older than 24 h are purged (at most once a minute, on a claim), each principal keeps at most
 MAX_PER_PRINCIPAL (the oldest finished ones go first) and an answer is stored only up to MAX_STORED_BODY bytes. A
-write is 2/s per device
-(limits.py), so the bounds are a backstop, not a limit anyone meets. A fenced hub refuses these writes like any other
+write is 2/s per device (limits.py), so the bounds are a backstop, not a limit anyone meets. A fenced hub refuses these writes like any other
 (sizeup/fence.py: FencedWrite -> 503), and the CAD write that follows is never reached."""
 from __future__ import annotations
 
@@ -34,7 +33,8 @@ from typing import Callable
 KEEP_S = 24 * 3600
 PURGE_EVERY_S = 60.0
 MAX_PER_PRINCIPAL = 1000
-MAX_STORED_BODY = 16 * 1024     # an answer longer than this is not kept (its key is released)
+MAX_STORED_BODY = 16 * 1024     # an answer longer than this is not kept (its key is released); the same number as
+                                 # handler.MAX_BODY by chance only: that caps a request, this an answer
 STALE_RUNNING_S = 120.0          # a claim whose worker died (a crash mid-request) is retried after this
 KEY = re.compile(r"[A-Za-z0-9_.:-]{8,128}")
 
@@ -68,9 +68,9 @@ class Idempotency:
         store = cad.store
 
         def connect() -> sqlite3.Connection:
-            from sizeup.cloud.hubstore import _connect
+            from sizeup.cloud.hubstore import connect as hub_connect
             path = ":memory:" if store.path == ":memory:" else str(Path(store.path).parent / "hub.sqlite")
-            db = _connect(path)
+            db = hub_connect(path)
             db.may_write = lambda: store.may_write()
             db.on_refuse = lambda: (getattr(store.db, "on_refuse", None) or (lambda: None))()
             return db
@@ -80,8 +80,6 @@ class Idempotency:
         if self._db is None:
             db = self._connect()
             db.executescript(SCHEMA)
-            if not any(r[1] == "owner" for r in db.execute("PRAGMA table_info(v1_idempotency)")):
-                db.execute("ALTER TABLE v1_idempotency ADD COLUMN owner TEXT NOT NULL DEFAULT ''")    # an older table
             self._db = db
         return self._db
 

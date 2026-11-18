@@ -12,7 +12,8 @@ Order, so that a v1 problem never reaches the console (docs/mobile-api.md "Shari
     is rate limited per address, one with a principal per device (limits.py): 429 + Retry-After. Then no principal
     on a device route: 401;
  6. v1's share of concurrent requests: 503 + Retry-After when it is used up;
- 7. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
+ 7. a route with a body (BODY_METHODS): the body is read, at most MAX_BODY (411, 408, 400, 413 otherwise);
+ 8. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
 from __future__ import annotations
 
 import json
@@ -33,8 +34,8 @@ from .switches import Switches
 PREFIX = "/api/v1/"
 MAX_PATH = 512
 # The request-body hook, shared by every v1 route with a body (writes now, push and the others reuse it verbatim):
-# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit or an unusable length: 413;
-# it raises BodyRefused for a missing length or a body that stalls). The handler sees the bytes as Ctx.body.
+# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit, a 413; it raises BodyRefused
+# for a missing, repeated or malformed length or a body that stalls). The handler sees the bytes as Ctx.body.
 MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
 BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")      # the verbs the hook reads a body for
 
@@ -77,8 +78,8 @@ class V1:
                 body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
-        request body up to a limit (None: missing or too big); called only for a POST that got past the token, the
-        limits and the busy check."""
+        request body up to a limit (None: over the limit, a 413; BodyRefused otherwise); called only for the
+        BODY_METHODS, after the token, the limits and the busy check."""
         try:
             return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:

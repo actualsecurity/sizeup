@@ -10,7 +10,7 @@ Every one goes through the console's own code, so every rule, validation and aud
 - what: CadApi.post on the console's own path (so Cad.unit_status / Alarms.acknowledge / Cad.note, the operator's name
   from Settings and the activity row (CadApi.did) are the console's). Nothing of the console's logic is repeated here.
 - audit: that activity row's "browser" (ua) column is `via=ios app=1.2.0 device=<id> client_at=<unix>`
-  (activity.client_tag). The late chronology line of a queued action is a note through the same path, so it has a
+  (gateway.client_tag). The late chronology line of a queued action is a note through the same path, so it has a
   row of its own.
 - Idempotency-Key (idempotency.py): required; a retry replays the first answer, the same key with another body is a 422.
 - If-Match <rev> (rev.py) on a unit's status: a stale rev is a 412 with the current object; on a queued action (one with
@@ -19,10 +19,12 @@ Every one goes through the console's own code, so every rule, validation and aud
   steps (the console's methods do the write and take no expected rev): a change between them is not caught.
 - Offline: `client_at` is the app's own time of the action. The server orders by receive time, writes `client_at` in the
   audit (and a chronology line when it is more than a minute behind), and clamps one more than 5 minutes ahead of the
-  server's clock (flagged `client_at_clamped`) and refuses one older than 7 days. An action that no longer makes
-  sense is a 409 with a machine-readable
-  `reason` and the current object (incident_closed, unit_changed, already_acknowledged): never applied late, never
-  merged. A dispatch is not here.
+  server's clock (flagged `client_at_clamped`) and refuses one older than 7 days. An action that no longer makes sense
+  is a 409 with a machine-readable `reason` and the current object (incident_closed, unit_changed,
+  already_acknowledged): never applied late, never merged.
+- No dispatch route. But a unit status with `incident_id` is the console's own status-on-a-call: for a working status
+  on an open incident, Cad.unit_status puts the unit on that call (and off any other), exactly as the console does,
+  under the same "dispatch" role. The spec says so (UnitStatusRequest.yaml).
 Known gap (fence): if the hub's fence drops after the CAD write but before the key's answer is kept, the key row stays
 "running" with the write applied. A retry is a 409 `in_progress` for 120 s, then the work runs again: a unit status is
 caught by If-Match and an acknowledge by `already_acknowledged`, but a note would be added twice.
@@ -34,11 +36,14 @@ import math
 import re
 from urllib.parse import unquote
 
-from . import routes
+from typing import TYPE_CHECKING
+
 from .errors import envelope
 from .idempotency import BUSY, KEY, MISMATCH, REPLAY, fingerprint
 from .serialize import scrub
-from .routes import Ctx, Route
+
+if TYPE_CHECKING:                   # annotations only: routes.py imports this module for its route table
+    from .routes import Ctx
 
 FUTURE_S = 300.0            # a client_at further ahead than this is clamped (docs/mobile-api.md section 8)
 PAST_S = 7 * 86400.0        # ... and one older than this is refused (a 0 would write a 1970 chronology line)
@@ -125,7 +130,7 @@ class Req:
         except ValueError:
             body = None
         if not isinstance(body, dict):
-            return fail(400, "invalid", "the body must be a JSON object")
+            return fail(400, "bad_request", "the body must be a JSON object")
         self.body = body
         return None
 
@@ -143,9 +148,9 @@ class Req:
         if raw is None:
             return None
         if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0:
-            return fail(400, "invalid", "client_at: unix seconds")
+            return fail(400, "bad_request", "client_at: unix seconds")
         if raw < self.now - PAST_S:
-            return fail(400, "invalid", "client_at: older than 7 days")
+            return fail(400, "bad_request", "client_at: older than 7 days")
         self.client_at = self.at = float(raw)
         if self.at > self.now + FUTURE_S:   # a clock running ahead: never in the future of the record
             self.at, self.clamped = self.now, True
@@ -164,12 +169,12 @@ class Req:
 
     def post(self, body: dict) -> tuple[dict | None, tuple | None]:
         """The console's write: (its answer, None), or (None, the refusal): the console's 400 {"error": text} is a v1
-        400 `invalid`."""
+        400 `bad_request`."""
         status, out = self.act.post(self.path, body, self.client)
         if status == 200:
             return out, None
         st = status if status in (403, 404) else 400
-        return None, fail(st, {403: "forbidden", 404: "not_found"}.get(st, "invalid"), _message(out))
+        return None, fail(st, {403: "forbidden", 404: "not_found"}.get(st, "bad_request"), _message(out))
 
     def say_late(self, iid, what: str) -> None:
         """A queued action applied late: one chronology line saying when the app made it (nothing else changes)."""
@@ -243,7 +248,7 @@ def _check_incident(req: Req, iid, current: dict):
         return None
     inc = req.act.incident(iid)
     if inc is None:
-        return fail(404, "no_such_incident", "no such incident")
+        return fail(404, "not_found", "no such incident")
     if not req.act.is_open(inc):
         return fail(409, "conflict", f"not applied: the incident is {inc['status']}", reason="incident_closed",
                     current=current)
@@ -255,7 +260,7 @@ def unit_status(ctx: Ctx):
 
     def resolve(act):
         u = act.unit(code)
-        return (f"/api/cad/unit/{u['id']}/status", u) if u else (None, fail(404, "no_such_unit", "no such unit"))
+        return (f"/api/cad/unit/{u['id']}/status", u) if u else (None, fail(404, "not_found", "no such unit"))
     req = Req(ctx, resolve)
     if req.refusal:
         return req.refusal
@@ -265,9 +270,9 @@ def unit_status(ctx: Ctx):
         current = req.act.unit_object(u["id"])           # the object GET /units serves: its rev is what If-Match checks
         status, iid = req.body.get("status"), _id(req.body.get("incident_id"))
         if not isinstance(status, str) or not status.strip():
-            return fail(400, "invalid", "status: required")
+            return fail(400, "bad_request", "status: required")
         if iid is False:
-            return fail(400, "invalid", "incident_id: an incident id (0 = no call)")
+            return fail(400, "bad_request", "incident_id: an incident id (0 = no call)")
         refusal = _if_match_conflict(req, ctx, current) or _check_incident(req, iid, current)
         if refusal:
             return refusal
@@ -292,12 +297,12 @@ def alarm_ack(ctx: Ctx):
 
     def resolve(act):
         return (f"/api/cad/alarm/{aid}/ack", act.alarm(aid)) if act.alarm(aid) else (
-            None, fail(404, "no_such_alarm", "no such alarm"))
+            None, fail(404, "not_found", "no such alarm"))
     req = Req(ctx, resolve)
     if req.refusal:
         return req.refusal
 
-    def already(a: dict):
+    def already():
         mine = req.act.alarm_object(aid)             # the object GET /alarms serves (the name only, scrubbed)
         return fail(409, "conflict", scrub(f"not applied: already acknowledged by {mine['ack_by'] or 'someone'}"),
                     reason="already_acknowledged", current=mine)
@@ -305,11 +310,11 @@ def alarm_ack(ctx: Ctx):
     def work():
         a = req.act.alarm(aid)
         if a["ack_at"] is not None:
-            return already(a)
+            return already()
         out, refusal = req.post({})
         if refusal:
             a = req.act.alarm(aid)
-            return already(a) if a["ack_at"] is not None else refusal     # another dispatcher got there first
+            return already() if a["ack_at"] is not None else refusal     # another dispatcher got there first
         a = req.act.alarm(aid)
         req.say_late(a["incident_id"], f"Alarm {aid} acknowledged")
         return 200, {"alarm": req.act.alarm_object(aid)} | req.extra(), {}
@@ -323,7 +328,7 @@ def incident_note(ctx: Ctx):
 
     def resolve(act):
         return (f"/api/cad/incident/{iid}/note", act.incident(iid)) if act.incident(iid) else (
-            None, fail(404, "no_such_incident", "no such incident"))
+            None, fail(404, "not_found", "no such incident"))
     req = Req(ctx, resolve)
     if req.refusal:
         return req.refusal
@@ -335,7 +340,7 @@ def incident_note(ctx: Ctx):
                         current=req.act.incident_object(iid))
         text = req.body.get("text")
         if not isinstance(text, str):
-            return fail(400, "invalid", "text: required")
+            return fail(400, "bad_request", "text: required")
         text = text.strip()
         if req.late:                    # the suffix counts against the console's 2000 characters: the text is trimmed
             suffix = f" [written {req.act.hms(req.at)}]"
@@ -352,13 +357,3 @@ def incident_note(ctx: Ctx):
             | req.extra(), {}
     return _once(req, work)
 
-
-ROUTES: list[Route] = [
-    Route("POST", "/api/v1/units/{code}/status", unit_status, "device", "writes", "dispatch"),
-    Route("POST", "/api/v1/alarms/{id}/ack", alarm_ack, "device", "writes", "dispatch"),
-    Route("POST", "/api/v1/incidents/{id}/notes", incident_note, "device", "writes", "dispatch"),
-]
-
-# whichever of routes.py and this module loads first (routes.py imports this one at its end: a circular import that is
-# safe because neither reads the other's names until both are loaded)
-routes.ROUTES.extend(ROUTES)

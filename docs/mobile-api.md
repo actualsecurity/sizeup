@@ -542,57 +542,15 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Idempotency | `Idempotency-Key` on every v1 POST; table `(principal, key) → (status, body, at)` kept 24 h. "I'm responding", status and ack retried on a flaky network never apply twice. The same key with a different body gets 422 |
 | Offline / queued actions | The app queues writes with the key and its own `at`. On replay the server orders by receive time, records `client_at` in the chronology, and refuses actions that no longer make sense (incident closed, unit moved on) with 409 + the current object. The app shows "not applied: …". A dispatch is never auto-merged |
 | Clock skew | `server_time` in `meta` and every SSE event; the app computes its offset. A `client_at` more than 5 min in the future is clamped and flagged |
-| Concurrency | `If-Match: <rev>` on incident edits (notes are append-only and need none); 412 with the current object. Needs a per-incident `rev` (today only the global `store.rev`) |
+| Concurrency | `If-Match: <rev>` on incident edits (notes are append-only and need none); 412 with the current object. Needs a per-incident `rev` (today only the global `store.rev`). As built: on unit status only ([10.2](#102-writes-as-built-562)) |
 | Machine API keys | Not end-user tokens. Service token + bearer + scopes, one key per consumer in SSM, listed on Settings > System with last use, rotated by script. One token per station |
-| Audit | `activity.py` gains `device_id`, `app_version` and `via` (web, ios, android). Every v1 write goes through `CadApi.did` as today |
+| Audit | `activity.py` gains `device_id`, `app_version` and `via` (web, ios, android). Every v1 write goes through `CadApi.did` as today. As built: packed into the activity row's `ua` column, no new columns ([10.2](#102-writes-as-built-562)) |
 | Observability | `perf.py` path families gain a client dimension `(via, app_version)`. Health tile: active devices, versions in the wild, push success and failure (SNS delivery logs), stream count |
 | Backward compatibility | v1 additive only; `min_app` forces upgrades; the last two app releases keep working. App store review and rollout take 1-7 days and users update late |
 | Feature flags | Server-side in `meta.features` (today code-driven behind `[mobile] enabled`; a source such as Settings or `[mobile] features` comes with the first feature), so a feature can be turned off without an app release. No third-party flag service |
 | Staging | **Deferred** (D8, 2026-11-16): mobile is built on the production hub behind [the safeguards](#sharing-the-production-hub). Still needed before the first external build: a second small hub task (0.25-0.5 vCPU, about $11-21 a month) on its own hostname and Access app, synthetic data only, outbound guard on except SNS to a sandbox app. App review needs a working demo login: give Apple and Google a **review account on staging**, never production |
 | Distribution | TestFlight (internal: up to 100 team members without review; external: beta review) and Play internal testing (up to 100 testers). Then a public listing, or Apple Business Manager custom apps for a private listing (**unverified** fit for volunteers' own phones) (D10) |
 | Repos | The hub, the spec and the contract tests stay in this **public** repo. The app goes in a **private** repo (proposed, D10). The app binary holds no secrets: only the hub URL; everything else comes from enrollment |
-
-**Writes (#562, built, behind the `writes` flag).** `POST /api/v1/units/{code}/status`, `/alarms/{id}/ack` and
-`/incidents/{id}/notes` go through the console's own code (`CadApi.post` on the console's path, so its role check,
-validation, operator name and activity row), as the device's person. The handler gets a `Gateway`
-(`sizeup/api/v1/gateway.py`), never a `CadApi`, the Cad service or SQL: `acting(principal)` is None for anything that is
-not a person's device (a 503), and an `Acting` offers only narrow lookups (unit, alarm, incident), `permit`, `post` and a
-note. They need the least role the console needs ("dispatch"; a viewer is a 403). Notes answer 201 where the console
-answers 200.
-
-- **Body.** At most 16 KB (413 `body_too_large`). A POST, PUT, PATCH or DELETE body must come with `Content-Length`: none,
-  or a chunked body, is a 411 `length_required`; a repeated or non-numeric one is a 400 `bad_body`; a body that does not
-  arrive within 8 s in total (one deadline, not per read) is a 408 `request_timeout`; the
-  connection is closed on each. The hook (`handler.MAX_BODY`, `respond(..., body=)`, `Ctx.body`) is shared by every v1
-  route with a body.
-- **Idempotency-Key** (required): table `v1_idempotency` in hub.sqlite (next to the CAD's state dir; made on the first
-  write), kept 24 h per device, at most 1000 per device, an answer over 16 KB is not kept. A retry gets the first answer
-  back with `Idempotent-Replayed: true`; the same key with another body is a 422; the same key while the first still runs
-  is a 409 `in_progress` with `Retry-After: 1`; a running claim older than 120 s is taken over (its owner token stops the
-  slow original from overwriting). Only 200, 201, 409 and 412 are kept: a 400, 403 or 404 can be corrected under the
-  same key.
-- **If-Match** takes the unit's `rev`: the rev `GET /units` serves (`serialize.with_rev(serialize.unit(...))`, one
-  `rev.py`), and is for unit status only (412 with the current unit); an alarm acknowledge and a note ignore the header
-  (an alarm is acknowledged once, and a second try is its own 409). A queued action (`client_at`) must send it (428
-  `precondition_required`; `*` counts as missing there), and a stale one is a 409 `unit_changed`, so an old queued
-  status never overrides a newer one. The check and the write are two steps (the console's methods do the write and
-  take no expected rev): a change between them is not caught.
-- **client_at**: older than 7 days is a 400, more than 5 minutes ahead is clamped (`client_at_clamped`). The audit is the
-  activity row of the console's own write, with its "browser" (`ua`) column packed as
-  `via=ios app=1.4.2 device=<id> client_at=<unix>` (`clamped` appended when clamped; not separate columns). `via` is ios,
-  android or web from `X-Client`, else `api`. A queued action more than a minute late adds a chronology note through the
-  console's note path (so it has an activity row of its own).
-- Known gap (fence): if the fence drops after the CAD write but before the key keeps its answer, the key stays
-  "running" with the write applied: a retry is a 409 `in_progress` for 120 s, then the work runs again (a unit status is
-  caught by If-Match, an acknowledge by `already_acknowledged`, a note is added twice).
-- Cost (#446): the key store's lock is held across two sqlite commits per write (the claim and the answer), at most 2
-  writes a second per device; nothing else in v1 takes it.
-- 409 answers carry `error.reason` (`incident_closed`, `unit_changed`, `already_acknowledged`, `in_progress`) and the
-  current object. The unit, alarm and incident (summary) in an answer or a `current` are the objects the reads serve,
-  built by the same serializers, so the object is what the next GET returns (once reads' cache, up to 1 s, rebuilds);
-  a note answers `{incident_id, units, places}` (the id a string). Every text goes through reads' `scrub`. An alarm's
-  `ack_by` is the name only: the console's operator string has the e-mail address, which no
-  v1 answer carries. A dispatch is never offered here.
 
 ---
 
@@ -730,6 +688,57 @@ writes. `/me` is PR 2's.
   by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
   remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
   only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
+
+### 10.2 Writes as built (#562)
+
+Behind the `writes` flag. `POST /api/v1/units/{code}/status`, `/alarms/{id}/ack` and
+`/incidents/{id}/notes` go through the console's own code (`CadApi.post` on the console's path, so its role check,
+validation, operator name and activity row), as the device's person. The handler gets a `Gateway`
+(`sizeup/api/v1/gateway.py`), never a `CadApi`, the Cad service or SQL: `acting(principal)` is None for anything that is
+not a person's device (a 503), and an `Acting` offers only narrow lookups (unit, alarm, incident), `permit`, `post` and a
+note. They need the least role the console needs ("dispatch"; a viewer is a 403). Notes answer 201 where the console
+answers 200.
+
+- **Body.** At most 16 KB (413 `body_too_large`). A POST, PUT, PATCH or DELETE body must come with `Content-Length`: none,
+  or a chunked body, is a 411 `length_required`; a repeated or non-numeric one is a 400 `bad_body`; a body that does not
+  arrive within 8 s in total (one deadline, not per read) is a 408 `request_timeout`; the
+  connection is closed on each. The hook (`handler.MAX_BODY`, `respond(..., body=)`, `Ctx.body`) is shared by every v1
+  route with a body.
+- **Idempotency-Key** (required): table `v1_idempotency` in hub.sqlite (next to the CAD's state dir; made on the first
+  write), kept 24 h per device, at most 1000 per device, an answer over 16 KB is not kept. A retry gets the first answer
+  back with `Idempotent-Replayed: true`; the same key with another body is a 422; the same key while the first still runs
+  is a 409 `in_progress` with `Retry-After: 1`; a running claim older than 120 s is taken over (its owner token stops the
+  slow original from overwriting). Only 200, 201, 409 and 412 are kept: a 400, 403 or 404 can be corrected under the
+  same key. After a 409 or 412 a fresh attempt is a new action with a new key: the key covers the method, path and
+  body, never If-Match, so the same key replays the 409 or 412.
+- **If-Match** takes the unit's `rev`: the rev `GET /units` serves (`serialize.with_rev(serialize.unit(...))`, one
+  `rev.py`), and is for unit status only (412 with the current unit); an alarm acknowledge and a note ignore the header
+  (an alarm is acknowledged once, and a second try is its own 409). A queued action (`client_at`) must send it (428
+  `precondition_required`; `*` counts as missing there), and a stale one is a 409 `unit_changed`, so an old queued
+  status never overrides a newer one. The check and the write are two steps (the console's methods do the write and
+  take no expected rev): a change between them is not caught.
+- **client_at**: older than 7 days is a 400, more than 5 minutes ahead is clamped (`client_at_clamped`). The audit is the
+  activity row of the console's own write, with its "browser" (`ua`) column packed as
+  `via=ios app=1.4.2 device=<id> client_at=<unix>` (`clamped` appended when clamped; not separate columns). `via` is ios,
+  android or web from `X-Client`, else `api`. A queued unit status or acknowledge more than a minute late adds a
+  separate chronology note through the console's note path (only when the unit or alarm is on an incident; the note
+  has an activity row of its own). A late note gets ` [written HH:MM:SS]` appended to its own text instead, which is
+  shortened to fit the console's 2000 characters.
+- Known gap (fence): if the fence drops after the CAD write but before the key keeps its answer, the key stays
+  "running" with the write applied: a retry is a 409 `in_progress` for 120 s, then the work runs again (a unit status is
+  caught by If-Match, an acknowledge by `already_acknowledged`, a note is added twice).
+- Cost (#446): the key store's lock is held across two sqlite commits per write (the claim and the answer), at most 2
+  writes a second per device; nothing else in v1 takes it.
+- 409 answers carry `error.reason` (`incident_closed`, `unit_changed`, `already_acknowledged`, `in_progress`) and the
+  current object. The unit, alarm and incident (summary) in an answer or a `current` are the objects the reads serve,
+  built by the same serializers, so the object is what the next GET returns (once reads' cache, up to 1 s, rebuilds);
+  a note answers `{incident_id, units, places}` (the id a string). Every text goes through reads' `scrub`. An alarm's
+  `ack_by` is the name only: the console's operator string has the e-mail address, which no v1 answer carries.
+- Errors use the reads' codes for the same meaning: `not_found` (404, the message names what: "no such unit") and
+  `bad_request` (400).
+- No dispatch route. A unit status with `incident_id` is the console's own status on a call, though: a working status
+  on an open incident puts the unit on that call and takes it off any other (`Cad.unit_status`), under the same
+  "dispatch" role. `UnitStatusRequest.yaml` says so.
 
 ---
 

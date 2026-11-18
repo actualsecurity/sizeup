@@ -83,6 +83,9 @@ def _connect(path: str, incremental: bool = False) -> sqlite3.Connection:
     return db
 
 
+connect = _connect      # the public name, for hub.sqlite's other users (sizeup/api/v1/idempotency.py)
+
+
 def _dump(d: dict) -> str:
     return json.dumps(d, separators=(",", ":"), sort_keys=True, default=str)
 

@@ -4,8 +4,11 @@ required: true
 description: >
   A UUID the app makes once per action and sends again, unchanged, on every retry (a flaky network, its offline queue).
   The hub keeps the first answer 24 hours per device and replays it (header `Idempotent-Replayed: true`) without
-  applying the action twice. The same key with another path or body is a 422 `idempotency_key_reused`; the same key
-  while the first request still runs is a 409 `in_progress` with Retry-After. 8 to 128 letters, digits and `- _ . :`.
+  applying the action twice. Only decisions are kept: 200, 201, 409 and 412. A 400, 403 or 404 is not kept, so the
+  corrected request may be sent again under the same key. After a 409 or 412 the action was not applied, and a fresh
+  attempt (with the current object's rev) is a new action: send a new key, or the 409 / 412 is replayed. The key
+  covers the method, path and body, never If-Match. The same key with another path or body is a 422
+  `idempotency_key_reused`; the same key while the first request still runs is a 409 `in_progress` with Retry-After. 8 to 128 letters, digits and `- _ . :`.
 schema:
   type: string
   pattern: "^[A-Za-z0-9_.:-]{8,128}$"

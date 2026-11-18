@@ -42,8 +42,8 @@ post:
       content: {application/json: {schema: {$ref: ../schemas/Error.yaml}}}
     default:
       description: >
-        An error: 400 (invalid, bad `client_at`, idempotency_key_required, invalid_idempotency_key), 401, 403 forbidden,
-        404 no_such_alarm, 408 request_timeout, 411 length_required, 413 body_too_large, 429, 503.
+        An error: 400 (bad_request: a bad body or `client_at`, idempotency_key_required, invalid_idempotency_key), 401, 403 forbidden,
+        404 not_found (no such alarm), 408 request_timeout, 411 length_required, 413 body_too_large, 429, 503.
       headers:
         Retry-After:
           description: Seconds to wait (429, 503).

@@ -3,5 +3,5 @@ required: [status]
 properties:
   status: {type: string, description: "A status code of Settings > Unit statuses; the console's validation applies."}
   note: {type: string, maxLength: 200, description: "The out-of-service reason."}
-  incident_id: {type: [string, integer], description: "Which call the status is for, as an incident id (a string, as the reads serve it; an integer is accepted); 0 or empty = none. A closed call is a 409 `incident_closed`."}
+  incident_id: {type: [string, integer], description: "Which call the status is for, as an incident id (a string, as the reads serve it; an integer is accepted); 0 or empty = none. A closed call is a 409 `incident_closed`. As on the console, a working status (for example dispatched or on location) on an open call puts the unit on that call, and takes it off any other call it was on."}
   client_at: {type: number, description: "The app's own time of the action (unix seconds): recorded in the audit; more than 5 minutes ahead of the server it is clamped."}

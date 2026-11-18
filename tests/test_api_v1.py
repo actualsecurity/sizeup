@@ -174,16 +174,25 @@ def test_path_templates_match_one_segment():
     assert v1.respond("GET", "/api/v1/incidents/", "", {})[0] == 404
 
 
+# The only imports of a store, sqlite3 or the CAD in sizeup/api, each a whole line in one file. Each is used on a
+# request only, never at import (tests/test_api_v1_writes.py: the key table is made on the first write).
+DB_IMPORTS = {
+    "reads.py": [r"from sizeup\.cad\.store import CadError"],           # the CAD's exception for a missing row
+    "gateway.py": [r"from sizeup\.cad\.api import CadApi",              # the one door to the CAD (#562)
+                   r"from sizeup\.cad\.store import OPEN, TZ, CadError"],
+    "idempotency.py": [r"import sqlite3",                                # the key store in hub.sqlite (#562)
+                       r"from sizeup\.cloud\.hubstore import connect as hub_connect"],
+}
+
+
 def test_the_package_never_touches_a_database():
-    """No startup database writes: nothing in sizeup/api reads or writes a store."""
+    """No startup database writes: nothing in sizeup/api imports a store, sqlite3 or the CAD, but the lines listed in
+    DB_IMPORTS (a new one there is a reviewed decision, not an accident)."""
     for f in PKG.rglob("*.py"):
-        # (the one import of the CAD's own exception class, CadError, is allowed: reads.py answers a missing row)
-        # (#562) the one door to the CAD and the key store (hub.sqlite): both only on a request, never at import
-        if f.name in ("gateway.py", "idempotency.py"):
-            continue
         src = f.read_text()
-        if f.name == "reads.py":      # only reads.py, and only that whole line
-            src = re.sub(r"^from sizeup\.cad\.store import CadError\s*(#.*)?$", "", src, flags=re.M)
+        for allowed in DB_IMPORTS.get(f.name, []):
+            src, n = re.subn(rf"^\s*{allowed}\s*(#.*)?$", "", src, flags=re.M)
+            assert n == 1, (f.name, allowed)          # a stale entry fails too
         assert not re.search(r"^\s*(import|from)\s+\S*(sqlite3|store|sizeup\.cad)", src, re.M), f
 
 

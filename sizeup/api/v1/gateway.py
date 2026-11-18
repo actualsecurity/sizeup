@@ -11,7 +11,6 @@ import json
 import threading
 from datetime import datetime
 
-from sizeup.cad.activity import client_tag
 from sizeup.cad.api import CadApi
 from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.cloud.access import Identity
@@ -21,6 +20,19 @@ from .principal import person
 from .serialize import alarm as alarm_shape
 from .serialize import incident_summary, with_rev
 from .serialize import unit as unit_shape
+
+
+def client_tag(via: str, device: str, app_version: str, client_at: float | None = None, clamped: bool = False) -> str:
+    """The "browser" of a write from the app: `via=ios app=1.2.0 device=dev-0001 client_at=1731700000` (+ ` clamped`).
+    The device id, app version and via go in the activity row's ua column, so the audit needs no new column in
+    cad.sqlite; the activity log cuts ua at UA_MAX, so the long fields are bounded here. Only ASCII letters, digits and
+    ._:-+ are kept: the tag cannot be forged and is safe in the CSV export."""
+    def clean(v: str, n: int) -> str:
+        return "".join(ch for ch in str(v) if (ch.isascii() and ch.isalnum()) or ch in "._:-+")[:n] or "-"
+    out = f"via={clean(via, 7)} app={clean(app_version, 20)} device={clean(device, 40)}"
+    if client_at is not None:
+        out += f" client_at={int(client_at)}" + (" clamped" if clamped else "")
+    return out
 
 
 class Acting:
@@ -43,7 +55,7 @@ class Acting:
         return datetime.fromtimestamp(t, TZ).strftime("%H:%M:%S")
 
     def client_tag(self, via: str, app: str, client_at: float | None = None, clamped: bool = False) -> str:
-        """The audit tag of this device's writes (activity.client_tag)."""
+        """The audit tag of this device's writes (client_tag above)."""
         return client_tag(via, self.principal.device, app, client_at, clamped)
 
     def log(self, message: str) -> None:
