@@ -1188,6 +1188,7 @@ class Sources:
     def __init__(self, cad, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print):
         self.cad, self.store, self.clock, self.log = cad, cad.store, clock, log
         self._lock = threading.RLock()
+        self._resent_said: set[tuple[str, str]] = set()     # (source, event id): a re-sent older report dropped, said
         # Is the paging decoder up? The hub sets it (the station connected); alone, always.
         self.paging_ok: Callable[[], bool] = lambda: True
         # trigger(reason): tell the station's adapters "poll now" (the app sets it: the runner here, or a job to the
@@ -1791,6 +1792,16 @@ class Sources:
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
                 into = self._report(ev.source, rep["merged_into"])
                 return into["incident_id"] if into else None
+            resent = d.get("resent") is True             # a copy the station's quarantine sends again (the hub marks it)
+            if rep and snap is not None and rep.get("seen_at") is not None and resent and snap < rep["seen_at"]:
+                # a re-sent copy older than the snapshot applied, by however little: never put back over it (a newer
+                # one may have come from a build without the station's own check, source_latest). Said once per event
+                key = (ev.source, ev.event_id)
+                if key not in self._resent_said:
+                    self._resent_said.add(key)
+                    self.log(f"incident sources: {label}: a re-sent older report of an event dropped (a newer one is "
+                             "applied)")
+                return rep["incident_id"]
             if rep and snap is not None and rep.get("seen_at") is not None and snap < rep["seen_at"] - SNAPSHOT_SKEW_S:
                 # an older snapshot than the one applied (the station's quarantine sending one again: 10 min stale at
                 # least): applying it would put back what the feed has changed since (type, location, units). Within

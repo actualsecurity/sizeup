@@ -269,7 +269,9 @@ The station treats 400 / 413 / 422 as "refused for good":
   new event after 10 min, 30 min, then hourly, for 8 tries or 24 h, then "stuck" until a person drops it.
 - A `source_event` is a snapshot. A quarantined one is dropped once the feed has sent a newer report of the same event,
   and the hub ignores a report more than 2 min older than the one it applied (`source_reports.seen_at`; within 2 min
-  it is applied, so the station's clock stepping back never drops a newer one).
+  it is applied, so the station's clock stepping back never drops a newer one). A copy the quarantine sends again
+  carries its `qid`, and the hub applies it only over an older snapshot, however close (a newer one may have come from a
+  build that didn't note it in `source_latest`).
 - An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late" for 24 h, then clears.
 - A page event whose `page_text` came first still brings its clip.
 

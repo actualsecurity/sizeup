@@ -601,3 +601,58 @@ def test_the_hubs_refusals_are_strict_json_whatever_the_station_sent(tmp_path):
         assert code == 413 and strict(body)["reason"] == "too_large" and strict(body)["max_bytes"] == hub_mod.MAX_EVENTS_BODY
     finally:
         hub.close()
+
+
+def test_a_resent_older_snapshot_never_overwrites_a_newer_one_within_the_skew(tmp_path):
+    """#791: a feed snapshot S1 is quarantined on the station; a build from before #762 (rolled back to) sends a newer
+    S2 60 s later without noting it in source_latest, and the hub applies it; back on today's build the quarantine sends
+    S1 again. That copy carries its qid, and the hub applies a re-sent copy only over an older snapshot, however close
+    (SNAPSHOT_SKEW_S still lets a first send through: the station's clock stepping back). Invented feed."""
+    from sizeup.cloud.station import StationLink
+    hub = HubRun(hub_cfg(tmp_path))
+    ob = Outbox(tmp_path / "st" / "outbox.sqlite")
+    try:
+        h, logs = hub.app.hub, []
+        sources = hub.app.cad.sources
+        sources.log = logs.append
+        now = time.time()
+        s1 = _feed(typ="ALARM/COMM", where="12 Example Ave", seen=now - 120)
+        s1["first_seen"] = now - 120
+        s2 = dict(_feed(units=("E60", "L31"), typ="STRU", where="14 Example Ave", seen=now - 60), first_seen=now - 120)
+        ob.add("source_event", s1, None, at=now - 120)
+        q = ob.quarantine(ob.batch(meta=True)[0], "apply_failed", "a hub bug", now=now - 119)   # (1) S1 held
+        assert q["critical"] is True
+        # (2) the older build sends S2 as a plain event (no qid); the hub applies it
+        code, body, _ = h._events(json.dumps({"epoch": "e-old", "events": [
+            {"seq": 1, "at": now - 60, "type": "source_event", "data": s2, "audio": None}]}).encode())
+        assert code == 200 and json.loads(body)["applied"] == 1
+
+        def report():
+            return json.loads(hub.app.cad.store.one("SELECT data FROM source_reports WHERE ref = 'A1'")["data"])
+        assert (report()["type"], report()["location"]) == ("STRU", "14 Example Ave")
+        # (3) today's build: the quarantine sends S1 again, as the station posts it (its qid on the event)
+        assert ob.requeue_due(now=now + 10 ** 4)[0]["superseded"] is False     # (this file never saw S2)
+        rows = ob.batch(meta=True)
+        sent = {}
+
+        class Client:
+            def request(self, method, path, body=None, timeout=None):
+                sent.update(body)
+                return {}
+        link = StationLink.__new__(StationLink)
+        link.outbox, link.station_id = ob, "pcfd"
+        link._post_events(Client(), rows)
+        assert sent["events"][0]["qid"] == q["id"]
+        code, body, _ = h._events(json.dumps(dict(sent, epoch="e-new")).encode())
+        assert code == 200 and json.loads(body)["acked"] == rows[0]["seq"]
+        assert (report()["type"], report()["location"], report()["units"]) == ("STRU", "14 Example Ave", ["E60", "L31"])
+        assert sum("re-sent older report" in m for m in logs) == 1
+        code, body, _ = h._events(json.dumps(dict(sent, epoch="e-again")).encode())     # (again: said once)
+        assert sum("re-sent older report" in m for m in logs) == 1
+        # a first send (no qid) of a snapshot 60 s older is still applied: the skew a station's clock may step back
+        code, body, _ = h._events(json.dumps({"epoch": "e-clock", "events": [
+            {"seq": 1, "at": now, "type": "source_event", "data": s1, "audio": None}]}).encode())
+        assert (report()["type"], report()["location"]) == ("ALARM/COMM", "12 Example Ave")
+    finally:
+        ob.close()
+        hub.close()

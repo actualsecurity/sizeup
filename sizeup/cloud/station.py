@@ -727,7 +727,10 @@ class StationLink:
         body = {"epoch": self.outbox.epoch, "station": self.station_id,
                 "events": [{"seq": r["seq"], "at": r["at"], "type": r["type"], "data": r["data"],
                             "audio": base64.b64encode(r["audio"]).decode() if r["audio"] else None,
-                            "audio_dropped": r["audio_dropped"]} for r in rows]}
+                            "audio_dropped": r["audio_dropped"],
+                            # a quarantined event sent again: its quarantine row (the hub applies such a feed snapshot
+                            # only over an older one; an older hub ignores the key)
+                            **({"qid": r["qid"]} if isinstance(r.get("qid"), int) else {})} for r in rows]}
         return client.request("POST", "/api/station/events", body, timeout=60.0)
 
     def _forward_once(self, client: HubClient, backoff: Backoff, now: float | None = None) -> float | None:
