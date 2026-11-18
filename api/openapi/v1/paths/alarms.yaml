@@ -1,0 +1,47 @@
+get:
+  operationId: listAlarms
+  summary: The alarms
+  description: >
+    The open alarms, the notices and the just acknowledged, as the console shows them now, newest first (at most 40
+    in all, so there is no paging). `ETag` is the list's rev.
+  parameters:
+    - $ref: ../parameters/IfNoneMatch.yaml
+  responses:
+    "200":
+      description: The alarms.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/AlarmList.yaml
+          example:
+            items:
+              - $ref: ../examples/Alarm.yaml
+            next: null
+            server_time: 1767225800.0
+            rev: 5d4c3b2a19080706
+    "304":
+      description: Not modified (the `If-None-Match` rev is current). No body.
+      headers:
+        ETag:
+          $ref: ../headers/ETag.yaml
+    "401":
+      description: Not signed in.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "503":
+      description: The CAD could not answer (`unavailable`), with Retry-After.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

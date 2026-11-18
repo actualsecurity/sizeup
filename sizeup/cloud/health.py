@@ -264,6 +264,13 @@ def _read(path: str) -> str:
         return ""
 
 
+def _hold_until(upd: dict) -> dict:
+    """A deferred switch's deadline (autoupdate.py "hold".until, the station's clock): {"hold_until": t} or {}."""
+    h = upd.get("hold") if isinstance(upd.get("hold"), dict) else {}
+    t = h.get("until")
+    return {"hold_until": float(t)} if isinstance(t, (int, float)) and not isinstance(t, bool) else {}
+
+
 def station_adapter(a) -> dict | None:
     """The station's incident-source adapter as it reported it (#301): state, short repo name, commit, text, and each
     source's health. Only these keys pass (the station sends no URL or credential; nothing else is shown either)."""
@@ -393,6 +400,8 @@ def station_metrics(app, metrics: Metrics) -> dict:
             jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
                          "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
                          "context": True}
+            if job in assigned and isinstance(rs.get("hold_until"), (int, float)):
+                jobs[job]["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: no fault
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
@@ -634,7 +643,8 @@ class StationHealth:
         desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
-                        "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                        "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                                       **_hold_until(upd)),
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
                         "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
@@ -667,14 +677,20 @@ class StationHealth:
                             "on": str(d.get("on") or "")[:64],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
-                            "detail": str(js.get("detail") or "")[:200]})
+                            "detail": str(js.get("detail") or "")[:200],
+                            # (#637) a P25 system held back after dropouts: until when (the hub's clock)
+                            "hold_until": js["hold_until"] + hub.skew
+                            if job != "Off" and isinstance(js.get("hold_until"), (int, float))
+                            and not isinstance(js.get("hold_until"), bool) else None})
         out["dongles"] = dongles
         names = {d["serial"]: d["name"] for d in dongles}
         out["groups"] = [{"name": str(g.get("name") or "")[:40],
                           "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
                           "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
                           "short": [str(j)[:40] for j in g.get("short") or []][:24],
-                          "unowned": [str(j)[:40] for j in g.get("unowned") or []][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []
+                                      if j not in (g.get("parked") or [])][:24],
+                          "parked": [str(j)[:40] for j in g.get("parked") or []][:24],     # (#637) off on purpose
                           "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
                                         for s, j in list((g.get("conflicts") or {}).items())[:16]}
                           if isinstance(g.get("conflicts"), dict) else {}}
@@ -951,8 +967,17 @@ class StationHealth:
                                                   and b["last"].get("line") else ""),
                              "since": float((b["last"] or {}).get("at") or now) if isinstance(b["last"], dict) else now}
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
-            held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
-                                           "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
+            # a deferred switch past its "by HH:MM" (autoupdate.py describe() says "behind" then): the updater died or
+            # hangs, so at once, not behind_s later
+            # (only its own deferral, to the hub's build, past "by HH:MM" + 2 min: a burst moving the hub on while it
+            # waits, or a late station switching to the build it staged, is the usual behind_s)
+            u = b["update"] if isinstance(b["update"], dict) else {}
+            overdue = (u.get("state") == "deferred" and same_build(u.get("to"), b["hub"])
+                       and isinstance(u.get("hold_until"), (int, float)) and self._station_now(now) > u["hold_until"] + 120)
+            held("behind", 0 if overdue else self.behind_s,
+                 {"severity": "warning", "title": "Station behind the hub",
+                  "text": f"{b['text']} (the hub runs {short(b['hub'])})"
+                          + (": its switch is overdue (sizeup-update on the station)" if overdue else "")})
         for x in m.get("duplicates") or []:
             on = f" {x['name']}'s job {x['job']} won't start until fixed." if x["job"] != "Off" else ""
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",

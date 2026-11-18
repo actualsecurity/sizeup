@@ -63,6 +63,12 @@ def test_a_docs_only_deploy_counts_as_success():
     assert ok and "nothing the station runs changed" in msg
 
 
+def test_a_deferred_switch_counts_once_the_station_has_built_it():
+    text = "updating ddddddd -> ccccccc: staged, switching by 18:40 (the hub's build is 2 min old: ...)"
+    ok, msg, _s, t, polls = run([(status(), "", 200), (status(state="deferred", text=text), "", 200)])
+    assert ok and msg == f"station: {text}" and polls == 2 and t == 15
+
+
 def test_failed_or_paused_fails_at_once_and_bad_credentials_too():
     ok, msg, _s, t, _n = run([(status(state="failed", text="update to ccccccc failed (preflight)",
                                       last={"to": NEW, "line": "update ...: not switched"}), "", 200)])
