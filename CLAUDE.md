@@ -54,7 +54,7 @@ the tests), `docs/cloud.md` (flows, handoff, health, every layer), `deploy/stati
 | `sizeup/cad/history.py`, `premise.py`, `preplan.py`, `preplan_docs.py`, `sizeup/attachments.py` | address history and search, premise notes, pre-plan points, site documents, incident attachments |
 | `sizeup/cad/routes.py`, `mapview.py`, `sizeup/roadgraph.py` | rig positions and probable routes on the road graph |
 | `sizeup/intel/` | radio intelligence: rule packs (`data/intel/`), engine, events, place (the locator: intersections, blocks, exits), push policy and the scrubbed push, `listen.py` (presigned Listen links), `infer.py` (the LLM stage on Bedrock: off by default, capped, backs the rules, never pushes alone) |
-| `sizeup/cloud/` | `station.py` (link), `outbox.py`, `hub.py`, `hubstore.py`, `sttinput.py` (each clip's exact speech-to-text input, station -> hub; `flac.py` its codec), `stations.py` (each station's token, who a request is), `autoupdate.py`, `configupdate.py`, `health.py`, `access.py`, `stationmode.py`, `adapters.py`, `adapterssm.py`, `adapterpass.py` (the adapter's password written from the hub, never read), the station's logs (`logread.py`, `logship.py`, `cwlogs.py`), `aircraftlink.py`, `vessellink.py` |
+| `sizeup/cloud/` | `station.py` (link), `outbox.py`, `hub.py`, `hubstore.py`, `sttinput.py` (each clip's exact speech-to-text input, station -> hub, pre-alerts then fire traffic first; `flac.py` its codec; `sttencode.py` its encoder worker; `sttarrival.py` its arrival delay on the hub), `stations.py` (each station's token, who a request is), `autoupdate.py`, `configupdate.py`, `health.py`, `access.py`, `stationmode.py`, `adapters.py`, `adapterssm.py`, `adapterpass.py` (the adapter's password written from the hub, never read), the station's logs (`logread.py`, `logship.py`, `cwlogs.py`), `aircraftlink.py`, `vessellink.py` |
 | `sizeup/handoff.py`, `leaderlock.py`, `fence.py`, `replicawatch.py` | the hub's hot/cold deploy supervisor, its S3 lock, the app's side of fencing, the replica checks and failure pushes |
 | `sizeup/audiostore.py`, `docstore.py`, `docfiles.py`, `pdfcheck.py`, `cachesync.py` | S3: clip audio, site documents and their checks, the map caches' copies |
 | `sizeup/notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes (alerts, status, intel), the phone pre-alert (read only; its topics are in Settings, not the repo), the protected-topic set (derived, fails closed; a static backstop of hashed names under it), the hub's error spikes |
@@ -84,7 +84,8 @@ caffeinate -i perl -e 'alarm 1800; exec @ARGV' .venv/bin/python -m pytest -n aut
 - **Worktrees have no `.venv`.** Use the main checkout's venv from inside the worktree, e.g.
   `../../../.venv/bin/python -m pytest -q` from `.claude/worktrees/<name>`. First check that it imports **your**
   code: `../../../.venv/bin/python -c 'import sizeup; print(sizeup.__file__)'` must print the worktree's path.
-- CI (`.github/workflows/test.yml`) runs pytest on Python 3.14 and builds the hub image, then checks `/healthz`.
+- CI (`.github/workflows/test.yml`) runs pytest on Python 3.14 in three parallel shards (`tools/ci_shard.py`; the
+  `pytest` check is green only when all three are) and builds the hub image, then checks `/healthz`.
 - Changes to `deploy/station/**`, `deploy/trunk-recorder/**`, `autoupdate.py`, `configupdate.py`, `adsbd.py` or
   `trunkrecd.py` also run **station-install** (`.github/workflows/station-install.yml`). It runs a real install on
   Ubuntu 24.04, shellcheck and a PowerShell parse check. Then it runs the auto-update end to end

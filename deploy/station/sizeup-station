@@ -10,7 +10,8 @@
 #                                switch, restart (config, state and secrets are kept); options pass to
 #                                install-linux.sh (--ref REF: run a branch; auto-update pauses)
 #   sizeup-station autoupdate on|off|status|now
-#                                follow the hub's build by itself (on by default; off = stay put)
+#                                follow the hub's build by itself (on by default; off = stay put); now: check now,
+#                                and an update waiting for its moment switches without waiting
 #   sizeup-station rollback      back to the release that ran before (a rename and a restart)
 #   sizeup-station secrets       enter the hub token / Cloudflare Access service token again
 #   sizeup-station adapter setup|status|remove|reset [source]
@@ -28,6 +29,9 @@
 #   sizeup-station stt [--hours H] [--bench clip.wav]
 #                                why speech-to-text is behind (#300): whisper's model, threads and pace, CPU use and
 #                                niceness of the radios, readsb and whisper, clips shed or skipped (read-only)
+#   sizeup-station quarantine [list | drop ID | drop all]
+#                                the events the hub refused for good, kept on the station (sizeup/cloud/outbox.py): a
+#                                critical one stuck or an alarm delivered too late stays on Health until dropped here
 #   sizeup-station version
 #
 # Never prints a secret: the hub check goes through the station itself (POST /api/station-mode/test).
@@ -47,6 +51,29 @@ RTLSDR_LIB=/opt/sizeup/rtl-sdr/lib
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     exec sudo "$0" "$@"
+  fi
+}
+
+# The updater running now (a oneshot is "activating" while it runs, waiting for its moment included)
+updater_running() {
+  case "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" in
+    activating|active|deactivating) return 0 ;;
+  esac
+  return 1
+}
+
+# Its state.json state ("deferred": built, waiting for its moment to switch, up to 45 min)
+updater_state() {
+  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("state", ""))' \
+    /var/lib/sizeup-update/state.json 2>/dev/null || true
+}
+
+# What to say when a command can't run because the updater is running
+updater_busy() {
+  echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+  if [ "$(updater_state)" = deferred ]; then
+    echo "It is waiting for its moment to switch (sudo sizeup-station autoupdate status): sudo sizeup-station" \
+         "autoupdate now switches now, autoupdate off stops it waiting; then try again." >&2
   fi
 }
 
@@ -287,8 +314,8 @@ case "$cmd" in
     exit 0 ;;
   update)
     need_root update "$@"
-    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
-      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+    if updater_running; then
+      updater_busy
       exit 1
     fi
     exec bash "$INSTALLER" --update "$@" ;;
@@ -298,10 +325,30 @@ case "$cmd" in
       on|off)
         need_root autoupdate "$@"
         python3 -I "$UPDATER" "$sub"
-        [ "$sub" = on ] && systemctl start --no-block sizeup-update.service
+        if [ "$sub" = on ]; then
+          systemctl start --no-block sizeup-update.service
+          exit 0
+        fi
+        # off while an update waits for its moment: it sees that within 15 s and stops waiting (nothing switches);
+        # stopped here if it hasn't by then, and only while it still waits (never mid-build or mid-switch)
+        if updater_running && [ "$(updater_state)" = deferred ]; then
+          for _ in $(seq 1 30); do updater_running || break; sleep 1; done
+          stopped=""
+          if updater_running && [ "$(updater_state)" = deferred ]; then
+            systemctl stop sizeup-update.service && stopped=1
+          fi
+          # said only when it is so: it stopped waiting by itself (paused), or was stopped while still waiting
+          if [ -n "$stopped" ] || [ "$(updater_state)" = paused ]; then
+            echo "the waiting update won't switch"
+          else
+            echo "the waiting update had already gone ahead: sudo sizeup-station autoupdate status" >&2
+          fi
+        fi
         exit 0 ;;
       now)
         need_root autoupdate "$@"
+        # an update waiting for its moment (a burst of hub deploys, the station busy) goes now: no settling, no queue
+        python3 -I "$UPDATER" now
         systemctl start sizeup-update.service
         python3 -I "$UPDATER" status ;;
       status)
@@ -311,8 +358,8 @@ case "$cmd" in
     esac ;;
   rollback)
     need_root rollback "$@"
-    if systemctl is-active --quiet sizeup-update.service 2>/dev/null; then
-      echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+    if updater_running; then
+      updater_busy
       exit 1
     fi
     exec python3 -I "$UPDATER" rollback "$@" ;;     # (--force: to a release whose adapter isn't set up now, #301)
@@ -322,8 +369,8 @@ case "$cmd" in
     case "$sub" in
       setup|remove)
         need_root adapter "$@"
-        if [ "$(systemctl show -p ActiveState --value sizeup-update.service 2>/dev/null || true)" = activating ]; then
-          echo "An automatic update is running (journalctl -u sizeup-update -f): try again when it's done." >&2
+        if updater_running; then
+          updater_busy
           exit 1
         fi
         rc=0
@@ -354,6 +401,11 @@ case "$cmd" in
     cd /
     exec env PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 LD_LIBRARY_PATH="$RTLSDR_LIB" "$VENV/bin/python" -S -P -m sizeup.radio.sdrserial "$@" ;;   # (-S: root never reads the venv's site-packages: #301)
   stt) exec python3 -I "$APP/tools/stt_diag.py" "$@" ;;
+  quarantine)
+    need_root quarantine "$@"
+    cd /
+    exec runuser -u sizeup -- env HOME=/var/lib/sizeup PYTHONPATH="$APP" PYTHONDONTWRITEBYTECODE=1 \
+      "$VENV/bin/python" -P -m sizeup.cloud.outbox --path /var/lib/sizeup/state/outbox.sqlite "$@" ;;
   version)
     echo "release: $(readlink -f /opt/sizeup/current 2>/dev/null || echo "none ($APP)") build $(cat "$APP/BUILD" 2>/dev/null || echo '?')"
     git --git-dir=/opt/sizeup/repo.git log -1 --format='%h %s (%cd)' --date=short "$(cat "$APP/BUILD" 2>/dev/null || echo HEAD)" 2>/dev/null || true

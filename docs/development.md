@@ -158,6 +158,15 @@ dongles plugged in:
   on a busy machine). Skips say why (`-rs`). On a clone with node installed, 13 to 45 skip: private replay data, and
   Litestream or Playwright if missing. Without node about 210 skip (the UI script tests). CI runs
   `python -m pytest -q -p no:cacheprovider -n auto --dist loadfile` on Ubuntu, Python 3.14, with node.
+- CI splits the test files into three parallel shards (`tools/ci_shard.py`, the `shard` job in `test.yml`): whole
+  files, so `--dist loadfile` behaves as before, dealt out longest first by the durations in
+  `tools/ci_shard_durations.json`. The files are the ones pytest's own collection finds with the repo's config
+  (subdirectories and `*_test.py` included). A new file with no recorded duration is still run (it counts as 2 s),
+  and `tests/test_ci_shard.py` fails if any split drops or repeats a file or misses one `pytest --collect-only`
+  finds. The `pytest` check is green only when all three shards are. To run one shard locally:
+  `.venv/bin/python -m pytest -n auto -q $(python tools/ci_shard.py 2 3)`.
+  Refresh the durations when the suite has changed a lot: run it once with `--durations=0 > /tmp/d.txt`, then
+  `python tools/ci_shard.py --refresh /tmp/d.txt` (the shards only get uneven, never wrong, as it ages).
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
   select()` (#457).
 - The only custom marker is `replay` (private captures; [below](#replay-tests)). Everything else is plain pytest.
@@ -201,6 +210,14 @@ The UI's JavaScript (`sizeup/web/static/*.js`) is tested by evaluating functions
 these tests look for `node` on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin`; a few only on `PATH`. They
 skip without it. One focus-order test in `tests/test_new_call.py` also wants `jsdom` where node can `require` it, and
 `tests/test_tts.py` wants the Kokoro voice set up (`tools/setup_tts.sh`, ~1.3 GB); both skip otherwise.
+
+### Contract tests
+
+`contracts/` holds a JSON Schema for each interface between a station (or any node) and the hub, with bodies that
+must and must not validate. `tests/test_contracts_*.py` check that today's hub, station and worker client send
+exactly that and ignore keys they don't know, and that every `/api/station/` route has its row in `contracts/routes.json`. A new key on
+the wire or a new route fails there until its schema or its row is brought up to date:
+[`contracts/README.md`](../contracts/README.md).
 
 ### The /cad bundles
 

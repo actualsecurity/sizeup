@@ -106,6 +106,12 @@ record_only = [383, 3127]
 aws_monthly_limit_usd = 25               # Settings > Radios can change it; reached: whisper on the station
 aws_context_budget_usd = 15              # another P25 system's (police) own: never ours nor our reserve; reached: whisper
 aws_idle_s = 120
+# Private term lists per kind of source (sizeup/stt_terms.py, docs/stt-vocabulary.md "Private term lists"): read from
+# s3://<backups bucket>/sizeup-hub/vocab/<name>.txt (the task role's backups policy reads it). Nothing changes until
+# they are uploaded there. whisper: the top of each list in the station's prompt; aws: a vocabulary per list
+# (sizeup-terms-<list>-<version>, inside step 12's sizeup-* grant).
+terms_whisper = true
+terms_aws = true
 
 [storage]
 keep_hours = 24                    # pages, monitor incidents, transcripts (the CAD keeps its own records)

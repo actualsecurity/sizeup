@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/node.schema.json",
+  "title": "Node",
+  "description": "Designed (docs/nodes.md 1 \"Node\"), not implemented. One machine in the registry: a station, a GPU worker, or both. The hub is not a node. Credentials are not part of this object: a node has a station token (sz1.<id>.<secret>), a worker token (sw1.<id>.<secret>) or both, each kept hash-only on the hub, and their id is the node's id.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["id"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
+      "description": "The node's id: 1 to 40 characters, lower-case letters, digits, `_` and `-`, starting with a letter or digit. The same shape as station and worker ids today (sizeup/cloud/stations.py ID, sizeup/cloud/sttworkers.py ID), and one namespace for every node."
+    },
+    "name": {"type": "string", "maxLength": 60, "description": "Free text for people, at most 60 characters."},
+    "kind": {
+      "type": "string",
+      "description": "Derived by the hub from the credentials the node has, never set: `station` (a station token), `worker` (a worker token), `station+worker` (both). A reader takes a value it does not know as unknown and never refuses the body for it.",
+      "x-known": ["station", "worker", "station+worker"],
+      "readOnly": true
+    },
+    "roles": {"$ref": "roles.schema.json"},
+    "capabilities": {"$ref": "capabilities.schema.json"}
+  }
+}

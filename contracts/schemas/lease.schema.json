@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/lease.schema.json",
+  "title": "Lease for an exactly-one role",
+  "description": "Designed (docs/nodes.md 2.2), not implemented. The hub's grant of a role that at most one node may run at a time (today's only one: `feed-adapter`), sent to its holder in the state answer and renewed by every state post. The holder acts only on a grant it received in this process, never on one read from disk. Time is relative: the holder counts `ttl_s` from the moment it SENT the post this answer belongs to, on a clock that keeps running through suspend, and stops the role's work 15 s before that runs out. An absolute time alone is never a lease: clocks on the nodes drift and step.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["role", "holder", "gen", "ttl_s"],
+  "additionalProperties": true,
+  "properties": {
+    "role": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,39}$",
+      "description": "The role this lease is for. One lease per role in the whole cluster. `feed-adapter` today; `training` later. A node ignores a lease for a role it does not know."
+    },
+    "holder": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
+      "description": "The node id that holds it. A node acts only on a lease whose holder is its own id."
+    },
+    "gen": {
+      "type": "array",
+      "description": "The lease id: the pair [hub leader-lock generation, lease generation]. Always compared as a pair, the leader generation first, by numeric value: [3, 1] is newer than [2, 99]. The lease generation goes up by one each time the role moves to another holder; the leader generation each time another hub task takes the leader lock. Granting and renewing the same pair again changes nothing (a post may arrive twice). Where docs/nodes.md writes one number (`active (gen 14)`, `idempotent per (node, gen)`) it means this pair.",
+      "prefixItems": [
+        {"$ref": "#/$defs/counter", "description": "The hub's leader-lock generation when it granted or renewed this lease, a count."},
+        {"$ref": "#/$defs/counter", "description": "The lease's own generation, a count."}
+      ],
+      "items": false,
+      "minItems": 2
+    },
+    "ttl_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 3600,
+      "description": "How long the lease lasts, seconds, counted by the holder from the send of the post this answers. 90 in the design: longer than a hub handoff (35 to 60 s)."
+    },
+    "expires_at": {
+      "type": "number",
+      "description": "Advisory only: the hub's own clock when the lease runs out, Unix seconds, for display and logs. A holder never decides anything from it."
+    }
+  },
+  "$defs": {
+    "counter": {
+      "title": "Counter",
+      "description": "A count that only goes up. A JSON integer from 0 to 2^53 - 1 (what every JSON reader keeps exact), or the same value as a string of decimal digits with no sign, no leading zero and no exponent (the only form allowed above 2^53 - 1; at most 20 digits). A reader compares the numeric values, never the strings and never as floating point.",
+      "oneOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$"}]
+    }
+  }
+}

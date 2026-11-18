@@ -183,7 +183,10 @@ POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, uni
                                           like dispatch; preview: true is the text only (audio: true renders it too)
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
                                           another agency's unit (any event): on it Dispatched (its set's first
-                                          status: a keyholder Notified), then its statuses (#219)
+                                          status), then its statuses (#219); status DP (DO: a third party's) puts
+                                          it on as that. A third-party unit (keyholder, utility, police) whatever
+                                          the status asked: Dispatched or Dispatch other, never Responding
+                                          -> {ok, moved, as: {unit: status it went on as}, status?}
                                           {unit_ids, status: RS | OL | ET | IC, operator} -> {ok, moved, status}: on
                                           any open event in that status, not dispatched (no Disp time, no dispatch
                                           logged, nothing said); 400 for a unit already on it, out of service, or
@@ -553,6 +556,17 @@ def _on_incident(m, b, o, c):
         what = [x for x in (_type(b.get("type", ""), b.get("subtype", "")) if b.get("type") else "",
                             _units(c, b.get("unit_ids")) if b.get("unit_ids") else "", "full response" if b.get("full") else "") if x]
         return f"Upgraded {ev}" + (f": {', '.join(what)}" if what else ""), n
+    if act == "attach" and isinstance(o.get("as"), dict) and o["as"] and set(o["as"].values()) != {b.get("status")}:
+        # each unit as it went on, when not all as asked (a third party: Dispatched); a plain attach's own units: attached
+        groups: dict[str, list[str]] = {}
+        for name in [x for x in _units(c, b.get("unit_ids")).split(", ") if x and x not in o["as"]]:
+            groups.setdefault("", []).append(name)
+        for name, st in o["as"].items():
+            groups.setdefault(str(st), []).append(str(name))
+        said = "; ".join(f"{', '.join(us)} " + ("attached" if not st else c.lists.status_phrase(st)
+                                               + (" (not dispatched)" if c.lists.role(st) in ("enroute", "onscene") else ""))
+                         for st, us in groups.items())
+        return f"Added to {ev}: {said}" + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else ""), n
     if act == "attach" and b.get("status"):
         return (f"Added {_units(c, b.get('unit_ids'))} to {ev} {c.lists.status_phrase(str(b['status']))} (not dispatched)"
                 + (f"; moved {', '.join(o['moved'])}" if o.get("moved") else "")), n
@@ -755,7 +769,9 @@ DOES = (
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/antenna-groups"), lambda m, b, o, c: ("Antenna groups: " + (_clip("; ".join(
-        f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))})"
+        f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))}"
+        + (f"; parked {', '.join(map(str, g.get('parked')))}" if isinstance(g.get("parked"), list) and g.get("parked")
+           else "") + ")"
         for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
         + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
@@ -1136,7 +1152,13 @@ class CadApi:
             return _json(404, {"error": "stations are the hub's"})
         if (why := self._signed_admin(who)) is not None:
             return _json(403, {"error": why})
-        return _json(200, reg.panel())
+        out = reg.panel()
+        sw = getattr(self.cad, "stt_workers", None)          # each station's whisper in the STT pool (#639 phase 2)
+        if sw is not None:
+            on = sw.pool_settings().get("stations") or {}
+            for s in out.get("stations", []):
+                s["pool_whisper"] = bool(on.get(s["id"], False))
+        return _json(200, out)
 
     def _stt_workers(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/stt-workers: Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639). The hub's only,
@@ -1346,6 +1368,17 @@ class CadApi:
         c = self.cad
         if m := SETTINGS.fullmatch(path):
             return c.settings_post(m.group(1), body, guard=guard)
+        if path == "/api/cad/stations" and body.get("action") == "pool_whisper" and getattr(c, "stt_workers", None):
+            from sizeup.cloud.sttworkers import WorkerError
+            op = str(body.get("operator") or "")
+            sid, on = str(body.get("id") or ""), body.get("on")
+            if not sid or not isinstance(on, bool) or c.stations.row(sid) is None:
+                raise CadError("pool_whisper: {id: a station, on: true or false}")
+            try:     # this station's whisper in the STT pool (#639 phase 2): audited like the pool's switches
+                return c.stt_workers.act({"action": "pool", "stations": {sid: on}}, op,
+                                         lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except WorkerError as e:
+                raise CadError(str(e)) from None
         if path == "/api/cad/stations" and getattr(c, "stations", None) is not None:
             from sizeup.cloud.stations import ConfirmNeeded, StationError
             op = str(body.get("operator") or "")

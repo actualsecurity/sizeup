@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "worker": "station:st-north",
+  "poll_s": 25.0,
+  "pool_on": false,
+  "classes": []
+}

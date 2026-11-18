@@ -91,6 +91,27 @@ How a row becomes an event, per pack whose scope it is in:
                       NEAR_INCIDENT_M) while that incident is open: the job we already have, linked
                       (Event.near_incident), never a new lead. A safety category is linked and NOT held: a hazard at
                       our own scene is what a crew most needs to hear.
+     A category with "fire_related": true (rules.py; the police pack's fire_report, fire_call, hazmat, alarm) is checked
+     for the FD already being there before it pushes (_fire; admin, 2026-11-17: a pre-alert is a jump on a call, and
+     PD's dispatch of a fire the FD is already working is not one): our fire incident (the CAD's own and the incident
+     sources', the county feed's included: fire_incidents; a type "fd_present" "types" allows for the category) at
+     its place (the same address or block, or a confirmed address or intersection within fd_radius_m), open and made
+     up to FD_OPEN_S before it, or closed within fd_window_min; with no place, an open one whose street the words name
+     in its town. Linked (Event.near_incident) and Event.fd set either way:
+       fd_on_scene    a unit on scene: held at log, unless the words are a safety change ("fd_present" "safety": a
+                      weapon, violence, an explosion or collapse, a member down): then an FYI at safety_priority
+       fd_dispatched  units assigned or en route, not cleared (or none known yet on an open incident made at most
+                      FD_PAGED_S before: toned out): held at log, unless the words add something
+                      ("add_info": people inside or trapped, injuries, spread, hazmat): an FYI at fyi_priority (2);
+                      a safety change: at safety_priority
+       fd_there       none of ours, but the words say the FD is there ("the fire department is already working it":
+                      another department's call, not in our feed): as fd_dispatched
+     The FD cleared (the incident closed, every unit cleared or in service, the feed's event closed): a pre-alert as
+     before (a rekindle), its body saying "FD here HH:MM". An FYI's title starts "FYI" and its body ends "FD on scene ·
+     #<number>". An event pushed before the FD was known is linked only, never lowered; one pushed as an FYI keeps its
+     FYI priority. A held call whose FD has cleared since (a rekindle merged into it) is let go as a pre-alert, "FD here
+     HH:MM"; one whose incident is gone (dismissed, no longer at the place) more than RELEASE_S after the call stays at
+     log ("fd_late"). An event of another category is never checked.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
      A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
      (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
@@ -104,6 +125,8 @@ How a row becomes an event, per pack whose scope it is in:
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
+  7. last, the local model behind the rules (backing.ModelBacking, engine.backing): a row of the police pack the rules
+     raised nothing with may be asked about off this thread; its answer comes back through _raise like a rule's.
 Intel never writes incidents, radio_links, incoming or alarms.
 """
 
@@ -111,6 +134,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -137,11 +161,21 @@ MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|contin
 # a dispatcher / HQ talker (they voice every job); never a unit's alias such as "RYE PD CAR 3"
 DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
-SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
+SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing; nor
+                                                                    # is any category its pack marks "safety" (_safe)
+OTHER_JOB = re.compile(r"\b(other|another|different|second) (job|call|incident|scene|assignment)\b", re.I)
+DEESCALATED = "de-escalated"           # the note a category's "deescalate" phrase leaves on its open event
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+FD_HELD = ("fd_on_scene", "fd_dispatched", "fd_there")   # a fire-related event held for the FD being there (_fire)
+FD_FYI = ("on_scene", "dispatched", "there")              # Event.fd of an event the FD is at: a push of it is an FYI
+FD_RANK = {"on_scene": 3, "dispatched": 2, "cleared": 1}   # which of two incidents at the place is the one (_fire_incident)
+FD_PAGED_S = 30 * 60.0                 # an open incident with no unit known yet, made at most this long before the
+                                       # event, is the FD already toned out (a page's own card): as dispatched
+FD_OPEN_S = 12 * 3600.0                # an open incident counts this long after it was made (a long fire); a closed one
+                                       # only when closed within fd_window_min (a rekindle after: a pre-alert, linked)
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
@@ -252,9 +286,17 @@ class IntelEngine:
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
         self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
+        self.backing = None                   # backing.ModelBacking: the local model behind the police rules (rows they left)
         # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
         # sets it; replay may), for near_incident. None: no incidents, nothing linked.
         self.incidents = None
+        # fire_incidents(opened_since, closed_since) -> [{id, number, type, lat, lon, label, address, created_at,
+        # closed_at, fd, fd_at}]: our incidents (the CAD's own and the incident sources', the county feed's included)
+        # made since opened_since and open, or closed since closed_since; fd "on_scene" | "dispatched" | "cleared" | ""
+        # (no unit known yet), fd_at when it cleared. For a fire-related event (_fire). None: never checked.
+        self.fire_incidents = None
+        self._numbers: dict = {}              # incident id -> (its number, when the FD cleared), as fire_incidents
+                                              # last gave them (the push, the console: fd_shown)
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -687,6 +729,13 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if not suppressed and pack.resolved and pack.resolves(text, ws):
+            changed += [x for x in self._resolve(pack, key, at, tid) if not any(x is c for c in changed)]
+        if not suppressed and pack.calm:
+            for x in (self._uncalm(pack, key, at, tid, ws, win.entries[tid], event_of)
+                      + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
+                if not any(x is c for c in changed):
+                    changed.append(x)
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -700,7 +749,8 @@ class IntelEngine:
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
-        if self.infer is not None and hits and not suppressed and pack.src.get("infer", True):   # ("infer": false: rules only)
+        if (self.infer is not None and hits and not suppressed and pack.src.get("infer", True)   # ("infer": false: rules only)
+                and not (self.backing is not None and self.backing.owns(pack))):     # one model per row (backing.py)
             try:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
             except Exception as e:  # noqa: BLE001 - the model never stops the rules
@@ -713,6 +763,12 @@ class IntelEngine:
             if ev is None and r.category in (rules_mod.WILD, "routine") and len(event_of) == 1:
                 ev = next(iter(event_of.values()))
             self.sink.hit(Hit(tid, r.id, r.v, round(float(w), 4), r.category, pack.name, at, ev.id if ev else None))
+        if self.backing is not None:          # last: only a row the rules raised nothing with is asked (backing.py)
+            try:
+                changed += self.backing.consider(self, pack, row, key, tid, win, at, suppressed, hits, changed,
+                                                 ruled=over)
+            except Exception as e:  # noqa: BLE001 - the model never stops the rules
+                self.log(f"intel: model: {type(e).__name__}")
         return changed
 
     def _could_reach(self, pack, win: Window, tid: str, hits: list) -> bool:
@@ -912,21 +968,119 @@ class IntelEngine:
                 best = (at, int(inc["id"]))
         return best[1] if best else None
 
+    def _fire(self, pack, ev: Event) -> str:
+        """A fire-related event with the FD already there (the module's doc, step 6): links it (near_incident), sets
+        ev.fd and, for an FYI, its priority. Returns why it is held ("fd_on_scene" | "fd_dispatched" | "fd_there"),
+        or "" (no FD there, the FD cleared, or an FYI: pushed as one). An event pushed as a pre-alert is linked only:
+        never held, never made an FYI; one pushed as an FYI stays one, at its FYI priority."""
+        texts = self._texts(pack, ev.source_key, ev.traffic_ids)
+        inc = self._fire_incident(pack, ev, texts)
+        if inc is not None:
+            ev.near_incident = int(inc["id"])
+        prio = pack.fd or {}
+        safety = pack.fd_said("safety", texts)
+        if ev.pushed_at is not None:
+            if ev.fd in FD_FYI:               # pushed as an FYI: never re-titled, never back to the category's priority
+                ev.priority = int(prio.get("safety_priority", 4) if safety else prio.get("fyi_priority", 2))
+            return ""
+        state = str((inc or {}).get("fd") or "")
+        if (inc is not None and not state and inc.get("closed_at") is None
+                and ev.first_at - float(inc.get("created_at") or 0.0) <= FD_PAGED_S):
+            state = "dispatched"              # open, no unit known yet, made just now: the FD is already toned out
+        if state not in ("on_scene", "dispatched") and pack.fd_said("there", texts):
+            state = "there"                   # said so: another department's call, or ours not in the data yet
+        ev.fd = state if state in (*FD_FYI, "cleared") else ""
+        if ev.fd in ("", "cleared"):
+            return ""                         # no FD there now (a rekindle after it cleared): a pre-alert as before
+        if safety:
+            ev.priority = int(prio.get("safety_priority", 4))
+            return ""
+        if ev.fd == "on_scene":
+            return "fd_on_scene"
+        if pack.fd_said("add_info", texts):
+            ev.priority = int(prio.get("fyi_priority", 2))
+            return ""
+        return f"fd_{ev.fd}"
+
+    def _fire_incident(self, pack, ev: Event, texts) -> dict | None:
+        """Our fire incident at a fire-related event's place (_fire): of a type the pack's "fd_present" "types" allow
+        for the category; open and opened at most FD_OPEN_S before the event, or closed at most fd_window_min before it
+        (and made at most INCIDENT_AFTER_S after its last transmission); at the same address or block, or (a confirmed
+        address or intersection) within fd_radius_m and half the place's radius. With no place: an open one whose
+        street the words name in its town (fire_street_said). Ranked: the FD on scene, dispatched, cleared; then open;
+        then the newest."""
+        if self.fire_incidents is None:
+            return None
+        win = float(self.policy.cfg.get("fd_window_min", 60)) * 60
+        rad = float(self.policy.cfg.get("fd_radius_m", 150))
+        types = (pack.fd or {}).get("types") or {}
+        allowed = types.get(ev.category, types.get("*"))
+        try:
+            incs = self.fire_incidents(ev.first_at - FD_OPEN_S, ev.first_at - win) or []
+        except Exception as e:  # noqa: BLE001 - no incidents: pushed as before
+            self.log(f"intel: fire incidents: {type(e).__name__}")
+            return None
+        placed = ev.precision != "none" and ev.lat is not None and ev.lon is not None
+        said = towns_said(texts) if not placed else set()
+        own = {t.lower() for t in pack.towns_for(ev.source_key)}
+        best = None
+        for inc in incs:
+            at = float(inc.get("created_at") or 0.0)
+            closed = inc.get("closed_at")
+            if not at or at > ev.last_at + INCIDENT_AFTER_S:
+                continue
+            if closed is None and at < ev.first_at - FD_OPEN_S:
+                continue
+            if closed is not None and float(closed) < ev.first_at - win:
+                continue
+            if allowed is not None and str(inc.get("type") or "").upper() not in allowed:
+                continue                      # not a fire incident (an aided, an MVA, a drill): never the FD at a fire
+            if placed:
+                hit = fire_place(ev, inc, rad)
+            else:
+                hit = closed is None and fire_street_said(inc, texts, said, own)
+            if not hit:
+                continue
+            if len(self._numbers) > 500:
+                self._numbers.clear()         # (a few a day: never grows without bound)
+            self._numbers[int(inc["id"])] = (str(inc.get("number") or ""), inc.get("fd_at"))
+            rank = (FD_RANK.get(str(inc.get("fd") or ""), 0), closed is None, at)
+            if best is None or rank > best[0]:
+                best = (rank, inc)
+        return best[1] if best else None
+
+    def _cleared_since(self, ev: Event) -> bool:
+        """The FD cleared the event's incident after its first transmission (a rekindle while the call was held):
+        let go as a pre-alert, never fd_late."""
+        if ev.fd != "cleared" or not ev.near_incident:
+            return False
+        at = self._numbers.get(int(ev.near_incident), ("", None))[1]
+        return at is None or float(at) > ev.first_at
+
+    def fd_shown(self, ev_fd: str, near) -> str:
+        """Event.fd as the console says it, from what the lookup last gave ("FD on scene · #26-000041")."""
+        number, at = self._numbers.get(int(near), ("", None)) if near else ("", None)
+        return push_mod.fd_text(ev_fd, number, at, self.tz)
+
     def _hold(self, pack, ev: Event, mode: str | None = None) -> None:
         """Out of area, or our own incident's: held at log (the module's doc, step 6). Only a pack with an area (the
-        county-wide packs): the police pack's events are never linked, and held only in a "place": true category
-        (unplaced, _unplaced). An event already pushed is never held
+        county-wide packs): the police pack's events are linked only in a "fire_related" category (_fire), and held
+        only there or in a "place": true category (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
-        if not pack.area and not pack.category(ev.category).get("place"):
+        cat = pack.category(ev.category)
+        if not pack.area and not cat.get("place") and not cat.get("fire_related"):
             return
-        if ev.suppressed == "placed_late" and ev.pushed_at is None:
-            ev.mode = lowest(ev.mode, "log")  # placed too late to be a pre-alert: stays at log
+        if ev.suppressed in ("placed_late", "fd_late") and ev.pushed_at is None:
+            ev.mode = lowest(ev.mode, "log")  # placed (or let go by the FD) too late to be a pre-alert: stays at log
             return
         if pack.area:
             ev.near_incident = self._incident(ev)
         why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
-        if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
+        fd = self._fire(pack, ev) if cat.get("fire_related") else None     # linked whatever else holds it
+        if fd is not None:
+            why = why or fd
+        elif not why and ev.near_incident is not None and not cat.get("safety"):
             why = "near_incident"
         if why and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")
@@ -940,7 +1094,11 @@ class IntelEngine:
             else:
                 ev.suppressed = ""
                 ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
-        elif ev.suppressed in ("out_of_area", "near_incident"):
+        elif (ev.suppressed in FD_HELD and ev.fd not in FD_FYI and not self._cleared_since(ev)
+              and ev.last_at - ev.first_at > RELEASE_S):
+            ev.suppressed = "fd_late"         # held for the FD, and the incident gone since (dismissed, no longer
+            ev.mode = lowest(ev.mode, "log")  # at the place): let go too late to be a pre-alert, as placed_late
+        elif ev.suppressed in ("out_of_area", "near_incident", *FD_HELD):
             ev.suppressed = ""
             if mode is not None:
                 ev.mode = max(ev.mode, mode, key=mode_rank)
@@ -1093,6 +1251,10 @@ class IntelEngine:
         if ev is not None and ev.note == "possibly cancelled" and speaks:
             reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
             ev.note = "re-opened"
+        elif ev is not None and ev.note == DEESCALATED and speaks:
+            ev.note = ""                      # the weapon is back in it: the note goes; a safety category's escalation
+            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)):   # ("pulled out a gun",
+                reopened, ev.note = True, "re-opened"                                               # never "in custody")
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
@@ -1284,13 +1446,19 @@ class IntelEngine:
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
         # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
         # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
-        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category in SAFETY]:
-            ev.note, ev.updated_at = "possibly cancelled", self.clock()
+        # a call whose category has "cancel_ttl_min" (EDP, a dispute) flagged by an earlier disregard: this one ends it
+        again = [] if named else [ev for ev in open_ if ev.note == "possibly cancelled" and self._soft(pack, ev.category)]
+        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and self._safe(pack, ev.category)
+                                    and ev not in again]:
+            now = self.clock()
+            ev.note, ev.updated_at = "possibly cancelled", now
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            if self._soft(pack, ev.category):            # "cancel_ttl_min": it lives no longer than this after it
+                ev.until = min(ev.until or now, now + float(pack.category(ev.category)["cancel_ttl_min"]) * 60)
             self.events.save(ev)
             self.sink.event(ev, "updated")
             out.append(ev)
-        for ev in named or [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category not in SAFETY]:
+        for ev in (named or [ev for ev in open_ if current & set(ev.traffic_ids) and not self._safe(pack, ev.category)]) + again:
             ev.status, ev.updated_at = "ended", self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
             self.events.save(ev)
@@ -1298,6 +1466,93 @@ class IntelEngine:
             out.append(ev)
         self._consume(pack.name, key)
         return out
+
+    def _deescalate(self, pack, row: dict, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
+        """A category's "deescalate" phrase (rules.py; the weapons category: "the gun was secured", "the firearm
+        has been recovered"): its open event on this source within merge_min (the span an open
+        event takes a new mention: the follow-up often comes once units are there) is noted DEESCALATED, with this row
+        in its traffic. Only an event this row ties to (_same_job: the category's own words, a unit, the talker, the
+        place), and with more than one such event open, only the one at the place this row says (none said or none
+        there: nothing is marked); the same when the row speaks of another job ("at the other call") or names only
+        units the event's rows don't. Never a row that itself says the category ("the gun was secured, the second
+        male has a machete"), never over a "possibly cancelled" note, never a push, an end or a new event. A later row that says the
+        category again clears the note (_raise), and pushes again when it alone is over the threshold."""
+        out = []
+        for cat in pack.deescalated(text, ws):
+            if any(r.category == cat and w > 0 for r, w in entry.hits):
+                continue
+            open_ = [e for e in self._open_for(pack, cat, key, at, self._merge_span(pack))
+                     if self._same_job(pack, e, entry, ws, {r.category for r, w in entry.hits if w > 0})]
+            if len(open_) > 1 or any(self._elsewhere(pack, e, entry) for e in open_):
+                if entry.place is None and self.locate is not None:
+                    entry.place = self._where(pack, row, key, [text], list(entry.who))
+                open_ = [e for e in open_ if entry.place is not None and e.precision != "none"
+                         and same_place(entry.place, e.place())]
+                if len(open_) != 1:
+                    continue
+            if not open_ or open_[0].note in (DEESCALATED, "possibly cancelled"):
+                continue
+            ev = open_[0]
+            ev.note, ev.updated_at = DEESCALATED, self.clock()
+            ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
+        return out
+
+    def _uncalm(self, pack, key: str, at: float, tid: str, ws: list[str], entry, event_of: dict) -> list[Event]:
+        """A row that says a category again, not raised (under the threshold by itself: the call-out's rows have left
+        the window): the note DEESCALATED on its open event comes off; a safety category's escalation ("escalate",
+        rules.py) re-opens it and pushes it again, as _raise does within the window."""
+        out = []
+        mine = {r.category for r, w in entry.hits if w > 0}
+        for cat in mine & set(pack.calm) - set(event_of):
+            for ev in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+                if ev.note != DEESCALATED or not self._same_job(pack, ev, entry, ws, mine):
+                    continue
+                now = self.clock()
+                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws):
+                    before = copy.deepcopy(ev)
+                    ev.note, ev.last_at, ev.updated_at = "re-opened", max(ev.last_at, at), now
+                    ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+                    self.events.save(ev)
+                    self._after(pack, ev, "reopened", now, before)
+                else:
+                    ev.note, ev.updated_at = "", now
+                    self.events.save(ev)
+                    self.sink.event(ev, "updated")
+                out.append(ev)
+        return out
+
+    def _safe(self, pack, cat: str) -> bool:
+        """A safety call: never ended by a disregard that names nothing, only "possibly cancelled". The engine's own
+        list, and in a police pack every category the pack marks "safety" (EDP, a dispute, an officer); the fire and
+        EMS packs keep the engine's list only."""
+        return cat in SAFETY or (pack.domain == "police" and pack.is_safety(cat))
+
+    def _soft(self, pack, cat: str) -> bool:
+        """A safety call a second disregard or a "resolved" phrase ends ("cancel_ttl_min": EDP, a dispute)."""
+        return self._safe(pack, cat) and pack.category(cat).get("cancel_ttl_min") is not None
+
+    def _resolve(self, pack, key: str, at: float, tid: str) -> list[Event]:
+        """A "resolved" phrase ("unfounded", "the caller called back"): the source's "possibly cancelled" calls with
+        "cancel_ttl_min" end."""
+        out = []
+        for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
+            if ev.note == "possibly cancelled" and self._soft(pack, ev.category):
+                ev.status, ev.updated_at = "ended", self.clock()
+                ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+                self.events.save(ev)
+                self.sink.event(ev, "ended")
+                out.append(ev)
+        return out
+
+    def _elsewhere(self, pack, ev: Event, entry) -> bool:
+        """The row speaks of another job ("at the other call"), or names units and none of the event's own."""
+        if OTHER_JOB.search(entry.text or ""):
+            return True
+        mine = frozenset(u for e in self._event_entries(pack, ev) for u in e.units)
+        return bool(entry.units) and not entry.units & mine
 
     def _consume(self, pack_name: str, key: str) -> None:
         """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""
@@ -1319,7 +1574,9 @@ class IntelEngine:
         if d.would_push:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
-            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful)
+            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful,
+                                   number=self._numbers.get(ev.near_incident or 0, ("", None))[0],
+                                   fd_at=self._numbers.get(ev.near_incident or 0, ("", None))[1])
             # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
             why = "" if self.policy.cfg.get("push_pii", True) else push_mod.scrub(msg, self._who(pack, ev))
             if why:
@@ -1368,6 +1625,11 @@ class IntelEngine:
             for k in [k for k, w in self.windows.items()
                       if not w.entries or max(e.at for e in w.entries.values()) < now - 2 * self._span(k[0])]:
                 del self.windows[k]
+            if self.backing is not None and self.enabled:
+                try:
+                    out += self.backing.tick(self, now)       # held questions due, deadlines passed (backing.py)
+                except Exception as e:  # noqa: BLE001 - the model never stops the tick
+                    self.log(f"intel: model: {type(e).__name__}")
             held = self.policy.digest_due(now) if self.enabled else []     # obeys enabled, push, quiet (M3)
             if held and hasattr(self.sink, "digest"):
                 evs = [e for e in (self.events.get(i) for i in held) if e is not None]
@@ -1507,8 +1769,16 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
 
 def _same(a: Event, b: Event) -> bool:
     keys = ("what_score", "level", "rules", "traffic_ids", "mode", "priority", "precision", "lat", "lon", "label_full",
-            "confirmed", "status", "category", "near_incident", "suppressed")
+            "confirmed", "status", "category", "near_incident", "suppressed", "fd")
     return all(getattr(a, k) == getattr(b, k) for k in keys)
+
+
+def _takes_done(n) -> bool:
+    """The notifier's send() takes a done callback (sizeup/notify.py Notifier / KindNotifier; not every test fake)."""
+    try:
+        return "done" in inspect.signature(n.send).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class LiveSink:
@@ -1554,10 +1824,26 @@ class LiveSink:
             if url:
                 m["body"] = f"{m['body']}\nListen: {url}"
                 actions = [{"label": "Listen", "url": url}]
-        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"], **({"actions": actions} if actions else {})):
+        kw = {"actions": actions} if actions else {}
+        if _takes_done(n):                          # ntfy's answer recorded on the event (events.py delivered())
+            kw["done"] = self._delivered(ev.id)
+        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"], **kw):
             self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect (or the queue is full): not pushed")
             return False
         return True
+
+    def _delivered(self, eid: int | None):
+        """The notify thread's outcome of this push onto the event: sent (ntfy's id, the HTTP status) or not (why)."""
+        events, log = self.engine.events, self.engine.log
+
+        def done(outcome: dict) -> None:
+            if eid is None or not hasattr(events, "delivered"):
+                return
+            try:
+                events.delivered(eid, outcome)
+            except Exception as e:  # noqa: BLE001 - the push went (or not) either way
+                log(f"intel: event {eid}: delivery not recorded ({type(e).__name__})")
+        return done
 
     def digest(self, evs: list[Event]) -> None:
         n = self.engine.notifier
@@ -1614,3 +1900,74 @@ def same_place(a, b) -> bool:
     if None in (a.lat, a.lon, b.lat, b.lon):
         return False
     return _m(a.lat, a.lon, b.lat, b.lon) <= SAME_PLACE_M
+
+
+def _block_of(label: str) -> str:
+    """"100 block of Example Rd, Town" as an address of that block ("100 Example Rd, Town"); else the label."""
+    return re.sub(r"^\s*(\d+)\s+block\s+of\s+", r"\1 ", label or "", flags=re.I)
+
+
+def place_town(label: str) -> str:
+    """The county town a normalized address ends with ("12 Example Rd, Port Chester" -> "port chester"); "" if none."""
+    from sizeup.cad.sources import county_towns
+    low = str(label or "").lower().replace("_", " ")
+    ws = tuple(re.findall(r"[a-z0-9]+", low.rsplit(",", 1)[1] if "," in low else low))
+    for k in sorted((k for k in county_towns() if k), key=len, reverse=True):
+        if len(ws) >= len(k) and ws[-len(k):] == k:
+            return " ".join(k)
+    return ""
+
+
+def fire_place(ev: Event, inc: dict, radius_m: float) -> bool:
+    """The event's place is the incident's (_fire_incident): the same address (sizeup/cad/sources.py same_place), the
+    same block of the same street (the house numbers' hundreds; within radius_m too when both have a point), or, for
+    a confirmed address or intersection, within radius_m and half the place's radius. Never two known towns."""
+    from sizeup.cad.sources import _same_street, place_key
+    from sizeup.cad.sources import same_place as same_address
+    mine = _block_of(ev.label_full)
+    shown = str(inc.get("address") or inc.get("label") or "")
+    ta, tb = (ev.town or place_town(ev.label_full)).lower(), place_town(shown) or place_town(inc.get("address_raw") or "")
+    if ta and tb and ta != tb:
+        return False
+    near = None
+    if ev.lat is not None and ev.lon is not None and inc.get("lat") is not None and inc.get("lon") is not None:
+        near = _m(ev.lat, ev.lon, float(inc["lat"]), float(inc["lon"])) <= radius_m + float(ev.radius_m or 0.0) / 2
+    if mine:
+        ka = place_key(mine)
+        for t in [x for x in (str(inc.get("address_raw") or ""), shown) if x]:
+            if same_address(mine, t):
+                return True
+            kb = place_key(t)
+            if (ka and kb and ka[0] == kb[0] == "addr" and _same_street(ka[2:], kb[2:]) and near is not False
+                    and _hundreds(ka[1]) is not None and _hundreds(ka[1]) == _hundreds(kb[1])):
+                return True
+    return bool(near) and ev.confirmed and ev.precision in ("address", "intersection")
+
+
+def _hundreds(num: str) -> int | None:
+    m = re.match(r"\d+", num or "")
+    return int(m.group(0)) // 100 if m else None
+
+
+def fire_street_said(inc: dict, texts, said=frozenset(), own=frozenset()) -> bool:
+    """An event with no place: the incident's street (its name words, then its suffix: "Example Road"; a street with no
+    suffix never, too loose), or one of its intersection's, said in the words, in the incident's town: never when the
+    words name another town (said: towns_said), and only when they name its town or it is one of the source's (own)."""
+    from sizeup.cad.sources import ABBR, place_key
+    shown = str(inc.get("address") or inc.get("label") or "")
+    town = place_town(shown) or place_town(inc.get("address_raw") or "")
+    if not town or (said and town not in said) or (town not in said and town not in own):
+        return False
+    k = place_key(str(inc.get("address_raw") or shown))
+    if k is None:
+        return False
+    streets = [k[2:]] if k[0] == "addr" else list(k[1]) if k[0] == "x" else []
+    streets = [(st[1], st[2]) for st in streets if st[1] and st[2]]          # (suffix, name words)
+    for text in texts or ():
+        ws = [ABBR.get(w, w) for w in re.findall(r"[a-z0-9]+", str(text).lower())]
+        for suffix, name in streets:
+            n = len(name)
+            for i in range(len(ws) - n):
+                if ws[i + n] == suffix and set(ws[i:i + n]) == set(name):
+                    return True
+    return False

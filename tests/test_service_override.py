@@ -383,7 +383,7 @@ def test_the_hub_answers_with_its_choices_and_the_station_keeps_them(tmp_path):
     assert sourcekeys.service_overrides() == {MINE: "fire"}
     src = (sourcekeys.__file__.replace("sourcekeys.py", "cloud/station.py"))
     s = open(src).read()
-    assert 'with_name("hub_services.json")' in s and 'self._set_services(r.get("services"))' in s
+    assert 'with_name("hub_services.json")' in s and '("services", self._set_services)' in s
 
 
 def test_an_older_stations_row_is_tagged_by_the_hubs_choice(tmp_path):

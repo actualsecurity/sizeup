@@ -97,10 +97,14 @@ class Event:
     priority: int = 3
     pushed_at: float | None = None
     push_count: int = 0
-    suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | unplaced | ""
+    suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | unplaced |
+                                       # fd_on_scene | fd_dispatched | fd_there | fd_late | ""
     updated_at: float = 0.0
-    note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened"
-    near_incident: int | None = None   # our own incident at its place (engine._incident): linked, never a radio link
+    note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened", "de-escalated"
+    near_incident: int | None = None   # our own incident at its place (engine._incident, _fire): linked, never a radio link
+    fd: str = ""                       # a fire-related event with the FD at its place (engine._fire): on_scene |
+                                       # dispatched | there (said so) -> a push of it is an FYI; cleared -> a pre-alert
+                                       # as usual ("FD here HH:MM")
     incident_id: int | None = None     # only after a person's Accept, and only for a pack with accept: true
 
     def place(self) -> Place:

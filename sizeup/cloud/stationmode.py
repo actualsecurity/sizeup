@@ -36,11 +36,12 @@ from typing import Callable
 from sizeup import tz
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import HubClient, HubError
-from sizeup.cloud.outbox import Outbox
+from sizeup.cloud.outbox import Outbox, open_outbox
 from sizeup.cloud.station import StationLink
 from sizeup.config import hub_url_problem
 
 SECURITY = "/usr/bin/security"
+DISPATCH_S = 300.0        # an emergency event of ours this new: its dispatch is under way (no update restarts the station)
 RUN = subprocess.run              # tests replace this: no test ever reads the real Keychain
 # name -> (environment variable, Config field with the config file's value, Config field with the Keychain service)
 SECRETS = {
@@ -67,6 +68,75 @@ def keychain(service: str) -> str:
 
 def _hhmm(t: float | None) -> str:
     return tz.hhmm(t, "")
+
+
+def station_hold(app) -> dict:
+    """What a restart would cut off now, for the auto-updater (sizeup/cloud/autoupdate.py moment()): {hard: what it
+    never switches during until its ceiling (a page coming in or held for its continuation, an emergency event of
+    ours dispatched in the last DISPATCH_S, an emergency window open, a carrier open, someone talking, a page or
+    Fire/EMS clip waiting for speech-to-text), stt: transcriptions queued or running and re-runs pending (it prefers
+    a moment with few), said: those in words}. Each part that can't be read counts as nothing: never a reason to
+    wait for ever (the updater's ceiling holds anyway)."""
+    hard, said = [], []
+    try:
+        pages = [p for p in app.paging_state() if not p.get("ended")]
+    except Exception:  # noqa: BLE001
+        pages = []
+    held = getattr(getattr(app, "pagehold", None), "held", None) or {}
+    chans = sorted({str(p.get("channel") or "?") for p in pages} | {str(k) for k in held})
+    if chans:
+        hard.append("page on " + ", ".join(chans))
+    age = dispatched_ago(app)
+    if age is not None:
+        hard.append(f"event of ours dispatched {int(age // 60)} min ago")
+    try:
+        if app.cad.alarms.windows.state(time.time()):
+            hard.append("emergency window open")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rows = app.radio_status()
+    except Exception:  # noqa: BLE001 - a status that can't be read is not a reason to wait
+        rows = []
+    opened = [str(r.get("label")) for r in rows if r.get("open")]
+    if opened:
+        hard.append("carrier open on " + ", ".join(opened))
+    try:
+        talking = app.live.state() if getattr(app, "live", None) is not None else []
+    except Exception:  # noqa: BLE001
+        talking = []
+    if talking:
+        hard.append(f"{len(talking)} talking")
+    stt = getattr(app, "stt", None)
+    try:
+        urgent = int((stt.stats() or {}).get("urgent") or 0) if stt is not None and hasattr(stt, "stats") else 0
+    except Exception:  # noqa: BLE001
+        urgent = 0
+    if urgent:
+        hard.append(f"{urgent} page / Fire-EMS clip(s) waiting for speech-to-text")
+    # (shed clips being caught up, sizeup/sttcatchup.py, never hold an update up: not counted, here or below)
+    try:
+        n = int(stt.busy(catchup=False)) if stt is not None and hasattr(stt, "busy") else 0
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n:
+        said.append(f"{n} transcription(s) in flight")
+    rerun = len(set(getattr(app, "_rerun_ids", ()) or ()) - set(getattr(app, "_catchup_ids", ()) or ()))
+    if rerun:
+        said.append(f"{rerun} re-run(s) pending")
+    return {"hard": hard, "stt": int(n) + rerun, "said": said}
+
+def dispatched_ago(app) -> float | None:
+    """Seconds since the newest emergency event still open was created, within DISPATCH_S (None: none). (The station's
+    CAD has the events of its own pages and feeds: there is no "ours" column to narrow it by.)"""
+    try:
+        now = time.time()
+        r = app.cad.store.one("SELECT MAX(created_at) AS t FROM incidents WHERE emergency = 1 AND status IN "
+                              "('queued', 'pending', 'active') AND created_at >= ?", (now - DISPATCH_S,))
+    except Exception:  # noqa: BLE001 - no CAD here (or not readable): nothing dispatched as far as it knows
+        return None
+    t = (r or {}).get("t")
+    return max(0.0, now - float(t)) if isinstance(t, (int, float)) else None
 
 
 class StationMode:
@@ -165,7 +235,8 @@ class StationMode:
             path = self.cfg.cloud_outbox or (str(self.path.parent / "outbox.sqlite") if self.path else "")
             if not self.forward and (not path or not Path(path).is_file()):
                 return None
-            self._outbox = Outbox(path or ":memory:", int(self.cfg.cloud_outbox_max_mb * 1024 * 1024))
+            self._outbox = open_outbox(path or ":memory:", int(self.cfg.cloud_outbox_max_mb * 1024 * 1024),
+                                       log=self.log)
         return self._outbox
 
     def _up(self) -> None:
@@ -201,14 +272,20 @@ class StationMode:
         """With the app (App.start): the link's threads, when forwarding is on and it can run."""
         with self._lock:
             self.started = True
+            if self._outbox is not None:
+                self._outbox.resume()           # (started again after a stop: its batches go out again)
             if self.link is not None and not self.problem:
                 self.link.start()
 
     def stop(self) -> None:
+        """With the app (App.stop): the link's threads end, and the outbox is let go in order (Outbox.release: the next
+        start keeps its epoch; a start after a stop that was not in order gets a new one)."""
         with self._lock:
             self.started = False
             if self.link is not None:
                 self.link.stop()
+            if self._outbox is not None:
+                self._outbox.release()
 
     def set(self, body: dict) -> dict:
         """POST /api/station-mode {forward?, hub_url?, operator?}: ValueError with the reason if not."""
@@ -296,33 +373,20 @@ class StationMode:
                     "station_id": str(getattr(self.link, "station_id", "") or self.cfg.station_id),
                     "config_id": self.cfg.station_id,
                     "status": self.status(), "secrets": self.secrets(), "keychain": keychain_available(),
-                    "update": dict(self.updates.status(), busy=self.busy())}
+                    "update": dict(self.updates.status(), **self.update_hold())}
+
+    def update_hold(self) -> dict:
+        """{busy: the text (an updater from before "hold" waits on it), hold: station_hold()}."""
+        h = station_hold(self.app)
+        return {"busy": ", ".join(h["hard"] + h["said"]), "hold": {"hard": h["hard"], "stt": h["stt"]}}
+
+    def hold(self) -> dict:
+        return station_hold(self.app)
 
     def busy(self) -> str:
-        """What a restart would cut off now ("" = a quiet moment): a carrier open, someone talking,
-        transcriptions queued or running, a re-run in progress. The auto-updater waits for "" (up to
-        a few minutes) before it switches releases (sizeup/cloud/autoupdate.py)."""
-        app, out = self.app, []
-        try:
-            rows = app.radio_status()
-        except Exception:  # noqa: BLE001 - a status that can't be read is not a reason to wait
-            rows = []
-        opened = [str(r.get("label")) for r in rows if r.get("open")]
-        if opened:
-            out.append("carrier open on " + ", ".join(opened))
-        live = getattr(app, "live", None)
-        talking = live.state() if live is not None else []
-        if talking:
-            out.append(f"{len(talking)} talking")
-        stt = getattr(app, "stt", None)
-        # (shed clips being caught up, sizeup/sttcatchup.py, never hold an update up: not counted, here or below)
-        n = stt.busy(catchup=False) if stt is not None and hasattr(stt, "busy") else 0
-        if n:
-            out.append(f"{n} transcription(s) in flight")
-        rerun = len(set(getattr(app, "_rerun_ids", ()) or ()) - set(getattr(app, "_catchup_ids", ()) or ()))
-        if rerun:
-            out.append(f"{rerun} re-run(s) pending")
-        return ", ".join(out)
+        """What a restart would cut off now ("" = a quiet moment), in words."""
+        h = station_hold(self.app)
+        return ", ".join(h["hard"] + h["said"])
 
     def hub_row(self) -> dict | None:
         """The monitor header's Hub row: only while forwarding is on."""

@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "build": "3f9c2ab71d04e5a6b7c8d9e0f1a2b3c4d5e6f708",
+  "caps": [
+    "p25_systems",
+    "stt_input",
+    "stt_pool"
+  ],
+  "pool": {
+    "on": false,
+    "worker": false,
+    "ready": 0,
+    "max_s": 0.0,
+    "gpu_idle": false,
+    "gpu_idle_n": 0
+  },
+  "services": {},
+  "station": "st-north",
+  "leases": {
+    "role": "feed-adapter",
+    "holder": "st-north",
+    "gen": [
+      7,
+      14
+    ],
+    "ttl_s": 90
+  }
+}

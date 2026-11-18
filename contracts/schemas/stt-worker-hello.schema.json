@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-hello.schema.json",
+  "title": "Worker hello",
+  "description": "The body of POST /api/station/stt/hello, as the GPU worker client sends it today (tools/stt_worker/worker.py hello; read by WorkerApi.handle, sizeup/cloud/sttworkers.py). JSON with a Content-Length, at most 1 MiB. The hub resolves the bearer token first: a GPU worker's own (sw1.<id>.<secret>), or a station's token for its whisper, which the hub knows as `station:<id>` and takes only while that station's whisper is in the pool. Sent once when the worker connects, and again after the hub was away.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["state", "model", "version"],
+  "additionalProperties": true,
+  "properties": {
+    "worker": {
+      "type": "string",
+      "description": "The id the worker believes it has. The hub does not read it: the id is the token's.",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+    },
+    "state": {
+      "type": "string",
+      "description": "`online`, `gaming` (the machine is in use: no jobs) or `paused`. The hub ignores a word it does not know and keeps the state it had.",
+      "x-known": ["online", "gaming", "paused"]
+    },
+    "model": {"type": "string", "description": "The speech-to-text model's name. The hub keeps 80 characters."},
+    "version": {"type": "string", "description": "The worker client's version. The hub keeps 40 characters."},
+    "gpu": {
+      "title": "GPU",
+      "description": "The graphics card as nvidia-smi gives it. The hub keeps only these keys, each a number or a string.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "util_pct": {"type": "number", "description": "GPU load, percent.", "minimum": 0},
+        "mem_used_mb": {"type": "number", "description": "Memory in use, MiB.", "minimum": 0},
+        "mem_total_mb": {"type": "number", "description": "Its memory, MiB.", "minimum": 0},
+        "others": {"type": "integer", "minimum": 0, "description": "Other processes using the card."},
+        "name": {"type": "string", "description": "The card's name. The hub keeps it; today's worker client does not send it."}
+      }
+    },
+    "load": {
+      "title": "Load",
+      "description": "A station's whisper only: its own work and pace. The hub keeps only these keys, each a number or a string.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "own": {"type": "integer", "minimum": 0, "description": "Clips of the station's own being transcribed now."},
+        "queue": {"type": "integer", "minimum": 0, "description": "Clips of its own waiting."},
+        "rtf": {"type": "number", "description": "Its measured pace: seconds of decoding per second of audio.", "minimum": 0},
+        "max_s": {"type": "number", "description": "The longest clip it would take, seconds of audio. The hub never offers it a longer one.", "minimum": 0},
+        "cpu_pct": {"type": "number", "description": "The machine's CPU load, percent.", "minimum": 0},
+        "service_s": {"type": "number", "description": "Its recent claim-to-text time, seconds.", "minimum": 0},
+        "why": {"type": "string", "description": "With `paused`: why it is not claiming now."}
+      }
+    },
+    "models": {
+      "title": "Models",
+      "description": "The models the worker serves. The hub reads it on every request (sizeup/cloud/infer.py seen); a key left out is unchanged. The worker client in tools/stt_worker sends it in every hello and state post.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "stt": {"type": "string", "description": "The speech-to-text model.", "maxLength": 80},
+        "llm": {"type": "string", "description": "The language model; \"\" for none now.", "maxLength": 80},
+        "llm_version": {"type": "string", "description": "Its server's version.", "maxLength": 64}
+      }
+    }
+  }
+}

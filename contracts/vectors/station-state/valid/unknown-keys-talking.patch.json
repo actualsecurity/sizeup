@@ -1,0 +1,10 @@
+{
+  "base": "station-state/valid/talking-only.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/talking/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/talking/1/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/paging/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/paging/0/pairs/0/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

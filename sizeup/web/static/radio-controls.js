@@ -135,7 +135,9 @@ window.RadioControls = (() => {
              + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
              + "dongles says how.\nAntenna group: dongles on one antenna feed, locked to its jobs (highest priority first). "
              + "A grouped dongle runs only those; they run only on its dongles. One gone: the rest run the higher "
-             + "jobs; back: each its own again.", n.radios, n.dups, n.sdr, n.ag, n.adsb, n.storage)),
+             + "jobs; back: each its own again. A parked job is off on purpose: no warning, never started by a fallback.\n"
+             + "Held to hh:mm: a P25 system whose dongle dropped out again soon after it came back; it starts by itself "
+             + "then.", n.radios, n.dups, n.sdr, n.ag, n.adsb, n.storage)),
         ...(n.rxCard ? [n.rxCard] : []),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
@@ -204,7 +206,7 @@ window.RadioControls = (() => {
     const radios = (st.state && st.state.radios) || [];
     syncList(st.n.radios, radios, {
       key: (r) => r.label,
-      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck,
+      sig: (r) => JSON.stringify([r.state, r.open, r.detail, r.mhz, r.quieting_db, r.restarts, r.word, r.open_s, r.stuck, r.hold_until,
                                   r.hiss_db, r.floor_db, r.open_db, r.close_db, r.now, r.tower, r.freqs]),
       make: () => el("span", "pill radio"),
       fill: (node, r) => {
@@ -214,13 +216,16 @@ window.RadioControls = (() => {
         // noise holding the squelch (GitHub #116). Amber, with how long; the station logged it once.
         const stuck = on && !!r.stuck;
         node.className = `pill radio ${state}${on ? " open" : ""}${stuck ? " stuck" : ""}`;
-        const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : r.word || (RADIO_STATE[state] ?? state);
+        // (#637) another P25 system held back after dropouts (a flapping dongle): not a fault, it starts by itself then
+        const held = state !== "ok" && r.hold_until ? `held to ${fmtTime(r.hold_until)}` : "";
+        const word = stuck ? `open ${mmss(r.open_s)} (stuck?)` : on ? "● RX" : held || r.word || (RADIO_STATE[state] ?? state);
         // #275: what it is on now ("126.4", "118.575 CTAF + 120.8") and HPN's tower, short (#278); the rest in the title
         const live = state === "ok" && r.now;
         node.replaceChildren(el("b", null, r.label), ...(live ? [el("span", "fq", r.now)] : []),
                              ...(r.tower ? [el("span", "tw", r.tower.open ? "Tower open" : "Tower closed")] : []),
                              ...(word ? [el("span", "st", word)] : []));
-        const bits = [r.detail || r.label];
+        // (#637) the hold in the viewer's time, as the pill says it (the station's detail has the station's clock)
+        const bits = [held ? `held back until ${fmtTime(r.hold_until)} after dropouts` : r.detail || r.label];
         if (r.mhz) bits.push(`${r.mhz} MHz`);
         if (r.restarts) bits.push(`${r.restarts} restarts`);
         const lines = [bits.join(" · ")];
@@ -294,10 +299,11 @@ window.RadioControls = (() => {
     const list = sdr.sdrs || [{ serial: "", mode: sdr.mode, present: true }];
     const modes = sdr.modes || [];
     const groups = sdr.groups || [];
-    // antenna groups: a grouped dongle offers only its group's jobs (and Off); another dongle never a group's job
+    // antenna groups: a grouped dongle offers only its group's jobs (and Off), never a parked one (#637); another
+    // dongle never a group's job
     const allowed = (x, m) => { const g = groups.find((y) => y.sdrs.includes(x.serial));
-      return m === "Off" || (g ? g.jobs.includes(m) : !groups.some((y) => y.jobs.includes(m))); };
-    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|") + "#" + JSON.stringify(groups.map((g) => [g.sdrs, g.jobs]));
+      return m === "Off" || (g ? g.jobs.includes(m) && !(g.parked || []).includes(m) : !groups.some((y) => y.jobs.includes(m))); };
+    const key = list.map((x) => x.serial).join("|") + "#" + modes.join("|") + "#" + JSON.stringify(groups.map((g) => [g.sdrs, g.jobs, g.parked || []]));
     if (box.dataset.key !== key) {
       box.replaceChildren();
       for (const x of list) {
@@ -339,7 +345,9 @@ window.RadioControls = (() => {
         badge.replaceChildren(...(window.Icon ? [Icon("lock", "sm")] : []), grp.name);
       }
       if (grp) badge.title = `Antenna group ${grp.name}: ${grp.jobs.join(" > ")} (highest priority first)`;
+      row.classList.toggle("noaudio", !!x.noaudio);
       setText(row.querySelector(".sdr-name"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
+              + (x.noaudio ? " · no audio" : "")                                       // (#703) out until it streams
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
               + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
@@ -352,7 +360,9 @@ window.RadioControls = (() => {
                 : x.set_by === "person" ? `${x.mode} picked by a person` : "";
       row.title = (x.present ? `SDR ${nm}` : `SDR ${nm}: not plugged in`) + (who ? `\n${who}` : "") + (x.ambiguous ? `\n${x.ambiguous}` : "")
         + (x.own ? `\nRuns ${x.mode} for SDR ${(x.for || []).map(nameOf).join(", ")}; back on ${x.own} when it returns` : "")
-        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "");
+        + (x.on ? `\n${x.mode} runs on SDR ${nameOf(x.on)} until this one is back` : "")
+        + (x.noaudio ? `\nOpens but streams no audio since ${fmtTime(x.noaudio.since)}: out until it streams again (tried after `
+           + `${(x.noaudio.retry_min || []).join(", ")} min), it is replugged, or a job is picked for it here` : "");
 
       for (const b of row.querySelectorAll("button[data-mode]")) {
         const m = b.dataset.mode;
@@ -993,9 +1003,10 @@ window.RadioControls = (() => {
       const jobs = el("span", "ag-jobs");
       g.jobs.forEach((j, k) => {
         if (k) jobs.append(el("span", "dim", " › "));
-        const off = (g.short || []).includes(j);
-        const t = el("span", off ? "warn" : "", j);
+        const off = (g.short || []).includes(j), parked = (g.parked || []).includes(j);
+        const t = el("span", off ? "warn" : parked ? "dim" : "", parked ? `${j} (parked)` : j);
         if (off) t.title = `${j}: not running (its dongle is gone and no lower job's dongle could take it)`;
+        if (parked) t.title = `${j}: parked (off on purpose): no warning, never started by a fallback`;
         jobs.append(t);
       });
       jobs.title = "Priority order: with a dongle gone, the higher jobs run";
@@ -1004,7 +1015,7 @@ window.RadioControls = (() => {
         const ed = el("button", "sm quiet", "Edit");
         ed.type = "button";
         ed.disabled = ag.busy || !!ag.edit;
-        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs] }; ag.error = ""; renderGroups(); });
+        ed.addEventListener("click", () => { ag.edit = { i, was: g.name, name: g.name, sdrs: [...g.sdrs], jobs: [...g.jobs], parked: [...(g.parked || [])] }; ag.error = ""; renderGroups(); });
         line.append(ed);
       }
       kids.push(line);
@@ -1015,7 +1026,7 @@ window.RadioControls = (() => {
       add.type = "button";
       add.title = "Lock dongles on one antenna feed to the jobs it carries";
       add.disabled = ag.busy;
-      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [] }; ag.error = ""; renderGroups(); });
+      add.addEventListener("click", () => { ag.edit = { i: -1, was: null, name: "", sdrs: [], jobs: [], parked: [] }; ag.error = ""; renderGroups(); });
       kids.push(add);
     }
     if (ag.error && !ag.edit) kids.push(el("div", "sdr-err", ag.error));
@@ -1049,7 +1060,14 @@ window.RadioControls = (() => {
       const li = el("li", "ag-job");
       const mv = (d) => { const t = e.jobs.slice(); [t[k], t[k + d]] = [t[k + d], t[k]]; e.jobs = t; ag.key = ""; renderGroups(); };
       const up = el("button", "sm quiet", "↑"), dn = el("button", "sm quiet", "↓"), x = el("button", "sm quiet", "✕");
-      for (const b of [up, dn, x]) b.type = "button";
+      // (#637) parked: off on purpose (a fireground left off for coverage): no warning, never started by a fallback
+      const parked = (e.parked || []).includes(j);
+      const pk = el("button", `sm quiet ag-park${parked ? " active" : ""}`, parked ? "Parked" : "Park");
+      pk.setAttribute("aria-pressed", String(parked));
+      pk.title = parked ? `${j} is off on purpose: click to unpark` : `Keep ${j} off on purpose: no warning, never started by a fallback`;
+      pk.addEventListener("click", () => { e.parked = parked ? e.parked.filter((y) => y !== j) : [...(e.parked || []), j]; ag.key = ""; renderGroups(); });
+      for (const b of [up, dn, x, pk]) b.type = "button";
+      pk.hidden = !parked && (sdr.no_park || []).includes(j);    // the county's and paging: never parked (fire coverage)
       up.disabled = k === 0;
       dn.disabled = k === e.jobs.length - 1;
       up.setAttribute("aria-label", `${j} up`);
@@ -1057,8 +1075,8 @@ window.RadioControls = (() => {
       x.setAttribute("aria-label", `Remove ${j}`);
       up.addEventListener("click", () => mv(-1));
       dn.addEventListener("click", () => mv(1));
-      x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); ag.key = ""; renderGroups(); });
-      li.append(el("span", "", `${k + 1}. ${j}`), up, dn, x);
+      x.addEventListener("click", () => { e.jobs = e.jobs.filter((y) => y !== j); e.parked = (e.parked || []).filter((y) => y !== j); ag.key = ""; renderGroups(); });
+      li.append(el("span", parked ? "dim" : "", `${k + 1}. ${j}`), up, dn, pk, x);
       jobs.append(li);
     });
     const add = el("select", "sm ag-addjob");
@@ -1070,8 +1088,8 @@ window.RadioControls = (() => {
     const save = el("button", "sm primary", "Save"), cancel = el("button", "sm quiet", "Cancel");
     for (const b of [save, cancel]) { b.type = "button"; b.disabled = ag.busy; }
     save.addEventListener("click", () => {
-      const g = { name: e.name.trim(), sdrs: e.sdrs, jobs: e.jobs };
-      const all = groups.map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs }));
+      const g = { name: e.name.trim(), sdrs: e.sdrs, jobs: e.jobs, parked: (e.parked || []).filter((j) => e.jobs.includes(j)) };
+      const all = groups.map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs, parked: x.parked || [] }));
       if (e.i === -1) all.push(g); else all[e.i] = g;
       postGroups(all);
     });
@@ -1083,7 +1101,7 @@ window.RadioControls = (() => {
       del.disabled = ag.busy;
       del.addEventListener("click", async () => {
         if (await UI.confirm(`Delete antenna group ${groups[e.i].name}? Its dongles and jobs are free again.`, { ok: "Delete", danger: true })) {
-          postGroups(groups.filter((_g, k) => k !== e.i).map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs })));
+          postGroups(groups.filter((_g, k) => k !== e.i).map((x) => ({ name: x.name, sdrs: x.sdrs, jobs: x.jobs, parked: x.parked || [] })));
         }
       });
       btns.append(del);
@@ -1338,7 +1356,7 @@ window.RadioControls = (() => {
   function renderSystems() {
     const n = st.n, sys = (st.state && st.state.p25_systems) || [], t = ((st.state && st.state.channels) || {}).tiers;
     const jobs = (x) => x.jobs.map((j) => `${j.job}${j.sdr ? ` on ${j.sdr}` : ""}`).join(", ");
-    setText(n.systems, sys.map((x) => `${x.label}: ${x.state}`
+    setText(n.systems, sys.map((x) => `${x.label}: ${x.state !== "ok" && x.hold_until ? `held to ${fmtTime(x.hold_until)}` : x.state}`
       + (x.cc && x.cc.rate != null ? ` · control ${x.cc.rate}/s` : "")
       + (x.unknown && x.unknown.length ? ` · ${x.unknown.length} unknown TG${x.unknown.length === 1 ? "" : "s"}` : "")
       + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")
@@ -1348,9 +1366,17 @@ window.RadioControls = (() => {
       const rest = w.grants - w.recording - w.encrypted;
       return `${w.tg} ${w.name}: ${w.grants} grants, ${w.recording} recorded, ${w.encrypted} encrypted${rest > 0 ? `, ${rest} not recorded` : ""}`;
     }).join("; ") : "");
+    // the split patch's counts (#647, systems.Activity): would split (log) / splits (on), ID flips, aliases, of its calls
+    const split = (x) => {
+      const p = x.split;
+      if (!p || !(p.calls || p.would || p.split || p.flip || p.alias)) return "";
+      const cut = p.split ? `${p.split} splits` : `${p.would} would split`;
+      return `\nSplit since ${fmtTime(p.since)}: ${cut}, ${p.flip} ID flips, ${p.alias} aliases, in ${p.calls} calls`
+        + (p.calls ? ` (${Math.min(100, (100 * p.cut) / p.calls).toFixed(1)}%)` : "");
+    };
     n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
       + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")
-      + watched(x)).join("\n\n");
+      + watched(x) + split(x)).join("\n\n");
     show(n.systems, sys.length > 0);
     const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
     const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);

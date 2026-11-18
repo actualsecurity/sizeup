@@ -14,6 +14,10 @@ keeps the same token in the `CF_Authorization` cookie). Verified here, stdlib on
     aud         contains the Access application's AUD tag ([cloud] access_aud)
     iss         https://<team> ([cloud] access_team)
     exp / nbf   with 60 s leeway
+    cached      a token that passed is kept (by its SHA-256, the last VERIFIED_MAX) so the next request skips the RSA
+                check (~0.12 ms of pure Python): exp / nbf are checked against the clock on every use, and it is used
+                only while its key id still gives the key that verified it (a key Cloudflare rotated out ends it).
+                A refused token is never kept.
 
 Identity = the token's `email` claim, lower-cased, and which login it is from (session: jti / nonce /
 iat, so a person's activity log has one "signed in" per login, not per request). A service token's JWT (the station's, on the
@@ -32,6 +36,7 @@ import re
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from typing import Callable
@@ -45,6 +50,7 @@ RETRY_NO_KEYS_S = 5          # no keys at all yet (the first fetch failed): try 
 FETCH_TIMEOUT_S = 5
 MAX_TOKEN = 8192
 MIN_RSA_BITS = 2048
+VERIFIED_MAX = 1024          # tokens whose signature was checked, kept (LRU) so a request doesn't check it again
 # DER DigestInfo for SHA-256 (RFC 8017 9.2 note 1): what the signature's padding wraps around the hash.
 SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 B64URL = re.compile(r"[A-Za-z0-9_-]*")
@@ -123,6 +129,9 @@ class AccessVerifier:
         self._fetched_at = 0.0          # last successful fetch
         self._tried_at = -1e18          # last attempt (successful or not)
         self._lock = threading.Lock()
+        # sha256(token) -> (kid, the key that verified it, the claims as JSON): verify() skips the RSA check for these
+        self._verified: OrderedDict[bytes, tuple[str, tuple[int, int], bytes]] = OrderedDict()
+        self._verified_lock = threading.Lock()
 
     # -- the team's keys ------------------------------------------------------------------------------
 
@@ -161,9 +170,26 @@ class AccessVerifier:
         """The token's claims, or AccessError."""
         if not token or len(token) > MAX_TOKEN or token.count(".") != 2:
             raise AccessError("not a JWT")
+        digest = hashlib.sha256(token.encode("utf-8", "surrogatepass")).digest()
+        with self._verified_lock:
+            hit = self._verified.get(digest)
+            if hit is not None:
+                self._verified.move_to_end(digest)
+        if hit is not None:
+            kid, key, payload = hit
+            if self.key(kid) == key:             # the key that verified it is still the team's (keys refreshed as verify does)
+                claims = json.loads(payload)     # a fresh copy each time: a caller can't change what is cached
+                try:
+                    self._in_time(claims)
+                except AccessError:
+                    self._forget(digest)
+                    raise
+                return claims
+            self._forget(digest)                 # rotated out: checked again below (and refused)
         h64, p64, s64 = token.split(".")
         try:
-            header, claims, sig = json.loads(_b64(h64)), json.loads(_b64(p64)), _b64(s64)
+            payload = _b64(p64)
+            header, claims, sig = json.loads(_b64(h64)), json.loads(payload), _b64(s64)
         except (ValueError, UnicodeDecodeError) as e:
             raise AccessError(f"malformed: {e}") from None
         if not isinstance(header, dict) or not isinstance(claims, dict):
@@ -183,13 +209,26 @@ class AccessVerifier:
             raise AccessError("wrong audience (another Access application)")
         if claims.get("iss") != self.issuer:
             raise AccessError(f"wrong issuer {str(claims.get('iss'))[:80]!r}")
+        self._in_time(claims)
+        with self._verified_lock:
+            self._verified[digest] = (kid, key, payload)
+            self._verified.move_to_end(digest)
+            while len(self._verified) > VERIFIED_MAX:
+                self._verified.popitem(last=False)
+        return claims                            # (the cache keeps the JSON: these can't change it)
+
+    def _in_time(self, claims: dict) -> None:
+        """exp / nbf against the clock, with LEEWAY_S (AccessError when not)."""
         now = self.clock()
         exp, nbf = claims.get("exp"), claims.get("nbf")
         if not isinstance(exp, (int, float)) or isinstance(exp, bool) or now > exp + LEEWAY_S:
             raise AccessError("expired")
         if nbf is not None and (not isinstance(nbf, (int, float)) or now + LEEWAY_S < nbf):
             raise AccessError("not valid yet")
-        return claims
+
+    def _forget(self, digest: bytes) -> None:
+        with self._verified_lock:
+            self._verified.pop(digest, None)
 
     def identity(self, token: str) -> Identity:
         c = self.verify(token)

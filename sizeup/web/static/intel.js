@@ -31,6 +31,12 @@ window.IntelCard = (() => {
     st.audio.addEventListener("ended", done);
     st.audio.play().catch((e) => { done(); UI.toast(`Can't play: ${e.message}`, "alert"); });
   }
+  // the last push at ntfy (sizeup/intel/events.py delivery): "sent 16:21:27" / "not sent: 429" / "queued"
+  function delivered(e, time) {
+    const d = e.delivery;
+    if (!d || !(d.at >= e.pushed_at)) return "queued";
+    return d.ok ? `sent ${time(d.at)}` : `not sent: ${d.status || d.error || "?"}`;
+  }
   function where(e) {
     if (!e.place || e.precision === "none") return "Location not heard";
     return e.confirmed ? e.place : `${e.place} ?`;
@@ -41,7 +47,7 @@ window.IntelCard = (() => {
     const head = el("div", "aa-head");
     const conf = el("span", `aa-conf ${e.level}`, `${e.level} ${pct(e.what)}`);
     conf.title = `What ${pct(e.what)} · where ${pct(e.where)} (${e.precision})\nRules: ${(e.rules || []).map((r) => r[0]).join(", ")}`
-      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)}` : "");
+      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)} · ${delivered(e, deps.time)}` : "");
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
@@ -52,7 +58,13 @@ window.IntelCard = (() => {
       sug.title = "The model's reading, not the rules': on the map only, never pushed";
       li.append(sug);
     }
-    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
+    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened", "de-escalated"
+    if (e.fd_shown) {                    // the FD already there (sizeup/intel/engine.py _fire): "FD on scene · #26-000123"
+      const fd = el("div", "aa-loc", e.fd_shown);
+      fd.title = e.fd === "cleared" ? `${e.fd_shown.split(" · ")[0]} (cleared): pre-alert`
+        : "The FD was already there when PD put this out: an FYI, not a pre-alert";
+      li.append(fd);
+    }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
@@ -110,12 +122,12 @@ window.IntelCard = (() => {
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, st.busy.has(e.id), st.playing]));
+      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, st.busy.has(e.id), st.playing]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((e) => card(e, deps)));
   }
-  return { column };
+  return { column, delivered };
 })();
 
 window.IntelSettings = (() => {
@@ -197,8 +209,14 @@ window.IntelSettings = (() => {
     const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
     lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
     const lnum = (key, min, max, label, tip) => num(s[key], min, max, 1, set(key), label, tip);
-    const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
+    // ready / not configured; a pushed link refused by S3 (the self-test, sizeup/intel/listen.py) reads "refused"
+    const lk = ls.links || {};
+    const lbad = ls.configured && lk.state === "failed";
+    const lst = el("span", ls.configured && !lbad ? "chip s-state default" : "chip s-state edited",
+      !ls.configured ? "not configured" : lbad ? "refused" : "ready");
     if (!ls.configured) lst.title = ls.why || "";
+    else if (lbad) lst.title = `A pushed link was refused: HTTP ${lk.status}${lk.code ? " " + lk.code : ""}. Phones can't play it`;
+    else if (lk.state === "ok") lst.title = "A pushed link played";
     top.append(line(llab, [
       field("expiry min", lnum("listen_expiry_min", 1, 720, "Minutes the link plays", "Minutes the link plays, then it expires")),
       field("before s", lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission")),
@@ -207,7 +225,9 @@ window.IntelSettings = (() => {
     ], lst));
     // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
     const inf = d.infer || {};
-    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
+    const owned = !!(d.model || {}).on && ((d.model || {}).cfg || {}).infer_pd !== false;     // backing.py owns the police pack
+    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data"
+      + (owned ? ". Not for the police pack while Local model is on (one model per row)" : ""));
     icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
     const inum = (key, min, max, step, label, tip) => num(s[key] ?? "", min, max, step, set(key), label, tip);
     const model = sInput(s.infer_model || "", 120, "Model id", set("infer_model"), "mono");
@@ -223,6 +243,30 @@ window.IntelSettings = (() => {
       field("$/month", inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)", "Budget, US dollars a month (from the tokens each call reports)")),
       field("sample %", inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)", "Percent of rows with a hit: asked and recorded only (evaluation)")),
     ], used, ist));
+    // the local model behind the police rules (sizeup/intel/backing.py): the PC worker when it is there, else rules only
+    const mo = d.model || {};
+    const mt = mo.today || {};
+    const mc = mo.cfg || {};
+    const mnum = (key, min, max, step, label, tip) => num(mc[key] ?? s[key] ?? "", min, max, step, set(key), label, tip);
+    const [mlab, mcb] = sCheck("Local model", (mc.infer_pd ?? s.infer_pd) !== false, "The PC worker's model classifies police rows the rules left alone; none available: rules only");
+    mcb.addEventListener("change", () => post({ action: "set", key: "infer_pd", value: mcb.checked }, mcb.checked ? "Local model on" : "Local model off"));
+    const mused = el("span", "dim small", `${mt.asked || 0} asked · ${mt.events || 0} events today`);
+    mused.title = "Today: " + ["asked", "ok", "no_worker", "gaming", "deadline", "invalid", "events", "evidence", "capped", "unavailable"]
+      .map((k) => `${mt[k] || 0} ${k}`).join(" · ") + (mo.model ? `\nModel ${mo.model} ${mo.model_version || ""}` : "");
+    const mst = el("span", mo.ready ? "chip s-state default" : "chip s-state edited", mo.ready ? "ready" : (mo.on ? "rules only" : "off"));
+    mst.title = mo.ready ? `Backend: ${mo.backend}` : `PC worker: ${mo.pc || "unavailable"}`;
+    top.append(line(mlab, [
+      field("min conf", mnum("infer_pd_threshold", 0, 1, 0.05, "Confidence at least this makes an event")),
+      field("/h", mnum("infer_pd_hour_cap", 0, 1000, 1, "Questions an hour at most")),
+      field("/day", mnum("infer_pd_day_cap", 0, 20000, 1, "Questions a day at most")),
+      field("wait s", mnum("infer_pd_after_s", 0, 60, 1, "Seconds to wait for the transmissions after it (0: ask at once)")),
+    ], mused, mst));
+    // its events push only when the transmission backs them (backing.py infer_pd_corroborate): else card and map
+    const [clab, ccb] = sCheck("Corroborate", (mc.infer_pd_corroborate ?? s.infer_pd_corroborate) !== false,
+      "On: a local model's event pushes only when its transmission also has a dispatch cue, a rule word of its category or a confirmed address; otherwise card and map only");
+    ccb.addEventListener("change", () => post({ action: "set", key: "infer_pd_corroborate", value: ccb.checked }, ccb.checked ? "Model events need corroboration" : "Model events push alone"));
+    top.append(line(clab, []));
+    // (Bedrock for it: a stub, off by default; no control here until it is built: backing.py BedrockBackend)
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
     ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
@@ -238,6 +282,13 @@ window.IntelSettings = (() => {
     top.append(line(elab, [
       field("quiet from", hm("quiet_from", "Quiet from (no pushes; empty: none)", "Quiet hours from, local time (no pushes; empty: none)"), "in-w-time"),
       field("to", hm("quiet_to", "Quiet until", "Quiet hours until, local time"), "in-w-time"),
+    ]));
+    // a fire-related PD call the FD is already at (sizeup/intel/engine.py _fire): logged, an FYI only when it adds something
+    const fdl = el("span", "", "FD there");
+    fdl.title = "A fire-related PD call at one of our fire incidents (ours or the county feed's) with the FD there: no pre-alert; an FYI only when the words add something";
+    top.append(line(fdl, [
+      field("min", lnum("fd_window_min", 5, 720, "A closed incident counts this many minutes", "Minutes: an incident closed this long before the call still counts (open ones: up to 12 h)")),
+      field("m", lnum("fd_radius_m", 25, 2000, "Within this many metres", "Metres: a confirmed address this close is the incident's (or the same address or block)")),
     ]));
     const kids = [top];
     const ran = new Map((((d.counters || {}).packs) || []).map((x) => [x.pack, x]));     // what each pack was handed

@@ -1,0 +1,10 @@
+{
+  "role": "feed-adapter",
+  "holder": "st-north",
+  "gen": [
+    7,
+    14
+  ],
+  "ttl_s": 90,
+  "expires_at": 1794990090.0
+}

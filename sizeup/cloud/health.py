@@ -19,6 +19,8 @@ notice when it clears:
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
     sdr:<serial>  a dongle the station had is gone (unplugged)                             critical
+    noaudio:<serial> a dongle that opens but streams no audio (#703: out until it streams     critical
+                  again, a person picks its job, or a replug); once, never per stall
     dup:<serial>  two or more dongles on the station share one serial (#242): nothing of  critical
                   ours opens that serial until one is renamed (sizeup-station sdr-serial)
     job:<job>     a dongle's job (a channel) not running for JOB_GRACE_S                   critical
@@ -36,6 +38,13 @@ notice when it clears:
     outbox        events waiting on the station for outbox_min (5): it couldn't reach the  warning
                   hub (invisible here until it comes back: worked out from the age of the
                   oldest event it reports)
+    rejected:<type> "Station event rejected by hub: <type>": a page, its text, an alarm or an  critical
+                  incident source's event the hub refuses for good, held in the station's
+                  quarantine (sizeup/cloud/outbox.py): sent again slowly, then stuck until a
+                  person drops it; "Station alarm delivered late, not raised" for one the hub
+                  took too late (sizeup/cad/alarms.py MAX_AGE_S)
+    rejected_minor:<type> another type refused, for REJECTED_RECENT_S after its last refusal   warning
+                  (its own mute kind: muting it never hides a critical one)
     disk          the station's disk over disk_pct (90) full                               warning (critical
                                                                                            from DISK_CRITICAL)
     stt_backlog   the station's whisper queue (sizeup/stt.py SttQueue, #195, #300): its oldest   warning
@@ -160,6 +169,9 @@ CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it be
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
+REFUSED_HINT_S = 600.0           # a part of the station's post left out for its shape (Hub._refused): a hint this long
+LINK_RESTART_HINT_S = 3600.0     # a station link thread that started again: a hint this long (StationLink.restarts)
+OUTBOX_NOTE_HINT_S = 24 * 3600.0  # the station outbox's own note (a file set aside, a new epoch): a hint this long
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
 STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195) ...
@@ -184,21 +196,85 @@ def hub_own(key: str) -> bool:
 MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
 # The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
-              "job": "Channel not running", "sdr": "SDR gone", "group": "Antenna group short", "dup": "Duplicate dongle serial",
+              "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
-              "outbox": "Station's events backing up", "disk": "Station disk full",
+              "outbox": "Station's events backing up", "rejected": "Station event rejected (critical)",
+              "rejected_minor": "Station event rejected (other)",
+              "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped",
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
-MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected")   # critical ones: muted for a time only, never
+                                                                          # until unmuted
+REJECTED_RECENT_S = 24 * 3600.0     # a non-critical event the hub refused: a warning this long after its last refusal
 
 
 def alert_kind(key: str) -> str:
     """An alert's key -> its kind for muting: "job:FG1" -> "job", "aws_budget80" -> "aws_budget"."""
     k = str(key).partition(":")[0]
     return "aws_budget" if k == "aws_budget80" else k
+
+
+def _quarantine(q, skew: float = 0.0) -> dict:
+    """The station's quarantine as it reported it (sizeup/cloud/outbox.py summary(): the events the hub refused), checked;
+    its times on the hub's clock. A station from before this reports none: nothing."""
+    q = q if isinstance(q, dict) else {}
+    num = (lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None)
+    rows = []
+    for r in (q.get("rows") if isinstance(q.get("rows"), list) else [])[:20]:
+        if not isinstance(r, dict) or not isinstance(r.get("kind"), str) or num(r.get("first_at")) is None:
+            continue
+        rows.append({"kind": r["kind"][:40], "reason": str(r.get("reason") or "")[:40],
+                     "error": str(r.get("error") or "")[:200], "first_at": num(r["first_at"]) + skew,
+                     "last_at": (num(r.get("last_at")) or num(r["first_at"])) + skew,
+                     "tries": int(num(r.get("tries")) or 1), "critical": bool(r.get("critical")),
+                     "state": str(r.get("state") or "held")[:10],
+                     "next_at": num(r.get("next_at")) + skew if num(r.get("next_at")) is not None else None})
+    kinds = {}
+    for k, v in list((q.get("kinds") if isinstance(q.get("kinds"), dict) else {}).items())[:40]:
+        if isinstance(k, str) and isinstance(v, dict):
+            kinds[k[:40]] = dict({f: int(num(v.get(f)) or 0) for f in ("n", "critical", "stuck", "late")},
+                                 **{f: num(v.get(f)) + skew if num(v.get(f)) is not None else None
+                                    for f in ("critical_first", "minor_first", "minor_last")})
+    return {"n": int(num(q.get("n")) or 0), "critical": int(num(q.get("critical")) or 0), "rows": rows, "kinds": kinds}
+
+
+def _rejected_alerts(q: dict, now: float) -> dict[str, dict]:
+    """The events the hub refused, per type, from the station's totals per type (its rows are a sample: the reason and
+    the next try). "rejected:<type>" (critical) while a critical one (a page, its text, an alarm, an incident source's
+    event) is held on the station: sent again slowly, stuck (no more tries), or an alarm the hub took too late to raise
+    (LATE_KEEP_S on the station). Stuck and late ones carry "dismiss": an admin's Dismiss on Health
+    (POST /api/cad/health/dismiss) or `sizeup-station quarantine drop`. "rejected_minor:<type>" (a warning, its own mute
+    kind: muting it never hides a critical one) for another type refused in the last REJECTED_RECENT_S."""
+    out: dict[str, dict] = {}
+    rows = q.get("rows") or []
+    for kind, c in (q.get("kinds") or {}).items():
+        crit = [r for r in rows if r["kind"] == kind and r["critical"]]
+        if c["critical"]:
+            late = c["late"] == c["critical"]
+            last = max(crit, key=lambda r: r["last_at"]) if crit else None
+            nxt = min((r["next_at"] for r in crit if r["next_at"] is not None), default=None)
+            state = (f"{c['stuck']} stuck (no more tries)" if c["stuck"]
+                     else "" if late else f"next try {_hhmm(nxt)}" if nxt else "")
+            text = (f"{c['critical']} held on the station" + (f" · {last['reason']}" if last else "")
+                    + (f": {last['error']}" if last and last["error"] else "") + (f" · {state}" if state else ""))
+            out[f"rejected:{kind}"] = {
+                "severity": "critical",
+                "title": f"Station {kind} delivered late, not raised" if late else f"Station event rejected by hub: {kind}",
+                "text": text, "since": c["critical_first"] or min((r["first_at"] for r in crit), default=now),
+                **({"dismiss": kind} if c["stuck"] or c["late"] else {})}
+        minor = c["n"] - c["critical"]
+        if minor > 0 and c["minor_last"] is not None and now - c["minor_last"] <= REJECTED_RECENT_S:
+            last = max((r for r in rows if r["kind"] == kind and not r["critical"]), key=lambda r: r["last_at"],
+                       default=None)
+            out[f"rejected_minor:{kind}"] = {
+                "severity": "warning", "title": f"Station event rejected by hub: {kind}",
+                "text": f"{minor} kept on the station, not sent again" + (f" · {last['reason']}" if last else "")
+                        + (f": {last['error']}" if last and last["error"] else ""),
+                "since": c["minor_first"] or c["minor_last"]}
+    return out
 
 
 def active_mutes(section: dict | None, now: float) -> dict[str, float | None]:
@@ -262,6 +338,13 @@ def _read(path: str) -> str:
         return Path(path).read_text()
     except OSError:
         return ""
+
+
+def _hold_until(upd: dict) -> dict:
+    """A deferred switch's deadline (autoupdate.py "hold".until, the station's clock): {"hold_until": t} or {}."""
+    h = upd.get("hold") if isinstance(upd.get("hold"), dict) else {}
+    t = h.get("until")
+    return {"hold_until": float(t)} if isinstance(t, (int, float)) and not isinstance(t, bool) else {}
 
 
 def station_adapter(a) -> dict | None:
@@ -393,6 +476,8 @@ def station_metrics(app, metrics: Metrics) -> dict:
             jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
                          "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
                          "context": True}
+            if job in assigned and isinstance(rs.get("hold_until"), (int, float)):
+                jobs[job]["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: no fault
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
@@ -537,6 +622,8 @@ class StationHealth:
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
         self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
+        # each STT input's arrival after its event, p50 / p95 (#677, sizeup/cloud/sttarrival.py stats; HubApp sets it)
+        self.stt_arrival: Callable[[float], dict | None] | None = None
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -596,8 +683,9 @@ class StationHealth:
             return
         hl = status.get("health") if isinstance(status.get("health"), dict) else {}
         heard_tg = hl.get("heard") if isinstance(hl.get("heard"), dict) else {}
-        seen = [(str(r.get("label") or ""), r.get("last_heard")) for r in status.get("radios") or []
-                if isinstance(r, dict) and r.get("label") not in NOT_CHANNELS]
+        radios = status.get("radios") if isinstance(status.get("radios"), list) else []
+        seen = [(str(r.get("label") or ""), r.get("last_heard")) for r in radios
+                if isinstance(r, dict) and str(r.get("label") or "") not in NOT_CHANNELS]
         seen += [(str(k), v.get("at") if isinstance(v, dict) else None) for k, v in heard_tg.items()]
         with self._lock:
             for label, heard in seen:
@@ -618,23 +706,43 @@ class StationHealth:
         return now - (self.hub.skew or 0.0)
 
     def model(self, now: float | None = None) -> dict:
-        """station_health: everything the panel shows, from the station's last report."""
+        """station_health: everything the panel shows, from the station's last report. A report it can't read (a value
+        of a type nothing expects: the hub checks each status as it comes, sizeup/cloud/statusshape.py, so a bug here)
+        never takes Health, the deploy check or the watcher down: the model of no report, marked unreadable and said in
+        the log once per error type."""
         now = self.clock() if now is None else now
-        hub, st = self.hub, self.hub.status or {}
+        st = self.hub.status if isinstance(self.hub.status, dict) else {}
+        try:
+            out = self._model(now, st)
+            self._model_said = None                     # (a later episode is said again)
+            return out
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the panel or the watcher
+            why = f"{type(e).__name__}"
+            if self.__dict__.get("_model_said") != why:
+                self._model_said = why
+                self.log(f"health: the station's report not read: {why}: {str(e)[:160]}")
+            out = self._model(now, {})
+            out["reported"], out["unreadable"] = False, why
+            out["hints"].append({"channel": "Station", "level": "warn", "text": f"its last report unreadable ({why})"})
+            return out
+
+    def _model(self, now: float, st: dict) -> dict:
+        hub = self.hub
         hl = st.get("health") if isinstance(st.get("health"), dict) else {}
         snow = self._station_now(now)
         last_state = hub.last_state
-        out: dict = {"at": now, "reported": bool(hub.status), "health_reported": bool(hl)}
+        out: dict = {"at": now, "reported": bool(st), "health_reported": bool(hl)}
         out["station"] = {"name": st.get("name") or "", "id": st.get("id") or "", "connected": hub.connected(),
                           "last_seen": hub.last_seen, "last_state": last_state,
                           "silent_s": round(now - last_state, 1) if last_state else None,
                           "skew_s": round(hub.skew, 1), "hub_started": hub.started,
                           "silent": self._silent(now)[0] is True}
         v = st.get("version") if isinstance(st.get("version"), dict) else {}
-        desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
+        desc = (hub.version() if st else None) or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
-                        "update": {k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                        "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
+                                       **_hold_until(upd)),
                         "last": upd.get("last") if isinstance(upd.get("last"), dict) else None,
                         "failed": upd.get("failed") if isinstance(upd.get("failed"), dict) else {},
                         "behind_since": self._first.get("behind"), "adapter": station_adapter(v.get("adapter"))}
@@ -648,6 +756,15 @@ class StationHealth:
         why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
         out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
         out["outbox"]["dropped_stt_why"] = why
+        pre = si.get("dropped_pre")                                 # (#677) of them, the pre-alert channels'
+        out["outbox"]["dropped_stt_pre"] = pre if isinstance(pre, int) and not isinstance(pre, bool) and pre > 0 else 0
+        wk = si.get("worker") if isinstance(si.get("worker"), dict) else {}     # (#677) where NORMAL / LOW are made
+        out["outbox"]["stt_worker"] = {"where": str(wk.get("where") or si.get("encoder") or "")[:120],
+                                       "state": str(wk.get("state") or "")[:20], "detail": str(wk.get("detail") or "")[:300],
+                                       "held": bool(si.get("held"))} if wk or si.get("encoder") else None
+        out["outbox"]["quarantine"] = _quarantine(ob.get("quarantine"), hub.skew)   # the events the hub refused
+        fire = si.get("dropped_fire")                               # ... and fire traffic's
+        out["outbox"]["dropped_stt_fire"] = fire if isinstance(fire, int) and not isinstance(fire, bool) and fire > 0 else 0
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -667,14 +784,24 @@ class StationHealth:
                             "on": str(d.get("on") or "")[:64],
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
-                            "detail": str(js.get("detail") or "")[:200]})
+                            "detail": str(js.get("detail") or "")[:200],
+                            # (#637) a P25 system held back after dropouts: until when (the hub's clock)
+                            "hold_until": js["hold_until"] + hub.skew
+                            if job != "Off" and isinstance(js.get("hold_until"), (int, float))
+                            and not isinstance(js.get("hold_until"), bool) else None,
+                            # (#703) out: it opens but streams no audio ({since: the hub's clock, job})
+                            "noaudio": {"since": na["since"] + hub.skew, "job": str(na.get("job") or "")[:40]}
+                            if isinstance(na := d.get("noaudio"), dict) and isinstance(na.get("since"), (int, float))
+                            else None})
         out["dongles"] = dongles
         names = {d["serial"]: d["name"] for d in dongles}
         out["groups"] = [{"name": str(g.get("name") or "")[:40],
                           "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
                           "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
                           "short": [str(j)[:40] for j in g.get("short") or []][:24],
-                          "unowned": [str(j)[:40] for j in g.get("unowned") or []][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []
+                                      if j not in (g.get("parked") or [])][:24],
+                          "parked": [str(j)[:40] for j in g.get("parked") or []][:24],     # (#637) off on purpose
                           "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
                                         for s, j in list((g.get("conflicts") or {}).items())[:16]}
                           if isinstance(g.get("conflicts"), dict) else {}}
@@ -746,6 +873,7 @@ class StationHealth:
                                                    "last_drop", "last_error", "max", "working")} if sq else None
         out["stt_catchup"] = self._catchup()
         out["stt_pool"] = self._stt_pool()
+        out["stt_time"] = self._stt_time()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -766,6 +894,27 @@ class StationHealth:
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
+        sr = getattr(hub, "status_refused", None)
+        if isinstance(sr, dict) and now - float(sr.get("at") or 0) < REFUSED_HINT_S:   # (the hub's own clock)
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"status left out since {_hhmm(sr.get('since'))}: {sr.get('why')} · last "
+                                         f"taken {_hhmm(t) if (t := getattr(hub, 'status_at', None)) else 'never'}"})
+        lv = getattr(hub, "live_refused", None)
+        if isinstance(lv, dict) and now - float(lv.get("at") or 0) < REFUSED_HINT_S:
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"talker / page going out left out at {_hhmm(lv.get('at'))}: {lv.get('why')}"})
+        lr = hl.get("link_restarts") if isinstance(hl.get("link_restarts"), dict) else {}
+        again = sorted(f"{str(k)[:40]} {v.get('n')}× ({str(v.get('why') or '?')[:40]}, {_hhmm(v['at'] + hub.skew)})"
+                       for k, v in list(lr.items())[:12] if isinstance(v, dict) and isinstance(v.get("at"), (int, float))
+                       and not isinstance(v.get("at"), bool) and 0 <= snow - v["at"] < LINK_RESTART_HINT_S)
+        if again:                                   # the station link's threads that raised and started again
+            out["hints"].append({"channel": "Station link", "level": "warn", "text": "restarted: " + ", ".join(again)})
+        notes = ob.get("notes") if isinstance(ob.get("notes"), list) else []
+        for n in notes[-3:]:                        # the outbox's own trouble (sizeup/cloud/outbox.py notes)
+            if isinstance(n, dict) and isinstance(n.get("text"), str) and isinstance(n.get("at"), (int, float)) \
+                    and not isinstance(n.get("at"), bool) and 0 <= snow - n["at"] < OUTBOX_NOTE_HINT_S:
+                out["hints"].append({"channel": "Station outbox", "level": "warn",
+                                     "text": f"{_hhmm(n['at'] + hub.skew)}: {n['text'][:200]}"})
         reg = getattr(hub, "stations", None)        # another station refused: the hub takes one until multi-station
         others = reg.others() if reg is not None and hasattr(reg, "others") else {}
         if others:
@@ -786,6 +935,10 @@ class StationHealth:
         except Exception:  # noqa: BLE001 - never in the way of the rest
             shifts = []
         out["hints"] += shifts
+        try:                                        # #677: the STT inputs' arrival on the hub after their events
+            out["stt_arrival"] = self.stt_arrival(now) if self.stt_arrival is not None else None
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            out["stt_arrival"] = None
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
@@ -845,6 +998,16 @@ class StationHealth:
         """The GPU worker pool (#639, HubApp.pool_health()): its workers, queue, fallbacks, and every channel's latency
         (transmission end -> text). None when there is nothing to show. A worker offline is never an alert."""
         fn = getattr(getattr(self.hub, "app", None), "pool_health", None)
+        if fn is None:
+            return None
+        try:
+            return fn()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _stt_time(self) -> dict | None:
+        """The dispatcher's trailing-time match rate (#727, HubApp.stt_time_health()), None with nothing checked."""
+        fn = getattr(getattr(self.hub, "app", None), "stt_time_health", None)
         if fn is None:
             return None
         try:
@@ -951,8 +1114,17 @@ class StationHealth:
                                                   and b["last"].get("line") else ""),
                              "since": float((b["last"] or {}).get("at") or now) if isinstance(b["last"], dict) else now}
         if b["state"] in ("behind", "updating", "paused", "failed") and b["hub"]:
-            held("behind", self.behind_s, {"severity": "warning", "title": "Station behind the hub",
-                                           "text": f"{b['text']} (the hub runs {short(b['hub'])})"})
+            # a deferred switch past its "by HH:MM" (autoupdate.py describe() says "behind" then): the updater died or
+            # hangs, so at once, not behind_s later
+            # (only its own deferral, to the hub's build, past "by HH:MM" + 2 min: a burst moving the hub on while it
+            # waits, or a late station switching to the build it staged, is the usual behind_s)
+            u = b["update"] if isinstance(b["update"], dict) else {}
+            overdue = (u.get("state") == "deferred" and same_build(u.get("to"), b["hub"])
+                       and isinstance(u.get("hold_until"), (int, float)) and self._station_now(now) > u["hold_until"] + 120)
+            held("behind", 0 if overdue else self.behind_s,
+                 {"severity": "warning", "title": "Station behind the hub",
+                  "text": f"{b['text']} (the hub runs {short(b['hub'])})"
+                          + (": its switch is overdue (sizeup-update on the station)" if overdue else "")})
         for x in m.get("duplicates") or []:
             on = f" {x['name']}'s job {x['job']} won't start until fixed." if x["job"] != "Off" else ""
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",
@@ -965,6 +1137,16 @@ class StationHealth:
             out["reception"] = {"severity": "critical" if rx["push"] else "warning", "title": "Reception test: job not restored",
                                 "text": rx["text"], "since": rx["since"] or now, "quiet": not rx["push"]}
         for d in m["dongles"]:
+            if d.get("noaudio") and d["present"]:
+                # (#703) one alert while it is out, never one per stall; where its job runs now, if anywhere
+                na = d["noaudio"]
+                on = next((x for x in m["dongles"] if x["serial"] != d["serial"] and x["job"] == na["job"]
+                           and x["running"]), None)
+                held(f"noaudio:{d['serial']}", 0, {
+                    "severity": "critical", "title": f"SDR {d['name']} no audio",
+                    "text": f"dongle {d['name']} ({d['serial']}) opens but streams no audio since {_hhmm(na['since'])}"
+                            + (f" · {na['job']} on SDR {on['name']}" if on else f" · {na['job']} not running")
+                            + " · replug it, or pick its job once it is fixed"})
             if d.get("context"):
                 continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
@@ -990,11 +1172,13 @@ class StationHealth:
             out["group"] = {"severity": "warning", "title": "Antenna groups dropped",
                                  "text": f"{m['groups_problem']} · every dongle unlocked until saved again", "since": now}
         if not m["shared"]:                              # one dongle per channel: each channel is a job
-            hl_jobs = ((self.hub.status or {}).get("health") or {}).get("jobs") or {}
+            hl_st = self.hub.status.get("health") if isinstance(self.hub.status, dict) else None
+            hl_jobs = hl_st.get("jobs") if isinstance(hl_st, dict) else None
             for c in m["channels"]:
                 j = hl_jobs.get(c["label"]) if isinstance(hl_jobs, dict) else None
-                state = (j or {}).get("state", c["state"])
-                if state in ("down", "absent", "starting") and (j or {}).get("expected", True) and c["mhz"]:
+                j = j if isinstance(j, dict) else {}
+                state = j.get("state", c["state"])
+                if state in ("down", "absent", "starting") and j.get("expected", True) and c["mhz"]:
                     held(f"job:{c['label']}", JOB_GRACE_S, {"severity": "critical", "title": f"{c['label']} not running",
                                                            "text": f"{c['label']}: {state}"
                                                                    + (f" ({c['detail']})" if c["detail"] else "")})
@@ -1036,6 +1220,7 @@ class StationHealth:
             out["outbox"] = {"severity": "warning", "title": "Station's events backing up",
                              "text": f"{ob['pending']} event(s) waiting, oldest {_hhmm(ob['oldest'])} · not reaching the hub",
                              "since": ob["oldest"]}
+        out.update(_rejected_alerts(ob.get("quarantine") or {}, now))
         disk = m["system"].get("disk_pct")
         if isinstance(disk, (int, float)) and disk >= self.disk_pct:
             out["disk"] = {"severity": "critical" if disk >= DISK_CRITICAL else "warning", "title": "Station disk full",
@@ -1238,7 +1423,7 @@ class StationHealth:
         if kind == "silent":
             last = self.hub.last_state
             w["detail"] = f"last heard {_hhmm(last)}" if last else "never reported"
-        elif kind == "sdr":
+        elif kind in ("sdr", "noaudio"):
             d = next((d for d in m["dongles"] if d["serial"] == arg), None)
             w["dongle"] = f"SDR {d['name'] if d else arg}"
             if d and d["job"] != "Off":
@@ -1294,7 +1479,16 @@ class StationHealth:
         with self._lock:
             m = self.model(now)
             self._log_adsb(m.get("adsb"))
-            conds, judged = self.conditions(m, now)
+            try:
+                conds, judged = self.conditions(m, now)
+                self._conds_said = None
+            except Exception as e:  # noqa: BLE001 - a report it can't judge: judged as none (silent still decided)
+                why = type(e).__name__
+                if self.__dict__.get("_conds_said") != why:
+                    self._conds_said = why
+                    self.log(f"health: the station's report not judged: {why}: {str(e)[:160]}")
+                m = dict(m, reported=False)
+                conds, judged = self.conditions(m, now)
             mutes = self._mutes(now)
             changes: list[tuple[str, dict]] = []
             settled = False
@@ -1331,6 +1525,10 @@ class StationHealth:
                     a["notify_after"] = float(c["notify_after"])   # pushed only once this old (#547)
                 else:
                     a.pop("notify_after", None)
+                if c.get("dismiss"):
+                    a["dismiss"] = str(c["dismiss"])     # an admin may dismiss it (the station's stuck / late events)
+                else:
+                    a.pop("dismiss", None)
             for key in list(self.active):
                 if key in conds:
                     continue
@@ -1481,6 +1679,7 @@ class StationHealth:
         mutes = self._mutes(now)
         with self._lock:
             out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {},
+                        **({"dismiss": a["dismiss"]} if a.get("dismiss") else {}),
                         flaps=self._flaps(a, now),                                  # back this often in 1 h (#340)
                         **({"muted": True, "muted_until": mutes[alert_kind(a["key"])]}
                            if alert_kind(a["key"]) in mutes else {}))

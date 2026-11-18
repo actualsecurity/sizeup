@@ -1,0 +1,21 @@
+{
+  "radio-receive": {
+    "channels": [
+      {
+        "job": "Paging 1",
+        "coverage": "shared"
+      }
+    ]
+  },
+  "stt-heavy": {
+    "classes": [
+      "pages",
+      "live"
+    ]
+  },
+  "stt-light": {
+    "classes": [
+      "shed"
+    ]
+  }
+}

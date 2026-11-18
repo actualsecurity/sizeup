@@ -108,6 +108,12 @@ receiver -> squelch -> transmission (clip) -> decoders -> speech-to-text -> radi
 | ADS-B (1090 MHz) | readsb on the one dongle named for it | `aircraft.json` every second | `radio/adsbd.py`, `cloud/aircraftlink.py` |
 | AIS (marine VHF) | AIS-catcher on the one dongle named for it. Off until the hardware is installed | Each vessel's latest messages | `radio/aisd.py`, `cloud/vessellink.py` |
 
+**Threads (analog FM and airband).** Each receiver's own thread reads its `rtl_fm` pipe (about 2 s of audio) and feeds
+the squelch and the live tap only: the talker and the emergency alarm at the key-up, a page going out. A finished
+transmission goes to its channel's worker (`radio/fm.py` `SegmentWorkers`: one thread per channel, in order, bounded,
+flushed at a stop), which runs `App._segment` (the whole clip's ID decode, the clip, speech-to-text's queue) and, on
+airband, the AGC and tone notch. A station switches threads every 1 ms (`sys.setswitchinterval`), like the hub.
+
 Talkgroup tiers for P25 systems other than the county's (`sizeup/tiers.py`): `alert` (record, transcribe, may raise a
 pre-alert), `text` (record and transcribe), `record` (audio only), `off`, and `activity` (encrypted: never recorded,
 only that it keyed). The default comes from the system's `talkgroups.csv`; Settings changes it per talkgroup.
@@ -259,7 +265,10 @@ pushed. It never creates an incident.
    (an event's mode is the rung its own rules reach; a cue's mode never moves it). Only these three packs' events
    are held at log when outside our area or at one of our own accepted emergency incidents (`out_of_area`,
    `near_incident`; never once pushed; a safety category is linked, not held: docs/cloud.md). The police pack's
-   events are never linked, and held only in its `fire_call` category (a burning smell, the FD notified) until it
+   events are linked only in a `"fire_related"` category (fire_report, fire_call, hazmat, alarm), and held only
+   there: when the FD is already there (one of our fire incidents, the CAD's or the county feed's, at the place,
+   or the words saying so): `fd_on_scene`, `fd_dispatched`, `fd_there`, an FYI only when the words add something
+   (the FD cleared: a pre-alert as usual); and in its `fire_call` category (a burning smell, the FD notified) until it
    has an address in the source's towns (`unplaced`); its own safety categories are weapons, barricade, EDP and
    dispute. The police pack reads Port Chester / Rye / Rye Brook PD only;
    `neighbor_police.json` reads the other MRRS police talkgroups with the same rules (`"rules_from"`), at log.
@@ -279,7 +288,7 @@ pushed. It never creates an incident.
 **Listen** (`listen.py`; on by default, needs `SIZEUP_AUDIO_BUCKET`): the event's transmissions plus the same source's
 from 45 s before to 60 s after, stitched into one file (AAC at 24 kbps with ffmpeg, else 8 kHz WAV; the hub image has
 no ffmpeg), written under a random key in the audio bucket's `listen/` prefix and linked by a presigned URL that
-expires (20 min). There is no sign-in on the link. Record-only, encrypted and activity-tier sources are never included.
+expires (60 min, `listen_expiry_min`; the file is deleted once its last link has expired). There is no sign-in on the link. Record-only, encrypted and activity-tier sources are never included.
 The file is restitched under the same key as later transmissions arrive. It never delays the push (its own thread); a
 403 from the bucket reads "not configured" and is retried after an hour.
 
@@ -479,7 +488,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | Station link | A bearer token per station (`sz1.<id>.<secret>`, 256 random bits), plus an Access service token, which only Cloudflare's edge checks: the hub itself checks the bearer alone. The hub keeps only each token's SHA-256 (hub.sqlite `stations`, `cloud/stations.py`) and turns the bearer into the station id it proves before reading any body (`cloud/hub.py` `_principal`, constant-time). A payload naming another station id is refused. The older shared token (`SIZEUP_STATION_TOKEN`) still works as one station until an admin retires it. Admins add, rotate and revoke stations in Settings > Station > Stations (audited, the token shown once). With no token configured and no station added the hub refuses every station call. [How station authentication works](cloud.md#how-station-authentication-works). |
 | Adapter credentials | The incident-source adapter runs only on the station, and only the station can read its credentials: systemd credentials, never environment variables (`sizeup/procenv.py`). A credential kept in SSM is read by the station's own IAM user (`cloud/adapterssm.py`). The hub can write one, never read it: an admin may type a new adapter password into Settings > Station > Adapter, and the hub puts it into SSM as a new version (`cloud/adapterpass.py`, #465). The value is kept out of logs, the audit, answers and errors. The hub's roles are denied reading and decrypting that parameter by the department's setup scripts, which are outside this repo. A failing adapter reports only the exception type. |
 | Context and police rows | The hub's pages and API serve another system's rows, text, ids and audio only to a verified signed-in person (`sourcekeys.may_see_context`). The station's own page, all-in-one and a hub without Access serve none. Their words are never written to a log. The one way such audio leaves without a sign-in is an intel push's Listen link (next row). |
-| Pushes | An intel push carries the category, town, address or block, time and level: no transcript words, talker or radio ID among its fields. Not scrubbed by default (`push_pii`, admin decision 2026-11-17: access is limited instead; ntfy topics are readable by anyone who knows the name); with it off, a scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL to the event's stitched audio, with no sign-in: whoever holds the link can play it until it expires; random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
+| Pushes | An intel push carries the category, town, address or block, time and level: no transcript words, talker or radio ID among its fields. Not scrubbed by default (`push_pii`, admin decision 2026-11-17: access is limited instead; ntfy topics are readable by anyone who knows the name); with it off, a scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL to the event's stitched audio, with no sign-in: whoever holds the link can play it until it expires; random key, expires in 60 min (`listen_expiry_min`), the file deleted by the hub once its last link has expired, and a one-day lifecycle rule on the `listen/` prefix, which a person sets up, as the backstop (`intel/listen.py`). |
 | Station logs | Read by a separate user with no network (`cloud/logread.py`), scrubbed on the station with its credential values, scrubbed again on the hub (`logscrub.py`, `cloud/logship.py`, `cloud/cwlogs.py`, [`station-logs.md`](station-logs.md)). |
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |
