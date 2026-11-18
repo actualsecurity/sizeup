@@ -3,14 +3,14 @@ moved to another Fire/EMS talkgroup: "all units operate on Fire/EMS 31", the uni
 
     incident_channels   incident x county talkgroup, from `since` until the incident closes or a person takes it off
                         (removed_at: never put back by a rule, only by a person). source, the first that found it:
-                          dispatch  a transcript on one of our channels that is on this open incident (its page, 60
+                          dispatch  a transcript on our talkgroups or a page that is on this open incident (its page, 60
                                     Control or one of its units on our talkgroup; on MAX_INCIDENTS at most: a page and
                                     the feed's own event for the same call, or units of two calls moved together, each
                                     get it) says to operate on it:
-                                    "operate on Fire/EMS 31", "switching to fire 31", "go to 31", "tac 31"; read against
+                                    "operate on Fire/EMS 31", "switching to fire 31", "switch to 31", "go to tac 31"; read against
                                     the talkgroups' own names (Cad.source_rows: the county's Fire/EMS talkgroups)
                           feed      its external CAD feed's comments or extra "channel" name it ("FIRE/EMS 31")
-                          units     UNITS_MIN transmissions of its own units (their radio IDs: the unit rule) on it
+                          units     UNITS_MIN of its own units (their radio IDs: the unit rule) heard on it while open
                           manual    a person ("+ channel" on the incident's radio card)
                         A dismissed incident never has one; a talkgroup of ours (Fire/EMS 15, the feed's and the status
                         hints' talkgroups) is never one.
@@ -25,7 +25,7 @@ While it is on (since .. close), a transmission on that talkgroup goes on the in
     A late call (#747/#753) is matched by its own start, never by when it arrived.
 
 Speech-to-text (promoted): while an incident of ours that has one is open, and TAIL_S after it closed (units still talk
-there), the talkgroup is transcribed like Fire/EMS 15 (App._stt_class URGENT: never shed; the station's FIRE input
+there), as long as the call is heard there (QUIET_S), the talkgroup is transcribed like Fire/EMS 15 (App._stt_class URGENT: never shed; the station's FIRE input
 lane; Amazon Transcribe within the monthly limit, never its reserve). The hub sends the set with the channel choices
 (channels.hub_aws "promote").
 """
@@ -54,8 +54,9 @@ CREATE INDEX IF NOT EXISTS incident_channels_tg ON incident_channels(talkgroup);
 """
 LEAD_S = 60.0               # its traffic counts from this long before what said it
 TAIL_S = 600.0              # promoted this long after the incident closed
+QUIET_S = 1800.0            # ... and while it was put on, or traffic on it went on the incident, this recently
 MAX_INCIDENTS = 3           # a move said on more of our incidents than this (by their links) isn't about one call
-UNITS_MIN = 2               # this many of the incident's own units' transmissions on a talkgroup: its channel
+UNITS_MIN = 2               # this many of the incident's own units heard on a talkgroup (their radios): its channel
 BACKFILL_MAX = 300
 NAMES_TTL_S = 60.0
 SOURCES = ("dispatch", "feed", "units", "manual")
@@ -63,7 +64,8 @@ OPEN = ("queued", "pending", "active")
 
 # -- reading a channel assignment -----------------------------------------------------------------------------------------
 
-TOKEN = re.compile(r"[a-z]+|\d+")
+TOKEN = re.compile(r"[a-z]+|\d+|[.,;:!?]")
+END = "."                   # a clause's end (the punctuation a transcript has, all one token)
 ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
 TEENS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
          "seventeen": 17, "eighteen": 18, "nineteen": 19}
@@ -74,21 +76,22 @@ VERBS = ({"operate", "operating", "operations"}, {"switch", "switching", "switch
                                                   "change", "changing", "head", "come"})
 BARE_VERBS = {"operate", "operating", "operations", "switch", "switching", "switched", "move", "moving", "change",
               "changing"}
-# The Fire/EMS family as said or misheard ("Fire/EMS", "fire and EMS", "fire EMS", "Fi MS"), and the words that mean
-# the same numbered channel ("tac 31", "ops 31")
-FAMILY = (("fire", "and", "ems"), ("fire", "e", "m", "s"), ("fire", "ems"), ("fire", "ms"), ("fi", "ems"), ("fi", "ms"),
-          ("far", "ems"), ("fire", "emts"), ("fire",), ("tac",), ("tactical",), ("ops",), ("channel",), ("talkgroup",),
-          ("talk", "group"))
-STRONG = {("fire", "and", "ems"), ("fire", "e", "m", "s"), ("fire", "ems"), ("fire", "ms"), ("fi", "ems"), ("fi", "ms"),
-          ("far", "ems"), ("fire", "emts"), ("tac",), ("tactical",), ("ops",)}     # enough without a verb (a feed comment)
-# what may follow a channel number said alone ("switch to 31", "go to 31 and ..."): never a house number's street
-AFTER_BARE = {"and", "now", "please", "for", "when", "on", "with", "thanks", "thank", "copy", "all", "units", "unit",
-              "command", "control", "over"}
+# The Fire/EMS family as said or misheard ("Fire/EMS", "fire and EMS", "fire EMS", "Fi MS"; FULL), and the shorter words
+# for the same numbered channel ("fire 31", "tac 31", "ops 31"). Never "channel N" / "talkgroup N": our own FM channels
+# are called that too.
+FULL = (("fire", "and", "ems"), ("fire", "e", "m", "s"), ("fire", "ems"), ("fire", "ms"), ("fi", "ems"), ("fi", "ms"),
+        ("far", "ems"), ("fire", "emts"))
+FAMILY = (*FULL, ("fire",), ("tac",), ("tactical",), ("ops",))
+# what may follow the channel's number: the clause ends, or one of these ("switch to 31 and ...", "fire 31 for the
+# command"); never a house number's street ("the fire 31 Sample Road")
+AFTER = {END, "and", "now", "please", "for", "when", "on", "with", "thanks", "thank", "copy", "all", "units", "unit",
+         "command", "control", "over", "time", "at"}
+RUN_TOGETHER = 6            # a Fire/EMS number of this many digits or more: a page's channel and what followed, run together
 FIRE_NAME = re.compile(r"^\s*fire\s*/?\s*(?:and\s+)?ems\s+(\d{1,3})\s*$", re.I)
 
 
 def tokens(text: str) -> list[str]:
-    return TOKEN.findall((text or "").lower().replace("/", " "))
+    return [END if t in ".,;:!?" else t for t in TOKEN.findall((text or "").lower().replace("/", " "))]
 
 
 def _number(toks: list[str], i: int) -> tuple[str, int] | None:
@@ -109,23 +112,24 @@ def _number(toks: list[str], i: int) -> tuple[str, int] | None:
     return None
 
 
-def _verb(toks: list[str], i: int) -> int | None:
-    """The index after a moving verb at i ("operate on", "switching over to", "go to the"), else None."""
+def _verb(toks: list[str], i: int) -> tuple[int, bool] | None:
+    """(the index after a moving verb at i: "operate on", "switching over to", "go to the"; whether "the" was said),
+    else None."""
     t = toks[i]
+    j = i + 1
     if t in VERBS[0]:
-        j = i + 1
-        if j < len(toks) and toks[j] == "on":
-            j += 1
-            return j + (j < len(toks) and toks[j] == "the")
-        return None
-    if t in VERBS[1]:
-        j = i + 1
+        if j >= len(toks) or toks[j] != "on":
+            return None
+    elif t in VERBS[1]:
         if j < len(toks) and toks[j] == "over":
             j += 1
-        if j < len(toks) and toks[j] == "to":
-            j += 1
-            return j + (j < len(toks) and toks[j] == "the")
-    return None
+        if j >= len(toks) or toks[j] != "to":
+            return None
+    else:
+        return None
+    j += 1
+    the = j < len(toks) and toks[j] == "the"
+    return j + the, the
 
 
 def _family(toks: list[str], j: int) -> tuple[tuple, int]:
@@ -139,9 +143,11 @@ def parse(text: str, channels: dict[int, str], strict: bool = True) -> list[int]
     """The talkgroups a transmission (or a feed's comment, strict=False) says to operate on, in order, from the
     county's talkgroup names (channels: {tg: name}): a Fire/EMS number after a moving verb ("operate on Fire/EMS 31",
     "switching to fire 31", "go to tac 31", "switch to 31"), a whole other name after one ("operate on Tech Rescue"); not
-    strict, also a Fire/EMS name alone ("FIRE/EMS 31", "OPS 31"). A number said alone only after switch / move / change /
-    operate, ending the phrase ("switch to 31 and ..."): never a house number. A Fire/EMS number run together with what
-    followed it (a page's "Fire EMS 31540963") is read as its first two digits when those are a channel."""
+    strict, also a Fire/EMS name alone ("FIRE/EMS 31", "OPS ON FIRE/EMS 31"). The number must end the clause or go on
+    with AFTER ("switch to 31 and ..."): never a house number. A number alone only after switch / move / change /
+    operate; "the fire" is the call, never a channel. A Fire/EMS number of RUN_TOGETHER digits or more (a page's
+    "Fire EMS 31540963": the channel and what followed, run together) is read as its first two digits when those are a
+    channel, else its first."""
     toks = tokens(text)
     fire: dict[str, int] = {}
     named: list[tuple[list[str], int]] = []
@@ -150,8 +156,8 @@ def parse(text: str, channels: dict[int, str], strict: bool = True) -> list[int]
         if m:
             fire[str(int(m.group(1)))] = tg
         else:
-            nt = tokens(name)
-            if nt and not any(w.isdigit() for w in nt[:1]):
+            nt = [w for w in tokens(name) if w != END]
+            if nt and not nt[0].isdigit():
                 named.append((nt, tg))
     out: list[int] = []
 
@@ -160,30 +166,34 @@ def parse(text: str, channels: dict[int, str], strict: bool = True) -> list[int]
             out.append(tg)
 
     for i in range(len(toks)):
-        j = _verb(toks, i)
-        verb = j is not None
-        if not verb:
-            if strict and toks[i] != "on":
-                continue
-            j = i + (toks[i] == "on")
+        v = _verb(toks, i)
+        if v is None:
+            if strict:
+                continue                                 # said on the air: a moving verb, always
+            j, the = i, False
+        else:
+            j, the = v
         fam, k = _family(toks, j)
-        if not verb and fam not in STRONG:
-            continue                                     # "on fire 31": the family said in full, or a verb
+        if v is None and fam not in FULL:
+            continue                                     # a feed's comment: the Fire/EMS name in full
+        if the and fam == ("fire",):
+            continue                                     # "go to the fire 31 ...": the call, not a channel
         got = _number(toks, k)
         if got is not None:
             digits, used = got
-            key = str(int(digits)) if len(digits) <= 3 else ""
-            if key in fire:
-                after = toks[k + used] if k + used < len(toks) else ""
-                if fam or (toks[i] in BARE_VERBS and (not after or after in AFTER_BARE)):
-                    take(fire[key])
+            after = toks[k + used] if k + used < len(toks) else END
+            if len(digits) <= 3 and str(int(digits)) in fire:
+                if (fam or toks[i] in BARE_VERBS) and after in AFTER:
+                    take(fire[str(int(digits))])
                     continue
-            elif fam in STRONG and len(digits) >= 4 and str(int(digits[:2])) in fire:
-                take(fire[str(int(digits[:2]))])         # "31540963": the channel and what followed, run together
-                continue
-        if verb:
+            elif fam in FULL and len(digits) >= RUN_TOGETHER:
+                first = next((d for d in (str(int(digits[:2])), str(int(digits[:1]))) if d in fire), "")
+                if first:
+                    take(fire[first])
+                    continue
+        if v is not None:
             for nt, tg in named:
-                if toks[j:j + len(nt)] == nt:
+                if toks[j:j + len(nt)] == nt and (toks[j + len(nt)] if j + len(nt) < len(toks) else END) in AFTER:
                     take(tg)
     return out
 
@@ -279,11 +289,16 @@ class OpChannels:
                        and (w["until"] is None or w["until"] >= at)})
 
     def promoted(self, now: float | None = None) -> set[int]:
-        """The talkgroups transcribed like ours now: an open incident's channel, or one closed in the last TAIL_S."""
+        """The talkgroups transcribed like ours now: an open incident's channel, or one closed in the last TAIL_S; and
+        only while the call is heard there (put on in the last QUIET_S, or a transmission on it on the incident in the
+        last QUIET_S): a call left open for hours never keeps a busy shared talkgroup ours."""
         now = self.cad.clock() if now is None else now
         rows = self.store.q("SELECT DISTINCT c.talkgroup FROM incident_channels c JOIN incidents i ON i.id = c.incident_id "
                             f"WHERE c.removed_at IS NULL AND (i.status IN ({','.join('?' * len(OPEN))}) OR "
-                            "(i.status = 'closed' AND i.closed_at >= ?))", (*OPEN, now - TAIL_S))
+                            "(i.status = 'closed' AND i.closed_at >= ?)) AND (c.since >= ? OR c.at >= ? OR EXISTS ("
+                            "SELECT 1 FROM radio_links l JOIN radio_traffic t ON t.id = l.traffic_id WHERE "
+                            "l.incident_id = c.incident_id AND t.talkgroup = c.talkgroup AND t.start >= ?))",
+                            (*OPEN, now - TAIL_S, now - QUIET_S, now - QUIET_S, now - QUIET_S))
         return {r["talkgroup"] for r in rows} - self.ours()
 
     # -- writing ----------------------------------------------------------------------------------------------------------
@@ -336,9 +351,10 @@ class OpChannels:
 
     # -- the links ------------------------------------------------------------------------------------------------------
 
-    def rule_links(self, t: dict, rigs: list[str]) -> tuple[dict[int, tuple[str, str]], set[int]]:
+    def rule_links(self, t: dict, rigs: list[str], ctx: dict | None = None) -> tuple[dict[int, tuple[str, str]], set[int]]:
         """For Comms.record (before its transaction; t as it takes it): ({incident: (why, unit)} to link, {incident}
-        whose unkept "on this channel" link this transmission must not have). Nothing off an operating channel."""
+        whose unkept "on this channel" link this transmission must not have). Nothing off an operating channel. ctx: the
+        radio log's context, when the caller has one for this time (a backfill)."""
         tg = t.get("talkgroup")
         if tg is None or (t.get("system") or sources.COUNTY) != sources.COUNTY:
             return {}, set()
@@ -351,10 +367,11 @@ class OpChannels:
             return {}, set(ids)                          # two of ours on one talkgroup: can't tell whose
         iid = ids[0]
         rl = self.cad.radiolog
-        ctx = rl.context(start, start)
+        ctx = ctx or rl.context(start, start)
         on = rl._units_on(ctx, iid, start)
-        if rigs:                                         # a radio we know: its unit's call (the unit rule), or not this one
-            return ({}, set()) if set(rigs) & on else ({}, {iid})
+        if rigs:                                         # a radio we know: its unit's call (as the unit rule), or not this one
+            mine = sorted(set(rigs) & on)
+            return ({iid: ("unit", mine[0])}, set()) if mine else ({}, {iid})
         add: dict[int, tuple[str, str]] = {}
         from sizeup.cad.radios import is_dispatcher
         for name in [x.strip() for x in (t.get("unit") or "").split(",") if x.strip()]:
@@ -389,17 +406,20 @@ class OpChannels:
         lo, hi = wins[0]["since"], min(wins[0]["until"] or 1e18, self.cad.clock() + 1)
         rows = self.store.q("SELECT * FROM radio_traffic WHERE talkgroup = ? AND system IN ('', ?) AND start >= ? AND start <= ? "
                             "ORDER BY start DESC LIMIT ?", (int(tg), sources.COUNTY, lo, hi, BACKFILL_MAX))
+        if not rows:
+            return 0
+        ctx = self.cad.radiolog.context(min(r["start"] for r in rows), max(r["start"] for r in rows))
         n = 0
         for r in rows:
             t = {"id": r["id"], "start": r["start"], "talkgroup": r["talkgroup"], "system": r["system"], "unit": r["talker"],
                  "text": r["text"], "source": r["channel"]}
-            add, drop = self.rule_links(t, [x.strip() for x in (r["rig"] or "").split(",") if x.strip()])
+            add, drop = self.rule_links(t, [x.strip() for x in (r["rig"] or "").split(",") if x.strip()], ctx)
             with self.store.tx() as db:
                 before = db.total_changes
                 self.cad.comms._channel_apply(db, r["id"], add, drop)
                 n += int(db.total_changes != before and iid in add)
             if (r["text"] or "").strip():
-                f = self.cad.radiolog.matches(r)
+                f = self.cad.radiolog.matches(r, ctx)
                 if iid in f:
                     self.cad.radiolog._link(r["id"], {iid: f[iid]})
         if n:
@@ -426,7 +446,7 @@ class OpChannels:
     # -- finding one ------------------------------------------------------------------------------------------------------
 
     def heard(self, tid: str) -> list[int]:
-        """A transcript on one of our channels (our talkgroups, an FM or paging channel) that is on open incidents of
+        """A transcript on one of our talkgroups or paging channels (never a fireground: its own "tac 2") that is on open incidents of
         ours (by any rule but this one's; MAX_INCIDENTS at most) and says to operate on one talkgroup: their channel
         from LEAD_S before it was said. The incidents that got one."""
         t = self.store.one("SELECT id, start, channel, talkgroup, system, text FROM radio_traffic WHERE id = ?", (tid,))
@@ -437,9 +457,9 @@ class OpChannels:
         said = parse(t["text"], names) if names else []
         if len(said) != 1:
             return []                                    # none, or more than one: not a clear move
-        tgs, fm = self.cad.radiolog._channels()
-        if (t["talkgroup"] not in tgs) if t["talkgroup"] is not None else (t["channel"] not in fm | set(self.cad.s.paging)):
-            return []                                    # said on one of our channels only
+        tgs, _fm = self.cad.radiolog._channels()
+        if (t["talkgroup"] not in tgs) if t["talkgroup"] is not None else (t["channel"] not in set(self.cad.s.paging)):
+            return []                                    # said on our talkgroups or a page (a fireground's "tac 2" is ours)
         incs = self.store.q("SELECT DISTINCT i.id, i.status, i.closed_at FROM radio_links l JOIN incidents i ON i.id = l.incident_id "
                             "WHERE l.traffic_id = ? AND l.why != ? AND i.status != 'dismissed'", (tid, WHY))
         incs = [i for i in incs if i["closed_at"] is None or i["closed_at"] >= t["start"]]
@@ -448,19 +468,18 @@ class OpChannels:
         return [i["id"] for i in incs if self.assign(i["id"], said[0], "dispatch", float(t["start"]) - LEAD_S, evidence=tid)]
 
     def after_record(self, t: dict, iids: list[int]) -> None:
-        """Comms.record just logged it (linked to iids): a transcript that moves the call (heard), and our units' radios
-        heard on another talkgroup while on one of ours (UNITS_MIN transmissions: that talkgroup is its channel)."""
+        """Comms.record just logged it (linked to iids): our units' radios heard on another talkgroup while on one of
+        ours (UNITS_MIN units: that talkgroup is its channel). A transcript that moves the call: on_text (heard)."""
         tid = str(t["id"])
-        if (t.get("text") or "").strip():
-            self.heard(tid)
         tg = t.get("talkgroup")
         if tg is None or not iids or (t.get("system") or sources.COUNTY) != sources.COUNTY or int(tg) in self.ours() \
                 or int(tg) not in self.names():
             return
         for iid in iids:
-            r = self.store.one("SELECT COUNT(*) AS n, MIN(t.start) AS first FROM radio_links l JOIN radio_traffic t ON "
-                               "t.id = l.traffic_id WHERE l.incident_id = ? AND l.why = 'unit' AND t.talkgroup = ? "
-                               "AND t.system IN ('', ?)", (iid, int(tg), sources.COUNTY))
+            r = self.store.one("SELECT COUNT(DISTINCT l.unit) AS n, MIN(t.start) AS first FROM radio_links l JOIN radio_traffic t "
+                               "ON t.id = l.traffic_id JOIN incidents i ON i.id = l.incident_id WHERE l.incident_id = ? AND "
+                               f"l.why = 'unit' AND t.talkgroup = ? AND t.system IN ('', ?) AND i.status IN ({','.join('?' * len(OPEN))})",
+                               (iid, int(tg), sources.COUNTY, *OPEN))
             if r and r["n"] >= UNITS_MIN:
                 have = self.store.one("SELECT 1 FROM incident_channels WHERE incident_id = ? AND talkgroup = ?", (iid, int(tg)))
                 if have is None:

@@ -293,7 +293,8 @@ class Comms:
         rigs = [r.strip() for r in (t.get("rig") or "").split(",") if r.strip()]
         chan: tuple[dict, set] = ({}, set())
         if p25 and self.channel_links is not None and not sources.other_p25({"talkgroup": t.get("talkgroup"),
-                                                                             "system": str(t.get("system") or "")}):
+                                                                             "system": str(t.get("system") or "")}) \
+                and (replace or self.store.one("SELECT 1 FROM radio_traffic WHERE id = ?", (tid,)) is None):
             try:                                # (outside the transaction: it reads the radio log's context)
                 chan = self.channel_links(t, rigs)
             except Exception as e:  # noqa: BLE001 - the transmission is logged whatever this does
@@ -432,6 +433,10 @@ class Comms:
                 if had[0] != OPCHANNEL or why == OPCHANNEL:
                     continue
                 db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
+            elif why == OPCHANNEL and not db.execute(
+                    "SELECT 1 FROM incident_channels c JOIN radio_traffic t ON t.talkgroup = c.talkgroup WHERE t.id = ? AND "
+                    "c.incident_id = ? AND c.removed_at IS NULL", (tid, iid)).fetchone():
+                continue                        # taken off meanwhile (a person, since it was worked out)
             self._auto(db, tid, iid, why, unit)
 
     @staticmethod
@@ -655,12 +660,19 @@ class Comms:
                 mine: dict[int, tuple[str, str]] = {}
                 for e in db.execute(self.ON_EVENT_BY_UNIT, (unit, r["start"], r["start"])).fetchall():
                     mine[e["incident_id"]] = ("unit", unit)
+                    db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ? AND why = ?",
+                               (r["id"], e["incident_id"], OPCHANNEL))       # its unit's now (opchannel.py)
                     before = db.total_changes
                     self._auto(db, r["id"], e["incident_id"], "unit", unit)
                     if db.total_changes != before:
                         got.add(e["incident_id"])
                 if not fm and r["turn"] is not None and r["talkgroup"] in self.incident_tgs:
                     self._dispatcher_links(db, r["id"], r["call_id"], r["turn"], bool(r["dispatcher"]), mine)
+                # a unit not on an incident it was folded on by its channel: another call's (opchannel.py), unless kept
+                db.execute(f"DELETE FROM radio_links WHERE traffic_id = ? AND why = ? AND incident_id NOT IN "
+                           f"({','.join('?' * len(mine)) or '-1'}) AND NOT EXISTS (SELECT 1 FROM radio_link_kept k WHERE "
+                           f"k.traffic_id = radio_links.traffic_id AND k.incident_id = radio_links.incident_id)",
+                           (r["id"], OPCHANNEL, *mine))
             if rows:
                 self.rev += 1
         return sorted(got)

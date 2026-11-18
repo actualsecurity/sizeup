@@ -59,11 +59,19 @@ def test_the_words_that_move_a_call_and_the_ones_that_dont():
             "go to 31 and stand by": [],                                   # "go to" a number alone: anything
             "switch to 31 Sample Road": [],                                # a house number, never a channel
             "Engine 60 respond to 31 Sample Road": [], "fire 31 is busy": [], "operate on Fire/EMS 15": [],
-            "operate on fire 31, then switch to fire 32": [TG31, TG32]}
+            "operate on fire 31, then switch to fire 32": [TG31, TG32],
+            "Engine 60 going to the fire 31 Sample Road": [],              # "the fire": the call, and a house number
+            "head to the fire, 32 Example Avenue": [], "go to ops 32 Main Street": [],
+            "go to channel 32": [], "switch to talkgroup 31": [],          # "channel N": our own FM channels too
+            "Ladder 31 on fire EMS 32 for the other job": [],              # no moving verb
+            "switch to tac 1945": [], "Engine 31 at 32 Sample Road": []}
+    names = {**NAMES, 4002: "Fire/EMS 2"}
     for text, want in said.items():
         assert parse(text, NAMES) == want, text
+    assert parse("Engine 2 on tac 31", names) == [] and parse("switch to channel 2 on the portable", names) == []
     assert parse("UNITS OPS ON FIRE/EMS 32", NAMES, strict=False) == [TG32]   # a feed's comment needs no verb
     assert parse("FIRE/EMS 32", NAMES, strict=False) == [TG32] and parse("FIRE/EMS 32", NAMES) == []
+    assert parse("OPS 32", NAMES, strict=False) == []                     # ... in full
 
 
 def test_the_channels_are_the_countys_fire_talkgroups_never_ours_or_a_control(rig):
@@ -161,10 +169,11 @@ def test_the_feeds_comment_and_our_units_radios_find_it_too(rig):
     rig.poll()
     a = rig.iid()
     assert chans(rig, a) == [(TG32, "feed")] and rig.cad.opchan.of([a])[a][0]["since"] == T0 + 5 - LEAD_S
-    b = call(rig, "B1", "40 Other Rd", units=("E63",))
+    b = call(rig, "B1", "40 Other Rd", units=("E63", "E62"))
     assert on31(rig, "4031-1-call_1-t0", T0 + 30, "Engine 63 to command", rig_="E63") == [b]
-    assert chans(rig, b) == []                                            # one is not enough
-    assert on31(rig, "4031-2-call_2-t0", T0 + 40, "", rig_="E63") == [b]
+    assert on31(rig, "4031-2-call_2-t0", T0 + 35, "", rig_="E63") == [b]
+    assert chans(rig, b) == []                                            # one unit keying twice is not enough
+    assert on31(rig, "4031-3-call_3-t0", T0 + 40, "", rig_="E62") == [b]
     assert chans(rig, b) == [(TG31, "units")]
     assert rig.cad.opchan.of([b])[b][0]["since"] == T0 + 30 - LEAD_S
 
@@ -259,3 +268,28 @@ def test_raise_channel_leaves_reruns_and_other_channels():
 def test_a_stand_in_app_without_the_promoted_set_keeps_its_class():
     from sizeup.app import _promoted
     assert _promoted(object()) == frozenset() and App.promoted_keys
+
+
+def test_a_folded_transmission_becomes_its_units_when_the_radio_is_named_and_leaves_when_it_is_anothers(rig):
+    iid = call(rig)
+    rig.cad.incident_channel(iid, {"talkgroup": TG31, "operator": "Lt. Test"})
+    assert on31(rig, "4031-1-call_1-t0", T0 + 20, "") == [iid] and on31(rig, "4031-2-call_2-t0", T0 + 25, "") == [iid]
+    with rig.cad.store.tx() as db:                                       # (the radio IDs heard, nobody's yet)
+        db.execute("UPDATE radio_traffic SET radio_id = '1234567' WHERE id = '4031-1-call_1-t0'")
+        db.execute("UPDATE radio_traffic SET radio_id = '7654321' WHERE id = '4031-2-call_2-t0'")
+    rig.cad.comms.relink("p25", "1234567", "E60")                         # named: a unit on it
+    rig.cad.comms.relink("p25", "7654321", "E191")                        # named: another department's
+    assert rig.links(iid)["4031-1-call_1-t0"] == ("unit", "E60") and "4031-2-call_2-t0" not in rig.links(iid)
+    assert on31(rig, "4031-3-call_3-t0", T0 + 30, "", rig_="E60") == [iid]
+    assert rig.links(iid)["4031-3-call_3-t0"] == ("unit", "E60")
+
+
+def test_promotion_ends_when_the_call_is_no_longer_heard_there(rig):
+    from sizeup.cad.opchannel import QUIET_S
+    iid = call(rig)
+    rig.cad.incident_channel(iid, {"talkgroup": TG31, "operator": "Lt. Test"})
+    added = rig.cad.store.one("SELECT at FROM incident_channels")["at"]
+    assert rig.cad.opchan.promoted(added + QUIET_S - 1) == {TG31}
+    assert rig.cad.opchan.promoted(added + QUIET_S + 1) == set()          # open for hours, nothing heard: not ours
+    on31(rig, "4031-1-call_1-t0", added + QUIET_S + 5, "", talker="60 Ctrl OP 3")
+    assert rig.cad.opchan.promoted(added + QUIET_S + 10) == {TG31}        # heard on it again
