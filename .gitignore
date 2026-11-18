@@ -253,5 +253,8 @@ stt-corrections*.jsonl
 # a local station config beside config.toml (docs/development.md)
 /config.station.toml
 
-# camera DVR runtime state a test run can leave in the working directory (#661)
+# the camera DVR's state file a test run can leave in the working directory (#661)
 /dvr/.dvr-state.json
+
+# /cad's bundles, built with the hub image (sizeup/web/bundle.py)
+sizeup/web/static/bundle/

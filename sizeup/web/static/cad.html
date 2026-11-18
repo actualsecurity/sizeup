@@ -8,11 +8,13 @@
 if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentElement.classList.add("board");</script>
 <link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/pcfd-mark-32.png">
+<!-- bundle css cad -->
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/cad.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/cadmap.css">
 <link rel="stylesheet" href="/static/health.css">
+<!-- /bundle -->
 </head>
 <body class="cad">
 <!-- One header for the console and the wall board (style.css "header"): the board hides .console-only, the console .board-only -->
@@ -157,6 +159,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div class="rn-tree-head"><button id="rn-folds" class="quiet sm icon" type="button" hidden>⊟</button><button id="rn-edit" class="quiet sm" type="button" title="Edit the folders (for everyone)" hidden>Edit</button></div>
           <div id="rn-tree" class="rn-tree"></div>
         </aside>
+        <div id="rn-size" class="rn-size"></div>
         <div class="rn-main">
           <div class="rn-tools">
             <button id="rn-open" class="sm rn-phone" type="button" title="Views and channels" aria-haspopup="dialog">Sources</button>
@@ -371,6 +374,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="d-queued" class="warnbox notice" hidden>
           <div id="d-qhead">60 Control page: set type, then Accept or Dismiss</div>
           <div id="d-qnote" class="qnote"></div>
+          <div id="d-qmerge" class="qmerge" hidden></div>
           <div class="row">
             <label class="inline">Type <select id="d-acc-type"></select></label>
             <label class="inline">Subtype <select id="d-acc-sub"></select></label>
@@ -710,9 +714,13 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       <div id="settings-radio-controls" class="radio-controls"></div>
       <div class="radio-controls" data-rtab="squelch" hidden>
         <section class="card">
-          <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum).">?</button></div>
+          <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum). Suggested (admins): the Open 7 days of the channel's own idle quieting and real transmissions suggest, the numbers on hover; Apply sets Open and Close, audited like an edit. Charts: the Signal tab.">?</button></div>
           <div id="settings-squelch"></div>
         </section>
+      </div>
+      <div class="radio-controls" data-rtab="signal" hidden>
+        <div id="settings-signal" class="sg-panel"></div>
+        <div id="settings-signal-thresholds"></div>
       </div>
       <div id="settings-tones" class="radio-controls" data-rtab="tones" hidden></div>
       <div id="settings-emergencies" class="radio-controls" data-rtab="emergencies" hidden></div>
@@ -755,6 +763,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 </div>
 
 <script src="/static/vendor/maplibre-gl.js"></script>
+<!-- bundle js cad -->
 <script src="/static/map-style.js"></script>
 <script src="/static/airport.js"></script>
 <script src="/static/maplayers.js"></script>
@@ -795,6 +804,8 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/streetview.js"></script>
 <script src="/static/preplan-docs.js"></script>
 <script src="/static/radio-controls.js"></script>
+<script src="/static/signal-chart.js"></script>
+<script src="/static/signal-panel.js"></script>
 <script src="/static/squelch-panel.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/adapterpass.js"></script>
@@ -811,5 +822,6 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/camoverlay.js"></script>
 <script src="/static/styleguide.js"></script>
 <script src="/static/logs.js"></script>
+<!-- /bundle -->
 </body>
 </html>

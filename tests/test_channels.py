@@ -224,6 +224,7 @@ def test_the_monthly_limit_sends_aws_channels_to_the_local_model(tmp_path):
         fake.close()
 
 
+@pytest.mark.flaky(issue=610)  # also #630
 def test_aws_refused_falls_back_to_the_local_model_never_dropped(tmp_path):
     fake = FakeTranscribe(refuse=403)
     app = App(base(clips_dir=str(tmp_path / "clips"), **aws_cfg(fake)))

@@ -36,9 +36,22 @@ const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Un
 const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
-const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
+const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
   ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
+// Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
+// shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
+const S_RC_NAMES = {
+  load: async () => (await api("GET", "/api/cad/comms/sources")).folders || { rev: "", names: {} },
+  save: async (key, name) => (await api("POST", "/api/cad/settings/radio_folders", { action: "name", key, name, operator: operator() }))
+    .radio_folders || { rev: "", names: {} },
+};
+// ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
+const S_RC_SERVICES = {
+  load: async () => { const s = await api("GET", "/api/cad/comms/sources"); return { services: s.services || {}, waiting: s.retag_waiting || [] }; },
+  save: async (key, service) => (await api("POST", "/api/cad/settings/radio_services", { action: "set", key, service, operator: operator() }))
+    .radio_services || {},
+};
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
@@ -411,7 +424,8 @@ function sRoute() {
     if (S_RADIO_TABS.some(([k]) => k === m[2])) S.rtab = m[2];
     if (!S_RADIO_TABS.some(([k]) => k === S.rtab)) S.rtab = "receivers";
     store("sizeup.cad.settings.radios", S.rtab);
-    if (location.hash !== `#settings/radios/${S.rtab}`) history.replaceState(null, "", `#settings/radios/${S.rtab}`);
+    const q = S.rtab === "signal" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";   // a Health hint's ?s=FG1&at=
+    if (location.hash !== `#settings/radios/${S.rtab}${q}`) history.replaceState(null, "", `#settings/radios/${S.rtab}${q}`);
   }
   if (!S_SECTIONS.some(([k]) => k === sec)) {
     sec = store("sizeup.cad.settings") || "lists";
@@ -496,9 +510,10 @@ function sRadioTab() {
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
   // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab });
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
+  if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
 }
 
 function sRadios() {
@@ -506,6 +521,33 @@ function sRadios() {
   if (box && S.rtab === "tones") box.replaceChildren(...sTonePage(S.data.tones));
   const em = $("#settings-emergencies");
   if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
+  const th = $("#settings-signal-thresholds");
+  if (th && S.rtab === "signal" && S.data.signal_metrics && sIsHub()) th.replaceChildren(sSignalThresholds(S.data.signal_metrics));
+}
+
+// Settings > Radios > Signal (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
+// warnings' thresholds. Admins, audited as Radios; the hub only (the metrics are the hub's).
+function sSignalThresholds(d) {
+  const card = sCard(sCardHead("Thresholds", "", sHelp("Suggested Open: the idle quieting's p90 (7 days, or since the last "
+    + "dongle / gain change) plus the margin, never above more than the % of real transmissions (0: none); in doubt, none "
+    + "is offered. Shift warnings: "
+    + "after an SDR, gain, squelch, plug or restart event, the 6 h after against the day before; a Health hint, never a push.")));
+  card.id = "s-signal-thresholds";
+  for (const [key, v] of Object.entries(d)) {
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(v.min); n.max = String(v.max); n.step = "0.5";
+    n.value = String(v.value);
+    n.disabled = !canDo("admin");
+    n.setAttribute("aria-label", v.label);
+    n.addEventListener("change", () => sPost("signal_metrics", { action: "set", key, value: Number(n.value) },
+      `${v.label}: ${n.value}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), n, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
+      () => sPost("signal_metrics", { action: "reset", key }, `${v.label}: ${v.default}`)));
+    card.append(row);
+  }
+  return card;
 }
 
 // Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page: a banner over the list,

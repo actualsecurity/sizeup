@@ -460,8 +460,8 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 
 | workflow | when | what |
 |---|---|---|
-| `test.yml` | Every push to main and every PR | pytest on Python 3.14 with the pinned Litestream; builds the hub image and checks `/healthz` |
-| `deploy.yml` | After `test` passes on main | Checks every SSM parameter the task definition names exists (stops before ECS if not); builds and pushes the arm64 image; rolls the ECS service; reads the new leader's replica check; waits for the station to report the new build |
+| `test.yml` | Every push to main and every PR | pytest on Python 3.14 with the pinned Litestream (known flakes retried once); builds the hub image and checks `/healthz`. Main's runs are never cancelled |
+| `deploy.yml` | After `test` passes on main | Picks the newest commit on main that passed `test` (docs/cloud.md "Back-to-back merges"); checks every SSM parameter the task definition names exists (stops before ECS if not); builds and pushes the arm64 image; rolls the ECS service; reads the new leader's replica check; waits for the station to report the new build |
 | `station-install.yml` | Changes under `deploy/station/`, `deploy/trunk-recorder/`, or to `autoupdate.py`, `configupdate.py`, `adsbd.py`, `trunkrecd.py` | shellcheck, a PowerShell parse, a real install on Ubuntu 24.04, the auto-update end to end |
 
 - **Profiling.** Per-thread CPU accounting is always on and a sampling profiler runs on demand (`sizeup/perf.py`);

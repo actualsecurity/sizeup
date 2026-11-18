@@ -279,7 +279,8 @@ def test_a_payload_naming_another_station_is_refused_and_logged_once_without_the
                 assert code == 401 and out["reason"] == "id_mismatch", out
                 assert "st-b" in out["error"] and tok.split(".")[2] not in out["error"]
         said = [m for m in logs if "refused" in m]
-        assert said == ["hub: station request refused: id_mismatch (station st-b)"]
+        # once a minute at most, with both ids
+        assert said == ["hub: station request refused: id_mismatch (station st-b): the station says t, the token is st-b"]
         assert all(tok.split(".")[2] not in m for m in logs)
         # its own id, or none (an older station): taken, and Health sees the authenticated id
         assert call(hub.url + "/api/station/state", "POST", {"at": 1.0, "status": {"id": "st-b"}}, token=tok)[0] == 200
