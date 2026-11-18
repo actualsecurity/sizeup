@@ -1,6 +1,7 @@
 """A "Listen" link for a radio pre-alert push: the transmissions around it, stitched into one small file a phone plays,
 behind an unguessable S3 presigned URL that expires (user, 2026-11-12: no sign-in on this link, so it is short-lived
-and random). Usable by any radio pre-alert (intel, and later the airport and 60 Control ones): a small interface.
+and random; 2026-11-17: an hour by default, and the file deleted once its link has expired). Usable by any radio
+pre-alert (intel, and later the airport and 60 Control ones): a small interface.
 
     listen = Listen(store, rows, clip, settings, clock, log)
     url = listen.link(ref, sources, traffic_ids, first_at, last_at)     # None: off, not configured, nothing to play
@@ -20,18 +21,41 @@ set of transmissions changes and written to the SAME key, so the link already on
 
 The bucket: SIZEUP_AUDIO_BUCKET (the hub's audio bucket), prefix listen/. The hub's task role needs PutObject / GetObject
 on listen/*, and a lifecycle rule removes listen/ objects after a day (sizeup-aws/27-listen-links.sh, run by a person).
+
+The cleanup: a link is a bearer URL until it expires, and its file is no use after. The hub deletes each listen/ object
+DELETE_MARGIN_S after the LAST presign of its key has expired (a refreshed key is signed again: only its final expiry
+counts), on the listen thread, in DeleteObjects batches (at most DELETE_BATCH keys a request, one batch a pass, so a
+long backlog never holds up the next upload). A key S3 keeps failing (not a 403) goes to the back of the queue and is
+dropped after DELETE_TRIES (the lifecycle rule takes it). Only while this process leads (leader(): the engine's lease):
+one that never leads never deletes. Nothing of this is stored, so after a restart (or a standby taking over) one sweep,
+once any link signed before this process led could no longer play, lists listen/ (ListObjectsV2) and queues for delete
+what was written before then and isn't this process's own. "Could no longer play" is judged by the LONGEST expiry the
+setting allows (SWEEP_EXPIRY_S, its range's max): the earlier leader may have signed with a longer one than is set now.
+That needs DeleteObject on listen/* and ListBucket (prefix listen/); until the grant is there an AccessDenied is logged
+once, shown on the Health row, and the cleanup rests CLEANUP_REST_S: the one-day lifecycle rule is the backstop.
+Never point a process with outbound on (an all-in-one with SIZEUP_ALLOW_OUTBOUND=1) at production's audio bucket: it
+would lead its own engine and sweep production's listen/ files.
 Until then the first upload is refused (403): the status says "not configured" and it is tried again only after RETRY_S;
 any other failure (a timeout, the network) is tried again after RETRY_SOON_S.
 
 Nothing here makes the push wait: link() presigns the (random, not yet written) key and returns at once; the stitching
 and the upload run on the "listen" thread, which also does refresh()'s work (the engine thread only queues it). The
 presigned URL is signed with credentials that outlive it (else they are fetched again first).
+
+The self-test: S3 checks a presigned URL only when it is played, so a link refused for its signature (or the grant)
+looks fine here and fails on the phone. After the first upload in a process, the link a push carries is fetched once
+the way a phone would (GET, Range bytes=0-0: a presigned GET's signature covers the method, so never HEAD), on a
+"listen-check" thread of its own with a short timeout. ok, failed (the HTTP status and S3's <Code>) or unchecked (it
+could not be reached); not ok, it is fetched again after a later upload, at most every CHECK_RETRY_S. One log line on the
+first result and on each change, never the URL (a bearer link); status()["links"] and health() (Settings > Station >
+Health, Intel) show it.
 """
 
 from __future__ import annotations
 
 import io
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -40,9 +64,12 @@ import threading
 import time
 import wave
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable
 
 import numpy as np
+
+from sizeup import tz
 
 PREFIX = "listen/"
 RATE = 8000
@@ -51,11 +78,19 @@ TICK_S = 0.06
 RETRY_S = 3600.0               # the bucket refused (403: the IAM grant isn't there): tried again after this long
 RETRY_SOON_S = 60.0            # anything else (a timeout, a 5xx, the network): tried again after this long
 CRED_MARGIN_S = 300.0          # presign with credentials that outlive the link by at least this much
+CHECK_TIMEOUT_S = 5.0          # the self-test's GET of a pushed link
+CHECK_RETRY_S = 900.0          # a link not ok (refused, unreachable): fetched again after a later upload, at most this often
+DELETE_MARGIN_S = 120.0        # a file is deleted this long after its last link expired
+SWEEP_EXPIRY_S = 720 * 60      # the longest listen_expiry_min allows (sizeup/intel/policy.py LIMITS): the restart sweep
+DELETE_BATCH = 1000            # keys a DeleteObjects request (S3's own limit); one batch a pass of the listen thread
+DELETE_TRIES = 5               # a key that fails this often (not a 403) is left to the lifecycle rule
+CLEANUP_REST_S = 3600.0        # the cleanup refused (AccessDenied): the lifecycle rule does it; tried again after this
+MAX_PENDING = 2000             # deletes waiting at most (past it the oldest are left to the lifecycle rule)
 LATE_S = 180.0                 # transcripts and clips arrive after the transmission: keep refreshing this much longer
 MAX_CLIPS = 40
 MAX_SECONDS = 600.0
 EXCLUDED_TIERS = ("record", "off", "activity")
-DEFAULTS = {"listen": True, "listen_expiry_min": 20, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24}
+DEFAULTS = {"listen": True, "listen_expiry_min": 60, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24}
 
 
 @dataclass
@@ -71,6 +106,8 @@ class Item:
     bytes: int = 0
     versions: int = 0
     refs: list = field(default_factory=list)
+    url: str = ""                      # the last presigned URL handed out (a bearer link: never logged)
+    signed_until: float = 0.0          # when the last link handed out expires
 
 
 def read_wav(data: bytes) -> np.ndarray:
@@ -168,6 +205,79 @@ class S3ListenStore:
             c = self.creds()
         return self.aws.presign(url, c, self.s3.region, "s3", expires=int(expires_s))
 
+    def probe(self, url: str, timeout: float) -> tuple[int, bytes]:
+        """GET a presigned URL as a phone would, its first byte only: (HTTP status, body). OSError: unreachable."""
+        from sizeup import outbound
+        why = outbound.check("aws s3", url)
+        if why:
+            raise OSError(why)
+        status, _h, data = self.s3.send("GET", url, {"Range": "bytes=0-0"}, None, timeout)
+        return int(status), data or b""
+
+    def delete(self, keys: list[str]) -> dict[str, str]:
+        """DeleteObjects (Quiet), at most DELETE_BATCH keys: {key: S3's error code} for the ones that failed (a missing
+        key is gone too). AwsError with the status (403: not permitted) when the request itself fails."""
+        import base64
+        import hashlib
+        from xml.sax.saxutils import escape
+
+        from sizeup.audiostore import _unxml
+        keys = list(keys)[:DELETE_BATCH]
+        if not keys:
+            return {}
+        body = ("<Delete><Quiet>true</Quiet>" + "".join(f"<Object><Key>{escape(k)}</Key></Object>" for k in keys)
+                + "</Delete>").encode()
+        try:
+            status, _h, data = self.s3._call("POST", "", {
+                "Content-Type": "application/xml", "Content-Length": str(len(body)),
+                "Content-MD5": base64.b64encode(hashlib.md5(body).digest()).decode()}, body, query="delete=")
+        except OSError as e:
+            raise self.aws.AwsError(f"S3 DELETE: {type(e).__name__}", "Network") from None
+        text = (data or b"").decode(errors="replace")
+        if status != 200 or not re.search(r"<DeleteResult[\s>/]", text):
+            raise self.aws.AwsError(f"S3 DELETE: {status} {s3_code(data)}", s3_code(data) or "NoDeleteResult", status)
+        out = {}
+        for block in re.findall(r"<Error>(.*?)</Error>", text, re.S):
+            k, c = re.search(r"<Key>(.*?)</Key>", block, re.S), re.search(r"<Code>(.*?)</Code>", block, re.S)
+            if k:
+                out[_unxml(k.group(1))] = c.group(1)[:64] if c else "Error"
+        return out
+
+    def list(self, prefix: str = PREFIX) -> list[tuple[str, float]]:
+        """ListObjectsV2 under prefix: [(key, last modified)]. AwsError with the status (403: not permitted)."""
+        from urllib.parse import quote
+
+        from sizeup.audiostore import _unxml
+        out: list[tuple[str, float]] = []
+        token = ""
+        for _ in range(100):
+            q = f"list-type=2&max-keys=1000&prefix={quote(prefix, safe='')}"
+            if token:
+                q = f"continuation-token={quote(token, safe='')}&" + q
+            try:
+                status, _h, data = self.s3._call("GET", "", {}, query=q)
+            except OSError as e:
+                raise self.aws.AwsError(f"S3 LIST: {type(e).__name__}", "Network") from None
+            text = (data or b"").decode(errors="replace")
+            if status != 200 or "<ListBucketResult" not in text:
+                raise self.aws.AwsError(f"S3 LIST: {status} {s3_code(data)}", s3_code(data), status)
+            for block in re.findall(r"<Contents>(.*?)</Contents>", text, re.S):
+                k = re.search(r"<Key>(.*?)</Key>", block, re.S)
+                t = re.search(r"<LastModified>(.*?)</LastModified>", block, re.S)
+                if k and t:
+                    out.append((_unxml(k.group(1)), datetime.fromisoformat(t.group(1).replace("Z", "+00:00")).timestamp()))
+            m = re.search(r"<NextContinuationToken>(.*?)</NextContinuationToken>", text, re.S)
+            if "<IsTruncated>true</IsTruncated>" not in text or not m:
+                break
+            token = _unxml(m.group(1))
+        return out
+
+
+def s3_code(data: bytes) -> str:
+    """S3's error <Code> in an XML body (SignatureDoesNotMatch, AccessDenied, ExpiredToken ...), else ""."""
+    m = re.search(rb"<Code>([A-Za-z0-9.]{1,64})</Code>", data or b"")
+    return m.group(1).decode() if m else ""
+
 
 def refused(e: Exception) -> bool:
     """The bucket said no for good (403: the grant isn't there), not a passing failure."""
@@ -178,7 +288,8 @@ class Listen:
     def __init__(self, store, rows: Callable[[list, float, float], list[dict]], clip: Callable[[str], bytes | None],
                  settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
                  log: Callable[[str], None] = print, ffmpeg: str | None = None, token=lambda: secrets.token_urlsafe(24),
-                 tiers: Callable[[list], dict] | None = None, worker: bool = True):
+                 tiers: Callable[[list], dict] | None = None, worker: bool = True,
+                 spawn: Callable[[Callable[[], None]], None] | None = None, leader: Callable[[], bool] | None = None):
         self.store, self.rows, self.clip, self.tiers = store, rows, clip, tiers
         self.settings = settings or (lambda: {})
         self.clock, self.log, self.ffmpeg, self.token = clock, log, ffmpeg, token
@@ -191,6 +302,20 @@ class Listen:
         self._jobs: list[str] = []
         self._wake = threading.Condition()
         self._thread: threading.Thread | None = None
+        # the self-test of a pushed link (module doc): state ok | failed | unchecked, the HTTP status, S3's code
+        self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="listen-check", daemon=True).start())
+        self.check: dict = {"state": "unchecked", "status": 0, "code": "", "at": 0.0}
+        self._checked_at = 0.0
+        self._checking = False
+        self._logged: tuple | None = None
+        # the cleanup (module doc): files whose last link has expired, deleted on the listen thread
+        self.leader = leader or (lambda: True)          # the engine's lease (the app); deletes only while it holds
+        self._deletes: dict[str, float] = {}           # key -> when it may be deleted
+        self._tries: dict[str, int] = {}               # key -> failed deletes (not a 403)
+        self._led_since = 0.0                          # the first link() / refresh() here while leading
+        self._swept = False
+        self._cleanup_at = 0.0                          # not before (after a refusal or a failure)
+        self.cleanup: dict = {"state": "", "at": 0.0, "code": ""}     # "" (nothing yet) | ok | denied | failed
 
     def cfg(self) -> dict:
         out = dict(DEFAULTS)
@@ -206,7 +331,87 @@ class Listen:
 
     def status(self) -> dict:
         return {"configured": self.configured, "why": self.why if not self.configured else "", "active": len(self.items),
-                "enabled": bool(self.cfg()["listen"])}
+                "enabled": bool(self.cfg()["listen"]), "links": dict(self.check),
+                "cleanup": {**self.cleanup, "pending": len(self._deletes)}}
+
+    def health(self) -> dict | None:
+        """Settings > Station > Health's Intel row for the links' self-test and the cleanup (the pack rows' shape), or
+        None: off, or no bucket (the Intel card says "not configured")."""
+        if self.store is None or not self.cfg()["listen"]:
+            return None
+        ck, cl = self.check, self.cleanup
+        state, code, status = ck["state"], ck["code"], ck["status"]
+        if state == "ok":
+            text, level = "ok", "ok"
+            title = f"A pushed Listen link played (HTTP {status}) at {tz.hhmm(ck['at'])}"
+        elif state == "failed":
+            text, level = f"refused ({code or status})", "warn"
+            title = (f"A pushed Listen link was refused: HTTP {status}{f' {code}' if code else ''} at "
+                     f"{tz.hhmm(ck['at'])}. Phones can't play these links. Checked again after a later push, at most "
+                     f"every {int(CHECK_RETRY_S // 60)} min")
+        else:
+            text, level = "unchecked", "off"
+            title = (f"Could not fetch a pushed Listen link ({code}) at {tz.hhmm(ck['at'])}" if ck["at"] else
+                     "Checked after the first Listen link is uploaded")
+        title += ". The self-test fetches a pushed link's first byte, as a phone would"
+        if cl["state"] == "denied":
+            text += " · cleanup not permitted"
+            level = "warn"
+            title += (f"\nCleanup: deleting or listing listen/ was refused ({cl['code'] or 'AccessDenied'}) at "
+                      f"{tz.hhmm(cl['at'])}: files stay until the 1-day lifecycle rule removes them. The task role needs "
+                      "DeleteObject on listen/* and ListBucket on listen/ (sizeup-aws 27)")
+        elif cl["state"] == "failed":
+            title += f"\nCleanup: failed ({cl['code']}) at {tz.hhmm(cl['at'])}: tried again in a minute"
+        else:
+            title += (f"\nCleanup: each file deleted {int(DELETE_MARGIN_S // 60)} min after its last link expired"
+                      f" ({len(self._deletes)} waiting)")
+        return {"pack": "listen", "label": "Listen links", "on": True, "level": level, "text": text, "title": title}
+
+    # -- the self-test ------------------------------------------------------------------------------------------
+
+    def _check_due(self) -> bool:
+        if self._checking or self.check["state"] == "ok":
+            return False
+        return not self._checked_at or self.clock() - self._checked_at >= CHECK_RETRY_S
+
+    def _maybe_check(self, it: Item) -> None:
+        """After an upload (the listen thread): the link it carries fetched on a thread of its own, when due."""
+        probe = getattr(self.store, "probe", None)
+        url = it.url
+        if probe is None or not url:
+            return
+        with self._lock:
+            if not self._check_due():
+                return
+            self._checking = True
+            self._checked_at = self.clock()
+        try:
+            self.spawn(lambda: self._check(probe, url))
+        except Exception:  # noqa: BLE001 - no thread: tried again after the next upload
+            with self._lock:
+                self._checking = False
+
+    def _check(self, probe, url: str) -> None:
+        try:
+            try:
+                status, body = probe(url, CHECK_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - unreachable (a timeout, the network, outbound off): unchecked
+                res = {"state": "unchecked", "status": 0, "code": type(e).__name__}
+            else:
+                ok = 200 <= status < 300
+                res = {"state": "ok" if ok else "failed", "status": status, "code": "" if ok else s3_code(body)}
+            res["at"] = self.clock()
+            with self._lock:
+                self.check = res
+                key = (res["state"], res["code"])
+                changed, self._logged = key != self._logged, key
+            if changed:
+                why = res["code"] or (f"HTTP {res['status']}" if res["status"] else "")
+                word = {"ok": "ok", "failed": "refused"}.get(res["state"], "unchecked")
+                self.log(f"intel: listen links {word}" + (f" ({why})" if why and res["state"] != "ok" else ""))
+        finally:
+            with self._lock:
+                self._checking = False
 
     def _ffmpeg(self) -> bool:
         return bool(self.ffmpeg if self.ffmpeg is not None else shutil.which("ffmpeg"))
@@ -251,6 +456,7 @@ class Listen:
                 self.log(f"listen: upload failed ({type(e).__name__}): trying again in a minute")
             return False
         it.clips, it.made_at, it.content_type, it.bytes, it.versions = key_set, self.clock(), ctype, len(body), it.versions + 1
+        self._maybe_check(it)
         return True
 
     # -- the interface ------------------------------------------------------------------------------------------
@@ -260,7 +466,9 @@ class Listen:
         c = self.cfg()
         if not c["listen"] or not self.configured:
             return None
+        expires_s = int(float(c["listen_expiry_min"]) * 60)
         with self._lock:
+            self._lead(self.clock())
             it = self.items.get(ref)
             if it is None:
                 ff = self._ffmpeg()
@@ -271,25 +479,34 @@ class Listen:
             else:
                 it.traffic_ids = list(dict.fromkeys([*it.traffic_ids, *traffic_ids]))
                 it.last_at = max(it.last_at, float(last_at))
+            # before the presign, under the lock: refresh() never forgets (and so deletes) a key being signed again
+            it.signed_until = max(it.signed_until, self.clock() + expires_s)
         try:
-            url = self.store.presign(it.key, int(float(c["listen_expiry_min"]) * 60), it.content_type)
+            url = self.store.presign(it.key, expires_s, it.content_type)
         except Exception as e:  # noqa: BLE001
             self.log(f"listen: presign failed ({type(e).__name__})")
             return None
+        it.url = url
         self._queue(ref)
         return url
 
     def refresh(self, now: float | None = None) -> int:
-        """Queue what may have new transmissions (its after-window still open); forget what is past. Never stitches
-        or uploads here (the engine's thread calls it): the listen thread does. Items queued."""
+        """Queue what may have new transmissions (its after-window still open); forget what is past (its file deleted
+        DELETE_MARGIN_S after its last link expired). Never stitches, uploads or deletes here (the engine's thread calls
+        it): the listen thread does. Items queued."""
         now = self.clock() if now is None else now
         c = self.cfg()
         n = 0
         with self._lock:
+            self._lead(now)
             for ref, it in list(self.items.items()):
                 end = it.last_at + float(c["listen_after_s"]) + LATE_S
-                if now > max(end, it.first_at + float(c["listen_expiry_min"]) * 60):
+                if now > max(end, it.signed_until):
                     del self.items[ref]
+                    if it.signed_until:                 # signed (so maybe written): deleted after the last link expired
+                        self._deletes[it.key] = it.signed_until + DELETE_MARGIN_S
+                        while len(self._deletes) > MAX_PENDING:     # the lifecycle rule takes the oldest
+                            self._deletes.pop(min(self._deletes, key=self._deletes.__getitem__))
                 elif now <= end and now >= self._retry_at:
                     self._jobs.append(ref)
                     n += 1
@@ -320,12 +537,13 @@ class Listen:
                         return
 
     def drain(self) -> int:
-        """Do the queued work here and now (the listen thread; tests). Uploads made."""
+        """Do the queued work here and now (the listen thread; tests), then the deletes that are due. Uploads made."""
         n = 0
         while True:
             with self._lock:
                 jobs, self._jobs = list(dict.fromkeys(self._jobs)), []
             if not jobs:
+                self.clean()
                 return n
             c = self.cfg()
             for ref in jobs:
@@ -335,3 +553,87 @@ class Listen:
                 before = it.versions
                 self._make(it, c)
                 n += it.versions - before
+
+    # -- the cleanup (the listen thread) --------------------------------------------------------------------------
+
+    def _lead(self, now: float) -> None:
+        """link() / refresh() (under the lock): from the first one while leading, this process may clean up."""
+        if not self._led_since and self._leading():
+            self._led_since = now
+
+    def _leading(self) -> bool:
+        try:
+            return bool(self.leader())
+        except Exception:  # noqa: BLE001 - can't tell: not leading (never deletes)
+            return False
+
+    def clean(self, now: float | None = None) -> int:
+        """One pass: a batch of the files whose last link has expired, deleted; once (when no link signed before this
+        process led can still play) the older files nobody here knows, listed and queued. Only while leading; never
+        raises. Objects deleted."""
+        now = self.clock() if now is None else now
+        delete = getattr(self.store, "delete", None)
+        if delete is None or not self._led_since or now < self._cleanup_at or not self._leading():
+            return 0
+        sweep = not self._swept and hasattr(self.store, "list") and now >= self._led_since + SWEEP_EXPIRY_S + DELETE_MARGIN_S
+        with self._lock:
+            due = sorted((at, k) for k, at in self._deletes.items() if at <= now)
+        if not due and not sweep:
+            return 0
+        gone = 0
+        try:
+            if sweep:
+                with self._lock:
+                    mine = {it.key for it in self.items.values()} | set(self._deletes)
+                old = [k for k, at in self.store.list(PREFIX)
+                       if k.startswith(PREFIX) and k not in mine and at < self._led_since]
+                self._swept = True
+                with self._lock:
+                    for k in old:
+                        self._deletes.setdefault(k, now)
+                    due = sorted((at, k) for k, at in self._deletes.items() if at <= now)
+            batch = [k for _at, k in due[:DELETE_BATCH]]
+            failed = delete(batch) if batch else {}
+        except Exception as e:  # noqa: BLE001 - the one-day lifecycle rule is the backstop
+            return self._clean_failed(e, now)
+        denied = {k: c for k, c in failed.items() if c == "AccessDenied"}
+        with self._lock:
+            for k in batch:
+                if k not in failed:
+                    self._deletes.pop(k, None)
+                    self._tries.pop(k, None)
+                    gone += 1
+                elif k not in denied:                    # to the back; after DELETE_TRIES, the lifecycle rule's
+                    self._tries[k] = self._tries.get(k, 0) + 1
+                    if self._tries[k] >= DELETE_TRIES:
+                        self._deletes.pop(k, None)
+                        self._tries.pop(k, None)
+                    else:
+                        self._deletes[k] = now + RETRY_SOON_S
+        if denied:
+            return gone + self._clean_failed(self._denied_error(), now)
+        if self.cleanup["state"] in ("denied", "failed"):
+            self.log("intel: listen cleanup ok")
+        self.cleanup = {"state": "ok", "at": now, "code": ""}
+        return gone
+
+    @staticmethod
+    def _denied_error() -> Exception:
+        e = RuntimeError("AccessDenied")
+        e.status, e.code = 403, "AccessDenied"           # type: ignore[attr-defined]
+        return e
+
+    def _clean_failed(self, e: Exception, now: float) -> int:
+        code = str(getattr(e, "code", "") or type(e).__name__)
+        was = self.cleanup["state"]
+        if refused(e):
+            self._cleanup_at = now + CLEANUP_REST_S
+            self.cleanup = {"state": "denied", "at": now, "code": code}
+            if was != "denied":
+                self.log("intel: listen cleanup not permitted, relying on the 1-day lifecycle")
+        else:
+            self._cleanup_at = now + RETRY_SOON_S
+            self.cleanup = {"state": "failed", "at": now, "code": code}
+            if was != "failed":
+                self.log(f"intel: listen cleanup failed ({code}): trying again in a minute")
+        return 0

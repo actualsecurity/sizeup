@@ -12,8 +12,8 @@
   "mode": "push",
   "towns": {"p25:mrrs:9211": ["Port Chester", "Rye", "Rye Brook"]},
   "categories": {
-    "fire_report": {"label": "Smoke / fire reported", "ttl_min": 45, "priority": 4, "mode": "push", "tag": "fire"},
-    "fire_call": {"label": "Burning smell / FD notified", "ttl_min": 45, "priority": 4, "mode": "push", "tag": "fire", "place": true, "defer_to": "fire_report",
+    "fire_report": {"label": "Smoke / fire reported", "ttl_min": 45, "priority": 4, "mode": "push", "tag": "fire", "fire_related": true},
+    "fire_call": {"label": "Burning smell / FD notified", "ttl_min": 45, "priority": 4, "mode": "push", "tag": "fire", "place": true, "defer_to": "fire_report", "fire_related": true,
                   "words": ["smell", "smells", "smelling", "smelled", "smelt", "odor", "odour", "burning", "smoke", "smoky", "flames"]},
     "weapons": {"label": "Weapon / shots", "ttl_min": 90, "priority": 5, "mode": "push", "tag": "warning", "safety": true,
                 "words": ["knife", "knives", "gun", "guns", "firearm", "weapon", "weapons", "shots", "gunshot", "gunshots", "armed", "stabbed",
@@ -37,14 +37,14 @@
     "barricade": {"label": "Barricade", "ttl_min": 120, "priority": 5, "mode": "push", "tag": "warning", "safety": true,
                   "words": ["barricade", "barricaded", "hostage", "hostages", "standoff", "negotiator", "swat", "esu"]},
     "aided": {"label": "Aided / unresponsive", "ttl_min": 30, "priority": 4, "mode": "push", "tag": "ambulance"},
-    "hazmat": {"label": "Gas / hazmat", "ttl_min": 60, "priority": 4, "mode": "push", "tag": "biohazard"},
+    "hazmat": {"label": "Gas / hazmat", "ttl_min": 60, "priority": 4, "mode": "push", "tag": "biohazard", "fire_related": true},
     "water_rescue": {"label": "Water rescue", "ttl_min": 60, "priority": 5, "mode": "push", "tag": "ocean"},
     "pursuit": {"label": "Pursuit", "ttl_min": 20, "priority": 3, "mode": "push", "tag": "rotating_light", "moves": true},
     "edp": {"label": "EDP", "ttl_min": 60, "priority": 3, "mode": "push", "tag": "warning", "safety": true, "cancel_ttl_min": 10,
             "words": ["edp", "emotionally", "disturbed", "suicidal", "suicide", "jumper", "psych", "psychiatric", "uncontrollable", "trashing", "smashing", "destroying"]},
     "dispute": {"label": "Dispute / fight", "ttl_min": 30, "priority": 3, "mode": "push", "tag": "rotating_light", "safety": true, "cancel_ttl_min": 10,
                 "words": ["fight", "fighting", "brawl", "domestic", "dispute", "altercation", "assaulting", "beating", "choking", "strangling"]},
-    "alarm": {"label": "Alarm", "ttl_min": 20, "priority": 2, "mode": "push", "tag": "bell"},
+    "alarm": {"label": "Alarm", "ttl_min": 20, "priority": 2, "mode": "push", "tag": "bell", "fire_related": true},
     "assault": {"label": "Assault", "ttl_min": 45, "priority": 3, "mode": "push", "tag": "ambulance",
                 "words": ["assault", "assaulted", "attacked", "punched", "beaten"]},
     "officer": {"label": "Officer: needs help", "ttl_min": 60, "priority": 5, "mode": "push", "tag": "rotating_light", "safety": true,
@@ -462,5 +462,45 @@
      "any": ["(traffic stop|parking complaint|noise complaint)", "(lockout|car lockout)", "(test|testing) (one|1) two", "(drill|exercise) only"]}
   ],
   "resolved": ["(caller|complainant) called back", "unfounded", "everything is (fine|ok|okay)", "no longer needed"],
-  "suppress": ["(disregard|disregarding)", "cancel (that|the call|the response)", "(training|this is a test|for training)", "(drill only|it's a drill|just a drill)"]
+  "suppress": ["(disregard|disregarding)", "cancel (that|the call|the response)", "(training|this is a test|for training)", "(drill only|it's a drill|just a drill)"],
+  "fd_present": {
+    "_about": "A fire_related category's push when the FD is already there (engine.py _fire; rules.py fd_present): our fire incident (of these types) at the place, or these words. Each group: its own \"not\" only.",
+    "there": [
+      {"any": ["(fd|fd's|fire department|fire department's|fire dept) (on scene|onscene|on location|out with|there with|working)",
+               "(the engine|the engine's|fire chief|fire chief's|fd chief) (on scene|onscene|on location|out with|there with|working)",
+               "(fd|fire department|fire dept) (is|are|was|were) (on scene|onscene|on location|out with|there with|working)",
+               "(the engine|fire chief|fd chief) (is|was) (on scene|onscene|on location|out with|there with|working)",
+               "(fd|fd's|fire department|fire department's|fire dept|the engine|fire chief) already (on scene|on location|there|working)",
+               "(fd|fire department|fire dept|the engine|fire chief) (is|are|was|were) already (on scene|on location|there|working)"]}
+    ],
+    "add_info": [
+      {"any": ["(people|person|someone|somebody|occupant|occupants|kids|children|child|residents) ... (inside|trapped|stuck)",
+               "(driver|victim|victims|resident|elderly|baby) ... (inside|trapped|stuck)",
+               "(employee|employees|worker|workers|manager|customer|customers|owner|tenant|tenants) ... (inside|trapped|stuck)",
+               "(entrapment|entrapped|pinned|can't get out|cannot get out|unable to get out)"],
+       "not": ["(no|nobody|no one) (inside|trapped|stuck)", "no (people|person|one|occupants|kids|children|residents|victims) (inside|trapped|stuck)",
+               "(no|negative) (entrapment|entrapments)", "(everyone|everybody) (out|is out|got out|made it out)"]},
+      {"any": ["(weapon|weapons|gun|guns|knife|firearm) on (scene|location)", "(armed|shots fired)"],
+       "not": ["no (weapon|weapons|gun|guns)", "not armed"]},
+      {"any": ["(injury|injuries|injured|burned|burns|hurt|unconscious|unresponsive)"],
+       "not": ["(no|negative|denies) (injury|injuries)", "(nobody|no one) (injured|hurt|burned)", "not (injured|hurt)"]},
+      {"any": ["(spreading|extending|extended|spread) to", "(extension|exposure|exposures)", "(next door|the house next door|adjoining)"],
+       "not": ["(no|negative) (extension|exposure|exposures)"]},
+      {"any": ["(hazmat|chemical|chemicals|propane|oxygen tank|oxygen tanks|fuel leak|leaking fuel|gas leak|gas line)"],
+       "not": ["no (hazmat|chemicals|gas leak)"]}
+    ],
+    "safety": [
+      {"any": ["(weapon|weapons|gun|guns|knife|firearm) on (scene|location)", "(shots fired|shooting|stabbing|stabbed|armed)"],
+       "not": ["no (weapon|weapons|gun|guns)", "not armed"]},
+      {"any": ["(fight|fighting|assault|assaulted|assaulting|attacking|attacked|combative|violent|hostile crowd)"]},
+      {"any": ["(explosion|explosions|exploded|blast|collapse|collapsed|collapsing)"],
+       "not": ["no (explosion|collapse)"]},
+      {"any": ["(officer|officers|firefighter|firefighters|member|cop) (down|injured|hurt|shot)", "(mayday|10-13|ten thirteen)"]}
+    ],
+    "types": {"*": ["STRU", "ALARM", "BRUSH", "MVF", "HAZARD", "INVEST", "MA", ""],
+              "hazmat": ["HAZARD", "INVEST", "MA", ""],
+              "alarm": ["ALARM", "STRU", "INVEST", "MA", ""]},
+    "fyi_priority": 2,
+    "safety_priority": 4
+  }
 }

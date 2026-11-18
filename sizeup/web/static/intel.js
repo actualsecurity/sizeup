@@ -31,6 +31,12 @@ window.IntelCard = (() => {
     st.audio.addEventListener("ended", done);
     st.audio.play().catch((e) => { done(); UI.toast(`Can't play: ${e.message}`, "alert"); });
   }
+  // the last push at ntfy (sizeup/intel/events.py delivery): "sent 16:21:27" / "not sent: 429" / "queued"
+  function delivered(e, time) {
+    const d = e.delivery;
+    if (!d || !(d.at >= e.pushed_at)) return "queued";
+    return d.ok ? `sent ${time(d.at)}` : `not sent: ${d.status || d.error || "?"}`;
+  }
   function where(e) {
     if (!e.place || e.precision === "none") return "Location not heard";
     return e.confirmed ? e.place : `${e.place} ?`;
@@ -41,7 +47,7 @@ window.IntelCard = (() => {
     const head = el("div", "aa-head");
     const conf = el("span", `aa-conf ${e.level}`, `${e.level} ${pct(e.what)}`);
     conf.title = `What ${pct(e.what)} · where ${pct(e.where)} (${e.precision})\nRules: ${(e.rules || []).map((r) => r[0]).join(", ")}`
-      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)}` : "");
+      + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)} · ${delivered(e, deps.time)}` : "");
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
@@ -53,6 +59,12 @@ window.IntelCard = (() => {
       li.append(sug);
     }
     if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened", "de-escalated"
+    if (e.fd_shown) {                    // the FD already there (sizeup/intel/engine.py _fire): "FD on scene · #26-000123"
+      const fd = el("div", "aa-loc", e.fd_shown);
+      fd.title = e.fd === "cleared" ? `${e.fd_shown.split(" · ")[0]} (cleared): pre-alert`
+        : "The FD was already there when PD put this out: an FYI, not a pre-alert";
+      li.append(fd);
+    }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
@@ -110,12 +122,12 @@ window.IntelCard = (() => {
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, st.busy.has(e.id), st.playing]));
+      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, st.busy.has(e.id), st.playing]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((e) => card(e, deps)));
   }
-  return { column };
+  return { column, delivered };
 })();
 
 window.IntelSettings = (() => {
@@ -197,8 +209,14 @@ window.IntelSettings = (() => {
     const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
     lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
     const lnum = (key, min, max, label, tip) => num(s[key], min, max, 1, set(key), label, tip);
-    const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
+    // ready / not configured; a pushed link refused by S3 (the self-test, sizeup/intel/listen.py) reads "refused"
+    const lk = ls.links || {};
+    const lbad = ls.configured && lk.state === "failed";
+    const lst = el("span", ls.configured && !lbad ? "chip s-state default" : "chip s-state edited",
+      !ls.configured ? "not configured" : lbad ? "refused" : "ready");
     if (!ls.configured) lst.title = ls.why || "";
+    else if (lbad) lst.title = `A pushed link was refused: HTTP ${lk.status}${lk.code ? " " + lk.code : ""}. Phones can't play it`;
+    else if (lk.state === "ok") lst.title = "A pushed link played";
     top.append(line(llab, [
       field("expiry min", lnum("listen_expiry_min", 1, 720, "Minutes the link plays", "Minutes the link plays, then it expires")),
       field("before s", lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission")),
@@ -238,6 +256,13 @@ window.IntelSettings = (() => {
     top.append(line(elab, [
       field("quiet from", hm("quiet_from", "Quiet from (no pushes; empty: none)", "Quiet hours from, local time (no pushes; empty: none)"), "in-w-time"),
       field("to", hm("quiet_to", "Quiet until", "Quiet hours until, local time"), "in-w-time"),
+    ]));
+    // a fire-related PD call the FD is already at (sizeup/intel/engine.py _fire): logged, an FYI only when it adds something
+    const fdl = el("span", "", "FD there");
+    fdl.title = "A fire-related PD call at one of our fire incidents (ours or the county feed's) with the FD there: no pre-alert; an FYI only when the words add something";
+    top.append(line(fdl, [
+      field("min", lnum("fd_window_min", 5, 720, "A closed incident counts this many minutes", "Minutes: an incident closed this long before the call still counts (open ones: up to 12 h)")),
+      field("m", lnum("fd_radius_m", 25, 2000, "Within this many metres", "Metres: a confirmed address this close is the incident's (or the same address or block)")),
     ]));
     const kids = [top];
     const ran = new Map((((d.counters || {}).packs) || []).map((x) => [x.pack, x]));     // what each pack was handed

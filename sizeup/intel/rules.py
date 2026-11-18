@@ -58,6 +58,23 @@ pack that a nameless disregard marks "possibly cancelled" lives at most this lon
 of the pack's "resolved" phrases ("unfounded", "the caller called back") ends it. A rule's "unless" phrases set its
 "not" phrases aside ("pointed a gun at" beside "a bat in his bedroom").
 
+A category with "fire_related": true (the police pack's fire_report, fire_call, hazmat, alarm) is checked for the FD
+already being there before it pushes (engine.py _fire): one of our fire incidents at its place (dispatched: held at
+log, an FYI only when the police words add something; on scene: held, an FYI only for a safety change; cleared: a
+pre-alert as usual), or the words saying so ("the fire department is already working it"). The pack's "fd_present"
+says what those words are, each a list of phrase groups ({"any", "not"}, one rule's grammar; a group's "not" guards
+only its own "any"):
+
+    "fd_present": {"there": [...],     the FD said to be there already ("the engine is on location")
+                   "add_info": [...],  what makes it worth an FYI with the FD only dispatched (people inside, trapped,
+                                       a weapon, injuries, spread, hazmat)
+                   "safety": [...],    a safety change at a scene the FD is working (a weapon, violence, an explosion
+                                       or collapse, an officer or firefighter down)
+                   "types": {"*": [...], "hazmat": [...]},   the incident types that are the FD at a fire, per
+                                       category ("*" the rest; "" a page with no type yet). Never an aided, an MVA
+                                       without fire, a service call, a drill
+                   "fyi_priority": 2, "safety_priority": 4}
+
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
 that must stay quiet writes "mode": "log" on the pack, every category and every rule (the engine takes the lowest).
@@ -306,6 +323,7 @@ class Pack:
     calm: dict = field(default_factory=dict)    # category -> its "deescalate" phrases, compiled
     rise: dict = field(default_factory=dict)    # category -> ("escalate", "escalate_not", "escalate_always"), compiled
     resolved: list = field(default_factory=list)   # phrases that end a "possibly cancelled" call with "cancel_ttl_min"
+    fd: dict = field(default_factory=dict)    # "fd_present" compiled: {kind: [(any, nots)], priorities} (fd_said)
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -354,6 +372,17 @@ class Pack:
 
     def is_safety(self, cat: str) -> bool:
         return bool(self.category(cat).get("safety"))
+
+    def fd_said(self, kind: str, texts) -> bool:
+        """One of the texts says it ("fd_present"'s there | add_info | safety): a group's phrase in it and none of
+        that group's "not" phrases (either reading)."""
+        for text in texts or ():
+            ws = words(text)
+            for anys, nots in self.fd.get(kind) or ():
+                if (any(_found(p, text, ws, self.norm) for p in anys)
+                        and not any(_found(p, text, ws, self.norm) for p in nots)):
+                    return True
+        return False
 
 
 def town_names() -> dict[str, str]:
@@ -419,6 +448,32 @@ def _phrases(xs, what: str) -> list[Phrase]:
         raise ValueError(f"{what}: {e}") from None
 
 
+FD_KINDS = ("there", "add_info", "safety")
+
+
+def fd_present(v, name: str) -> dict:
+    """A pack's "fd_present" compiled (ValueError with the reason): {kind: [(any, nots)], "types": {category or "*":
+    frozenset of incident types ("" a page with none)}, "fyi_priority", "safety_priority"}; {} without one."""
+    if not v:
+        return {}
+    if not isinstance(v, dict):
+        raise ValueError(f"{name}.fd_present: an object")
+    out: dict = {}
+    for k in FD_KINDS:
+        groups = v.get(k) or []
+        if not isinstance(groups, list) or not all(isinstance(g, dict) for g in groups):
+            raise ValueError(f"{name}.fd_present.{k}: a list of {{\"any\": [...], \"not\": [...]}}")
+        out[k] = [(_phrases(g.get("any") or [], f"{name}.fd_present.{k}"), _phrases(g.get("not") or [], f"{name}.fd_present.{k} not"))
+                  for g in groups]
+    types = v.get("types") or {}
+    if not isinstance(types, dict) or not all(isinstance(t, list) for t in types.values()):
+        raise ValueError(f"{name}.fd_present.types: {{category or \"*\": [incident types]}}")
+    out["types"] = {str(c): frozenset(str(t).upper() for t in ts) for c, ts in types.items()}
+    out["fyi_priority"] = int(_num(v.get("fyi_priority", 2), 1, 5, f"{name}.fd_present.fyi_priority"))
+    out["safety_priority"] = int(_num(v.get("safety_priority", 4), 1, 5, f"{name}.fd_present.safety_priority"))
+    return out
+
+
 def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = None) -> Pack:
     """One pack from its file's dict and the Settings over it (ValueError with the reason)."""
     name = str(d.get("name") or "")
@@ -437,6 +492,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
                    "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
+                   "fire_related": bool(cd.get("fire_related")),
                    "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
                    "deescalate": [p.src for p in _phrases(cd.get("deescalate") or [], f"{name}.{c}.deescalate")],
                    "escalate": [p.src for p in _phrases(cd.get("escalate") or [], f"{name}.{c}.escalate")],
@@ -492,7 +548,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 rise={c: ([Phrase(x) for x in cd["escalate"]], [Phrase(x) for x in cd["escalate_not"]],
                           [Phrase(x) for x in cd["escalate_always"]])
                       for c, cd in cats.items() if cd["escalate"] or cd["escalate_always"]},
-                resolved=_phrases(d.get("resolved") or [], f"{name}.resolved"))
+                resolved=_phrases(d.get("resolved") or [], f"{name}.resolved"),
+                fd=fd_present(d.get("fd_present"), name))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -508,12 +565,12 @@ def read_files(paths=None) -> list[dict]:
     return out
 
 
-INHERITED = ("suppress", "normalize", "threshold", "window_s", "context_factor")
+INHERITED = ("suppress", "normalize", "threshold", "window_s", "context_factor", "fd_present")
 
 
 def rules_from(d: dict, others: dict) -> dict:
     """A pack with "rules_from": "<pack>" reads that pack's categories, rules and suppress phrases (and its normalize,
-    threshold, window_s and context_factor, unless it says its own) as written in that pack's file: one list of rules,
+    threshold, window_s, context_factor and fd_present, unless it says its own) as written in that pack's file: one list of rules,
     kept in one file, for two scopes (the police pack and neighbor_police: the same rules, another mode). Its rules'
     ids are "rule_prefix" (default "<its name>.") + theirs ("area.pd.barricade"), so Settings tune each pack's rules on
     their own (intel_rules is keyed by rule id) and the counts per rule stay apart; its categories' labels are
@@ -569,6 +626,9 @@ def ruleset_hash(packs: list[Pack]) -> str:
                           *([[x.src for x in r.unless]] if r.unless else [])]
                          for r in p.rules], [x.src for x in p.suppress],
                         *([[x.src for x in p.resolved]] if p.resolved else []),
+                        {k: [[[x.src for x in a], [x.src for x in n]] for a, n in v] if isinstance(v, list)
+                         else {c: sorted(ts) for c, ts in v.items()} if isinstance(v, dict) else v
+                         for k, v in p.fd.items()},
                         *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],
                       sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]

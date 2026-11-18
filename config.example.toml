@@ -160,6 +160,11 @@ talker_prompt = "off"              # "ids": hint each call with who keyed up ("7
 #                                  # docs/stt-vocabulary.md). Airband and police sources have their own, not set here.
 # aws_endpoint = ""                # tests / dev only: a local fake (ws://127.0.0.1:9431)
 # aws_api_endpoint = ""            # tests / dev only: a local fake of the JSON API (http://127.0.0.1:9432)
+# Private term lists per kind of source (sizeup/stt_terms.py, docs/stt-vocabulary.md "Private term lists"). The hub
+# reads them from its backups bucket (vocab/); all-in-one from terms_dir. Never put them in this repo.
+# terms_whisper = false            # the top of a source's list in whisper's prompt
+# terms_aws = false                # one Amazon Transcribe custom vocabulary per list (needs aws = true)
+# terms_dir = ""                   # all-in-one / dev: a folder with county_fire.txt, pd_dispatch.txt, ems.txt, airband.txt, places.txt
 
 [p25]
 # trunk-recorder capture directory (Westchester County P25, South simulcast site). Empty = no P25.

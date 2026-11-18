@@ -357,6 +357,25 @@ const StationHealth = (() => {
             w.model, g.util_pct !== undefined ? `${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "",
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
         }), ""));
+      const inf = sp.infer;
+      if (inf) {  // the workers' local LLM (sizeup/cloud/infer.py): its own lane after the pre-alert clips; tasks, times, counts only
+        const ms = (v) => (v === null || v === undefined ? "—" : `${v} s`);
+        const bad = Object.entries(inf.why_h || {}).filter(([k, n]) => k !== "ok" && n);
+        const ih = el("h3", "hl-sub", "GPU workers: LLM");
+        ih.title = "Classifications for the intel engine on a worker's local model. Pre-alert clips always first; a gaming worker stops its LLM. Prompts and answers are never kept";
+        kids.push(ih, dl([
+          ["LLM", inf.available ? `On · ${inf.ready} ready` : "None ready", inf.available ? "" : "dim"],
+          ["Done", `${inf.ok_h || 0}/h · p50 ${ms(inf.p50_s)} · p95 ${ms(inf.p95_s)}` + (inf.queued || inf.leased ? ` · ${inf.queued} waiting · ${inf.leased} out` : "")],
+          ["Failed", bad.length ? bad.map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ") : "none", bad.length ? "hl-warn" : ""],
+        ]));
+        kids.push(table(["Worker", "State", "STT", "LLM", "Jobs/h", "Failed"], (inf.workers || []).map((w) => [
+          w.id, [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim"],
+          w.stt, [w.llm || "none", w.llm ? "" : "dim", w.llm_version ? `Version ${w.llm_version}` : ""], w.jobs_h, w.fails_h]), ""));
+        const tasks = Object.entries(inf.tasks || {});
+        if (tasks.length) kids.push(table(["Task", "Jobs/h", "p50", "p95", "Tokens in/out", "Failed"], tasks.map(([k, t]) => [
+          k, t.n, ms(t.p50_s), ms(t.p95_s), t.tokens_in === null ? "—" : `${t.tokens_in}/${t.tokens_out}`,
+          [Object.entries(t.why || {}).map(([w, n]) => `${n} ${w.replace("_", " ")}`).join(" · ") || "0", Object.keys(t.why || {}).length ? "hl-warn" : ""]]), ""));
+      }
       const lat = sp.latency || [];
       if (lat.length) {
         const lh = el("h3", "hl-sub", "Speech-to-text latency");
@@ -413,7 +432,9 @@ const StationHealth = (() => {
       (h.dongles || []).map((x) => [x.name, x.serial, [x.present ? "yes" : "no", x.present ? "" : "hl-bad"], x.group || "",
         x.own ? `${x.job} (own ${x.own})` : x.on ? `${x.job} → ${(h.dongles.find((d) => d.serial === x.on) || {}).name || x.on}` : x.job,
         // (#637) a P25 system held back after dropouts: no fault, until when
-        x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
+        // (#703) out: it opens but streams no audio
+        x.noaudio ? ["no audio", "hl-bad", `Opens but streams no audio since ${fmtTime(x.noaudio.since)} (${x.noaudio.job}); replug it, or pick its job once fixed`]
+          : x.hold_until && !x.running && x.present ? [`held to ${fmtTime(x.hold_until)}`, "hl-warn", "Held back after dropouts (a flapping dongle); starts by itself then"]
           : [x.job === "Off" ? "—" : x.running ? "yes" : (x.state || "no"), x.job === "Off" ? "dim" : x.running ? "hl-ok" : "hl-bad"],
         x.restarts || 0, [x.ambiguous || (x.held_by ? `held by ${x.held_by.app} (${x.held_by.mode})`
           : x.hold_until && !x.running ? `held back until ${fmtTime(x.hold_until)} after dropouts` : x.detail), x.ambiguous ? "hl-bad" : ""]]),

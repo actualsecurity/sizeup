@@ -41,7 +41,9 @@
 from __future__ import annotations
 
 import argparse
+import select as select_mod
 import json
+import math
 import uuid
 import os
 import re
@@ -72,6 +74,8 @@ from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
                               pl_text, speech_seconds, voice_floor_db)
+from sizeup.radio.fm import _mmss as fm_mmss
+from sizeup.radio import fm as fm_mod
 from sizeup.radio.am import AmReceiver
 from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
@@ -88,12 +92,13 @@ from sizeup.radio import recorder as trunk_recorder
 from sizeup.radio import reception
 from sizeup.radio import systems as p25_systems
 from sizeup.radio import groups as antenna
+from sizeup.radio import usbreset
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
-from sizeup import channels
+from sizeup import channels, stt_terms
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -150,6 +155,13 @@ GROUP_HOLD_S = 10.0        # antenna groups: a dongle gone (or back) this long b
 GROUP_RETRY_S = 60.0       # ... a stand-in that didn't start: that dongle isn't tried again for this long
 GROUP_FLAP_S = 1800.0      # ... gone again this soon after it came back: a flapping dongle, and its next return
 GROUP_BACK_HOLD_S = (120.0, 600.0, 1800.0)   # ... counts only once it has stayed this long (per flap in a row)
+# A dongle that opens but streams no audio (#703): rtl_fm starts without an error and not a byte comes ("stalled")
+NOAUDIO_STALLS = 3         # this many such stalls in a row ...
+NOAUDIO_WINDOW_S = 120.0   # ... within this long (after one USB reset, where there is one): the dongle counts as failed
+NOAUDIO_GRACE_S = 120.0    # after startup (a restart, an update): stalls not counted, dongles may still be attaching
+NOAUDIO_PROBE_S = (120.0, 600.0, 1800.0)   # a failed dongle, idle, tried again this long after (per try in a row)
+NOAUDIO_PROBE_LEN_S = 8.0  # ... with rtl_fm on it: audio this long from its first byte (that within STALL_S) and it is back
+NOAUDIO_SINCE_MIN = 1577836800.0   # (2020-01-01) a saved "since" before this, or past tomorrow: not one
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
@@ -420,6 +432,7 @@ class AwsJob:
     rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
     catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
+    vocab_v: str = ""         # the vocabulary its stream used (AwsTranscriber sets it): the transcript's vocab_v
 
 
 @dataclass
@@ -554,9 +567,18 @@ class App:
         self._gfail: dict[str, float] = {}    # a stand-in that didn't start there: not tried again until then
         self._gshort: dict[str, list[str]] = {}   # each group's wanted jobs that have no dongle now
         self._gflap: dict[str, tuple[int, float | None]] = {}   # each grouped dongle: (flaps in a row, back since)
+        # (#703) dongles that open but stream no audio: each one's stalls without audio (monotonic), the ones a USB
+        # reset was tried on, and the ones out ("no audio"): {serial: {since, job, tries, next, usb, reset}}
+        self._stalls: dict[str, list[float]] = {}
+        self._reset_tried: set[str] = set()
+        self._noaudio: dict[str, dict] = {}
+        self._noaudio_lock = threading.Lock()
+        self._probing: set[str] = set()
+        self._started_mono: float | None = None   # start(): stalls count only NOAUDIO_GRACE_S after it
         self._watching = False                # the sdr-watch thread runs
         self._lock_saved()
         self._load_standins()
+        self._load_noaudio()                  # (#703) the dongles out for no audio when sizeup stopped stay out
         # Each serial's product while it was the only dongle with it (#242): {serial: product}. When a second dongle
         # turns up with the same serial (a factory 00000001), the one whose product differs is the newcomer: the
         # alert suggests renaming that one, and sizeup-station sdr-serial knows which physical dongle a job meant.
@@ -673,6 +695,7 @@ class App:
         if cfg.stt_aws:
             self._aws_setup()
             _mark("speech-to-text")
+        self._terms_setup()
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
         # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
         # subscribes: one alert): prealert_sync() follows Settings > Station > Hub link.
@@ -1040,7 +1063,7 @@ class App:
                  history=getattr(page, "history", None) or [], rerun_at=getattr(page, "rerun_at", None),
                  rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
-                 read_twice=page.read_twice)
+                 read_twice=page.read_twice, vocab_v=getattr(page, "vocab_v", "") or "")
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
@@ -1099,13 +1122,39 @@ class App:
                 pass
 
     def _prompt(self, item) -> str:
-        """whisper's prompt for one recording: the configured text, plus (stt.talker_prompt) the
-        talkers on this call as they're said on the air."""
+        """whisper's prompt for one recording: the source's own (_base_prompt), with the top of its private term list
+        ahead of it in what that leaves of the budget (sizeup/stt_terms.py; [stt] terms_whisper, the station's from
+        the hub). item.vocab_v: which list went in ("" none)."""
+        try:
+            ts = self._terms_for_item(item)
+        except Exception as e:  # noqa: BLE001 - the source's own prompt then
+            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            ts = None
+        base = self._base_prompt(item, short=ts is not None)
+        try:
+            text, vocab_v = stt_terms.with_terms(base, ts)
+        except Exception as e:  # noqa: BLE001 - the source's own prompt then
+            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            text, vocab_v = base, ""
+        try:
+            item.vocab_v = vocab_v
+        except AttributeError:
+            pass
+        return text
+
+    def _base_prompt(self, item, short: bool = False) -> str:
+        """The source's own prompt: the configured text, plus (stt.talker_prompt) the talkers on this call as they're
+        said on the air; airband and another system's police have their own. short: a term list goes with it, so a
+        police profile's prompt keeps only its towns' busiest streets (stt_terms.PROFILE_STREETS: the addresses that
+        matter; its 30 alone filled most of whisper's budget), the list the rest."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
         prof = self._stt_profile(item)
         if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
-            return self._profile_prompt(prof)
+            if not short:
+                return self._profile_prompt(prof)
+            n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
+            return self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
@@ -1545,6 +1594,7 @@ class App:
                                                | ({} if any(t is m for m in own) else {"other_page": True})
                                                for t in page.tones],
                                      "tone_seq": list(getattr(page, "tone_seq", None) or []),
+                                     "vocab_v": getattr(page, "vocab_v", "") or "",
                                      "voice_at": round(page.voice_offset_s, 2) if page.tones else None},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
@@ -2110,6 +2160,7 @@ class App:
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
                                      "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", ""),
+                                     "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
                                     replace=replace)
@@ -2572,7 +2623,8 @@ class App:
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
             # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
-            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup)
+            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup,
+                                   vocab_v=getattr(job, "vocab_v", ""))
             # (a restarted station no longer has the transmission to compare: a skipped clip with words now has changed)
             changed = changed or (job.catchup and bool(text))
         with self._lock:
@@ -2632,13 +2684,14 @@ class App:
         self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
-                alt: dict | None = None, why: str = "re-run", quiet: bool = False) -> bool:
+                alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
         (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
         but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
-        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event)."""
+        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event). vocab_v: the term
+        list or vocabulary that biased the new text (sizeup/stt_terms.py), on the row and the event."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
@@ -2649,7 +2702,7 @@ class App:
                 page.history = hist[-5:]  # type: ignore[attr-defined]
                 changed = True
             page.raw, page.confidence = text, confidence
-            page.rerun_at, page.model = time.time(), model  # type: ignore[attr-defined]
+            page.rerun_at, page.model, page.vocab_v = time.time(), model, vocab_v  # type: ignore[attr-defined]
             if alt is not None:
                 page.alt_text, page.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
             page.status = "done" if text else "no_speech"
@@ -2661,7 +2714,7 @@ class App:
         changed = changed or (old is not None and old != text)
         self.store.retext(cid, text, status, confidence, model, alt=alt)
         try:
-            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
@@ -2673,7 +2726,8 @@ class App:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
-                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {})})
+                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
+                              **({"vocab_v": vocab_v} if vocab_v else {})})
         return changed
 
 
@@ -2885,7 +2939,9 @@ class App:
                 return {}
             return {r["id"]: r["tier"] for r in cad.store.q(
                 f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(ids))})", ids)}
-        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers)
+        # leader: the engine's lease, so only the hub that leads deletes listen/ files (listen.py, the cleanup)
+        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers,
+                      leader=lambda: intel.leader())
 
     def _atc_leader(self) -> bool:
         """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""
@@ -2941,6 +2997,9 @@ class App:
         out = [*self.cad.settings.vocabulary(), *self.vocabulary_suggestions()]
         if getattr(self, "pd_sources", None):
             out += self.police_vocabulary()
+        if getattr(self, "term_vocabs", None) is not None:      # the private term lists' (sizeup/stt_terms.py)
+            for ts in self.stt_terms.sets().values():
+                out += stt_terms.aws_phrases(ts.terms)
         return out
 
     def police_vocabulary(self) -> list[str]:
@@ -2955,6 +3014,199 @@ class App:
         if self.aws is not None and self.aws.vocabulary != name:
             self.aws.vocabulary = name
             log(f"aws transcribe: custom vocabulary {name} in use from the next stream")
+
+    # -- private term lists per kind of source (sizeup/stt_terms.py, the STT plan's step 3a) -----------------------
+
+    def _terms_setup(self) -> None:
+        """A station keeps what the hub sends it (set_stt_terms). The hub reads the lists from its backups bucket, all-in-one
+        from [stt] terms_dir; with neither (or both switches off) nothing changes. [stt] terms_aws: per (list, the
+        channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
+        those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
+        self.stt_terms = None
+        self.term_vocabs = None
+        self.term_cleanup = None
+        if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
+            self.aws.vocab_version = self._vocab_version
+        if self.cfg.cloud_role == "station":
+            self.stt_terms = stt_terms.Pushed()
+            return
+        if self.aws is not None:
+            store = self.cad.store
+            tv = stt_terms.TermVocabularies(self.aws.region, store.meta_get, store.meta_put, self._own_vocab_phrases,
+                                            self.cfg.stt_aws_api_endpoint, log=log, leader=self._atc_leader)
+            if not self.cfg.stt_terms_aws:
+                self.term_cleanup = tv if tv.pairs() else None
+        if not (self.cfg.stt_terms_whisper or self.cfg.stt_terms_aws):
+            return
+        files = stt_terms.files_from(os.environ, self.cfg.stt_terms_dir)
+        if files is None:
+            return
+        self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        if self.cfg.stt_terms_aws and self.aws is not None:
+            self.term_vocabs = tv
+            self.aws.term_vocabulary = self._term_vocab_for
+            self.aws.vocab_respell = lambda name: self.term_vocabs.respell(name)
+
+    def _terms_cleanup(self) -> None:
+        """[stt] terms_aws off: the term vocabularies made before deleted, once this task leads (a thread; at most an
+        hour of looking)."""
+        tv = self.term_cleanup
+        if tv is None:
+            return
+
+        def run():
+            for _ in range(60):
+                if self._stopping.is_set():
+                    return
+                if self._atc_leader():
+                    tv.cleanup()
+                    return
+                self._stopping.wait(60.0)
+        threading.Thread(target=run, name="stt-terms-cleanup", daemon=True).start()
+
+    def _terms_read(self, store, changed: bool) -> None:
+        """After each read of the lists: the AWS vocabularies made for their versions (an API error tried again), and the
+        station sent the new prompts' terms."""
+        if self.term_vocabs is not None:
+            self.term_vocabs.sync(store.sets())
+        if changed:
+            self.stt_terms_check()
+
+    def stt_terms_check(self) -> None:
+        """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
+
+    def stt_terms_payload(self) -> dict | None:
+        """What a station is sent (set_stt_terms): nothing while terms_whisper is off; None (send nothing) until the
+        lists' first read is over."""
+        if self.cfg.stt_terms_whisper and isinstance(self.stt_terms, stt_terms.TermStore):
+            return self.stt_terms.payload() if self.stt_terms.loaded else None
+        return {"v": "", "sets": {}}
+
+    def set_stt_terms(self, payload) -> dict:
+        """The hub's lists for whisper's prompt (a call from the hub): kept in memory. {v, sets}: what is applied."""
+        if not isinstance(self.stt_terms, stt_terms.Pushed):
+            raise RuntimeError("not a station: the term lists are read here")
+        st = self.stt_terms.apply(payload)
+        log("speech-to-text terms from the hub: " + (", ".join(f"{k} ({v})" for k, v in st["sets"].items()) or "none"))
+        return st
+
+    def stt_terms_applied(self) -> dict:
+        """What the station reports in its status ({v}): the hub sends the lists again when it differs."""
+        return self.stt_terms.state() if isinstance(self.stt_terms, stt_terms.Pushed) else {"v": ""}
+
+    def _terms_for_item(self, item):
+        """The term set for whisper's prompt on this recording, None for none (off, no list, transit ...)."""
+        terms = getattr(self, "stt_terms", None)
+        if terms is None or (isinstance(terms, stt_terms.TermStore) and not self.cfg.stt_terms_whisper):
+            return None
+        return terms.get(self._own_for_item(item))
+
+    def _own_for_item(self, item) -> str | None:
+        """Which list a recording takes (stt_terms.own_for): a page the paging one, a transmission by its source."""
+        if isinstance(item, Page) or getattr(item, "kind", "") == "page":
+            return "county_fire"
+        if isinstance(item, Traffic):
+            src = self._row_source(item)
+            kind = self._kind.get(item.source, "") if item.talkgroup is None else ""
+            return stt_terms.own_for(src["source_key"], src["service"], kind) or self._own_for_key(traffic_key(item))
+        key = str(getattr(item, "source_key", "") or "")
+        service = str(getattr(item, "service", "") or "")
+        return stt_terms.own_for(key, service, self._kind.get(key, "")) if service else self._own_for_key(key)
+
+    def _own_for_key(self, key: str) -> str | None:
+        """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
+        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        key = str(key or "")
+        kind = self._kind.get(key, "")
+        service = ""
+        got = sources.parse(key) if channels.is_tg(key) else None
+        if got is not None:
+            system, tg = got
+            if system == sources.COUNTY:
+                group = (self.tg.info.get(tg) or {}).get("group") or ""
+                service = sources.service(group) if group else ("fire" if tg in self.cfg.p25_incident_talkgroups else "")
+            else:
+                rt = getattr(self, "systems", {}).get(system)
+                info = (rt.system.talkgroups.get(tg) or {}) if rt is not None else {}
+                service = str(info.get("service") or "")
+            key = sources.p25(system, tg)
+        elif kind:
+            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
+            service = sources.service(kind=kind)
+        return stt_terms.own_for(key, service, kind)
+
+    def _own_vocab(self, channel: str) -> str:
+        """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
+        another system's other talkgroups none, ours sizeup-pcfd."""
+        from sizeup.transcribe import PD_VOCABULARY, is_context
+        if self._kind.get(channel) == "airband" and getattr(self, "atc_vocab", None) is not None:
+            return self.atc_vocab.name
+        if channel in getattr(self, "pd_sources", ()) and getattr(self, "pd_vocab", None) is not None:
+            return PD_VOCABULARY
+        return "" if is_context(channel) else self.cfg.stt_aws_vocabulary
+
+    def _own_vocab_phrases(self, base: str) -> list[str]:
+        """An own vocabulary's phrases: Settings > Radios > Vocabulary's list as it is (edits included), the ATC list as
+        sizeup-atc last got it (_atc_pushed_phrases), the police one."""
+        if not base:
+            return []
+        if getattr(self, "atc_vocab", None) is not None and base == self.atc_vocab.name:
+            return self._atc_pushed_phrases()
+        if getattr(self, "pd_vocab", None) is not None and base == self.pd_vocab.name:
+            return self.police_vocabulary()
+        if base == self.cfg.stt_aws_vocabulary:
+            return list(self.cad.settings.vocabulary())
+        return []
+
+    ATC_PUSHED = "stt_terms_atc_base"
+
+    def _atc_pushed_phrases(self) -> list[str]:
+        """sizeup-atc's phrases as AWS last got them (#257's refresher pushes the operators seen when they change), so the
+        airband term vocabulary changes only when sizeup-atc does, never with every operator seen or gone. The refresher
+        keeps no copy: the list now is kept (in the CAD's meta, by the leader) when its signature is sizeup-atc's; until
+        one is, the copy kept before, else the fixed list."""
+        import hashlib
+        from sizeup import atc
+        from sizeup.transcribe import build_vocabulary
+        store = self.cad.store
+        try:
+            kept = json.loads(store.meta_get(self.ATC_PUSHED) or "{}")
+        except ValueError:
+            kept = {}
+        sig = self.atc_vocab.state().get("sig") or ""
+        if sig and kept.get("sig") == sig:
+            return [str(p) for p in kept.get("phrases") or ()]
+        r = getattr(self, "atc_refresh", None)
+        now = list(r.phrases()) if r is not None else list(atc.vocabulary()["phrases"])
+        if sig and hashlib.sha1(json.dumps(build_vocabulary(now)["phrases"]).encode()).hexdigest()[:12] == sig:
+            if self._atc_leader():
+                store.meta_put(self.ATC_PUSHED, json.dumps({"sig": sig, "phrases": now}))
+            return now
+        return [str(p) for p in kept.get("phrases") or ()] or list(atc.vocabulary()["phrases"])
+
+    def _term_vocab_for(self, channel: str) -> str:
+        """The AWS vocabulary of a channel's term list and own vocabulary once READY ("" for none: it keeps its own);
+        the first time a pair is asked for, the leader makes it."""
+        own = self._own_for_key(channel)
+        if self.term_vocabs is None or self.stt_terms is None or self.stt_terms.get(own) is None:
+            return ""
+        base = self._own_vocab(channel)
+        name = self.term_vocabs.ready(own, base)
+        if not name:
+            self.term_vocabs.want(own, base)
+        return name
+
+    def _vocab_version(self, name: str) -> str:
+        """vocab_v of a vocabulary a stream used: a term vocabulary's "<list>+<own vocabulary>@<version>", another one's
+        "<name>@<its sig>"."""
+        v = stt_terms.vocab_v_of(name)
+        if v:
+            return v
+        for vb in (self.vocab, getattr(self, "atc_vocab", None), getattr(self, "pd_vocab", None)):
+            if vb is not None and vb.name == name:
+                sig = vb.state().get("sig") or ""
+                return f"{name}@{sig}" if sig else name
+        return name
 
     def _aws_start(self, item, pcm: np.ndarray, key: str) -> None:
         """Amazon Transcribe for a transmission (shown at once as "Transcribing", the text follows) or a
@@ -2987,14 +3239,16 @@ class App:
         status = "done" if text else "no_speech"
         if job.rerun:
             changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
-                                   quiet=job.catchup)
+                                   quiet=job.catchup, vocab_v=job.vocab_v)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
             page.raw, page.confidence, page.status, page.model = text, conf, status, channels_model()
+            page.vocab_v = job.vocab_v  # type: ignore[attr-defined]
             self._transcribed(page)
         else:
-            self._retext(job.id, text, status, conf, channels_model(), alt=job.alt, why="AWS Transcribe")
+            self._retext(job.id, text, status, conf, channels_model(), alt=job.alt, why="AWS Transcribe",
+                         vocab_v=job.vocab_v)
 
     def _aws_failed(self, job: AwsJob, why: str) -> None:
         """Never dropped: the local model takes it ("both": the local text simply stays)."""
@@ -3161,6 +3415,8 @@ class App:
             a = self.pd_vocab.state()
             a.pop("respell", None)
             st["pd"] = a
+        if getattr(self, "term_vocabs", None) is not None:      # one per private term list (no terms, only states)
+            st["terms"] = self.term_vocabs.state()
         return st
 
     def aws_status(self) -> dict:
@@ -3729,6 +3985,7 @@ class App:
         given = [j for sd in new if (auto or antenna.of_sdr(self.groups, sd)) and (j := self._arrive(sd))]
         if auto:
             self._watch_failing()
+        self._watch_noaudio(gone)
         if self.groups or self._own:
             self._groups_reconcile(settling=waiting)
         return given
@@ -3766,6 +4023,258 @@ class App:
                         f"left as is: pick its job in the web app")
             elif st.get("state") == "ok":
                 self._failing.discard(sd)
+
+    # -- a dongle that opens but streams no audio (#703) --------------------------------------------------------------
+
+    def _noaudio_quiet(self, sd: str) -> str:
+        """Why a stall on this dongle doesn't count now (rtl_fm stopped or held on purpose), or ""."""
+        if self._stopping.is_set():
+            return "stopping"
+        if self._started_mono is None or time.monotonic() - self._started_mono < NOAUDIO_GRACE_S:
+            return "startup"
+        if self.switching:
+            return "a switch under way"
+        upd = getattr(getattr(self, "station", None), "updates", None)
+        try:
+            if upd is not None and (upd.state() or {}).get("state") == "updating":
+                return "an update under way"
+        except Exception:  # noqa: BLE001 - a look, never in the way
+            pass
+        if claims.other(sd):
+            return "another app holds it"
+        return ""
+
+    def _on_stall(self, r) -> None:
+        """(the receiver's thread) Its rtl_fm opened the dongle and not a byte of audio came (fm.py, on_stall).
+        NOAUDIO_STALLS of them within NOAUDIO_WINDOW_S: one USB reset (usbreset.py; none under WSL), then, at the next
+        NOAUDIO_STALLS, the dongle is out ("no audio"): its antenna group runs its job on a healthy dongle if one can
+        take it (_groups_reconcile; an out dongle is a last resort, never left idle with a job nowhere). Said once;
+        Health alerts once (noaudio:<serial>). The reset runs outside the lock (it can take a second or two)."""
+        sd = getattr(r.device, "serial", None)
+        if not sd or not self.shared:
+            return
+        if self._noaudio_quiet(sd):
+            self._stalls.pop(sd, None)
+            return
+        now = time.monotonic()
+        with self._noaudio_lock:
+            if sd in self._noaudio:
+                return
+            q = [t for t in self._stalls.get(sd, []) if now - t < NOAUDIO_WINDOW_S] + [now]
+            self._stalls[sd] = q
+            if len(q) < NOAUDIO_STALLS:
+                return
+            self._stalls.pop(sd, None)
+            reset = sd not in self._reset_tried
+            self._reset_tried.add(sd)
+        head = f"sdr: SDR {self.sdr_name(sd)} ({r.channel.label}): {len(q)} stalls with no audio in {now - q[0]:.0f} s"
+        if reset:
+            why = usbreset.reset(sd)
+            if not why:
+                log(f"{head}: USB reset; it is out at the next {NOAUDIO_STALLS} like these")
+                return
+            log(f"{head}: no USB reset ({why})")
+        with self._noaudio_lock:
+            if sd in self._noaudio:
+                return
+            self._noaudio[sd] = {"since": time.time(), "job": r.channel.label, "tries": 0,
+                                 "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usbreset.ident(sd), "gone": 0}
+        self._save_noaudio()
+        g = antenna.of_sdr(self.groups, sd)
+        log(f"sdr: CRITICAL SDR {self.sdr_name(sd)} streams no audio ({r.channel.label}): out "
+            + (f"of antenna group {g.name}: its job runs on a healthy dongle of it if one can take it, else stays and "
+               "retries here; " if g else "(no antenna group: nothing to move to); ")
+            + f"back when it streams again (tried in {NOAUDIO_PROBE_S[0] / 60:.0f} min), a person picks its job, or it "
+            "is plugged in again")
+
+    def _on_audio(self, r) -> None:
+        """(the receiver's thread) Audio from the dongle: its stalls forgotten, and a dongle out for no audio is back."""
+        sd = getattr(r.device, "serial", None)
+        if not sd:
+            return
+        self._stalls.pop(sd, None)
+        self._reset_tried.discard(sd)
+        self._noaudio_clear(sd, f"streams again ({r.channel.label})")
+
+    def _noaudio_clear(self, sd: str, why: str) -> bool:
+        with self._noaudio_lock:
+            st = self._noaudio.pop(sd, None)
+            self._stalls.pop(sd, None)
+            self._reset_tried.discard(sd)
+        if st is not None:
+            log(f"sdr: SDR {self.sdr_name(sd)} {why}: back after {fm_mmss(time.time() - st['since'])} of no audio")
+            self._save_noaudio()
+        return st is not None
+
+    NOAUDIO_FILE = "antenna_noaudio.json"   # the dongles out for no audio ({serial: {since, job, usb}}): kept over a restart
+
+    def _noaudio_path(self) -> Path | None:
+        return self._mode_file.with_name(self.NOAUDIO_FILE) if self._mode_file else None
+
+    def _save_noaudio(self) -> None:
+        p = self._noaudio_path()
+        if p is None:
+            return
+        with self._noaudio_lock:
+            cur = {sd: {"since": st["since"], "job": st["job"], "usb": list(st["usb"]) if st["usb"] else None}
+                   for sd, st in self._noaudio.items()}
+        try:
+            if cur:
+                tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}")   # (two threads may save at once)
+                tmp.write_text(json.dumps(cur))
+                os.replace(tmp, p)
+            else:
+                p.unlink(missing_ok=True)
+        except OSError as e:
+            log(f"sdr: couldn't keep the no-audio dongles ({p.name}): {e}")
+
+    def _load_noaudio(self) -> None:
+        """At startup: the dongles that were out for no audio when sizeup stopped stay out (a restart or an update
+        never hands a job back to a dead dongle for another round of stalls), each only if it is plugged in at the
+        same USB address (none to compare: kept); a replug since, or one not there, starts fresh."""
+        p = self._noaudio_path()
+        try:
+            d = json.loads(p.read_text()) if p and p.is_file() else {}
+        except (OSError, ValueError):
+            d = {}
+        here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s} if d else set()
+        for sd, st in (d.items() if isinstance(d, dict) else ()):
+            try:                                     # (one bad entry never keeps the station's radios from starting)
+                since = st.get("since") if isinstance(st, dict) else None
+                if sd not in here or not isinstance(since, (int, float)) or isinstance(since, bool) \
+                        or not math.isfinite(since) or not NOAUDIO_SINCE_MIN <= since <= time.time() + 86400:
+                    continue
+                usb = tuple(st["usb"]) if isinstance(st.get("usb"), list) and len(st["usb"]) == 2 else None
+                now_at = usbreset.ident(sd)
+                if usb is not None and now_at is not None and now_at != usb:
+                    log(f"sdr: SDR {self.sdr_name(sd)} was out for no audio; on a new USB address now: tried again")
+                    continue
+                self._noaudio[sd] = {"since": float(since), "job": str(st.get("job") or "")[:60], "tries": 0,
+                                     "next": time.monotonic() + NOAUDIO_PROBE_S[0], "usb": usb, "gone": 0}
+                self._gusable[sd], self._gseen[sd] = False, (False, time.monotonic())
+                log(f"sdr: SDR {self.sdr_name(sd)} still out for no audio (since "
+                    f"{time.strftime('%H:%M', time.localtime(since))}, as when sizeup stopped)")
+            except Exception as e:  # noqa: BLE001
+                self._noaudio.pop(sd, None)
+                log(f"sdr: {self.NOAUDIO_FILE}: entry {str(sd)[:40]!r} skipped ({type(e).__name__})")
+        if d and not self._noaudio:
+            self._save_noaudio()
+
+    def _watch_noaudio(self, gone: set[str], here: list[str] | None = None) -> None:
+        """(the sdr-watch thread) Each dongle out for no audio: plugged in again ends it (missing from two looks in a
+        row that listed other dongles, then back; or a new USB device number); an idle one (its job runs on a healthy
+        dongle, or none) is tried again with rtl_fm at NOAUDIO_PROBE_S (_probe), never while another app or a
+        reception test has it."""
+        now = time.monotonic()
+        trusted = bool(self._seen)              # (an empty look, librtlsdr failing: never "unplugged")
+        for sd, st in list(self._noaudio.items()):
+            if sd not in self._seen:
+                if trusted:
+                    st["gone"] = st.get("gone", 0) + 1
+                continue
+            if st.get("gone", 0) >= 2:
+                self._noaudio_clear(sd, "plugged in again")
+                continue
+            st["gone"] = 0
+            if st["usb"] is not None and (u := usbreset.ident(sd)) is not None and u != st["usb"]:
+                self._noaudio_clear(sd, "on a new USB address (replugged)")
+                continue
+            if sd in self._probing or now < st["next"]:
+                continue
+            if any(m != OFF_MODE and self._program_on(m) == sd for m in self.modes):
+                continue                    # it runs a job (a last resort): its first audio ends it (_on_audio)
+            lent = self.reception.lent()
+            if claims.other(sd) or self.reception.holds(sd) or (lent and lent[0] == sd):
+                st["next"] = now + NOAUDIO_PROBE_S[0]       # (not a try)
+                continue
+            self._probing.add(sd)
+            threading.Thread(target=self._probe_noaudio, args=(sd,), name="sdr-probe", daemon=True).start()
+
+    def _probe_noaudio(self, sd: str) -> None:
+        try:
+            ok = self._probe(sd)
+        except Exception as e:  # noqa: BLE001 - a try, never in the way
+            ok = False
+            log(f"sdr: SDR {self.sdr_name(sd)} no-audio probe: {type(e).__name__}: {e}")
+        finally:
+            self._probing.discard(sd)
+        if ok:
+            self._noaudio_clear(sd, "streams again (tried with rtl_fm)")
+            return
+        with self._noaudio_lock:
+            st = self._noaudio.get(sd)
+            if st is None:
+                return
+            if ok is None:                                  # couldn't try (another app's claim): not a try
+                st["next"] = time.monotonic() + NOAUDIO_PROBE_S[0]
+                return
+            st["tries"] += 1
+            st["next"] = time.monotonic() + NOAUDIO_PROBE_S[min(st["tries"], len(NOAUDIO_PROBE_S) - 1)]
+            first = st["tries"] == 1
+        if first:
+            log(f"sdr: SDR {self.sdr_name(sd)} still streams no audio: tried again every "
+                f"{', '.join(f'{x / 60:.0f}' for x in NOAUDIO_PROBE_S[1:])} min")
+
+    def _probe(self, sd: str) -> bool | None:
+        """rtl_fm on this idle dongle for NOAUDIO_PROBE_LEN_S, on its job's frequency: True when audio came the whole
+        time (no gap over a second, about half the bytes at least), False when not, None when it couldn't be tried
+        (not found, another app's claim). sizeup's claim is held meanwhile and let go after, only if it took it."""
+        idx = sdr_lookup.resolve(sd, self.cfg.rtl_fm)
+        if idx is None:
+            return None
+        if claims.other(sd):
+            return None
+        took = claims.holder(sd) is None                    # (a claim of ours already there: left as it is)
+        if took and not claims.claim(sd, "no-audio test"):
+            return None
+        job = (self._noaudio.get(sd) or {}).get("job", "")
+        mhz = next((c.mhz for c in self.cfg.channels if c.label == job and c.mhz), 460.0)
+        p = None
+        try:
+            p = subprocess.Popen(self._probe_argv(idx, mhz), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 start_new_session=True, env=child_env())
+            # the first bytes within STALL_S (a dongle can be slow to open, over usbipd), then audio for
+            # NOAUDIO_PROBE_LEN_S from that first byte with no gap over a second
+            opened, first, last, got = time.monotonic(), None, None, 0
+            while p.poll() is None:
+                now = time.monotonic()
+                if first is None and now - opened > fm_mod.STALL_S:
+                    return False                            # never started
+                if first is not None and now - first >= NOAUDIO_PROBE_LEN_S:
+                    break
+                r, _w, _x = select_mod.select([p.stdout], [], [], 0.25)
+                if r:
+                    chunk = os.read(p.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    got, last = got + len(chunk), time.monotonic()
+                    first = first if first is not None else last
+                elif last is not None and time.monotonic() - last > 1.0:
+                    return False                            # a gap: not streaming
+            return first is not None and time.monotonic() - first >= NOAUDIO_PROBE_LEN_S \
+                and got >= 24000 * NOAUDIO_PROBE_LEN_S      # (half its 2 bytes a sample at least)
+        except OSError:
+            return False
+        finally:
+            if p is not None and p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)
+                    p.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if took and not any(m != OFF_MODE and self._program_on(m) == sd for m in self.modes):
+                claims.release(sd)
+
+    def _probe_argv(self, idx, mhz: float) -> list[str]:
+        return [self.cfg.rtl_fm or "rtl_fm", "-d", str(idx), "-f", f"{mhz * 1e6:.0f}", "-s", "24000", "-"]
+
+    def noaudio_row(self, sd: str) -> dict | None:
+        st = self._noaudio.get(sd)
+        return ({"since": st["since"], "job": st["job"], "retry_min": [round(x / 60) for x in NOAUDIO_PROBE_S]}
+                if st else None)
 
     # -- antenna groups (sizeup/radio/groups.py) ---------------------------------------------------------------------
 
@@ -3882,10 +4391,11 @@ class App:
             return bool(rt.system.covered([k for j, (r, k) in self._sys_jobs.items() if r is rt and j in on]))
         return job in self.modes
 
-    def _group_usable_now(self, sd: str, here: set[str], devs) -> bool:
+    def _group_usable_now(self, sd: str, here: set[str], devs, last_resort: bool = False) -> bool:
         """A grouped dongle can run a job now: plugged in, not reserved, not lent to a reception test, not another
-        app's, its serial on one dongle, and no stand-in failed to start on it lately."""
-        if sd not in here or self._sdr_ignored(sd) or self.reception.holds(sd):
+        app's, its serial on one dongle, and no stand-in failed to start on it lately; and streaming audio (#703:
+        one out for no audio is out, as one unplugged, unless last_resort: then only that is overlooked)."""
+        if sd not in here or self._sdr_ignored(sd) or self.reception.holds(sd) or (sd in self._noaudio and not last_resort):
             return False
         lent = self.reception.lent()
         if lent is not None and lent[0] == sd:
@@ -3955,7 +4465,12 @@ class App:
                 usable = [s for s in g.sdrs if self._group_view(s, self._group_usable_now(s, here, devs))]
                 if settling:
                     continue
-                for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
+                # (#703) out for no audio, but there and otherwise fine: a last resort for a job no healthy dongle can
+                # take (it keeps retrying there), never left idle with its job nowhere
+                spare_out = [s for s in g.sdrs if s not in usable and s in self._noaudio
+                             and self._group_usable_now(s, here, devs, last_resort=True)]
+                for s in [s for s in g.sdrs if s not in usable and s not in spare_out and s in self._own
+                          and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
                 # a dongle on a job outside its group or parked there (kept at startup, _lock_saved): left as it is,
@@ -3968,6 +4483,13 @@ class App:
                           and s not in self._auto_skip]
                 plan, short = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job,
                                            self._group_runnable)
+                for job in list(short):             # (#703) the last resort, highest job first: the out dongle that
+                    # runs it now, else its own, else any out one free in the plan
+                    free = sorted([s for s in spare_out if s not in plan],
+                                  key=lambda s: (self.assign.get(s) != job, own.get(s) != job))
+                    if free and self._group_runnable(job, (set(plan.values()) - {OFF_MODE}) | {job}):
+                        plan[free[0]] = job
+                        short.remove(job)
                 if short != self._gshort.get(g.name, []):
                     gone = [self.sdr_name(s) for s in g.sdrs if s not in usable and own.get(s, OFF_MODE) != OFF_MODE]
                     log(f"sdr: group {g.name}: " + (f"short of dongles (SDR {', '.join(gone) or '?'}): "
@@ -4230,6 +4752,8 @@ class App:
     def _fresh_receiver(self, old: NfmReceiver, serial: str) -> NfmReceiver:
         c = next(c for c in self.cfg.channels if c.label == old.channel.label)
         r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
+        r.on_stall = lambda r=r: self._on_stall(r)        # (#703) a dongle that opens but streams no audio
+        r.on_audio = lambda r=r: self._on_audio(r)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
         self._apply_squelch()
@@ -4378,6 +4902,10 @@ class App:
         why = self._ambiguity(sdr) if mode != OFF_MODE else ""
         if why:
             return f"SDR {self.sdr_name(sdr)}: {why}"
+        if by == "person" and self._noaudio_clear(sdr, f"picked by a person ({mode})"):
+            # (#703) a person's pick ends its "no audio": trusted at once (its next stalls count again)
+            if sdr in self._gusable:
+                self._gusable[sdr], self._gseen[sdr] = True, (True, time.monotonic())
         g = antenna.of_sdr(self.groups, sdr)
         if g is not None:
             return self._set_group_mode(g, mode, sdr, by)
@@ -4422,6 +4950,8 @@ class App:
                 if self.set_by.get(sdr) != by:           # a person confirmed what auto picked: theirs now
                     self.set_by[sdr] = by
                     self._save_modes()
+                if mode != OFF_MODE and self._program_on(mode) != sdr:
+                    self._groups_reconcile()             # (#703) its job on a stand-in: back here, if it can be
                 return None
             for o in [o for o in (g.sdrs if g else ()) if o != sdr and mode != OFF_MODE and self._own_of(o) == mode]:
                 log(f"SDR {self.sdr_name(o)}: {mode} -> {OFF_MODE} (moving to {self.sdr_name(sdr)})")
@@ -4505,6 +5035,7 @@ class App:
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
                           "lent": self.reception.lent_row(sd),  # (#410) lent to a reception test: {paused, owed}
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None),
+                          "noaudio": self.noaudio_row(sd),     # (#703) out: opens but streams no audio {since, job}
                           **self._group_row(sd)}
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
@@ -4522,6 +5053,10 @@ class App:
                     st["keyups"] = self.keyups(r.channel.label)
             if self.shared and r.channel.label not in self.assign.values():
                 st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None, open_s=None, stuck=False)
+            elif self.shared and (sd := getattr(r.device, "serial", None)) in self._noaudio and not r._stop.is_set():
+                # (#703) its dongle opens but streams no audio: one steady state, not ok/down at every retry
+                st.update(state="down", word="no audio", detail=f"SDR {self.sdr_name(sd)} streams no audio "
+                                                                f"({st.get('restarts', 0)} restarts)")
             out.append(st)
         if self.p25:
             st = self.p25.status()
@@ -4647,12 +5182,16 @@ class App:
         self.stt.start()
         self.catchup.start()                      # its first look minutes from now: nothing written at start
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        if isinstance(self.stt_terms, stt_terms.TermStore):
+            self.stt_terms.start()                # the private term lists, read now and every few minutes
+        self._terms_cleanup()
         if not self.forwarding():
             self.cad.intel.start()                # radio pre-alerts (sizeup/intel): the "intel" thread
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
         self.cad.preplan_docs.start()             # site documents: objects no document names, swept (#459)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
+        self._started_mono = time.monotonic()     # (#703) stalls count only NOAUDIO_GRACE_S after this
         if self.shared:
             self.reception.recover()          # (#410) a test that never ended: its dongle starts on its own job
             self._booting = True
@@ -4882,6 +5421,8 @@ class App:
     def stop(self) -> None:
         self._stopping.set()
         self.catchup.stop()
+        if isinstance(getattr(self, "stt_terms", None), stt_terms.TermStore):
+            self.stt_terms.stop()
         self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
         self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
