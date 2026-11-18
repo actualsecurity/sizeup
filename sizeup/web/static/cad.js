@@ -142,6 +142,22 @@ function toLocalInput(unix) {
   const p = Object.fromEntries(fmt("parts").formatToParts(new Date(unix * 1000)).map((x) => [x.type, x.value]));
   return `${p.year}-${p.month}-${p.day}T${p.hour === "24" ? "00" : p.hour}:${p.minute}`;
 }
+// An event's Until, as shown on its card and its facts: the day too when it isn't today or the day the event began;
+// flagged when it is before the event was created (a wrong day) or has passed while the event is still open (a
+// non-emergency one closes by itself once no unit is on it: sizeup/cad/store.py expire_until). -> {text, warn, tip} | null
+function untilInfo(inc, now = serverNow()) {
+  const u = inc.until_at;
+  if (!u) return null;
+  const day = (t) => toLocalInput(t).slice(0, 10), d = new Date(u * 1000);
+  const dated = day(u) !== day(now) || (!!inc.created_at && day(u) !== day(inc.created_at));
+  const text = (dated ? `${fmt("short").format(d)} ` : "") + fmt("hm").format(d);
+  const before = !!inc.created_at && u < inc.created_at - 60, passed = !before && u <= now && isOpen(inc);
+  const flag = before ? "before created" : passed ? "passed" : "";
+  const tip = before ? `Until ${fmtRecv(u)} is before the event was created (${fmtRecv(inc.created_at)}): check the day`
+    : passed ? (inc.emergency ? "Until has passed" : "Until has passed: closes once no unit is on it")
+    : inc.emergency ? fmtRecv(u) : `${fmtRecv(u)}: closes by itself then (Expired)`;
+  return { text: flag ? `${text} · ${flag}` : text, warn: !!flag, tip };
+}
 function fromLocalInput(v) {
   if (!v) return null;
   const guess = Date.parse(v + ":00Z") / 1000;              // as if UTC, then correct by the zone's offset
@@ -326,7 +342,7 @@ function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SU
   for (const k of keys) if (k in c) return c[k] === "emergency";
   return true;
 }
-const live = (x) => !x.retired;     // retired: named on old events, off the pick lists
+const live = (x) => !x.retired && !x.system;     // retired, or the hub's own (Expired): named on events, off the pick lists
 function subtypesFor(t) {            // the type -> subtype map: only those listed (none, or not in the map: no subtype)
   const m = (L().type_subtypes || {})[t] || [];
   return (L().event_subtypes || []).filter((s) => live(s) && m.includes(s.code));
@@ -577,7 +593,8 @@ function fillQueueItem(li, inc) {
     if (mo && !BOARD && canDo("dispatch")) li.append(mergeRow(inc, "qs q-merge"));
     else li.append(el("div", "qs dim", mo ? `Same call as ${mo.ref}?` : "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
-    if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
+    const u = untilInfo(inc);
+    if (u) li.append(Object.assign(el("div", u.warn ? "qs warn" : "qs dim", `Until ${u.text}`), { title: u.tip }));
   } else if (!isOpen(inc)) {
     const foot = el("div", "qs dim closed-foot");
     foot.append(el("span", "", inc.status === "dismissed" ? "Dismissed" : nameOf("dispositions", inc.disposition) || "Closed"));
@@ -648,7 +665,7 @@ function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
-    i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
+    i.until_at, untilInfo(i)?.text, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
     i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed],
     i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
@@ -820,8 +837,11 @@ function renderDetail() {
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");
-  show($("#d-until-w"), !!inc.until_at);
-  setText($("#d-until"), inc.until_at ? fmtTime(inc.until_at) : "");
+  const until = untilInfo(inc);
+  show($("#d-until-w"), !!until);
+  setText($("#d-until"), until ? until.text : "");
+  $("#d-until").classList.toggle("warn", !!until && until.warn);
+  $("#d-until").title = until ? until.tip : "";
   show($("#d-disp-w"), !!inc.disposition);
   setText($("#d-disp"), inc.disposition ? nameOf("dispositions", inc.disposition) : "");
   const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
@@ -3353,6 +3373,7 @@ function openEdit() {
   $("#e-phone").value = inc.phone || "";
   $("#e-via").value = inc.received_via || "";
   $("#e-emergency").checked = !!inc.emergency;
+  show($("#e-until-w"), !inc.emergency);               // an Until is a non-emergency event's (it closes it)
   $("#e-until").value = toLocalInput(inc.until_at);
   $("#e-remarks").value = inc.remarks || "";
   airportForm("e", inc);
@@ -3938,6 +3959,7 @@ $("#d-events-toggle").addEventListener("click", () => timelineFold(!cad.timeline
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
+$("#e-emergency").addEventListener("change", () => show($("#e-until-w"), !$("#e-emergency").checked));
 $("#e-type").addEventListener("change", () => {     // a new type offers only its subtypes; back to the event's: as it was
   const inc = selected(), t = $("#e-type").value;
   fillSubtypes($("#e-subtype"), t);

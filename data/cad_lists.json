@@ -189,7 +189,8 @@
     {"code": "UNFOUNDED", "name": "Unfounded"},
     {"code": "UNKNOWN", "name": "Unknown"},
     {"code": "OTHER", "name": "Other"},
-    {"code": "NO MEDICAL", "name": "No medical"}
+    {"code": "NO MEDICAL", "name": "No medical"},
+    {"code": "EXPIRED", "name": "Expired"}
   ],
   "_received_via": "How the call came in (Event info). A 60 Control page arrives as 60 CONTROL. Not in the sheet: a stand-in.",
   "received_via": [

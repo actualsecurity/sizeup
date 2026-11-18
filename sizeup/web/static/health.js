@@ -154,6 +154,7 @@ const StationHealth = (() => {
       const box = el("div", "hl-hints");
       for (const x of h.hints) {
         const p = el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`);
+        if (x.title) p.title = x.title;   // (#686: why a level wasn't checked)
         if (x.link) {                  // a signal shift (#606): the chart at that time
           const a = el("a", "nav", "Chart");
           a.href = x.link;
