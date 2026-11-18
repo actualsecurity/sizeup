@@ -89,20 +89,23 @@ def test_where_no_reset_is_possible_it_is_out_at_the_first_stalls(st, monkeypatc
     assert any("no USB reset (WSL: no USB reset through usbipd)" in x for x in logs)
 
 
-def test_stalls_spread_out_or_broken_by_audio_never_add_up(st, monkeypatch):
+def test_stalls_spread_out_or_broken_by_audio_never_add_up(st):
     plugged, logs, make, resets = st
     app = grouped(make)
-    t = [1000.0]
-    monkeypatch.setattr(appmod.time, "monotonic", lambda: t[0])
     r = app._receiver("South 2")
-    for _ in range(6):                                                       # one a minute: never 3 in 2 min
-        app._on_stall(r)
-        t[0] += 61
+    now = time.monotonic()
+    # two stalls longer ago than the window: the next one is the first of its window
+    app._stalls["uhf-b"] = [now - appmod.NOAUDIO_WINDOW_S - 30, now - appmod.NOAUDIO_WINDOW_S - 1]
     app._on_stall(r)
+    assert len(app._stalls["uhf-b"]) == 1
     app._on_stall(r)
     app._on_audio(r)                                                         # audio between: they start over
+    assert "uhf-b" not in app._stalls
     app._on_stall(r)
-    assert not resets and not app._noaudio
+    app._on_stall(r)
+    assert len(app._stalls["uhf-b"]) == 2 and not resets and not app._noaudio
+    app._on_stall(r)
+    assert resets == ["uhf-b"]                                               # (the third in the window counts)
 
 
 def test_it_comes_back_when_it_streams_again_and_waits_longer_each_try_it_doesnt(st, monkeypatch):
