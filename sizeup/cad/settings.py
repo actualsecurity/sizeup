@@ -529,6 +529,8 @@ class Editor:
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
         self._use_services(ov)
         self.cad._state = None
+        if getattr(self.cad, "intel", None) is not None:
+            self.cad.intel.sources_changed()      # a source's service, the intel topic: intel's push sources again
 
     def _use_services(self, ov: dict) -> None:
         """The admins' service per source: the CAD's copy (the pages) and the process's (every row tagged from now)."""

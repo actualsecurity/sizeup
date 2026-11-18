@@ -1,0 +1,246 @@
+"""The sources intel could push from (sizeup/intel/engine.py, "Push sources"): speech-to-text's priority hook.
+
+    IntelEngine.push_sources() -> (frozenset of source keys, revision); sizeup.intel.push_sources() without the engine.
+
+Held here, over the public talkgroups files (the county's and MRRS's) and the packs as shipped:
+  - the police pack gives exactly its three talkgroups; Area PD (neighbor_police) at log gives nothing; raised to push
+    in Settings it adds every other MRRS police talkgroup, and the revision goes up;
+  - intel off, the kill switch off, no intel topic in effect: nothing, revision up; no change: the same revision;
+  - an admin's radio_services choice moves a source in or out (the service as rows are tagged live);
+  - the set is what feed() reads: the same Pack.in_scope over the same rows;
+  - no engine here (a station): (frozenset(), 0).
+
+Synthetic only (this repository is public): invented topics, no transcripts. Talkgroup numbers are the public files'."""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import sizeup.intel
+from sizeup import notify, sourcekeys
+from sizeup.intel import engine as engine_mod
+from sizeup.intel import rules as rules_mod
+from sizeup.intel.engine import IntelEngine, RecordingSink, source_rows
+from sizeup.intel.events import MemoryEvents
+from sizeup.radio.systems import read_talkgroups
+from sizeup.talkgroups import TalkgroupPrefs
+from tests.test_cad import make_cad
+from tests.test_intel import Clock
+
+TR = Path(__file__).resolve().parents[1] / "deploy" / "trunk-recorder"
+OURS = frozenset({"p25:mrrs:9211", "p25:mrrs:9212", "p25:mrrs:9213"})
+CHANNELS = (SimpleNamespace(label="South 2", kind="paging"), SimpleNamespace(label="FG1", kind="traffic"),
+            SimpleNamespace(label="HPN Tower", kind="airband"))
+TOPIC = "pcfd-xmpl-intel-sources"
+
+
+def prefs() -> TalkgroupPrefs:
+    """The talkgroups as the app knows them: the county's file (as config.py reads it) and MRRS's (#409)."""
+    with (TR / "talkgroups.csv").open() as f:
+        county = {int(r["Decimal"]): {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
+                                      "encrypted": "E" in (r.get("Mode") or "").upper()} for r in csv.DictReader(f)}
+    return TalkgroupPrefs(county, set(), None, others={"mrrs": read_talkgroups(TR / "systems" / "mrrs" / "talkgroups.csv",
+                                                                             "mrrs")})
+
+
+def mrrs_police() -> set[str]:
+    with (TR / "systems" / "mrrs" / "talkgroups.csv").open() as f:
+        return {f"p25:mrrs:{r['Decimal']}" for r in csv.DictReader(f) if r["Service"] == "police"}
+
+
+class Topic:
+    """The INTEL kind's notifier as LiveSink reads it: enabled while a topic is in effect."""
+    enabled = True
+
+
+def engine(settings: dict | None = None, notifier=None):
+    """An engine over the shipped packs, with Settings read at each reload() (as the CAD's are) and every known
+    source: the public talkgroups files and three channels."""
+    cfg = settings if settings is not None else {}
+    e = IntelEngine(settings=lambda: cfg, events=MemoryEvents(), sink=RecordingSink(), thread=False, clock=Clock())
+    e.notifier = Topic() if notifier is None else notifier
+    tg = prefs()
+    e.sources = lambda: source_rows(tg.state(), CHANNELS)
+    return e, cfg
+
+
+def test_the_police_pack_gives_exactly_its_three_talkgroups_area_pd_at_log_none():
+    e, _cfg = engine()
+    keys, rev = e.push_sources()
+    assert keys == OURS
+    assert rev == 1
+    assert e.push_sources() == (OURS, 1)                       # no change: the same revision (cached)
+    # every pack's sources are known here: Area PD reads the other MRRS police talkgroups, at log
+    assert e.pack("neighbor_police").mode == "log"
+    known = {r["source"] for r in e.sources()}
+    assert mrrs_police() <= known and "p25:westchester:359" in known and {"fm:FG1", "air:HPN Tower"} <= known
+
+
+def test_area_pd_raised_to_push_in_settings_adds_the_other_mrrs_police_talkgroups():
+    e, cfg = engine()
+    assert e.push_sources() == (OURS, 1)
+    cfg["intel_packs"] = {"neighbor_police": {"mode": "push"}}
+    e.reload()                                                  # (the Settings op reloads: test_settings_ops_*)
+    keys, rev = e.push_sources()
+    assert keys == mrrs_police() and rev == 2
+    assert keys - OURS >= {"p25:mrrs:9563", "p25:mrrs:9564", "p25:mrrs:9000", "p25:mrrs:8000", "p25:mrrs:8002"}
+    assert "p25:mrrs:9570" not in keys                          # PC-Rye EMS: neither pack's service
+    e.reload()                                                  # a reload that changes nothing: the same revision
+    assert e.push_sources() == (keys, 2)
+    # its every category at log again: nothing of Area PD's (its rules, from police.json, stay at push)
+    cfg["intel_packs"] = {"neighbor_police": {"mode": "push", "categories": {
+        c: {"mode": "log"} for c in e.pack("neighbor_police").categories}}}
+    e.reload()
+    assert e.push_sources() == (OURS, 3)
+
+
+def test_a_rule_or_category_at_push_is_needed_with_the_pack():
+    cats = {p.name: p for p in rules_mod.load_packs()}["police"].categories
+    e, cfg = engine({"intel_packs": {"police": {"categories": {c: {"mode": "log"} for c in cats}}}})
+    pol = e.pack("police")
+    assert pol.mode == "push" and not engine_mod.can_push(pol)
+    assert e.push_sources() == (frozenset(), 1)
+    cfg["intel_packs"] = {}
+    cfg["intel_rules"] = {r.id: {"mode": "log"} for r in pol.rules}          # every rule at log
+    e.reload()
+    assert e.push_sources() == (frozenset(), 1)                 # still none: the same revision
+    cfg["intel_rules"] = {r.id: {"mode": "log"} for r in pol.rules if r.id != "pd.shots"}
+    e.reload()
+    assert e.push_sources() == (OURS, 2)                        # one rule at push in a category at push: the pack's
+
+
+@pytest.mark.parametrize("off", ["enabled", "push", "topic", "notifier"])
+def test_intel_off_the_kill_switch_or_no_topic_empties_it_and_bumps_the_revision(off):
+    e, cfg = engine()
+    assert e.push_sources() == (OURS, 1)
+    if off == "topic":
+        e.notifier.enabled = False
+        e.sources_changed()                                     # (Settings' notify section: settings._use)
+    elif off == "notifier":
+        e.notifier = None
+        e.sources_changed()
+    else:
+        cfg["intel"] = {off: False}
+        e.reload()
+    assert e.push_sources() == (frozenset(), 2)
+    assert e.push_sources() == (frozenset(), 2)
+    if off == "topic":
+        e.notifier.enabled = True
+        e.sources_changed()
+    elif off == "notifier":
+        e.notifier = Topic()
+        e.sources_changed()
+    else:
+        cfg["intel"] = {}
+        e.reload()
+    assert e.push_sources() == (OURS, 3)
+
+
+def test_an_admins_service_choice_moves_a_source_in_or_out():
+    e, _cfg = engine()
+    assert e.push_sources() == (OURS, 1)
+    sourcekeys.set_service_overrides({"p25:mrrs:9212": "ems"})     # (conftest puts the process's map back)
+    e.sources_changed()
+    assert e.push_sources() == (OURS - {"p25:mrrs:9212"}, 2)
+    sourcekeys.set_service_overrides({})
+    e.sources_changed()
+    assert e.push_sources() == (OURS, 3)
+
+
+def test_recomputed_at_most_push_refresh_s_after_the_last_without_a_change_told(monkeypatch):
+    e, _cfg = engine()
+    assert e.push_sources() == (OURS, 1)
+    sourcekeys.set_service_overrides({"p25:mrrs:9213": "other"})   # nothing told
+    assert e.push_sources() == (OURS, 1)                        # cached
+    t = engine_mod.time.monotonic() + engine_mod.PUSH_REFRESH_S + 1
+    monkeypatch.setattr(engine_mod.time, "monotonic", lambda: t)
+    assert e.push_sources() == (OURS - {"p25:mrrs:9213"}, 2)
+
+
+def test_the_set_is_what_feed_reads_one_predicate():
+    """Every known source a pack that can push reads (Pack.in_scope, as feed() calls it), and no other."""
+    e, cfg = engine({"intel_packs": {"neighbor_police": {"mode": "push"}}})
+    keys, _rev = e.push_sources()
+    for r in e.sources():
+        row = {**r, "id": "t1", "text": "x", "start": 1.0}
+        read = [p.name for p in e.packs if p.in_scope(row) and engine_mod.can_push(p)]
+        assert (r["source"] in keys) == bool(read), r["source"]
+
+
+def test_source_rows_tag_as_rows_are_tagged_live():
+    rows = {r["source"]: r for r in source_rows(prefs().state(), CHANNELS)}
+    assert rows["p25:mrrs:9211"] == {"source": "p25:mrrs:9211", "system": "mrrs", "service": "police",
+                                     "tier": "alert", "dept": ""}
+    assert rows["p25:westchester:359"]["service"] == "police" and rows["p25:westchester:359"]["tier"] == ""
+    assert rows["fm:South 2"]["service"] == "fire" and rows["fm:South 2"]["system"] == "analog"
+    assert rows["air:HPN Tower"]["service"] == "air" and rows["air:HPN Tower"]["system"] == "airband"
+    # the station's row first (the hub's list), the hub's own file after it: the first one's
+    first = source_rows([{"source": "p25:mrrs:9211", "system": "mrrs", "service_auto": "ems", "tier": "text"},
+                         *prefs().state()])
+    assert next(r for r in first if r["source"] == "p25:mrrs:9211")["service"] == "ems"
+
+
+def test_no_engine_here_is_none_and_a_station_forwarding_is_none(monkeypatch):
+    monkeypatch.setattr(engine_mod, "_live", None)
+    assert sizeup.intel.push_sources() == (frozenset(), 0)
+    e, _cfg = engine()
+    engine_mod.set_live(e)
+    assert sizeup.intel.push_sources() == (OURS, 1)
+    e.active = lambda: False                                    # a station forwarding to its hub
+    assert sizeup.intel.push_sources() == (frozenset(), 0)
+
+
+def test_settings_ops_recompute_it(tmp_path):
+    """The CAD's Settings: intel's (the kill switch, a pack's mode), radio_services and the intel topic."""
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True                          # (an MRRS talkgroup's service: signed-in admins)
+    cad.pushes = notify.Pushes(intel_topic=TOPIC, settings=lambda: cad.settings.section(notify.SECTION),
+                               log=lambda m: None)
+    e = cad.intel
+    e.notifier = cad.pushes.notifier(notify.INTEL)
+    tg = prefs()
+    e.sources = lambda: source_rows(tg.state(), CHANNELS)
+    post = lambda sec, **b: cad.settings_post(sec, {"operator": "Lt. Test", **b})      # noqa: E731
+    assert e.push_sources() == (OURS, 1)
+    post("intel", action="pack", pack="neighbor_police", mode="push")
+    assert e.push_sources() == (mrrs_police(), 2)
+    post("intel", action="pack", pack="neighbor_police", mode="log")
+    assert e.push_sources() == (OURS, 3)
+    post("radio_services", action="set", key="p25:mrrs:9211", service="ems")
+    cad.retag_thread.join(10)
+    assert e.push_sources() == (OURS - {"p25:mrrs:9211"}, 4)
+    post("radio_services", action="set", key="p25:mrrs:9211", service="automatic")
+    cad.retag_thread.join(10)
+    assert e.push_sources() == (OURS, 5)
+    post("intel", action="set", key="push", value=False)
+    assert e.push_sources() == (frozenset(), 6)
+    post("intel", action="set", key="push", value=True)
+    assert e.push_sources() == (OURS, 7)
+    post("notify", action="off", key=notify.INTEL)
+    assert e.push_sources() == (frozenset(), 8)
+    post("notify", action="reset", key=notify.INTEL)
+    assert e.push_sources() == (OURS, 9)
+    assert e.push_sources() == (OURS, 9)
+
+
+def test_the_hub_wires_it_its_files_then_the_stations_list(tmp_path, monkeypatch):
+    """HubApp (App's wiring): the engine is this process's, its sources the hub's own talkgroups files and channels
+    until the station says what it lists; the station's rows win then."""
+    from sizeup.cloud.hub import HubApp
+    from sizeup.radio.systems import load
+    from tests.test_cloud import hub_cfg
+    monkeypatch.setattr(engine_mod, "_live", None)              # (put back after: the process's engine is the app's)
+    app = HubApp(hub_cfg(tmp_path, alerts_intel_topic=TOPIC, p25_systems=(load(TR / "systems" / "mrrs"),)))
+    assert engine_mod._live is app.cad.intel
+    keys, rev = sizeup.intel.push_sources()
+    assert keys == OURS and rev >= 1
+    assert {"fm:South 2", "fm:FG1"} <= {r["source"] for r in app.cad.intel.sources()}
+    # the station's list (its talkgroups file says EMS for 9212, say): the station's row first
+    app.hub.talkgroups = [{"source": "p25:mrrs:9212", "system": "mrrs", "tg": 9212, "service_auto": "ems",
+                           "service": "ems", "tier": "text"}]
+    app.cad.intel.sources_changed()
+    assert sizeup.intel.push_sources() == (OURS - {"p25:mrrs:9212"}, rev + 1)

@@ -19,6 +19,27 @@
     engine.ruleset_hash()
     engine.counts(now)    what it did with what it was handed, per pack (sizeup/intel/counters.py): Settings > System >
                           Intel and Settings > Station > Health; one "intel: considered N, ..." log line an hour
+    engine.push_sources() (frozenset of source keys, revision): the sources intel could push from right now, for
+                          speech-to-text's priority (see "Push sources" below); sizeup.intel.push_sources() without
+                          the engine at hand
+
+Push sources (the hook for speech-to-text's queue: a source intel can push from is transcribed at HIGH or above).
+The engine runs on the HUB (the CAD of record; all-in-one too). A station's engine is idle (active() is False while it
+forwards to a hub), so there sizeup.intel.push_sources() is (frozenset(), 0): a station that wants the set gets it
+from the hub over whatever hub-to-station channel speech-to-text uses (nothing here sends it).
+
+    keys  qualified source keys (sizeup/sourcekeys.py): p25:<system>:<tg> (the county's p25:westchester:<n>),
+          fm:<label>, air:<label>. A source is in it when intel is on (the "enabled" switch), pushes are on (the kill
+          switch "push"), the INTEL kind has a topic in effect (LiveSink pushes nothing without one), and a pack that
+          could push reads it: the pack's mode is push and one of its rules is on, at push, in a category at push
+          (Settings' intel_packs / intel_rules applied; can_push()). Which sources a pack reads is Pack.in_scope() itself,
+          the predicate feed() uses, over every known source as a row of the radio log would carry it (source_rows():
+          the talkgroups files' talkgroups with their service as tagged live, the admins' radio_services choices over
+          it, and the configured FM and airband channels). So the set never disagrees with what the engine reads.
+          Quiet hours and the rate caps are left out: they hold a push for a while, the source stays one that pushes.
+    rev   bumped only when the set changes (0: never computed; the first set is 1). Recomputed after reload() (the
+          packs, intel's Settings) and sources_changed() (any Settings change: radio_services, the notify topics), and
+          at most PUSH_REFRESH_S after the last (a station's talkgroups list arriving at the hub); otherwise cached.
 
 The sink (no side effect happens in the engine itself):
 
@@ -134,6 +155,7 @@ ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgrou
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
+PUSH_REFRESH_S = 60.0                  # push_sources(): recomputed at least this often (sources nothing tells us of)
 
 
 @dataclass
@@ -239,6 +261,14 @@ class IntelEngine:
         self._summed_at: dict = {}            # the overall totals at that line
         self._led = False                     # the kept counters are read when this one first leads (a handover too)
         self.count_errors = 0                 # a counter that failed (never the transcript's problem: _count)
+        # push_sources(): every source known here, as rows of the radio log (source_rows(); the app sets it). None:
+        # no source is known, so none is one intel pushes from
+        self.sources = None
+        self._push_lock = threading.Lock()    # its own: never waits on a row being read (self._lock)
+        self._push: frozenset | None = None
+        self._push_rev = 0
+        self._push_at = 0.0
+        self._push_dirty = True
         self.reload()
         if sink is None:
             sink = LiveSink(self) if store is not None else RecordingSink()
@@ -261,6 +291,7 @@ class IntelEngine:
                     self.packs = self._load_without_bad(snap, e)
             self._hash = rules_mod.ruleset_hash(self.packs)
             self._catwords = {}
+        self.sources_changed()                # the packs and switches: push_sources() again
         self._watch()                         # a pack or detection turned on: watched from now (counters.py)
 
     def _load_without_bad(self, snap: dict, err) -> list:
@@ -290,6 +321,47 @@ class IntelEngine:
 
     def pack(self, name: str):
         return next((p for p in self.packs if p.name == name), None)
+
+    # -- push sources: speech-to-text's priority hook (the module's doc, "Push sources") ------------------------------
+
+    def sources_changed(self) -> None:
+        """Something push_sources() depends on changed (the packs, a Settings section, the known sources): the next
+        call recomputes it. Cheap: nothing is computed here."""
+        self._push_dirty = True
+
+    def push_sources(self) -> tuple[frozenset[str], int]:
+        """(the source keys intel could push from right now, a revision bumped only when that set changes). Cached;
+        recomputed after sources_changed() / reload(), else at most PUSH_REFRESH_S after the last time."""
+        with self._push_lock:
+            now = time.monotonic()
+            if self._push is None or self._push_dirty or now - self._push_at >= PUSH_REFRESH_S:
+                self._push_dirty = False      # (before: a change while computing marks it again)
+                self._push_at = now
+                keys = self._push_keys()
+                if keys != self._push:
+                    self._push = keys
+                    self._push_rev += 1
+            return self._push, self._push_rev
+
+    def _push_keys(self) -> frozenset[str]:
+        if not self.enabled or not self.policy.cfg.get("push", True):
+            return frozenset()                # intel off, or the kill switch: nothing is pushed
+        n = self.notifier
+        try:
+            if n is None or not getattr(n, "enabled", True):
+                return frozenset()            # no intel topic in effect: LiveSink sends nothing (#641)
+        except Exception as e:  # noqa: BLE001 - the topic unknown: none (the push would fail closed too)
+            self.log(f"intel: push sources: the topic: {type(e).__name__}")
+            return frozenset()
+        packs = [p for p in self.packs if can_push(p)]
+        if not packs or self.sources is None:
+            return frozenset()
+        try:
+            rows = list(self.sources())
+        except Exception as e:  # noqa: BLE001 - the sources unreadable now: the set as it was
+            self.log(f"intel: push sources: the known sources: {type(e).__name__}")
+            return self._push if self._push is not None else frozenset()
+        return frozenset(str(r.get("source") or "") for r in rows if any(p.in_scope(r) for p in packs))
 
     # -- the live queue ---------------------------------------------------------------------------------------------
 
@@ -1285,6 +1357,79 @@ class IntelEngine:
     def _span(self, name: str) -> float:
         p = self.pack(name)
         return p.window_s if p is not None else 120.0
+
+
+def can_push(pack) -> bool:
+    """The pack could push an event: its mode is push, and one of its rules is on, at push, in one of its categories
+    at push (a "*" cue alone never raises an event). As compiled, so with Settings' overrides (rules.load_packs)."""
+    if pack.mode != "push":
+        return False
+    return any(r.enabled and r.mode == "push" and r.category in pack.categories
+               and pack.category(r.category).get("mode", "push") == "push" for r in pack.rules)
+
+
+def source_rows(talkgroups=(), channels=(), county: str = "") -> list[dict]:
+    """Every known source as a row of the radio log carries it ({source, system, service, tier, dept}: what
+    Pack.in_scope reads), for push_sources().
+
+    talkgroups  TalkgroupPrefs.state()-shaped rows ({source, system, tg, group, service, service_auto, tier,
+                department}): the station's list on the hub first, then the hub's own talkgroups files; a source given
+                twice is the first one's
+    channels    the configured FM and airband channels (config ChannelCfg: label, kind)
+
+    Tagged as App._row_source and Comms.record tag a row: the service with no choice (the file's column, else the
+    group's words; an FM channel's fire, an airband channel's air), the admins' radio_services choice over it
+    (sourcekeys.overridden); a tier only for another P25 system's talkgroup."""
+    from sizeup import sourcekeys
+    county = county or sourcekeys.COUNTY
+    out: dict[str, dict] = {}
+    for r in talkgroups or ():
+        if not isinstance(r, dict):
+            continue
+        system = str(r.get("system") or county)
+        key = str(r.get("source") or "")
+        if not key and r.get("tg") is not None:
+            key = sourcekeys.p25(system, int(r["tg"]))
+        if not key or key in out:
+            continue
+        auto = str(r.get("service_auto") or r.get("service") or "") or sourcekeys.service(str(r.get("group") or ""))
+        out[key] = {"source": key, "system": system, "service": sourcekeys.overridden(key, auto),
+                    "tier": "" if system == county else str(r.get("tier") or ""),
+                    "dept": str(r.get("department") or r.get("dept") or "")}
+    for c in channels or ():
+        label, kind = str(getattr(c, "label", "") or ""), str(getattr(c, "kind", "") or "")
+        key = sourcekeys.fm(label, kind)
+        if not label or key in out:
+            continue
+        air = kind == "airband"
+        out[key] = {"source": key, "system": "airband" if air else "analog",
+                    "service": sourcekeys.overridden(key, sourcekeys.service(kind=kind or "traffic")), "tier": "",
+                    "dept": ""}
+    return list(out.values())
+
+
+# The one engine of this process that reads the transcripts (the app sets it: App, HubApp), for push_sources() below
+_live: IntelEngine | None = None
+
+
+def set_live(engine: IntelEngine | None) -> None:
+    global _live
+    _live = engine
+
+
+def push_sources() -> tuple[frozenset[str], int]:
+    """IntelEngine.push_sources() of this process's engine, for code without the engine at hand (speech-to-text's
+    queue). (frozenset(), 0) when none runs here: no engine, or a station forwarding to its hub (the hub's engine is
+    the one that pushes; a station gets the set from it, see the module's doc)."""
+    e = _live
+    if e is None:
+        return frozenset(), 0
+    try:
+        if not e.active():
+            return frozenset(), 0
+    except Exception:  # noqa: BLE001 - not known to be the one that reads: none
+        return frozenset(), 0
+    return e.push_sources()
 
 
 def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:

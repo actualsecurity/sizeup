@@ -854,6 +854,13 @@ class App:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
+        # speech-to-text's priority hook (sizeup.intel.push_sources()): the sources intel could push from, over every
+        # source known here: the talkgroups as the CAD lists them (the hub: its station's), then this process's own
+        # talkgroups files, and the configured channels
+        from sizeup.intel import engine as intel_engine
+        intel.sources = lambda: intel_engine.source_rows([*self.cad.source_rows(), *self.tg.state()], self.cfg.channels,
+                                                         self.tg.county)
+        intel_engine.set_live(intel)
         if cfg.alerts_config_note:
             log(f"notify: config: {cfg.alerts_config_note}")
         log(self.pushes.line())
