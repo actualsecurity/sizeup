@@ -91,6 +91,9 @@ ANY_KIND = "any"                        # a run-card kind slot that takes any ap
 ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
 COMMAND = "IC"                          # Incident command: one unit per event
 LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
+# Dispositions only the hub sets (a passed Until: store.expire_until): named on events, never on a pick list, refused
+# from a person's Close. Set here, so an edit in Settings can't make one pickable.
+SYSTEM_DISPOSITIONS = ("EXPIRED",)
 
 
 class ListsError(ValueError):
@@ -153,8 +156,9 @@ class Lists:
     # -- codes and names ----------------------------------------------------------------------------
 
     def codes(self, which: str) -> tuple[str, ...]:
-        """The active codes (what can be picked now); a retired one is still named (name())."""
-        return tuple(x["code"] for x in getattr(self, which) if not x.get("retired"))
+        """The active codes (what can be picked now); a retired one, or one only the hub sets (system), is still
+        named (name())."""
+        return tuple(x["code"] for x in getattr(self, which) if not x.get("retired") and not x.get("system"))
 
     def retired(self, which: str, code: str) -> bool:
         return any(x["code"] == code and x.get("retired") for x in getattr(self, which))
@@ -619,7 +623,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     """The lists from the file's contents (or the defaults with the Settings edits laid over)."""
     types = _items(d, "event_types", where, CODE, ("color", "help"))
     subtypes = _items(d, "event_subtypes", where, CODE, ("help",))
-    dispositions = _items(d, "dispositions", where, LONG_CODE)
+    dispositions = tuple(dict(x, system=True) if x["code"] in SYSTEM_DISPOSITIONS else x
+                         for x in _items(d, "dispositions", where, LONG_CODE))
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
     type_codes, sub_codes = {t["code"] for t in types}, {s["code"] for s in subtypes}

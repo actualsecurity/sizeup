@@ -47,7 +47,7 @@ from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, UNTIL_GRACE_S, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
@@ -919,6 +919,8 @@ class Cad:
     def create(self, body: dict) -> dict:
         """Accept event (Event info): numbered at once; emergency -> Pending events, else Non-emergency."""
         f = self._fields(body, partial=False)
+        if f.get("until_at") is not None and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            raise CadError("Until is in the past: check the day (or leave it empty)")   # it would expire at once
         self._place(f)
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
@@ -929,6 +931,10 @@ class Cad:
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
+        if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
+            old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
+            if f["until_at"] != old["until_at"] and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+                raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
@@ -989,6 +995,16 @@ class Cad:
 
     def close(self, iid: int, body: dict) -> dict:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
+
+    def expire_until(self, now: float | None = None) -> list[dict]:
+        """Non-emergency events whose Until has passed closed (Store.expire_until; Sources' ticker calls this at its
+        start and every TICK_S), each one a line in the hub log."""
+        done = self.store.expire_until(now)
+        for d in done:
+            until = datetime.fromtimestamp(d["until_at"], TZ).strftime("%m/%d %H:%M")
+            self.log(f"CAD: {d['number'] or d['id']}: until {until} passed: "
+                     + ("closed (Expired)" if d["closed"] else f"kept open, {', '.join(d['units'])} on it"))
+        return done
 
     def reopen(self, iid: int, body: dict) -> dict:
         """A closed or dismissed event back on the boards (#89): see Store.reopen. A feed's in service no longer closes
