@@ -2395,7 +2395,12 @@ class App:
                                   caught=lambda since: comms.caught_up(since, since - oldest),
                                   route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
                                   aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
-                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log,
+                                  to_pool=self._catchup_pool)
+
+    def _catchup_pool(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to the GPU worker pool (the hub's, sizeup/sttpool.py): none here."""
+        return False, ""
 
     def _catchup_may_run(self) -> bool:
         """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call). Under a lease

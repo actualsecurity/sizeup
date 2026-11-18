@@ -33,7 +33,8 @@ const S = {
 // on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
-const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]];
+const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["workers", "STT workers"], ["logs", "Logs"], ["adapter", "Adapter"],
+  ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
@@ -2456,6 +2457,7 @@ function sStationPanel(panel) {
   if (S.stab === "health") sHealth($("#s-station-health"));
   if (S.stab === "logs" && window.StationLogsView) StationLogsView.mount($("#s-station-logs"));
   if (S.stab === "stations" && window.StationsCard) StationsCard.mount($("#s-station-stations"));
+  if (S.stab === "workers" && window.SttWorkersCard) SttWorkersCard.mount($("#s-station-workers"));   // GPU workers (#639)
   if (S.stab === "adapter" && window.AdapterPasswordCard) AdapterPasswordCard.mount($("#s-station-adapter"));
   if (S.stab === "link") sStation();
 }
