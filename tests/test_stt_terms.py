@@ -746,3 +746,101 @@ def test_a_runs_file_from_before_vocab_v_gets_the_column(tmp_path):
     runs = sttruns.Runs(str(path), log=lambda m: None)
     assert runs.add("FG1-9", "aws", text="x", vocab_v="ems+none@0123456789ab")
     assert runs.of("FG1-9")[0]["vocab_v"] == "ems+none@0123456789ab"
+
+
+def test_a_sync_asked_for_while_one_runs_is_done_after_it():
+    """TermVocabularies.sync runs one at a time: a request that comes in meanwhile (the lists changed, a channel asked)
+    is never dropped, the running one goes round again with it."""
+    kv, api = {}, FakeApi(pending=0)
+    gate, inside = threading.Event(), threading.Event()
+
+    def base(b):
+        inside.set()
+        assert gate.wait(5)
+        return []
+
+    tv = TermVocabularies("us-east-1", kv.get, kv.__setitem__, base, call=api, log=lambda m: None, poll_s=0.01)
+    kv[tv.PAIRS] = json.dumps({"pairs": [["county_fire", ""]]})
+    first = threading.Thread(target=tv.sync, args=(_sets(),))
+    first.start()
+    assert inside.wait(5)                                       # the first sync is in the middle of its pair
+    tv.sync({})                                                 # the list taken away meanwhile: returns at once ...
+    assert first.is_alive()
+    gate.set()
+    first.join(10)
+    assert not first.is_alive()
+    m = tv.meta("county_fire", "")                              # ... and was done right after the first
+    assert m["want"] == "" and m["names"] == [] and not api.vocabs
+
+
+def test_each_pool_job_carries_the_vocab_v_of_its_own_prompt(tmp_path, monkeypatch):
+    """_pool_first and _catchup_pool: a job's vocab_v is the list that went in that job's prompt, never one left on
+    the item from an earlier prompt."""
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import HubRun, hub_cfg
+    monkeypatch.delenv("LITESTREAM_BUCKET", raising=False)
+    write(tmp_path / "terms", county_fire=FIRE, places=PLACES)
+    hub = HubRun(hub_cfg(tmp_path, stt_terms_whisper=True, stt_terms_dir=str(tmp_path / "terms")))
+    try:
+        app = hub.app
+        app.stt_terms.refresh()
+        ts = app.stt_terms.get("county_fire")
+        jobs, pool = [], app.sttpool
+        app.sttpool = SimpleNamespace(ready=lambda cls: (True, ""), submit=lambda job: jobs.append(job) or True,
+                                      has=lambda cid: False)
+        pcm = np.zeros(8000 * 2, np.int16)
+        t = Traffic("FG1-901", "FG1", 1.0, 3.0, "")
+        assert app._pool_first(t, pcm, "FG1")
+        assert "Zephyrton" in jobs[-1].prompt and jobs[-1].extra["vocab_v"] == ts.vocab_v
+        t2 = Traffic("FG1-902", "FG1", 1.0, 3.0, "")
+        t2.vocab_v = "county_fire@ffffffffffff"                 # an earlier prompt's, and this one fails to build
+        monkeypatch.setattr(app, "_prompt", lambda item: 1 / 0)
+        assert app._pool_first(t2, pcm, "FG1")
+        assert jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
+        monkeypatch.undo()
+        monkeypatch.delenv("LITESTREAM_BUCKET", raising=False)
+        # the catch-up's
+        t3 = Traffic("FG1-903", "FG1", 1.0, 3.0, "")
+        monkeypatch.setattr(app, "_catchup_pcm", lambda *a: pcm)
+        monkeypatch.setattr(app, "_find", lambda cid: (t3, "FG1"))
+        sent, _why = app._catchup_pool({"id": "FG1-903", "key": "FG1", "source": "FG1", "start": 1.0, "seconds": 2.0})
+        assert sent and "Zephyrton" in jobs[-1].prompt and jobs[-1].extra["vocab_v"] == ts.vocab_v
+        monkeypatch.setattr(app, "_find", lambda cid: (None, ""))
+        sent, _why = app._catchup_pool({"id": "FG1-904", "key": "FG1", "source": "FG1", "start": 1.0, "seconds": 2.0})
+        assert sent and jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
+        app.sttpool = pool
+    finally:
+        hub.close()
+
+
+def test_a_runs_file_that_cant_be_opened_leaves_no_connection(tmp_path, monkeypatch):
+    import sqlite3
+    from sizeup import sttruns
+    closed = []
+
+    class Conn:
+        def __init__(self, *a, **k):
+            self.db = real(*a, **k)
+
+        def execute(self, sql, *a):
+            if sql.startswith("ALTER"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return self.db.execute(sql, *a)
+
+        def executescript(self, sql):
+            return self.db.executescript(sql)
+
+        def close(self):
+            closed.append(True)
+            self.db.close()
+
+    path = tmp_path / "runs.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(sttruns.SCHEMA.replace(", vocab_v TEXT NOT NULL DEFAULT ''", ""))
+    db.close()
+    real = sqlite3.connect
+    monkeypatch.setattr(sttruns.sqlite3, "connect", Conn)
+    runs = sttruns.Runs(str(path), log=lambda m: None)
+    assert not runs.add("FG1-9", "aws", text="x") and closed == [True] and runs._db is None
+    monkeypatch.setattr(sttruns.sqlite3, "connect", real)
+    assert runs.add("FG1-9", "aws", text="x")                   # the next write tries again, and works

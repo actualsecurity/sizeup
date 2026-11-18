@@ -696,6 +696,9 @@ def test_station_to_hub_the_engines_get_exactly_what_the_station_whisper_got(tmp
     st.stt.start()
     st.link.start()
     try:
+        # (#726) a station with no hub_caps.json queues no STT input until the hub first answers: wait for its caps,
+        # or a transmission heard before that goes up at 8 kHz only and this fails on a slow machine
+        assert wait(lambda: sttinput.CAP in st.link.hub_caps, 10)
         now = time.time()
         a = voice(3.0, seed=21)
         st._segment(Channel(453.0375, "FG1"), Segment(now, now + 3.0, a, 20.0, []))
