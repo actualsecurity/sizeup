@@ -1070,7 +1070,7 @@ function sItemRow(sec, x, i, n) {
     return li;
   }
   if (x.system) {
-    const sys = el("span", "dim small s-system", "set by the hub");
+    const sys = el("span", "dim small", "set by the hub");
     sys.title = "A non-emergency event closes with this when its Until passes. Not on the pick lists; can't be edited, retired or deleted.";
     li.append(sys);
     if (x.state === "edited") li.append(sBtn("Reset", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} reset`)));
