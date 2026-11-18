@@ -1,0 +1,5 @@
+name: If-None-Match
+in: header
+required: false
+description: The `ETag` (the rev) of the copy the app has. If it is still current the answer is 304 with no body.
+schema: {type: string}

@@ -120,6 +120,7 @@ from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
 from sizeup import sttpool, sttruns
+from sizeup.cloud import infer as infer_mod
 from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
@@ -717,8 +718,10 @@ class Hub:
         d = json.loads(raw or b"{}")
         if not isinstance(d, dict) or not isinstance(d.get("items"), list):
             raise ValueError("{items: [...]}")
+        sid = ""
         if p is not None:
-            self._claim(p, d.get("station"))         # (the station a payload names must be the one its token proves)
+            # (the station a payload names must be the one its token proves; its id keys the arrival delays, #677)
+            sid = self._claim(p, d.get("station")) or p.id
         stored, refused = [], []
         try:
             for it in d["items"][:200]:
@@ -727,7 +730,7 @@ class Hub:
                     continue
                 fenced = fence_mod.refused()
                 try:
-                    ok = self.app.put_stt_input(it)
+                    ok = self.app.put_stt_input(it, station=sid)
                 except Exception as e:  # noqa: BLE001 - one malformed item never fails the post (nor stalls the lane)
                     if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != fenced:
                         raise
@@ -923,9 +926,15 @@ class HubApp(App):
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
                                      log=log)
         self.stt_latency = sttruns.LatencyBook()
+        # the LLM lane (sizeup/cloud/infer.py): a worker's local model for the intel engine's JSON classifications; its own
+        # queue, after the pre-alert clips, off unless a worker advertises an LLM. Prompts and answers never kept
+        self.infer_lane = infer_mod.Lane(stt_busy=self.sttpool.holds_prealert, may_write=self._may_write_audio, log=log,
+                                         enabled=lambda: bool(self.hub.workers.pool_settings()["on"]),
+                                         llm_on=self.hub.workers.llm_on)
+        self.stt_api.infer = self.infer_lane
         self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
         self.cad.stt_workers_live = self._worker_live
-        self.cad.stt_pool_forget = lambda wid: self.sttpool.forget(wid, "revoked")   # what it holds falls back now
+        self.cad.stt_pool_forget = lambda wid: (self.sttpool.forget(wid, "revoked"), self.infer_lane.forget(wid))[0]
         # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
@@ -1018,6 +1027,11 @@ class HubApp(App):
         self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
         self.cad.station_metrics_insight = self.metric_insight
         self.health.shifts = self.metric_insight.hints
+        # #677: each STT input's arrival after its event (sizeup/cloud/sttarrival.py): into the metrics store, on Health
+        from sizeup.cloud.sttarrival import Arrival
+        self.stt_arrival = Arrival()
+        self._stt_arrival_cache = None
+        self.health.stt_arrival = self.stt_arrival_stats
         self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
@@ -1055,12 +1069,13 @@ class HubApp(App):
             # #275: a station whose config isn't renamed yet (its update is deferred once) sends the old name: its
             # transmissions are the renamed channel's here (airband, the pre-alerts, AWS); the id stays the station's
             d = {**d, "source": RENAMED[d["source"]]}
-        if kind == "page":
-            self._apply_page(d, audio)
+        if kind in ("page", "traffic"):
+            (self._apply_page if kind == "page" else self._apply_traffic)(d, audio)
+            arrival = getattr(self, "stt_arrival", None)
+            if arrival is not None:                  # (#677: its STT input's arrival is measured from now)
+                arrival.event(str(d.get("id") or ""))
         elif kind == "page_text":
             self._apply_page_text(d)
-        elif kind == "traffic":
-            self._apply_traffic(d, audio)
         elif kind == "retext":
             pid = self._id(d)
             with self._lock:
@@ -1678,8 +1693,9 @@ class HubApp(App):
         if w is None:
             return {"state": "offline"}
         now = self.sttpool.clock()
+        lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version}
+                "version": w.version, "llm": lw.llm if lw is not None else ""}
 
     def pool_health(self) -> dict | None:
         """Settings > Station > Health: the pool (its workers, queue, fallbacks, p50/p90) and every channel's latency.
@@ -1689,6 +1705,7 @@ class HubApp(App):
         if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
             return None
         return {"active": active, "settings": self.hub.workers.pool_settings(), **self.sttpool.stats(),
+                "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
                 "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
 
@@ -1828,10 +1845,11 @@ class HubApp(App):
 
     # -- the speech-to-text input (sizeup/cloud/sttinput.py) -------------------------------------------------------
 
-    def put_stt_input(self, it: dict) -> bool:
+    def put_stt_input(self, it: dict, station: str = "") -> bool:
         """One clip's STT input from POST /api/station/stt, beside its clip (the same channel, talkgroup and time: the
         same retention), whether its event came already or not. False: not one to keep (refused for good, logged; its
-        STT consumers get the listening clip). A write the fence refused is raised (nothing acked)."""
+        STT consumers get the listening clip). A write the fence refused is raised (nothing acked). Its arrival after
+        its event is measured (#677, sizeup/cloud/sttarrival.py), under `station` (the post's)."""
         try:
             cid = self._id(it)
             kind = it.get("kind")
@@ -1856,7 +1874,41 @@ class HubApp(App):
                 raise
             self._stt_say(f"hub: speech-to-text input for {cid} not stored: {type(e).__name__}: {str(e)[:120]}")
             return False
+        status = self.hub.status if isinstance(getattr(self.hub, "status", None), dict) else {}
+        self.stt_arrival.blob(cid, station or str(status.get("id") or ""), kind, where.get("channel") or "")
         return True
+
+    def stt_arrival_flush(self) -> int:
+        """The STT input arrival delays measured since (#677) into the station metrics (kind "stt_in", the subject the
+        channel): graphed on the Signal tab, Health's p50 / p95. On the metrics-backup thread, never a request's (a
+        standby's write refused there must not fail a post): on a standby they are dropped (the leader measures its
+        own). The records added."""
+        got = self.stt_arrival.take()
+        if not got:
+            return 0
+        n = 0
+        for station, recs in got.items():
+            try:
+                n += int(self.metric_store.ingest(station, recs, tell=False).get("accepted") or 0)
+            except fence_mod.FencedWrite:
+                pass
+            except Exception as e:  # noqa: BLE001 - a measurement, never in anything's way
+                self._stt_say(f"hub: STT input arrival not kept: {type(e).__name__}: {str(e)[:120]}")
+        if n:
+            self._stt_arrival_cache = None
+        return n
+
+    def stt_arrival_stats(self, now: float | None = None) -> dict | None:
+        """Health: the STT inputs' arrival after their events, p50 / p95 per kind and channel over 1 h and 24 h (#677).
+        Read from the metrics store at most once a minute."""
+        from sizeup.cloud import sttarrival
+        now = time.time() if now is None else now
+        hit = getattr(self, "_stt_arrival_cache", None)
+        if hit is not None and 0 <= now - hit[0] < 60.0:
+            return hit[1]
+        out = sttarrival.stats(self.metric_store, now)
+        self._stt_arrival_cache = (now, out)
+        return out
 
     def stt_stored(self) -> None:
         """STT inputs were stored: wake read_stt_audio's waiters (once per post)."""
@@ -2339,6 +2391,10 @@ class HubApp(App):
         every 3 h. The leader's only (the store checks); never takes anything down."""
         from sizeup.cloud.metricstore import BACKUP_TURN_S
         while not self._stopping.wait(BACKUP_TURN_S):
+            try:                                   # (#677) the STT input arrival delays measured since: into the store
+                self.stt_arrival_flush()
+            except Exception as e:  # noqa: BLE001
+                self.hub.log(f"metrics: STT input arrival: {type(e).__name__}: {e}")
             try:
                 if self.metric_store.backup_turn() in ("restored", "none"):
                     self.apply_station_renames()   # settled from a copy: a rename since it was made, again
@@ -2387,6 +2443,7 @@ class HubApp(App):
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written
+        infer_mod.install(self.infer_lane.start())  # the LLM lane: sizeup.cloud.infer.submit() asks it from now on
         self.catchup.start()                      # its first look minutes from now: no writes at start
         # radio pre-alerts (sizeup/intel): the "intel" thread, as App.start() starts it. Without it every transcript
         # handed to the engine waited in its queue unread: no rule was ever tried on the hub
@@ -2409,6 +2466,8 @@ class HubApp(App):
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
         self.cad.intel.stop()                          # (a flag: the thread ends at its next wait)
+        infer_mod.uninstall(self.infer_lane)
+        self.infer_lane.stop()                         # (what it had: None at once; the intel engine goes on without)
         left = self.sttpool.stop(fall_back=False)   # (what a GPU worker had stays "pending": the next start routes it)
         if left:
             self.hub.log(f"stt pool: stopping with {left} clip(s) still out: the next start sends them the AWS way")

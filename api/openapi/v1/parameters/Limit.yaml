@@ -1,0 +1,5 @@
+name: limit
+in: query
+required: false
+description: The page size, 1 or more. Larger than the list's cap is clamped to it (incidents 50 by default, at most 200; units 100 by default, at most 500). Not a number, or below 1, is a 400 `bad_request`.
+schema: {type: integer, minimum: 1}
