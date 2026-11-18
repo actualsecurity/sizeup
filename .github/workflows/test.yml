@@ -42,15 +42,34 @@ jobs:
       # Tests marked @pytest.mark.flaky (known flakes, each with its issue) get one retry on failure: "R" in the
       # progress, "N rerun" in the totals and a warning annotation (tests/conftest.py). Any other failure is final.
       # PYTHONFAULTHANDLER: a crash in C before or after pytest's own faulthandler (on during the session) still dumps.
-      - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile
+      # A run still going after 21 min (a good one takes 10-19) has stalled (#740: twice at 98%, silent until the job
+      # timeout): its processes are listed and SIGUSR1 makes the controller and every worker print every thread's
+      # stack and go on (tests/conftest.py). The step's own timeout leaves the job time for the step below.
+      - name: pytest
+        timeout-minutes: 27
         env:
           PYTHONFAULTHANDLER: "1"
+        run: |
+          python -m pytest -q -p no:cacheprovider -n auto --dist loadfile &
+          pytest_pid=$!
+          ( sleep 1260
+            echo "::warning::pytest still running after 21 min (#740): its processes and every thread's stack follow"
+            ps -o pid,ppid,etime,rss,args -p "$pytest_pid" --ppid "$pytest_pid" || true
+            kill -USR1 "$pytest_pid" 2>/dev/null || true
+            pkill -USR1 -P "$pytest_pid" || true ) &
+          watchdog=$!
+          rc=0
+          wait "$pytest_pid" || rc=$?
+          pkill -P "$watchdog" 2>/dev/null || true
+          kill "$watchdog" 2>/dev/null || true
+          exit "$rc"
       # A worker that died without a word ("node down", #740): the conftest says its exit status; a SIGKILL there is
-      # most likely the OOM killer, which only the kernel log names.
-      - if: failure()
+      # most likely the OOM killer, which only the kernel log names. Also after a timeout (cancelled).
+      - if: failure() || cancelled()
         run: |
           free -m || true
           sudo dmesg -T 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -20 || true
+          ps -eo pid,ppid,etime,rss,args | grep -E "[p]ython" || true
 
   image:
     # The hub image (docs/cloud.md): build it and check it serves /healthz with no radios, no
