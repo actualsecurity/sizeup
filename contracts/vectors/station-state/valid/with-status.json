@@ -246,7 +246,8 @@
         "cc": {"rate": null, "low_since": null, "last_low": null, "retunes": 0, "last_retune": null, "silent_since": null},
         "unknown": [],
         "encrypted": [],
-        "watched": []
+        "watched": [],
+        "split": {"would": 0, "split": 0, "flip": 0, "alias": 0, "calls": 0, "cut": 0, "since": 1795013347.1}
       }
     ],
     "reception": {
