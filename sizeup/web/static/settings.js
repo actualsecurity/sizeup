@@ -1685,7 +1685,7 @@ function sUnitRow(u, i, n, kinds, boards) {
   meta.append(sState(u.state, u.retired));
   if (!u.named && !u.retired) meta.append(sConfirm(""));
   if (u.made_fire) {                    // an old edit saved another agency's unit as our engine: Reset puts it back
-    const w = el("span", "warn small made-fire", "Made a fire unit by an old edit: Reset?");
+    const w = el("span", "warn small", "Made a fire unit by an old edit: Reset?");
     w.title = "Saved as Engine / Fire by a Settings edit made before this was fixed. Reset restores the data file's unit.";
     meta.append(w);
   }
