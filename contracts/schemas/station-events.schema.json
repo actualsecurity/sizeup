@@ -306,7 +306,7 @@
         "source": {"type": "string", "description": "The adapter's id: a lower-case letter or digit, then at most 31 of a-z, 0-9, `_`, `-`; never `paging`. The hub fails the event otherwise.", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
         "label": {"type": "string", "description": "The adapter's name for people. The hub keeps the first 60 characters."},
         "rank": {"type": "integer", "description": "The adapter's rank among the sources, 1 the first. The hub takes anything outside 1 to 99 as 1."},
-        "seen_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station handed this version on, Unix seconds."},
+        "seen_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station handed this version on, Unix seconds. From #762 on the hub keeps it with the report and ignores a version more than 120 s older than the one it has applied (one sent again from the station's quarantine)."},
         "first_seen": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station first had the event, Unix seconds: the adapter's own time when it gives a believable one, else `seen_at`. The hub takes it as when the report came."},
         "event": {"$ref": "#/$defs/feed_event"}
       }

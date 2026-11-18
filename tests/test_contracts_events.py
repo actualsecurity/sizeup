@@ -27,6 +27,7 @@ from sizeup.radio.tones import ToneEvent
 from tests import contracts as c
 from tests import contracts_lane as lane
 from tests.test_app import wait
+from tests.test_contracts_events_cursor import E1_A_FAILED_EVENT_IS_ACKED_AND_GONE
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = c.load(lane.EVENTS)
@@ -294,7 +295,9 @@ def test_what_is_and_is_not_checked_about_a_clip(tmp_path):
         assert post(2, "clip-2", good[:20] + " \n!*" + good[20:])["applied"] == 1
         assert hub.clip("clip-2") == base64.b64decode(good)                         # not strict: the junk is left out
         assert post(3, "clip-3", "")["applied"] == 1 and not hub.has_clip("clip-3")  # "": no clip
-        assert post(4, "clip-4", "abc") == {"ok": True, "acked": 4, "applied": 0}    # cannot be decoded: the event fails
+        listed = {} if E1_A_FAILED_EVENT_IS_ACKED_AND_GONE else {"rejected": [                # (#762 lists it)
+            {"i": 0, "seq": 4, "type": "traffic", "reason": "apply_failed", "error": "Error: Incorrect padding"}]}
+        assert post(4, "clip-4", "abc") == {"ok": True, "acked": 4, "applied": 0, **listed}   # not base64: it fails
         assert hub.hub.errors == 1 and hub.hub.last_error.startswith("traffic #4: Error")
         assert c.errors(lane.EVENTS, dict(base, events=[dict(base["events"][0], audio="abc")])) != []
     finally:
@@ -468,9 +471,9 @@ def test_the_station_holds_context_events_back_from_a_hub_that_has_not_said_p25_
 
 
 def test_the_station_ignores_the_keys_it_does_not_know_in_the_answer(tmp_path):
-    """The station as the reader: a newer hub's answer (keys it has never heard of, the fixed E1's `failed` among
-    them) is read like today's: `acked`, nothing else."""
-    extra = {"from_the_future": {"x": [1, 2]}, "failed": [], "cursor": {"epoch": "x", "seq": 1}}
+    """The station as the reader: a newer hub's answer (keys it has never heard of, and #762's `rejected`, which
+    today's station does not know either) is read like today's: `acked`, nothing else."""
+    extra = {"from_the_future": {"x": [1, 2]}, "rejected": [], "cursor": {"epoch": "x", "seq": 1}}
     lv = lane.Lane(tmp_path, events_answer_with=extra)
     try:
         st = lv.station()
@@ -478,7 +481,7 @@ def test_the_station_ignores_the_keys_it_does_not_know_in_the_answer(tmp_path):
         assert lv.drained(st, 2) and wait(lambda: st.link.sent == 2, 10) and st.link.last_error == ""
         assert all(json.loads(a)["from_the_future"] == {"x": [1, 2]} for _, _, a in lv.events_seen)
         ans = json.loads(lv.events_seen[0][2])
-        assert c.errors(lane.ANSWER, ans) == [] and len(c.undeclared(lane.ANSWER, ans)) == 3
+        assert c.errors(lane.ANSWER, ans) == [] and len(c.undeclared(lane.ANSWER, ans)) == 2
         assert all(t.is_alive() for t in st.link._threads)
     finally:
         lv.close()
@@ -703,7 +706,7 @@ def test_each_deviation_of_the_durable_lane_is_pinned_by_a_test_or_says_it_was_r
     `test_known_deviation_*` in one of this lane's test files, behind a switch, unless its row says it was read."""
     text = (c.ROOT / "README.md").read_text(encoding="utf-8")
     rows = {m[1]: m[0] for m in re.finditer(r"^\| ([EJO]\d+) \|.*$", text, re.M)}
-    assert {"E1", "E2", "E3", "E4"} <= set(rows)
+    assert {"E1", "E2", "E3", "E4", "E5"} <= set(rows)
     pinned: set[str] = set()
     for name in LANE_TESTS:
         src = (ROOT / "tests" / name).read_text(encoding="utf-8")

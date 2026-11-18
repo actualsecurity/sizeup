@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-events-answer.schema.json",
   "title": "Station events answer",
-  "description": "The hub's 200 answer to POST /api/station/events, as it sends it today (Hub._events, sizeup/cloud/hub.py). The station reads `acked` and nothing else: it deletes every row of its outbox up to it and sends what is left. An answer without a usable `acked` (missing, not a number) is taken as a failed post: the same batch goes again after the backoff. Any other status (400, 401, 409, 413, 503) is the `station-error` envelope and the same batch goes again.",
+  "description": "The hub's 200 answer to POST /api/station/events, as it sends it today (Hub._events, sizeup/cloud/hub.py). Today's station reads `acked` and nothing else: it deletes every row of its outbox up to it and sends what is left (from #762 on it also reads `rejected`). An answer without a usable `acked` (missing, not a number) is taken as a failed post: the same batch goes again after the backoff. Any other status (400, 401, 409, 413, 503) is the `station-error` envelope and the same batch goes again (from #762 on a 400 / 413 / 422 makes the station split the batch instead, and the hub's 400 and 413 say why in `reason`: `bad_json`, `bad_batch`, `too_large` with `max_bytes`).",
   "x-status": "as-built",
   "x-version": 1,
   "x-complete": true,
@@ -12,6 +12,24 @@
   "properties": {
     "ok": {"const": true, "description": "Always true. The station does not read it."},
     "acked": {"type": "integer", "description": "The hub's cursor after this post: the highest `seq` of this post's epoch it has dealt with (applied, skipped as delivered before, or failed and given up on). 0 when it has none of this epoch. It may be lower than the last `seq` sent (the hub stopped at a `source_event` it will take again) and higher (an earlier post got further). The station takes it with int(): a string of digits or a float would pass, the hub sends an integer.", "minimum": 0, "maximum": 9007199254740991},
-    "applied": {"type": "integer", "description": "How many events of this post were applied now (not skipped, not failed). The station does not read it.", "minimum": 0}
+    "applied": {"type": "integer", "description": "How many events of this post were applied now (not skipped, not failed). The station does not read it.", "minimum": 0},
+    "rejected": {
+      "type": "array",
+      "description": "From #762 on, and only when there is one: the events of this post the hub did not take, each skipped without holding up the ones behind it. The cursor has moved past every one that has a `seq` of its own, so `acked` covers them: the station must not take `acked` alone as delivered. A station from #762 on moves each listed row whose `seq` is at or under `acked` from its outbox to its quarantine (kept, counted in its status; a page, its text, an alarm and a source_event are sent again later as new events unless the reason is `malformed`). A station from before #762 ignores the key and deletes the rows. A retry of a post lists them again, as long as the hub has not restarted since. A hub from before #762 sends no such key.",
+      "items": {
+        "title": "One event the hub did not take",
+        "x-complete": true,
+        "type": "object",
+        "required": ["i", "seq", "type", "reason", "error"],
+        "additionalProperties": true,
+        "properties": {
+          "i": {"type": "integer", "minimum": 0, "description": "The event's index in this post's `events`, from 0."},
+          "seq": {"type": ["integer", "null"], "description": "The event's `seq`. null when it had none the hub could read (missing, a string, a float, a boolean, an item that is no object); a `seq` under 1 is given as it came. With null or under 1 the cursor did not move for it."},
+          "type": {"type": "string", "maxLength": 40, "description": "The event's `type`, cut to 40 characters; \"\" for an item that is no object."},
+          "reason": {"type": "string", "description": "Why, as one word a program can act on. `malformed`: it can never apply, however often it is sent (no usable `seq`, `data` that is no object, a clip id the hub refuses, a feed event that is none). `apply_failed`: the hub failed to apply it for a reason of its own (base64 it cannot decode is counted here too); it may apply later. A station must take a word it does not know as `apply_failed`.", "x-known": ["malformed", "apply_failed"]},
+          "error": {"type": "string", "maxLength": 200, "description": "For people: the exception's type and, but for an incident source's events, its text; at most 200 characters."}
+        }
+      }
+    }
   }
 }

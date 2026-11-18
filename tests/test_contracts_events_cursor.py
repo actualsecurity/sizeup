@@ -21,14 +21,17 @@ from tests.test_app import wait
 
 GOLDEN = json.loads((c.ROOT / "events" / "cursor.json").read_text(encoding="utf-8"))
 SEQUENCES = {s["name"]: s for s in GOLDEN["sequences"]}
+REASONS = c.load(lane.ANSWER)["properties"]["rejected"]["items"]["properties"]["reason"]["x-known"]
 
 # -- known deviations (contracts/README.md "Known deviations"), pinned as the code is today ------------------------------
 # Each test below states today's behaviour and the fixed one. When a fix lands, flip its line here from True to False
-# (nothing else), mark the row in contracts/README.md fixed and change the sequence of contracts/events/cursor.json
-# that carries its name.
-E1_A_FAILED_EVENT_IS_ACKED_AND_GONE = True        # fixed: the answer names it (`failed`), the station keeps it aside
-E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX = True       # fixed: after a 400 / 413 the station sets the event aside and goes on
+# (nothing else) and mark the row in contracts/README.md fixed. E1 and E2 are #762's: their fixed branches, and the
+# `from_762` forms of the seven golden sequences it changes (replayed instead once E1 is flipped), are what #762 does
+# at 9542d08f, checked with it merged in and both switches flipped.
+E1_A_FAILED_EVENT_IS_ACKED_AND_GONE = True        # #762: the answer lists it under `rejected`, the station keeps it aside
+E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX = True       # #762: the station splits the batch, sets that event aside and goes on
 E3_ONE_CURSOR_FOR_EVERY_SENDER = True             # fixed: a cursor per (station, epoch): a retry is skipped whoever posted between
+E5_NO_READABLE_ANSWER_TO_A_POST_OVER_THE_LIMIT = True   # fixed: the station's client gets the 413 and its reason
 
 
 # -- the golden sequences against a real hub -----------------------------------------------------------------------------
@@ -69,9 +72,15 @@ def hub_fails_marked_events(lv) -> None:
     sources.on_event = on_event
 
 
+def as_replayed(step: dict) -> dict:
+    """A step as it is replayed: its own keys, or with E1 flipped (#762 on main) those of its `from_762` over them."""
+    own = {k: v for k, v in step.items() if k != "from_762"}
+    return own if E1_A_FAILED_EVENT_IS_ACKED_AND_GONE else {**own, **step.get("from_762", {})}
+
+
 def replay(lv, seq: dict, tmp_path) -> None:
     hub_fails_marked_events(lv)
-    for k, step in enumerate(seq["steps"]):
+    for k, step in enumerate(map(as_replayed, seq["steps"])):
         where = f"{seq['name']}, step {k + 1}"
         if step.get("restart"):
             lv.hub.close()
@@ -83,7 +92,8 @@ def replay(lv, seq: dict, tmp_path) -> None:
         assert code == step["status"], (where, code, ans)
         if code == 200:
             assert c.errors(lane.ANSWER, ans) == [] and c.undeclared(lane.ANSWER, ans) == [], (where, ans)
-            assert {key: ans[key] for key in step["answer"]} == step["answer"], (where, ans)
+            assert {key: ans.get(key) for key in step["answer"]} == step["answer"], (where, ans)
+            assert ("rejected" in ans) == ("rejected" in step["answer"]), (where, ans)
         else:
             assert c.errors("station-error", ans) == [], (where, ans)
             assert ans.get("reason") == step.get("reason"), (where, ans)
@@ -110,12 +120,20 @@ def test_the_golden_file_is_well_formed_and_its_events_are_what_the_schema_says(
     assert GOLDEN["x-version"] == 1 and len(SEQUENCES) == len(GOLDEN["sequences"]) >= 15
     used = set()
     for s in GOLDEN["sequences"]:
-        assert set(s) == {"name", "rule", "steps"} and s["rule"].endswith((".", ".)")) and s["steps"], s["name"]
+        assert set(s) - {"rule_from_762"} == {"name", "rule", "steps"} and s["steps"], s["name"]
+        assert all(s[k].endswith((".", ".)")) for k in ("rule", "rule_from_762") if k in s), s["name"]
+        assert ("rule_from_762" in s) == any("from_762" in step for step in s["steps"]), s["name"]
         for step in s["steps"]:
             if step.get("restart"):
                 continue
-            assert set(step) <= {"post", "status", "answer", "reason", "cursor", "applied_times", "errors"}, s["name"]
+            keys = {"post", "status", "answer", "reason", "cursor", "applied_times", "errors"}
+            assert set(step) <= keys | {"from_762"} and set(step.get("from_762", {})) <= keys - {"post"}, s["name"]
             assert ("answer" in step) == (step["status"] == 200), s["name"]
+            later = {**step, **step.get("from_762", {})}
+            for r in later.get("answer", {}).get("rejected", []):
+                assert set(r) == {"i", "seq", "type", "reason", "error"} and r["reason"] in REASONS, s["name"]
+            if later.get("answer"):
+                assert c.errors(lane.ANSWER, {"ok": True, **later["answer"]}) == [], s["name"]
             post = step["post"]
             if isinstance(post, dict) and isinstance(post.get("events"), list):
                 used |= {name for _, name in post["events"]}
@@ -128,6 +146,7 @@ def test_the_golden_file_is_well_formed_and_its_events_are_what_the_schema_says(
     # every deviation a sequence names is one this file pins, and the reverse
     named = {d for s in GOLDEN["sequences"] for d in re.findall(r"\bE\d+\b", s["rule"])}
     assert named == {"E1", "E2", "E3"}
+    assert sum("rule_from_762" in s for s in GOLDEN["sequences"]) == 7
 
 
 def _made_to_fail(ev: dict) -> bool:
@@ -344,8 +363,11 @@ def test_the_events_post_is_plain_json_with_a_content_length_and_the_hub_caps_it
 def test_known_deviation_an_event_the_hub_fails_to_apply_is_acked_and_gone(tmp_path):
     """E1. One event that raises on the hub (a hub bug, a shape it does not take) is counted, logged and skipped, and
     the answer's `acked` covers it with no word about it: the real station deletes it, and with it the page, the
-    transmission or the words. Only `source_event` is spared (the golden sequences). Fixed: the answer names what
-    failed (`failed`: [seq]) and the station keeps those rows aside instead of deleting them."""
+    transmission or the words. Only `source_event` is spared (the golden sequences). Fixed (#762): the hub still skips
+    it and still moves its cursor past it, but lists it in the answer (`rejected`: [{i, seq, type, reason, error}],
+    reason `apply_failed` or `malformed`), and the station moves the row from its outbox to its quarantine instead of
+    deleting it. A transmission stays there (`held`: kept, counted in the status, never sent again by itself); a page,
+    its text, an alarm and a source_event are sent again later, as new events."""
     lv = lane.Lane(tmp_path)
     real = lv.hub.app.apply
     fails: list[str] = []
@@ -363,17 +385,29 @@ def test_known_deviation_an_event_the_hub_fails_to_apply_is_acked_and_gone(tmp_p
         good = lane.fm(st, at=at + 10, radio=0x7302)
         assert bad == fails[0]
         assert wait(lambda: any(t.id == good for t in lv.hub.app.store.loose) and len(lv.events()) == 4, 20)
-        h = lv.hub.app.hub
+        h, ob = lv.hub.app.hub, st.link.outbox
         seq = next(ev["seq"] for ev in lv.events() if ev["type"] == "traffic" and ev["data"]["id"] == bad)
+        index = next(k for raw, _, _ in lv.events_seen for k, ev in enumerate(json.loads(raw)["events"]) if ev["seq"] == seq)
         answers = [json.loads(a) for _, code, a in lv.events_seen if code == 200]
         assert h.errors == 1 and h.last_error.startswith(f"traffic #{seq}: RuntimeError")
         assert not any(t.id == bad for t in lv.hub.app.store.loose)             # the hub does not have it
-        assert wait(lambda: st.link.outbox.pending()[0] == 0, 20)               # ... and the station's outbox is empty
+        assert wait(lambda: ob.pending()[0] == 0, 20)                           # ... and the station's outbox is empty
+        assert h.seq == 4 and sum(a["applied"] for a in answers) == 3           # acked past it, either way
+        listed = [r for a in answers for r in a.get("rejected", [])]
         if E1_A_FAILED_EVENT_IS_ACKED_AND_GONE:
-            assert h.seq == 4 and all("failed" not in a for a in answers)       # acked, with no word about it
-            assert sum(a["applied"] for a in answers) == 3
+            assert listed == [] and wait(lambda: st.link.sent == 4, 10)         # no word about it: counted as sent
+            assert "quarantine" not in [r[0] for r in ob.db.execute("SELECT name FROM sqlite_master")]   # kept nowhere
         else:
-            assert any(a.get("failed") == [seq] for a in answers)               # (the row is kept aside, not deleted)
+            assert listed == [{"i": index, "seq": seq, "type": "traffic", "reason": "apply_failed",
+                               "error": "RuntimeError: a bug on the hub"}]
+            assert all(c.errors(lane.ANSWER, a) == [] and c.undeclared(lane.ANSWER, a) == [] for a in answers)
+            assert wait(lambda: st.link.sent == 3 and ob.summary()["n"] == 1, 10)
+            [row] = ob.summary()["rows"]                      # the row is kept aside: its type and why, not sent again
+            assert {k: row[k] for k in ("kind", "reason", "error", "tries", "critical", "next_at", "state")} == {
+                "kind": "traffic", "reason": "apply_failed", "error": "RuntimeError: a bug on the hub", "tries": 1,
+                "critical": False, "next_at": None, "state": "held"}
+            assert ob.requeue_due(time.time() + 30 * 86400) == []
+            assert "1 event(s) refused by the hub, kept here" in st.link.status_row()["detail"]
     finally:
         lv.hub.app.apply = real
         lv.close()
@@ -382,10 +416,12 @@ def test_known_deviation_an_event_the_hub_fails_to_apply_is_acked_and_gone(tmp_p
 @pytest.mark.parametrize("status", [400, 413])
 def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_good(tmp_path, monkeypatch, status):
     """E2. The station takes a 400 or a 413 like an outage: the same oldest rows again, for ever (the backoff only
-    spaces the tries). A batch always starts with the oldest row, so one event the hub will never take (a 413: one
-    clip over the hub's 32 MiB once in base64; a 400: a body it cannot read) keeps every later event on the station:
-    nothing reaches the hub until someone deletes the outbox. Fixed: after a 400 / 413 the station sends the batch's
-    events one by one, sets the refused one aside (kept, counted, said in its status) and goes on."""
+    spaces the tries). A batch always starts with the oldest row, so one event the hub will never take keeps every
+    other event on the station, the ones queued before it in the same batch too: nothing reaches the hub until someone
+    deletes the outbox. Here five rows wait and the hub (a stub, answering as today's hub words them) refuses any post
+    with the third. Fixed (#762): on a 400 / 413 / 422 the station halves the batch until the refused event is alone,
+    asks the hub once with an empty batch whether it takes anything at all, moves that event to its quarantine (reason:
+    the hub's `reason`, else `too_large` for a 413 and `http_<status>`), and the rest go in order."""
     poison = "Fireground1-1794990000000"
 
     def answer(body):
@@ -393,23 +429,61 @@ def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_go
             return status, {"error": "too large (32 MB max): send smaller batches" if status == 413 else "bad request: x"}
         return acks_all(body)
     stub = StubHub(answer)
-    st = stub_station(tmp_path, stub, monkeypatch)
-    try:
-        st.link.emit("retext", {"id": poison, "text": "x", "status": "done", "confidence": None, "model": "m.bin"})
-        assert wait(lambda: len(stub.posts) >= 2, 20)
-        for k in range(3):                                    # what the station hears afterwards
-            st.link.emit("heard", {"system": "p25", "radio_id": f"99000{k}", "alias": "", "at": c.T0, "channel": "x"})
-        n = len(stub.posts)
-        assert wait(lambda: len(stub.posts) >= n + 5, 20)
-        if E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX:
-            assert all(p["events"][0]["seq"] == 1 for p in stub.posts)          # the same oldest row, every time
-            assert st.link.outbox.pending()[0] == 4 and st.link.sent == 0       # nothing left the station
+    waiting = Outbox(tmp_path / "st" / "outbox.sqlite")       # (in the file before the station starts: one first batch)
+    for k in range(1, 6):
+        if k == 3:
+            waiting.add("retext", {"id": poison, "text": "x", "status": "done", "confidence": None, "model": "m.bin"})
         else:
-            assert wait(lambda: st.link.sent == 3, 20)
-            assert st.link.outbox.pending()[0] <= 1
+            waiting.add("heard", {"system": "p25", "radio_id": f"99000{k}", "alias": "", "at": c.T0, "channel": "x"})
+    waiting.close()
+    st = stub_station(tmp_path, stub, monkeypatch)
+    seqs = lambda: [[ev["seq"] for ev in p["events"]] for p in stub.posts]      # noqa: E731
+    try:
+        if E2_A_REFUSED_BATCH_BLOCKS_THE_OUTBOX:
+            assert wait(lambda: len(stub.posts) >= 6, 20)
+            assert all(x == [1, 2, 3, 4, 5] for x in seqs())                    # the same five rows, every time
+            assert st.link.outbox.pending()[0] == 5 and st.link.sent == 0       # nothing left the station
+        else:
+            assert wait(lambda: st.link.outbox.pending()[0] == 0, 20) and wait(lambda: st.link.sent == 4, 10)
+            # halved until the refused one is alone; an empty batch to ask whether the hub takes anything; the rest
+            assert seqs() == [[1, 2, 3, 4, 5], [1, 2], [3, 4], [3], [], [4, 5]]
+            q = st.link.outbox.summary()
+            assert (q["n"], q["critical"]) == (1, 0)
+            assert {k: q["rows"][0][k] for k in ("kind", "reason", "error", "tries", "critical", "state")} == {
+                "kind": "retext", "reason": "too_large" if status == 413 else "http_400",
+                "error": "too large (32 MB max): send smaller batches" if status == 413 else "bad request: x",
+                "tries": 1, "critical": False, "state": "held"}
     finally:
         st.link.stop()
         stub.close()
+
+
+def test_known_deviation_a_post_over_the_hubs_limit_gets_no_answer_the_station_can_read(tmp_path):
+    """E5. The hub answers a body over a route's limit (32 MiB of events) with 413 without reading it, and closes the
+    connection (sizeup/web/server.py). A client that is still sending, as it is with a body that size, gets a broken
+    pipe or a reset before it can read the answer: the station's client sends once more, the same happens, and it
+    reports that the hub closed the connection (status 0: an outage), never the 413. So over a direct connection the
+    one real case of E2's 413, a single event whose clip is over 24 MiB (a batch of several is cut at 4 MiB), is retried
+    for ever with #762 too: its split is for a 400 / 413 / 422 that arrives. (A proxy in front of the hub that reads the
+    whole request first may hand the 413 on.) Fixed: the client gets status 413 and the hub's `reason`."""
+    lv = lane.Lane(tmp_path)
+    client = HubClient(lv.url, lv.own, timeout=30.0)
+    try:
+        base = dict(c.vectors(lane.EVENTS, "valid"))["traffic-fm.json"]
+        clip = "UklGR" + "A" * (33 * 1024 * 1024)             # one event, 33 MiB of base64: just over the limit
+        post = dict(base, events=[dict(base["events"][0], audio=clip)])
+        with pytest.raises(HubError) as e:
+            client.request("POST", "/api/station/events", post, timeout=30.0)
+        assert [code for _, code, _ in lv.events_seen] in ([413], [413, 413])   # the hub answered it (twice: the re-send)
+        assert c.errors("station-error", json.loads(lv.events_seen[0][2])) == []
+        if E5_NO_READABLE_ANSWER_TO_A_POST_OVER_THE_LIMIT:
+            assert e.value.status == 0 and "closed the connection" in str(e.value)
+        else:
+            assert e.value.status == 413 and "too large" in str(e.value)
+        assert lv.hub.app.hub.seq == 0
+    finally:
+        client.close()
+        lv.close()
 
 
 def test_known_deviation_one_cursor_for_every_sender(tmp_path):

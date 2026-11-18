@@ -1,6 +1,6 @@
 {
   "x-version": 1,
-  "description": "The cursor rules of POST /api/station/events as golden sequences (contracts/README.md, Events). tests/test_contracts_events_cursor.py replays each against a real hub over HTTP, on a hub that has never had a post. `events`: the made-up events the sequences use, by name ({type, data}; `item`: that JSON value itself in place of an event; `hub_fails`: the test makes the hub fail to apply it for a reason of the hub's own). A step is a post and what must follow: `post.events` is a list of [seq, event name] (seq null: the event is sent without one; an event is sent as {seq, at, type, data, audio: null, audio_dropped: false}), `status` the HTTP status, `answer` the keys of the 200 answer, `cursor` the hub's [epoch, seq] afterwards, `applied_times` how many times each named `activity` event has been applied on the hub so far (an activity adds to its minute's count, so twice shows), `errors` the hub's count of events it failed to apply so far. `{restart: true}`: the hub is stopped and started again on the same database.",
+  "description": "The cursor rules of POST /api/station/events as golden sequences (contracts/README.md, Events). tests/test_contracts_events_cursor.py replays each against a real hub over HTTP, on a hub that has never had a post. `events`: the made-up events the sequences use, by name ({type, data}; `item`: that JSON value itself in place of an event; `hub_fails`: the test makes the hub fail to apply it for a reason of the hub's own). A step is a post and what must follow: `post.events` is a list of [seq, event name] (seq null: the event is sent without one; an event is sent as {seq, at, type, data, audio: null, audio_dropped: false}), `status` the HTTP status, `answer` the keys of the 200 answer, `cursor` the hub's [epoch, seq] afterwards, `applied_times` how many times each named `activity` event has been applied on the hub so far (an activity adds to its minute's count, so twice shows), `errors` the hub's count of events it failed to apply so far. `{restart: true}`: the hub is stopped and started again on the same database. `from_762` on a step: what that step answers once #762 is on main (the keys it gives replace the step's own); `rule_from_762`: the sequence's rule from then on. The test replays those instead when its E1 switch is flipped. The other sequences are the same before and after.",
   "events": {
     "a": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916501, "calls": 1, "radios": ["880001"]}},
     "b": {"type": "activity", "data": {"source": "p25:east:7003", "minute": 29916502, "calls": 1, "radios": ["880001"]}},
@@ -306,11 +306,15 @@
     {
       "name": "an-event-that-fails-is-acked-and-skipped",
       "rule": "KNOWN DEVIATION E1. An event the hub fails to apply (here: a clip id it refuses) is counted, logged, skipped and ACKED: the answer covers it and has no word about it, so the station deletes it. The events behind it are applied.",
+      "rule_from_762": "E1 as #762 fixes it: the event is still skipped and the cursor still moves past it, but the answer lists it under `rejected` with why (`malformed`: it can never apply, here a clip id the hub refuses; `apply_failed`: the hub's own trouble), and the station keeps it aside.",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "bad-id"], [2, "a"]]},
           "status": 200,
           "answer": {"acked": 2, "applied": 1},
+          "from_762": {
+            "answer": {"acked": 2, "applied": 1, "rejected": [{"i": 0, "seq": 1, "type": "traffic", "reason": "malformed", "error": "BadEvent: bad id '../x'"}]}
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 2],
           "applied_times": {"a": 1},
           "errors": 1
@@ -334,11 +338,22 @@
     {
       "name": "what-is-skipped-without-a-word",
       "rule": "An item of `events` that is not an object is skipped. An event without `seq` is taken as `seq` 0: at or under every cursor, so never applied, and no error.",
+      "rule_from_762": "From #762 on an event needs a `seq` that is an integer from 1: an item that is not an object and an event without one are listed under `rejected` as `malformed`, by their index in the post (`seq` null), never applied, and never move the cursor.",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [null, "not-an-object"], [null, "b"], [2, "c"]]},
           "status": 200,
           "answer": {"acked": 2, "applied": 2},
+          "from_762": {
+            "answer": {
+              "acked": 2,
+              "applied": 2,
+              "rejected": [
+                {"i": 1, "seq": null, "type": "", "reason": "malformed", "error": "an event needs a seq (an integer from 1)"},
+                {"i": 2, "seq": null, "type": "activity", "reason": "malformed", "error": "an event needs a seq (an integer from 1)"}
+              ]
+            }
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 2],
           "applied_times": {"a": 1, "b": 0, "c": 1},
           "errors": 0
@@ -348,6 +363,7 @@
     {
       "name": "a-source-event-the-hub-fails-is-sent-again",
       "rule": "The one exception to E1: a `source_event` the hub fails to apply for a reason of its own (not a malformed one) is NOT acked, and nothing behind it in the post is looked at: `acked` stays under it and the station sends it again. On its third delivery it is given up like any other event.",
+      "rule_from_762": "As before for its first two deliveries (not acked, nothing behind it looked at, no `rejected`); on the third it is given up, acked, and listed under `rejected` as `apply_failed`: the station keeps it aside and sends it again later, as a new event.",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"], [2, "source-event-the-hub-fails"], [3, "b"]]},
@@ -369,6 +385,9 @@
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "source-event-the-hub-fails"], [3, "b"]]},
           "status": 200,
           "answer": {"acked": 3, "applied": 1},
+          "from_762": {
+            "answer": {"acked": 3, "applied": 1, "rejected": [{"i": 0, "seq": 2, "type": "source_event", "reason": "apply_failed", "error": "RuntimeError"}]}
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 3],
           "applied_times": {"a": 1, "b": 1},
           "errors": 3
@@ -378,11 +397,15 @@
     {
       "name": "a-malformed-source-event-is-acked-and-skipped",
       "rule": "A `source_event` that is not one (its `event` breaks the interface) is skipped and acked like any other failed event; a good one is applied.",
+      "rule_from_762": "The same, and from #762 on it is listed under `rejected` as `malformed` (its error is the type only: a feed's text never leaves the hub's log).",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "source-event-malformed"], [2, "source-event"], [3, "a"]]},
           "status": 200,
           "answer": {"acked": 3, "applied": 2},
+          "from_762": {
+            "answer": {"acked": 3, "applied": 2, "rejected": [{"i": 0, "seq": 1, "type": "source_event", "reason": "malformed", "error": "SourceError"}]}
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 3],
           "applied_times": {"a": 1},
           "errors": 1
@@ -392,11 +415,24 @@
     {
       "name": "seq-as-a-string-or-a-float",
       "rule": "The hub reads `seq` with int(): a string of digits and a float are taken (the float cut to its whole part). A writer sends an integer.",
+      "rule_from_762": "From #762 on the hub takes neither: a `seq` that is a string or a float is `malformed`, listed by its index, not applied, and the cursor stays.",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [["1", "a"], [2.7, "b"]]},
           "status": 200,
           "answer": {"acked": 2, "applied": 2},
+          "from_762": {
+            "answer": {
+              "acked": 0,
+              "applied": 0,
+              "rejected": [
+                {"i": 0, "seq": null, "type": "activity", "reason": "malformed", "error": "an event needs a seq (an integer from 1)"},
+                {"i": 1, "seq": null, "type": "activity", "reason": "malformed", "error": "an event needs a seq (an integer from 1)"}
+              ]
+            },
+            "cursor": ["aaaaaaaaaaaaaaaa", 0],
+            "applied_times": {"a": 0, "b": 0}
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 2],
           "applied_times": {"a": 1, "b": 1},
           "errors": 0
@@ -406,6 +442,7 @@
     {
       "name": "a-seq-that-is-no-number-refuses-the-whole-post",
       "rule": "A `seq` that int() does not take is 400 for the whole post: nothing of it is applied and the cursor stays. The station sends the same post again (KNOWN DEVIATION E2).",
+      "rule_from_762": "From #762 on it no longer refuses the post: that one event is `malformed`, listed by its index, and the rest of the post is applied.",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
@@ -417,6 +454,16 @@
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[2, "b"], ["x", "c"]]},
           "status": 400,
+          "from_762": {
+            "status": 200,
+            "answer": {
+              "acked": 2,
+              "applied": 1,
+              "rejected": [{"i": 1, "seq": null, "type": "activity", "reason": "malformed", "error": "an event needs a seq (an integer from 1)"}]
+            },
+            "cursor": ["aaaaaaaaaaaaaaaa", 2],
+            "applied_times": {"a": 1, "b": 1, "c": 0}
+          },
           "cursor": ["aaaaaaaaaaaaaaaa", 1],
           "applied_times": {"a": 1, "b": 0, "c": 0},
           "errors": 0
@@ -426,6 +473,7 @@
     {
       "name": "a-body-that-is-no-events-post",
       "rule": "A body that is not an object with an `events` list is 400; a `station` that is another id than the token's is 401 `id_mismatch`. The cursor stays.",
+      "rule_from_762": "The same, and from #762 on the 400 says why in `reason`: `bad_batch` (`bad_json` for a body that is not JSON; a 413 says `too_large` and `max_bytes`).",
       "steps": [
         {
           "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": [[1, "a"]]},
@@ -434,9 +482,15 @@
           "cursor": ["aaaaaaaaaaaaaaaa", 1],
           "errors": 0
         },
-        {"post": {"epoch": "aaaaaaaaaaaaaaaa"}, "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
-        {"post": {"epoch": "aaaaaaaaaaaaaaaa", "events": {"1": "a"}}, "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
-        {"post": [], "status": 400, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
+        {"post": {"epoch": "aaaaaaaaaaaaaaaa"}, "status": 400, "from_762": {"reason": "bad_batch"}, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
+        {
+          "post": {"epoch": "aaaaaaaaaaaaaaaa", "events": {"1": "a"}},
+          "status": 400,
+          "from_762": {"reason": "bad_batch"},
+          "cursor": ["aaaaaaaaaaaaaaaa", 1],
+          "errors": 0
+        },
+        {"post": [], "status": 400, "from_762": {"reason": "bad_batch"}, "cursor": ["aaaaaaaaaaaaaaaa", 1], "errors": 0},
         {
           "post": {"epoch": "bbbbbbbbbbbbbbbb", "station": "st-other", "events": [[1, "b"]]},
           "status": 401,
