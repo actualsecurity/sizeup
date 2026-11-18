@@ -9,7 +9,9 @@ because the hub is one Python process on 0.5 vCPU and several stations, more con
 planned.
 
 Production (the hub's own `perf` lines, 16 before and 10 after the state-push cache of #699; ECS metrics; the access
-log's timings: numbers only):
+log's timings: numbers only). The 10 "after" samples are each the first five minutes of a new task in the two hours
+after the deploy, and the same deploys carried two changes to how often the Settings page reloads, which also
+lower the request figures:
 
 | | before | after |
 |---|---|---|
@@ -29,25 +31,29 @@ Local, on a synthetic CAD (CPU time; Fargate is about 3 times slower, an estimat
 | SSE, 1,000 clients | asyncio prototype 13.1 ms/s, p50 74 ms; Go 20.2 ms/s, p50 55 ms |
 
 A model built from these (estimates) says where 0.5 vCPU runs out with today's code: in a working incident, at one
-station with 25 consoles (100 %) or three stations with 5 (114 %). The split there is 161 ms/s of rebuilds and
+station with 25 consoles (100 %) or three stations with 5 (114 %). It takes Fargate as 3 times slower than the
+local machine (range 2 to 4.5; one production cross-check suggests about 5), two mobile clients polling per console,
+and assumed rates for a working incident (0.5 transmissions a second per station, 0.4 incident changes a second). The split there is 161 ms/s of rebuilds and
 ingest, 114 of per-client compression and 148 of the consoles' own requests. With four Python fixes, three stations
-with 25 consoles is 76 %. A Go fan-out changes those cells by 0 to 3 points up to 25 consoles.
+with 25 consoles is 76 % (over 100 % if Fargate is 5 times slower). A Go fan-out changes those cells by 0 to 3
+points up to 25 consoles, whatever the factor.
 
 ## Decision
 
 The state push, and everything else on the hub's real-time path, stays in Python. The fixes that return the gain, in
 order (the first three measured, the fourth estimated):
 
-1. Compress each push once and share the bytes among clients (today each client compresses its own copy).
+1. Compress each push once and share the bytes among clients (today each client compresses its own copy). At 200
+   streams this is 94 % of what Go saves; a thread per client in Python still costs 49 ms/s there against 6.7.
 2. Cache the status-word repair per radio row.
 3. Cache the verified Access token until it expires.
 4. Do not rebuild the CAD state for a transmission that touches no incident.
 
-Then: per-incident sections so a change sends one incident (about 55 KB, not 553 KB), and a 1 vCPU task before
+Then: per-incident sections so a change sends one incident (about 55 KB, not 553 KB, by division), and a 1 vCPU task before
 several stations (it doubles the headroom and ends the throttling of bursts over 50 ms; a second core adds little
 once compression is shared, because one interpreter uses one core).
 
-These belong to the session that owns hub performance, and were handed over with the benchmarks.
+These were handed, with the benchmarks, to whoever maintains hub performance.
 
 ## Alternatives
 
@@ -57,8 +63,9 @@ These belong to the session that owns hub performance, and were handed over with
   channel for the activity log, and a place in the hot/cold handover. Estimated at 700 to 1,000 lines of Go, one to
   two weeks, and a second runtime on a hub that is one process by design, to save from nothing to a few tens of
   milliseconds of CPU a second over the fixed Python. Rejected for now.
-- **An asyncio event loop in Python** for the streams. Matches Go's CPU to 1,000 clients. Not needed at today's
-  client counts; it is the first thing to try if streams reach the hundreds.
+- **An asyncio event loop in Python** for the streams. A standalone prototype (not wired into the hub) matches Go's
+  CPU to 1,000 clients. Not needed at today's client counts; it is the first thing to try if streams reach the
+  hundreds.
 
 ## Consequences
 

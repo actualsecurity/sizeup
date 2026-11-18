@@ -4,8 +4,8 @@ Status: proposed · Date: 2026-11-18
 
 ## Context
 
-Every interface a native component would speak was mapped from the code: 11 station-to-hub routes (and two more
-rows for their sub-routes), the GPU worker's job API, the stream to consoles, the objects they carry, and 22 local
+Every interface a native component would speak was mapped from the code: 11 station-to-hub routes (with their
+authentication and clip-audio encoding), the GPU worker's job API, the stream to consoles, the objects they carry, and 22 local
 files and pipes on the station. The mapping was read from the code and spot-checked, not executed against it.
 
 - **No station interface has a schema or validation.** A version field `v` is sent on five routes and read on none.
