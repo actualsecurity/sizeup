@@ -252,8 +252,13 @@ class Broadcaster:
     a page merges it into what it has (live.js). An id from another boot, or none: the whole state."""
     MIN_GAP_S = 0.25   # poke() pushes at once, but never more often than this
 
-    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0):
+    def __init__(self, state_fn: Callable[[], dict], period_s: float = 1.0, reuse: bool = False):
         self.state_fn, self.period_s = state_fn, period_s
+        # reuse: state_fn hands back the same object for a section that hasn't changed and never changes one in place
+        # (Cad.state: its cached sections, rebuilt only on a new store.rev): that section's JSON is kept, not made again
+        # each second (the incidents and units are most of ~400 KB; #446)
+        self.reuse = reuse
+        self._made: dict[str, tuple[object, bytes]] = {}     # key -> (the object last serialized, its JSON)
         self.boot = secrets.token_hex(4)
         self._wake = threading.Event()
         self._cond = threading.Condition()
@@ -289,7 +294,7 @@ class Broadcaster:
             st = self.state_fn() if st is None else st
             if not isinstance(st, dict):
                 raise TypeError(f"state is a {type(st).__name__}, not a dict")
-            parts = {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+            parts = self._serialize(st)
         except Exception as e:  # never let one bad state kill the display
             parts = {"time": json.dumps(time.time()).encode(), "error": json.dumps(f"{type(e).__name__}: {e}").encode()}
         with self._cond:
@@ -300,6 +305,21 @@ class Broadcaster:
             self._seq, self._sections, self._gone = seq, sections, gone
             self._cond.notify_all()
         return seq
+
+    def _serialize(self, st: dict) -> dict[str, bytes]:
+        if not self.reuse:
+            return {str(k): json.dumps(v, separators=(",", ":")).encode() for k, v in st.items()}
+        made, out = {}, {}
+        for k, v in st.items():
+            k = str(k)
+            was = self._made.get(k)
+            # the same object (held here, so its id is never another's) and a container: its JSON as made last time.
+            # A scalar or a new object: made again (cheap, or changed)
+            b = was[1] if was is not None and was[0] is v and isinstance(v, (dict, list)) else \
+                json.dumps(v, separators=(",", ":")).encode()
+            made[k], out[k] = (v, b), b
+        self._made = made
+        return out
 
     # -- what a page is sent ----------------------------------------------------------------------------------
 
@@ -1318,7 +1338,7 @@ class WebServer:
         self.broadcaster = Broadcaster(state_fn)
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
-        self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
+        self.cad_broadcaster = Broadcaster(cad.cad.state, reuse=True) if cad is not None and role != "station" else None
         self.perf = perf                # sizeup/perf.py Perf (the hub, #425): each request thread's CPU as it ends
 
         class Httpd(ThreadingHTTPServer):

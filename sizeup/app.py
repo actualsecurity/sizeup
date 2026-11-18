@@ -716,7 +716,7 @@ class App:
         self.roads.gis = self.gis
         self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
-        self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
+        self.roads.wall_settings = lambda: self.cad.settings.section("camera_wall")
         self.cad.camera_area = self.roads.settings_rows
         self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
@@ -914,7 +914,7 @@ class App:
         # Settings > Data sources (sizeup/datasources.py, #186): every pull above with its status, Refresh now and,
         # for the slow ones, the schedule the registry keeps (the admins' choices in the CAD settings).
         from sizeup import datasources
-        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.overrides().get(datasources.SECTION) or {})
+        self.datasources = datasources.build(self, log=log, choices=lambda: self.cad.settings.section(datasources.SECTION))
         self.cad.datasources = self.datasources
         self._fm_live: dict[str, dict] = {}
         self._stopping = threading.Event()

@@ -486,7 +486,7 @@ class Store:
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self._closed = False
-        self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
+        self.rev = 0          # bumped on every committed change (a row written): the page refetches nothing, it's pushed
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
         self.after_commit = self.after_rollback = self.touch = None
@@ -830,6 +830,10 @@ class Store:
                 store.lock.acquire()
                 try:
                     store.db.execute("BEGIN IMMEDIATE")
+                    # what the connection had changed before: a transaction that changed no row (a feed's list with
+                    # nothing new, an expiry with nothing due) is no CAD change, so no rev (#446: each bump rebuilds
+                    # the whole console state and makes every open page ask again)
+                    self.changes0 = store.db.total_changes
                 except BaseException:
                     # Busy past the timeout, or a transaction already open: __exit__ never runs for a failed
                     # __enter__, so the lock is given back here (else every later write waits on it forever).
@@ -874,7 +878,7 @@ class Store:
                                         pass
                                 raise
                             done = not store.db.in_transaction       # (a COMMIT that took)
-                    if done:
+                    if done and store.db.total_changes != self.changes0:
                         store.rev += 1
                 finally:
                     # What rides on a transaction without being part of it (the Radio page's change notes,

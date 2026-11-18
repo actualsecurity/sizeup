@@ -475,6 +475,7 @@ class Editor:
         self.base_ours: set[str] = set()
         self.unknown_log: Path | None = None
         self._heard_cache: tuple = ((), [])
+        self._sections: dict[str, tuple] = {}        # section() -> (_written() then, its overrides)
 
     # -- overrides ------------------------------------------------------------------------------------
 
@@ -485,9 +486,28 @@ class Editor:
         return out
 
     def section(self, name: str) -> dict:
-        """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes)."""
-        return {r["key"]: json.loads(r["value"])
-                for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,))}
+        """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes; the alarms'
+        settings, read at every state push). Read again only when the file may have changed (_written); a copy each
+        time, so a caller may change what it gets."""
+        ver = self._written()
+        got = self._sections.get(name) if ver is not None else None
+        if got is None or got[0] != ver:
+            got = (ver, {r["key"]: json.loads(r["value"])
+                         for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,))})
+            if ver is not None:
+                self._sections[name] = got
+        return copy.deepcopy(got[1])
+
+    def _written(self) -> tuple | None:
+        """What moves with any write to the CAD file: this connection's own (total_changes), another's (PRAGMA
+        data_version: the replica follower before a takeover). None inside an open transaction (what it reads may still
+        be rolled back): never cached then. The imported place names are thousands of rows in the same table, so a
+        section is never read through overrides() where it is asked every second (#446)."""
+        db = self.store.db
+        with self.store.lock:
+            if db.in_transaction:
+                return None
+            return db.total_changes, db.execute("PRAGMA data_version").fetchone()[0]
 
     def build(self, ov: dict) -> lists_mod.Lists:
         try:
@@ -700,7 +720,7 @@ class Editor:
 
     def logs_page(self, ov: dict | None = None) -> dict:
         """Settings > Station > Logs: each setting, its default and whether it is edited."""
-        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        e = (self.section(LOGS_SECTION) if ov is None else (ov.get(LOGS_SECTION) or {}))
         c = cwlogs.config(e)
         return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
                 for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
@@ -851,7 +871,7 @@ class Editor:
     def mutes_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Push notifications > Mute (#340): each health alert kind, muted or not, until when."""
         now = self.store.clock()
-        on = health_mod.active_mutes((self.overrides() if ov is None else ov).get(MUTE_SECTION) or {}, now)
+        on = health_mod.active_mutes((self.section(MUTE_SECTION) if ov is None else (ov.get(MUTE_SECTION) or {})), now)
         return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
                            "timed_only": k in health_mod.MUTE_TIMED_ONLY}
                           for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
@@ -908,7 +928,7 @@ class Editor:
 
     def errors_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Hub error alerts (#285): the switch and the two thresholds, each with its default."""
-        e = ((self.overrides() if ov is None else ov).get(ERR_SECTION) or {})
+        e = (self.section(ERR_SECTION) if ov is None else (ov.get(ERR_SECTION) or {}))
         return {k: {"label": errwatch.LABELS[k], "value": e.get(k, d), "default": d, "edited": k in e,
                     **({"min": errwatch.LIMITS[k][0], "max": errwatch.LIMITS[k][1]} if k in errwatch.LIMITS else {})}
                 for k, d in errwatch.DEFAULTS.items()} | {"window_min": errwatch.WINDOW_S / 60,
@@ -945,7 +965,7 @@ class Editor:
 
     def signal_page(self, ov: dict | None = None) -> dict:
         """Settings > Radios > Signal (#606): the suggestion's margin and the shift thresholds, each with its default."""
-        e = ((self.overrides() if ov is None else ov).get(SIGNAL_SECTION) or {})
+        e = (self.section(SIGNAL_SECTION) if ov is None else (ov.get(SIGNAL_SECTION) or {}))
         cur = metricsinsight.settings(e)
         return {k: {"label": metricsinsight.LABELS[k], "value": cur[k], "default": d, "edited": k in e,
                     "min": metricsinsight.LIMITS[k][0], "max": metricsinsight.LIMITS[k][1]}
@@ -980,7 +1000,7 @@ class Editor:
 
     def mapd_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Map display (#376): each zoom, its default and whether it is edited."""
-        e = ((self.overrides() if ov is None else ov).get(MAPD_SECTION) or {})
+        e = (self.section(MAPD_SECTION) if ov is None else (ov.get(MAPD_SECTION) or {}))
         z = mapview.display_zooms(e)
         return {k: {"label": mapview.DISPLAY_LABELS[k], "value": z[k], "default": d, "edited": k in e,
                     "min": mapview.display_limits(k)[0], "max": mapview.display_limits(k)[1]}
@@ -988,7 +1008,7 @@ class Editor:
 
     def premise_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Address notes (#403): each category, who may see it (everyone | dispatcher | admin)."""
-        e = ((self.overrides() if ov is None else ov).get(PREMISE_SECTION) or {})
+        e = (self.section(PREMISE_SECTION) if ov is None else (ov.get(PREMISE_SECTION) or {}))
         return {k: {"label": lab, "value": e.get(k, "everyone"), "edited": k in e, "choices": list(PREMISE_LEVELS)}
                 for k, lab in _visibility_keys().items()}
 
@@ -1015,7 +1035,7 @@ class Editor:
 
     def em_page(self, ov: dict | None = None) -> dict:
         """Settings > Radios > Emergencies: the services whose emergencies (not ours) stand out on the Radio page."""
-        e = ((self.overrides() if ov is None else ov).get(EM_SECTION) or {})
+        e = (self.section(EM_SECTION) if ov is None else (ov.get(EM_SECTION) or {}))
         return {"prominent": em_prominent(e), "default": list(EM_DEFAULT), "edited": "prominent" in e,
                 "choices": list(sourcekeys.SERVICES)}
 
@@ -1141,7 +1161,7 @@ class Editor:
 
     def atc_page(self, ov: dict | None = None) -> dict:
         """Settings > System > ATC talkers (#252): each switch, its default (on) and whether it is edited."""
-        a = ((self.overrides() if ov is None else ov).get(ATC_SECTION) or {})
+        a = (self.section(ATC_SECTION) if ov is None else (ov.get(ATC_SECTION) or {}))
         return {k: {"label": lab, "value": bool(a.get(k, True)), "default": True, "edited": k in a} for k, lab in ATC_KEYS.items()} \
             | {"channels": sorted(getattr(getattr(self.cad, "atc_talkers", None), "channels", ()) or ())}
 
@@ -2185,7 +2205,7 @@ class Editor:
     # -- radios: channels (record / transcribe / engine) and speech-to-text (sizeup/channels.py) ---------------
 
     def channel_overrides(self) -> dict:
-        return dict(self.overrides().get(channels_mod.SECTION) or {})
+        return self.section(channels_mod.SECTION)
 
     def _channel_value(self, key: str, cur: dict, vals: dict):
         """The override to store for key: only what differs from the default (REMOVE: nothing does)."""
@@ -2264,7 +2284,7 @@ class Editor:
     # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/channels.py, sizeup/radio/fm.py) --------------
 
     def squelch_overrides(self) -> dict:
-        return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
+        return self.section(channels_mod.SQUELCH_SECTION)
 
     def _squelch_op(self, action: str, body: dict, op: str) -> dict:
         """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
@@ -2399,7 +2419,7 @@ class Editor:
     # the rest, and sent to the station with the channel choices (the hub's set_channel_prefs job).
 
     def tone_overrides(self) -> dict:
-        return dict(self.overrides().get(TONES_SECTION) or {})
+        return self.section(TONES_SECTION)
 
     def tone_rows(self) -> list[dict]:
         """GET /api/cad/tones: each pair named here (not the edits to list rows or entities), who named it and when."""
@@ -2634,7 +2654,7 @@ class Editor:
         return True
 
     def stt_values(self) -> dict:
-        return dict(self.overrides().get("stt") or {})
+        return self.section("stt")
 
     def _vocab_list(self, v) -> list[str]:
         if not isinstance(v, list) or len(v) > MAX_VOCAB:
@@ -2774,7 +2794,7 @@ class Editor:
     # audited, exported and imported with the rest; sizeup/roads.py Roads.area reads them on every request.
 
     def wall_values(self) -> dict:
-        return dict(self.overrides().get(WALL_SECTION) or {})
+        return self.section(WALL_SECTION)
 
     @staticmethod
     def _wall_margin(v) -> int:
