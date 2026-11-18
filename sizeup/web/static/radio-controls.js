@@ -224,7 +224,8 @@ window.RadioControls = (() => {
         node.replaceChildren(el("b", null, r.label), ...(live ? [el("span", "fq", r.now)] : []),
                              ...(r.tower ? [el("span", "tw", r.tower.open ? "Tower open" : "Tower closed")] : []),
                              ...(word ? [el("span", "st", word)] : []));
-        const bits = [r.detail || r.label];
+        // (#637) the hold in the viewer's time, as the pill says it (the station's detail has the station's clock)
+        const bits = [held ? `held back until ${fmtTime(r.hold_until)} after dropouts` : r.detail || r.label];
         if (r.mhz) bits.push(`${r.mhz} MHz`);
         if (r.restarts) bits.push(`${r.restarts} restarts`);
         const lines = [bits.join(" · ")];
@@ -1066,6 +1067,7 @@ window.RadioControls = (() => {
       pk.title = parked ? `${j} is off on purpose: click to unpark` : `Keep ${j} off on purpose: no warning, never started by a fallback`;
       pk.addEventListener("click", () => { e.parked = parked ? e.parked.filter((y) => y !== j) : [...(e.parked || []), j]; ag.key = ""; renderGroups(); });
       for (const b of [up, dn, x, pk]) b.type = "button";
+      pk.hidden = !parked && (sdr.no_park || []).includes(j);    // the county's and paging: never parked (fire coverage)
       up.disabled = k === 0;
       dn.disabled = k === e.jobs.length - 1;
       up.setAttribute("aria-label", `${j} up`);

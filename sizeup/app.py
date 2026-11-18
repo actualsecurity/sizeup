@@ -3979,6 +3979,10 @@ class App:
             return f"{mode} is locked to {gj.name}: SDR {', '.join(self.sdr_name(s) for s in gj.sdrs)}"
         return ""
 
+    def _parkable(self, job: str) -> bool:
+        """(#637) A job a group may park: never the county's trunk-recorder or paging (fire coverage)."""
+        return job != P25_MODE and self._kind.get(job) != "paging"
+
     def _parked(self, mode: str, gs: list | None = None) -> str:
         """Why `mode` may run on no dongle: parked in its antenna group (#637: switched off there on purpose), or ""."""
         g = antenna.of_job(self.groups if gs is None else gs, mode) if mode != OFF_MODE else None
@@ -4214,6 +4218,15 @@ class App:
                         return f"SDR {self.sdr_name(s)} is reserved (ADS-B, AIS or sdr_ignore): never in a group"
                     if s not in known:
                         return f"{g.name}: no SDR {s!r} here"
+            # (#637) never parked: the county's trunk-recorder and paging (the alert that no dongle has one stays);
+            # a reception test's job while it runs
+            for g in gs:
+                if bad := next((j for j in g.parked if not self._parkable(j)), None):
+                    return f"{bad} can't be parked (fire coverage): take it out of {g.name}, or give it a dongle"
+            t = getattr(self.reception, "active", None)
+            testing = set(t.get("plan") or []) if isinstance(t, dict) else set()
+            if bad := next((j for g in gs for j in g.parked if j in testing), None):
+                return f"a reception test runs {bad}: stop it before parking {bad}"
             lent = self.reception.lent()
             for sd in sorted(known | set(self.assign)):
                 m = lent[1] if lent and lent[0] == sd else self._own_of(sd)
@@ -4228,6 +4241,10 @@ class App:
                     return f"SDR {self.sdr_name(sd)} runs {m}: switch it Off before parking {m}"
             asks = [f"{w}: in a fallback the higher one takes the other's dongle"
                     for g in gs if (w := antenna.fire_order(g, self._fire_rank))]
+            was = {j for g in self.groups for j in g.parked}
+            if fire := [j for g in gs for j in g.parked if j not in was and self.fire_job(j)]:
+                # (#637) a fireground parked: no warning that no dongle has it any more, asked once when parked
+                asks.append(f"Parking {', '.join(fire)} keeps a fire channel off with no warning")
             here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s}
             now = {m for sd, m in self.assign.items() if m != OFF_MODE and sd in here and self._program_on(m) == sd}
             stops = sorted(j for j in now - self._running_after(gs) if self.fire_job(j))
@@ -4617,6 +4634,7 @@ class App:
                           **self._group_row(sd)}
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
+                "no_park": [m for m in self.modes if m != OFF_MODE and not self._parkable(m)],   # (#637) the editor
                 "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
     def radio_status(self) -> list[dict]:
