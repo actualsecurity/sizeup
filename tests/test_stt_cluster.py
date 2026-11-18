@@ -272,8 +272,8 @@ def test_a_restarting_station_hands_everything_waiting_to_the_pool_and_nothing_i
             ids.append(fm_segment(st))
             time.sleep(0.01)
         assert wait(lambda: st.stt.busy() == 3 and hold.calls == 1, 10)   # one on whisper, two waiting
-        n = st._stt_stop_queue(finish_s=0.2)                # the update stops it: the one on whisper doesn't finish
-        assert n["pool"] == 3 and n["saved"] == 0
+        n = st._stt_handoff(wait_s=0.2)                     # the update stops it: the one on whisper doesn't finish
+        assert n["pool"] == 3 and n["saved"] == 0 and n["in_flight"] == 1
         st.stt._stopping = False                            # (the station back: its whisper may be asked again)
         hold.go.set()
         assert wait(lambda: all(any(t["id"] == tid and t["text"] for t in all_traffic(hub.get("/api/state")))
@@ -302,8 +302,8 @@ def test_a_station_restarting_with_a_full_queue_and_no_pool_saves_it_and_queues_
         ctx = [fm_segment(app) for _ in range(3)]               # context clips behind it
     fire2 = fm_segment(app)
     assert wait(lambda: app.stt.busy() == 5 and hold.calls == 1, 10)
-    n = app._stt_stop_queue(finish_s=0.1)                       # no hub: saved, every one
-    assert n == {"pool": 0, "saved": 5, "reruns": 0}
+    n = app._stt_handoff(wait_s=0.1)                            # no hub: saved, every one
+    assert (n["pool"], n["saved"], n["skipped"], n["in_flight"]) == (0, 5, 0, 1)
     assert (tmp_path / "stt-queue.json").is_file()
     hold.go.set()
     app2 = App(cfg)                                             # the next start
@@ -532,7 +532,7 @@ def test_the_stop_path_runs_before_whisper_and_the_link_stop(tmp_path, monkeypat
     from tests.test_cloud import base
     app = App(base(clips_dir=str(tmp_path / "clips")))
     order = []
-    monkeypatch.setattr(app, "_stt_stop_queue", lambda *a, **k: order.append("stt queue") or {})
+    monkeypatch.setattr(app, "_stt_handoff", lambda *a, **k: order.append("stt queue") or {})
     monkeypatch.setattr(app.whisper, "stop", lambda: order.append("whisper"))
     app.stop()
     assert order[:2] == ["stt queue", "whisper"]
@@ -551,15 +551,28 @@ def test_a_stopping_station_hands_pre_alert_clips_over_only_to_an_idle_gpu_and_s
     app._emit = lambda kind, d, clip=None: sent.append((kind, d))
     fire = Traffic("FG1-7", "FG1", 1.0, 4.0, "", status="pending")
     ctx = Traffic("MRRSOps-7", "MRRS Ops", 1.0, 4.0, "", status="pending")
-    app.stt.withdraw = lambda priority=None: [(URGENT, fire, None, "FG1", 1.0), (LOW, ctx, None, CTX, 1.0)]
-    app.stt.stop = lambda timeout=0.0: None
-    n = app._stt_stop_queue()
-    assert n == {"pool": 1, "saved": 1, "reruns": 0}           # the context clip to the pool, Fire/EMS saved here
+    app.stt.submit(fire, np.zeros(1600, np.float32), URGENT, "FG1")
+    app.stt.submit(ctx, np.zeros(1600, np.float32), LOW, CTX)
+    n = app._stt_handoff(wait_s=0.0)
+    assert (n["pool"], n["saved"], n["skipped"]) == (1, 1, 0)   # the context clip to the pool, Fire/EMS saved here
     saved = __import__("json").loads((tmp_path / "stt-queue.json").read_text())
     assert [(e["id"], e["class"]) for e in saved] == [("FG1-7", URGENT)]
     # a saved queue that can't be read is kept aside, said, never crashes the start
     (tmp_path / "stt-queue.json").write_text("{not json")
     assert app._stt_resume() == 0 and (tmp_path / "stt-queue.bad").is_file()
+
+
+def test_with_nowhere_to_save_the_stop_marks_them_for_the_catch_up_as_before(tmp_path):
+    from sizeup.app import App
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    app._stt_queue_file = lambda: None                            # (no clips dir: nowhere to save)
+    t = Traffic("FG1-8", "FG1", 1.0, 4.0, "", status="pending")
+    app.stt.submit(t, np.zeros(1600, np.float32), URGENT, "FG1")
+    n = app._stt_handoff(wait_s=0.0)
+    assert n["skipped"] == 1 and t.status == "skipped" and "the station stopped" in t.model
+    assert [r["id"] for r in app.cad.comms.shed_clips(0)[0]] == ["FG1-8"]   # the catch-up's, stopped-station rows first
 
 
 # -- the public whisper-queue API (the radio session's encoder; restart hand-over) -------------------------------------
@@ -609,26 +622,23 @@ def test_withdraw_current_and_stop_hand_back_everything_in_order():
 
 
 def test_a_source_the_pre_alerts_push_from_is_high_at_least_whatever_its_tier(tmp_path, monkeypatch):
-    from sizeup import intel
-    from sizeup.app import App, push_key
+    from sizeup.app import App
     from sizeup.incidents import Traffic
+    from sizeup.intel import engine
     from sizeup.stt import HIGH
     from tests.test_cloud import base
-    monkeypatch.delattr(intel, "is_push_source", raising=False)        # (the set path; the engine's below if it has one)
     app = App(base(clips_dir=str(tmp_path / "clips")))
     app.tg.info[("mrrs", 9212)] = {"name": "Tac", "tier": "text"}
     t = Traffic("9212-1-call_1", "Tac", 1.0, 3.0, "", status="pending")
     t.source_key = "p25:mrrs:9212"
 
     def push(keys, rev):
-        monkeypatch.setattr(intel, "push_sources", lambda: (frozenset(keys), rev), raising=False)
-        app._push_cache = (0.0, frozenset(), 0)                       # (read again: the cache is PUSH_CACHE_S)
+        monkeypatch.setattr(engine, "push_sources", lambda: (frozenset(keys), rev))
+    push(set(), 0)
     assert app._stt_priority(t, "p25:mrrs:9212") == LOW                 # a text-tier talkgroup: context
     push({"p25:mrrs:9212"}, 3)
     assert app._stt_priority(t, "p25:mrrs:9212") == HIGH                # its alerts: never shed as context
-    # the queue's keys normalised to the engine's row-style ones: the county's "tg:<n>", an FM label, an airband one
-    assert push_key("tg:383") == "p25:westchester:383" and push_key("FG9") == "fm:FG9"
-    assert push_key("Tower", "airband") == "air:Tower" and push_key("p25:mrrs:9212") == "p25:mrrs:9212"
+    # the queue's keys as rows are keyed: the county's "tg:<n>", an FM label
     push({"p25:westchester:383", "fm:MRRS Ops"}, 4)
     ctx = Traffic("383-1-call_1", "WCPD", 1.0, 3.0, "", status="pending", talkgroup=383)
     app.tg.main = lambda tg, system=None: False                          # (a county talkgroup heard as context: LOW)
@@ -640,19 +650,27 @@ def test_a_source_the_pre_alerts_push_from_is_high_at_least_whatever_its_tier(tm
     fire = Traffic("FG1-1", "FG1", 1.0, 3.0, "", status="pending")
     push({"fm:FG1"}, 5)
     assert app._stt_priority(fire, "FG1") == URGENT                     # (never lowered)
-    monkeypatch.setattr(intel, "push_sources", lambda: (_ for _ in ()).throw(RuntimeError("no engine")), raising=False)
-    app._push_cache = (0.0, frozenset(), 0)
+    monkeypatch.setattr(engine, "push_sources", lambda: (_ for _ in ()).throw(RuntimeError("no engine")))
     assert app._stt_priority(t, "p25:mrrs:9212") == LOW                 # a failing source raises nothing
 
 
-def test_the_station_and_the_engine_normalise_keys_alike():
+def test_the_station_and_the_engine_say_the_same_of_every_key(tmp_path, monkeypatch):
+    """The cross-check (#716): a station deciding from the set the hub sent it and the hub deciding with
+    sizeup.intel.is_push_source agree on county talkgroups, other systems', FM and airband labels."""
     from sizeup import intel
-    from sizeup.app import push_key
-    fn = getattr(intel, "is_push_source", None)
-    if fn is None:
-        pytest.skip("sizeup.intel.is_push_source (#716) isn't here yet")
-    for key, kind in (("tg:383", ""), ("p25:mrrs:9212", ""), ("FG1", ""), ("Tower", "airband")):
-        assert isinstance(push_key(key, kind), str) and isinstance(fn(key, kind), bool)
+    from sizeup.app import App
+    from sizeup.intel import engine
+    from tests.test_cloud import base
+    keys = frozenset({"p25:westchester:383", "p25:mrrs:9212", "fm:FG9", "air:Tower"})
+    monkeypatch.setattr(engine, "push_sources", lambda: (keys, 7))
+    st = App(base(clips_dir=str(tmp_path / "clips")))
+    st.forwarding = lambda: True
+    st.set_stt_alert_keys(sorted(keys), 7)
+    for key, kind in (("tg:383", ""), ("tg:307", ""), ("p25:westchester:383", ""), ("p25:mrrs:9212", ""),
+                      ("p25:mrrs:9211", ""), ("FG9", ""), ("FG9", "traffic"), ("FG1", ""), ("Tower", "airband"),
+                      ("Tower", ""), ("fm:FG9", ""), ("air:Tower", "")):
+        assert st.is_push_source(key, kind) == intel.is_push_source(key, kind), (key, kind)
+    assert intel.is_push_source("tg:383") and intel.is_push_source("FG9") and not intel.is_push_source("tg:307")
 
 
 def test_the_hub_sends_its_stations_the_alert_sources_when_their_revision_differs(tmp_path, monkeypatch):
@@ -660,7 +678,8 @@ def test_the_hub_sends_its_stations_the_alert_sources_when_their_revision_differ
     from sizeup.stt import HIGH
     from sizeup.incidents import Traffic
     state = {"keys": frozenset({"p25:mrrs:9212"}), "rev": 7}
-    monkeypatch.setattr(intel, "push_sources", lambda: (state["keys"], state["rev"]), raising=False)
+    from sizeup.intel import engine
+    monkeypatch.setattr(engine, "push_sources", lambda: (state["keys"], state["rev"]))
     hub = HubRun(hub_cfg(tmp_path))
     st = None
     try:

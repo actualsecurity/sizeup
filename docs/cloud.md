@@ -370,8 +370,10 @@ The Linux station (deploy/station/README.md "Updating") runs exactly the commit 
 * The updater only takes a commit that is on `origin/main`; builds it **beside** the running one
   (`/opt/sizeup/releases/<sha>`: the code, its venv, as hard links when the requirements didn't
   change; trunk-recorder / whisper.cpp / rtl-sdr only when their pins changed); preflights it
-  (imports, the config, the databases in a scratch dir, the units, the programs); waits up to 5 min
-  for a quiet moment (no carrier open, nobody talking, no transcription running); swaps
+  (imports, the config, the databases in a scratch dir, the units, the programs); waits for the moment
+  to switch (the hub's build held still 10 min, so a burst of deploys is one restart; no page, dispatch,
+  carrier or talker; few transcriptions waiting; at most 45 min behind, or at once for an urgent build:
+  deploy/station/README.md "Updating"); swaps
   `/opt/sizeup/current` by rename and restarts once; and swaps back if `/healthz` doesn't answer with
   the new build within 90 s. A failed build is not tried again until the hub moves on. 3 releases kept.
 * A commit that changes nothing the station runs (docs, tests, CI, the hub's files) doesn't restart
@@ -667,8 +669,11 @@ queue then tests each PR on top of the ones ahead of it before merging; the depl
 
 **The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
-update log line ("update abc1234 -> def5678: ok in 74 s (built 40 s, waited 0 s for a quiet moment, web back
-6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime change".
+update log line ("update abc1234 -> def5678: ok in 674 s (built 40 s, waited 10 min: settle 10 min; went: a quiet
+moment; web back 6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime
+change", and a deferred one as soon as the station has built and preflighted it ("staged, switching by HH:MM": the
+switch waits for the hub to settle and for a quiet moment, 45 min at most; the hub's "behind" alert covers one that
+doesn't come).
 The step **fails** when the update failed or was rolled back, when auto-update is paused on the station, when
 the token is refused, or when 15 min pass; a failed workflow emails as usual, and the hub's own "behind"
 alert follows. Without the secrets the step is skipped with a warning.
@@ -1436,7 +1441,7 @@ The pool's catch-up keeps the catch-up's bounds on any worker:
 
 The sources the radio pre-alerts push alerts from are HIGH at least, in the station's queue and the pool, whatever their tier. On the hub they come from `sizeup.intel.is_push_source` or `push_sources()`.
 - The hub's leader sends them to the station (`set_stt_alert_keys`) when the revision the station reports differs.
-- The station compares its channel keys normalised the same way (`app.push_key`: "tg:<n>" becomes "p25:westchester:<n>", a label becomes "fm:" or "air:").
+- The station compares its channel keys normalised the same way (`sizeup.intel.engine.source_key`: "tg:<n>" becomes "p25:westchester:<n>", a label becomes "fm:" or "air:"). A test checks that the station and the hub agree on every kind of key.
 - The set is cached (5 s), never computed per clip under a lock.
 
 #### Public API and Health
@@ -3476,7 +3481,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 12 categories, 19 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 12 categories, 21 rules, Port Chester / Rye / Rye Brook PD only; the log-only `county_police.json`, `ems.json`, `fire.json` and `neighbor_police.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
@@ -3487,7 +3492,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
 | Settings, API, card | `admin.py`, `static/intel.js` | Settings > System > Intel; the 60 Control column's card |
 
-**The log-only packs.** Three more packs read what the hub already transcribes. The pack, every category and every
+**The log-only packs.** Four more packs read what the hub already transcribes (`neighbor_police` differs: its row). The pack, every category and every
 rule of each is written at `log`: an event in `intel_events`, its hits in `intel_hits` and a line in the log, and
 never the map's events, the console's card or a push. The engine takes the lowest of the three modes, so no single
 switch turns one on: an admin raises the pack, the category and the rule in Settings > System > Intel. Settings
@@ -3499,6 +3504,7 @@ saved before they existed name only `police` and its rules, and change nothing h
 | `county_police` | the county system's police talkgroups | smoke or fire, the fire department asked for, a fire alarm, gas / wires / CO, a critical patient, EMS asked for with what it is for, a crash with EMS or injuries (rollover, pedestrian struck, entrapment, a vehicle into a building, a pursuit ending in a crash), a person or vehicle in water, an elevator / lock-in / someone trapped, shots or a weapon, a barricade |
 | `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
 | `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
+| `neighbor_police` ("Area PD") | every MRRS police talkgroup but the `police` pack's own (Harrison PD, MTA PD, the interop talkgroups: `"exclude"`) | the `police` pack's categories and rules, read from `police.json` at load (`"rules_from": "police"`, rule ids `area.<id>`, labels `Area PD: <label>` in Settings, the plain label beside the pack's in a push and on the card), so the two never drift; only the pack is written at `log`, so raising the pack alone in Settings turns it on |
 
 Each strong phrase family is a rule of its own, at or over the threshold alone. That includes `cpd.ems_request`
 (0.6): on the county police talkgroups "EMS en route" or "ambulance is being sent" is an event by itself, the most
@@ -3528,7 +3534,7 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
-| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
+| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. With no place it stays at log until it expires: the tick never lets it go. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
 [...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that

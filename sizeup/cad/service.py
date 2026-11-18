@@ -480,6 +480,8 @@ class Cad:
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 "places_rev": self.settings.places_rev(),  # the place names' version: the Common places layer asks again
+                # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
+                "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
@@ -940,7 +942,9 @@ class Cad:
         f = self._fields(body, partial=True)
         if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
             old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
-            if f["until_at"] != old["until_at"] and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+            if old["until_at"] is not None and f["until_at"] // 60 == old["until_at"] // 60:
+                del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
+            elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
                 raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))

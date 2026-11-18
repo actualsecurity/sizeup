@@ -22,6 +22,7 @@ from urllib.parse import parse_qs
 
 from sizeup.fence import FencedWrite
 
+from . import reads
 from .errors import JSON, error
 from .limits import Limits
 from .principal import Resolver, none_yet, person
@@ -42,12 +43,14 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, cad=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        # the read resources' data (#560): a read-only facade over the hub's Cad; a handler gets this, never the Cad
+        self.reads = reads.Reads(cad, log=self.log) if cad is not None else None
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -111,8 +114,14 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
-            status, obj = route.handler(ctx)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads)
+            # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
+            # finished (status, body, content type, headers), which is what errors.error() makes
+            res = route.handler(ctx)
+            if len(res) == 4:
+                return res
+            status, obj, extra = (*res, {})[:3]
+            body = b"" if obj is None else json.dumps(obj, separators=(",", ":")).encode()
+            return status, body, JSON, {"Cache-Control": "no-store", **extra}
         finally:
             self.limits.leave()

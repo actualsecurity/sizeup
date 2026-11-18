@@ -1,0 +1,7 @@
+name: after
+in: query
+required: false
+description: >
+  The `next` of the previous page, opaque: pass it back unchanged. A cursor that is not one of this list's is a 400
+  `bad_cursor`. Rows added meanwhile never move rows already sent (the cursor is a position, not an offset).
+schema: {type: string, maxLength: 200}

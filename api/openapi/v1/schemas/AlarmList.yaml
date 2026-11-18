@@ -1,0 +1,12 @@
+type: object
+description: "The alarms and notices the console shows now, newest first (at most 40, so no further pages: `next` is always null)."
+required: [items, next, server_time, rev]
+properties:
+  items:
+    type: array
+    items:
+      $ref: ./Alarm.yaml
+  next: {type: "null"}
+  server_time: {type: number}
+  rev:
+    $ref: ./Rev.yaml
