@@ -113,7 +113,7 @@ from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALL
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.audiostore import STT_SRC
-from sizeup.cloud import sttinput
+from sizeup.cloud import client as wire, sttinput
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -172,7 +172,7 @@ class StationOffline(RuntimeError):
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
-    return code, json.dumps(obj, separators=(",", ":")).encode(), JSON
+    return code, wire.dumps(obj, default=None), JSON      # strict JSON: a number that isn't finite goes as null
 
 
 def _hhmm(t: float | None) -> str:
@@ -599,7 +599,7 @@ class Hub:
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
                     return _json(413, {"error": "too large"})
-                res = json.loads(raw or b"{}")
+                res = wire.loads(raw or b"{}")
                 if not isinstance(res, dict):
                     return _json(400, {"error": "a JSON object"})
                 return _json(200, {"ok": True}) if self.jobs.finish(m.group(1), res) else \
@@ -638,15 +638,15 @@ class Hub:
         """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
         if raw is None:
             return _json(413, {"error": "too large"})
-        d = json.loads(raw or b"{}")
+        d = wire.loads(raw or b"{}")
         if not isinstance(d, dict):
             raise ValueError("a JSON object")
         claimed = d["status"].get("id") if isinstance(d.get("status"), dict) else None
         sid = self._claim(p, claimed) if p is not None else ""
         now = time.time()
         self.last_state = now
-        if isinstance(d.get("at"), (int, float)):
-            self.skew = now - float(d["at"])
+        if isinstance(d.get("at"), (int, float)) and not isinstance(d["at"], bool) and math.isfinite(d["at"]):
+            self.skew = now - float(d["at"])     # (never NaN: wire.loads reads a bare NaN as None)
         if isinstance(d.get("status"), dict):
             st = dict(d["status"])
             if sid:
@@ -699,7 +699,7 @@ class Hub:
         layer = getattr(self.app, "aircraft", None)
         if layer is None:
             return _json(404, {"error": "no aircraft layer here"})
-        return _json(200, layer.station_ingest(json.loads(raw or b"{}"), size))
+        return _json(200, layer.station_ingest(wire.loads(raw or b"{}"), size))
 
     def _vessels(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our AIS receiver's vessels, forwarded by the station (#402): into the Vessels layer, nothing else."""
@@ -717,7 +717,7 @@ class Hub:
         layer = getattr(self.app, "vessels", None)
         if layer is None:
             return _json(404, {"error": "no vessels layer here"})
-        return _json(200, layer.station_ingest(json.loads(raw or b"{}")))
+        return _json(200, layer.station_ingest(wire.loads(raw or b"{}")))
 
     def _logs(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
         """The station's journal, scrubbed (sizeup/cloud/logship.py): into CloudWatch (sizeup/cloud/cwlogs.py), in the
@@ -751,7 +751,7 @@ class Hub:
                 return _json(413, {"error": "too large"})
         if len(raw or b"") > MAX_STT_JSON:
             return _json(413, {"error": "too large"})
-        d = json.loads(raw or b"{}")
+        d = wire.loads(raw or b"{}")
         if not isinstance(d, dict) or not isinstance(d.get("items"), list):
             raise ValueError("{items: [...]}")
         sid = ""
@@ -798,7 +798,7 @@ class Hub:
         if store is None:
             return _json(404, {"error": "no station metrics here"})
         try:
-            d = json.loads(raw or b"{}")
+            d = wire.loads(raw or b"{}")
         except (ValueError, RecursionError, OverflowError) as e:
             # a batch that isn't one: 400, which the station drops (never sent again and again)
             return _json(400, {"error": f"bad JSON: {type(e).__name__}"})
@@ -844,7 +844,7 @@ class Hub:
             return self._refused_batch(413, "too_large", f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): "
                                                          "send smaller batches", max_bytes=MAX_EVENTS_BODY)
         try:
-            d = json.loads(raw or b"{}")
+            d = wire.loads(raw or b"{}")
         except (ValueError, RecursionError) as e:
             return self._refused_batch(400, "bad_json", f"bad request: not JSON ({type(e).__name__})")
         if not isinstance(d, dict) or not isinstance(d.get("events"), list):

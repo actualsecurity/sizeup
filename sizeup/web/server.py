@@ -909,9 +909,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return None
             return self.rfile.read(n) if 0 <= n <= limit else None
 
-        # HEAD: what GET would answer, without the body. Netskope's browser isolation checks a page
-        # with HEAD before loading it; it got 501 here (ECC workstation, 2026-10-08).
-        do_HEAD = do_GET
+        def do_HEAD(self) -> None:
+            """What GET would answer, without the body. Netskope's browser isolation checks a page with HEAD before
+            loading it; it got 501 here (ECC workstation, 2026-10-08). Not the station API: a GET there does things
+            (the job poll hands each waiting job out once; any route marks the station seen), so a HEAD (a probe, a
+            proxy's health check) gets 405 and no handler runs. Every other GET is a read (the streams stop after
+            their headers on HEAD; /api/v1 counts a HEAD as a read)."""
+            if urlsplit(self.path).path.startswith("/api/station/"):
+                self.close_connection = True
+                return self._send(405, b'{"error":"GET or POST, not HEAD"}', "application/json", {"Allow": "GET, POST"})
+            self.do_GET()
 
         def _other_method(self) -> None:
             """PUT, PATCH, DELETE, OPTIONS: nothing serves them but /api/v1, which answers in its own error shape (a
