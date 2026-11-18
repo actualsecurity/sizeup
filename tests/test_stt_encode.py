@@ -407,24 +407,54 @@ def _q(*entries):
                            _items=[[p, k, None, None, "", 10_000.0 - age, False] for k, (p, age) in enumerate(entries)])
 
 
+def _transcriber(q):
+    """A real Transcriber's behind_live() over the queue `q` (sizeup/stt.py: SttQueue.behind_live on its list)."""
+    from sizeup.stt import SttQueue, Transcriber
+    real = SttQueue(clock=q.clock)
+    real._items = q._items
+    t = Transcriber.__new__(Transcriber)
+    t._q = real
+    return t
+
+
+@pytest.mark.parametrize("how", ["behind_live", "fallback"])
 @pytest.mark.parametrize("entries, behind", [
     ([(LOW, BEHIND_S + 1)], False),                         # a context talkgroup's clip: kept up to 15 min by design
     ([(CONTEXT_FALLBACK, 1000.0), (CONTEXT, 500.0)], False),
     ([(RERUN, 5000.0)], False),
     ([(LIVE, BEHIND_S - 1), (LOW, 800.0)], False),
+    ([(LIVE, BEHIND_S)], False),                            # (more than BEHIND_S: at it, not yet)
     ([(LIVE, BEHIND_S + 1)], True),
     ([(HIGH, BEHIND_S + 1)], True),
     ([(URGENT, BEHIND_S + 5), (LOW, 10.0)], True),
 ])
-def test_whisper_is_behind_only_on_live_traffic(entries, behind):
-    link = SimpleNamespace(app=SimpleNamespace(stt=SimpleNamespace(_q=_q(*entries))))
-    assert StationLink._whisper_behind(link) is behind
+def test_whisper_is_behind_only_on_live_traffic(entries, behind, how):
+    """Transcriber.behind_live() (#715); a whisper without it (an older Transcriber, a stand-in): the same rule from
+    its queue's own list."""
+    q = _q(*entries)
+    stt = _transcriber(q) if how == "behind_live" else SimpleNamespace(_q=q)
+    assert hasattr(stt, "behind_live") is (how == "behind_live")
+    assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=stt))) is behind
+
+
+def test_the_hold_follows_behind_live_and_never_its_queue_behind_its_back():
+    said = [True]
+    stt = SimpleNamespace(behind_live=lambda: said[0], _q=_q((LIVE, 0.0)))   # (its list says otherwise: not read)
+    link = SimpleNamespace(app=SimpleNamespace(stt=stt))
+    assert StationLink._whisper_behind(link) is True
+    said[0] = False
+    assert StationLink._whisper_behind(link) is False
 
 
 def test_whisper_behind_is_never_a_guess_that_holds_anything():
-    for q in (None, SimpleNamespace(clock=lambda: 1.0, _cv=threading.Lock(), _items=[["x"]]),
-              SimpleNamespace(clock=lambda: 1 / 0, _cv=threading.Lock(), _items=[])):
-        assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=SimpleNamespace(_q=q)))) is False
+    def boom():
+        raise RuntimeError("whisper restarting")
+    for stt in (None, SimpleNamespace(behind_live=boom, _q=_q((LIVE, BEHIND_S + 10))),
+                SimpleNamespace(behind_live="not callable", _q=None),
+                SimpleNamespace(_q=None),
+                SimpleNamespace(_q=SimpleNamespace(clock=lambda: 1.0, _cv=threading.Lock(), _items=[["x"]])),
+                SimpleNamespace(_q=SimpleNamespace(clock=lambda: 1 / 0, _cv=threading.Lock(), _items=[]))):
+        assert StationLink._whisper_behind(SimpleNamespace(app=SimpleNamespace(stt=stt))) is False
 
 
 def test_a_live_backlog_holds_normal_and_low_never_pre_or_fire():
@@ -496,6 +526,29 @@ def test_the_station_holds_only_its_normal_and_low_inputs_while_whisper_is_behin
     assert wait(lambda: stt_rows(st, air.id), 30)
     assert st.link.stt_stats()["held"] is False and st.link.stt_stats()["encoder"]
     assert "dropped_fire" in st.link.stt_stats()
+
+
+def test_the_station_holds_its_normal_and_low_inputs_on_its_whispers_behind_live(station, monkeypatch):
+    """End to end on a station: the hold follows Transcriber.behind_live(); PRE and FIRE never wait."""
+    from sizeup import app as app_mod
+    from sizeup.radio.page import Page
+    st = station
+    monkeypatch.setattr(app_mod, "AIRBAND_FIRST", {"HPN ATC"})
+    behind = [True]
+    monkeypatch.setattr(st.stt, "behind_live", lambda: behind[0])
+    page = Page("South2-1790000000400", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
+    a = voice(1.0, seed=7)
+    st.link.stt_input(page, a, PRE)
+    fire = _transmission(st, "FG1-1790000000401", "FG1", voice(1.0, seed=8), True, eng="aws")
+    air = _transmission(st, "HPNATC-1790000000402", "HPN ATC", voice(1.0, seed=9), False, eng="aws")
+    assert wait(lambda: stt_rows(st, page.id) and stt_rows(st, fire.id), 30)   # the page and fire traffic: never held
+    assert wait(lambda: st.link.stt_encoder.holding, 30)
+    assert stt_rows(st, air.id) == [] and st.link.stt_stats()["held"] is True
+    behind[0] = False                                                       # whisper caught up
+    assert wait(lambda: stt_rows(st, air.id), 30)
+    monkeypatch.setattr(st.stt, "behind_live", lambda: 1 / 0)              # a whisper that can't say: never held
+    air2 = _transmission(st, "HPNATC-1790000000403", "HPN ATC", voice(1.0, seed=10), False, eng="aws")
+    assert wait(lambda: stt_rows(st, air2.id), 30)
 
 
 # -- the unit (#709) --------------------------------------------------------------------------------------------------
