@@ -1,0 +1,39 @@
+# The station's speech-to-text input encoder (#677, sizeup/cloud/sttencode.py): the FLAC of each clip's exact whisper
+# input, for the hub, in a cgroup of its own at a low CPU weight. In sizeup-station (Nice=-5, CPUWeight=500) it would
+# compete at the station's weight, above whisper's (100), whatever its niceness. sizeup-station sends it each clip over
+# /run/sizeup-stt-encode/encode.sock; while the socket isn't there the station makes them on its own thread.
+# Same user as sizeup, no privilege. Restarted with sizeup-station (PartOf): both run the same release's code.
+[Unit]
+Description=sizeup station: speech-to-text input encoder (FLAC), below whisper
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+PartOf=sizeup-station.service
+After=sizeup-station.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+WorkingDirectory=/opt/sizeup
+RuntimeDirectory=sizeup-stt-encode
+RuntimeDirectoryMode=0700
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/bin/sh -c 'rel=$$(readlink -f /opt/sizeup/current) && cd "$$rel" && PYTHONPATH="$$rel" exec "$$rel/venv/bin/python" -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock'
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+# Below everything that matters: the radios (500), whisper (100), the updater (20).
+Nice=19
+CPUWeight=10
+IOWeight=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-stt-encode
+
+[Install]
+WantedBy=sizeup-station.service

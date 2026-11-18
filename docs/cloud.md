@@ -250,8 +250,10 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   so never at the station's own weight. A thread (or child) of sizeup-station competes at its `CPUWeight=500`, above
   whisper's 100, whatever its niceness. So by default (`SIZEUP_STT_ENCODER=auto`) the station hands each clip to the
   `sizeup-stt-encode` service (`python -m sizeup.cloud.sttencode --serve /run/sizeup-stt-encode/encode.sock`: same
-  user, no privilege, its own cgroup at `CPUWeight=10`, `Nice=19`; the unit is #709). Where that socket isn't there
-  (the service not installed yet, restarting, macOS, the tests) the station's own thread makes them, as before, and
+  user, no privilege, its own cgroup at `CPUWeight=10`, `Nice=19`: `deploy/station/systemd/sizeup-stt-encode.service`,
+  installed and started by `install-linux.sh`, `PartOf=sizeup-station.service` so both always run the same release,
+  #709). Where that socket isn't there (a station not updated yet, the service restarting, macOS, the tests) the
+  station's own thread makes them, as before, and
   looks for it again every 5 min. The station's status says which (`stt_input.encoder`: `service`, `process` or
   `thread (<why>)`). The bytes are the same either way.
   - The socket is 0600 in a 0700 directory, and each side checks the other's uid (`SO_PEERCRED`; elsewhere the

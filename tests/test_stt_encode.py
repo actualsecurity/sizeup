@@ -444,3 +444,27 @@ def test_the_station_holds_only_its_normal_and_low_inputs_while_whisper_is_behin
     assert wait(lambda: stt_rows(st, air.id), 10)
     assert st.link.stt_stats()["held"] is False and st.link.stt_stats()["encoder"]
     assert "dropped_fire" in st.link.stt_stats()
+
+
+# -- the unit (#709) --------------------------------------------------------------------------------------------------
+
+
+def test_the_encode_service_unit_runs_below_whisper_with_the_station_and_the_installer_runs_it():
+    from pathlib import Path
+    station = Path(__file__).resolve().parent.parent / "deploy" / "station"
+    unit = (station / "systemd" / "sizeup-stt-encode.service").read_text()
+    for want in ("User=sizeup", "Group=sizeup", "CPUWeight=10", "Nice=19", "NoNewPrivileges=yes",
+                 "RuntimeDirectory=sizeup-stt-encode", "RuntimeDirectoryMode=0700", "PartOf=sizeup-station.service",
+                 "After=sizeup-station.service", "WantedBy=sizeup-station.service", "Restart=always",
+                 f"-m sizeup.cloud.sttencode --serve {sttencode.SOCKET}"):
+        assert want in unit, want
+    settings = [ln for ln in unit.splitlines() if ln and not ln.startswith("#")]
+    assert not [ln for ln in settings if ln.startswith(("User=root", "AmbientCapabilities", "CapabilityBoundingSet"))]
+    assert "CPUWeight=100" in (station / "systemd" / "sizeup-whisper.service").read_text()   # (what it stays under)
+    assert sttencode.SOCKET == "/run/sizeup-stt-encode/encode.sock"
+    sh = (station / "install-linux.sh").read_text()
+    assert "sizeup-trunk-recorder.service sizeup-stt-encode.service; do" in sh                # installed
+    assert "systemctl enable --quiet sizeup-stt-encode.service" in sh                          # enabled
+    restart = sh.index("systemctl restart sizeup-stt-encode.service")
+    assert sh.index("systemctl restart sizeup-station.service") < restart                     # after the station
+    assert "/etc/systemd/system/sizeup-stt-encode.service \\" in sh                          # verified
