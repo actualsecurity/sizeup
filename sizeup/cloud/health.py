@@ -169,6 +169,8 @@ CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it be
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
+REFUSED_HINT_S = 600.0           # a part of the station's post left out for its shape (Hub._refused): a hint this long
+LINK_RESTART_HINT_S = 3600.0     # a station link thread that started again: a hint this long (StationLink.restarts)
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
 STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waiting this long is an alert (#195) ...
@@ -680,8 +682,9 @@ class StationHealth:
             return
         hl = status.get("health") if isinstance(status.get("health"), dict) else {}
         heard_tg = hl.get("heard") if isinstance(hl.get("heard"), dict) else {}
-        seen = [(str(r.get("label") or ""), r.get("last_heard")) for r in status.get("radios") or []
-                if isinstance(r, dict) and r.get("label") not in NOT_CHANNELS]
+        radios = status.get("radios") if isinstance(status.get("radios"), list) else []
+        seen = [(str(r.get("label") or ""), r.get("last_heard")) for r in radios
+                if isinstance(r, dict) and str(r.get("label") or "") not in NOT_CHANNELS]
         seen += [(str(k), v.get("at") if isinstance(v, dict) else None) for k, v in heard_tg.items()]
         with self._lock:
             for label, heard in seen:
@@ -702,20 +705,39 @@ class StationHealth:
         return now - (self.hub.skew or 0.0)
 
     def model(self, now: float | None = None) -> dict:
-        """station_health: everything the panel shows, from the station's last report."""
+        """station_health: everything the panel shows, from the station's last report. A report it can't read (a value
+        of a type nothing expects: the hub checks each status as it comes, sizeup/cloud/statusshape.py, so a bug here)
+        never takes Health, the deploy check or the watcher down: the model of no report, marked unreadable and said in
+        the log once per error type."""
         now = self.clock() if now is None else now
-        hub, st = self.hub, self.hub.status or {}
+        st = self.hub.status if isinstance(self.hub.status, dict) else {}
+        try:
+            out = self._model(now, st)
+            self._model_said = None                     # (a later episode is said again)
+            return out
+        except Exception as e:  # noqa: BLE001 - a report: never in the way of the panel or the watcher
+            why = f"{type(e).__name__}"
+            if self.__dict__.get("_model_said") != why:
+                self._model_said = why
+                self.log(f"health: the station's report not read: {why}: {str(e)[:160]}")
+            out = self._model(now, {})
+            out["reported"], out["unreadable"] = False, why
+            out["hints"].append({"channel": "Station", "level": "warn", "text": f"its last report unreadable ({why})"})
+            return out
+
+    def _model(self, now: float, st: dict) -> dict:
+        hub = self.hub
         hl = st.get("health") if isinstance(st.get("health"), dict) else {}
         snow = self._station_now(now)
         last_state = hub.last_state
-        out: dict = {"at": now, "reported": bool(hub.status), "health_reported": bool(hl)}
+        out: dict = {"at": now, "reported": bool(st), "health_reported": bool(hl)}
         out["station"] = {"name": st.get("name") or "", "id": st.get("id") or "", "connected": hub.connected(),
                           "last_seen": hub.last_seen, "last_state": last_state,
                           "silent_s": round(now - last_state, 1) if last_state else None,
                           "skew_s": round(hub.skew, 1), "hub_started": hub.started,
                           "silent": self._silent(now)[0] is True}
         v = st.get("version") if isinstance(st.get("version"), dict) else {}
-        desc = hub.version() or {"state": "unknown", "text": "the station doesn't report its version"}
+        desc = (hub.version() if st else None) or {"state": "unknown", "text": "the station doesn't report its version"}
         upd = v.get("update") if isinstance(v.get("update"), dict) else {}
         out["build"] = {"station": v.get("build") or "", "hub": hub.build, "state": desc["state"], "text": desc["text"],
                         "update": dict({k: upd.get(k) for k in ("state", "since", "to", "from", "paused") if k in upd},
@@ -871,6 +893,21 @@ class StationHealth:
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
+        sr = getattr(hub, "status_refused", None)
+        if isinstance(sr, dict) and now - float(sr.get("at") or 0) < REFUSED_HINT_S:   # (the hub's own clock)
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"status left out since {_hhmm(sr.get('since'))}: {sr.get('why')} · last "
+                                         f"taken {_hhmm(t) if (t := getattr(hub, 'status_at', None)) else 'never'}"})
+        lv = getattr(hub, "live_refused", None)
+        if isinstance(lv, dict) and now - float(lv.get("at") or 0) < REFUSED_HINT_S:
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"talker / page going out left out at {_hhmm(lv.get('at'))}: {lv.get('why')}"})
+        lr = hl.get("link_restarts") if isinstance(hl.get("link_restarts"), dict) else {}
+        again = sorted(f"{str(k)[:40]} {v.get('n')}× ({str(v.get('why') or '?')[:40]}, {_hhmm(v['at'] + hub.skew)})"
+                       for k, v in list(lr.items())[:12] if isinstance(v, dict) and isinstance(v.get("at"), (int, float))
+                       and not isinstance(v.get("at"), bool) and 0 <= snow - v["at"] < LINK_RESTART_HINT_S)
+        if again:                                   # the station link's threads that raised and started again
+            out["hints"].append({"channel": "Station link", "level": "warn", "text": "restarted: " + ", ".join(again)})
         reg = getattr(hub, "stations", None)        # another station refused: the hub takes one until multi-station
         others = reg.others() if reg is not None and hasattr(reg, "others") else {}
         if others:
@@ -1128,11 +1165,13 @@ class StationHealth:
             out["group"] = {"severity": "warning", "title": "Antenna groups dropped",
                                  "text": f"{m['groups_problem']} · every dongle unlocked until saved again", "since": now}
         if not m["shared"]:                              # one dongle per channel: each channel is a job
-            hl_jobs = ((self.hub.status or {}).get("health") or {}).get("jobs") or {}
+            hl_st = self.hub.status.get("health") if isinstance(self.hub.status, dict) else None
+            hl_jobs = hl_st.get("jobs") if isinstance(hl_st, dict) else None
             for c in m["channels"]:
                 j = hl_jobs.get(c["label"]) if isinstance(hl_jobs, dict) else None
-                state = (j or {}).get("state", c["state"])
-                if state in ("down", "absent", "starting") and (j or {}).get("expected", True) and c["mhz"]:
+                j = j if isinstance(j, dict) else {}
+                state = j.get("state", c["state"])
+                if state in ("down", "absent", "starting") and j.get("expected", True) and c["mhz"]:
                     held(f"job:{c['label']}", JOB_GRACE_S, {"severity": "critical", "title": f"{c['label']} not running",
                                                            "text": f"{c['label']}: {state}"
                                                                    + (f" ({c['detail']})" if c["detail"] else "")})
@@ -1433,7 +1472,16 @@ class StationHealth:
         with self._lock:
             m = self.model(now)
             self._log_adsb(m.get("adsb"))
-            conds, judged = self.conditions(m, now)
+            try:
+                conds, judged = self.conditions(m, now)
+                self._conds_said = None
+            except Exception as e:  # noqa: BLE001 - a report it can't judge: judged as none (silent still decided)
+                why = type(e).__name__
+                if self.__dict__.get("_conds_said") != why:
+                    self._conds_said = why
+                    self.log(f"health: the station's report not judged: {why}: {str(e)[:160]}")
+                m = dict(m, reported=False)
+                conds, judged = self.conditions(m, now)
             mutes = self._mutes(now)
             changes: list[tuple[str, dict]] = []
             settled = False

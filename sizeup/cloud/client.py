@@ -77,10 +77,12 @@ REJECTED = frozenset({400, 413, 422})
 
 
 class HubError(RuntimeError):
-    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None, body: dict | None = None):
+    def __init__(self, msg: str, status: int = 0, retry_after: float | None = None, reason: str = "",
+                 body: dict | None = None):
         super().__init__(msg)
         self.status = status       # 0 = never reached the hub (network, TLS, timeout)
         self.retry_after = retry_after   # the hub's Retry-After (a deploy's handoff: 503 + 2 s), seconds
+        self.reason = reason       # the hub's word for a refusal ({error, reason}: "id_mismatch", ...), "" none
         self.body = body           # the hub's JSON answer, when it sent one ({error, reason, ...})
 
 
@@ -215,9 +217,10 @@ class HubClient:
                 if (r.status == 401 and reason) or (r.status == 409 and reason == "multi_station_off"):
                     # the hub refused this station's token (sizeup/cloud/stations.py): what and what to do, never the token
                     raise HubError(f"hub refused this station ({reason}): {msg}"
-                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status)
+                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status,
+                                   reason=reason)
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
-                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")),
+                raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")), reason,
                                doc if isinstance(doc, dict) else None)
             try:
                 return loads(raw or b"{}")

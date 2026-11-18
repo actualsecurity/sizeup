@@ -506,6 +506,18 @@ class Feed:
             self.matcher = Matcher.of(self.cfg)
             self._for = L
 
+    def shows(self, row: dict) -> bool:
+        """Whether state()'s rows() may hold this transmission ({talkgroup, channel, system}): the same test as its query.
+        Anything it can't tell: yes (Comms.record then rebuilds the console's state, as for any write)."""
+        try:
+            self._refresh()
+            tg = row.get("talkgroup")
+            if tg is None:
+                return str(row.get("channel") or "") in self.paging
+            return int(tg) in {int(x) for x in self.cfg.talkgroups} and str(row.get("system") or "") in ("", COUNTY)
+        except Exception:  # noqa: BLE001
+            return True
+
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:
         """The newest transmissions on the feed's talkgroups, newest first, each with pc (why it is
         talking to us, '' if not), has_audio and the events it is linked to."""

@@ -74,6 +74,7 @@ from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
                               pl_text, speech_seconds, voice_floor_db)
+from sizeup.radio.fm import SegmentWorkers
 from sizeup.radio.fm import _mmss as fm_mmss
 from sizeup.radio import fm as fm_mod
 from sizeup.radio.am import AmReceiver
@@ -121,6 +122,7 @@ MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pend
                    "OR EXISTS (SELECT 1 FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = i.id "
                    "AND u.kind = 'marine' AND a.cleared_at IS NULL AND UPPER(u.name) NOT LIKE 'DPT%')) LIMIT 1")
 HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
+STATION_SWITCH_S = 0.001    # ... and a station's: its radio readers (start_app())
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -658,10 +660,14 @@ class App:
         self.paging = LivePaging(self.plan, set(cfg.ours) | set(cfg.cad_monitor_departments),
                                  hold_s=max(HOLD_S, max(cont, default=0.0) + 1.0))
         self.paging_state: Callable[[], list[dict]] = self.paging.state    # the hub: the station's (cloud/hub.py)
-        self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc(a), log=log)
+        self.tap = LiveTap(lambda label: self._kind.get(label, ""), self.paging, self.live, mdc=lambda a: self._mdc_at(a),
+                           log=log)
         self.tap.on_emergency = self._fm_emergency      # the emergency button at the key-up (#128)
+        # each channel's finished transmissions, off its reader (radio/fm.py SegmentWorkers): one per channel, kept for
+        # every receiver made of it (a dongle move), so they are handled in order and never two at once
+        self._seg_workers: dict[str, SegmentWorkers] = {}
         for r in self.receivers:
-            self.tap.attach(r)
+            self._wire_receiver(r)
         self.cad.paging = lambda: self.paging_state()
         self.cad.has_clip = self.has_clip
         # A page that isn't ours naming our units is flagged (#115's safety net): the feed's unit matcher, for the
@@ -1310,23 +1316,29 @@ class App:
         emergency button (#128); MDC's emergency acknowledge (the console's answer) is not."""
         out: list[tuple[str, bool]] = []
         for b in audios:
-            found: list[tuple[str, bool]] = []
-            try:
-                found += [(p.unit_hex, p.kind == "emergency") for p in mdc_decode(b, RATE)
-                          if p.kind in ("pre-id", "post-id", "emergency")]
-            except Exception:
-                pass
-            try:            # a long transmission: its first and last 3 s (where a radio sends its ID)
-                edge = 3 * RATE
-                for part in ([b] if len(b) <= 2 * edge else [b[:edge], b[-edge:]]):
-                    found += [(p.id, p.emergency) for p in fleetsync.decode(part, RATE)
-                              if p.kind in ("pre-id", "post-id", "emergency")]
-            except Exception:
-                pass
-            for x in found:
-                if x not in out:
-                    out.append(x)
+            for h, e, _at in self._mdc_at(b):
+                if (h, e) not in out:
+                    out.append((h, e))
         return out
+
+    @staticmethod
+    def _mdc_at(b: np.ndarray) -> list[tuple[str, bool, float]]:
+        """_mdc for one piece of audio, each ID with where its packet's sync begins (s into b): the live tap places an
+        ID in its look-back or its buffer by it (radio/tap.py, #706). MDC-1200's first, then FleetSync's."""
+        found: list[tuple[str, bool, float]] = []
+        try:
+            found += [(p.unit_hex, p.kind == "emergency", p.start_s) for p in mdc_decode(b, RATE)
+                      if p.kind in ("pre-id", "post-id", "emergency")]
+        except Exception:
+            pass
+        try:            # a long transmission: its first and last 3 s (where a radio sends its ID)
+            edge = 3 * RATE
+            for at, part in ([(0, b)] if len(b) <= 2 * edge else [(0, b[:edge]), (len(b) - edge, b[-edge:])]):
+                found += [(p.id, p.emergency, at / RATE + p.start_s - len(fleetsync.SYNC) / p.baud)
+                          for p in fleetsync.decode(part, RATE) if p.kind in ("pre-id", "post-id", "emergency")]
+        except Exception:
+            pass
+        return found
 
     def _units(self, seg: Segment, found: list[tuple[str, bool]] | None = None) -> list[str]:
         """Who keyed up: MDC-1200 PTT-IDs in the bursts cut from the transmission's ends, and anywhere
@@ -1551,7 +1563,9 @@ class App:
 
         def busy(label: str) -> bool:
             r = self._receiver(label)
-            return r is not None and r.squelch.open and r.squelch.continuing
+            # (a continuation that has closed but is still waiting for its worker, radio/fm.py SegmentWorkers: the page
+            # isn't finished until it has been added to it)
+            return r is not None and ((r.squelch.open and r.squelch.continuing) or r.pending(label))
         for page in self.pagehold.due(time.time() if now is None else now, busy):
             self._page_done(page)
 
@@ -4946,10 +4960,18 @@ class App:
         r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         r.on_stall = lambda r=r: self._on_stall(r)        # (#703) a dongle that opens but streams no audio
         r.on_audio = lambda r=r: self._on_audio(r)
-        self.tap.attach(r)
+        self._wire_receiver(r)
         self.receivers[self.receivers.index(old)] = r
         self._apply_squelch()
         return r
+
+    def _wire_receiver(self, r: NfmReceiver) -> None:
+        """The live tap on a receiver, and its channel's workers (the same for the receiver it replaces)."""
+        self.tap.attach(r)
+        label = r.channel.label
+        if label not in self._seg_workers:
+            self._seg_workers[label] = SegmentWorkers(label, lambda ch, seg: self._segment(ch, seg), log)
+        r.workers = self._seg_workers[label]
 
     def _running(self, r) -> bool:
         """A receiver with its program up on a dongle (its job assigned, when the dongles are switchable)."""
@@ -5631,6 +5653,16 @@ class App:
         self.cad.preplan_docs.stop()
         for r in self.receivers:
             r.stop()
+        # what each squelch held at the stop and every transmission still waiting for its worker (radio/fm.py
+        # SegmentWorkers), handled before the pages still held are finalised: 10 s for them all at most
+        drain_until = time.monotonic() + 10.0
+        for r in self.receivers:
+            if not r.drain(max(0.0, drain_until - time.monotonic())):
+                log(f"{r.channel.label}: stopped with transmissions still being handled")
+        for label, w in self._seg_workers.items():   # (a receiver replaced at a dongle move: its queue is in these)
+            if not w.drain(max(0.0, drain_until - time.monotonic())):
+                log(f"{label}: stopped with transmissions still being handled")
+            w.close()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are
             try:
                 self._page_done(page)
@@ -5818,6 +5850,11 @@ def start_app(cfg: Config, fence=None) -> App:
         # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
         # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
         sys.setswitchinterval(HUB_SWITCH_S)
+    else:
+        # A station's (and all-in-one's) receivers: each reads its rtl_fm pipe every 50 ms, and at Python's default 5 ms
+        # a frame waited behind any busy thread (a transmission's worker, whisper's queue, the hub link): 8 ms late at
+        # the median, 47 ms at p99 with one busy thread on a fast PC; under 1 ms at 1 ms
+        sys.setswitchinterval(STATION_SWITCH_S)
     app = make_app(cfg, fence)
     if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
         from sizeup import errwatch

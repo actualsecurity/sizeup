@@ -108,6 +108,12 @@ receiver -> squelch -> transmission (clip) -> decoders -> speech-to-text -> radi
 | ADS-B (1090 MHz) | readsb on the one dongle named for it | `aircraft.json` every second | `radio/adsbd.py`, `cloud/aircraftlink.py` |
 | AIS (marine VHF) | AIS-catcher on the one dongle named for it. Off until the hardware is installed | Each vessel's latest messages | `radio/aisd.py`, `cloud/vessellink.py` |
 
+**Threads (analog FM and airband).** Each receiver's own thread reads its `rtl_fm` pipe (about 2 s of audio) and feeds
+the squelch and the live tap only: the talker and the emergency alarm at the key-up, a page going out. A finished
+transmission goes to its channel's worker (`radio/fm.py` `SegmentWorkers`: one thread per channel, in order, bounded,
+flushed at a stop), which runs `App._segment` (the whole clip's ID decode, the clip, speech-to-text's queue) and, on
+airband, the AGC and tone notch. A station switches threads every 1 ms (`sys.setswitchinterval`), like the hub.
+
 Talkgroup tiers for P25 systems other than the county's (`sizeup/tiers.py`): `alert` (record, transcribe, may raise a
 pre-alert), `text` (record and transcribe), `record` (audio only), `off`, and `activity` (encrypted: never recorded,
 only that it keyed). The default comes from the system's `talkgroups.csv`; Settings changes it per talkgroup.

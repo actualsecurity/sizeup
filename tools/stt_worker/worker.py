@@ -17,7 +17,9 @@ tools/stt_worker/README.md."""
 from __future__ import annotations
 
 import argparse
+import ctypes
 import dataclasses
+import hashlib
 import http.client
 import io
 import json
@@ -25,6 +27,7 @@ import logging
 import logging.handlers
 import os
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -96,6 +99,18 @@ class Config:
     busy_grace_s: float = 3.0              # GPU load this soon after our own inference is still ours
     tick_s: float = 0.5
     log_file: str = ""                     # default <state_dir>/worker.log; "-" = stderr only
+    # the local LLM (the hub's infer lane): llama.cpp's llama-server on this PC; llm_url "" = none
+    llm_url: str = ""                      # e.g. http://127.0.0.1:8180 (loopback only)
+    llm_server: list = dataclasses.field(default_factory=list)  # argv: the worker starts and restarts it
+    llm_process: str = "llama-server"      # its process name, so its GPU use isn't taken for a game
+    llm_model: str = ""                    # the label the hub shows, e.g. qwen2.5-7b-instruct-q4_k_m
+    llm_model_sha256: str = ""             # the GGUF's SHA-256: checked before llama-server first starts (pinned)
+    llm_stop_gaming_s: float = -1.0        # gaming this long: llama-server stopped (its VRAM back to the game); below 0
+                                           # (default): 60 s for a model up to 6 GB, 20 s for a bigger one
+    llm_timeout_s: float = 30.0
+    llm_check_s: float = 10.0
+    llm_fail_max: int = 3                  # failed generations in a row: no LLM until its health check passes again
+    llm_no_think: bool = True              # chat_template_kwargs enable_thinking false (Qwen3; others ignore it)
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
 
     @property
@@ -220,11 +235,94 @@ def validate(cfg: Config) -> None:
     w = urlsplit(cfg.whisper_url)
     if w.scheme != "http" or w.hostname not in LOOPBACK:
         raise ConfigError("whisper_url: whisper-server on this PC only, e.g. http://127.0.0.1:8179/inference")
-    argv = [str(a) for a in cfg.whisper_server]
+    if _bad_host(cfg.whisper_server):
+        # whisper-server answers any web page (CORS *): on the network, any site could use the GPU
+        raise ConfigError("whisper_server: --host must be 127.0.0.1 (whisper-server must not listen on the network)")
+    if cfg.llm_url or cfg.llm_server:
+        u = urlsplit(cfg.llm_url)
+        if u.scheme != "http" or u.hostname not in LOOPBACK or not u.port:
+            raise ConfigError("llm_url: llama-server on this PC only, e.g. http://127.0.0.1:8180")
+        if not cfg.llm_model:
+            raise ConfigError("llm_model: the model's label for the hub, e.g. qwen2.5-7b-instruct-q4_k_m")
+        if cfg.llm_model_sha256 and not re.fullmatch(r"[0-9A-Fa-f]{64}", cfg.llm_model_sha256):
+            raise ConfigError("llm_model_sha256: the GGUF's SHA-256, 64 hex digits")
+        if cfg.llm_server:
+            check_llm_argv(cfg.llm_server)
+            if not cfg.llm_model_sha256:
+                raise ConfigError("llm_model_sha256: required with llm_server (the GGUF's pinned SHA-256, README step 4b)")
+            port = _arg(cfg.llm_server, ("--port",))
+            if str(port or "8080") != str(u.port):
+                raise ConfigError(f"llm_server: --port {port or '8080 (its default)'} isn't llm_url's port {u.port}")
+
+
+# llama-server's options the worker lets through (name: takes a value), and nothing else: no verbose logs or a prompts
+# directory (prompts), no slots endpoint, slot saving, tools, agents or MCP, no CORS origins, no API key on a command
+# line (the worker sets its own), no model but one local, pinned GGUF (no -hf / URL, no draft model, LoRA or mmproj)
+LLM_ARGS = {"-m": True, "--model": True, "--host": True, "--port": True, "-c": True, "--ctx-size": True,
+            "-ngl": True, "--gpu-layers": True, "--n-gpu-layers": True, "-np": True, "--parallel": True,
+            "--jinja": False, "--no-webui": False, "--no-ui": False, "--no-slots": False, "--reasoning": True,
+            "-rea": True, "-t": True, "--threads": True, "-fa": True, "--flash-attn": True, "-b": True,
+            "--batch-size": True, "-ub": True, "--ubatch-size": True, "--no-mmap": False, "-ctk": True,
+            "--cache-type-k": True, "-ctv": True, "--cache-type-v": True}
+
+
+def check_llm_argv(argv: list) -> None:
+    """llm_server: a program, then only LLM_ARGS (as "-x v" or "--x=v"), exactly one -m, --host loopback only.
+    ConfigError otherwise."""
+    argv = [str(a) for a in argv]
+    if not argv:
+        raise ConfigError("llm_server: llama-server's command line")
+    models, i = 0, 1
+    while i < len(argv):
+        name, eq, _value = argv[i].partition("=")
+        if name not in LLM_ARGS:
+            raise ConfigError(f"llm_server: {argv[i][:40]} not allowed (allowed: {', '.join(sorted(LLM_ARGS))})")
+        if LLM_ARGS[name] and not eq:
+            if i + 1 >= len(argv):
+                raise ConfigError(f"llm_server: {name} needs a value")
+            i += 1
+        elif eq and not LLM_ARGS[name]:
+            raise ConfigError(f"llm_server: {name} takes no value")
+        models += name in ("-m", "--model")
+        i += 1
+    if models != 1:
+        raise ConfigError("llm_server: exactly one -m <the GGUF file>")
+    if _bad_host(argv):
+        raise ConfigError("llm_server: --host must be 127.0.0.1 (llama-server must not listen on the network)")
+
+
+def llm_command(argv: list) -> list:
+    """llm_server as the worker runs it: --host 127.0.0.1 when it names none, and always --no-slots and --no-webui."""
+    argv = [str(a) for a in argv]
+    names = {a.partition("=")[0] for a in argv[1:]}
+    if "--host" not in names:
+        argv += ["--host", "127.0.0.1"]
+    for flag in ("--no-slots", "--no-webui"):
+        if flag not in names:
+            argv.append(flag)
+    return argv
+
+
+def _arg(argv: list, names: tuple) -> str | None:
+    """An option's value in an argv ("--port 8180" or "--port=8180"), None when it isn't there."""
+    argv = [str(a) for a in argv]
     for i, a in enumerate(argv):
-        if a == "--host" and (i + 1 >= len(argv) or argv[i + 1] not in LOOPBACK):
-            # whisper-server answers any web page (CORS *): on the network, any site could use the GPU
-            raise ConfigError("whisper_server: --host must be 127.0.0.1 (whisper-server must not listen on the network)")
+        name, eq, value = a.partition("=")
+        if name in names:
+            return value if eq else (argv[i + 1] if i + 1 < len(argv) else "")
+    return None
+
+
+def _bad_host(argv: list) -> bool:
+    """--host (or --host=...) with anything but loopback: a server that would listen on the network."""
+    argv = [str(a) for a in argv]
+    for i, a in enumerate(argv):
+        name, eq, value = a.partition("=")
+        if name == "--host":
+            value = value if eq else (argv[i + 1] if i + 1 < len(argv) else "")
+            if any(h.strip() not in LOOPBACK for h in value.split(",")):
+                return True
+    return False
 
 
 class Redact(logging.Filter):
@@ -298,6 +396,16 @@ def write_json(path: Path, doc: dict) -> None:
             if attempt == 19:
                 raise
             time.sleep(0.05)
+
+
+def write_secret(path: Path, text: str) -> None:
+    """A file only this user may read (0600; on Windows the user's own %LOCALAPPDATA% folder's ACL)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 class Control:
@@ -655,21 +763,156 @@ def result_body(out: dict, model: str, fetch_ms: int, infer_ms: int) -> dict:
             "timing": {"fetch_ms": int(fetch_ms), "infer_ms": int(infer_ms)}}
 
 
+class _BasicLimits(ctypes.Structure):
+    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32), ("SchedulingClass", ctypes.c_uint32)]
+
+
+class _ExtendedLimits(ctypes.Structure):     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes on 64-bit Windows)
+    _fields_ = [("BasicLimitInformation", _BasicLimits), ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+class KillOnClose:
+    """Windows: a job object with KILL_ON_JOB_CLOSE that the worker's children join, so when the worker ends, however
+    it ends (`schtasks /End`, a crash), Windows ends whisper-server and llama-server with it: no orphan holding the GPU
+    (and llama-server's ~6 GB) with a key nobody knows. Elsewhere, or when Windows refuses: nothing (best effort; the
+    pid file and reap_leftovers() cover a leftover at the next start)."""
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JobObjectExtendedLimitInformation = 9
+
+    def __init__(self):
+        self.handle = None
+        if os.name != "nt":
+            return
+        try:
+            k32 = ctypes.windll.kernel32
+            k32.CreateJobObjectW.restype = ctypes.c_void_p
+            h = k32.CreateJobObjectW(None, None)
+            info = _ExtendedLimits()
+            info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if h and k32.SetInformationJobObject(ctypes.c_void_p(h), self.JobObjectExtendedLimitInformation,
+                                                 ctypes.byref(info), ctypes.sizeof(info)):
+                self.handle = h
+            else:
+                log.info("children: no kill-on-close job object (Windows said no)")
+        except (OSError, AttributeError, ValueError) as e:
+            log.info("children: no kill-on-close job object (%s)", type(e).__name__)
+
+    def add(self, proc) -> bool:
+        handle = getattr(proc, "_handle", None)
+        if self.handle is None or handle is None:
+            return False
+        try:
+            return bool(ctypes.windll.kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle),
+                                                                        ctypes.c_void_p(int(handle))))
+        except (OSError, AttributeError, ValueError):
+            return False
+
+
+def process_name(pid: int, run: Callable[[list], str] = None) -> str:
+    """The program name of a live pid ("llama-server"), "" when there is none (best effort)."""
+    run = run or run_cmd
+    try:
+        if os.name == "nt":
+            out = run(["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"])
+            row = out.strip().splitlines()[0].strip().strip('"').split('","') if out.strip() else []
+            return row[0].removesuffix(".exe") if len(row) > 1 and row[1] == str(pid) else ""
+        return Path(run(["ps", "-p", str(int(pid)), "-o", "comm="]).strip()).name
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return ""
+
+
+def kill_pid(pid: int, run: Callable[[list], str] = None) -> None:
+    run = run or run_cmd
+    try:
+        if os.name == "nt":
+            run(["taskkill", "/PID", str(int(pid)), "/T", "/F"])
+        else:
+            os.kill(int(pid), signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+
+def port_owner(port: int, run: Callable[[list], str] = None) -> int:
+    """The pid listening on 127.0.0.1:port (netstat -ano on Windows, lsof elsewhere), 0 when it can't be told."""
+    run = run or run_cmd
+    try:
+        if os.name == "nt":
+            for line in run(["netstat", "-ano", "-p", "TCP"]).splitlines():
+                cols = line.split()
+                if len(cols) >= 5 and cols[0] == "TCP" and cols[3] == "LISTENING" \
+                        and cols[1].rsplit(":", 1)[-1] == str(int(port)) and cols[4].isdigit():
+                    return int(cols[4])
+            return 0
+        out = run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"]).split()
+        return int(out[0]) if out and out[0].isdigit() else 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+
+
+class Children:
+    """state_dir/children.json: {name: pid} of the servers this worker started, so the next start can end one a
+    worker that died left running (reap_leftovers): only a pid that is still that program."""
+
+    def __init__(self, path: Path, run: Callable[[list], str] | None = None):
+        self.path, self.run = path, run
+        self._lock = threading.Lock()
+
+    def set(self, name: str, pid: int | None) -> None:
+        with self._lock:
+            doc = read_json(self.path)
+            if pid:
+                doc[name] = int(pid)
+            else:
+                doc.pop(name, None)
+            try:
+                write_json(self.path, doc)
+            except OSError as e:
+                log.debug("children file: %s", e)
+
+    def reap_leftovers(self, names: dict) -> list[int]:
+        """names: {name in the file: its program name}. The pids still alive as that program: ended. Which."""
+        ended = []
+        for name, pid in read_json(self.path).items():
+            prog = names.get(name)
+            if prog and isinstance(pid, int) and pid > 0:
+                found = process_name(pid, self.run)
+                if found and found.lower().removesuffix(".exe") == prog.lower().removesuffix(".exe"):
+                    log.warning("%s (pid %s) was left running by a worker that ended: stopping it", name, pid)
+                    kill_pid(pid, self.run)
+                    ended.append(pid)
+            self.set(name, None)
+        return ended
+
+
 class WhisperProcess:
     """whisper-server started (and restarted) by the worker, when `whisper_server` is set: one Task Scheduler task,
     no console window, its pid known for the GPU check, its output in whisper-server.log (rotated), and none of the
     worker's secrets in its environment. When something already answers on the port, it is used and nothing is
-    started. A relative program path is from the config file's folder, which is also its working directory."""
+    started. A relative program path is from the config file's folder, which is also its working directory. The same
+    for llama-server (name "llama-server", llama-server.log, its own environment: llm_env)."""
 
     def __init__(self, argv: list, log_path: Path, popen: Callable = subprocess.Popen, clock: Callable = time.monotonic,
-                 base_dir: str = ""):
+                 base_dir: str = "", name: str = "whisper-server", env: Callable[[], dict] | None = None,
+                 job: KillOnClose | None = None, children: Children | None = None,
+                 command: Callable[[list], list] | None = None):
+        """name: the server's (its log lines, its logger); env(): its environment at each start (default child_env);
+        job: the kill-on-close job object it joins; children: where its pid is kept for the next start; command:
+        what the argv becomes (llama-server's: llm_command)."""
         self.argv, self.log_path, self.popen, self.clock, self.base_dir = argv, log_path, popen, clock, base_dir
+        self.name, self.env, self.job, self.children = name, env or child_env, job, children
+        self._command = command or (lambda a: a)
         self.proc = None
         self.started = -1e9
         self._out: logging.Logger | None = None
 
     def command(self) -> list[str]:
-        argv = [os.path.expandvars(str(a)) for a in self.argv]
+        argv = [os.path.expandvars(str(a)) for a in self._command(list(self.argv))]
         if argv and self.base_dir and not Path(argv[0]).is_absolute() and (Path(self.base_dir) / argv[0]).exists():
             argv[0] = str(Path(self.base_dir) / argv[0])
         return argv
@@ -684,7 +927,7 @@ class WhisperProcess:
     def _logger(self) -> logging.Logger:
         if self._out is None:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            out = logging.getLogger("sizeup.stt_worker.whisper_server")
+            out = logging.getLogger("sizeup.stt_worker." + self.name.replace("-", "_"))
             out.propagate = False
             out.setLevel(logging.INFO)
             h = logging.handlers.RotatingFileHandler(self.log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
@@ -705,19 +948,24 @@ class WhisperProcess:
         if self.running() or port_alive or self.clock() - self.started < 10:
             return
         if self.proc is not None:
-            log.warning("whisper-server exited (%s): starting it again", self.proc.poll())
+            log.warning("%s exited (%s): starting it again", self.name, self.proc.poll())
         self.started = self.clock()
         try:
             self.proc = self.popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, env=child_env(), cwd=self.base_dir or None,
+                                   stdin=subprocess.DEVNULL, env=self.env(), cwd=self.base_dir or None,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            log.info("started whisper-server (pid %s)", self.proc.pid)
+            log.info("started %s (pid %s)", self.name, self.proc.pid)
+            if self.job is not None and not self.job.add(self.proc) and self.job.handle is not None:
+                log.warning("%s (pid %s) couldn't join the kill-on-close job: it may outlive the worker (the next "
+                            "start ends it)", self.name, self.proc.pid)
+            if self.children is not None:
+                self.children.set(self.name, self.proc.pid)
         except OSError as e:
             self.proc = None
-            log.error("can't start whisper-server: %s", e)
+            log.error("can't start %s: %s", self.name, e)
             return
         if getattr(self.proc, "stdout", None) is not None:
-            threading.Thread(target=self._pump, args=(self.proc.stdout,), name="whisper-server-log", daemon=True).start()
+            threading.Thread(target=self._pump, args=(self.proc.stdout,), name=f"{self.name}-log", daemon=True).start()
 
     def stop(self) -> None:
         if self.running():
@@ -726,6 +974,191 @@ class WhisperProcess:
                 self.proc.wait(5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        if self.children is not None and self.proc is not None:
+            self.children.set(self.name, None)
+
+
+# --- llama-server: the local LLM (the hub's infer lane) ------------------------------------------------------------
+
+class LlmError(Exception):
+    pass
+
+
+def llm_env(key: str) -> dict:
+    """llama-server's environment: the worker's secrets out, every LLAMA_* setting out (one could make it listen on the
+    network, log prompts or open its slots endpoint), and its API key in: a random one per start, so no web page on this
+    PC can use it (llama-server answers any origin) and it never shows on a command line."""
+    env = {k: v for k, v in child_env().items() if not k.upper().startswith("LLAMA_")}
+    env["LLAMA_API_KEY"] = key
+    return env
+
+
+class LlmCall:
+    """One chat completion on its own connection, which another thread can abort(): llama-server stops generating when
+    the client goes away (a pre-alert clip came, gaming, the deadline)."""
+
+    def __init__(self, llm: "Llm", body: bytes, timeout: float):
+        self.llm, self.body = llm, body
+        self.conn = http.client.HTTPConnection(llm.host, llm.port, timeout=timeout)
+        self.aborted = False
+
+    def run(self) -> tuple[dict | None, int, int]:
+        """(the answer as a JSON object or None when it isn't one, prompt tokens, completion tokens). LlmError."""
+        try:
+            if self.aborted:
+                raise OSError("aborted")
+            self.conn.request("POST", "/v1/chat/completions", body=self.body, headers=self.llm.headers())
+            r = self.conn.getresponse()
+            data = r.read()
+        except (OSError, http.client.HTTPException) as e:
+            if self.aborted:
+                raise LlmError("aborted") from None
+            raise LlmError(f"llama-server unreachable ({type(e).__name__})") from None
+        finally:
+            self.conn.close()
+        if r.status != 200:
+            raise LlmError(f"llama-server said {r.status}")
+        try:
+            doc = json.loads(data)
+            content = doc["choices"][0]["message"]["content"]
+            usage = doc.get("usage") or {}
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise LlmError("llama-server sent something that isn't a chat completion") from None
+        text = re.sub(r"^\s*<think>.*?</think>", "", str(content or ""), flags=re.S).strip()
+        try:
+            out = json.loads(text)
+        except ValueError:
+            out = None
+        return (out if isinstance(out, dict) else None, int(_num(usage.get("prompt_tokens")) or 0),
+                int(_num(usage.get("completion_tokens")) or 0))
+
+    def abort(self) -> None:
+        self.aborted = True
+        sock = self.conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+
+
+class Llm:
+    """llama.cpp's llama-server, OpenAI-compatible: /v1/chat/completions with response_format json_schema (its
+    grammar constrains the output to the schema), temperature 0, one answer. key: the API key it was started with."""
+
+    def __init__(self, url: str, timeout_s: float = 30.0, no_think: bool = True):
+        self.url, self.timeout_s, self.no_think = url, timeout_s, no_think
+        u = urlsplit(url)
+        self.host, self.port = u.hostname or "127.0.0.1", u.port or 80
+        self.key = ""
+
+    def headers(self) -> dict:
+        return {"Content-Type": "application/json", **({"Authorization": f"Bearer {self.key}"} if self.key else {})}
+
+    def call(self, messages: list, schema: dict, max_tokens: int = 256, name: str = "answer",
+             timeout: float | None = None) -> LlmCall:
+        body = {"messages": messages, "max_tokens": int(max_tokens), "temperature": 0, "stream": False,
+                "cache_prompt": True,
+                "response_format": {"type": "json_schema",
+                                    "json_schema": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", name)[:64] or "answer",
+                                                    "strict": True, "schema": schema}}}
+        if self.no_think:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        return LlmCall(self, json.dumps(body).encode(), timeout or self.timeout_s)
+
+    def status(self) -> int:
+        """GET /v1/models with the key: 200 once the model is loaded, 503 while loading, 401 when the llama-server on
+        the port isn't the one started with this key (a leftover); 0 when nothing answers. A short timeout: it never
+        holds the checks that run around it for long."""
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=2)
+        try:
+            conn.request("GET", "/v1/models", headers=self.headers())
+            r = conn.getresponse()
+            r.read()
+            return r.status
+        except (OSError, http.client.HTTPException):
+            return 0
+        finally:
+            conn.close()
+
+    def health(self) -> bool:
+        return self.status() == 200
+
+    def alive(self) -> bool:
+        try:
+            socket.create_connection((self.host, self.port), timeout=1).close()
+            return True
+        except OSError:
+            return False
+
+    def check(self) -> tuple[dict | None, int, int]:
+        """A tiny constrained answer (no GPU time to speak of): LlmError if it fails."""
+        return self.call([{"role": "user", "content": 'Reply with {"ok": true}.'}],
+                         {"type": "object", "required": ["ok"], "additionalProperties": False,
+                          "properties": {"ok": {"type": "boolean"}}}, 16, "check",
+                         timeout=max(self.timeout_s, 60.0)).run()
+
+
+def schema_valid(v, schema: dict) -> bool:
+    """v against the JSON schema subset the hub uses (sizeup/cloud/infer.py valid(): the hub checks again)."""
+    if not isinstance(schema, dict):
+        return False
+    t = schema.get("type")
+    kinds = {"null": lambda x: x is None, "boolean": lambda x: isinstance(x, bool),
+             "integer": lambda x: isinstance(x, int) and not isinstance(x, bool),
+             "number": lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and x == x
+             and abs(x) != float("inf"),
+             "string": lambda x: isinstance(x, str), "object": lambda x: isinstance(x, dict),
+             "array": lambda x: isinstance(x, list)}
+    if t is not None and not any(kinds.get(k, lambda x: False)(v) for k in ([t] if isinstance(t, str) else t)):
+        return False
+    if "enum" in schema and not any(v == e and isinstance(v, bool) == isinstance(e, bool) for e in schema["enum"]):
+        return False
+    if "const" in schema and v != schema["const"]:
+        return False
+    if "anyOf" in schema and not any(schema_valid(v, s) for s in schema["anyOf"]):
+        return False
+    if isinstance(v, dict):
+        props = schema.get("properties") or {}
+        if any(k not in v for k in schema.get("required") or ()):
+            return False
+        if schema.get("additionalProperties", True) is False and set(v) - set(props):
+            return False
+        if not all(schema_valid(v[k], s) for k, s in props.items() if k in v):
+            return False
+    if isinstance(v, list):
+        if not schema.get("minItems", 0) <= len(v) <= schema.get("maxItems", len(v)):
+            return False
+        if "items" in schema and not all(schema_valid(x, schema["items"]) for x in v):
+            return False
+    if isinstance(v, str) and not schema.get("minLength", 0) <= len(v) <= schema.get("maxLength", len(v)):
+        return False
+    if kinds["number"](v):
+        if not schema.get("minimum", v) <= v <= schema.get("maximum", v):
+            return False
+        if v <= schema.get("exclusiveMinimum", v - 1) or v >= schema.get("exclusiveMaximum", v + 1):
+            return False
+    return True
+
+
+def file_sha256(path: Path, cache: Path) -> str:
+    """A big file's SHA-256, remembered in `cache` by its path, size and mtime (a 5 GB GGUF takes a while to hash):
+    the next start checks it again only when the file changed."""
+    st = path.stat()
+    key = {"path": str(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    doc = read_json(cache)
+    if {k: doc.get(k) for k in key} == key and isinstance(doc.get("sha256"), str):
+        return doc["sha256"]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    write_json(cache, dict(key, sha256=h.hexdigest()))
+    return h.hexdigest()
 
 
 # --- the GPU: gaming detection -------------------------------------------------------------------------------------
@@ -890,6 +1323,32 @@ class Worker:
         self.gpu = GpuMonitor(cfg, run, clock, busy=self._busy, ours=self._our_pids, fullscreen=fullscreen)
         self.hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
         self.hb_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
+        # the local LLM (the hub's infer lane), when llm_url is set: its own thread, hub connection and counts
+        self.llm = Llm(cfg.llm_url, cfg.llm_timeout_s, cfg.llm_no_think) if cfg.llm_url else None
+        self.kill_job = KillOnClose()           # (self.job is the clip in hand: not this)
+        self.children = Children(Path(cfg.state_dir) / "children.json", run)
+        if self.proc is not None:
+            self.proc.job, self.proc.children = self.kill_job, self.children
+        self.llm_proc = WhisperProcess(cfg.llm_server, Path(cfg.state_dir) / "llama-server.log", popen, clock,
+                                       cfg.base_dir, name="llama-server", env=self._llm_start_env, job=self.kill_job,
+                                       children=self.children, command=llm_command) \
+            if self.llm is not None and cfg.llm_server else None
+        self._llm_sig: tuple | None = None   # the checked GGUF's (size, mtime): looked at again before each start
+        self.llm_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
+        self.llm_backoff = Backoff()
+        self.llm_ok = False
+        self.llm_err = "checking"
+        self.llm_fails = 0
+        self.llm_verified: bool | None = None if self.llm_proc is not None and cfg.llm_model_sha256 else True
+        self._llm_checked = -1e9
+        self._llm_started_at = -1e9
+        self._llm_until = 0.0              # an older hub without the infer lane: not asked again before this
+        self._llm_call: LlmCall | None = None
+        self._llm_claiming = False
+        self._preempt = threading.Event()  # a pre-alert clip came: the generation in flight steps aside
+        self.llm_job: dict | None = None
+        self.llm_on: bool | None = None    # the hub's switches for this worker's LLM jobs (None: not said yet)
+        self.llm_counts = {"done": 0, "invalid": 0, "released": 0, "lost": 0, "failed": 0}
         self.backoff = Backoff()
         self.connected = False             # hello answered; the heartbeat runs only then
         self.link = "starting"
@@ -937,12 +1396,16 @@ class Worker:
         return self._inferring > 0 or self.clock() < self._busy_until
 
     def _our_pids(self) -> set:
+        """whisper-server's and llama-server's pids: their GPU memory is ours, never another process's (a game)."""
         pids = {self.cfg.whisper_pid} if self.cfg.whisper_pid else set()
-        if self.proc is not None and self.proc.pid:
-            pids.add(self.proc.pid)
+        for proc in (self.proc, self.llm_proc):
+            if proc is not None and proc.pid:
+                pids.add(proc.pid)
         at, found = self._pids
         if self.clock() - at > 30:
             found = find_pids(self.cfg.whisper_process, self.run_cmd)
+            if self.llm is not None:
+                found = found | find_pids(self.cfg.llm_process, self.run_cmd)
             self._pids = (self.clock(), found)
         return pids | found
 
@@ -955,6 +1418,11 @@ class Worker:
             call.abort()
         if self._claiming:
             self.hub.interrupt()
+        lcall = self._llm_call
+        if lcall is not None:
+            lcall.abort()
+        if self._llm_claiming:
+            self.llm_hub.interrupt()
 
     @property
     def stopped(self) -> bool:
@@ -964,12 +1432,18 @@ class Worker:
 
     def _state_body(self) -> dict:
         state, reason = self.state()
-        body = {"state": state, "model": self.cfg.model, "version": VERSION}
+        body = {"state": state, "model": self.cfg.model, "version": VERSION, "models": self.models()}
         if reason:
             body["reason"] = reason
         if self.gpu.info:
             body["gpu"] = dict(self.gpu.info)
         return body
+
+    def models(self) -> dict:
+        """What the hub's infer lane is told: the STT model and the LLM while llama-server answers ("" otherwise)."""
+        ready = self.llm is not None and self.llm_ok
+        return {"stt": self.cfg.model, "llm": self.cfg.llm_model if ready else "",
+                "llm_version": self.cfg.llm_model_sha256[:12].lower() if ready else ""}
 
     def hello(self) -> None:
         body = self._state_body()
@@ -1016,10 +1490,11 @@ class Worker:
             try:
                 state = self.state()
                 now = self.clock()
-                if state != last_state:
-                    if last_state is not None:
+                sig = (state, self.llm_ok)         # (the LLM coming or going: the hub hears at once too)
+                if sig != last_state:
+                    if last_state is not None and state != last_state[0]:
                         log.info("state: %s%s", state[0], f" ({state[1]})" if state[1] else "")
-                    last_state = state
+                    last_state = sig
                     self._wake.set()
                     last_sent = -1e9       # tell the hub at once
                 if self.connected and now - last_sent >= self.cfg.heartbeat_s:
@@ -1065,8 +1540,8 @@ class Worker:
                         and now - self._gaming_since >= self.cfg.gaming_stop_whisper_min * 60):
                     log.info("gaming for %.0f min: stopping whisper-server (its VRAM back to the game)",
                              self.cfg.gaming_stop_whisper_min)
+                    self._whisper_down("stopped while gaming")     # (said first: no check in between sees it gone)
                     self.proc.stop()
-                    self._whisper_down("stopped while gaming")
                 if self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
                     last_proc = now
                     self.proc.ensure(self.whisper.alive())
@@ -1106,6 +1581,114 @@ class Worker:
         self._wake.set()
         return True
 
+    def _llm_monitor_loop(self) -> None:
+        """llama-server's checks on a thread of their own: a slow answer never holds the GPU (gaming) samples."""
+        while not self.stopped:
+            try:
+                self._llm_monitor(self.clock(), self.held())
+            except Exception:  # noqa: BLE001 - the LLM's checks must outlive any bug
+                log.exception("llm monitor: unexpected error (carrying on)")
+                self._stop.wait(5)
+            self._stop.wait(self.cfg.tick_s)
+
+    def llm_stop_after_s(self) -> float:
+        """Seconds of gaming before llama-server is stopped: llm_stop_gaming_s, or (below 0, the default) 60 for a model
+        up to 6 GB and 20 for a bigger one (Gemma-3-12B: ~8 GB the game wants back sooner)."""
+        if self.cfg.llm_stop_gaming_s >= 0:
+            return self.cfg.llm_stop_gaming_s
+        return 20.0 if (self._llm_sig or (0, 0))[0] > 6e9 else 60.0
+
+    def _llm_model_path(self) -> Path:
+        path = Path(os.path.expandvars(_arg(self.cfg.llm_server, ("-m", "--model")) or ""))
+        return Path(self.cfg.base_dir) / path if not path.is_absolute() and self.cfg.base_dir else path
+
+    def _llm_changed(self) -> bool:
+        """The GGUF isn't the file that was checked any more (its size or time): checked again before a start."""
+        try:
+            st = self._llm_model_path().stat()
+            return (st.st_size, st.st_mtime_ns) != self._llm_sig
+        except OSError:
+            return True
+
+    def _llm_monitor(self, now: float, held) -> None:
+        """llama-server: stopped after llm_stop_after_s() of gaming (its 6-8 GB of VRAM the game wants), started again
+        (and checked) once the PC is neither gaming nor paused; never started with a model whose hash isn't pinned (the
+        file looked at again before each start: checked again when it changed)."""
+        if (self.llm_proc is not None and self.llm_proc.running() and self._gaming_since is not None
+                and now - self._gaming_since >= self.llm_stop_after_s()):
+            log.info("gaming for %.0f s: stopping llama-server (its VRAM back to the game)", now - self._gaming_since)
+            self._llm_down("stopped while gaming")         # (said first: no job goes to it meanwhile)
+            self.llm_proc.stop()
+        if held or not self.llm_verified:
+            return
+        if self.llm_proc is not None and not self.llm_proc.running() and now - self._llm_started_at >= 5:
+            if self.cfg.llm_model_sha256 and self._llm_changed():
+                self.llm_verified = None
+                threading.Thread(target=self.verify_llm, name="llm-verify", daemon=True).start()
+                return
+            self._llm_started_at = now
+            self.llm_proc.ensure(self.llm.alive())
+        if now - self._llm_checked < self.cfg.llm_check_s or self._llm_call is not None:
+            return
+        self._llm_checked = now
+        code = self.llm.status()
+        if code == 200:
+            if not self.llm_ok:
+                log.info("llama-server: ok (%s)", self.cfg.llm_model)
+            self.llm_ok, self.llm_err, self.llm_fails = True, "", 0
+        elif code == 401:
+            self._llm_down(f"port {self.llm.port} answered 401: not this worker's llama-server")
+            if self.llm_proc is not None and not self.llm_proc.running():
+                # only the program that holds llm_url's port, and only if it is a llama-server (a leftover of a worker
+                # that died): never another llama-server the user runs elsewhere
+                pid = port_owner(self.llm.port, self.run_cmd)
+                name = process_name(pid, self.run_cmd) if pid else ""
+                prog = Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else self.cfg.llm_process
+                if pid and name and name.lower().removesuffix(".exe") in {
+                        prog.lower().removesuffix(".exe"), self.cfg.llm_process.lower().removesuffix(".exe")}:
+                    log.warning("stopping a leftover %s (pid %s) that holds port %s", name, pid, self.llm.port)
+                    kill_pid(pid, self.run_cmd)
+        else:
+            self._llm_down("loading" if code == 503 else "not answering")
+
+    def _llm_down(self, why: str) -> None:
+        if self.llm_ok:
+            log.warning("llama-server: %s: no LLM jobs until it answers", why)
+        self.llm_ok, self.llm_err = False, why
+        self._llm_checked = self.clock()
+
+    def _llm_start_env(self) -> dict:
+        """At each llama-server start: a new API key, known only to this worker (and kept in state_dir/llm-key, for
+        `worker.py check`: the user's own folder, the file the user's only)."""
+        key = secrets.token_urlsafe(24)
+        if self.llm is not None:
+            self.llm.key = key
+        try:
+            write_secret(Path(self.cfg.state_dir) / "llm-key", key)
+        except OSError as e:
+            log.debug("llm-key: %s", e)
+        return llm_env(key)
+
+    def verify_llm(self) -> bool:
+        """The GGUF that llm_server loads (-m) against llm_model_sha256, before llama-server first starts. A mismatch or a
+        missing file: no LLM (llama-server never started), said in the log and status."""
+        path = self._llm_model_path()
+        try:
+            st = path.stat()
+            got = file_sha256(path, Path(self.cfg.state_dir) / "llm-model.json")
+        except OSError as e:
+            self.llm_verified, self.llm_err = False, f"model file: {e.strerror or e}"
+            log.error("llama-server: can't read its model %s: %s", path.name, e.strerror or e)
+            return False
+        if got.lower() != self.cfg.llm_model_sha256.lower():
+            self.llm_verified, self.llm_err = False, "model hash mismatch"
+            log.error("llama-server: %s's SHA-256 isn't llm_model_sha256: not started (download it again)", path.name)
+            return False
+        self._llm_sig = (st.st_size, st.st_mtime_ns)
+        self.llm_verified = True
+        log.info("llama-server: model %s verified (sha256 %s...)", path.name, got[:12])
+        return True
+
     def _whisper_down(self, why: str) -> None:
         if self.whisper_ok:
             log.warning("whisper-server: %s: paused until it answers", why)
@@ -1118,6 +1701,9 @@ class Worker:
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
                "version": VERSION}
+        if self.llm is not None:
+            doc["llm"] = {"model": self.cfg.llm_model, "state": "ok" if self.llm_ok else self.llm_err,
+                          "jobs": dict(self.llm_counts)}
         try:
             write_json(self.cfg.status_path, doc)
         except OSError as e:
@@ -1128,8 +1714,19 @@ class Worker:
     def run(self) -> None:
         log.info("sizeup STT worker %s: worker %s, model %s, hub %s", VERSION, self.cfg.worker_id, self.cfg.model,
                  urlsplit(self.cfg.hub_url).hostname)
-        for target, name in ((self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"),
-                             (self._jobs_loop, "jobs")):
+        if self.llm is not None:
+            log.info("local LLM: %s at %s", self.cfg.llm_model, self.cfg.llm_url)
+            if self.llm_proc is not None and not self.cfg.llm_model_sha256:
+                log.warning("llm_model_sha256 isn't set: llama-server's model isn't checked against its pin")
+        progs = {"whisper-server": Path(str(self.cfg.whisper_server[0])).name if self.cfg.whisper_server else "",
+                 "llama-server": Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else ""}
+        self.children.reap_leftovers(progs)        # what a worker that died left running (no job object elsewhere)
+        loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor")]
+        if self.llm_verified is None:
+            loops.append((self.verify_llm, "llm-verify"))
+        if self.llm is not None:
+            loops += [(self._llm_loop, "llm"), (self._llm_monitor_loop, "llm-monitor")]
+        for target, name in loops + [(self._jobs_loop, "jobs")]:     # (the jobs thread last: run() waits on it)
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
@@ -1196,11 +1793,15 @@ class Worker:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", lease):
             log.warning("a job without a usable lease: ignored")
             return
-        self.job = job
+        with self._lock:                       # (with do_infer's: a generation either sees this clip or is told)
+            self.job = job
+            if job.get("fast") is True and self._llm_call is not None:
+                self._preempt.set()            # a pre-alert clip: the LLM's generation steps aside (STT first)
         try:
             self._do_job(job, lease)
         finally:
-            self.job = None
+            with self._lock:
+                self.job = None
             self._call = None
             self.last_job_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -1353,6 +1954,162 @@ class Worker:
         if last is not None and not last.status:
             raise last                     # the hub went away: reconnect
 
+    # -- the LLM's jobs (the hub's infer lane: sizeup/cloud/infer.py)
+
+    def _llm_loop(self) -> None:
+        """Claims infer jobs while connected, online and llama-server answers. Its own hub connection, so a long poll
+        here never holds a clip's; the hub gives it nothing while this worker holds a pre-alert clip."""
+        said_old = False
+        while not self.stopped:
+            try:
+                if not (self.connected and self.llm_ok and self.state()[0] == "online") or self.clock() < self._llm_until:
+                    self._stop.wait(self.cfg.tick_s)
+                    continue
+                self.llm_step()
+                self.llm_backoff.ok()
+            except HubError as e:
+                self.llm_hub.close()
+                if self.stopped:
+                    break
+                if e.status == 404:            # a hub from before the infer lane
+                    if not said_old:
+                        log.info("the hub has no LLM lane (an older hub): asking again every 10 min")
+                        said_old = True
+                    self._llm_until = self.clock() + 600
+                    continue
+                wait = self.llm_backoff.fail(e)
+                if self.llm_backoff.n == 1:
+                    log.warning("llm: %s: trying again in %.0f s", e, wait)
+                self.sleep(wait if not e.refused else self.cfg.unauthorized_retry_s)
+            except Exception:  # noqa: BLE001 - a bug must not end the LLM's loop
+                self.llm_hub.close()
+                wait = self.llm_backoff.fail()
+                log.exception("llm: unexpected error: trying again in %.0f s", wait)
+                self.sleep(wait)
+
+    def llm_step(self) -> None:
+        self.llm_hub.interrupted = False
+        self._llm_claiming = True
+        try:
+            if self.stopped:
+                return
+            ans = self.llm_hub.request("POST", f"{API}/infer/claim",
+                                       {"wait": self.claim_wait, "state": self.state()[0], "models": self.models()},
+                                       timeout=self.claim_wait + 15)
+        finally:
+            self._llm_claiming = False
+        if ans.get("llm_on") is False:         # the pool or this worker's "LLM jobs" switched off on the hub
+            if self.llm_on is not False:
+                log.info("hub: LLM jobs are off for this worker (Settings > Station > STT workers)")
+            self.llm_on = False
+            self._llm_until = self.clock() + 60
+        elif "llm_on" in ans and self.llm_on is False:
+            log.info("hub: LLM jobs are on again")
+            self.llm_on = True
+        job = ans.get("job")
+        if isinstance(job, dict):
+            self.do_infer(job)
+
+    def _llm_release(self, lease: str, why: str) -> None:
+        try:
+            self.llm_hub.request("POST", f"{API}/infer/{lease}/release", {"why": why}, timeout=10)
+            self.llm_counts["released"] += 1
+        except HubError as e:
+            self.llm_counts["lost"] += 1
+            if not e.lease_lost:
+                log.warning("infer release failed (%s): its deadline ends it on the hub", e)
+
+    def do_infer(self, job: dict) -> None:
+        """One classification: llama-server under the job's JSON schema, aborted at once for a pre-alert clip, gaming,
+        a pause or the job's deadline. Logs the job id, task, times and token counts only: never the prompt or the
+        answer."""
+        lease, jid, task = str(job.get("lease") or ""), str(job.get("id") or "")[:16], str(job.get("task") or "")[:40]
+        if not re.fullmatch(r"[0-9a-f]{16}", lease):
+            log.warning("an infer job without a usable lease: ignored")
+            return
+        t0 = self.clock()
+        deadline = t0 + max(0.0, (_num(job.get("deadline_s")) or 10.0) - 0.3)
+        messages, schema = job.get("messages"), job.get("schema")
+        state = self.state()[0]
+        if state != "online" or self.stopped or self.llm is None:
+            self._llm_release(lease, "stopping" if self.stopped else state if state in ("gaming", "paused") else "error")
+            return
+        if not isinstance(messages, list) or not isinstance(schema, dict):
+            self._llm_release(lease, "error")
+            return
+        call = self.llm.call(messages, schema, min(int(_num(job.get("max_tokens")) or 256), 1024), task,
+                             timeout=max(1.0, deadline - t0))
+        box: dict = {}
+
+        def generate() -> None:
+            try:
+                box["out"] = call.run()
+            except LlmError as e:
+                box["err"] = e
+            except Exception as e:  # noqa: BLE001 - a bug here: the job handed back (its type only: no prompt in a trace)
+                box["err"] = LlmError(f"unexpected {type(e).__name__}")
+            finally:
+                with self._lock:
+                    self._inferring -= 1
+                    self._busy_until = self.clock() + self.cfg.busy_grace_s
+
+        with self._lock:                       # (with do_job's: a pre-alert clip held now, or one that comes, stops it)
+            fast = isinstance(self.job, dict) and self.job.get("fast") is True
+            if not fast:
+                self._preempt.clear()
+                self.llm_job, self._llm_call = job, call
+                self._inferring += 1
+        if fast:
+            self._llm_release(lease, "preempted")
+            log.info("infer %s %s: a pre-alert clip is being decoded: handed back", jid, task)
+            return
+        th = threading.Thread(target=generate, name=f"llm-{lease}", daemon=True)
+        th.start()
+        try:
+            while th.is_alive():
+                th.join(min(0.05, self.cfg.tick_s))
+                if not th.is_alive():
+                    break
+                state = self.state()[0]
+                why = ("stopping" if self.stopped else state if state != "online"
+                       else "preempted" if self._preempt.is_set() else "")
+                if why:
+                    call.abort()               # llama-server stops generating: the GPU is the clip's (or the game's)
+                    self._llm_release(lease, why)
+                    log.info("infer %s %s: %s: handed back", jid, task, why)
+                    return
+                if self.clock() >= deadline:
+                    call.abort()
+                    self.llm_counts["lost"] += 1
+                    log.info("infer %s %s: no answer by its deadline: dropped", jid, task)
+                    return
+        finally:
+            self.llm_job, self._llm_call = None, None
+        infer_ms = round((self.clock() - t0) * 1000)
+        if "err" in box:
+            self.llm_fails += 1
+            self.llm_counts["failed"] += 1
+            log.warning("infer %s %s: %s (%d in a row): handed back", jid, task, box["err"], self.llm_fails)
+            self._llm_release(lease, "error")
+            if self.llm_fails >= self.cfg.llm_fail_max:
+                self._llm_down(f"{self.llm_fails} failures in a row")
+            return
+        self.llm_fails = 0
+        out, tin, tout = box["out"]
+        ok = out is not None and schema_valid(out, schema)
+        try:
+            self.llm_hub.request("POST", f"{API}/infer/{lease}/complete",
+                                 {"output": out, "tokens_in": tin, "tokens_out": tout, "infer_ms": infer_ms}, timeout=10)
+        except HubError as e:
+            if not e.lease_lost and not e.status:
+                raise                          # the hub went away: the loop reconnects
+            self.llm_counts["lost"] += 1
+            log.info("infer %s %s: the hub refused the answer (%s)", jid, task, e.status)
+            return
+        self.llm_counts["done" if ok else "invalid"] += 1
+        log.info("infer %s %s: %d ms, %d+%d tokens%s", jid, task, infer_ms, tin, tout,
+                 "" if ok else ", not valid under its schema")
+
     def shutdown(self) -> None:
         self.stop()
         for t in self._threads:
@@ -1369,9 +2126,12 @@ class Worker:
                 pass
         if self.proc is not None:
             self.proc.stop()
+        if self.llm_proc is not None:
+            self.llm_proc.stop()
         self._write_status(("stopped", ""))
         self.hub.close()
         self.hb_hub.close()
+        self.llm_hub.close()
         log.info("stopped")
 
 
@@ -1396,6 +2156,11 @@ def _status_text(cfg: Config, now: float | None = None) -> str:
         jobs = st.get("jobs") or {}
         lines.append("jobs: " + ", ".join(f"{jobs.get(k, 0)} {k}" for k in ("done", "released", "lost", "failed"))
                      + (f", last {st.get('last_job_at')}" if st.get("last_job_at") else ""))
+        llm = st.get("llm")
+        if isinstance(llm, dict):
+            lj = llm.get("jobs") or {}
+            lines.append(f"llm: {llm.get('model')}, {llm.get('state')}; jobs: "
+                         + ", ".join(f"{lj.get(k, 0)} {k}" for k in ("done", "invalid", "released", "lost", "failed")))
         gpu = st.get("gpu")
         if gpu:
             lines.append(f"gpu: {gpu.get('util_pct')}%, {gpu.get('mem_used_mb')}/{gpu.get('mem_total_mb')} MB, "
@@ -1413,6 +2178,22 @@ def _check(cfg: Config) -> int:
     except WhisperError as e:
         ok = False
         print(f"whisper-server: {e}")
+    if cfg.llm_url:
+        llm = Llm(cfg.llm_url, cfg.llm_timeout_s, cfg.llm_no_think)
+        try:                                   # the running worker's llama-server: the key it was started with
+            llm.key = (Path(cfg.state_dir) / "llm-key").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        t = time.monotonic()
+        try:
+            out, tin, tout = llm.check()
+            if out != {"ok": True}:
+                raise LlmError("llama-server's answer didn't follow the schema")
+            print(f"llama-server: ok ({time.monotonic() - t:.1f} s for a constrained answer, {tin}+{tout} tokens)")
+        except LlmError as e:
+            ok = False
+            print(f"llama-server: {e}" + (" (not the worker's llama-server, or the worker restarted it since: its key "
+                                           "is in state\\llm-key)" if "401" in str(e) else ""))
     hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
     try:
         ans = hub.request("POST", f"{API}/hello", {"worker": cfg.worker_id, "version": VERSION, "model": cfg.model,

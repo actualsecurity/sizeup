@@ -60,10 +60,9 @@ class FakeHub:
             raise HubError("hub said 503: the hub is updating: back in a few seconds", 503)
         evs = body["events"]
         if self.max_bytes is not None and len(json.dumps(body)) > self.max_bytes:
-            raise HubError("hub said 413: too large (1 MB max): send smaller batches", 413, None,
-                           {"error": "too large", "reason": "too_large"})
+            raise HubError("hub said 413: too large (1 MB max): send smaller batches", 413, None, body={"error": "too large", "reason": "too_large"})
         if any(e["data"].get("id") in self.poison for e in evs):
-            raise HubError("hub said 400: bad request: invalid literal", 400, None, {"error": "bad request: invalid literal"})
+            raise HubError("hub said 400: bad request: invalid literal", 400, None, body={"error": "bad request: invalid literal"})
         self.got += [e["data"].get("id") for e in evs]
         self.acked = max([e["seq"] for e in evs], default=self.acked)
         return {"ok": True, "acked": self.acked, "applied": len(evs)}
@@ -197,7 +196,7 @@ def test_a_hub_that_refuses_everything_holds_every_event_never_quarantines_them(
     class Broken(FakeHub):
         def request(self, method, path, body=None, timeout=None, **kw):
             self.posts += 1
-            raise HubError("hub said 400: bad request: no", 400, None, {"error": "bad request: no"})
+            raise HubError("hub said 400: bad request: no", 400, None, body={"error": "bad request: no"})
     for k in range(3):
         link.outbox.add("page", page(k), None)
     hub, backoff = Broken(), Backoff(jitter=lambda a, b: 1.0)
@@ -378,7 +377,7 @@ def test_a_quarantined_source_event_is_dropped_once_the_feed_has_a_newer_report(
         def request(self, method, path, body=None, timeout=None, **kw):
             if any(e["type"] == "source_event" and e["data"]["seen_at"] == T for e in body["events"]):
                 self.posts += 1
-                raise HubError("hub said 400: bad request", 400, None, {"error": "bad request"})
+                raise HubError("hub said 400: bad request", 400, None, body={"error": "bad request"})
             return super().request(method, path, body, timeout, **kw)
     hub = Refuse()
     drain(link, hub, now=T)
