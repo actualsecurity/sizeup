@@ -9,6 +9,8 @@ by Cad.state() as the broadcaster's next push makes it. Per kind it prints, as o
 pushes rebuilt the state, and the CPU ms (this thread) of the write + that push, p50 / p95, and of the push alone.
 
   context        another P25 system's talkgroup (context only)
+  context_retext the same, recorded waiting for its text, then its text by Comms.retext (the hub's own
+                 speech-to-text); the write measured is the retext
   county_other   one of the county's talkgroups that is not the 60 Control feed's
   airband        an airband row
   fg1_no_id      our fireground channel, no radio ID (on no incident, #163)
@@ -72,7 +74,7 @@ def main() -> None:
         seq[0] += 1
         t = {"id": f"{kind}-{seq[0]}", "start": time.time(), "end": time.time() + 3, "source": "FG1", "talkgroup": None,
              "unit": "", "rig": "", "radio_id": "", "text": f"made-up words {seq[0]}", "status": "done"}
-        if kind == "context":
+        if kind.startswith("context"):
             t.update(source="PD Dispatch", talkgroup=9001, unit="Car 7", system="metro", source_key="p25:metro:9001",
                      group="Police", service="police", tier="text")
         elif kind == "county_other":
@@ -87,12 +89,18 @@ def main() -> None:
 
     out = {"sizeup": os.path.dirname(sizeup.__file__), "incidents": a.incidents, "rows_each": a.rows,
            "state_kb": round(len(json.dumps(c.state(), default=str)) / 1024)}
-    for kind in ("context", "county_other", "airband", "fg1_no_id", "feed", "on_incident"):
+    for kind in ("context", "context_retext", "county_other", "airband", "fg1_no_id", "feed", "on_incident"):
         both, push, rebuilt = [], [], 0
         for _ in range(a.each):
             t = row(kind)
+            if kind.endswith("_retext"):
+                c.record_traffic(dict(t, text="", status="pending"))
+                c.state()
             c0 = time.thread_time()
-            c.record_traffic(t)
+            if kind.endswith("_retext"):
+                c.comms.retext(t["id"], t["text"], "done", "aws")
+            else:
+                c.record_traffic(t)
             c1 = time.thread_time()
             was = c._state
             c.state()
