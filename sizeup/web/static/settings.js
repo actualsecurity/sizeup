@@ -358,6 +358,7 @@ async function sLoad(opts = {}) {
 // alarms and Intel (their own reads: another admin's change, the 24 h counts), the audio kept and the cameras on the
 // wall. Users: who was seen when, at most every 15 s.
 function sRefresh() {
+  if (document.hidden) return;              // (not shown: its cards catch up once it is, sHook)
   if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
   S.refreshDue = false;
   if (S.section === "users") sActivity();
@@ -910,6 +911,7 @@ function sHook() {                 // every render (cad.js): keep up with edits 
   if (!cad.state || !S.data || S.loading) return;
   const st = cad.state;
   if (st.settings_rev !== S.seenSettingsRev) { sLoad(); return; }          // (the state's, as at the last read)
+  if (document.hidden) return;              // a tab not shown reads nothing on the clock (back: the next render does)
   const every = S_LIVE.has(S.section) ? S_POLL.live : S_POLL.other, now = Date.now();
   if (st.rev !== S.data.rev && now - (S.loadedAt || 0) >= every) { sLoad(); return; }
   // what System reads apart from the settings (the counts, the audit log, Emergency alarms, Intel's counters) keeps up

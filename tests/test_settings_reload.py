@@ -66,7 +66,7 @@ def test_the_page_never_parses_the_imported_place_names(tmp_path, monkeypatch):
     assert "places" not in cad.settings.overrides(skip=("places",)) and "places" in cad.settings.overrides()
 
 
-def test_the_pages_usage_counts_follow_new_records_and_a_delete_still_counts_exactly(tmp_path, monkeypatch):
+def test_the_pages_usage_counts_follow_new_records_and_a_stale_count_never_lets_a_delete_through(tmp_path, monkeypatch):
     cad = make_cad(tmp_path)
     used = lambda: {r["code"]: r["used"] for r in cad.settings.page()["lists"]["event_types"]["items"]}
     n = used().get("SERVICE", 0)
@@ -77,10 +77,37 @@ def test_the_pages_usage_counts_follow_new_records_and_a_delete_still_counts_exa
     monkeypatch.setattr(settings_mod.Editor, "usage", lambda self, sec: runs.append(sec) or real(self, sec))
     used()
     assert runs == []                                 # nothing new: kept
-    cad.store.db.execute("UPDATE incidents SET type = 'SERVICE'")       # (no new row: the clock)
-    monkeypatch.setattr(settings_mod.Editor, "PAGE_USAGE_S", 0.0)
-    used()
-    assert "event_types" in runs
+    # a code put on a record with no new row: the page's count is stale (0), the delete still asks exactly and refuses
+    spare = next(c for c, k in used().items() if k == 0 and c != "SERVICE")
+    cad.store.db.execute("UPDATE incidents SET type = ? WHERE id = (SELECT MAX(id) FROM incidents)", (spare,))
+    assert used()[spare] == 0
+    with pytest.raises(Exception, match="can't delete"):
+        cad.settings_post("event_types", {"action": "delete", "code": spare, "operator": "KM"})
+    assert spare in used()
+    monkeypatch.setattr(settings_mod.Editor, "PAGE_USAGE_S", 0.0)    # ... and the clock catches the page up
+    runs.clear()
+    assert used()[spare] == 1 and "event_types" in runs
+
+
+def test_system_edits_still_count_the_place_names(tmp_path):
+    cad = make_cad(tmp_path)
+    assert "places" not in cad.settings.page()["system"]["overrides"]
+    with cad.store.tx() as db:
+        for i in range(3):
+            db.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES ('places', ?, ?, 0)",
+                       (f"sample place {i}", json.dumps({"name": f"Sample Place {i}", "address": f"{i} Example Ave"})))
+    counts = cad.settings.page()["system"]["overrides"]
+    assert counts["places"] == 3 and list(counts) == sorted(counts)
+
+
+def test_an_email_linked_at_sign_in_moves_settings_rev(tmp_path):
+    cad = make_cad(tmp_path)
+    email = "person@example.org"
+    cad.settings_post("users", {"action": "add", "name": email, "operator": "KM"})   # named by the email, no email yet
+    r0 = cad.state()["settings_rev"]
+    assert cad.settings.person(email)["email"] == email
+    assert cad.store.one("SELECT email FROM operators WHERE name = ?", (email,))["email"] == email
+    assert cad.state()["settings_rev"] != r0
 
 
 def test_the_page_reads_the_units_once(tmp_path, monkeypatch):
@@ -149,6 +176,23 @@ def test_another_admins_change_is_read_at_once(site, browser_page):
     site.another_admin_mutes_an_alert()
     pg.wait_for_function("() => /Muted until/.test(document.querySelector('#s-pushes').innerText)", timeout=5000)
     assert len(pg.reads) > n0 and time.monotonic() - t0 < 5
+
+
+def test_a_hidden_tab_reads_nothing_on_the_clock_but_a_setting_still(site, browser_page):
+    pg = browser_page
+    open_at(pg, site, "lists", "#s-lists form.s-add input.s-name")
+    pg.evaluate("() => Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })")
+    n0 = len(pg.reads)
+    for _ in range(7):
+        site.a_call_runs()
+        pg.wait_for_timeout(1000)
+    assert len(pg.reads) == n0                        # Lists would read every 5 s when shown
+    site.another_admin_mutes_an_alert()
+    for _ in range(50):
+        if len(pg.reads) > n0:
+            break
+        pg.wait_for_timeout(100)
+    assert len(pg.reads) == n0 + 1                    # a setting changed: read, so the tab is right when shown
 
 
 def test_lists_counts_keep_up_with_the_calls(site, browser_page):

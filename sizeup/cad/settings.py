@@ -734,7 +734,7 @@ class Editor:
         out["type_subtypes"] = self._map_page(L, ov)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
-        out["system"] = self._system(ov)
+        out["system"] = self._system(ov, places=len(self._places_cached()[2]))      # (ov is without them)
         out["tones"] = self.tones_page()
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
@@ -1315,14 +1315,23 @@ class Editor:
                         "factor, closures in effect avoided), else straight-line distance × road factor at an average "
                         "speed; plus turnout from quarters. No traffic. Shown as “~3 min est.”."}
 
-    def _system(self, ov: dict) -> dict:
+    def _system(self, ov: dict, places: int | None = None) -> dict:
         try:
             raw = self.path.read_bytes()
         except OSError:
             raw = b""
         return {"data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 "sha256": hashlib.sha256(raw).hexdigest()[:12], "schema": SCHEMA_VERSION,
-                "overrides": {k: len(v) for k, v in ov.items()}, "db": self.store.path}
+                "overrides": self._counts(ov, places), "db": self.store.path}
+
+    @staticmethod
+    def _counts(ov: dict, places: int | None) -> dict[str, int]:
+        """System > Edits: how many overrides each section holds; places: the place names' count when ov was read
+        without them (page(): overrides(skip=("places",)))."""
+        out = {k: len(v) for k, v in ov.items()}
+        if places:
+            out["places"] = places
+        return dict(sorted(out.items()))
 
     # -- edits ------------------------------------------------------------------------------------------
 
@@ -3161,7 +3170,8 @@ class Editor:
                                 {"email": email, "seen": "signed in through Cloudflare Access (not named yet)"})
                     self.store.rev += 1
                 elif not row["email"]:      # an operator named by the email itself, entered by hand
-                    db.execute("UPDATE operators SET email = ? WHERE id = ?", (email, row["id"]))
+                    # (updated_at: settings_rev moves, so an open Users page shows the email at once)
+                    db.execute("UPDATE operators SET email = ?, updated_at = ? WHERE id = ?", (email, self.store.clock(), row["id"]))
             r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,)) or {"name": email, "callsign": ""}
         return {"email": email, "name": r["name"], "callsign": r["callsign"], "operator": self.recorded(r["name"], email)}
 
