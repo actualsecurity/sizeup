@@ -55,7 +55,8 @@ window.IntelCard = (() => {
     if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     if (e.fd_shown) {                    // the FD already there (sizeup/intel/engine.py _fire): "FD on scene · #26-000123"
       const fd = el("div", "aa-loc", e.fd_shown);
-      fd.title = "The FD was already there when PD put this out: an FYI, not a pre-alert";
+      fd.title = e.fd === "cleared" ? `${e.fd_shown.split(" · ")[0]} (cleared): pre-alert`
+        : "The FD was already there when PD put this out: an FYI, not a pre-alert";
       li.append(fd);
     }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);

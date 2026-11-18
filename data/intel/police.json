@@ -84,11 +84,11 @@
     "_about": "A fire_related category's push when the FD is already there (engine.py _fire; rules.py fd_present): our fire incident (of these types) at the place, or these words. Each group: its own \"not\" only.",
     "there": [
       {"any": ["(fd|fd's|fire department|fire department's|fire dept) (on scene|onscene|on location|out with|there with|working)",
-               "(the engine|the engine's|the chief|the chief's) (on scene|onscene|on location|out with|there with|working)",
+               "(the engine|the engine's|fire chief|fire chief's|fd chief) (on scene|onscene|on location|out with|there with|working)",
                "(fd|fire department|fire dept) (is|are|was|were) (on scene|onscene|on location|out with|there with|working)",
-               "(the engine|the chief) (is|was) (on scene|onscene|on location|out with|there with|working)",
-               "(fd|fd's|fire department|fire department's|fire dept|the engine|the chief) already (on scene|on location|there|working)",
-               "(fd|fire department|fire dept|the engine|the chief) (is|are|was|were) already (on scene|on location|there|working)"]}
+               "(the engine|fire chief|fd chief) (is|was) (on scene|onscene|on location|out with|there with|working)",
+               "(fd|fd's|fire department|fire department's|fire dept|the engine|fire chief) already (on scene|on location|there|working)",
+               "(fd|fire department|fire dept|the engine|fire chief) (is|are|was|were) already (on scene|on location|there|working)"]}
     ],
     "add_info": [
       {"any": ["(people|person|someone|somebody|occupant|occupants|kids|children|child|residents) ... (inside|trapped|stuck)",

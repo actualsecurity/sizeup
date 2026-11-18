@@ -178,10 +178,12 @@ def test_an_open_incident_whose_units_all_cleared_is_a_pre_alert_too():
     assert ev.fd == "cleared" and len(pushed(sink)) == 1
 
 
-def test_an_incident_with_no_unit_yet_is_linked_and_a_pre_alert():
-    e, sink = engine(inc(typ="", fd=""))                     # a page with no type and no units yet
+@pytest.mark.parametrize("made, held", [(-10 * 60, True), (-30 * 60, True), (-45 * 60, False)])
+def test_an_open_incident_with_no_unit_known_yet_is_the_fd_toned_out_for_half_an_hour(made, held):
+    e, sink = engine(inc(typ="", fd="", made=made))          # a page's own card: no type, no units read yet
     ev = one(e, DUMPSTER)
-    assert ev.near_incident == 41 and ev.fd == "" and len(pushed(sink)) == 1
+    assert ev.near_incident == 41
+    assert (ev.fd, ev.suppressed, len(pushed(sink))) == (("dispatched", "fd_dispatched", 0) if held else ("", "", 1))
 
 
 # -- the words alone --------------------------------------------------------------------------------------------------
@@ -190,7 +192,7 @@ def test_an_incident_with_no_unit_yet_is_linked_and_a_pre_alert():
     DUMPSTER_WORKED,
     f"{DUMPSTER}, FD on scene with it",
     f"{DUMPSTER}, the engine is on location",
-    f"{DUMPSTER}, the chief's on scene",
+    f"{DUMPSTER}, the fire chief's on scene",
 ])
 def test_the_fd_said_to_be_there_with_no_incident_of_ours_is_logged(text):
     e, sink = engine()
@@ -302,6 +304,15 @@ def test_the_same_block_far_away_is_another_place():
     assert one(e, DUMPSTER).near_incident is None
 
 
+def test_the_town_of_a_raw_address_counts_when_there_is_no_normalized_one():
+    i = {**inc(), "address": "", "label": "", "address_raw": "20 EXAMPLE RD RYE_BROOK", "lat": None, "lon": None}
+    e, _sink = engine(i)
+    assert one(e, DUMPSTER).near_incident is None
+    i = {**i, "address_raw": "20 EXAMPLE RD PORT_CHESTER"}
+    e, _sink = engine(i)
+    assert one(e, DUMPSTER).near_incident == 41
+
+
 def test_the_same_address_in_another_town_is_another_place():
     i = {**inc(), "address": "20 Example Rd, Rye Brook", "label": "20 Example Rd, Rye Brook"}
     e, _sink = engine(i)
@@ -395,6 +406,24 @@ def test_a_hold_let_go_late_stays_at_log():
     one(e, "odor of gas at 15 Sample Street, still strong", "t2", NOW + RELEASE_S + 60)
     [ev] = e.events.open_events()
     assert ev.suppressed == "fd_late" and ev.mode == "log" and pushed(sink) == []
+
+
+def test_a_rekindle_merged_into_a_held_call_is_a_pre_alert():
+    from datetime import datetime
+    e, sink = engine(inc())
+    assert one(e, DUMPSTER).suppressed == "fd_dispatched"                    # the FD on its way: held
+    cleared = NOW + 15 * 60                                                   # the FD clears and leaves
+    e.fire_incidents = lambda _a, _b: [inc(fd="cleared", fd_at=cleared)]
+    ev = one(e, "Car 3, smoke showing again from the dumpster behind 20 Example Road", "t2", NOW + 20 * 60)
+    assert ev.fd == "cleared" and ev.suppressed == "" and ev.mode == "push"
+    [(_ev, d)] = pushed(sink)
+    assert d.priority == 4 and not d.message["title"].startswith("FYI")
+    assert d.message["body"].endswith(f" · FD here {datetime.fromtimestamp(cleared).strftime('%H:%M')} · #26-000041")
+
+
+def test_a_bare_chief_on_a_pd_channel_is_not_the_fd():
+    e, sink = engine()
+    assert one(e, f"{DUMPSTER}, the chief is on scene").fd == "" and len(pushed(sink)) == 1
 
 
 def test_a_hold_let_go_soon_is_a_pre_alert():

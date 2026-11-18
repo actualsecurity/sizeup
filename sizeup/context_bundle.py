@@ -501,6 +501,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         "outcome": {"status": e["status"], "at": raw["updated_at"] if e["status"] != "open" else None, "by": status_by,
                     "note": e["note"], "acknowledged": None, "incident": _incident(cad, raw.get("incident_id")),
                     "near_incident": _incident(cad, e.get("near_incident")), "fd": e.get("fd_shown") or "",
+                    "fd_state": e.get("fd") or "",
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
                     "pushed_at": e["pushed_at"], "suppressed": e["suppressed"]},
     }

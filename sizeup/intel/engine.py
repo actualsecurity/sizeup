@@ -100,7 +100,8 @@ How a row becomes an event, per pack whose scope it is in:
      in its town. Linked (Event.near_incident) and Event.fd set either way:
        fd_on_scene    a unit on scene: held at log, unless the words are a safety change ("fd_present" "safety": a
                       weapon, violence, an explosion or collapse, a member down): then an FYI at safety_priority
-       fd_dispatched  units assigned or en route, none cleared of them all: held at log, unless the words add something
+       fd_dispatched  units assigned or en route, not cleared (or none known yet on an open incident made at most
+                      FD_PAGED_S before: toned out): held at log, unless the words add something
                       ("add_info": people inside or trapped, injuries, spread, hazmat): an FYI at fyi_priority (2);
                       a safety change: at safety_priority
        fd_there       none of ours, but the words say the FD is there ("the fire department is already working it":
@@ -108,8 +109,9 @@ How a row becomes an event, per pack whose scope it is in:
      The FD cleared (the incident closed, every unit cleared or in service, the feed's event closed): a pre-alert as
      before (a rekindle), its body saying "FD here HH:MM". An FYI's title starts "FYI" and its body ends "FD on scene ·
      #<number>". An event pushed before the FD was known is linked only, never lowered; one pushed as an FYI keeps its
-     FYI priority. A hold that ends more than RELEASE_S after the call (the incident dismissed) stays at log
-     ("fd_late"). An event of another category is never checked.
+     FYI priority. A held call whose FD has cleared since (a rekindle merged into it) is let go as a pre-alert, "FD here
+     HH:MM"; one whose incident is gone (dismissed, no longer at the place) more than RELEASE_S after the call stays at
+     log ("fd_late"). An event of another category is never checked.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
      A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
      (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
@@ -164,6 +166,8 @@ INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last
 FD_HELD = ("fd_on_scene", "fd_dispatched", "fd_there")   # a fire-related event held for the FD being there (_fire)
 FD_FYI = ("on_scene", "dispatched", "there")              # Event.fd of an event the FD is at: a push of it is an FYI
 FD_RANK = {"on_scene": 3, "dispatched": 2, "cleared": 1}   # which of two incidents at the place is the one (_fire_incident)
+FD_PAGED_S = 30 * 60.0                 # an open incident with no unit known yet, made at most this long before the
+                                       # event, is the FD already toned out (a page's own card): as dispatched
 FD_OPEN_S = 12 * 3600.0                # an open incident counts this long after it was made (a long fire); a closed one
                                        # only when closed within fd_window_min (a rekindle after: a pre-alert, linked)
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
@@ -959,6 +963,9 @@ class IntelEngine:
                 ev.priority = int(prio.get("safety_priority", 4) if safety else prio.get("fyi_priority", 2))
             return ""
         state = str((inc or {}).get("fd") or "")
+        if (inc is not None and not state and inc.get("closed_at") is None
+                and ev.first_at - float(inc.get("created_at") or 0.0) <= FD_PAGED_S):
+            state = "dispatched"              # open, no unit known yet, made just now: the FD is already toned out
         if state not in ("on_scene", "dispatched") and pack.fd_said("there", texts):
             state = "there"                   # said so: another department's call, or ours not in the data yet
         ev.fd = state if state in (*FD_FYI, "cleared") else ""
@@ -1021,6 +1028,14 @@ class IntelEngine:
                 best = (rank, inc)
         return best[1] if best else None
 
+    def _cleared_since(self, ev: Event) -> bool:
+        """The FD cleared the event's incident after its first transmission (a rekindle while the call was held):
+        let go as a pre-alert, never fd_late."""
+        if ev.fd != "cleared" or not ev.near_incident:
+            return False
+        at = self._numbers.get(int(ev.near_incident), ("", None))[1]
+        return at is None or float(at) > ev.first_at
+
     def fd_shown(self, ev_fd: str, near) -> str:
         """Event.fd as the console says it, from what the lookup last gave ("FD on scene · #26-000041")."""
         number, at = self._numbers.get(int(near), ("", None)) if near else ("", None)
@@ -1058,9 +1073,10 @@ class IntelEngine:
             else:
                 ev.suppressed = ""
                 ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
-        elif (ev.suppressed in FD_HELD and ev.fd not in FD_FYI and ev.last_at - ev.first_at > RELEASE_S):
-            ev.suppressed = "fd_late"         # held for the FD, let go too late to be a pre-alert (the incident
-            ev.mode = lowest(ev.mode, "log")  # dismissed, cleared): stays at log, as placed_late
+        elif (ev.suppressed in FD_HELD and ev.fd not in FD_FYI and not self._cleared_since(ev)
+              and ev.last_at - ev.first_at > RELEASE_S):
+            ev.suppressed = "fd_late"         # held for the FD, and the incident gone since (dismissed, no longer
+            ev.mode = lowest(ev.mode, "log")  # at the place): let go too late to be a pre-alert, as placed_late
         elif ev.suppressed in ("out_of_area", "near_incident", *FD_HELD):
             ev.suppressed = ""
             if mode is not None:
@@ -1763,7 +1779,7 @@ def fire_place(ev: Event, inc: dict, radius_m: float) -> bool:
     from sizeup.cad.sources import same_place as same_address
     mine = _block_of(ev.label_full)
     shown = str(inc.get("address") or inc.get("label") or "")
-    ta, tb = (ev.town or place_town(ev.label_full)).lower(), place_town(shown)
+    ta, tb = (ev.town or place_town(ev.label_full)).lower(), place_town(shown) or place_town(inc.get("address_raw") or "")
     if ta and tb and ta != tb:
         return False
     near = None
@@ -1792,7 +1808,7 @@ def fire_street_said(inc: dict, texts, said=frozenset(), own=frozenset()) -> boo
     words name another town (said: towns_said), and only when they name its town or it is one of the source's (own)."""
     from sizeup.cad.sources import ABBR, place_key
     shown = str(inc.get("address") or inc.get("label") or "")
-    town = place_town(shown)
+    town = place_town(shown) or place_town(inc.get("address_raw") or "")
     if not town or (said and town not in said) or (town not in said and town not in own):
         return False
     k = place_key(str(inc.get("address_raw") or shown))
