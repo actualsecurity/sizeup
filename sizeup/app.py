@@ -61,6 +61,7 @@ from typing import Callable
 
 import numpy as np
 
+from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
 from sizeup import janitor, tz
 from sizeup.cad import Cad
@@ -4924,7 +4925,9 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
                        perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
-                       adapter_password=adapter_password(cfg))
+                       adapter_password=adapter_password(cfg),
+                       mobile=Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                                       max_streams=cfg.mobile_max_streams))
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 

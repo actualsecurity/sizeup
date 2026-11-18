@@ -1151,6 +1151,27 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
   python -m sizeup --config deploy/hub/config.hub.toml        # http://localhost:8090/cad, /healthz
 ```
 
+### The app's API switches (`[mobile]`, #619)
+
+The mobile API (`/api/v1`, [mobile-api.md](mobile-api.md)) is built on this hub, so it is inert until switched on:
+
+```toml
+[mobile]
+enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelope beside GET /api/v1/meta
+# max_requests = 8   # v1's share of concurrent requests (1 to 64): over it, 503 busy + Retry-After
+# max_streams = 16   # v1's share of open streams (0 to 64; 2 a device; no stream is built yet)
+```
+
+- A hub (or all-in-one) key, never a station's: a station's config refuses the section, and an older release refuses
+  a key it doesn't know. Unknown keys are refused. The config is read once at start: a change is one line and a restart.
+- Off: nothing reads a token key, creates a table or sends a push, and `meta.features` reports every flag false.
+- Per-feature flags (auth, reads, stream, writes, push, media, responders) are in `meta.features`, each off until its
+  pull request is proven (code-driven until a feature wires a source, e.g. `[mobile] features` or a settings
+  policy); a route whose flag is off answers as if it did not exist.
+- Rate limits are in memory per device (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`), and per
+  address for requests with no device token.
+- The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.
+
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
 
 > "lets try it [AWS Transcribe], but lets make it configurable, which channel in the settings gets
