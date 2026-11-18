@@ -132,7 +132,7 @@ def test_dispatched_and_the_words_add_something_is_a_low_priority_fyi(extra):
 def test_dispatched_and_a_safety_change_is_at_the_safety_priority():
     e, sink = engine(inc(n=42, label="15 Sample St", dlat=0.01, typ="HAZARD"))
     one(e, f"{LAUNDROMAT}, the owner is assaulting a customer")
-    [(_ev, d)] = pushed(sink)
+    [(_ev, d)] = [(x, d) for x, d in pushed(sink) if x.category == "hazmat"]   # (the assault is its own dispute push)
     assert d.priority == 4 and d.message["title"].startswith("FYI · ")
 
 

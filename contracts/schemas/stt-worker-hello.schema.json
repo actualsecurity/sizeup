@@ -54,7 +54,7 @@
     },
     "models": {
       "title": "Models",
-      "description": "The models the worker serves. The hub reads it on every request (sizeup/cloud/infer.py seen); a key left out is unchanged. Today's worker client in tools/stt_worker does not send it yet.",
+      "description": "The models the worker serves. The hub reads it on every request (sizeup/cloud/infer.py seen); a key left out is unchanged. The worker client in tools/stt_worker sends it in every hello and state post.",
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,

@@ -47,7 +47,7 @@ TERMS = "# county_fire: made up\n# units\nEngine one\nLadder two\n# places\nNort
 # flipped, every test of this file passes.
 J1_A_JOB_IS_HANDED_OUT_ONCE_AND_A_LATE_RESULT_IS_404 = True   # redelivered until answered; a late result is taken (200)
 J2_A_RESULT_IS_DROPPED_AFTER_THREE_TRIES = True               # kept, and sent again when the hub answers
-J3_THE_JOBS_THREAD_ENDS_ON_A_WRONG_TYPE = True                # #782: that answer is left out, the thread goes on
+J3_THE_JOBS_THREAD_ENDS_ON_A_WRONG_TYPE = False               # #782: that answer is left out, the thread goes on
 J4_AN_ARGUMENT_TOO_MANY_IS_A_TYPE_ERROR = True                # named arguments; one the station does not know is ignored
 J5_NO_ARGUMENTS_MEANS_EVERYTHING = True                       # a call without its arguments is refused
 J6_THE_HUB_RAISES_ON_A_WRONG_TYPE_IN_A_RESULT = True          # text only / nothing queued, as for no answer at all

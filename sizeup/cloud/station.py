@@ -135,6 +135,32 @@ def source_rows(runner) -> list[dict]:
 
 
 POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
+RESTART_S = (1.0, 30.0)    # a link thread that raised starts again after this long (doubling, at most the second)
+
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# The hub's state answer, field by field (D6 of #774): (check, what it must be). A field of another type is ignored and
+# the value it last gave stays (said once per field); absent (or null) is what it always was: a hub without it.
+ANSWER = {
+    "build": (lambda v: isinstance(v, str), "a string"),
+    "caps": (lambda v: isinstance(v, list) and all(isinstance(c, str) for c in v), "a list of strings"),
+    "services": (lambda v: isinstance(v, dict), "an object"),
+    "pool": (lambda v: isinstance(v, dict), "an object"),
+    "station": (lambda v: isinstance(v, str), "a string"),
+}
+# the rest of what the hub answers, as said when it isn't so
+OTHER = {"answer": (None, "an object"), "jobs": (None, "a list of objects"), "jobs[]": (None, "an object")}
+# ... and the pool's word (#639 phase 2), each of its fields so
+POOL = {"on": (lambda v: isinstance(v, bool), "true or false"), "worker": (lambda v: isinstance(v, bool), "true or false"),
+        "ready": (_is_int, "an integer"), "max_s": (_is_num, "a number"),
+        "gpu_idle": (lambda v: isinstance(v, bool), "true or false"), "gpu_idle_n": (_is_int, "an integer")}
 
 
 def _cpu_pct() -> float | None:
@@ -163,7 +189,9 @@ class StationLink:
                            if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else None)
         try:
             if self._caps_file is not None and self._caps_file.is_file():
-                self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))
+                kept = json.loads(self._caps_file.read_text())
+                if ANSWER["caps"][0](kept):                 # (a file of another shape: as if none)
+                    self.hub_caps = frozenset(kept)
         except (OSError, ValueError, TypeError):
             pass
         # the admins' service per source, as the hub last sent it (sourcekeys.set_service_overrides): kept beside it too
@@ -188,6 +216,12 @@ class StationLink:
         disk = cfg.cloud_outbox if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else (cfg.clips_dir or ".")
         self.metrics = Metrics(str(Path(disk).parent) if disk != "." else ".")
         self._threads: list[threading.Thread] = []
+        self._answer_bad: set[str] = set()      # the answer's fields said to be of another type (said once each)
+        # the link's threads that raised and started again, by name: {n, why, at} (the Hub row, Health's hints)
+        self.restarts: dict[str, dict] = {}
+        # what the hub left out of this station's posts for its shape (its answer's "refused" / "reason"): "" none
+        self.refused, self._refused = "", {"status": "", "live": ""}
+        self._watch_lock = threading.Lock()
         # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
         # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
@@ -219,7 +253,11 @@ class StationLink:
     hub_caps: frozenset = frozenset()       # what the hub says it knows ("caps" in its answers): "p25_systems" (#409)
 
     def _set_caps(self, caps) -> None:
-        caps = frozenset(str(c) for c in (caps or []))
+        """What the hub says it knows: a list of strings (none: a hub without any). Anything else is never taken."""
+        if caps is not None and not (isinstance(caps, (list, tuple, set, frozenset))
+                                     and all(isinstance(c, str) for c in caps)):
+            return self._wrong("caps")
+        caps = frozenset(caps or [])
         if caps != self.hub_caps:
             self.hub_caps = caps
             try:
@@ -232,6 +270,8 @@ class StationLink:
         """The hub's service per source (its answer's "services"): every row tagged here from now on uses it, the
         station's own CAD's never; kept beside the outbox when it changed."""
         if not isinstance(m, dict):
+            if m is not None and keep:
+                self._wrong("services")
             return
         m = sourcekeys.clean_services(m)
         if m == sourcekeys.service_overrides() and sourcekeys._service_from_hub:
@@ -244,6 +284,79 @@ class StationLink:
             except OSError:
                 pass
         self.log(f"hub link: service per source from the hub: {len(m)} chosen")
+
+    def _wrong(self, field: str) -> None:
+        """A field of the hub's answer of another type than it must be: ignored (the last good value stays), said once
+        until it is good again."""
+        bad = self.__dict__.setdefault("_answer_bad", set())
+        if field not in bad:
+            bad.add(field)
+            kept = ANSWER.get(field) or (POOL.get(field[5:]) if field.startswith("pool.") else None)
+            what = (kept or OTHER.get(field) or (None, "of its type"))[1]
+            self.log(f"hub link: the hub's {field} is not {what}: ignored"
+                     + (", its last good value kept" if kept else ""))
+
+    def _good(self, field: str) -> None:
+        self.__dict__.setdefault("_answer_bad", set()).discard(field)
+
+    def _set_pool(self, word) -> None:
+        """The pool's word (its state answer's "pool"; a hub without it: {}): each field of its type, else the value it
+        last had."""
+        if word is None:
+            self.pool = {}
+            return
+        if not isinstance(word, dict):
+            return self._wrong("pool")
+        out = dict(word)
+        for k, (ok, _what) in POOL.items():
+            if k in out and not ok(out[k]):
+                self._wrong(f"pool.{k}")
+                if k in self.pool:
+                    out[k] = self.pool[k]
+                else:
+                    del out[k]
+            elif k in out:
+                self._good(f"pool.{k}")
+        self.pool = out
+
+    def apply_answer(self, r) -> None:
+        """The hub's answer to a state post, field by field: a field of another type is ignored (the last good value
+        stays, ANSWER); one that fails to apply never stops the others, nor the thread (said once per field)."""
+        if not isinstance(r, dict):
+            return self._wrong("answer")
+        self._good("answer")
+        for field, apply in (("build", self.updates.hub), ("caps", self._set_caps),
+                             ("services", self._set_services),     # (a hub before this sends none: kept as they were)
+                             ("pool", self._set_pool),             # (#639 phase 2; older: none)
+                             ("station", self.adopt)):
+            v = r.get(field)
+            if v is not None and not ANSWER[field][0](v):
+                self._wrong(field)
+                continue
+            self._good(field)
+            try:
+                apply(v)
+                self._good(f"{field}!")
+            except Exception as e:  # noqa: BLE001 - one field never in the way of the rest, nor of the link
+                if f"{field}!" not in self.__dict__.setdefault("_answer_bad", set()):
+                    self._answer_bad.add(f"{field}!")
+                    self.log(f"hub link: the hub's {field} not applied: {type(e).__name__}: {str(e)[:120]}")
+
+    def _left_out(self, r, had_status: bool) -> None:
+        """The hub's word on what it left out of this post for its shape (its answer's "refused": ["status", "live"],
+        "reason"; the rest was taken): said once per reason, on the Hub row while it lasts. A post that carried a status
+        and has no word on it clears the status' word; any post taken without a word on the talkers clears theirs."""
+        ref = r.get("refused") if isinstance(r, dict) and isinstance(r.get("refused"), list) else []
+        why = str(r.get("reason") or "?")[:300] if isinstance(r, dict) else "?"
+        for part, sent in (("status", had_status), ("live", True)):
+            if part in ref:
+                text = f"the hub left out this station's {'status' if part == 'status' else 'talkers / pages'}: {why}"
+                if text != self._refused[part]:
+                    self.log(f"hub link: {text}")
+                self._refused[part] = text
+            elif sent:
+                self._refused[part] = ""
+        self.refused = " · ".join(t for t in self._refused.values() if t)
 
     def adopt(self, sid) -> None:
         """The id the hub took this station's post as ("station" in its state answer): this station's id from now on,
@@ -275,9 +388,10 @@ class StationLink:
         """The hub's last word, heard lately: a worker other than this station's whisper could take a context clip (this
         long) now. Never a round trip: a clip no worker elsewhere could take stays here; nor to a hub not heard lately
         (its last word may be stale: a hub deploying), which keeps it here (saved, or queued) instead."""
-        if not self.pool_takes() or int(self.pool.get("ready") or 0) <= 0 or not self.connected():
+        ready, max_s = self.pool.get("ready"), self.pool.get("max_s")
+        if not self.pool_takes() or not _is_int(ready) or ready <= 0 or not self.connected():
             return False
-        return seconds is None or seconds <= float(self.pool.get("max_s") or 0.0)
+        return seconds is None or (_is_num(max_s) and seconds <= max_s)
 
     def pool_gpu_idle(self) -> bool:
         """The hub's last word, heard lately: a GPU worker idle and quick on pre-alert clips now (a stopping station
@@ -290,7 +404,7 @@ class StationLink:
         if not self.pool_takes() or not self.connected():
             return 0
         n = self.pool.get("gpu_idle_n")
-        return int(n) if isinstance(n, int) and not isinstance(n, bool) else int(bool(self.pool.get("gpu_idle")))
+        return max(0, n) if _is_int(n) else int(self.pool.get("gpu_idle") is True)
 
     def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
@@ -346,17 +460,95 @@ class StationLink:
     def start(self) -> StationLink:
         if self._threads:
             return self
-        for name, fn in (("hub-forward", self._forward), ("hub-state", self._state), ("hub-jobs", self._jobs),
-                         ("hub-stt", self._stt_forward)):
-            t = threading.Thread(target=fn, name=name, daemon=True)
-            t.start()
-            self._threads.append(t)
+        self._threads = [go() for _name, go in self._loops()]
         self.aircraft.start()
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         self.logs.start()
         self.metrics_link.start()
         self.pool_worker.start()              # (idle until the hub says its pool takes stations)
         return self
+
+    def _loops(self) -> tuple:
+        """The link's own threads, in order: (name, start it supervised)."""
+        return (("hub-forward", lambda: self._spawn("hub-forward", self._forward)),
+                ("hub-state", lambda: self._spawn("hub-state", self._state)),
+                ("hub-jobs", lambda: self._spawn("hub-jobs", self._jobs)),
+                ("hub-stt", lambda: self._spawn("hub-stt", self._stt_forward)))
+
+    def _spawn(self, name: str, fn) -> threading.Thread:
+        t = threading.Thread(target=self._supervised, args=(name, fn), name=name, daemon=True)
+        t.start()
+        return t
+
+    def _supervised(self, name: str, fn) -> None:
+        """A link thread's loop that never dies: whatever it raises (a hub's answer nothing expected, a bug) is said
+        (once per thread and error type), counted (the Hub row, Health) and the loop starts again, after RESTART_S
+        (doubling while it keeps raising; a fresh client, its own state as at the start)."""
+        wait = RESTART_S[0]
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                fn()
+                return                                  # (stopped)
+            except Exception as e:  # noqa: BLE001 - the link's threads never die
+                self._restarted(name, e)
+            if time.monotonic() - t0 > 10 * RESTART_S[1]:
+                wait = RESTART_S[0]                     # (it ran a good while: not the same streak)
+            self._stop.wait(wait)
+            wait = min(RESTART_S[1], wait * 2)
+
+    def _restarted(self, name: str, e: BaseException) -> None:
+        why = type(e).__name__
+        with self._lock:
+            r = self.restarts.setdefault(name, {"n": 0, "why": "", "at": None})
+            said = r["why"] == why
+            r.update(n=r["n"] + 1, why=why, at=time.time())
+        if not said:
+            self.log(f"hub link: {name} raised {why}: {str(e)[:160]}; started again")
+
+    def watchdog(self) -> list[str]:
+        """The link's long-lived threads, each alive while the link runs: one that died (a forwarder's own loop has
+        a catch-all; this is the check of the check) is started again and counted like a restart. The names."""
+        if not self._threads or self._stop.is_set() or not self._watch_lock.acquire(blocking=False):
+            return []
+        try:
+            return self._watch()
+        finally:
+            self._watch_lock.release()
+
+    def _watch(self) -> list[str]:
+        def dead(t) -> bool:                            # (one made but not started yet, in start(): not dead)
+            return t is not None and t.ident is not None and not t.is_alive()
+        out = []
+        for i, (name, go) in enumerate(self._loops()):
+            if i < len(self._threads) and dead(self._threads[i]):
+                self._restarted(name, RuntimeError("thread ended"))
+                self._threads[i] = go()
+                out.append(name)
+        for name, obj in (("hub-aircraft", self.aircraft), ("hub-vessels", self.vessels), ("hub-logs", self.logs),
+                          ("pool-worker", self.pool_worker)):
+            if dead(getattr(obj, "_thread", None)) and not obj._stop.is_set():
+                self._restarted(name, RuntimeError("thread ended"))
+                obj._thread = None
+                obj.start()
+                out.append(name)
+        ml = self.metrics_link
+        for i, (name, make) in enumerate((
+                ("station-metrics", lambda: threading.Thread(target=ml._sample, name="station-metrics", daemon=True)),
+                ("hub-metrics", lambda: threading.Thread(target=ml._send, name="hub-metrics", daemon=True)))):
+            if i < len(ml._threads) and dead(ml._threads[i]) and not ml._stop.is_set():
+                self._restarted(name, RuntimeError("thread ended"))
+                ml._threads[i] = make()
+                ml._threads[i].start()
+                out.append(name)
+        return out
+
+    def restarts_text(self, within_s: float = 3600.0) -> str:
+        """The link's threads that started again in the last hour: "hub-state 2× (TypeError, 14:05)"; "" for none."""
+        now = time.time()
+        with self._lock:
+            rs = sorted((k, dict(v)) for k, v in self.restarts.items() if now - (v["at"] or 0) < within_s)
+        return ", ".join(f"{n} {r['n']}× ({r['why']}, {tz.hhmm(r['at'])})" for n, r in rs)
 
     @property
     def running(self) -> bool:
@@ -426,6 +618,12 @@ class StationLink:
         lost = sum(self.stt_stats()["dropped"].values())
         if lost:
             detail += f" · {lost} STT input(s) dropped (the hub used the clip)"
+        if getattr(self, "refused", ""):
+            detail += f" · {self.refused}"
+        self.watchdog()
+        again = self.restarts_text()
+        if again:
+            detail += f" · restarted: {again}"
         v = self.updates.status()
         detail += f" · version: {v['text']}"
         ad = self.adapter(v)
@@ -486,7 +684,9 @@ class StationLink:
                                for r in rows]}
             try:
                 r = client.request("POST", "/api/station/events", body, timeout=60.0)
-                acked = int(r["acked"])
+                acked = r["acked"]
+                if not _is_int(acked):              # (true would ack seq 1; "7" or 7.5 is no hub's answer)
+                    raise ValueError(f"the hub's acked is not an integer ({type(acked).__name__})")
             except (HubError, KeyError, TypeError, ValueError) as e:
                 self._fail(e)
                 self._stop.wait(backoff.fail(e))
@@ -514,8 +714,9 @@ class StationLink:
                     "items": [dict(r["data"], n=r["n"], stt=sttinput.to_wire(r["flac"], r["meta"])) for r in rows]}
             try:
                 r = client.request("POST", sttinput.PATH, body, timeout=60.0, gzip_body=True)
-                stored = [int(n) for n in r.get("stored") or []]
-                refused = [int(n) for n in r.get("refused") or []]
+                stored, refused = r.get("stored") or [], r.get("refused") or []
+                if not all(isinstance(x, list) and all(_is_int(n) for n in x) for x in (stored, refused)):
+                    raise ValueError("the hub's stored / refused: lists of integers")
             except (HubError, TypeError, ValueError, AttributeError) as e:
                 if isinstance(e, HubError) and e.status == 404:          # a hub without the route after all
                     self._set_caps(self.hub_caps - {sttinput.CAP})
@@ -553,6 +754,10 @@ class StationLink:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself
             out["health"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        self.watchdog()
+        if self.restarts:                               # the link's threads that started again (Health's hints)
+            with self._lock:
+                out["health"]["link_restarts"] = {k: dict(v) for k, v in self.restarts.items()}
         if talkgroups:
             out["talkgroups"] = app.talkgroups_state() if app.p25 else []
         return out
@@ -577,15 +782,12 @@ class StationLink:
             try:
                 r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
-                self.updates.hub(r.get("build") if isinstance(r, dict) else None)
-                if isinstance(r, dict):
-                    self._set_caps(r.get("caps"))
-                    self._set_services(r.get("services"))      # (a hub before this sends none: kept as they were)
-                    self.pool = r["pool"] if isinstance(r.get("pool"), dict) else {}   # (#639 phase 2; older: none)
-                    self.adopt(r.get("station"))
+                self.apply_answer(r)
+                self._left_out(r, "status" in body)
+                left_out = r.get("refused") if isinstance(r, dict) and isinstance(r.get("refused"), list) else []
                 if "status" in body:
                     last_status, self._status_now = now, False
-                    if "talkgroups" in body["status"]:
+                    if "talkgroups" in body["status"] and "status" not in left_out:   # (left out: sent again next)
                         last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
                                                 for r in body["status"]["talkgroups"]]
                 backoff.ok()
@@ -611,7 +813,18 @@ class StationLink:
             backoff.ok()
             if not self._stop.is_set():
                 self._ok()
-            for job in r.get("jobs") or []:        # handed to this station: run, even if just turned off
+            jobs = r.get("jobs") if isinstance(r, dict) else None
+            if jobs is not None and not isinstance(jobs, list):
+                self._wrong("jobs")                 # (a list of objects: none taken from this answer)
+                jobs = None
+            if isinstance(jobs, list):
+                self._good("jobs")
+                if all(isinstance(j, dict) for j in jobs):
+                    self._good("jobs[]")
+            for job in jobs or []:                  # handed to this station: run, even if just turned off
+                if not isinstance(job, dict):
+                    self._wrong("jobs[]")
+                    continue
                 threading.Thread(target=self._run_job, args=(job,), name="hub-job", daemon=True).start()
 
     def _run_job(self, job: dict) -> None:

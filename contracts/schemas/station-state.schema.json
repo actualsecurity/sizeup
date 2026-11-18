@@ -550,7 +550,8 @@
                 "description": "Recent key-ups on encrypted talkgroups: {tg, name, source, ...}, never the radio.",
                 "items": {"type": "object"}
               },
-              "watched": {"type": "array", "description": "Counts on the talkgroups being watched: {tg, name, since, grants, ...}.", "items": {"type": "object"}}
+              "watched": {"type": "array", "description": "Counts on the talkgroups being watched: {tg, name, since, grants, ...}.", "items": {"type": "object"}},
+              "split": {"type": "object", "description": "Counts of the cuts the recorder made, or would have made, where a new talker came in on the voice channel (sizeup/radio/systems.py state): a count per kind, and `since`. Optional: a station from before the P25 split sends none.", "properties": {"since": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the counts began, Unix seconds."}}, "additionalProperties": {"type": "integer", "minimum": 0}}
             }
           }
         },

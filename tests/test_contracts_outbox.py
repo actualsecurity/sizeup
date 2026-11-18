@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from sizeup.cloud import outbox as outbox_mod
+from sizeup.cloud import station as stationmod
 from sizeup.cloud.outbox import Outbox
 from tests import contracts as c
 from tests.test_app import wait
@@ -38,7 +39,7 @@ TABLES = ("outbox", "meta", "stt_inputs")
 # (nothing else) and mark the row in contracts/README.md fixed.
 O1_A_FILE_SET_BACK_HANDS_OUT_THE_SAME_SEQ_AGAIN = True   # fixed: never the same seq twice under one epoch
 O2_NAN_IS_STORED_AS_A_TOKEN_THAT_IS_NOT_JSON = True      # fixed: stored as null, like #779 on the wire
-O3_A_ROW_IT_CANNOT_READ_ENDS_THE_FORWARDER = True        # fixed: that row is set aside, the ones behind it go up
+O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER = True        # fixed: that row is set aside, the ones behind it go up
 O4_A_FILE_SQLITE_CANNOT_OPEN_STOPS_THE_STATION = True    # fixed: the file is moved aside, a new outbox, the station starts
 
 
@@ -997,16 +998,18 @@ O3_ROWS = {
 
 
 @pytest.mark.parametrize("case", list(O3_ROWS))
-def test_known_deviation_a_row_the_station_cannot_read_ends_the_forwarder(tmp_path, monkeypatch, case):
+def test_known_deviation_a_row_the_station_cannot_read_blocks_the_forwarder(tmp_path, monkeypatch, case):
     """O3. The station as the reader of its own file does not handle a row of the wrong type. `data` that is not JSON
     raises in Outbox.batch(); `audio` stored as text (a writer that bound a string) comes back as a str and raises in
-    the forwarder's base64. Both are outside the forwarder's error handling: the hub-forward thread ends, and no
-    event goes to the hub until the station restarts, and then again, since the row is still the oldest. Only a
-    second writer of the file (or a damaged row) can make one: today's add() cannot. Fixed: the row is set aside
-    (said once in the log), and the events behind it go up."""
+    the forwarder's base64. Both are outside the forwarder's own error handling. Since #782 the thread no longer ends:
+    the link starts its loop again and counts it (the Hub row, Health), and the loop raises again on the same row,
+    which is still the oldest. So no event goes to the hub, across restarts of the station too. Only a second writer
+    of the file (or a damaged row) can make one: today's add() cannot. Fixed: the row is set aside (said once in the
+    log), and the events behind it go up."""
     sql, error = O3_ROWS[case]
     died: list[tuple[str, str]] = []
     monkeypatch.setattr(threading, "excepthook", lambda a: died.append((a.thread.name, type(a.exc_value).__name__)))
+    monkeypatch.setattr(stationmod, "RESTART_S", (0.05, 0.2))                            # (the loop's restart delays)
     lv = c.Live(tmp_path)
     try:
         st = lv.station()
@@ -1017,9 +1020,9 @@ def test_known_deviation_a_row_the_station_cannot_read_ends_the_forwarder(tmp_pa
         assert wait(lambda: link.outbox.pending()[0] == 0 and hub.seq == 1, 30)          # the lane works
         link.outbox.db.execute(sql)                                                      # another writer's row: seq 2
         link.emit("heard", {"system": "p25", "radio_id": "990002", "alias": "", "at": None, "channel": ""})
-        if O3_A_ROW_IT_CANNOT_READ_ENDS_THE_FORWARDER:
-            forward.join(10.0)
-            assert not forward.is_alive() and ("hub-forward", error) in died
+        if O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER:
+            assert wait(lambda: link.restarts.get("hub-forward", {}).get("n", 0) >= 2, 30)   # started again, raised again
+            assert link.restarts["hub-forward"]["why"] == error and forward.is_alive() and not died
             assert link.outbox.pending()[0] == 2 and hub.seq == 1                        # nothing more goes up
             if error == "JSONDecodeError":
                 with pytest.raises(ValueError):
