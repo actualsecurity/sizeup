@@ -283,7 +283,7 @@ def parse(text: str, known=None) -> Dispatch:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
         after = masked[a.end():]
         crosses = []
-        again = re.compile(rf"\b{re.escape(a.group(1))}\s*[,.]?\s*$")
+        again = re.compile(rf"\b{re.escape(a.group(1))}\s+$")
         for sm in STREET.finditer(after[:160]):
             if again.search(after[:sm.start()]):
                 continue                                   # the address read again, however misheard: never a cross

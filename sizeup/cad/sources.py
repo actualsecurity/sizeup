@@ -1157,33 +1157,40 @@ def heard_place(heard: str, typed: str, towns=()) -> str:
 
 
 def one_letter_street(heard: tuple, typed: tuple, towns) -> bool:
-    """A page's street (place_key) one letter off a feed's (pagematch.one_edit), sure enough to join on (pagematch
-    one_letter): the same directions before and after and the same suffix, said on both; the feed's street on the map
-    in those towns; and no other street there (any suffix) as close to the heard name: one edit from it or the same
-    folded, or within SNAP_MARGIN of the feed's street's similarity (fuzzy.name_sim). False with no street list there:
-    nobody can tell it isn't another street."""
+    """A page's street (place_key) one letter off a feed's (pagematch.one_letter_name), sure enough to join on
+    (pagematch one_letter): the same directions before and after and the same suffix, said on both; a street list for
+    every one of those towns (one without: nobody can tell it isn't another street there) and the feed's street on it;
+    and no other street there (any suffix) as close to the heard name, either run together in any order
+    (pagematch.spellings: "Sample Fird" is "Samplefird"): the same, one edit or the same folded, or within SNAP_MARGIN
+    of the feed's street's similarity (fuzzy.name_sim)."""
     if heard is None or typed is None or heard[0] != "addr" or typed[0] != "addr":
         return False
     (_, _, hp, hs, hn, hq), (_, _, tp, ts, tn, tq) = heard, typed
-    if not (hs and hs == ts and hp == tp and hq == tq):
+    if not (hs and hs == ts and hp == tp and hq == tq) or not pagematch.one_letter_name(hn, tn):
         return False
-    h, t = " ".join(sorted(hn)), " ".join(sorted(tn))
-    if not pagematch.one_edit(h, t):
-        return False
-    known = [(n, st) for town in dict.fromkeys(str(x).lower() for x in towns or () if x) for n, st, _ in STREETS.get(town, ())]
-    if not any(st[2] == tn and _same_street(st, typed[2:]) for _, st in known):
+    towns = list(dict.fromkeys(str(x).lower() for x in towns or () if x))
+    if not towns or any(t not in STREETS for t in towns):
+        return False                                       # a town with no street list: unsure
+    known = [st for t in towns for _, st, _ in STREETS[t]]
+    if not any(st[2] == tn and _same_street(st, typed[2:]) for st in known):
         return False                                       # the feed's street not on the map there: unsure
-    near = name_sim(h, t)
-    return not any(st[2] != tn and (n == h or pagematch.one_edit(n, h) or fold(n) == fold(h)
-                                    or name_sim(n, h) >= near - SNAP_MARGIN) for n, st in known)
+    said = pagematch.spellings(hn)
+    near = max(name_sim(a, b) for a in said for b in pagematch.spellings(tn))
+    return not any(a == b or pagematch.one_edit(a, b) or fold(a) == fold(b) or name_sim(a, b) >= near - SNAP_MARGIN
+                   for st in known if st[2] != tn for b in pagematch.spellings(st[2]) for a in said)
 
 
-def known_street_name(name: frozenset, towns) -> bool | None:
-    """A street name (_street's name words) is a street the map has in those towns; None with no street list there."""
-    towns = [t for t in dict.fromkeys(str(x).lower() for x in towns or () if x) if t in STREETS]
-    if not towns:
-        return None
-    return any(st[2] == name for t in towns for _, st, _ in STREETS[t])
+def cross_as_mapped(name: frozenset):
+    """A cross street a page says (_street's name words) as the map spells it: the name when the map has it (any
+    town), else the one known street it snaps to (fuzzy.snap); the name as said when two are near it or there is no
+    street list; None when it is near no known street (garbled: no evidence)."""
+    if not STREETS:
+        return name
+    known = {st[2] for rows in STREETS.values() for _, st, _ in rows}
+    if name in known:
+        return name
+    how, got = snap(" ".join(sorted(name)), [(" ".join(sorted(k)), k) for k in known])
+    return got if how == "snap" else name if how == "ambiguous" else None
 
 
 def _towns_agree(a: str, b: str) -> bool:
@@ -2562,7 +2569,7 @@ class Sources:
             e.elsewhere = next((n for n in ambiguous if pagematch.says_name(words, n)), "")
             e.elsewhere_near = bool(e.elsewhere) and any(pagematch.says_name(words, n) for n in near)
         mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
-        mine_x = {x for x in mine_x if known_street_name(x, where_t) is not False}   # one not on the map: garbled
+        mine_x = {y for y in map(cross_as_mapped, mine_x) if y}   # as the map spells it; near none: garbled
         if mine_x:                                           # the feed's only when the page says some
             feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
             if feed_x:

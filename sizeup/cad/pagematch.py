@@ -12,12 +12,14 @@ anything weaker is only a button for a person.
                   - the street exactly the feed's (exact_street: the same name, directions before and after, and the
                     same suffix, said on both); a street the page misheard ("snapped") is weak at most, but for one
                     letter off (below)
-                  - one letter off (one_letter): the page's street one edit from the feed's (a letter wrong, in, out,
-                    or two swapped: one_edit; names of SHORT letters or more), the same directions and suffix said, the
-                    feed's street on the map in the call's towns and no other street there as close to the heard name
-                    (one edit, or within SNAP_MARGIN of the feed's similarity: a street of ours one letter from
-                    another is never guessed at), the house number exactly the feed's (never doubled, misread or
-                    near), the same family of call (both known): then as an exact street
+                  - one letter off (one_letter): the page's street one edit from the feed's in one word (a letter
+                    wrong, in, out, or two swapped: one_letter_name; that word letters only, SHORT letters or more,
+                    the other words the same), the same directions and suffix said, the feed's street on the map, a
+                    street list for every one of the call's towns, and no other street there as close to the heard
+                    name, its words run together in any order (spellings: the same, one edit, or within SNAP_MARGIN
+                    of the feed's similarity: a street of ours one letter from another is never guessed at), the
+                    house number exactly the feed's (never doubled, misread or near), the same family of call (both
+                    known): then as an exact street
                   - the feed's location has a house number
                   - the feed is fresh: its last report "ok" and recent (the page's own event may simply be late)
                   - the page within STRONG_S (sources.SAME_CALL_S) of the feed's dispatch
@@ -28,8 +30,9 @@ anything weaker is only a button for a person.
                     address (a chain's two stores) never is, and one that is only town names, department or agency
                     words or the street's own words ("PORT CHESTER", "SAMPLE POST" on Sample Post Rd) is no name. A
                     cross street, the family of call or being the only open call are supporting evidence only (shown),
-                    never enough. A cross street the page says that the map doesn't know in the call's towns (a
-                    garbled one) is no evidence either way (with no street list there, compared as said)
+                    never enough. A cross street the page says is compared as the map spells it (snapped over every
+                    known street, any town); one near no known street at all (garbled) is no evidence either way
+                    (with no street list, compared as said)
     against     on the street as typed, any house number but the same or doubled (one digit off, "418" or "413" for
                 412, is the house next door); on a misheard street another number ("near" stays neutral there, a digit
                 in or out is for it); another of the department's places on that street (a misheard one: the feed's)
@@ -122,6 +125,26 @@ def one_edit(a: str, b: str) -> bool:
                                   and a[diff[1]] == b[diff[0]])
     long, short = (a, b) if len(a) > len(b) else (b, a)
     return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
+
+
+def one_letter_name(heard, typed) -> bool:
+    """Two street names (_street's name words) one letter apart: as many words, all but one the same, and that one
+    word one_edit from the other's, letters only (a digit is another road: "Route 120" / "Route 1201") and of
+    fuzzy.SHORT letters or more on both sides ("Hill" / "Mill" are two streets)."""
+    from sizeup.cad.fuzzy import SHORT
+    h, t = set(heard or ()), set(typed or ())
+    if len(h) != len(t) or len(h - t) != 1 or len(t - h) != 1:
+        return False
+    (a,), (b,) = h - t, t - h
+    return (a.isalpha() and b.isalpha() and min(len(a), len(b)) >= SHORT and one_edit(a, b))
+
+
+def spellings(words) -> set[str]:
+    """A street name's words run together in every order ("sample fird" -> {"samplefird", "firdsample"}): how a page
+    may say it with or without the space (at most four words: every order; more: as sorted)."""
+    from itertools import permutations
+    w = sorted(str(x).lower() for x in words or ())
+    return {"".join(p) for p in permutations(w)} if len(w) <= 4 else {"".join(w)}
 
 
 def name_words(name: str) -> list[str]:

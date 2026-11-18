@@ -52,6 +52,41 @@ def test_one_edit():
     assert not one("sampleford", "sampleford")                                     # the same: not misheard
     assert not one("samplfird", "sampleford") and not one("modelton", "sampleford")
     assert not one("elm", "elk")                                                    # short: exact only
+    name = lambda a, b: pagematch.one_letter_name(frozenset(a.split()), frozenset(b.split()))
+    assert name("samplefird", "sampleford") and name("sample pirtal", "sample portal")
+    assert not name("sample hill", "sample mill")                                  # the word that differs: short
+    assert not name("route 1201", "route 120") and not name("route 12", "route 120")   # digits: another road
+    assert not name("sample park x", "sample park")                                # a word more
+    assert not name("sampel pirtal", "sample portal")                              # two words off
+    assert not name("sample pist", "sample post")                                  # four letters: exact only
+    assert pagematch.spellings(frozenset({"sample", "fird"})) == {"samplefird", "firdsample"}
+
+
+def test_one_letter_street_needs_every_town_listed_and_no_rival_however_spaced(streets):
+    k = src.place_key
+    heard, typed = k("47 Samplefird Ave"), k("47 SAMPLEFORD AVE")
+    assert src.one_letter_street(heard, typed, ("Port Chester",))
+    assert not src.one_letter_street(heard, typed, ("Port Chester", "Model Village"))   # no street list there
+    assert not src.one_letter_street(heard, typed, ())
+    assert not src.one_letter_street(k("47 N Samplefird Ave"), typed, ("Port Chester",))   # a direction more
+    assert not src.one_letter_street(k("47 Samplefird St"), typed, ("Port Chester",))      # another suffix
+    streets({**MAP, "port chester": [*MAP["port chester"], "Sample Fird Ave"]})
+    assert not src.one_letter_street(heard, typed, ("Port Chester",))               # the same, run together
+    two, feed2 = k("47 Sample Firdham Ave"), k("47 SAMPLE FORDHAM AVE")
+    streets({"port chester": ["Sample Fordham Ave", "Samplefirdham Ave"]})
+    assert not src.one_letter_street(two, feed2, ("Port Chester",))                 # heard with a space, mapped without
+    streets({"port chester": ["Sample Fordham Ave"]})
+    assert src.one_letter_street(two, feed2, ("Port Chester",))
+
+
+def test_cross_streets_as_the_map_spells_them(streets):
+    name = lambda x: src._street(x)[3]
+    assert src.cross_as_mapped(name("Patternwood Ave")) == name("Patternwood Ave")
+    assert src.cross_as_mapped(name("Paternwood Ave")) == name("Patternwood Ave")    # misheard: the map's
+    assert src.cross_as_mapped(name("Exampleridge Rd")) == name("Exampleridge Rd")   # another town's: still known
+    assert src.cross_as_mapped(name("Specimum Ave")) is None                         # near none: garbled
+    streets({})
+    assert src.cross_as_mapped(name("Specimum Ave")) == name("Specimum Ave")         # no street list: as said
 
 
 def test_the_repeat_of_the_address_is_never_a_cross_street():
@@ -62,6 +97,9 @@ def test_the_repeat_of_the_address_is_never_a_cross_street():
     keep = parse("Port Chester Fire Department, 47 Sampleford Avenue, cross of Specimen Place and Patternwood "
                  "Avenue, commercial alarm.")
     assert keep.cross_street == "specimen place and patternwood avenue"
+    other = parse("Port Chester Fire Department, 5 Sampleford Avenue cross of Specimen Place, building 5, "
+                  "Patternwood Avenue, commercial alarm.")                     # the number, a comma: no re-read
+    assert other.cross_street == "specimen place and patternwood avenue"
 
 
 # -- the scenario --------------------------------------------------------------------------------------------------
@@ -124,6 +162,22 @@ def test_another_real_street_one_letter_away_never_joins(tmp_path, streets):
     a, p = scenario(rig)
     assert p != a and paging_on(rig) == p and len(open_incidents(rig)) == 2
     assert "merge_offer" not in state_inc(rig, p)
+
+
+def test_a_street_as_heard_but_run_together_never_joins(tmp_path, streets):
+    """The page's street is a street of ours spelled with a space: it may be that one."""
+    streets({**MAP, "port chester": [*MAP["port chester"], "Sample Fird Ave"]})
+    rig = Rig(tmp_path)
+    a, p = scenario(rig)
+    assert p != a and len(open_incidents(rig)) == 2
+
+
+def test_a_town_of_the_call_with_no_street_list_never_joins(tmp_path, streets):
+    """Our tones' second town has no street list: a street there one letter off can't be ruled out."""
+    streets({"port chester": MAP["port chester"]})
+    rig = Rig(tmp_path)
+    a, p = scenario(rig)
+    assert p != a and len(open_incidents(rig)) == 2
 
 
 def test_a_third_street_as_close_to_the_heard_one_never_joins(tmp_path, streets):
@@ -198,15 +252,20 @@ def test_mutual_aid_never_joins(tmp_path):
     assert p != a and "merge_offer" not in state_inc(rig, p) and possibly(rig, p, a)
 
 
-def test_a_chains_store_elsewhere_named_without_our_number_never_joins(tmp_path):
+def test_a_chains_store_elsewhere_named_with_another_number_never_joins(tmp_path):
+    """The feed at one of a chain's two stores on the street; the page names the chain at a number of its own (a
+    digit in: the misheard street's "misread", for it) on the street misheard: the other store, never joined."""
     rig = Rig(tmp_path)
     rig.cad.local_places = lambda: [
         {"key": "cp:a", "name": "EXAMPLE BISTRO", "aliases": [], "address": "47 SAMPLEFORD AVE", "muni": "port chester",
          "label": "Example Bistro"},
-        {"key": "cp:b", "name": "EXAMPLE BISTRO", "aliases": [], "address": "300 PATTERNWOOD AVE",
+        {"key": "cp:b", "name": "EXAMPLE BISTRO", "aliases": [], "address": "300 SAMPLEFORD AVE",
          "muni": "port chester", "label": "Example Bistro"}]
-    a, p = scenario(rig, PAGE.replace("47 Samplefird", "Samplefird").replace("Exmple bistro", "Example Bistro"))
+    a, p = scenario(rig, PAGE.replace("47 Samplefird", "477 Samplefird").replace("Exmple bistro", "Example Bistro")
+                    .replace("47 Modelton", "477 Modelton"))
     assert p != a
+    why = state_inc(rig, p)["merge_offer"]["why"]
+    assert "Example Bistro (also elsewhere)" in why and "house number (a digit misheard)" in why
 
 
 def test_another_of_our_places_on_the_feeds_street_named_is_only_offered(tmp_path):
