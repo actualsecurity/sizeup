@@ -1061,7 +1061,7 @@ function sItemRow(sec, x, i, n) {
   ord.append(up, down);
   const edit = (item, what) => sPost(sec, { action: "edit", code: x.code, item }, `${x.code} ${what}`);
   const name = sInput(x.name, 60, "Name", (v) => { if (v && v !== x.name) edit({ name: v }, "renamed"); }, "s-name");
-  name.disabled = deleted;
+  name.disabled = deleted || !!x.system;          // the hub's own (Expired): read-only, never on a pick list
   li.append(ord, el("code", "s-code", x.code), name);
   if (sec === "event_types") {
     li.append(sColor(x.color, (v) => edit({ color: v }, "color changed"), "Color"));
@@ -1089,6 +1089,13 @@ function sItemRow(sec, x, i, n) {
   li.append(el("span", "dim small s-used", usedText + (x.used ? `used ${x.used}×` : "unused")), el("span", "spacer"));
   if (deleted) {
     li.append(sBtn("Restore", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} restored`)));
+    return li;
+  }
+  if (x.system) {
+    const sys = el("span", "dim small", "set by the hub");
+    sys.title = "A non-emergency event closes with this when its Until passes. Not on the pick lists; can't be edited, retired or deleted.";
+    li.append(sys);
+    if (x.state === "edited") li.append(sBtn("Reset", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} reset`)));
     return li;
   }
   li.append(x.retired
