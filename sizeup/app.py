@@ -1596,11 +1596,12 @@ class App:
         if call.audio is not None:
             # One row per key-up (issue #62): 60 Control and the unit it's talking to, a unit keying
             # twice, a radio with no ID; each piece is transcribed with only its own talker as the hint.
-            for pc in split_turns(call):
+            for k, pc in enumerate(split_turns(call)):
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig=self.radios.rig_p25(pc.pairs),
                             radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
+                t.call_id, t.turn = call.id, k  # the whole call it is a key-up of (= cad/comms.py split_call)  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -1643,10 +1644,11 @@ class App:
         eng = "off" if tier == tiers.RECORD else channels.effective(
             dict(self.channel_pref(key), transcribe=True), self.aws_ok(key)[0])
         if call.audio is not None:
-            for pc in split_turns(call):
+            for k, pc in enumerate(split_turns(call)):
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
+                t.call_id, t.turn = call.id, k  # type: ignore[attr-defined]
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]

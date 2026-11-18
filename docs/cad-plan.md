@@ -43,7 +43,7 @@ The original plan follows, unchanged except where a line says "now" or gives a s
      console replaces: `data/cad_lists.json`, codes as in the sheet, readable names on screen.
    - Emergency events go Pending (accepted) -> Active (units dispatched) -> closed with a
      disposition. Non-emergency ones (notifications, road closures, hydrants) are logged and tracked
-     until closed, with no dispatch.
+     until closed, with no dispatch; one with an Until closes by itself (Expired) when it passes.
    - Created automatically from a 60 Control page or Fire/EMS 15 dispatch that names Port Chester
      (sizeup already detects these). Waits in "From 60 Control" until a person accepts it.
    - Or entered by hand: a walk-in, a phone call, a still alarm, a mutual-aid request.

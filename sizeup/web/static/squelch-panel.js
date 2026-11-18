@@ -45,23 +45,31 @@ window.SquelchPanel = (() => {
   }
 
   // the suggestions (admins; the hub's): {key: suggestion}; none (not the hub, not an admin): the column stays empty
-  // keyed by subject; a subject two stations report is left out (which one would Apply set?)
+  // keyed by subject; of the stations that report one, those with floor data in its window (an old or renamed
+  // station id beside the one that reports it now never blanks it); two with data: left out (which would Apply set?)
   async function suggest() {
     st.suggAt = Date.now();
     try {
       const r = await fetch("/api/cad/metrics?view=squelch", { headers: { Accept: "application/json" } });
       if (!r.ok) { st.sugg = null; return; }
+      const all = {};
+      for (const c of (await r.json()).channels || []) (all[c.subject] = all[c.subject] || []).push(c);
       const by = {};
-      for (const c of (await r.json()).channels || []) by[c.subject] = c.subject in by ? null : c;
+      for (const [k, rows] of Object.entries(all)) {
+        const live = rows.filter((c) => c.minutes > 0);
+        const pick = live.length ? live : rows;
+        by[k] = pick.length === 1 ? pick[0] : null;
+      }
       st.sugg = by;
     } catch (_) { st.sugg = null; }
   }
 
   async function apply(c, s) {
     const run = c.running || {};
-    // the server refuses it unless this is still what runs (expect): a suggestion is for the squelch it saw
+    // expect: the squelch the suggestion was worked out for (its own, not what the card shows running): the server
+    // refuses it unless that is still what runs and the suggestion still offers Apply
     const body = { action: "set", key: c.key, open_db: s.open, close_db: s.close,
-      expect: { open_db: run.open_db, close_db: run.close_db }, operator: typeof operator === "function" ? operator() : "" };
+      expect: { open_db: s.cur_open, close_db: s.cur_close }, operator: typeof operator === "function" ? operator() : "" };
     const ok = !window.UI || !UI.confirm ? true : await UI.confirm(`${c.key}: Open ${db(run.open_db)} → ${db(s.open)} dB, `
       + `Close ${db(run.close_db)} → ${db(s.close)} dB? ${s.under ?? 0} of ${s.real ?? 0} real transmissions under ${db(s.open)} dB`
       + (s.cut_tails ? `, ${s.cut_tails} tails cut sooner` : ""), { ok: "Apply" });

@@ -189,7 +189,7 @@ What `install-linux.sh` installs (Linux, and WSL on the Windows PC):
 | one release per commit: the code (`git archive`, root-owned: the service user only reads it), its own venv, `BUILD` (the sha), `BUILDS` (the builds it runs with) | `/opt/sizeup/releases/<sha>` |
 | the release that runs (a link, swapped by rename) | `/opt/sizeup/current` |
 | rtl-sdr-blog v1.3.6 (RTL-SDR Blog V4 support): rtl_fm, rtl_test, rtl_eeprom, librtlsdr | `/opt/sizeup/rtl-sdr` -> `builds/rtl-sdr-blog-<tag>-<commit>` |
-| trunk-recorder v5.2.0 with its plugins (unit_script) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>` |
+| trunk-recorder v5.2.0 with its plugins (unit_script), patched (#638) | `/opt/sizeup/trunk-recorder` -> `builds/trunk-recorder-<tag>-<commit>-p<patch hash>` |
 | whisper.cpp v1.9.4 whisper-server, built for this CPU (AVX2 on the i5-6400T) | `/opt/sizeup/whisper` -> `builds/whisper.cpp-<tag>-<commit>-native` |
 | readsb v3.16.21 (wiedehopf), RTL-SDR with the bias-tee switch, against rtl-sdr-blog's librtlsdr: the ADS-B decoder (#235) | `/opt/sizeup/readsb` -> `builds/readsb-<tag>-<commit>` |
 | whisper model, SHA-256 checked; `whisper.bin` points at the one in use | `/opt/sizeup/models` |
@@ -221,7 +221,9 @@ Not installed by it: AIS-catcher ([AIS receiver](#ais-receiver)).
 | `sizeup-update.path` / `.timer` / `.service` | root | The auto-updater ([Updating](#updating)). |
 
 The source builds are pinned to a tag **and** its commit (a moved tag is refused), built once per
-pin into their own directory under `/opt/sizeup/builds`, and rebuilt only with `--rebuild`. trunk-recorder's `config.json` in
+pin into their own directory under `/opt/sizeup/builds`, and rebuilt only with `--rebuild`. trunk-recorder gets one
+patch of ours before its build (`tr_patch` in `install-linux.sh`, [why](../trunk-recorder/README.md#one-row-per-key-up-issue-62)):
+its hash is in the build's name, so changing the patch makes a new build. trunk-recorder's `config.json` in
 `/var/lib/sizeup/trunk-recorder` is made from the repo's `deploy/trunk-recorder/config.json` on every
 run: change it there. The whisper models come from huggingface.co/ggerganov/whisper.cpp at a fixed
 revision and are checked against the SHA-256 that revision lists for them. On Ubuntu 24.04,
