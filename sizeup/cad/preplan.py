@@ -573,8 +573,12 @@ class Preplan:
         return out
 
     def _bump(self) -> None:
+        """After the write's commit: the gen moves, and the rev again, so a state built between the commit (its rev) and
+        here (the old gen) is built once more (no other write may come to move it, #446)."""
         with self._lock:
             self.gen += 1
+        with self.store.lock:
+            self.store.rev += 1
 
     def create(self, body: dict) -> dict:
         """POST /api/cad/preplan {kind, lat, lon, label?, note?, level?, priority?, review_by?, incident_id | where?,

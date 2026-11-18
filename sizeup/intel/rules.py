@@ -15,9 +15,16 @@ A pack says which radio sources it reads (scope), what its categories are and th
 Phrases: words in order, case and punctuation aside; "..." a gap of up to GAP_WORDS words with no "no" / "not" in it
 (sizeup/cad/alarms.py's grammar); "(a|b|c d)" one of the alternatives, each one or more words. A rule hits a text
 when any of its phrases is in it and none of its "not" phrases is. "re:" in front: a regular expression instead
-(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d").
+(at most RE_MAX characters, case-insensitive), for what words can't say ("10-\\d\\d"). An expression must not backtrack
+without bound: its separator and word classes share no character ("[^\\w'.?!]+" beside "[\\w']+"; never "\\W+"
+beside "[\\w']+", which both take an apostrophe), and each character of a run is taken by one alternative only (the
+police pack's ellipsis, "\\.(?=\\.)|(?<=\\.)\\.(?!\\.)": a dot beside a dot, never a sentence's end).
+tests/test_intel_packs.py times every pack's expressions on hostile texts, and an expression reads only the first
+RE_TEXT_MAX characters.
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
+"exclude" (source keys or globs) takes sources back out: neighbor_police reads every MRRS police talkgroup except the
+police pack's own (Port Chester / Rye / Rye Brook PD), with the police pack's rules ("rules_from": rules_from()).
 
 Speech-to-text tolerance (a pack with "normalize": "<table>", data/intel/tables/<table>.json): the table's fixes
 (Normalizer: sound-alikes such as "order of gas" -> "odor of gas", split and merged words, number words as digits) make
@@ -34,6 +41,13 @@ without "normalize" matches exactly as before. Suppress phrases are tried on bot
 the file's). With an area, the address lookup searches those towns (and the towns said), and an event placed outside
 them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
 (the police pack, whose sources are local): every place counts, as before.
+
+A category with "place": true (the police pack's fire_call) is held at log until its event has a place a crew can
+drive to (an address, intersection, block or landmark) in the source's towns ("towns"), else the pack's area: a
+burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
+words, or a read-back by the call's talker or units within minutes). "words": the words that tie a later transmission
+to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
+category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
 
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
@@ -62,7 +76,9 @@ GAP = "..."
 GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
 TOKEN = re.compile(r"(?:[A-Za-z]\.){2,}|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
-RE_MAX = 200
+RE_MAX = 300
+RE_TEXT_MAX = 4000              # a "re:" expression reads at most this many characters of a transmission (minutes of
+                                # speech): bounds the time an expression with backtracking can take on a freak text
 PHRASE_MAX = 120
 RULES_MAX = 400
 WILD = "*"                      # a rule for every category (a dispatch cue): counts only beside a real hit
@@ -231,7 +247,7 @@ class Phrase:
 
     def found(self, text: str, ws: list[str]) -> bool:
         if self.rx is not None:
-            return self.rx.search(text or "") is not None
+            return self.rx.search((text or "")[:RE_TEXT_MAX]) is not None
         return any(_match_at(ws, i, self.items) for i in range(len(ws)))
 
 
@@ -278,12 +294,14 @@ class Pack:
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
-        empty list: any). Never a bare talkgroup number."""
+        empty list: any), and its source key none of "exclude" (globs). Never a bare talkgroup number."""
         sc = self.scope or {}
         key = str(row.get("source") or row.get("source_key") or "")
         if sc.get("services") and str(row.get("service") or "") not in sc["services"]:
             return False
         if sc.get("sources") and not any(fnmatch.fnmatchcase(key, g) for g in sc["sources"]):
+            return False
+        if any(fnmatch.fnmatchcase(key, g) for g in sc.get("exclude") or ()):
             return False
         if sc.get("tiers") and str(row.get("tier") or "") not in sc["tiers"]:
             return False
@@ -384,7 +402,12 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
+                   "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
+                   "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
+    for c, cd in cats.items():
+        if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
+            raise ValueError(f"{name}.{c}.defer_to: another of {name}'s categories")
     rules = []
     seen = set()
     for r in d.get("rules") or []:
@@ -439,14 +462,57 @@ def read_files(paths=None) -> list[dict]:
     return out
 
 
+INHERITED = ("suppress", "normalize", "threshold", "window_s", "context_factor")
+
+
+def rules_from(d: dict, others: dict) -> dict:
+    """A pack with "rules_from": "<pack>" reads that pack's categories, rules and suppress phrases (and its normalize,
+    threshold, window_s and context_factor, unless it says its own) as written in that pack's file: one list of rules,
+    kept in one file, for two scopes (the police pack and neighbor_police: the same rules, another mode). Its rules'
+    ids are "rule_prefix" (default "<its name>.") + theirs ("area.pd.barricade"), so Settings tune each pack's rules on
+    their own (intel_rules is keyed by rule id) and the counts per rule stay apart; its categories' labels are
+    "<its label>: <theirs>" (the Settings card names each category's control by its label; a push and the card show
+    them without the prefix, push.category_label). The other pack's Settings
+    and its admin's local.* rules are not taken. ValueError with the reason."""
+    src = d.get("rules_from")
+    if not src:
+        return d
+    name = str(d.get("name") or "")
+    if not isinstance(src, str):
+        raise ValueError(f"{name}.rules_from: a pack's name")
+    base = others.get(src)
+    if base is None and re.fullmatch(r"[a-z][a-z0-9_]{0,23}", str(src)) and (DATA / f"{src}.json").is_file():
+        base = json.loads((DATA / f"{src}.json").read_text())
+    if base is None or src == name:
+        raise ValueError(f"{name}.rules_from: another pack's name ({src!r} isn't one)")
+    if base.get("rules_from"):
+        raise ValueError(f"{name}.rules_from: {src} takes its rules from another pack itself")
+    if "rules" in d or "categories" in d:
+        raise ValueError(f"{name}: rules_from, or rules and categories of its own, not both")
+    prefix = str(d.get("rule_prefix") or f"{name}.")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,23}\.", prefix):
+        raise ValueError(f"{name}.rule_prefix {prefix!r}: lower-case letters, digits, _, then a dot")
+    out = dict(d)
+    for k in INHERITED:
+        if k not in d and k in base:
+            out[k] = json.loads(json.dumps(base[k]))
+    label = str(d.get("label") or name.upper())
+    out["categories"] = {c: {**(cd or {}), "label": f"{label}: {(cd or {}).get('label') or c.replace('_', ' ').capitalize()}"}
+                         for c, cd in (base.get("categories") or {}).items()}
+    out["rules"] = [{**r, "id": prefix + str(r.get("id") or "")} for r in base.get("rules") or []]
+    return out
+
+
 def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]:
     """Packs from files or dicts (None: data/intel/*.json) with Settings' overrides over them:
-    {"intel_packs": {pack: {...}}, "intel_rules": {rule id: {...}}} (the other sections are ignored). Pure."""
+    {"intel_packs": {pack: {...}}, "intel_rules": {rule id: {...}}} (the other sections are ignored). Pure (a pack
+    whose "rules_from" isn't among those given reads that pack's file)."""
     ov = overrides or {}
     srcs = []
     for x in (read_files() if paths_or_dicts is None else paths_or_dicts):
         srcs.append(x if isinstance(x, dict) else json.loads(Path(x).read_text()))
-    return [compile_pack(d, ov.get("intel_packs") or {}, ov.get("intel_rules") or {}) for d in srcs]
+    by_name = {str(d.get("name") or ""): d for d in srcs}
+    return [compile_pack(rules_from(d, by_name), ov.get("intel_packs") or {}, ov.get("intel_rules") or {}) for d in srcs]
 
 
 def ruleset_hash(packs: list[Pack]) -> str:

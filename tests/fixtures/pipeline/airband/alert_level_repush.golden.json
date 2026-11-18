@@ -1,0 +1,731 @@
+{
+ "why": "REPUSH_S (300 s): an alert level pushed again (and the county feed polled) only above any level pushed, or 300 s or more after the last push: 2 -> 1 -> 2 at 299 s is quiet, 2 -> 1 -> 2 at 300 s pushes and polls again.",
+ "steps": [
+  {
+   "step": {
+    "do": "radio",
+    "t": 0,
+    "id": "fire-1",
+    "tg": 307,
+    "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 0.0,
+     "title": "HPN Alert 2 · Citation · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Alert",
+        "declared 11:59 · Fire/EMS 15"
+       ],
+       [
+        "Event",
+        "queued · not dispatched"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "Citation",
+       "problem": "",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-2",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 11:59:56): HPN Alert 2 · Citation · RWY 34 (alert high 100%)\n11:59:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34”\nAlert: declared 11:59 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "",
+     "acft_runway": "34",
+     "created_at": 0.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": -4.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (60 Control): HPN Alert 2 · Citation · RWY 34 (alert high 100%)",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 0.0,
+     "kind": "created",
+     "text": "From 60 Control radio, waiting to be accepted: Airport / Alert 2 (full emergency) at 240 Airport Rd; received via Radio",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": -4.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 2 · Citation · RWY 34: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · queued, not dispatched",
+     "operator": ""
+    },
+    {
+     "incident": "I1",
+     "at": 0.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert 11:59:56 on this event: HPN Alert 2 · Citation · RWY 34",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 2 · Citation · RWY 34",
+     "message": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 2"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 100,
+    "id": "fire-2",
+    "tg": 307,
+    "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 100.0,
+     "title": "HPN Alert 1 · standby · Citation · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 96.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 2 → 1 12:01 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-1",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 11:59:56): HPN Alert 2 · Citation · RWY 34 (alert high 100%)\n11:59:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34”\nAlert: declared 11:59 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "",
+     "acft_runway": "34",
+     "created_at": 0.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 100.0,
+     "kind": "edit",
+     "text": "Edited type: Airport / Alert 1 (local standby)",
+     "operator": "60 Control radio"
+    },
+    {
+     "incident": "I1",
+     "at": 96.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 1 · standby · Citation · RWY 34: “60 Control, car 9901, the alert has been downgraded to an alert level 1”",
+     "operator": ""
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 299,
+    "id": "fire-3",
+    "tg": 307,
+    "text": "60 Control, car 9901, upgrade to an alert level 2"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 299.0,
+     "title": "HPN Alert 2 · Citation · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 96.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-3",
+        "at": 295.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 2",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 1 → 2 12:04 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "Citation",
+       "problem": "",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-2",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 11:59:56): HPN Alert 2 · Citation · RWY 34 (alert high 100%)\n11:59:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34”\nAlert: declared 11:59 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "",
+     "acft_runway": "34",
+     "created_at": 0.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 299.0,
+     "kind": "edit",
+     "text": "Edited type: Airport / Alert 2 (full emergency)",
+     "operator": "60 Control radio"
+    },
+    {
+     "incident": "I1",
+     "at": 295.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 2 · Citation · RWY 34: “60 Control, car 9901, upgrade to an alert level 2”",
+     "operator": ""
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 299.5,
+    "id": "fire-4",
+    "tg": 307,
+    "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 299.5,
+     "title": "HPN Alert 1 · standby · Citation · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 4,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 96.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-3",
+        "at": 295.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 2",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-4",
+        "at": 295.5,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-1"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 2 → 1 12:04 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 1,
+       "type": "Citation",
+       "problem": "",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 0.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-1",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 11:59:56): HPN Alert 2 · Citation · RWY 34 (alert high 100%)\n11:59:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34”\nAlert: declared 11:59 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "",
+     "acft_runway": "34",
+     "created_at": 0.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 299.5,
+     "kind": "edit",
+     "text": "Edited type: Airport / Alert 1 (local standby)",
+     "operator": "60 Control radio"
+    },
+    {
+     "incident": "I1",
+     "at": 295.5,
+     "kind": "prealert",
+     "text": "60 Control: Alert 1 · standby · Citation · RWY 34: “60 Control, car 9901, the alert has been downgraded to an alert level 1”",
+     "operator": ""
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 300,
+    "id": "fire-5",
+    "tg": 307,
+    "text": "60 Control, car 9901, upgrade to an alert level 2"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "radio",
+     "kind": "alert_level",
+     "subject": "alert-level",
+     "group": "",
+     "at": -4.0,
+     "updated_at": 300.0,
+     "title": "HPN Alert 2 · Citation · RWY 34",
+     "detail": "60 Control: alert level 2",
+     "confidence": 1.0,
+     "channel": "Fire/EMS 15",
+     "count": 5,
+     "status": "open",
+     "outcome_at": null,
+     "incident": "I1",
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "fire-1",
+        "at": -4.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-2",
+        "at": 96.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-3",
+        "at": 295.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 2",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-4",
+        "at": 295.5,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, the alert has been downgraded to an alert level 1",
+        "hits": [
+         "alert level 1"
+        ],
+        "context": false
+       },
+       {
+        "id": "fire-5",
+        "at": 296.0,
+        "channel": "Fire/EMS 15",
+        "text": "60 Control, car 9901, upgrade to an alert level 2",
+        "hits": [
+         "alert level 2"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "alert_level"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": "ALERT-2"
+      },
+      "rank": 6,
+      "lines": [
+       [
+        "Event",
+        "queued · not dispatched"
+       ],
+       [
+        "Alert",
+        "Alert 1 → 2 12:04 · Fire/EMS 15"
+       ]
+      ],
+      "alert_level": {
+       "level": 2,
+       "type": "Citation",
+       "problem": "",
+       "runway": "34",
+       "final_nm": null,
+       "drill": false,
+       "car": "9901",
+       "talker": "",
+       "top": 2,
+       "pushed_at": 300.0
+      }
+     }
+    }
+   ],
+   "incidents": [
+    {
+     "id": "I1",
+     "number": null,
+     "type": "AIRPORT",
+     "subtype": "ALERT-2",
+     "status": "queued",
+     "source": "60 Control radio",
+     "source_ref": "alert-level:A1",
+     "emergency": 1,
+     "received_via": "RADIO",
+     "address": "240 Airport Rd",
+     "lat": 41.068787,
+     "lon": -73.704333,
+     "geo_label": "240 Airport Rd, Rye Brook",
+     "remarks": "Airport pre-alert (60 Control, 11:59:56): HPN Alert 2 · Citation · RWY 34 (alert high 100%)\n11:59:56 Fire/EMS 15: “60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34”\nAlert: declared 11:59 · Fire/EMS 15\nNot dispatched.",
+     "acft_type": "Citation",
+     "acft_nature": "",
+     "acft_runway": "34",
+     "created_at": 0.0,
+     "accepted_at": null
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": "I1",
+     "at": 300.0,
+     "kind": "edit",
+     "text": "Edited type: Airport / Alert 2 (full emergency)",
+     "operator": "60 Control radio"
+    },
+    {
+     "incident": "I1",
+     "at": 296.0,
+     "kind": "prealert",
+     "text": "60 Control: Alert 2 · Citation · RWY 34: “60 Control, car 9901, upgrade to an alert level 2”",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN Alert 2 · Citation · RWY 34",
+     "message": "“60 Control, car 9901, the alert has been downgraded to an alert level 1” · “60 Control, car 9901, upgrade to an alert level 2” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "priority": 5,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "county_feed_poll_now": [
+    "airport alert level 2"
+   ]
+  }
+ ]
+}

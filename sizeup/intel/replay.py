@@ -194,13 +194,13 @@ def open_ro(path: str | Path) -> sqlite3.Connection:
     return con
 
 
-def read_settings(db: sqlite3.Connection) -> dict:
-    """The copy's intel Settings ({section: {key: value}}), as the live engine reads them (Settings.section)."""
+def _sections(db: sqlite3.Connection, names: tuple[str, ...]) -> dict | None:
+    """{section: {key: value}} of the copy's Settings, as the hub reads them (Settings.overrides); None: no table."""
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings_overrides'").fetchone():
-        return {}
-    out: dict = {s: {} for s in SETTINGS_SECTIONS}
+        return None
+    out: dict = {s: {} for s in names}
     for sec, key, value in db.execute("SELECT section, key, value FROM settings_overrides WHERE section IN "
-                                      f"({','.join('?' * len(SETTINGS_SECTIONS))})", SETTINGS_SECTIONS):
+                                      f"({','.join('?' * len(names))})", names):
         try:
             out[sec][key] = json.loads(value)
         except ValueError:
@@ -208,13 +208,30 @@ def read_settings(db: sqlite3.Connection) -> dict:
     return out
 
 
+def read_settings(db: sqlite3.Connection) -> dict:
+    """The copy's intel Settings ({section: {key: value}}), as the live engine reads them (Settings.section)."""
+    return _sections(db, SETTINGS_SECTIONS) or {}
+
+
+def read_service_overrides(db: sqlite3.Connection) -> dict[str, str]:
+    """The copy's admin service per source (Settings radio_services), as the hub takes them at its start
+    (sizeup/cad/settings.py Settings._use_services: sourcekeys.clean_services). {}: none, or a copy from before them."""
+    from sizeup import sourcekeys
+    from sizeup.cad.settings import SVC_SECTION
+    return sourcekeys.clean_services((_sections(db, (SVC_SECTION,)) or {}).get(SVC_SECTION))
+
+
 TALKGROUPS = Path(__file__).resolve().parents[2] / "deploy" / "trunk-recorder"
 
 
-def talkgroup_groups(base: Path | None = None) -> dict[tuple[str, int], tuple[str, str]]:
+def talkgroup_groups(base: Path | None = None,
+                     services: dict[str, str] | None = None) -> dict[tuple[str, int], tuple[str, str]]:
     """{(system, talkgroup): (group, service)} from the talkgroups files in the repo: the county's
     (deploy/trunk-recorder/talkgroups.csv, its "Tag" column) and each other system's (systems/<name>/talkgroups.csv,
-    with its own "Service" column). The service as the live hub names it (sourcekeys.service)."""
+    with its own "Service" column). The service as the live hub names it (sourcekeys.service): the admins' choice for
+    its source when there is one, else the file's. services: those choices ({qualified key: service}, as
+    read_service_overrides gives them), in place of the process's ({}: none, the file's for every talkgroup); None:
+    the process's (sourcekeys.set_service_overrides). Never sets the process's."""
     import csv
     from sizeup import sourcekeys
     base = TALKGROUPS if base is None else Path(base)
@@ -231,7 +248,12 @@ def talkgroup_groups(base: Path | None = None) -> dict[tuple[str, int], tuple[st
             except ValueError:
                 continue
             group = str(r.get("Tag") or "")
-            out[(system, tg)] = (group, sourcekeys.service(group, r.get("Service") or ""))
+            listed, key = r.get("Service") or "", sourcekeys.p25(system, tg)
+            if services is None:
+                svc = sourcekeys.service(group, listed, key=key)
+            else:
+                svc = services.get(key) or sourcekeys.service(group, listed)
+            out[(system, tg)] = (group, svc)
     return out
 
 
@@ -258,8 +280,9 @@ def fill_service(rows: list[dict], groups: dict | None = None) -> int:
 
 def load_rows(db: sqlite3.Connection, since: float | None = None, until: float | None = None,
               services: Iterable[str] = (), groups: dict | None = None) -> list[dict]:
-    """The radio log's rows in time order, an empty service filled from the talkgroups files (fill_service), then
-    only `services` when given."""
+    """The radio log's rows in time order, an empty service filled from the talkgroups files (fill_service) under the
+    copy's own admin choices (read_service_overrides; the process's are neither read nor changed), then only
+    `services` when given. A row's stored service is never changed."""
     have = {r[1] for r in db.execute("PRAGMA table_info(radio_traffic)")}
     cols = ", ".join(c if c in have else f"'' AS {c}" for c in ROW_COLUMNS)
     where, args = ["1"], []
@@ -271,6 +294,8 @@ def load_rows(db: sqlite3.Connection, since: float | None = None, until: float |
         args.append(until)
     rows = [dict(r) for r in db.execute(f"SELECT {cols} FROM radio_traffic WHERE {' AND '.join(where)} "
                                         "ORDER BY start, id", args)]
+    if groups is None:
+        groups = talkgroup_groups(services=read_service_overrides(db))
     fill_service(rows, groups)
     svc = {s for s in services if s}
     return [r for r in rows if r.get("service") in svc] if svc else rows

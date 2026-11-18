@@ -46,6 +46,7 @@ def test_the_card_asks_for_what_it_did_and_names_every_field():
     settings = js[js.index("window.IntelSettings"):]
     assert 'sPost("intel", body' in settings
     for body in ('{ action: "set", key, value: v }', '{ action: "set", key: "push", value: cb.checked }',
+                 '{ action: "set", key: "push_pii", value: pcb.checked }',
                  '{ action: "set", key: "listen", value: lcb.checked }', '{ action: "set", key: "infer", value: icb.checked }',
                  '{ action: "set", key: "enabled", value: ecb.checked }', '{ action: "set", key, value: i.value }',
                  '{ action: "pack", pack: p.name, [key]: v }', '{ action: "category", pack: p.name, category: c.name, mode: v }',
@@ -188,7 +189,7 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
         assert title.strip(), (kind, name, title)                            # (the "?" is help.js's own: it opens its text)
     labels = pg.evaluate("() => [...document.querySelectorAll('#s-intel .in-f')].map((l) => [l.querySelector('.in-l').textContent, l.title, l.querySelector('input, select').title])")
     packs = len(site.j("GET", "/api/cad/intel")[1]["packs"])
-    assert packs == 4                                                        # the first pack and the three log-only ones
+    assert packs == 5                                                        # the first pack and the four log-only ones
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
                                          "model", "/day", "$/month", "sample %", "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
     for text, title, field_title in labels:
@@ -259,6 +260,7 @@ def test_every_control_posts_what_it_did(site, browser):
         (at(f"{rule['id']} weight"), "0.35", {"action": "rule", "rule": rule["id"], "w": 0.35}),
         (check("Listen link"), None, {"action": "set", "key": "listen", "value": not d["settings"]["listen"]}),
         (check("Inference"), None, {"action": "set", "key": "infer", "value": not d["settings"].get("infer")}),
+        (check("PII"), None, {"action": "set", "key": "push_pii", "value": not d["settings"]["push_pii"]}),
         (check("Push"), None, {"action": "set", "key": "push", "value": not d["settings"]["push"]}),
         (check("Detection"), None, {"action": "set", "key": "enabled", "value": not d["settings"]["enabled"]}),
     ]
@@ -273,8 +275,8 @@ def test_every_control_posts_what_it_did(site, browser):
         c.querySelectorAll('input, select, button:not(.help)').length]; }""") if not REF else None
     if kinds:
         ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
-        assert len(d["packs"]) == 4 and nrule > 80                           # every pack's rows, each with its own controls
-        assert kinds[:5] == [4, 15 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        assert len(d["packs"]) == 5 and nrule > 80                           # every pack's rows, each with its own controls
+        assert kinds[:5] == [5, 15 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
         names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
         assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved

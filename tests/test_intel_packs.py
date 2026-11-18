@@ -17,6 +17,7 @@ Synthetic only (this repository is public): invented, short, fragmentary radio t
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -66,7 +67,7 @@ def everything_at(mode: str, names=NEW) -> dict:
 
 def test_the_new_packs_the_categories_and_the_rules_are_all_at_log():
     packs = {p.name: p for p in rules_mod.load_packs()}
-    assert list(packs) == ["police", *NEW]
+    assert list(packs) == ["police", *NEW, "neighbor_police"]
     for name in NEW:
         p = packs[name]
         assert p.mode == "log" and p.accept is False and p.norm is not None, name
@@ -608,12 +609,18 @@ def test_a_place_that_reads_as_a_person_or_an_id_is_withheld(pack, source, servi
             assert bad.lower() not in json.dumps(d.message).lower() and "location not heard" in d.message["body"]
 
 
-def test_the_settings_page_lists_four_packs_and_who_may_change_them(live):
+def test_the_settings_page_lists_five_packs_and_who_may_change_them(live):
     cad, _n, api = live
     page = cad.intel_admin.page(gate=False)
-    assert [p["name"] for p in page["packs"]] == ["police", *NEW]
-    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log"]
-    for p in page["packs"][1:]:
+    assert [p["name"] for p in page["packs"]] == ["police", *NEW, "neighbor_police"]
+    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log", "log"]
+    area = page["packs"][-1]                              # the police pack's rules at push, the pack at log (one switch)
+    assert area["label"] == "Area PD" and area["scope"]["exclude"] == page["packs"][0]["scope"]["sources"]
+    assert all(r["id"].startswith("area.pd.") and r["mode"] == "push" for r in area["rules"])
+    raise_area = {"action": "pack", "pack": "neighbor_police", "mode": "push"}
+    assert call(api, "/api/cad/settings/intel", raise_area, CASEY)[0] == 200
+    assert cad.intel.pack("neighbor_police").mode == "push"           # one switch: its categories and rules are at push
+    for p in page["packs"][1:4]:
         assert all(c["mode"] == "log" and not c["edited"] for c in p["categories"]) and all(r["mode"] == "log" for r in p["rules"])
         assert p["scope"]["services"] and all(g.endswith(":*") for g in p["scope"]["sources"])    # never a talkgroup number
     post = lambda b, who: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
@@ -986,3 +993,93 @@ def test_one_bad_override_never_drops_the_others():
     assert e.pack("police").threshold == 0.7 and next(r for r in e.pack("police").rules if r.id == "pd.shots").mode == "map"
     assert e.pack("ems").area == rules_mod.load_packs()[2].area                # the file's area
     assert any("intel_packs/ems not applied" in m for m in logged)
+
+
+# -- every "re:" expression of every pack runs in linear time on hostile texts (#670's review) ----------------------------
+
+HOSTILE_TEXTS = [
+    "dryer" + "'" * 20000 + " x",                    # a run of apostrophes: once both a separator and a word
+    "outlet" + "." * 20000 + "x",                    # a run of dots: the ellipsis
+    "dryer " + ". " * 10000 + "x",
+    "outlet " + "..x " * 5000,
+    "outlet" + " " * 20000 + "x",
+    "man" + " ," * 10000 + " x",
+    "panel " + "a " * 25000,
+    "the dryer " + "it's " * 10000,
+    "the man " + "a' " * 10000,
+    "x" * 50000,
+    "the dryer in the ' basement is... " * 1500,   # a 50k-character transcript of near misses
+    "!?.'-, " * 8000,
+]
+BUDGET_S = 0.25                                      # one match at most: a linear expression takes milliseconds even
+                                                     # on a loaded machine (0.05 failed at load ~100); a backtracking
+                                                     # one takes seconds (over 5 s on 200 apostrophes, measured)
+HARD_STOP_S = 1.0                                    # a match still running then has hung: the test fails, never hangs
+
+
+def found_within(src: str, text: str, limit: float) -> float:
+    """Phrase(src).found(text): its time, or AssertionError past limit. SIGALRM interrupts `re` (it checks for
+    signals while it backtracks); without it (no setitimer, or not the main thread), a child process with a timeout."""
+    import signal
+    import threading
+    if hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread():
+        def stop(_sig, _frame):
+            raise TimeoutError
+        before = signal.signal(signal.SIGALRM, stop)
+        signal.setitimer(signal.ITIMER_REAL, limit)
+        t0 = time.perf_counter()
+        try:
+            rules_mod.Phrase(src).found(text, [])
+        except TimeoutError:
+            raise AssertionError(f"{src[:60]!r} still running after {limit} s on {text[:20]!r}…") from None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, before)
+        return time.perf_counter() - t0
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    t0 = time.perf_counter()
+    proc = ctx.Process(target=_found, args=(src, text))
+    proc.start()
+    proc.join(limit + 5)                            # the child's own start-up is not the expression's time
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise AssertionError(f"{src[:60]!r} still running on {text[:20]!r}…")
+    return 0.0 if proc.exitcode == 0 else float("inf")
+
+
+def _found(src: str, text: str) -> None:
+    rules_mod.Phrase(src).found(text, [])
+
+
+def test_every_re_expression_runs_fast_on_hostile_texts():
+    exprs = {p.src for pack in rules_mod.load_packs() for r in pack.rules for p in [*r.any, *r.nots] if p.rx is not None}
+    assert len(exprs) >= 4                                         # the police pack's own, at least
+    for src in sorted(exprs):
+        for text in HOSTILE_TEXTS:
+            took = found_within(src, text, HARD_STOP_S)
+            assert took < BUDGET_S, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
+
+
+def test_a_hung_expression_fails_the_timing_test_instead_of_hanging_it():
+    """The pattern #670's review found: "\\W+" beside "[\\w']+" backtracks without bound on a run of apostrophes. It
+    must still fail the budget: it runs past the hard stop (four times the budget), so the budget stays meaningful."""
+    bad = r"re:\b(dryer|stove)(\W+(?!(no|not)\b)[\w']+){0,3}\W+(smoking|sparking)\b"
+    t0 = time.perf_counter()
+    with pytest.raises(AssertionError, match="still running"):
+        found_within(bad, "dryer" + "'" * 4000 + " x", HARD_STOP_S)
+    assert BUDGET_S * 4 <= HARD_STOP_S and time.perf_counter() - t0 < 10
+
+
+def test_an_expression_reads_at_most_re_text_max_characters():
+    p = rules_mod.Phrase("re:smoking")
+    assert p.found("x " * 100 + "smoking", [])
+    assert not p.found("x" * rules_mod.RE_TEXT_MAX + " smoking", [])
+
+
+def test_an_expression_is_at_most_re_max_characters():
+    assert rules_mod.RE_MAX == 300
+    rules_mod.Phrase("re:" + "a" * rules_mod.RE_MAX)
+    with pytest.raises(rules_mod.PhraseError, match="1 to 300 characters"):
+        rules_mod.Phrase("re:" + "a" * (rules_mod.RE_MAX + 1))

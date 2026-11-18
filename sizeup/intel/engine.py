@@ -19,12 +19,49 @@
     engine.ruleset_hash()
     engine.counts(now)    what it did with what it was handed, per pack (sizeup/intel/counters.py): Settings > System >
                           Intel and Settings > Station > Health; one "intel: considered N, ..." log line an hour
+    engine.push_sources() (frozenset of source keys, revision): the sources intel could push from right now, for
+                          speech-to-text's priority (see "Push sources" below); sizeup.intel.push_sources() without
+                          the engine at hand
+    engine.is_push_source(channel_key, kind="")   that check for one speech-to-text channel key ("tg:307", "FG1"):
+                          sizeup.intel.is_push_source() without the engine
+
+Push sources (the hook for speech-to-text's queue: a source intel can push from is transcribed at HIGH or above).
+The engine runs on the HUB (the CAD of record; all-in-one too). A station's engine is idle (active() is False while it
+forwards to a hub), so there sizeup.intel.push_sources() is (frozenset(), 0): a station that wants the set gets it
+from the hub over whatever hub-to-station channel speech-to-text uses (nothing here sends it).
+
+    keys  qualified source keys (sizeup/sourcekeys.py): p25:<system>:<tg> (the county's p25:westchester:<n>),
+          fm:<label>, air:<label>. A source is in it when intel is on (the "enabled" switch), pushes are on (the kill
+          switch "push"), the INTEL kind has a topic in effect (LiveSink pushes nothing without one), and a pack that
+          could push reads it: the pack's mode is push and one of its rules is on, at push, in a category at push
+          (Settings' intel_packs / intel_rules applied; can_push()). Which sources a pack reads is Pack.in_scope() itself,
+          the predicate feed() uses, over every known source as a row of the radio log would carry it (source_rows():
+          the talkgroups files' talkgroups with their service as tagged live, the admins' radio_services choices over
+          it, and the configured FM and airband channels). So the set never disagrees with what the engine reads.
+          Quiet hours and the rate caps are left out: they hold a push for a while, the source stays one that pushes.
+    rev   a content hash of the set (push_rev(): the first 8 bytes of sha256 over the sorted keys, one per line,
+          masked to 53 bits so JSON and JavaScript keep it exact; never 0). The same set always has the same rev, in
+          any process and after a restart, so a hub that restarts can never hand a station a rev it already holds with
+          other keys; a different set has another one. The empty set has its own (non-zero) rev; 0 is only "no engine
+          here / not computed" (sizeup.intel.push_sources() on a station). The set is recomputed after reload() (the
+          packs, intel's Settings) and sources_changed() (any Settings change: radio_services, the notify topics), and
+          at most PUSH_REFRESH_S after the last (a station's talkgroups list arriving at the hub); otherwise cached.
+
+    is_push_source(channel_key, kind="") -> bool: the check speech-to-text should make (sizeup.intel.is_push_source()
+    without the engine), never a raw `key in keys`. STT keys a transmission by its channel key (sourcekeys.channel_key,
+    app.traffic_key): "tg:<n>" for the county's talkgroup, "p25:<system>:<n>" for another system's, and the BARE label
+    for an FM or airband channel ("FG1", "HPN Tower"). The set holds source keys as rows carry them, so the key is
+    normalised the way rows are keyed (source_key()): a talkgroup by sourcekeys.service_key ("tg:307" is
+    "p25:westchester:307"); a bare label by sourcekeys.fm(label, kind) as App._row_source does it (kind "airband":
+    "air:<label>", any other kind: "fm:<label>"; kind not given: either one, a channel's label being unique here); a
+    key already "fm:" / "air:" as it is. A caller that compares itself must normalise the same way (source_key()).
 
 The sink (no side effect happens in the engine itself):
 
     sink.hit(Hit)                 every hit: shadow, below threshold and suppressed-by-mode too
     sink.event(Event, change)     raised | updated | ended | expired
-    sink.push(Event, Decision)    the policy's verdict; Decision.message is the composed, scrubbed push when would_push
+    sink.push(Event, Decision)    the policy's verdict; Decision.message is the composed push when would_push (scrubbed
+                                  only with push_pii off)
     sink.clear(tid, keep)         optional: a re-transcription, the rules that no longer hit tid
     sink.digest(events)           optional: the events held over a rate cap, when a digest is due
 
@@ -39,7 +76,8 @@ How a row becomes an event, per pack whose scope it is in:
      (subject = pack:category:place), else a new one;
   4. WHERE: the window's words through locate() (only while not confirmed);
   5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
-     store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what. The rules'
+     store, never shown or pushed); policy.decide() says whether to push, push.compose() (+ scrub() with push_pii
+     off) what. The rules'
      rung is the highest mode M such that the rules at M or above ALONE (their weights, every cue whatever its mode,
      every damper) reach the threshold: a rule at a lower mode adds to WHAT but never lifts the event over its mode, so
      raising one weak rule to push never makes the strong ones beside it push (#535 review). With every rule of a
@@ -54,6 +92,15 @@ How a row becomes an event, per pack whose scope it is in:
                       (Event.near_incident), never a new lead. A safety category is linked and NOT held: a hazard at
                       our own scene is what a crew most needs to hear.
      When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
+     A category with "place": true (rules.py; any pack) is held the same way while it has no place a crew can drive to
+     (PLACED) in the source's towns, else the pack's area: "unplaced", or "out_of_area" for a place elsewhere. Only its
+     own words or a read-back of the held call place it (_may_place); placed more than RELEASE_S after the call-out it
+     stays at log ("placed_late"). A category with "defer_to" is never raised beside that category (_deferred), and an
+     event of that category takes its open event over: one pre-alert per call. The tick never lets a held call go: an
+     unplaced one stays at log until it expires (#640: a burning smell with no address is no pre-alert).
+     A push can only be as early as the transcript: a row is read when its text lands (consider), so speech-to-text's
+     queue (sizeup/stt.py: another system's "text" talkgroups wait in the LOW class) is the delay before a push, never
+     the engine. A row transcribed after newer rows of its source is still read (Window.prune keeps it).
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -95,18 +142,36 @@ SAME_PLACE_M = 150.0                   # two places this close are the same inci
 NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
 INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
 INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
+RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
+                                       # place found later than this updates the event at log ("placed_late"), unpushed
+# a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
+# house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
+# other content word ("suspicious", "vehicle", "also ... when you clear") makes the row another job's.
+READBACK_WORDS = frozenset({"copy", "copied", "that's", "thats", "that", "that'll", "is", "it's", "its", "it", "going",
+                            "gonna", "to", "be", "correction", "correct", "repeat", "again", "the", "address", "at", "uh",
+                            "um", "ok", "okay", "yeah", "yes", "roger", "10", "4", "sorry", "make", "number", "of",
+                            "on", "in", "dispatch", "advised",
+                            "house", "home", "apartment", "apt", "residence", "building", "caller", "caller's",
+                            "callers"})
+APT_WORDS = frozenset({"apartment", "apt"})    # ... and the number right after one ("unit 3" is a police unit's)
+APT_NUMBER = re.compile(r"\d{1,4}[a-z]?|[a-z]\d{0,3}")
+STOP_JOIN_S = 1.0                      # stop(): how long the thread may take to finish the row in hand
 STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
                           "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
                           "circle", "highway", "hwy", "plaza", "square"})
 STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
               "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
 QUEUE_MAX = 5000
+WHO_MAX = 500                          # unplaced events whose talkers and units are kept past the window
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
            "alt_text, model FROM radio_traffic WHERE id = ?")
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
+PUSH_REFRESH_S = 60.0                  # push_sources(): recomputed at least this often (sources nothing tells us of)
+PUSH_REV_BITS = 53                     # push_rev(): exact as a JSON number in JavaScript too (2^53)
 
 
 @dataclass
@@ -126,8 +191,10 @@ class Entry:
 class Window:
     entries: dict = field(default_factory=dict)      # tid -> Entry
 
-    def prune(self, newest: float, span: float) -> None:
-        for tid in [t for t, e in self.entries.items() if e.at < newest - span]:
+    def prune(self, newest: float, span: float, keep: str = "") -> None:
+        """Entries older than span before the newest go; never `keep` (the row being read: a transmission transcribed
+        late, after newer ones of its source, is still judged, with what the window holds, instead of dropped)."""
+        for tid in [t for t, e in self.entries.items() if e.at < newest - span and t != keep]:
             del self.entries[tid]
 
     def ordered(self) -> list[tuple[str, Entry]]:
@@ -204,11 +271,20 @@ class IntelEngine:
         self._ticked = 0.0
         self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
         self._catwords: dict[tuple[str, str], set] = {}
+        self._who_of: dict = {}               # unplaced event id -> (talkers, units) of its own transmissions
         self.counters = counters_mod.Counters(self.clock)
         self._summed = self.clock()           # the hourly log line: the first an hour after start
         self._summed_at: dict = {}            # the overall totals at that line
         self._led = False                     # the kept counters are read when this one first leads (a handover too)
         self.count_errors = 0                 # a counter that failed (never the transcript's problem: _count)
+        # push_sources(): every source known here, as rows of the radio log (source_rows(); the app sets it). None:
+        # no source is known, so none is one intel pushes from
+        self.sources = None
+        self._push_lock = threading.Lock()    # its own: never waits on a row being read (self._lock)
+        self._push: frozenset | None = None
+        self._push_rev = 0                    # push_rev(self._push); 0 until computed
+        self._push_at = 0.0
+        self._push_dirty = True
         self.reload()
         if sink is None:
             sink = LiveSink(self) if store is not None else RecordingSink()
@@ -231,6 +307,7 @@ class IntelEngine:
                     self.packs = self._load_without_bad(snap, e)
             self._hash = rules_mod.ruleset_hash(self.packs)
             self._catwords = {}
+        self.sources_changed()                # the packs and switches: push_sources() again
         self._watch()                         # a pack or detection turned on: watched from now (counters.py)
 
     def _load_without_bad(self, snap: dict, err) -> list:
@@ -261,6 +338,53 @@ class IntelEngine:
     def pack(self, name: str):
         return next((p for p in self.packs if p.name == name), None)
 
+    # -- push sources: speech-to-text's priority hook (the module's doc, "Push sources") ------------------------------
+
+    def sources_changed(self) -> None:
+        """Something push_sources() depends on changed (the packs, a Settings section, the known sources): the next
+        call recomputes it. Cheap: nothing is computed here."""
+        self._push_dirty = True
+
+    def push_sources(self) -> tuple[frozenset[str], int]:
+        """(the source keys intel could push from right now, push_rev() of them: a content hash, the same for the same
+        set in any process). Cached; recomputed after sources_changed() / reload(), else at most PUSH_REFRESH_S after
+        the last time."""
+        with self._push_lock:
+            now = time.monotonic()
+            if self._push is None or self._push_dirty or now - self._push_at >= PUSH_REFRESH_S:
+                self._push_dirty = False      # (before: a change while computing marks it again)
+                self._push_at = now
+                keys = self._push_keys()
+                if keys != self._push:
+                    self._push, self._push_rev = keys, push_rev(keys)
+            return self._push, self._push_rev
+
+    def is_push_source(self, channel_key: str, kind: str = "") -> bool:
+        """The channel (as speech-to-text keys it: "tg:307", "p25:mrrs:9211", a bare "FG1") is one intel could push
+        from now (push_sources(), cached), its key normalised as rows are keyed (source_key(); the module's doc)."""
+        keys, _rev = self.push_sources()
+        return any(k in keys for k in source_key(channel_key, kind))
+
+    def _push_keys(self) -> frozenset[str]:
+        if not self.enabled or not self.policy.cfg.get("push", True):
+            return frozenset()                # intel off, or the kill switch: nothing is pushed
+        n = self.notifier
+        try:
+            if n is None or not getattr(n, "enabled", True):
+                return frozenset()            # no intel topic in effect: LiveSink sends nothing (#641)
+        except Exception as e:  # noqa: BLE001 - the topic unknown: none (the push would fail closed too)
+            self.log(f"intel: push sources: the topic: {type(e).__name__}")
+            return frozenset()
+        packs = [p for p in self.packs if can_push(p)]
+        if not packs or self.sources is None:
+            return frozenset()
+        try:
+            rows = list(self.sources())
+        except Exception as e:  # noqa: BLE001 - the sources unreadable now: the set as it was
+            self.log(f"intel: push sources: the known sources: {type(e).__name__}")
+            return self._push if self._push is not None else frozenset()
+        return frozenset(str(r.get("source") or "") for r in rows if any(p.in_scope(r) for p in packs))
+
     # -- the live queue ---------------------------------------------------------------------------------------------
 
     def consider(self, tid) -> None:
@@ -281,9 +405,19 @@ class IntelEngine:
         self._restore()
         self._thread = threading.Thread(target=self._run, name="intel", daemon=True)
         self._thread.start()
+        self.log("intel: engine started (" + ", ".join(f"{p.name} {p.mode}" for p in self.packs) + ")")
 
     def stop(self) -> None:
+        """No more rows: the thread ends after the one in hand (at most STOP_JOIN_S waited for, so a push it was making
+        never lands after a drain has begun, and a slow one never holds the drain up)."""
         self._stop.set()
+        t = self._thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            try:
+                self._q.put_nowait("")       # wakes its wait at once ("" is no row)
+            except queue.Full:
+                pass
+            t.join(STOP_JOIN_S)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -292,9 +426,10 @@ class IntelEngine:
             except queue.Empty:
                 tid = None
             try:
-                if tid is not None:
+                if tid and not self._stop.is_set():
                     self._one(tid)
-                self._maybe_tick()
+                if not self._stop.is_set():
+                    self._maybe_tick()
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the thread
                 self.errors += 1
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
@@ -520,7 +655,7 @@ class IntelEngine:
                        for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
-        win.prune(max(e.at for e in win.entries.values()), pack.window_s)
+        win.prune(max(e.at for e in win.entries.values()), pack.window_s, keep=tid)
         changed: list[Event] = []
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)
@@ -539,6 +674,15 @@ class IntelEngine:
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
             if mode == "off":
                 continue
+            dfr = self._deferred(pack, cat, cats, key, at, win.entries[tid])
+            if isinstance(dfr, Event):       # the call it defers to, unplaced: this row's address is its place
+                up = self._set_place(pack, dfr, win.entries[tid].place, key, tid, at)
+                if up is not None:
+                    event_of[up.category] = up
+                    changed.append(up)
+                continue
+            if dfr:
+                continue
             ev = self._raise(pack, row, key, cat, cd, what, contrib, mode, win, at, tid)
             if ev is not None:
                 event_of[cat] = ev
@@ -551,7 +695,8 @@ class IntelEngine:
             for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
                 moving = self._moving(pack, ev, win.entries[tid])
                 if (ev.category not in event_of and (not ev.confirmed or moving) and self.locate is not None
-                        and self._same_job(pack, ev, win.entries[tid], ws, mine)):
+                        and (self._may_place(pack, ev, win.entries[tid], False) if ev.suppressed == "unplaced"
+                             else self._same_job(pack, ev, win.entries[tid], ws, mine))):
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
@@ -650,6 +795,8 @@ class IntelEngine:
     def category_words(self, pack, cat: str) -> set:
         """The telling words of a category's rules ("smoke", "flames", "shots" ...)."""
         k = (pack.name, cat)
+        if k not in self._catwords and pack.category(cat).get("words"):
+            self._catwords[k] = set(pack.category(cat)["words"])     # its own list (fire_call: never "have", "check")
         if k not in self._catwords:
             out = set()
             for r in pack.rules:
@@ -767,22 +914,123 @@ class IntelEngine:
 
     def _hold(self, pack, ev: Event, mode: str | None = None) -> None:
         """Out of area, or our own incident's: held at log (the module's doc, step 6). Only a pack with an area (the
-        county-wide packs): the police pack's events are never held or linked. An event already pushed is never held
+        county-wide packs): the police pack's events are never linked, and held only in a "place": true category
+        (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
-        if not pack.area:
+        if not pack.area and not pack.category(ev.category).get("place"):
             return
-        ev.near_incident = self._incident(ev)
-        why = "out_of_area" if self._outside(pack, ev) else ""
+        if ev.suppressed == "placed_late" and ev.pushed_at is None:
+            ev.mode = lowest(ev.mode, "log")  # placed too late to be a pre-alert: stays at log
+            return
+        if pack.area:
+            ev.near_incident = self._incident(ev)
+        why = "out_of_area" if self._outside(pack, ev) else self._unplaced(pack, ev)
         if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
             why = "near_incident"
         if why and ev.pushed_at is None:
             ev.mode = lowest(ev.mode, "log")
             ev.suppressed = why
+        elif ev.suppressed == "unplaced":
+            # placed: the mode its rules raised it at (the window may have let the call-out go: never None here),
+            # unless the place came too long after the call-out to be a pre-alert
+            if ev.last_at - ev.first_at > RELEASE_S:
+                ev.suppressed = "placed_late"
+                ev.mode = lowest(ev.mode, "log")
+            else:
+                ev.suppressed = ""
+                ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
         elif ev.suppressed in ("out_of_area", "near_incident"):
             ev.suppressed = ""
             if mode is not None:
                 ev.mode = max(ev.mode, mode, key=mode_rank)
+
+    def _event_mode(self, pack, ev: Event) -> str:
+        """The mode the event's own rules (ev.rules, with their weights then) give it: pack, category and rung."""
+        by = {r.id: r for r in pack.rules}
+        got = [(float(w), "", by[i]) for i, _v, w in ev.rules if i in by]
+        pos = [x for x in got if x[2].category == ev.category and x[0] > 0]
+        cues = [x for x in got if x[2].category == rules_mod.WILD and x[0] > 0]
+        damp = [x for x in got if x[0] < 0]
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        return lowest(pack.mode, cd.get("mode", "push"), rung(pos, damp, thr, cues)) if pos else "log"
+
+    def _may_place(self, pack, ev: Event, entry, speaks: bool) -> bool:
+        """An "unplaced" event takes a place only from a row that says its category itself, or from a read-back of
+        the held call: within RELEASE_S of it, no other job's cue (no hit of another category, no dispatch cue, no
+        unit the call never named), and said by the call's own talker (the dispatcher repeating the address) or by a
+        unit the call named. Never by a talker's next job ("car 9 respond to ..., a dispute")."""
+        if speaks:
+            return True
+        if entry.at - ev.first_at > RELEASE_S or any(r.category != ev.category for r, _w in entry.hits):
+            return False
+        talkers, units = self._held_who(pack, ev)
+        if entry.units - units or not self._address_only(entry):
+            return False
+        return bool(entry.talker and entry.talker in talkers) or bool(entry.units & units)
+
+    @staticmethod
+    def _address_only(entry) -> bool:
+        """The row is the address and nothing else: its place's words (number, street, town), street words, the units
+        it names and READBACK_WORDS. Anything more ("they have a suspicious vehicle", "also ... when you clear") is
+        another job's, never the held call's read-back.
+        A known gap: the dispatcher's next job said as a bare address ("21 Sample Street, Port Chester.") by the same
+        talker within RELEASE_S reads exactly like a read-back and places the held call there. The words can't tell
+        them apart; the one cheap guard is _unplaced's: an address outside the source's towns stays held
+        ("out_of_area"), never pushed."""
+        if entry.place is None or not entry.place.label:
+            return False
+        ok = set(rules_mod.words(entry.place.label)) | STREET_WORDS | READBACK_WORDS
+        ok |= {w for u in entry.units for w in u.split()}
+        ws = rules_mod.words(entry.text)
+        # "apartment 3", "apt 2b": the address's own apartment, read back with it
+        apt = {i + d for i in range(len(ws) - 1) if ws[i] in APT_WORDS and APT_NUMBER.fullmatch(ws[i + 1]) for d in (0, 1)}
+        return all(w in ok or i in apt for i, w in enumerate(ws))
+
+    def _held_who(self, pack, ev: Event) -> tuple[set, frozenset]:
+        """The talkers and units of an unplaced event's own transmissions (kept past the window, _note_who)."""
+        talkers, units = self._who_of.get(ev.id, (set(), frozenset()))
+        mine = [e for e in self._event_entries(pack, ev)]
+        return (talkers | {e.talker for e in mine if e.talker},
+                units | frozenset(u for e in mine for u in e.units))
+
+    def _note_who(self, pack, ev: Event) -> None:
+        if ev.suppressed == "unplaced" and ev.id is not None:
+            self._who_of[ev.id] = self._held_who(pack, ev)
+            while len(self._who_of) > WHO_MAX:
+                self._who_of.pop(next(iter(self._who_of)))
+        else:
+            self._who_of.pop(ev.id, None)
+
+    def _deferred(self, pack, cat: str, cats: dict, key: str, at: float, entry):
+        """One pre-alert per call: a category that defers to another ("defer_to": fire_call to fire_report) is not
+        raised while that one is over its threshold in this window, or has an open event on this source at this place
+        (or either has none). The other way round, _raise takes the deferring category's open event over.
+        False: not deferred; True: deferred; an Event: deferred to that open event, which has no place while this row
+        has one (the caller gives it the place: "location unknown", then the address).
+        The rows that have a place, and the open event that has one, defer only when the places match."""
+        to = pack.category(cat).get("defer_to")
+        if not to:
+            return False
+        for e in self._open_for(pack, to, key, at, self._merge_span(pack)):
+            if e.precision == "none":
+                return e if entry.place is not None and entry.place.precision in PLACED else True
+            if entry.place is None or same_place(entry.place, e.place()):
+                return True
+        tcd = pack.category(to)
+        thr = tcd.get("threshold") if tcd.get("threshold") is not None else pack.threshold
+        return to in cats and cats[to][0] >= thr
+
+    def _unplaced(self, pack, ev: Event) -> str:
+        """A "place": true category (rules.py): "unplaced" until the event has a place a crew can drive to (PLACED),
+        "out_of_area" when that place is outside the source's towns (else the pack's area); "" otherwise."""
+        if not pack.category(ev.category).get("place"):
+            return ""
+        if ev.precision not in PLACED:
+            return "unplaced"
+        towns = {t.lower() for t in (pack.towns_for(ev.source_key) or pack.area)}
+        return "out_of_area" if towns and (ev.town or "").lower() not in towns else ""
 
     def _rules_mode(self, pack, ev: Event) -> str | None:
         """The mode the window's rules give the event's category now (pack, category and rung), None: not reached."""
@@ -822,7 +1070,12 @@ class IntelEngine:
         rp = entry.place if speaks else None
         fresh = bool(NEW_CALL.search(entry.text))
         ev, moved, reopened = None, False, False
-        for e in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+        span = self._merge_span(pack)
+        under = [e for e in self._open_for(pack, None, key, at, span)               # a deferring category's call:
+                 if e.category != cat and pack.category(e.category).get("defer_to") == cat]   # taken over (one per call)
+        for e in self._open_for(pack, cat, key, at, span) + under:
+            if e.suppressed == "unplaced" and not self._may_place(pack, e, entry, speaks):
+                continue                      # a held call takes only its own words or its read-back
             ep = e.place() if e.precision != "none" else None
             if rp is not None and ep is not None and same_place(rp, ep):
                 ev = e                        # the same place again ("another caller ...": more of the same)
@@ -830,8 +1083,8 @@ class IntelEngine:
                 continue                      # "new call": another place, or none said: a new incident
             elif rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
                 ev = e                        # no place said ("still smoke showing"): the open one (#492 re-check)
-            elif rp is not None and ep is None and e.last_at >= at - pack.window_s:
-                ev = e                        # the place, right after a call-out that had none
+            elif rp is not None and ep is None and (e.last_at >= at - pack.window_s or e.suppressed == "unplaced"):
+                ev = e                        # the place, right after a call-out that had none (or held for one)
             elif (rp is not None and ep is not None and self._moving(pack, e, entry)
                   and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
                 ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
@@ -866,6 +1119,10 @@ class IntelEngine:
                     mode = lowest(mode, "log")
                     break
         before = copy.deepcopy(ev) if ev is not None else None
+        if ev is not None and ev.category != cat:
+            ev.category = cat                 # a deferring category's call, now this one's (one pre-alert per call)
+            if ev.suppressed == "unplaced":
+                ev.suppressed = ""            # (held for its old category's sake: _hold judges it as this one)
         rules = sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in contrib})
         if ev is None:
             ev = Event(domain=pack.domain, pack=pack.name, category=cat, source_key=key,
@@ -893,6 +1150,7 @@ class IntelEngine:
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
         self.events.save(ev)
+        self._note_who(pack, ev)
         self._after(pack, ev, change, now, before, moved=moved and before is not None and before.precision != "none"
                     and not same_place(before.place(), ev.place()))
         return ev
@@ -919,6 +1177,7 @@ class IntelEngine:
             return None
         ev.updated_at = self.clock()
         self.events.save(ev)
+        self._note_who(pack, ev)
         self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
         return ev
 
@@ -1061,7 +1320,8 @@ class IntelEngine:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
             msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful)
-            why = push_mod.scrub(msg, self._who(pack, ev))
+            # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
+            why = "" if self.policy.cfg.get("push_pii", True) else push_mod.scrub(msg, self._who(pack, ev))
             if why:
                 self.log(f"intel: push of event {ev.id} withheld by the scrub ({why})")
                 d = Decision(d.mode, False, "scrub", d.priority)
@@ -1121,6 +1381,109 @@ class IntelEngine:
         return p.window_s if p is not None else 120.0
 
 
+def push_rev(keys) -> int:
+    """The revision of a set of push sources: a content hash of its sorted keys (sha256, the first 8 bytes, big-endian,
+    masked to PUSH_REV_BITS), never 0 (that is "no engine / not computed"): the same set, the same rev, in any process."""
+    h = int.from_bytes(hashlib.sha256("\n".join(sorted(keys)).encode()).digest()[:8], "big") & ((1 << PUSH_REV_BITS) - 1)
+    return h or 1
+
+
+def source_key(channel_key: str, kind: str = "") -> tuple[str, ...]:
+    """The source keys (as rows carry them) a speech-to-text channel key may be: "tg:<n>" / "p25:<system>:<n>" ->
+    sourcekeys.service_key's qualified key; "fm:<label>" / "air:<label>" as it is; a bare label -> sourcekeys.fm(label,
+    kind) (App._row_source's: "air:" for kind "airband", else "fm:"), or with no kind both ("fm:" first). () for none."""
+    from sizeup import sourcekeys
+    key = str(channel_key or "")
+    if not key:
+        return ()
+    if sourcekeys.parse(key) is not None:
+        return (sourcekeys.service_key(key),)
+    if key.startswith(("fm:", "air:")):
+        return (key,)
+    if kind:
+        return (sourcekeys.fm(key, kind),)
+    return (sourcekeys.fm(key), sourcekeys.fm(key, "airband"))
+
+
+def can_push(pack) -> bool:
+    """The pack could push an event: its mode is push, and one of its rules is on, at push, in one of its categories
+    at push (a "*" cue alone never raises an event). As compiled, so with Settings' overrides (rules.load_packs)."""
+    if pack.mode != "push":
+        return False
+    return any(r.enabled and r.mode == "push" and r.category in pack.categories
+               and pack.category(r.category).get("mode", "push") == "push" for r in pack.rules)
+
+
+def source_rows(talkgroups=(), channels=(), county: str = "") -> list[dict]:
+    """Every known source as a row of the radio log carries it ({source, system, service, tier, dept}: what
+    Pack.in_scope reads), for push_sources().
+
+    talkgroups  TalkgroupPrefs.state()-shaped rows ({source, system, tg, group, service, service_auto, tier,
+                department}): the station's list on the hub first, then the hub's own talkgroups files; a source given
+                twice is the first one's
+    channels    the configured FM and airband channels (config ChannelCfg: label, kind)
+
+    Tagged as App._row_source and Comms.record tag a row: the service with no choice (the file's column, else the
+    group's words; an FM channel's fire, an airband channel's air), the admins' radio_services choice over it
+    (sourcekeys.overridden); a tier only for another P25 system's talkgroup."""
+    from sizeup import sourcekeys
+    county = county or sourcekeys.COUNTY
+    out: dict[str, dict] = {}
+    for r in talkgroups or ():
+        if not isinstance(r, dict):
+            continue
+        system = str(r.get("system") or county)
+        key = str(r.get("source") or "")
+        if not key and r.get("tg") is not None:
+            key = sourcekeys.p25(system, int(r["tg"]))
+        if not key or key in out:
+            continue
+        auto = str(r.get("service_auto") or r.get("service") or "") or sourcekeys.service(str(r.get("group") or ""))
+        out[key] = {"source": key, "system": system, "service": sourcekeys.overridden(key, auto),
+                    "tier": "" if system == county else str(r.get("tier") or ""),
+                    "dept": str(r.get("department") or r.get("dept") or "")}
+    for c in channels or ():
+        label, kind = str(getattr(c, "label", "") or ""), str(getattr(c, "kind", "") or "")
+        key = sourcekeys.fm(label, kind)
+        if not label or key in out:
+            continue
+        air = kind == "airband"
+        out[key] = {"source": key, "system": "airband" if air else "analog",
+                    "service": sourcekeys.overridden(key, sourcekeys.service(kind=kind or "traffic")), "tier": "",
+                    "dept": ""}
+    return list(out.values())
+
+
+# The one engine of this process that reads the transcripts (the app sets it: App, HubApp), for push_sources() below
+_live: IntelEngine | None = None
+
+
+def set_live(engine: IntelEngine | None) -> None:
+    global _live
+    _live = engine
+
+
+def push_sources() -> tuple[frozenset[str], int]:
+    """IntelEngine.push_sources() of this process's engine, for code without the engine at hand (speech-to-text's
+    queue). (frozenset(), 0) when none runs here: no engine, or a station forwarding to its hub (the hub's engine is
+    the one that pushes; a station gets the set from it, see the module's doc)."""
+    e = _live
+    if e is None:
+        return frozenset(), 0
+    try:
+        if not e.active():
+            return frozenset(), 0
+    except Exception:  # noqa: BLE001 - not known to be the one that reads: none
+        return frozenset(), 0
+    return e.push_sources()
+
+
+def is_push_source(channel_key: str, kind: str = "") -> bool:
+    """IntelEngine.is_push_source() of this process's engine; False when none runs here (as push_sources())."""
+    keys, _rev = push_sources()
+    return any(k in keys for k in source_key(channel_key, kind))
+
+
 def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
     """The highest mode whose own rules reach thr: the category's evidence [(w, tid, rule)] at that mode or above
     (noisy-OR), with every cue, times every damper. A cue's own mode never moves the rung (as before the rung: a cue
@@ -1175,6 +1538,9 @@ class LiveSink:
         if not d.would_push or d.message is None:
             return False
         if n is None or not self.engine.leader():
+            return False
+        if not getattr(n, "enabled", True):       # no intel topic in effect: held, and no Listen clip made for nothing
+            self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect: not pushed")
             return False
         m = dict(d.message)
         actions = []

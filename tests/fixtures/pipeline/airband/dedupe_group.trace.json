@@ -1,0 +1,290 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 0,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "We just got lasered on a two mile final, green laser from the ground",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.55,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "laser",
+      "subject": "laser",
+      "group": "HPN Tower",
+      "title": "HPN ATC: laser strike (laser strike)",
+      "confidence": 0.55,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": null
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: laser strike (laser strike) (0.55)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 90,
+    "id": "twr-2"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-2",
+     "ch": "HPN Tower",
+     "fed": "Tower, N456CD, unable to taxi, we are stuck on the runway",
+     "hits": [
+      [
+       "disabled",
+       "unable to taxi"
+      ]
+     ],
+     "score": 0.7825,
+     "adsb": null,
+     "context": [
+      "twr-1"
+     ],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "runway",
+      "subject": "acft:N456CD",
+      "group": "HPN Tower",
+      "title": "HPN ATC: disabled aircraft / runway (disabled aircraft): N456CD",
+      "confidence": 0.78,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N456CD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "added"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-2",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-2",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 181,
+    "id": "twr-3"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-3",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N789EF, engine failure",
+     "hits": [
+      [
+       "mayday",
+       "mayday"
+      ],
+      [
+       "engine",
+       "engine failure"
+      ]
+     ],
+     "score": 0.991875,
+     "adsb": null,
+     "context": [
+      "twr-2"
+     ],
+     "row": "A2"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "emergency",
+      "subject": "acft:N789EF",
+      "group": "HPN Tower",
+      "title": "HPN ATC: MAYDAY: N789EF",
+      "confidence": 0.99,
+      "rank": 3,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N789EF",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-3",
+     "record": {
+      "role": "unknown",
+      "talker": {
+       "callsign": "",
+       "status": ""
+      },
+      "aircraft": {
+       "callsign": "N789EF",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N789EF",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N789EF",
+      "group": "",
+      "title": "HPN ATC: abnormal · engine, emergency · N789EF",
+      "confidence": 0.7,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N789EF",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "added"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-3",
+     "row": "A2"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: MAYDAY: N789EF (0.99)",
+    "airport_watch: airport watch: N789EF: abnormal -> pre-alert #A2 (0.70)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 185,
+    "id": "gnd-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "gnd-1",
+     "ch": "HPN Ground",
+     "fed": "Westchester Ground, we just got lasered taxiing out, green laser from the parking lot",
+     "hits": [
+      [
+       "laser",
+       "lasered"
+      ]
+     ],
+     "score": 0.55,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "laser",
+      "subject": "laser",
+      "group": "HPN Ground",
+      "title": "HPN ATC: laser strike (laser strike)",
+      "confidence": 0.55,
+      "rank": 1,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "added"
+    },
+    {
+     "watch": "talkers",
+     "id": "gnd-1",
+     "record": null
+    },
+    {
+     "watch": "airport_watch",
+     "id": "gnd-1",
+     "row": null
+    }
+   ]
+  }
+ ]
+}

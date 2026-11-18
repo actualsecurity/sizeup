@@ -33,12 +33,26 @@ const S = {
 // on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
-const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]];
+const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["workers", "STT workers"], ["logs", "Logs"], ["adapter", "Adapter"],
+  ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
-const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
+const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
   ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
+// Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
+// shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
+const S_RC_NAMES = {
+  load: async () => (await api("GET", "/api/cad/comms/sources")).folders || { rev: "", names: {} },
+  save: async (key, name) => (await api("POST", "/api/cad/settings/radio_folders", { action: "name", key, name, operator: operator() }))
+    .radio_folders || { rev: "", names: {} },
+};
+// ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
+const S_RC_SERVICES = {
+  load: async () => { const s = await api("GET", "/api/cad/comms/sources"); return { services: s.services || {}, waiting: s.retag_waiting || [] }; },
+  save: async (key, service) => (await api("POST", "/api/cad/settings/radio_services", { action: "set", key, service, operator: operator() }))
+    .radio_services || {},
+};
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
@@ -288,8 +302,8 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 
 // ---- load / save ----------------------------------------------------------------------------------
 
-// The settings as they are now. The CAD's rev moves with every call, unit and transmission (sHook), the settings
-// seldom: the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
+// The settings as they are now. The CAD's rev moves with every call, unit and transmission, the settings seldom (sHook
+// reads them again at once only when settings_rev moves, else on a slower clock): the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
 // scroll position, the focus and typed text (fresh: the form that was just saved starts clean).
 // "What it shows" is by section (S_PART_OF: a part of the settings drawn in one section only; a part not named is
 // everyone's), and without what moves with the calls and the radio (S_LIVE_KEYS: a list item's "used 12×" and "3 now",
@@ -321,8 +335,10 @@ async function sLoad(opts = {}) {
     return;
   }
   S.loading = true;
+  if (cad.state) S.seenSettingsRev = cad.state.settings_rev;       // (sHook: read again when it moves)
   try {
     const d = await api("GET", "/api/cad/settings");
+    S.loadedAt = Date.now();
     const [sig, live] = sSigs(d, S.section);
     const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
     S.data = d;
@@ -343,6 +359,7 @@ async function sLoad(opts = {}) {
 // alarms and Intel (their own reads: another admin's change, the 24 h counts), the audio kept and the cameras on the
 // wall. Users: who was seen when, at most every 15 s.
 function sRefresh() {
+  if (document.hidden) return;              // (not shown: its cards catch up once it is, sHook)
   if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
   S.refreshDue = false;
   if (S.section === "users") sActivity();
@@ -411,7 +428,8 @@ function sRoute() {
     if (S_RADIO_TABS.some(([k]) => k === m[2])) S.rtab = m[2];
     if (!S_RADIO_TABS.some(([k]) => k === S.rtab)) S.rtab = "receivers";
     store("sizeup.cad.settings.radios", S.rtab);
-    if (location.hash !== `#settings/radios/${S.rtab}`) history.replaceState(null, "", `#settings/radios/${S.rtab}`);
+    const q = S.rtab === "signal" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";   // a Health hint's ?s=FG1&at=
+    if (location.hash !== `#settings/radios/${S.rtab}${q}`) history.replaceState(null, "", `#settings/radios/${S.rtab}${q}`);
   }
   if (!S_SECTIONS.some(([k]) => k === sec)) {
     sec = store("sizeup.cad.settings") || "lists";
@@ -496,9 +514,10 @@ function sRadioTab() {
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
   // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab });
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
+  if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
 }
 
 function sRadios() {
@@ -506,6 +525,33 @@ function sRadios() {
   if (box && S.rtab === "tones") box.replaceChildren(...sTonePage(S.data.tones));
   const em = $("#settings-emergencies");
   if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
+  const th = $("#settings-signal-thresholds");
+  if (th && S.rtab === "signal" && S.data.signal_metrics && sIsHub()) th.replaceChildren(sSignalThresholds(S.data.signal_metrics));
+}
+
+// Settings > Radios > Signal (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
+// warnings' thresholds. Admins, audited as Radios; the hub only (the metrics are the hub's).
+function sSignalThresholds(d) {
+  const card = sCard(sCardHead("Thresholds", "", sHelp("Suggested Open: the idle quieting's p90 (7 days, or since the last "
+    + "dongle / gain change) plus the margin, never above more than the % of real transmissions (0: none); in doubt, none "
+    + "is offered. Shift warnings: "
+    + "after an SDR, gain, squelch, plug or restart event, the 6 h after against the day before; a Health hint, never a push.")));
+  card.id = "s-signal-thresholds";
+  for (const [key, v] of Object.entries(d)) {
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(v.min); n.max = String(v.max); n.step = "0.5";
+    n.value = String(v.value);
+    n.disabled = !canDo("admin");
+    n.setAttribute("aria-label", v.label);
+    n.addEventListener("change", () => sPost("signal_metrics", { action: "set", key, value: Number(n.value) },
+      `${v.label}: ${n.value}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), n, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
+      () => sPost("signal_metrics", { action: "reset", key }, `${v.label}: ${v.default}`)));
+    card.append(row);
+  }
+  return card;
 }
 
 // Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page: a banner over the list,
@@ -852,12 +898,30 @@ function sUnnamed(d) {
   el("div", "tscroll").appendChild(t).parentNode);
 }
 
+// When to read the settings again. Their own version (the state's settings_rev: any setting written, removed or
+// audited, a user added or edited) at once. The CAD's rev moves with every call, unit and transmission: what moves with
+// it (S_LIVE_KEYS: "used 3×", a unit's status, the audio kept) is read again at most every S_POLL.live ms in the
+// sections that show it on every row (S_LIVE), every S_POLL.other ms in the rest (each read builds every section on
+// the hub: read on every rev, an open Settings page asked about every 1.5 s, 1-2.5 s each, slowing every other request).
+const S_POLL = { live: 5000, other: 30000 };
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere
   sStationTab();
   if (S.section === "station" && cad.state && !S.stationShown && S.data) sRender(true);   // the first state: its tab
   if (!S.section) return;
   if (S.section === "runcards") sRunTools();
-  if (cad.state && S.data && cad.state.rev !== S.data.rev && !S.loading) sLoad();
+  if (!cad.state || !S.data || S.loading) return;
+  const st = cad.state;
+  if (st.settings_rev !== S.seenSettingsRev) { sLoad(); return; }          // (the state's, as at the last read)
+  if (document.hidden) return;              // a tab not shown reads nothing on the clock (back: the next render does)
+  const every = S_LIVE.has(S.section) ? S_POLL.live : S_POLL.other, now = Date.now();
+  if (st.rev !== S.data.rev && now - (S.loadedAt || 0) >= every) { sLoad(); return; }
+  // what System reads apart from the settings (the counts, the audit log, Emergency alarms, Intel's counters) keeps up
+  // with the calls by itself, each card its own small read: at most every S_POLL.live ms, never the whole settings
+  if ((S.section === "system" || S.section === "users") && st.rev !== S.refreshRev && now - (S.refreshedAt || 0) >= S_POLL.live) {
+    S.refreshRev = st.rev;
+    S.refreshedAt = now;
+    sRefresh();
+  }
 }
 
 // ---- lists ----------------------------------------------------------------------------------------
@@ -997,7 +1061,7 @@ function sItemRow(sec, x, i, n) {
   ord.append(up, down);
   const edit = (item, what) => sPost(sec, { action: "edit", code: x.code, item }, `${x.code} ${what}`);
   const name = sInput(x.name, 60, "Name", (v) => { if (v && v !== x.name) edit({ name: v }, "renamed"); }, "s-name");
-  name.disabled = deleted;
+  name.disabled = deleted || !!x.system;          // the hub's own (Expired): read-only, never on a pick list
   li.append(ord, el("code", "s-code", x.code), name);
   if (sec === "event_types") {
     li.append(sColor(x.color, (v) => edit({ color: v }, "color changed"), "Color"));
@@ -1025,6 +1089,13 @@ function sItemRow(sec, x, i, n) {
   li.append(el("span", "dim small s-used", usedText + (x.used ? `used ${x.used}×` : "unused")), el("span", "spacer"));
   if (deleted) {
     li.append(sBtn("Restore", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} restored`)));
+    return li;
+  }
+  if (x.system) {
+    const sys = el("span", "dim small", "set by the hub");
+    sys.title = "A non-emergency event closes with this when its Until passes. Not on the pick lists; can't be edited, retired or deleted.";
+    li.append(sys);
+    if (x.state === "edited") li.append(sBtn("Reset", "Default", () => sPost(sec, { action: "reset", code: x.code }, `${x.code} reset`)));
     return li;
   }
   li.append(x.retired
@@ -2414,6 +2485,7 @@ function sStationPanel(panel) {
   if (S.stab === "health") sHealth($("#s-station-health"));
   if (S.stab === "logs" && window.StationLogsView) StationLogsView.mount($("#s-station-logs"));
   if (S.stab === "stations" && window.StationsCard) StationsCard.mount($("#s-station-stations"));
+  if (S.stab === "workers" && window.SttWorkersCard) SttWorkersCard.mount($("#s-station-workers"));   // GPU workers (#639)
   if (S.stab === "adapter" && window.AdapterPasswordCard) AdapterPasswordCard.mount($("#s-station-adapter"));
   if (S.stab === "link") sStation();
 }
@@ -2431,7 +2503,7 @@ function sHealth(panel) {
 // server shows them to nobody else. Empty = the default (SSM / the config); Turn off = no pushes of that kind.
 
 const S_PUSH_FROM = { settings: "Settings", ssm: "SSM", env: "Environment", config: "Config file", default: "Default",
-  fallback: "Shared", off: "Turned off", none: "Not set" };
+  fallback: "Shared", off: "Turned off", none: "Not set", same: "Refused" };
 // A refusal goes under its field and stays until that field is edited or saved again (S.pushErr); what was typed stays.
 function sPushErr(card, key, text) {
   if (text) S.pushErr[key] = text; else delete S.pushErr[key];
@@ -2503,7 +2575,9 @@ async function sPushes(card) {
     const head = el("div", "row");
     head.append(el("b", "s-eta-l", k.label), el("span", `chip s-state ${k.topic ? "edited" : "default"}`, S_PUSH_FROM[k.source] || k.source));
     const now = el("div", "dim small");
-    now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", "", k.source === "off" ? "Off" : "Not set"), { title: "No pushes of this kind" }),
+    now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", k.kind === "intel" && k.source !== "off" ? "warn" : "",
+      k.source === "off" ? "Off" : k.source === "same" ? "Refused: same as alerts / status" : "Not set"),
+      { title: k.kind === "intel" ? "No intel pushes: they need a topic of their own, never the alerts or status topic" : "No pushes of this kind" }),
       ...(k.topic ? [el("span", "mono", k.topic), el("span", "", ` (${k.source_text})`)] : []));
     const input = sPushField(card, k.kind, sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono"));
     input.minLength = d.min_len;
@@ -2568,8 +2642,9 @@ async function sPushes(card) {
   next.append(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
-    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
-    + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter), on their own topic only: never the alerts "
+    + "or status topic (refused); not set: no intel pushes. "
+    + "Only one of alerts / status set: both go to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never a protected topic (the ones read for pre-alerts, and the extras listed): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
   sStamp(next);

@@ -62,9 +62,18 @@ Reset to default = drop the override (one item, or a whole section).
     alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
                                    silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
                                    Health, not pushed (#340; Settings > System > Push notifications, admins)
-    radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}]}: the Radio page
-                                   rail's folders, set for the department (#607, sizeup/cad/radiofolders.py; admins, from
-                                   the rail's Edit); not set: the automatic grouping
+    signal_metrics                 key "margin_db" | "miss_pct" | "shift_db" | "opens_x" | "rate_x" | "cc_drop_pct" -> a
+                                   number: the suggested squelch's margin and the shift warnings' thresholds (#606,
+                                   sizeup/cloud/metricsinsight.py; Settings > Radios > Signal, admins)
+    radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}], names?: {source
+                                   key: name}}: the Radio page rail's folders, set for the department, and the channels'
+                                   display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
+                                   name from Settings > Radios > Channels); not set: the automatic grouping
+    radio_services                 key a source key (qualified: p25:<system>:<tg>, fm:<label>, air:<label>) -> fire | police
+                                   | ems | transit | air | other: that source's service whatever its talkgroups file or
+                                   its group's words say (sizeup/sourcekeys.py; admins, from Settings > Radios > Channels
+                                   or the rail's Edit); not set: automatic. A change re-tags its rows of the last
+                                   RETAG_DAYS (Cad.retag_services, audited with the count)
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -93,6 +102,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -103,7 +113,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
-from sizeup.cloud import cwlogs
+from sizeup.cloud import cwlogs, metricsinsight
 from sizeup.cloud import health as health_mod
 from sizeup.geo.localaddr import parse_number, split_address
 from sizeup.geo.places import norm_tokens
@@ -175,10 +185,32 @@ PAGE_SECTION[EM_SECTION] = "radios"
 # as Radios. key "layout" -> {folders: [{id, name, section, items}]}; not set: the automatic grouping.
 FOLDERS_SECTION = radiofolders.SECTION
 PAGE_SECTION[FOLDERS_SECTION] = "radios"
+# A source's service chosen by the admins (fire, police, ...: sizeup/sourcekeys.py), over its talkgroups file's column
+# and its group's words: Settings > Radios > Channels and the rail's Edit, audited as Radios. key a qualified source key
+# -> a service; not set: automatic.
+SVC_SECTION = "radio_services"
+PAGE_SECTION[SVC_SECTION] = "radios"
+# The station metrics read back (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
+# warnings' thresholds, Settings > Radios > Signal, admins, audited as Radios. key -> a number (LIMITS); not set: DEFAULTS.
+SIGNAL_SECTION = metricsinsight.SECTION
+PAGE_SECTION[SIGNAL_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
 LOGS_SECTION = cwlogs.SECTION
 PAGE_SECTION[LOGS_SECTION] = "system"
+
+
+def services_moved(before: dict, after: dict) -> list[str]:
+    """The source keys whose service choice differs between two sets of overrides (settings radio_services)."""
+    a, b = sourcekeys.clean_services(before.get(SVC_SECTION)), sourcekeys.clean_services(after.get(SVC_SECTION))
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def mark_retag(db, keys, at: float, operator: str) -> None:
+    """In the setting's own transaction: these sources' recent rows are still to re-tag (Cad.retag_services clears it)."""
+    for k in keys:
+        db.execute("INSERT INTO radio_retag_pending (key, at, operator) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                   "at = excluded.at, operator = excluded.operator", (k, at, operator or ""))
 
 
 def em_value(v) -> list[str]:
@@ -444,19 +476,53 @@ class Editor:
         self.base_ours: set[str] = set()
         self.unknown_log: Path | None = None
         self._heard_cache: tuple = ((), [])
+        self._sections: dict[str, tuple] = {}        # section() -> (_written() then, its overrides)
+        self._usage_cache: dict[str, tuple] = {}     # _page_usage(): section -> (what it counts' marks, when, the counts)
 
     # -- overrides ------------------------------------------------------------------------------------
 
-    def overrides(self) -> dict[str, dict]:
+    def overrides(self, skip: tuple[str, ...] = ()) -> dict[str, dict]:
+        """Every section's overrides; skip: sections left out (the page: "places", thousands of imported names it reads
+        through local_places, never here)."""
         out: dict[str, dict] = {}
-        for r in self.store.q("SELECT section, key, value FROM settings_overrides ORDER BY section, key"):
+        where = f" WHERE section NOT IN ({','.join('?' * len(skip))})" if skip else ""
+        for r in self.store.q(f"SELECT section, key, value FROM settings_overrides{where} ORDER BY section, key", skip):
             out.setdefault(r["section"], {})[r["key"]] = json.loads(r["value"])
         return out
 
+    def settings_rev(self) -> str:
+        """What moves with every change the Settings page shows as a setting: any override written or removed, any
+        audited change (every Settings write is audited), a user added or edited. The page reloads at once when it
+        moves (settings.js sHook); what moves with the calls and the radio ("used 3×", a unit's status, the audio kept)
+        it reads again on its own, slower. The state carries it (Cad.state, built only when the rev moves)."""
+        a = self.store.one("SELECT MAX(id) AS id FROM settings_audit")
+        o = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at, TOTAL(LENGTH(value)) AS size FROM settings_overrides")
+        u = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM operators")
+        return json.dumps([a["id"] if a else None, *(o.values() if o else ()), *(u.values() if u else ())], separators=(",", ":"))
+
     def section(self, name: str) -> dict:
-        """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes)."""
-        return {r["key"]: json.loads(r["value"])
-                for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,))}
+        """One section's overrides only (the push topics, read at every push: sizeup/notify.py Pushes; the alarms'
+        settings, read at every state push). Read again only when the file may have changed (_written); a copy each
+        time, so a caller may change what it gets."""
+        ver = self._written()
+        got = self._sections.get(name) if ver is not None else None
+        if got is None or got[0] != ver:
+            got = (ver, {r["key"]: json.loads(r["value"])
+                         for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,))})
+            if ver is not None:
+                self._sections[name] = got
+        return copy.deepcopy(got[1])
+
+    def _written(self) -> tuple | None:
+        """What moves with any write to the CAD file: this connection's own (total_changes), another's (PRAGMA
+        data_version: the replica follower before a takeover). None inside an open transaction (what it reads may still
+        be rolled back): never cached then. The imported place names are thousands of rows in the same table, so a
+        section is never read through overrides() where it is asked every second (#446)."""
+        db = self.store.db
+        with self.store.lock:
+            if db.in_transaction:
+                return None
+            return db.total_changes, db.execute("PRAGMA data_version").fetchone()[0]
 
     def build(self, ov: dict) -> lists_mod.Lists:
         try:
@@ -468,6 +534,7 @@ class Editor:
         """At start: the saved edits over the data file. If they no longer fit it (the file changed
         under them), the file alone, said in the log: nothing is lost, Settings shows the edits."""
         ov = self.overrides()
+        self._use_services(ov)                  # (whatever the lists make of the rest: a source's tag never waits)
         if not ov:
             return
         try:
@@ -495,7 +562,15 @@ class Editor:
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
+        self._use_services(ov)
         self.cad._state = None
+        if getattr(self.cad, "intel", None) is not None:
+            self.cad.intel.sources_changed()      # a source's service, the intel topic: intel's push sources again
+
+    def _use_services(self, ov: dict) -> None:
+        """The admins' service per source: the CAD's copy (the pages) and the process's (every row tagged from now)."""
+        self.cad.radio_services = sourcekeys.clean_services(ov.get(SVC_SECTION))
+        sourcekeys.set_service_overrides(self.cad.radio_services)
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
                 check=None, extra_sql=None) -> dict:
@@ -511,7 +586,10 @@ class Editor:
         if check:
             check(L)
         now = self.store.clock()
+        # a source's service chosen or put back (here, or by an import): its recent rows to re-tag, marked with it
+        moved = services_moved(ov, trial)
         with self.store.tx() as db:
+            mark_retag(db, moved, now, operator)
             for sec, key, val in changes:
                 if val is REMOVE:
                     db.execute("DELETE FROM settings_overrides WHERE section = ? AND key = ?", (sec, key))
@@ -526,6 +604,8 @@ class Editor:
         self._use(L, trial)
         self.store.sync_units()          # new / retired / moved units, statuses: on the boards now
         self.store.rev += 1
+        if moved:
+            self.cad.retag_services()                   # (off this thread)
         return {"ok": True}
 
     @staticmethod
@@ -578,6 +658,20 @@ class Editor:
             add(q("SELECT u.name AS k, COUNT(*) AS n FROM events e JOIN units u ON u.id = e.unit_id GROUP BY u.name"))
         return out
 
+    PAGE_USAGE_S = 30.0          # the page's "used N×" at most this old (a delete still asks usage() itself)
+
+    def _page_usage(self, sec: str) -> dict[str, int]:
+        """usage() for the page: kept until a record is added to what it counts, at most PAGE_USAGE_S (its GROUP BYs
+        over every incident, event and unit history row were most of a page read; the counts only say "in use")."""
+        mark = tuple(self.store.one("SELECT (SELECT MAX(id) FROM incidents) AS i, (SELECT MAX(id) FROM events) AS e, "
+                                    "(SELECT MAX(id) FROM unit_history) AS h, (SELECT COUNT(*) FROM assignments) AS a, "
+                                    "(SELECT COUNT(*) FROM run_cards) AS c").values())
+        now = time.monotonic()
+        got = self._usage_cache.get(sec)
+        if got is None or got[0] != mark or now - got[1] > self.PAGE_USAGE_S:
+            got = self._usage_cache[sec] = (mark, now, self.usage(sec))
+        return dict(got[2])
+
     def _used_why(self, sec: str, code: str) -> str:
         q = self.store.q
         parts = []
@@ -602,19 +696,20 @@ class Editor:
     # -- the page ---------------------------------------------------------------------------------------
 
     def page(self) -> dict:
-        L, ov = self.cad.lists, self.overrides()
+        L, ov = self.cad.lists, self.overrides(skip=("places",))      # (the place names: _place_names_page)
         out: dict = {"rev": self.store.rev, "lists": {}, "titles": LIST_TITLES, "roles": list(ROLES),
                      "audit_sections": list(AUDIT_SECTIONS)}
+        live = self.store.units()
         for sec in LIST_SECTIONS:
             base = {x["code"]: x for x in getattr(self.base, sec)}
-            o, used = ov.get(sec, {}), self.usage(sec)
+            o, used = ov.get(sec, {}), self._page_usage(sec)
             rows = [dict(x, state="added" if x["code"] not in base else "edited" if x["code"] in o else "default",
                          used=used.get(x["code"], 0), default=base.get(x["code"])) for x in getattr(L, sec)]
             rows += [dict(base[c], state="deleted", used=0, default=base[c]) for c, v in o.items()
                      if isinstance(v, dict) and v.get("deleted") and c in base]
             out["lists"][sec] = {"items": rows, "ordered": "_order" in o, "edited": bool(o)}
         now_in = {}
-        for u in self.store.units():
+        for u in live:
             now_in[u["status"]] = now_in.get(u["status"], 0) + 1
         for r in out["lists"]["unit_statuses"]["items"]:
             r["now"] = now_in.get(r["code"], 0)
@@ -635,13 +730,13 @@ class Editor:
                                  "edited": "_list" in ov.get("geo_town_order", {})}
         out["place_names"] = self._place_names_page()
         out["local_addresses"] = self._addresses_page()
-        out["units"] = self._unit_rows(L, ov)
+        out["units"] = self._unit_rows(L, ov, live)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
         out["type_subtypes"] = self._map_page(L, ov)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
-        out["system"] = self._system(ov)
+        out["system"] = self._system(ov, places=len(self._places_cached()[2]))      # (ov is without them)
         out["tones"] = self.tones_page()
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
@@ -649,6 +744,7 @@ class Editor:
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
         out["radio_emergencies"] = self.em_page(ov)
+        out["signal_metrics"] = self.signal_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
         out["station_logs"] = self.logs_page(ov)
@@ -656,7 +752,7 @@ class Editor:
 
     def logs_page(self, ov: dict | None = None) -> dict:
         """Settings > Station > Logs: each setting, its default and whether it is edited."""
-        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        e = (self.section(LOGS_SECTION) if ov is None else (ov.get(LOGS_SECTION) or {}))
         c = cwlogs.config(e)
         return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
                 for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
@@ -807,7 +903,7 @@ class Editor:
     def mutes_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Push notifications > Mute (#340): each health alert kind, muted or not, until when."""
         now = self.store.clock()
-        on = health_mod.active_mutes((self.overrides() if ov is None else ov).get(MUTE_SECTION) or {}, now)
+        on = health_mod.active_mutes((self.section(MUTE_SECTION) if ov is None else (ov.get(MUTE_SECTION) or {})), now)
         return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
                            "timed_only": k in health_mod.MUTE_TIMED_ONLY}
                           for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
@@ -864,7 +960,7 @@ class Editor:
 
     def errors_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Hub error alerts (#285): the switch and the two thresholds, each with its default."""
-        e = ((self.overrides() if ov is None else ov).get(ERR_SECTION) or {})
+        e = (self.section(ERR_SECTION) if ov is None else (ov.get(ERR_SECTION) or {}))
         return {k: {"label": errwatch.LABELS[k], "value": e.get(k, d), "default": d, "edited": k in e,
                     **({"min": errwatch.LIMITS[k][0], "max": errwatch.LIMITS[k][1]} if k in errwatch.LIMITS else {})}
                 for k, d in errwatch.DEFAULTS.items()} | {"window_min": errwatch.WINDOW_S / 60,
@@ -899,9 +995,44 @@ class Editor:
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
 
+    def signal_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Signal (#606): the suggestion's margin and the shift thresholds, each with its default."""
+        e = (self.section(SIGNAL_SECTION) if ov is None else (ov.get(SIGNAL_SECTION) or {}))
+        cur = metricsinsight.settings(e)
+        return {k: {"label": metricsinsight.LABELS[k], "value": cur[k], "default": d, "edited": k in e,
+                    "min": metricsinsight.LIMITS[k][0], "max": metricsinsight.LIMITS[k][1]}
+                for k, d in metricsinsight.DEFAULTS.items()}
+
+    @staticmethod
+    def _signal_value(key, v) -> float:
+        lo, hi = metricsinsight.LIMITS[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise CadError(f"{key}: {lo:g} to {hi:g}")
+        return round(float(v), 2)
+
+    def _signal_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins (sizeup/cad/api.py), audited as Radios."""
+        key = body.get("key")
+        if key not in metricsinsight.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(metricsinsight.DEFAULTS)}")
+        d = metricsinsight.DEFAULTS[key]
+        cur = metricsinsight.settings(self.section(SIGNAL_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            v = self._signal_value(key, body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        stored = self.section(SIGNAL_SECTION)
+        if (v == d and key not in stored) or (key in stored and stored[key] == v):
+            return {"ok": True, "signal_metrics": self.signal_page()}     # nothing changes: nothing to audit
+        out = self._commit([(SIGNAL_SECTION, key, REMOVE if v == d else v)], op,
+                           [("radios", f"{SIGNAL_SECTION}/{key}", f"{cur:g}", f"{v:g}")])
+        return {**out, "signal_metrics": self.signal_page()}
+
     def mapd_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Map display (#376): each zoom, its default and whether it is edited."""
-        e = ((self.overrides() if ov is None else ov).get(MAPD_SECTION) or {})
+        e = (self.section(MAPD_SECTION) if ov is None else (ov.get(MAPD_SECTION) or {}))
         z = mapview.display_zooms(e)
         return {k: {"label": mapview.DISPLAY_LABELS[k], "value": z[k], "default": d, "edited": k in e,
                     "min": mapview.display_limits(k)[0], "max": mapview.display_limits(k)[1]}
@@ -909,7 +1040,7 @@ class Editor:
 
     def premise_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Address notes (#403): each category, who may see it (everyone | dispatcher | admin)."""
-        e = ((self.overrides() if ov is None else ov).get(PREMISE_SECTION) or {})
+        e = (self.section(PREMISE_SECTION) if ov is None else (ov.get(PREMISE_SECTION) or {}))
         return {k: {"label": lab, "value": e.get(k, "everyone"), "edited": k in e, "choices": list(PREMISE_LEVELS)}
                 for k, lab in _visibility_keys().items()}
 
@@ -936,7 +1067,7 @@ class Editor:
 
     def em_page(self, ov: dict | None = None) -> dict:
         """Settings > Radios > Emergencies: the services whose emergencies (not ours) stand out on the Radio page."""
-        e = ((self.overrides() if ov is None else ov).get(EM_SECTION) or {})
+        e = (self.section(EM_SECTION) if ov is None else (ov.get(EM_SECTION) or {}))
         return {"prominent": em_prominent(e), "default": list(EM_DEFAULT), "edited": "prominent" in e,
                 "choices": list(sourcekeys.SERVICES)}
 
@@ -957,29 +1088,84 @@ class Editor:
                            [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
         return {**out, "radio_emergencies": self.em_page()}
 
+    def services_page(self, cur: dict | None = None) -> dict:
+        """{source key: service} the admins chose, as this reader may know of them (another system's: signed in only)."""
+        cur = self.cad.radio_services if cur is None else cur
+        sees = self.cad.comms._sees_context()
+        return {k: v for k, v in cur.items() if sees or not radiofolders.context_key(k)}
+
+    def _services_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, service} | set_many {services: {key: service}}: a source's service (fire | police | ems | transit |
+        air | other), over its talkgroups file's column and its group's words; "automatic" (or blank): none chosen.
+        Admins, audited as Radios (radio_services/<key>, old -> new); the source's rows of the last RETAG_DAYS re-tagged
+        off this thread, the count audited when done (Cad.retag_services)."""
+        if action == "set":
+            want = {body.get("key"): body.get("service")}
+        elif action == "set_many":
+            want = body.get("services")
+            if not isinstance(want, dict) or not want:
+                raise CadError("services: {source key: service}")
+            if len(want) > radiofolders.MAX_ITEMS:
+                raise CadError(f"services: at most {radiofolders.MAX_ITEMS}")
+        else:
+            raise CadError("action: set or set_many")
+        cur = sourcekeys.clean_services(self.section(SVC_SECTION))
+        new = dict(cur)
+        sees = self.cad.comms._sees_context()
+        for raw, svc in want.items():
+            if not radiofolders.is_key(raw):
+                raise CadError("key: a source key (fm:<label>, air:<label>, p25:<system>:<talkgroup>)")
+            key = sourcekeys.service_key(raw)
+            if radiofolders.context_key(key) and not sees:
+                raise CadError("key: another system's talkgroup (sign in to change it)")
+            svc = sourcekeys.AUTOMATIC if svc in (None, "") else svc
+            if svc != sourcekeys.AUTOMATIC and svc not in sourcekeys.SERVICES:
+                raise CadError(f"service: {sourcekeys.AUTOMATIC} or one of {', '.join(sourcekeys.SERVICES)}")
+            if svc == sourcekeys.AUTOMATIC:
+                new.pop(key, None)
+            else:
+                new[key] = svc
+        moved = sorted(k for k in set(cur) | set(new) if cur.get(k) != new.get(k))
+        if not moved:                                   # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_services": self.services_page()}
+        out = self._commit([(SVC_SECTION, k, new[k] if k in new else REMOVE) for k in moved], op,
+                           [("radios", f"{SVC_SECTION}/{k}", cur.get(k, sourcekeys.AUTOMATIC), new.get(k, sourcekeys.AUTOMATIC))
+                            for k in moved])
+        return {**out, "radio_services": self.services_page()}
+
     def _folders_op(self, action: str, body: dict, op: str) -> dict:
-        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | reset {base?}: the Radio page's
-        folders and channel names (#607), admins,
+        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | name {key, name, base?} | reset
+        {base?}: the Radio page's folders and channel names (#607; name: one channel's alone, Settings > Radios >
+        Channels; blank: its own again), admins,
         audited as Radios. base: the rev the edit started from (radiofolders.rev; "" the default): someone else saved
         meanwhile -> refused, nothing written."""
         cur = radiofolders.stored(self.overrides())
         base = body.get("base")
         if base is not None and base != radiofolders.rev(cur):
             raise CadError("the folders were changed meanwhile: reload them and edit again")
+        audit_key, old_s = f"{FOLDERS_SECTION}/{radiofolders.KEY}", None
         if action == "reset":
             v = None
         elif action == "set":
             v = radiofolders.clean({"folders": body.get("folders"), "names": body.get("names")})
             if not self.cad.comms._sees_context():
                 v = radiofolders.merge_hidden(v, cur)
+        elif action == "name":
+            # one channel's or talkgroup's name (Settings > Radios > Channels): the folders as they are; display only
+            key = radiofolders.name_key(body.get("key"))
+            if radiofolders.context_key(key) and not self.cad.comms._sees_context():
+                raise CadError("key: another system's talkgroup (sign in to name it)")
+            v = radiofolders.named(cur, key, body.get("name"))
+            audit_key = f"{FOLDERS_SECTION}/names/{key}"
+            old_s = ((cur or {}).get("names") or {}).get(key) or "default"
         else:
-            raise CadError("action: set or reset")
+            raise CadError("action: set, name or reset")
         if v == cur:                                    # nothing changes: nothing written, nothing audited
             return {"ok": True, "radio_folders": radiofolders.for_viewer(cur, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
         out = self._commit([(FOLDERS_SECTION, radiofolders.KEY, REMOVE if v is None else v)], op,
-                           [("radios", f"{FOLDERS_SECTION}/{radiofolders.KEY}", radiofolders.summary(cur),
-                             radiofolders.summary(v))])
+                           [("radios", audit_key, radiofolders.summary(cur), radiofolders.summary(v)) if old_s is None
+                            else ("radios", audit_key, old_s, ((v or {}).get("names") or {}).get(key) or "default")])
         return {**out, "radio_folders": radiofolders.for_viewer(v, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
 
@@ -1007,7 +1193,7 @@ class Editor:
 
     def atc_page(self, ov: dict | None = None) -> dict:
         """Settings > System > ATC talkers (#252): each switch, its default (on) and whether it is edited."""
-        a = ((self.overrides() if ov is None else ov).get(ATC_SECTION) or {})
+        a = (self.section(ATC_SECTION) if ov is None else (ov.get(ATC_SECTION) or {}))
         return {k: {"label": lab, "value": bool(a.get(k, True)), "default": True, "edited": k in a} for k, lab in ATC_KEYS.items()} \
             | {"channels": sorted(getattr(getattr(self.cad, "atc_talkers", None), "channels", ()) or ())}
 
@@ -1059,10 +1245,10 @@ class Editor:
             return {"ok": True}
         return self._commit([(DEPT_SECTION, key, v)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur.get(key, "unset"), v)])
 
-    def _unit_rows(self, L, ov: dict) -> dict:
-        o, used = ov.get("units", {}), self.usage("units")
+    def _unit_rows(self, L, ov: dict, units: list[dict] | None = None) -> dict:
+        o, used = ov.get("units", {}), self._page_usage("units")
         base_on = {c for c, _, _ in self.base.board_units()}
-        live = {u["name"]: u for u in self.store.units()}
+        live = {u["name"]: u for u in (self.store.units() if units is None else units)}
         rows, on = [], set()
         for b in L.unit_boards:
             pos = 0
@@ -1131,14 +1317,23 @@ class Editor:
                         "factor, closures in effect avoided), else straight-line distance × road factor at an average "
                         "speed; plus turnout from quarters. No traffic. Shown as “~3 min est.”."}
 
-    def _system(self, ov: dict) -> dict:
+    def _system(self, ov: dict, places: int | None = None) -> dict:
         try:
             raw = self.path.read_bytes()
         except OSError:
             raw = b""
         return {"data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 "sha256": hashlib.sha256(raw).hexdigest()[:12], "schema": SCHEMA_VERSION,
-                "overrides": {k: len(v) for k, v in ov.items()}, "db": self.store.path}
+                "overrides": self._counts(ov, places), "db": self.store.path}
+
+    @staticmethod
+    def _counts(ov: dict, places: int | None) -> dict[str, int]:
+        """System > Edits: how many overrides each section holds; places: the place names' count when ov was read
+        without them (page(): overrides(skip=("places",)))."""
+        out = {k: len(v) for k, v in ov.items()}
+        if places:
+            out["places"] = places
+        return dict(sorted(out.items()))
 
     # -- edits ------------------------------------------------------------------------------------------
 
@@ -1156,7 +1351,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FOLDERS_SECTION: self._folders_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -1222,6 +1417,9 @@ class Editor:
         if code not in items and not (action == "reset" and code in o):
             raise CadError(f"no {code!r} in {title}")
         cur = items.get(code)
+        if sec == "dispositions" and code in lists_mod.SYSTEM_DISPOSITIONS and action in ("edit", "retire", "restore", "delete"):
+            raise CadError(f"{code} is the hub's own (a passed Until closes an event with it): "
+                           "it can't be edited, retired or deleted")
         if action == "edit":
             raw = body.get("item")
             if isinstance(raw, dict) and raw.get("code") not in (None, code):
@@ -2051,7 +2249,7 @@ class Editor:
     # -- radios: channels (record / transcribe / engine) and speech-to-text (sizeup/channels.py) ---------------
 
     def channel_overrides(self) -> dict:
-        return dict(self.overrides().get(channels_mod.SECTION) or {})
+        return self.section(channels_mod.SECTION)
 
     def _channel_value(self, key: str, cur: dict, vals: dict):
         """The override to store for key: only what differs from the default (REMOVE: nothing does)."""
@@ -2088,7 +2286,9 @@ class Editor:
                 vals = {k: channels_mod.clean(k, {f: body.get(f) for f in channels_mod.FIELDS}) for k in keys}
             except ValueError as e:
                 raise CadError(str(e)) from None
-            changes, audit = [], []
+            changes, audit, applied = [], [], []
+            # A talkgroup's Record first, all of them (its own switch, on the station): one refused stops the rest,
+            # and those already applied are on the record (audited) before the refusal is said
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
@@ -2096,7 +2296,11 @@ class Editor:
                     err = "no talkgroups here" if ctx is None else (
                         ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
-                        raise CadError(err)
+                        if applied:
+                            self._commit([], op, applied)
+                        raise CadError(f"{key}: {err}" + (f" ({len(applied)} before it applied)" if applied else ""))
+                    applied.append(("radios", f"channel/{key}", None, {"record": rec}))
+            for key, v in vals.items():
                 if not v:
                     continue
                 cur = ov.get(key) or {}
@@ -2106,9 +2310,9 @@ class Editor:
                 if before != after:
                     changes.append((channels_mod.SECTION, key, new))
                     audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))
-            if not changes:
+            if not changes and not applied:
                 return {"ok": True}
-            out = self._commit(changes, op, audit)
+            out = self._commit(changes, op, applied + audit)
         elif action == "reset":
             key = _text(body.get("key"), "key", 40)
             if key not in ov:
@@ -2124,10 +2328,13 @@ class Editor:
     # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/channels.py, sizeup/radio/fm.py) --------------
 
     def squelch_overrides(self) -> dict:
-        return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
+        return self.section(channels_mod.SQUELCH_SECTION)
 
     def _squelch_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
+        the squelch the suggestion was worked out for: refused unless that is what runs now and, on the hub, the
+        channel's suggestion still offers Apply for it: a suggestion applied from Settings > Radios > Squelch, #606,
+        #686) | reset {key}. Audited."""
         ctx = self.cad.radio_ctx
         locked = ctx.channels_locked() if ctx is not None else ""
         if locked:
@@ -2137,6 +2344,20 @@ class Editor:
         dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
         if action == "set":
             self._squelch_editable(key)
+            exp = body.get("expect")
+            if exp is not None:                       # #606: applied from a suggestion worked out for what ran then
+                rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+                run = (rows.get(key) or {}).get("running") or {}
+                if not isinstance(exp, dict) or any(not isinstance(exp.get(f), (int, float)) or isinstance(exp.get(f), bool)
+                                                    or run.get(f) is None or abs(float(run[f]) - float(exp[f])) > 0.01
+                                                    for f in ("open_db", "close_db")):
+                    raise CadError(f"{key} now runs Open {run.get('open_db')} / Close {run.get('close_db')}: "
+                                   "not what the suggestion was for, look again")
+                # ... and the suggestion itself still offers it, for that squelch (#686: the hub's own check)
+                check = getattr(getattr(self.cad, "station_metrics_insight", None), "applicable", None)
+                why = check(key, exp, {f: body.get(f) for f in ("open_db", "close_db")}) if callable(check) else ""
+                if why:
+                    raise CadError(why)
             try:
                 vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
             except ValueError as e:
@@ -2154,12 +2375,18 @@ class Editor:
             before = {**dflt, **(ov.get(key) or {})}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
                                [("radios", f"squelch/{key}", before, eff)])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         elif action == "reset":
             key = _text(key, "key", 40)
             if key not in ov:
                 return {"ok": True}
             out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
                                [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+            ins = getattr(self.cad, "station_metrics_insight", None)   # its suggestion again (#606)
+            if ins is not None:
+                ins.forget(key)
         else:
             raise CadError("action: set or reset")
         if ctx is not None:
@@ -2236,7 +2463,7 @@ class Editor:
     # the rest, and sent to the station with the channel choices (the hub's set_channel_prefs job).
 
     def tone_overrides(self) -> dict:
-        return dict(self.overrides().get(TONES_SECTION) or {})
+        return self.section(TONES_SECTION)
 
     def tone_rows(self) -> list[dict]:
         """GET /api/cad/tones: each pair named here (not the edits to list rows or entities), who named it and when."""
@@ -2471,7 +2698,7 @@ class Editor:
         return True
 
     def stt_values(self) -> dict:
-        return dict(self.overrides().get("stt") or {})
+        return self.section("stt")
 
     def _vocab_list(self, v) -> list[str]:
         if not isinstance(v, list) or len(v) > MAX_VOCAB:
@@ -2611,7 +2838,7 @@ class Editor:
     # audited, exported and imported with the rest; sizeup/roads.py Roads.area reads them on every request.
 
     def wall_values(self) -> dict:
-        return dict(self.overrides().get(WALL_SECTION) or {})
+        return self.section(WALL_SECTION)
 
     @staticmethod
     def _wall_margin(v) -> int:
@@ -2733,7 +2960,8 @@ class Editor:
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
-        default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
+        default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES). An intel topic
+        that is an alerts or status topic, or the reverse, is refused (notify.INTEL_SAME_WHY: intel's channel is its own)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
         if p is None:
@@ -2776,6 +3004,10 @@ class Editor:
                 why = p.problem(t)
                 if why:
                     raise CadError(f"{notify.LABELS[key]}: {why}")
+                # intel goes to a channel of its own (admin, 2026-11-17): never the alerts' or status' topic, either way
+                theirs = (notify.ALERTS, notify.STATUS) if key == notify.INTEL else (notify.INTEL,)
+                if notify.same_topic(t, p.named(theirs)):
+                    raise CadError(f"{notify.LABELS[key]}: {notify.INTEL_SAME_WHY}")
                 new = {"topic": t}
             else:
                 new = REMOVE
@@ -2949,7 +3181,8 @@ class Editor:
                                 {"email": email, "seen": "signed in through Cloudflare Access (not named yet)"})
                     self.store.rev += 1
                 elif not row["email"]:      # an operator named by the email itself, entered by hand
-                    db.execute("UPDATE operators SET email = ? WHERE id = ?", (email, row["id"]))
+                    # (updated_at: settings_rev moves, so an open Users page shows the email at once)
+                    db.execute("UPDATE operators SET email = ?, updated_at = ? WHERE id = ?", (email, self.store.clock(), row["id"]))
             r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,)) or {"name": email, "callsign": ""}
         return {"email": email, "name": r["name"], "callsign": r["callsign"], "operator": self.recorded(r["name"], email)}
 
@@ -3073,7 +3306,10 @@ class Editor:
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 # names secret; the county's place names: their own import, never in this file
-                "overrides": _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS}),
+                # (radio_services always, {} with none: an import of this file sets them as it says; only a file from
+                # before them, without the section, keeps the ones here)
+                "overrides": {SVC_SECTION: {}, **_without_imported({k: v for k, v in self.overrides().items()
+                                                                   if k not in KEPT_SECTIONS})},
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
                                "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
@@ -3119,6 +3355,13 @@ class Editor:
         self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
+        from sizeup.intel.admin import clean_value
+        intel = ov.get("intel") or {}
+        for k, v in list(intel.items()):  # as Settings > System > Intel takes it: a bad value refuses the whole file
+            try:                          # (policy.settings() would read it as the default without a word)
+                intel[k] = clean_value(k, v, intel)
+            except CadError as e:
+                raise CadError(f"overrides.intel.{k}: {str(e).split(': ', 1)[-1]}") from None
         if ADDR_SECTION in ov:            # sizeup/geo/localaddr.py: a point that can't be placed is skipped, in the notes
             ov[ADDR_SECTION], more = self._import_addresses(ov[ADDR_SECTION])
             self._import_notes = list(getattr(self, "_import_notes", None) or []) + more
@@ -3148,6 +3391,13 @@ class Editor:
                 e["prominent"] = em_value(e["prominent"])
             except CadError as x:
                 raise CadError(f"overrides.{EM_SECTION}.{x}") from None
+        for k, v in (ov.get(SIGNAL_SECTION) or {}).items():   # sizeup/cloud/metricsinsight.py (#606)
+            if k not in metricsinsight.DEFAULTS:
+                raise CadError(f"overrides.{SIGNAL_SECTION}: {', '.join(metricsinsight.DEFAULTS)} only")
+            try:
+                self._signal_value(k, v)
+            except CadError as x:
+                raise CadError(f"overrides.{SIGNAL_SECTION}.{x}") from None
         f = ov.get(FOLDERS_SECTION) or {}                     # the Radio page's folders (#607)
         if set(f) - {radiofolders.KEY}:
             raise CadError(f"overrides.{FOLDERS_SECTION}: {radiofolders.KEY} only")
@@ -3156,6 +3406,10 @@ class Editor:
                 f[radiofolders.KEY] = radiofolders.clean(f[radiofolders.KEY])
             except CadError as x:
                 raise CadError(f"overrides.{FOLDERS_SECTION}.{x}") from None
+        for k, v in (ov.get(SVC_SECTION) or {}).items():      # a source's service (sizeup/sourcekeys.py)
+            if not radiofolders.is_key(k) or sourcekeys.service_key(k) != k or v not in sourcekeys.SERVICES:
+                raise CadError(f"overrides.{SVC_SECTION}: {k!r} -> {v!r} (a qualified source key -> "
+                               f"{' | '.join(sourcekeys.SERVICES)})")
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
@@ -3291,6 +3545,11 @@ class Editor:
             self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
                                 f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
         cur = _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS})
+        if SVC_SECTION not in ov and cur.get(SVC_SECTION):
+            # a file with no service choices (one from before them): the ones here are kept, not cleared (Auto, one
+            # by one, clears them)
+            ov = {**ov, SVC_SECTION: dict(cur[SVC_SECTION])}
+        svc_moved = services_moved(cur, ov)
         changes = []
         for sec in sorted(set(cur) | set(ov)):
             a, b = cur.get(sec, {}), ov.get(sec, {})
@@ -3356,12 +3615,17 @@ class Editor:
                 self._audit(db, now, op, c["section"], f"{c['store']}/{c['key']}" if c["store"] not in ("run_cards", "operators")
                             else c["key"], c["old"], c["new"])
             self._audit(db, now, op, "system", "import", None, f"{len(changes)} changes")
+            mark_retag(db, svc_moved, now, op)
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
+        if svc_moved:
+            self.cad.retag_services()          # a source's service the file changed: its recent rows (off this thread)
         if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt", channels_mod.SQUELCH_SECTION)
                                                   for c in changes):
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
+        if getattr(self.cad, "intel", None) is not None and any(c["store"] in INTEL_SECTIONS for c in changes):
+            self.cad.intel.reload()          # the intel switches (push, push_pii, the caps) live now, as after their own op
         return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

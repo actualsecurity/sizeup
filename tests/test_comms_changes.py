@@ -116,6 +116,7 @@ def writers(c):
         ("retag_pages", lambda: c.comms.retag_pages(lambda a, b: ["Sample FD"], lambda names: True), "pg-1",
          lambda: "Sample FD" in row(c, "pg-1")["tones"]),
         ("fix_air", lambda: c.comms.fix_air(["Tower"]), "reset", lambda: row(c, "tw-1")["system"] == "airband"),
+        ("retag", lambda: c.comms.retag("fm:FG1", "other", 0), "reset", lambda: row(c, "fg-2")["service"] == "other"),
         ("alarm raised", lambda: c.alarms.on_traffic(dict(tx("fg-new", t + 20, text="mayday mayday", rig="E63", radio_id="4242098"), at=t + 20)),
          "fg-new", lambda: c.store.one("SELECT 1 AS x FROM alarms WHERE traffic_id = 'fg-new'") is not None),
         ("alarm acknowledged", lambda: c.alarms.acknowledge(c.alarm["id"], {"operator": "Lt. Sample"}), "fg-m",
@@ -136,7 +137,8 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
+WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air",
+           "retag", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "corrections_kept", "emergencies", "events_of", "facets", "for_incidents",
            "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "cursor", "source_names",

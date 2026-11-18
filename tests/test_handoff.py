@@ -1102,6 +1102,7 @@ def test_the_app_fence_kills_litestream_and_exits_the_moment_the_lease_is_stale(
     assert killed == [4242] and exited == [EXIT_FENCED] and not f.ok()
 
 
+@pytest.mark.flaky(issue=668)
 def test_the_supervisor_keeps_the_lease_file_fresh_for_the_app(world, tmp_path):
     a = Task(world, "A", tmp_path).start()
     until(lambda: a.sup.role == "active")

@@ -43,6 +43,7 @@ DEFAULT_REGION = "us-east-1"
 CREDS_S = 3.0               # the container credentials endpoint
 REFRESH_BEFORE_S = 300.0    # fetch new container credentials this long before they expire
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"   # S3 presigned URLs: the literal string stands in for the payload hash
 ALGORITHM = "AWS4-HMAC-SHA256"
 
 
@@ -210,10 +211,14 @@ def sign(method: str, url: str, headers: dict[str, str], body: bytes, creds: Cre
 
 
 def presign(url: str, creds: Credentials, reg: str, service: str, expires: int = 300, at: datetime | None = None,
-            payload_hash: str = EMPTY_SHA256, method: str = "GET") -> str:
+            payload_hash: str | None = None, method: str = "GET") -> str:
     """url with SigV4 query authentication (only `host` signed). The session token goes in the signed
-    query (X-Amz-Security-Token), as Transcribe's WebSocket API and S3 want it. AwsError "OutboundOff" as sign()."""
+    query (X-Amz-Security-Token), as Transcribe's WebSocket API and S3 want it. payload_hash: by default
+    "UNSIGNED-PAYLOAD" for S3 (a presigned S3 URL signed with anything else is refused, SignatureDoesNotMatch)
+    and the empty body's sha256 for everything else (Transcribe's streaming URL). AwsError "OutboundOff" as sign()."""
     _outbound(service, url)
+    if payload_hash is None:
+        payload_hash = UNSIGNED_PAYLOAD if service == "s3" else EMPTY_SHA256
     amz, day = _stamp(at)
     u = urllib.parse.urlsplit(url)
     pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)

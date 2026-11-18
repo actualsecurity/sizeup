@@ -1,0 +1,8 @@
+{"do": "scenario", "t0": "day", "why": "Expiry is lazy: an open pre-alert unanswered for MORE than expire_s (1800 s from its last addition) stays open in the table until something runs tick(): the console's read, or the next raise. A read exactly at 1800 s keeps it."}
+{"do": "air", "t": 0, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "we just got lasered on a two mile final, green laser from the ground"}
+{"do": "read", "t": 1800}
+{"do": "wait", "t": 1801}
+{"do": "read", "t": 1801}
+{"do": "air", "t": 1900, "id": "twr-2", "ch": "HPN Tower", "dur": 4, "text": "we just got lasered again on short final, green laser from the ground"}
+{"do": "wait", "t": 3701}
+{"do": "air", "t": 3702, "id": "twr-3", "ch": "HPN Tower", "dur": 4, "text": "tower, we went off the runway, we are in the grass at taxiway alfa"}
