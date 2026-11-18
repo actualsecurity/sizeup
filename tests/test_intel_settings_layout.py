@@ -191,7 +191,8 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
     packs = len(site.j("GET", "/api/cad/intel")[1]["packs"])
     assert packs == 5                                                        # the first pack and the four log-only ones
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
-                                         "model", "/day", "$/month", "sample %", "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
+                                         "model", "/day", "$/month", "sample %", "min conf", "/h", "/day", "wait s", "$/month",
+                                         "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
     for text, title, field_title in labels:
         assert len(title) > len(text) and title == field_title, (text, title)
     hovers = {t: h for t, h, _ in labels}

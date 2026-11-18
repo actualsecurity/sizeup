@@ -938,7 +938,9 @@ class HubApp(App):
         self.health.sources = self.cad.sources.panel
         # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py); first, a warning
         # row when intel pushes go nowhere (no intel topic of its own, or one refused: notify.Pushes.intel_health)
-        self.health.intel = lambda: [r for r in (self.pushes.intel_health(),) if r] + self.cad.intel.counts()["packs"]
+        # ... and last, the local model behind the police rules (sizeup/intel/backing.py): PC worker ok / rules only
+        self.health.intel = lambda: [r for r in (self.pushes.intel_health(),) if r] + self.cad.intel.counts()["packs"] \
+            + ([self.cad.intel.backing.health_row()] if getattr(self.cad.intel, "backing", None) is not None else [])
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
         # and each aircraft source with the FAA registry (#542: last good read, failures and back-off on hover)
         self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else []) \
