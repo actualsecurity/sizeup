@@ -193,20 +193,6 @@ def service_overrides() -> dict[str, str]:
     return dict(_service_over)
 
 
-@contextmanager
-def service_overrides_as(m):
-    """These choices in place of the process's for the block, the process's put back after (whatever happened): the
-    intel replay's, from the copy's own Settings (sizeup/intel/replay.py load_rows). Over a station's from the hub too:
-    the copy is what the replay is of."""
-    global _service_over, _service_from_hub
-    before = (_service_over, _service_from_hub)
-    _service_over = clean_services(m)
-    try:
-        yield
-    finally:
-        _service_over, _service_from_hub = before
-
-
 def overridden(key, computed: str = "") -> str:
     """The admins' service for a source when they chose one, else `computed`."""
     return (_service_over.get(service_key(key)) or computed) if key else computed

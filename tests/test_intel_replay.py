@@ -698,7 +698,7 @@ def test_rows_from_before_the_service_column_are_scoped_as_live_rows_are(tmp_pat
 def test_an_admins_service_choice_in_the_copy_scopes_rows_stored_without_a_service(tmp_path):
     """#689's per-source service choice, read from the copy's own Settings: a row stored with no service on a talkgroup
     whose file says transit is scoped as the admins chose (fire); the county's keyed as the hub keys it (tg:<n> is
-    p25:westchester:<n>); a row's stored service is kept; the process's own choices are back after."""
+    p25:westchester:<n>); a row's stored service is kept; the process's own choices are left as they were."""
     from sizeup import sourcekeys
     cad = make_cad(tmp_path)
     cad.comms.context_broadcast = True                 # as on the hub behind Access: every reader is signed in (#419)
@@ -740,13 +740,52 @@ def test_without_a_choice_in_the_copy_the_file_says_and_the_process_choices_stay
     cad.store.db.close()
 
 
-def test_service_choices_for_a_block_are_put_back_even_when_it_fails():
+def test_the_process_choices_are_never_changed_while_rows_load(tmp_path, monkeypatch):
+    """The copy's choices are passed to talkgroup_groups, never put in the process's place (another thread there, the
+    live tagging or an admin's save, sees the process's own throughout)."""
     from sizeup import sourcekeys
-    sourcekeys.set_service_overrides({"fm:FG1": "other"}, hub=True)
-    with pytest.raises(RuntimeError):
-        with sourcekeys.service_overrides_as({"p25:mrrs:9121": "fire", "tg:383": "nonsense"}):
-            assert sourcekeys.service_overrides() == {"p25:mrrs:9121": "fire"}
-            assert sourcekeys.service("MNR Fire Brigade", "transit", key="p25:mrrs:9121") == "fire"
-            raise RuntimeError("boom")
-    assert sourcekeys.service_overrides() == {"fm:FG1": "other"} and sourcekeys._service_from_hub
-    assert sourcekeys.service("MNR Fire Brigade", "transit", key="p25:mrrs:9121") == "transit"
+    cad = make_cad(tmp_path)
+    cad.comms.context_broadcast = True
+    cad.settings_post("radio_services", {"operator": "Lt. Test", "action": "set", "key": "p25:mrrs:9121",
+                                         "service": "fire"})
+    row(cad, "old-1", 1000.0, "smoke showing", service="", system="mrrs", tg=9121)
+    cad.store.db.commit()
+    mine = {"p25:mrrs:9122": "police"}
+    sourcekeys.set_service_overrides(mine, hub=True)
+    held = sourcekeys._service_over
+    seen, sets = [], []
+    real_groups, real_fill = rp.talkgroup_groups, rp.fill_service
+    monkeypatch.setattr(sourcekeys, "set_service_overrides", lambda *a, **k: sets.append(a))
+
+    def groups(*a, **k):
+        seen.append(sourcekeys.service_overrides())
+        out = real_groups(*a, **k)
+        seen.append(sourcekeys.service_overrides())
+        return out
+
+    def fill(*a, **k):
+        seen.append(sourcekeys.service_overrides())
+        return real_fill(*a, **k)
+
+    monkeypatch.setattr(rp, "talkgroup_groups", groups)
+    monkeypatch.setattr(rp, "fill_service", fill)
+    con = rp.open_ro(tmp_path / "cad.sqlite")
+    try:
+        (r,) = rp.load_rows(con)
+    finally:
+        con.close()
+    assert r["service"] == "fire"
+    assert seen == [mine] * 3 and sets == [] and sourcekeys._service_over is held and sourcekeys._service_from_hub
+    cad.store.db.close()
+
+
+def test_talkgroup_groups_with_a_map_in_place_of_the_process_choices():
+    from sizeup import sourcekeys
+    sourcekeys.set_service_overrides({"p25:mrrs:9121": "police", "p25:westchester:383": "ems"})
+    assert rp.talkgroup_groups()[("mrrs", 9121)][1] == "police"                       # None: the process's
+    assert rp.talkgroup_groups()[("westchester", 383)][1] == "ems"
+    given = rp.talkgroup_groups(services={"p25:mrrs:9121": "fire"})                  # the map's, not merged
+    assert given[("mrrs", 9121)][1] == "fire" and given[("westchester", 383)][1] == "police"
+    none = rp.talkgroup_groups(services={})                                          # a copy from before #689
+    assert none[("mrrs", 9121)][1] == "transit" and none[("westchester", 383)][1] == "police"
+    assert sourcekeys.service_overrides() == {"p25:mrrs:9121": "police", "p25:westchester:383": "ems"}
