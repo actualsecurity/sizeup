@@ -64,10 +64,16 @@ def _null(_name: str) -> None:
     return None
 
 
+def _finite_float(s: str) -> float | None:
+    """A number token as a float, None when it doesn't fit one (1e999 reads as Infinity otherwise)."""
+    f = float(s)
+    return f if math.isfinite(f) else None
+
+
 def loads(raw: bytes | str):
-    """JSON from the other side, with the bare tokens NaN / Infinity / -Infinity (an older sender) read as None:
-    nothing made from one is ever NaN."""
-    return json.loads(raw, parse_constant=_null)
+    """JSON from the other side, with the bare tokens NaN / Infinity / -Infinity (an older sender) and a number too big
+    for a float (1e999) read as None: nothing made from one is ever NaN or infinite."""
+    return json.loads(raw, parse_constant=_null, parse_float=_finite_float)
 
 
 # The hub refused what was sent itself, not the station or the moment: the same body is refused again (a malformed
