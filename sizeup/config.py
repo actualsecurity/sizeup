@@ -28,6 +28,13 @@ STATION_LL = (40.99600, -73.66453)   # lat, lon: the station PC is at the South 
 
 PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
 PAGING_CONTINUE_S = 3.0
+# Key-ups (sizeup/radio/fm.py, am.py): a transmission is cut where its carrier dropped and a new key-up came back
+# inside the hang. split_s: the drop (under the close level) that alone makes one, 0: never; jump_db: every frame of
+# the carrier back this far over its own level after 0.1 s gone (upward only). Measured 2026-11 (#645): FG1 drops
+# inside a key-up 107 of 110 under 0.2 s; HPN Tower carriers 3-17 dB over the floor. Both 0: off (the hang bridges
+# every drop). Paging is off: a simulcast page fades and comes back stronger mid-page (opt in with jump_db: radio/fm.py).
+KEYUP_SPLIT_S = {"traffic": 0.2, "paging": 0.0, "airband": 0.15}
+KEYUP_JUMP_DB = {"traffic": 10.0, "paging": 0.0, "airband": 6.0}
 KINDS = ("paging", "traffic", "airband")
 # Airband (#233: HPN ATC, AM): shortfinal's tested receiver settings (sizeup/radio/am.py): the carrier squelch opens
 # 3.5 dB over the noise floor, 36.4 dB of gain. hang_s / drop_db / continue_s are the FM squelch's: not used here.
@@ -69,9 +76,21 @@ class ChannelCfg:
     # local day (None: all day); label: the airband channel that frequency belongs to (its transmissions are that
     # channel's). More than one frequency on: rtl_sdr + the channelizer instead of rtl_fm (sizeup/radio/channelize.py).
     also: tuple[tuple[float, int | None, int | None, str], ...] = ()
+    # Key-ups (KEYUP_SPLIT_S / KEYUP_JUMP_DB above): None: by kind
+    split_s: float | None = None
+    jump_db: float | None = None
+
+    @property
+    def keyups(self) -> str:
+        """The FM squelch's key-up mode (radio/fm.py NoiseSquelch keyups): the kind, or "" when both are 0 (off)."""
+        return self.kind if (self.split_s or self.jump_db) and self.kind in ("traffic", "paging") else ""
 
     def __post_init__(self):
         paging = self.kind == "paging"
+        if self.split_s is None:
+            object.__setattr__(self, "split_s", KEYUP_SPLIT_S.get(self.kind, 0.0))
+        if self.jump_db is None:
+            object.__setattr__(self, "jump_db", KEYUP_JUMP_DB.get(self.kind, 0.0))
         if self.hang_s is None:
             object.__setattr__(self, "hang_s", PAGING_HANG_S if paging else None)
         if self.continue_s is None:
@@ -98,6 +117,7 @@ class Config:
     tones_file: str = ""                       # the tone list file read into tones ([radio] tones_file), "" for none
     p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
+    p25_tg_file_rows: int = 0      # rows the county's talkgroups file gave (0: no file; the [p25] talkgroups only)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     p25_emergency_window_min: float = 10.0   # the emergency button keeps its talkgroup and radio this long (#128)
     # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
@@ -667,8 +687,20 @@ def _airband(c: dict, i: int) -> ChannelCfg:
         raise ConfigError(f"{where}.squelch_db: 1 to 20 dB over the noise floor (3.5: shortfinal's, tested)")
     sched = _schedule(c["schedule"], mhz, where) if "schedule" in c else ()
     also = _also(c["also"], where) if "also" in c else ()
+    split, jump = _keyup_keys(c, where)
     return ChannelCfg(str(c["label"]), mhz, "airband", c.get("device", ""), c.get("gain_db", AIRBAND_GAIN_DB), sq,
-                      schedule=sched, also=also)
+                      schedule=sched, also=also, split_s=split, jump_db=jump)
+
+
+def _keyup_keys(c: dict, where: str) -> tuple[float | None, float | None]:
+    """A channel's split_s (0 to 2 s) and jump_db (0 to 40 dB), each None when not set (by kind: KEYUP_SPLIT_S)."""
+    out = []
+    for k, hi in (("split_s", 2.0), ("jump_db", 40.0)):
+        v = c.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= float(v) <= hi):
+            raise ConfigError(f"{where}.{k}: 0 to {hi:g} (0: off)")
+        out.append(None if v is None else float(v))
+    return out[0], out[1]
 
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -1412,7 +1444,7 @@ def load(path: str | Path) -> Config:
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
-                                                 "drop_db", "hang_s", "continue_s", "schedule", "also"})
+                                                 "drop_db", "hang_s", "continue_s", "schedule", "also", "split_s", "jump_db"})
         if c.get("kind", "traffic") not in KINDS:
             raise ConfigError(f"radio.channels[{i}].kind: 'paging', 'traffic' or 'airband'")
         kind = c.get("kind", "traffic")
@@ -1434,11 +1466,13 @@ def load(path: str | Path) -> Config:
         cont = c.get("continue_s")
         if cont is not None and not 0 <= float(cont) <= 30:
             raise ConfigError(f"radio.channels[{i}].continue_s: 0 to 30 seconds")
+        split, jump = _keyup_keys(c, f"radio.channels[{i}]")
         channels.append(ChannelCfg(c["label"], float(c["mhz"]), kind, c.get("device", ""),
                                    c.get("gain_db", 40.0), float(c.get("squelch_db", 10.0)),
                                    float(drop) if drop else None,
                                    float(hang) if hang is not None else None,
-                                   float(cont) if cont is not None else None))
+                                   float(cont) if cont is not None else None,
+                                   split_s=split, jump_db=jump))
     labels = [c.label for c in channels]
     if len(set(labels)) != len(labels):
         raise ConfigError("radio.channels: two channels have the same label")
@@ -1488,6 +1522,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError("p25.emergency_window_min: minutes from 0 to 120 (10: the default)")
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
     p25_info: dict[int, dict] = {k: {"name": v, "group": "", "encrypted": False} for k, v in p25_tgs.items()}
+    p25_tg_rows = 0
     if p25.get("talkgroups_file"):  # trunk-recorder's talkgroups.csv: one list for both programs
         import csv
         tf = Path(p25["talkgroups_file"])
@@ -1495,6 +1530,7 @@ def load(path: str | Path) -> Config:
         if not tf.is_file():
             raise ConfigError(f"p25.talkgroups_file: {tf} not found")
         for r in csv.DictReader(tf.read_text().splitlines()):
+            p25_tg_rows += 1
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
@@ -1624,7 +1660,7 @@ def load(path: str | Path) -> Config:
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)), **aws_stt,
         p25_dir=rel(p25.get("capture_dir", "")),
-        p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
+        p25_talkgroups=p25_tgs, p25_tg_info=p25_info, p25_tg_file_rows=p25_tg_rows,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()}, p25_emergency_window_min=em_window,
         p25_systems=more_systems, tier_keep_days=tier_days, context_audio_max_mb=context_mb,

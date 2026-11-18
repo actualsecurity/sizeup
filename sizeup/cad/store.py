@@ -75,6 +75,10 @@ ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "
 PLACEHOLDER_SCHEMA = """CREATE TABLE IF NOT EXISTS placeholder_releases (
     id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL, placeholder_id INTEGER NOT NULL, assignment_id INTEGER NOT NULL,
     by_unit_id INTEGER NOT NULL, at REAL NOT NULL, restored_at REAL)"""
+# A source's service changed (settings radio_services): its recent rows still to re-tag, written with the setting and
+# taken off when the re-tag is done (Cad.retag_services); a start of the CAD of record runs what is left
+RETAG_SCHEMA = """CREATE TABLE IF NOT EXISTS radio_retag_pending (
+    key TEXT PRIMARY KEY, at REAL NOT NULL, operator TEXT NOT NULL DEFAULT '')"""
 
 SCHEMA = """
 CREATE TABLE units (
@@ -513,6 +517,7 @@ class Store:
             if stmt.strip():
                 self.db.execute(stmt)
         self.db.execute(PLACEHOLDER_SCHEMA)               # which unit's sign-on released a placeholder (undo puts it back)
+        self.db.execute(RETAG_SCHEMA)                     # a source's rows still to re-tag (settings radio_services)
         for stmt in oos_mod.SCHEMA.split(";"):            # automation refused on an out-of-service unit (oos.py)
             if stmt.strip():
                 self.db.execute(stmt)

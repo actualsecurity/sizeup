@@ -293,6 +293,17 @@ def _chunklist(text: str) -> tuple[int, list[tuple[str, float]]]:
 
 
 class Dvr:
+    """Lock order (#644): every path takes them in this order, never the other way round, and lets go of a later one
+    before it takes an earlier one again:
+        _ensuring[cid] (a camera's on-demand read) -> _scanning -> _disk -> _lock -> the state's _lock
+        _parked_lock -> _lock
+        the state's _wlock -> the state's _lock
+    _scanning is waited for by _scan (a pool worker's round via record_once -> _ensure, the rescan thread, index_rest,
+    scan_now) and only tried by follow() (it never waits for it: a folder being read, the move comes later). So nothing
+    that holds _lock calls what takes _disk (wanted(): follow() moves a folder under _disk; _room, _write, evict): it
+    runs with no lock held, and its answer is kept under _lock only when no later one was kept already (_set_wanted:
+    pin and tick)."""
+
     def __init__(self, roads, root: str | Path, window_s: float = WINDOW_S, max_bytes: int = MAX_BYTES,
                  near_m: float = NEAR_M, always: tuple[str, ...] = (), linger_s: float = LINGER_S,
                  max_cameras: int = MAX_CAMERAS, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
@@ -316,7 +327,7 @@ class Dvr:
         self._rescan: threading.Thread | None = None
         self._scanning = threading.Lock()         # a folder's listing and merge (_scan_dir) vs follow()'s moves
         self._ensuring: dict[str, threading.Lock] = {}   # cid -> its folder being read on demand (_ensure)
-        self._twin_logged: set[int] = set()
+        self._twin_logged: set[tuple[str, int]] = set()   # (camera, key): "two segments under key" said once
         self._folders: set[str] | None = None     # the camera folders at resume() (what the state's bytes may count)
         self._checked_at = -1e18                  # the state last brought up to date (checkpoint)
         self._state_read = False                  # the state file read (resume, _offsets)
@@ -337,6 +348,7 @@ class Dvr:
         self._cams: dict[str, dict] = {}          # cid -> {segs: _Segs {key: (t0, dur, bytes)}, last, end, offset, ...}
         self._opened: dict[str, float] = {}       # cid -> last time someone watched it live
         self._wanted: dict[str, list[str]] = {}
+        self._wanted_gen = self._wanted_kept = 0  # wanted() asked / the newest one kept (_set_wanted, #644)
         self.stopped = ""                         # why recording stopped (the disk), "" when it records
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -353,6 +365,7 @@ class Dvr:
         self._free_read: tuple[float, int, int] | None = None   # (when, free bytes, total_bytes() then): _free_after
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
+            self._clean_parked_tmp()
             self._offsets()
             self._scanned.set()
             self._indexed.set()
@@ -464,8 +477,8 @@ class Dvr:
                 other = [x for x in files if x[3] != keep[3]]
                 same = [x[3] for x in other if abs(x[0] - keep[0]) <= max(keep[1], 1.0)]
                 twins += same
-                if len(same) < len(other) and key not in self._twin_logged:
-                    self._twin_logged.add(key)
+                if len(same) < len(other) and (name, key) not in self._twin_logged:
+                    self._twin_logged.add((name, key))
                     self.log(f"dvr: {name}: two segments under key {key} at different times: both kept")
             if c["segs"]:
                 last = max(c["segs"])
@@ -736,10 +749,23 @@ class Dvr:
             pins = dict(self.pins)
         self.save_pins(pins)
         self.log(f"dvr: {cid} {'kept' if on else 'no longer kept'}")
-        with self._lock:
-            self._wanted = self.wanted()
+        self._set_wanted()
         self.roads._changed()
         return self.status(cid)
+
+    def _set_wanted(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """wanted() worked out with no lock held (follow() takes _disk, then _lock: #644), kept as _wanted unless a
+        later one (a Keep's, a tick's, begun after this one) was kept meanwhile: then that one stands. (what was
+        wanted before, what is wanted now)."""
+        with self._lock:
+            self._wanted_gen += 1
+            gen = self._wanted_gen
+        wanted = self.wanted()
+        with self._lock:
+            before = self._wanted
+            if gen > self._wanted_kept:
+                self._wanted, self._wanted_kept = wanted, gen
+            return before, self._wanted
 
     def _incident_cams(self) -> dict[str, float]:
         """Camera id -> metres from the nearest open CAD event, for the cameras an event wants. Worked out again only
@@ -1076,10 +1102,7 @@ class Dvr:
                 self._rescan.start()                           # this thread, the rounds go on meanwhile
                 if wait_all:
                     self._rescan.join()
-        wanted = self.wanted()
-        with self._lock:
-            before = self._wanted
-            self._wanted = wanted
+        before, wanted = self._set_wanted()
         self._parked_tick()                                    # (#550) the parked cameras' checks, when due
         if set(wanted) != set(before):
             added, gone = set(wanted) - set(before), set(before) - set(wanted)
@@ -1156,6 +1179,7 @@ class Dvr:
         self._scan()
         self._offsets()
         self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
         self._rescanned_at = self.clock()
         self._scanned.set()
         self._indexed.set()
@@ -1218,6 +1242,7 @@ class Dvr:
         """After resume(): the whole index from the folders, merged with what was recorded meanwhile."""
         t = time.monotonic()
         self.state.clean(STALE_TMP_S)
+        self._clean_parked_tmp()
         try:
             self._scan(first=True)
         except Exception as e:  # pragma: no cover - an unreadable folder: what was read stands
@@ -1479,6 +1504,25 @@ class Dvr:
                     self.parked[cid] = q
             except (KeyError, TypeError, ValueError):
                 continue
+
+    def _clean_parked_tmp(self, stale_s: float = STALE_TMP_S) -> None:
+        """(#603) A temp file of PARKED_FILE left by a writer killed while writing it (.parked.<pid>.tmp at the root):
+        gone once stale_s old, only by a task that may write. Never PARKED_FILE itself, never a fresh one (a write
+        under way: ours under _parked_lock, or another task's)."""
+        if not self.may_write():
+            return
+        stem = Path(PARKED_FILE).stem
+        with self._parked_lock:
+            try:
+                found = [f for f in os.scandir(self.root) if f.name.startswith(f"{stem}.") and f.name.endswith(".tmp")]
+            except OSError:
+                return
+            for f in found:
+                try:
+                    if time.time() - f.stat().st_mtime > stale_s:
+                        Path(f.path).unlink(missing_ok=True)
+                except OSError:
+                    continue
 
     def _save_parked(self) -> None:
         """PARKED_FILE written whole (a temp file renamed), only by the leader (may_write); the list copied under the

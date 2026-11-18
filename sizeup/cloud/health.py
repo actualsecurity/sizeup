@@ -10,6 +10,11 @@ and checks it every TICK_S for these conditions, each with a text, a severity, a
 notice when it clears:
 
     silent        no state post for [alerts] silent_min (3)                                critical
+    id_mismatch   "Station rejected: id mismatch (station says X, token is Y)": the        critical
+                  station's posts refused (401 id_mismatch) in the last MISMATCH_HOLD_S
+                  (sizeup/cloud/stations.py; two or more): it is up and trying, but the hub
+                  won't take it (its [station] id isn't its token's). Decided on the hub's own
+                  data; pushed once it has gone on MISMATCH_NOTIFY_S (45 s)
     behind        on another build than the hub's for behind_min (15)                      warning
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
@@ -97,6 +102,8 @@ episode's push says so. Each alert's own grace (held()) is as before.
 Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
 unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Station > Health as before,
 marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
+"metrics_shift" (#606, sizeup/cloud/metricsinsight.py: a channel's signal shifted after an event) is a hint, never pushed:
+muted, it isn't shown.
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
@@ -159,13 +166,15 @@ STT_BACKLOG_S = 600.0       # the station's whisper: its oldest live clip waitin
 STT_CLEAR_S = 120.0         # ... until the oldest waits less than this ...
 STT_CLEAR_HOLD_S = 900.0    # ... for this long: one episode, however the queue wobbles (#300)
 STT_NOTIFY_S = 1200.0       # pushed only while the oldest has waited this long (a shorter one: the panel, no push)
-NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S}   # alerts pushed only once they are this old (from their since)
+MISMATCH_NOTIFY_S = 45.0    # "Station rejected": pushed only once it has gone on this long (a rename's in-flight post
+                            # never pushes)
+NOTIFY_AFTER = {"stt_backlog": STT_NOTIFY_S, "id_mismatch": MISMATCH_NOTIFY_S}   # pushed only this old (from since)
 BUDGET_WARN = 0.8           # this month's AWS cost at this share of the limit: a warning (and a push)
 SETTLE_S = 15 * 60.0        # #340: "Recovered" only once an alert has stayed clear this long; back sooner: one episode
 SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
 FLAP_N = 3                  # back this many times ...
 FLAP_WINDOW_S = 3600.0      # ... within this long
-HUB_OWN = ("silent", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
+HUB_OWN = ("silent", "id_mismatch", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
 REPLICA_STALE = 3.0         # the Replicas row says "stale" when the last check is this many leader intervals old
 
 
@@ -177,12 +186,13 @@ MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
               "job": "Channel not running", "sdr": "SDR gone", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
-              "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
+              "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
-              "replication_checks": "Takeover checks skipped"}
-MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+              "replication_checks": "Takeover checks skipped",
+              "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
 def alert_kind(key: str) -> str:
@@ -526,6 +536,7 @@ class StationHealth:
         self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self.metrics: Callable[[], dict | None] | None = None    # the station metrics' copies (sizeup/cloud/metricstore.py)
+        self.shifts: Callable[[], list] | None = None    # the signal shifts after an event (sizeup/cloud/metricsinsight.py)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -632,6 +643,11 @@ class StationHealth:
         out["outbox"] = {"pending": int(ob.get("pending") or 0), "oldest": oldest + hub.skew if oldest else None,
                          "age_s": round(snow - oldest, 1) if oldest and ob.get("pending") else None,
                          "dropped_audio": int(ob.get("dropped_audio") or 0)}
+        si = st.get("stt_input") if isinstance(st.get("stt_input"), dict) else {}
+        why = si.get("dropped") if isinstance(si.get("dropped"), dict) else {}
+        why = {str(k)[:20]: int(v) for k, v in list(why.items())[:10] if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+        out["outbox"]["dropped_stt"] = sum(why.values())          # each clip's STT input (sizeup/cloud/sttinput.py)
+        out["outbox"]["dropped_stt_why"] = why
         rows = [r for r in st.get("radios") or [] if isinstance(r, dict)]
         jobs = hl.get("jobs") if isinstance(hl.get("jobs"), dict) else {}
         sdr = st.get("sdr") if isinstance(st.get("sdr"), dict) else None
@@ -765,6 +781,11 @@ class StationHealth:
         sc = (out.get("stt_pool") or {}).get("copies") if isinstance(out.get("stt_pool"), dict) else None
         if sc and sc.get("warn"):                   # the transcripts-as-written copies (#639): a warning, never an alert
             out["hints"].append({"channel": "Transcripts", "level": "warn", "text": sc["warn"]})
+        try:                                        # #606: a channel's signal shifted after an event (a warning, no push)
+            shifts = self.shifts() if self.shifts is not None and "metrics_shift" not in self._mutes(now) else []
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            shifts = []
+        out["hints"] += shifts
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
@@ -886,11 +907,22 @@ class StationHealth:
                 "severity": "warning", "title": "Takeover checks skipped",
                 "text": "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1: the replica's checks at a takeover are off · remove "
                         "it in the next deploy", "since": self.__dict__.setdefault("_skip_since", now)}
+        reg = getattr(self.hub, "stations", None)               # the hub's own: its posts refused as another id
+        mm = reg.mismatch() if reg is not None and hasattr(reg, "mismatch") else None
+        if mm and mm.get("n", 0) < 2:
+            mm = None                                            # one refusal is no episode (a post in flight)
+        if mm:
+            out["id_mismatch"] = {
+                "severity": "critical",
+                "title": f"Station rejected: id mismatch (station says {mm['said'] or '?'}, token is {mm['token']})",
+                "text": f"its posts refused since {_hhmm(mm['since'])} · Settings > Station > Stations, or its [station] id",
+                "since": float(mm["since"])}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",
                              "text": (f"no word from {name} since {_hhmm(since)} · radios and transcripts not reaching the hub"
-                                      if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})"),
+                                      if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})")
+                                     + (" · its posts are refused: id mismatch" if mm else ""),
                              "since": since}
         if silent is None:
             out["silent"] = None                         # undecided: keep as it is

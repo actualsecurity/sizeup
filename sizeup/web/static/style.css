@@ -63,6 +63,11 @@
     --err: #EE6475;
     --info: #6AA6E8;                         /* 60 Control / dispatcher side */
     --c: #9AA3AD;                            /* the current category color (status, type: set per element) */
+    /* charts (signal-chart.js, #606): the categorical steps for the dark surface (validated: CVD ΔE >= 9 adjacent) */
+    --viz-1: #3987E5;                        /* voice, the main line */
+    --viz-2: #D95926;                        /* page, uncovered grants */
+    --viz-3: #199E70;                        /* an ID burst */
+    --viz-4: #C98500;                        /* the suggested Open */
 
     /* type */
     --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

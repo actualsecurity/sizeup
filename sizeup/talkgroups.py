@@ -14,11 +14,23 @@ another system (`others`: {system: {tg: info}}, from sizeup/radio/systems.py) ha
 context, never our incident's). The county's choices stay in talkgroups.json under the bare number, as a release from
 before this reads them; the other systems' are in talkgroups_systems.json under "p25:<system>:<tg>". A talkgroup
 granted on another system that isn't in its file is counted as unknown (unknown()).
+
+A bare number is always the county's. Settings > Radios once sent Main / Record on another system's talkgroup by its
+number alone (before the page sent the source), which saved a county choice under that number: an "Unknown — TG 9211"
+card under the county, and nothing on the other system's talkgroup (its tier). drop_orphans() (the app, once the
+history has been seeded) drops such a choice: a number the county neither lists nor has heard (no county call in the
+history) that another system lists, and only when the county's talkgroups file gave rows. It runs once per station
+(talkgroups_migrated.json marks it done, with what it dropped, written before anything is dropped, and logged), so
+a real county choice could be put back by hand and none is ever dropped later. Numbers are not
+guaranteed unique: config.load refuses another system only for a number the county LISTS, so an unlisted county
+talkgroup that is heard can share a number with another system; it stays the county's. elsewhere() is what
+App.set_talkgroup refuses a bare number by (the same test, live).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -42,6 +54,8 @@ class TalkgroupPrefs:
         self.path = Path(path) if path else None
         self.systems_path = self.path.with_name("talkgroups_systems.json") if self.path else None
         self.unknown_path = self.path.with_name("talkgroups_unknown.json") if self.path else None
+        self.migrated_path = self.path.with_name("talkgroups_migrated.json") if self.path else None
+        self.migrated: list[tuple[int, str, dict]] = []      # drop_orphans(): (number, the system that lists it, what)
         self._lock = threading.Lock()
         self._prefs: dict = {}
         self._seen: dict = {}                 # key -> {"count", "last", "dropped"}
@@ -69,6 +83,60 @@ class TalkgroupPrefs:
     def _k(self, tg: int, system: str = ""):
         """The key a talkgroup is held under: its number for the county's, (system, number) for another system's."""
         return int(tg) if not system or system == self.county else (system, int(tg))
+
+    def drop_orphans(self, county_listed: bool = True) -> list[tuple[int, str, dict]]:
+        """County choices saved under another system's number by the old page (see above): dropped ONCE per station,
+        never again (talkgroups_migrated.json marks it done: after this release nothing makes such an entry, so a later
+        one could only be a real county choice). Call once the history is seeded (the county's heard talkgroups).
+        county_listed: the county's talkgroups file gave rows; without one a county talkgroup can't be told from
+        another system's: nothing is dropped and nothing marked (the next start tries again). The sidecar is written
+        first (a temp file, then replaced); it can't be: nothing is dropped. A sidecar that can't be read is moved
+        aside (.corrupt-<time>), and counts as done. -> what was dropped (also `migrated`)."""
+        if not self.migrated_path or not county_listed:
+            return []
+        done = self.migrated_path.is_file()
+        if done:
+            try:
+                json.loads(self.migrated_path.read_text())
+            except (OSError, ValueError):
+                try:                                  # kept for a person to look at, never overwritten
+                    self.migrated_path.rename(self.migrated_path.with_name(
+                        f"{self.migrated_path.name}.corrupt-{int(time.time())}"))
+                except OSError:
+                    pass
+            return []
+        with self._lock:
+            gone = []
+            for k in [k for k in self._prefs if not isinstance(k, tuple) and k not in self.info and k not in self._seen]:
+                if owners := self._owners(k):
+                    gone.append((k, owners[0], dict(self._prefs[k])))
+        mark = {"version": 1, "at": time.time(), "dropped": [{"tg": k, "system": o, "prefs": w} for k, o, w in gone]}
+        tmp = self.migrated_path.with_name(self.migrated_path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(mark))
+            os.replace(tmp, self.migrated_path)
+        except OSError:
+            return []                             # not kept, so not dropped (the next start tries again)
+        if not gone:
+            return []
+        with self._lock:
+            for k, _o, _w in gone:
+                self._prefs.pop(k, None)
+        self.save()
+        self.migrated = gone
+        return gone
+
+    def _owners(self, tg: int) -> list[str]:
+        """The other systems whose files list this number."""
+        return sorted(k[0] for k in self.info if isinstance(k, tuple) and k[1] == int(tg))
+
+    def elsewhere(self, tg: int) -> list[str]:
+        """A bare number the county neither lists nor has heard, that another system lists: those systems ([] for a
+        county talkgroup). A choice sent by that number alone was meant for the other system's talkgroup."""
+        tg = int(tg)
+        with self._lock:
+            ours = tg in self.info or tg in self._seen
+        return [] if ours else self._owners(tg)
 
     @staticmethod
     def _parts(k) -> tuple[str, int]:
@@ -205,10 +273,13 @@ class TalkgroupPrefs:
     def group_of(self, tg: int, system: str = "") -> str:
         return self.info.get(self._k(tg, system), {}).get("group") or "Unknown"
 
-    def set_group(self, group: str, record: bool | None = None, main: bool | None = None) -> int:
-        """A whole section (e.g. 'County Police') on or off. Turning recording on skips encrypted
-        talkgroups (they can't be decoded). Saved per talkgroup, so it survives restarts."""
-        tgs = {tg for tg in set(self.info) | set(self._seen) | set(self._prefs) if self.group_of(*self._parts(tg)[::-1]) == group}
+    def set_group(self, group: str, record: bool | None = None, main: bool | None = None, system: str = "") -> int:
+        """A whole section (e.g. 'County Police') of one system (`system`: "" or the county's name = the county's) on
+        or off. Turning recording on skips encrypted talkgroups (they can't be decoded). Saved per talkgroup, so it
+        survives restarts. Never another system's section of the same name (an "Unknown" under each)."""
+        which = "" if system == self.county else str(system or "")
+        tgs = {tg for tg in set(self.info) | set(self._seen) | set(self._prefs)
+               if self._parts(tg)[0] == which and self.group_of(*self._parts(tg)[::-1]) == group}
         for sysname, tg in [tg for tg in tgs if isinstance(tg, tuple)]:
             self.set(tg, record=record, system=sysname)       # by its tier
         with self._lock:
@@ -251,7 +322,10 @@ class TalkgroupPrefs:
                              # choices are (sizeup/channels.py); tier None: the county's own switches
                              "system": sysname or self.county, "source": sources.p25(sysname or self.county, tg),
                              "key": sources.channel_key(sysname, tg, self.county), "ours": main,
-                             "service": sources.service(i.get("group") or "", i.get("service") or ""),
+                             # its service: the admins' for this source (sourcekeys.overridden), else automatic
+                             "service": sources.service(i.get("group") or "", i.get("service") or "",
+                                                        key=sources.p25(sysname or self.county, tg)),
+                             "service_auto": sources.service(i.get("group") or "", i.get("service") or ""),
                              "department": i.get("department") or "", "tier": self.tier(tg, sysname)})
         rows.sort(key=lambda r: (not r["main"], -(r["last"] or 0), r["group"], r["tg"]))
         return rows

@@ -253,6 +253,10 @@ stt-corrections*.jsonl
 # a local station config beside config.toml (docs/development.md)
 /config.station.toml
 
-# test leftovers that never belong in the repo: an object passed as a file path, the DVR state of a run in the checkout
+# test leftovers that never belong in the repo: an object passed as a file path; the camera DVR's state file a test run
+# can leave in the working directory (#661)
 /<*
-/dvr/
+/dvr/.dvr-state.json
+
+# /cad's bundles, built with the hub image (sizeup/web/bundle.py)
+sizeup/web/static/bundle/

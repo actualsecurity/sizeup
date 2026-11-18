@@ -4,6 +4,7 @@
    only while its call is open (the server's oos_notices says which); then it lapses and the unit stays as it was. ✓ puts the unit in service (its free status;
    dispatchers and admins), ✕ leaves it out of service. A viewer, and the wall board, see it and nothing to press.
    Drawn after every render (cad.hooks) over what cad.js drew. */
+"use strict";
 (function () {
   "use strict";
   const busy = new Set();                  // notices being acted on: not offered twice
