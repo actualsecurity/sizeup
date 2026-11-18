@@ -583,3 +583,22 @@ def test_an_admin_dismisses_a_stuck_page_from_health_and_it_is_audited(tmp_path)
         if st is not None:
             st.link.stop()
         hub.close()
+
+
+def test_the_hubs_refusals_are_strict_json_whatever_the_station_sent(tmp_path):
+    """#779's wire: an older station's bare NaN is read as null, and every answer here (the rejected list, the 400 / 413
+    reasons) is RFC 8259 JSON."""
+    def strict(raw):
+        return json.loads(raw, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        h = hub.app.hub
+        code, body, _ = h._events(b'{"epoch":"e1","events":[{"seq":1,"type":"traffic","data":{"id":"../x","confidence":NaN}}]}')
+        r = strict(body)
+        assert code == 200 and r["acked"] == 1 and [(x["seq"], x["reason"]) for x in r["rejected"]] == [(1, "malformed")]
+        code, body, _ = h._events(b"{not json")
+        assert code == 400 and strict(body)["reason"] == "bad_json"
+        code, body, _ = h._events(None)
+        assert code == 413 and strict(body)["reason"] == "too_large" and strict(body)["max_bytes"] == hub_mod.MAX_EVENTS_BODY
+    finally:
+        hub.close()
