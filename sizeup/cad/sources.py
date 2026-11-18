@@ -1056,6 +1056,7 @@ def same_place_halved(a: str, b: str, heard_a: bool = True, heard_b: bool = True
     return bool((ha and same_place(ha, b)) or (hb and same_place(a, hb)))
 
 
+_CROSS: dict = {}                                  # cross_as_mapped's answers per street list ("of": that list, None: its names)
 STREETS: dict[str, list[tuple[str, tuple, str]]] = {}   # town -> [(name words, (pre, suffix, name, post), as written)]: the gazetteer's
                                                    # streets (set_streets); empty: no street list, no snapping
 APPARATUS: set[str] = set()                        # the board's units, norm_unit (set_apparatus): run-together splits
@@ -1186,11 +1187,19 @@ def cross_as_mapped(name: frozenset):
     street list; None when it is near no known street (garbled: no evidence)."""
     if not STREETS:
         return name
-    known = {st[2] for rows in STREETS.values() for _, st, _ in rows}
-    if name in known:
-        return name
-    how, got = snap(" ".join(sorted(name)), [(" ".join(sorted(k)), k) for k in known])
-    return got if how == "snap" else name if how == "ambiguous" else None
+    if _CROSS.get("of") is not STREETS:                    # another street list: answered afresh
+        _CROSS.clear()
+        _CROSS["of"], _CROSS[None] = STREETS, {st[2] for rows in STREETS.values() for _, st, _ in rows}
+    if name not in _CROSS:                                 # (each name once per street list: snap reads them all)
+        known = _CROSS[None]
+        if name in known:
+            _CROSS[name] = name
+        else:
+            how, got = snap(" ".join(sorted(name)), [(" ".join(sorted(k)), k) for k in known])
+            _CROSS[name] = got if how == "snap" else name if how == "ambiguous" else None
+        while len(_CROSS) > CROSS_CACHE + 2:               # bounded (the list and its names stay)
+            _CROSS.pop(next(k for k in _CROSS if k not in (None, "of")))
+    return _CROSS[name]
 
 
 def _towns_agree(a: str, b: str) -> bool:
@@ -2569,10 +2578,10 @@ class Sources:
             e.elsewhere = next((n for n in ambiguous if pagematch.says_name(words, n)), "")
             e.elsewhere_near = bool(e.elsewhere) and any(pagematch.says_name(words, n) for n in near)
         mine_x = self._cross_names(f.get("cross_street") or "") if cross else set()
-        mine_x = {y for y in map(cross_as_mapped, mine_x) if y}   # as the map spells it; near none: garbled
         if mine_x:                                           # the feed's only when the page says some
             feed_x = self._cross_names(inc["cross_street"] or "") or self._cross_names(self._block_cross(inc))
-            if feed_x:
+            mine_x = {y for y in map(cross_as_mapped, mine_x) if y} if feed_x else mine_x   # as the map spells
+            if feed_x and mine_x:                                                          # them; near none: garbled
                 e.cross = "match" if mine_x & feed_x else "differ"
         pf, ff = pagematch.families(f.get("type") or "", f.get("subtype") or ""), pagematch.families(inc["type"], inc["subtype"])
         if pf and ff:
