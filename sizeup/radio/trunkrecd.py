@@ -183,6 +183,25 @@ def rtl_serial(device: str | None) -> str:
     return ""
 
 
+# The station's trunk-recorder patch (#638, install-linux.sh tr_patch): per system, SIZEUP_TR_SPLIT in its environment,
+# from the system's config.json "sizeup": {"split": ...}: off (stock), log (stock; logs where it would cut), on.
+SPLIT_ENV = "SIZEUP_TR_SPLIT"
+SPLIT_MODES = ("off", "log", "on")
+SPLIT_DEFAULT = "log"
+
+
+def split_mode(argv: list[str], workdir: str | Path) -> str:
+    """SIZEUP_TR_SPLIT for the trunk-recorder argv runs in workdir: its config's "sizeup": {"split"} (#638), SPLIT_DEFAULT
+    when it says none (or something else)."""
+    k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
+    name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
+    try:
+        mode = (json.loads((Path(workdir) / name).read_text()).get("sizeup") or {}).get("split")
+    except (OSError, ValueError, AttributeError):
+        mode = None
+    return mode if mode in SPLIT_MODES else SPLIT_DEFAULT
+
+
 def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = None,
                  ambiguous=None, left_out: list[str] | None = None) -> list[str]:
     """argv with --config pointing at a copy of its config (config.runtime.json, written in workdir) whose sources
@@ -196,6 +215,7 @@ def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = N
     if dev is None and not src.is_file():
         return argv                                      # no config of ours to amend: run as configured
     conf = json.loads(src.read_text())
+    conf.pop("sizeup", None)                             # sizeup's side of the file (#638)
     if dev is not None:
         for s in conf.get("sources", []):
             s["device"] = f"rtl={dev}"
@@ -859,6 +879,7 @@ class Supervisor:
         # trunk-recorder runs ffmpeg / sox by name for call audio
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
+        env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)
@@ -1424,6 +1445,7 @@ class SystemSupervisor(Supervisor):
             return
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
+        env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)
