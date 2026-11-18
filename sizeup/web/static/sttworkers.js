@@ -2,6 +2,7 @@
 // pool's switches; admins, the hub only. GET /api/cad/stt-workers: each worker (id, name, last used, revoked, its live
 // state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | pool}: add
 // and rotate answer the new token, shown here ONCE (this page's memory until Done, never stored) with a copy button.
+"use strict";
 const SttWorkersCard = (() => {
   const POLL_MS = 10000;
   const CLASS_LABELS = { urgent: "Pages, Fire/EMS 15, firegrounds", high: "Airband", live: "Other main channels",
