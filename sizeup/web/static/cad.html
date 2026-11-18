@@ -84,7 +84,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <ol id="q-active" class="list q"></ol>
     </section>
     <section>
-      <h2 title="Logged, no dispatch, open until closed">Non-emergency</h2>
+      <h2 title="Logged, no dispatch, open until closed or its Until passes">Non-emergency</h2>
       <ol id="q-nonemerg" class="list q"></ol>
     </section>
     <!-- folded to start, with the count (#89); the choice is remembered per browser (cad.js closedFold) -->
@@ -328,7 +328,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <input id="f-emergency" type="checkbox" checked> <span>Emergency</span>
             <span id="f-class" class="dim small"></span>
           </label>
-          <label id="f-until-w" class="field span2" hidden title="Optional: closures, hydrants out of service">Until
+          <label id="f-until-w" class="field span2" hidden title="Optional (closures, hydrants out of service): the event closes by itself then, as Expired">Until
             <input id="f-until" type="datetime-local">
           </label>
           <fieldset id="f-airport" class="span2 ap-fields" hidden>

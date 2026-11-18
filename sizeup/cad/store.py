@@ -69,6 +69,10 @@ OPEN = ("queued", "pending", "active")
 # here is well under that; the cap also bounds the radio links the state fetches for them, comms.for_incidents).
 CLOSED_HOURS = 24
 CLOSED_MAX = 40
+# A non-emergency event's Until enforced (Store.expire_until): closed with this disposition, by this operator.
+EXPIRED = "EXPIRED"
+UNTIL_OPERATOR = "Until"
+UNTIL_GRACE_S = 60.0       # a new event's Until this far in the past still taken (the minute typed is the current one)
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
@@ -458,6 +462,12 @@ def local_year(at: float) -> int:
 def event_number(year: int, n: int) -> str:
     """The sheet's EVENT #: 2-digit year, dash, 6-digit sequence (26-000001)."""
     return f"{year % 100:02d}-{n:06d}"
+
+
+def _when(at: float, now: float) -> str:
+    """A time on a timeline line: "13:37" on the day of now, else "11/17 13:37" (local)."""
+    d = datetime.fromtimestamp(at, TZ)
+    return d.strftime("%H:%M" if d.date() == datetime.fromtimestamp(now, TZ).date() else "%m/%d %H:%M")
 
 
 class Store:
@@ -1606,6 +1616,50 @@ class Store:
                         + (f"; cleared {names}" if names else ""), operator, at=now)
         return self.incident(iid)
 
+    def expire_until(self, now: float | None = None) -> list[dict]:
+        """A non-emergency event's Until (a closure, a hydrant out of service, a notification) enforced: every open
+        one whose until_at has passed is closed, disposition EXPIRED, "Event closed: Expired at 13:37 (until
+        13:37)" on its timeline by UNTIL_OPERATOR. Derived from the stored until_at alone, so a restart, a takeover
+        or a sleep only makes it later, never forgotten (Sources' ticker runs it at its start and every TICK_S). A
+        unit still on the event keeps it open (a clock never takes a unit off a call): one line "Until 13:37 passed:
+        open while E60 is on it", and it closes on the sweep after the last one clears. An emergency event or a
+        queued page: never. The leader only (may_write): a standby writes nothing.
+        -> [{id, number, until_at, closed, units (still on it)}] of what it acted on."""
+        now = self.clock() if now is None else now
+        rows = self.q("SELECT id FROM incidents WHERE status IN ('pending', 'active') AND emergency = 0 "
+                      "AND until_at IS NOT NULL AND until_at <= ? ORDER BY until_at, id", (now,))
+        if not rows or not self.may_write():
+            return []
+        out = []
+        for r in rows:
+            with self.tx() as db:
+                inc = db.execute("SELECT id, number, until_at, status, emergency FROM incidents WHERE id = ?",
+                                 (r["id"],)).fetchone()
+                if (inc is None or inc["status"] not in ("pending", "active") or inc["emergency"]
+                        or inc["until_at"] is None or inc["until_at"] > now):
+                    continue                                 # changed since the look above
+                until = _when(inc["until_at"], now)
+                on = [a["name"] for a in db.execute(
+                    "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                    "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY u.sort, u.id", (inc["id"],))]
+                if on:                                       # said once per set of units, then left to them
+                    text = f"Until {until} passed: open while {', '.join(on)} {'is' if len(on) == 1 else 'are'} on it"
+                    if db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'system' AND text = ?",
+                                  (inc["id"], text)).fetchone() is None:
+                        self._event(db, inc["id"], "system", text, UNTIL_OPERATOR, at=now)
+                        out.append({"id": inc["id"], "number": inc["number"], "until_at": inc["until_at"],
+                                    "closed": False, "units": on})
+                    continue
+                names = ", ".join(self._release_all(db, inc["id"], UNTIL_OPERATOR, now))
+                db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
+                           (now, EXPIRED, inc["id"]))
+                self._event(db, inc["id"], "closed",
+                            f"Event closed: Expired at {_when(now, now)} "
+                            f"(until {until})" + (f"; cleared {names}" if names else ""), UNTIL_OPERATOR, at=now)
+                out.append({"id": inc["id"], "number": inc["number"], "until_at": inc["until_at"], "closed": True,
+                            "units": []})
+        return out
+
     def reopen(self, iid: int, operator: str = "") -> dict:
         """A closed or dismissed event back on the boards, its number kept (#89). Closed: Active if a unit
         was ever on it, else Pending (a non-emergency one: open again); the disposition is cleared and
@@ -1627,9 +1681,14 @@ class Store:
         else:
             at = "?"
         who = re.sub(r"\s*<[^<>]*>\s*$", "", operator).strip()       # "Name <email>" (api.py): the name
+        # an Until already passed would close it again on the next sweep (expire_until): taken off, said so; a new
+        # one is set with Edit
+        gone = inc["until_at"] is not None and inc["until_at"] <= now
         with self.tx() as db:
-            db.execute("UPDATE incidents SET status = ?, closed_at = NULL, disposition = '' WHERE id = ?", (status, iid))
-            self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}", operator, at=now)
+            db.execute("UPDATE incidents SET status = ?, closed_at = NULL, disposition = ''"
+                       + (", until_at = NULL" if gone else "") + " WHERE id = ?", (status, iid))
+            self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}"
+                        + (f"; until {_when(inc['until_at'], now)} (passed) cleared" if gone else ""), operator, at=now)
         return self.incident(iid)
 
     def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = (),

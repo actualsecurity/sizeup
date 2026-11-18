@@ -176,7 +176,7 @@ Two engines, chosen per channel in Settings > Radios (`sizeup/channels.py`): `lo
 
 | area | what | module |
 |---|---|---|
-| Events | Queued (from a page or feed), pending, active, closed or dismissed. Emergency and non-emergency. Numbered `YY-NNNNNN`. | `store.py`, `service.py` |
+| Events | Queued (from a page or feed), pending, active, closed or dismissed. Emergency and non-emergency. Numbered `YY-NNNNNN`. A non-emergency event's Until closes it as Expired once passed (kept open while a unit is on it), from the stored time: the incident-sources ticker checks at its start and every 5 s on the leader, and the timeline says "Event closed: Expired at 13:37 (until 13:37)". A new event's Until in the past, or an edit to before the event was created, is refused; Reopen clears a passed one. | `store.py` (`expire_until`), `service.py`, `sources.py` |
 | Units | Two status boards, assignments with dispatched / en route / on scene / cleared times, full unit history | `store.py`, `lists.py` |
 | Department placeholders | A mutual-aid department's placeholder unit is assigned first and released when a real unit of that department shows up. Never located or mapped. | `automode.py`, `sources.py` |
 | Run cards | Event type (and subtype) to ordered slots; recommendations use estimated drive time and where each rig is now | `runcards.py`, `eta.py`, `mapview.py` |
