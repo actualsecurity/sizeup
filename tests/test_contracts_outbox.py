@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -23,8 +24,10 @@ import pytest
 
 from sizeup.cloud import outbox as outbox_mod
 from sizeup.cloud import station as stationmod
+from sizeup.cloud.client import HubClient
 from sizeup.cloud.outbox import Outbox
 from tests import contracts as c
+from tests import contracts_lane as lane
 from tests.test_app import wait
 
 HERE = c.ROOT / "outbox"
@@ -41,6 +44,8 @@ O1_A_FILE_SET_BACK_HANDS_OUT_THE_SAME_SEQ_AGAIN = True   # fixed: never the same
 O2_NAN_IS_STORED_AS_A_TOKEN_THAT_IS_NOT_JSON = True      # fixed: stored as null, like #779 on the wire
 O3_A_ROW_IT_CANNOT_READ_BLOCKS_THE_FORWARDER = True        # fixed: that row is set aside, the ones behind it go up
 O4_A_FILE_SQLITE_CANNOT_OPEN_STOPS_THE_STATION = True    # fixed: the file is moved aside, a new outbox, the station starts
+O5_A_RESENT_SNAPSHOT_PUTS_BACK_WHAT_THE_FEED_CHANGED = True   # fixed: the hub never applies a re-sent copy (qid) older
+#                                                                      than its snapshot of that event
 
 
 # -- the file as it is: tables, columns, pragmas -----------------------------------------------------------------------
@@ -1064,9 +1069,8 @@ def test_what_a_build_from_before_the_quarantine_does_with_it_after_a_switch_bac
     quarantine. It sends a refused page's copy that waits in the outbox as any event and deletes it on the ack, but
     the quarantine row stays: once today's code is back it sends the page again (twice in all: the hub keys a page by
     its id). It notes no newer snapshot of an incident source's event in source_latest, so today's code then sends a
-    quarantined older snapshot again after the newer one: the hub ignores it only when it was seen more than 2 min
-    (SNAPSHOT_SKEW_S) before the one it applied (sizeup/cad/sources.py on_event), else it puts back what the feed had
-    changed. What was held stays held; nothing is lost either way."""
+    quarantined older snapshot again after the newer one, and the hub applies it (O5, pinned below). What was held
+    stays held; nothing is lost either way."""
     path = tmp_path / "st" / "outbox.sqlite"
     feed = {"source": "east-cad", "event": {"event_id": "E-1001", "kind": "Fire alarm"}}
     ob = Outbox(path)
@@ -1239,10 +1243,88 @@ def test_known_deviation_a_file_sqlite_cannot_open_stops_the_station(tmp_path):
         lv.close()
 
 
+def test_known_deviation_a_resent_snapshot_puts_back_what_the_feed_changed_after_a_switch_back(tmp_path):
+    """O5. An incident source's snapshot S1 the hub refused is quarantined on the station (critical: sent again later).
+    The station is switched back to the build from before #762 (contracts/outbox/history/4-stt-priority.sql) and
+    queues the feed's newer snapshot S2 of the same event, a minute later, without noting it in source_latest (that
+    build has no such table); the hub applies S2. Back on today's code, requeue_due() finds no newer snapshot noted and
+    sends S1 again, and the hub applies it: sizeup/cad/sources.py on_event skips an older snapshot only when it is more
+    than SNAPSHOT_SKEW_S (120 s) older than the one applied. So the incident's type, location and units go back to S1's
+    and stay so until the feed changes the event again; nobody is told. Fixed (the hub's maintainers' choice): the
+    station says a copy is a re-send (`qid` on the event in the post), and the hub applies a re-sent copy only if its
+    seen_at is not older than its own snapshot of that event, whatever the skew; a first send keeps the 120 s
+    tolerance (checked here too). Not chosen: the station reconciling source_latest from the outbox when it opens a
+    file."""
+    now = time.time()
+    lv = lane.Lane(tmp_path / "hub")
+    client = HubClient(lv.url, lv.own, timeout=30.0)
+    sources = lv.hub.app.cad.sources
+
+    def snapshot(seen: float, kind: str, where: str, units: list[str]) -> dict:
+        return {"source": "demo", "label": "Demo feed", "rank": 1, "seen_at": seen, "first_seen": now - 600,
+                "event": {"source": "demo", "event_id": "S1", "type": kind, "location": where, "units": units,
+                          "times": {"dispatched": now - 600}, "unit_times": {}, "comments": [], "closed": False,
+                          "extra": {}, "aliases": []}}
+
+    def on_the_hub() -> tuple:
+        d = json.loads(sources._report("demo", "S1")["data"])
+        return d["type"], d["location"], d["units"]
+    s1 = snapshot(now - 300, "ALARM", "12 Example Ave", ["E5"])
+    s2 = snapshot(now - 240, "STRUCTURE FIRE", "14 Example Ave", ["E5", "L2"])
+    path = tmp_path / "st" / "outbox.sqlite"
+    ob = Outbox(path)
+    try:
+        ob.add("source_event", s1, at=now - 300)
+        ob.quarantine(ob.batch(meta=True)[0], "apply_failed", "RuntimeError", now=now - 290)    # (the hub's trouble)
+        epoch = ob.epoch
+    finally:
+        ob.close()
+    older = BY_NAME["4-stt-priority"]                     # the switch back: that build's own statements
+    db = connect(path, ro=False)
+    try:
+        older.run(db, "open")
+        db.execute(older.one("INSERT INTO outbox")[0], (now - 240, "source_event", json.dumps(s2), None, 0))
+        rows = db.execute(*older.one("SELECT seq, at, kind, data, audio, audio_dropped FROM outbox")).fetchall()
+        sent = client.request("POST", "/api/station/events", {"epoch": epoch, "station": c.STATION, "events": [
+            {"seq": seq, "at": at, "type": kind, "data": json.loads(data), "audio": None, "audio_dropped": False}
+            for seq, at, kind, data, _, _ in rows]}, timeout=30.0)
+        assert sent["acked"] == 2 and "rejected" not in sent
+        db.execute(older.one("DELETE FROM outbox WHERE seq <=")[0], (2,))
+    finally:
+        db.close()
+    assert on_the_hub() == ("STRUCTURE FIRE", "14 Example Ave", ["E5", "L2"])          # S2 applied
+    ob = Outbox(path)                                     # ... and today's code again
+    link = types.SimpleNamespace(outbox=ob, station_id=c.STATION)
+    try:
+        assert [(x["kind"], x["superseded"]) for x in ob.requeue_due(now=now + 400)] == [("source_event", False)]
+        copy = ob.batch(meta=True)
+        assert [(r["seq"], r["qid"], r["data"]["seen_at"]) for r in copy] == [(3, 1, now - 300)]
+        posted: list[dict] = []
+        real = client.request
+        client.request = lambda *a, **k: (posted.append(a[2]), real(*a, **k))[1]   # the body as the station sends it
+        assert stationmod.StationLink._post_events(link, client, copy)["acked"] == 3
+        client.request = real
+        if O5_A_RESENT_SNAPSHOT_PUTS_BACK_WHAT_THE_FEED_CHANGED:
+            assert "qid" not in posted[0]["events"][0]                                 # (nothing says it is a re-send)
+            assert on_the_hub() == ("ALARM", "12 Example Ave", ["E5"])                # S1 over S2: the change is gone
+        else:
+            assert posted[0]["events"][0]["qid"] == 1
+            assert on_the_hub() == ("STRUCTURE FIRE", "14 Example Ave", ["E5", "L2"])  # S2 stays
+        # a first send (no qid) a minute older than the hub's snapshot: applied, as today (a clock stepping back)
+        s3 = snapshot(now - 300, "ALARM", "16 Example Ave", ["E7"])
+        ob.add("source_event", s3, at=now - 300)
+        assert stationmod.StationLink._post_events(link, client, ob.batch(meta=True)[-1:])["acked"] == 4
+        assert on_the_hub() == ("ALARM", "16 Example Ave", ["E7"])
+    finally:
+        ob.close()
+        client.close()
+        lv.close()
+
+
 def test_each_outbox_deviation_has_its_switch_and_its_test():
     """O1.. are pinned here: each switch at the top of this file is read by exactly one test whose docstring starts
     with its number."""
     src = Path(__file__).read_text(encoding="utf-8")
     switches = re.findall(r"^(O\d+)_[A-Z0-9_]+ = True\b", src, re.M)
     pinned = re.findall(r'def test_known_deviation_\w+\(.*\):\n    \"\"\"(O\d+)\. ', src)
-    assert switches == pinned == [f"O{i}" for i in range(1, len(switches) + 1)] and len(switches) == 4
+    assert switches == pinned == [f"O{i}" for i in range(1, len(switches) + 1)] and len(switches) == 5

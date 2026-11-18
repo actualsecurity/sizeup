@@ -48,7 +48,7 @@ new key, or a new schema, behind a capability string.
 | `node-state-answer` | designed | 1 | `station-state-answer` plus `capabilities_wanted`, `roles_rev`, `roles`, `leases` |
 | `node-worker-hello` | designed | 1 | `stt-worker-hello` plus `capabilities`, `capabilities_rev` |
 | `station-events` | as built | 1 | the body of `POST /api/station/events`: `{epoch, station, events: [{seq, at, type, data, audio, audio_dropped}]}`, with one sub-schema per event `type` (12) |
-| `station-events-answer` | as built | 1 | the hub's 200 answer: `ok`, `acked` (its cursor), `applied` |
+| `station-events-answer` | as built | 1 | the hub's 200 answer: `ok`, `acked` (its cursor), `applied`, and `rejected` (the events it did not take: `{i, seq, type, reason, error}`) when there is one |
 | `station-jobs` | as built | 1 | the hub's 200 answer to `GET /api/station/jobs?wait=`: `jobs`, each `{id, type, args}`; the arguments of `tts`, `sources_reset` and of each of the 16 functions of `call` |
 | `station-job-result` | as built | 1 | the body of `POST /api/station/jobs/<id>`: `ok`, `error`, `result`, `label`, `audio`; what `result` is per function |
 | `station-job-result-answer` | as built | 1 | the hub's 200 answer to a job's result: `ok` |
@@ -220,6 +220,7 @@ main, its switch goes from `True` to `False` (one line) and its row here is mark
 | O2 | low | `sizeup/cloud/outbox.py:211`, `132-133`, read back at `241` | D1 again, in the file: a float NaN or infinity in an event's data is stored as the bare token `NaN` / `-Infinity`. A second implementation reading the row with a strict reader fails on it; Python reads it back and the forwarder sends it on as it is. Fixed: stored as null | main session |
 | O3 | medium | `sizeup/cloud/outbox.py:318`, `sizeup/cloud/station.py:715` (data); `698`, `725` (audio), at `040596d3` | The station does not handle a row of the wrong type in its own file. `data` that is not JSON raises in `Outbox.batch()`, outside the forwarder's own error handling: since #782 the thread is started again and counted instead of ending, and raises again on the same row, which is still the oldest. `audio` stored as text raises TypeError in the base64 of the post: since #762 (merged 2026-11-18) that is inside the forwarder's error handling (`_post_events`), which takes it as a failed post, says "a bytes-like object is required" as the hub link's error and sends the same batch again after the backoff; not quarantined (the quarantine is for what the hub refuses). Either way no event goes up, across restarts of the station too. Only a second writer of the file or a damaged row can make one. Fixed: the row is set aside, said once in the log, and the events behind it go up | main session |
 | O4 | medium | `sizeup/cloud/outbox.py:85-88`, `sizeup/cloud/stationmode.py:238`, `sizeup/app.py:5803` | The outbox is opened while the station starts, outside any error handling: a file SQLite cannot open (damaged, or using a newer SQLite's features) raises `DatabaseError` there and the station does not start at all, over a file that only queues what goes to the hub. Fixed: the file is moved aside with a line in the log, a new outbox (a new epoch) is made, the station starts | main session |
+| O5 | high | `sizeup/cloud/outbox.py:428`, `sizeup/cloud/station.py:693`, `sizeup/cad/sources.py:1794` | A switch back to a build from before #762 and forward again puts an incident source's old data back on an incident, silently. A snapshot S1 the hub refused is quarantined on the station; the older build queues the feed's newer snapshot S2 without noting it in `source_latest` (it has no such table) and the hub applies S2; back on today's code `requeue_due` finds nothing newer noted and sends S1 again, and the hub applies it, since `on_event` skips an older snapshot only when it is more than `SNAPSHOT_SKEW_S` (120 s) older. The incident's type, location and units are S1's until the feed changes the event again. Fixed (the hub maintainers' choice, with the O1 / J4-J6 / O3 / O4 fixes): the station marks a re-sent copy (`qid` on the event) and the hub applies a copy only if its `seen_at` is not older than its own snapshot of that event, whatever the skew; a first send keeps the 120 s tolerance. Not chosen: the station reconciling `source_latest` from its outbox when it opens a file | main session |
 
 As built and worth knowing:
 
@@ -268,7 +269,7 @@ tests/test_contracts_events.py       the events post and its answer; which keys 
 tests/test_contracts_events_cursor.py  the golden sequences against a real hub; the station's side; E1, E2, E3, E5
 tests/test_contracts_jobs.py         the job poll's answer and a job's result; J1-J6
 tests/test_contracts_outbox.py       the outbox file: the recordings, the sequences, the quarantine, an update, a switch
-                                     back; O1-O4
+                                     back; O1-O5
 ```
 
 ### Events
@@ -351,11 +352,13 @@ As built and worth knowing (each pinned by a test or a sequence):
 
 - An event's `at` and `audio_dropped` are sent and never read by the hub. A transmission's `text` must be there and
   is then replaced by `raw`. A page's `departments`, `read_twice` and `rerun_result` are sent and never read.
-- An item of `events` that is not an object is skipped; an event without `seq` is taken as 0 and never applied; an
-  unknown `type` is acked, counted in `applied`, and no error. So a new type needs a capability string first, as
+- An item of `events` that is not an object, or an event without a `seq` the hub takes, is not applied and is listed
+  under `rejected` as `malformed` by its index (`seq` null), the cursor not moving for it; an unknown `type` is
+  acked, counted in `applied`, and no error. So a new type needs a capability string first, as
   `activity` and another P25 system's rows wait for `p25_systems` (held back, not queued, without it).
-- The hub reads `seq` with `int()`: a string of digits and a float pass. A post without `epoch` is epoch `""` and
-  moves the cursor like any other. A post with no events answers the cursor.
+- The hub takes as `seq` only an integer from 1: a string of digits, a float or a boolean is `malformed` (`seq`
+  null), one under 1 is `malformed` with its value; the rest of the post is applied (#762). A post without `epoch` is
+  epoch `""` and moves the cursor like any other. A post with no events answers the cursor.
 - The hub takes any size of `seq`: `acked` can pass 2^53 if a writer lets it. The schema stops at 2^53 - 1.
 
 **#762 on main** (merged 2026-11-18; its fixed branches were written against its head `9542d08f`, and what landed
@@ -471,9 +474,9 @@ switch back, so its contract is the file itself, not a JSON Schema.
   build is back; before #419 context audio has no budget of its own; before #701 the inputs go oldest first
   whatever their priority; before #762 the quarantine is left alone (both directions work, tested with the #701
   build's own code): a copy waiting in the outbox goes up as any event and is deleted on the ack, so today's code
-  sends it once more when it is back (harmless: the hub keys pages, their text and alarms by id), and a newer
-  snapshot of an incident source's event that build queues is not noted in `source_latest`, so a quarantined older
-  one goes again after it (the hub ignores it only when it was seen more than 2 min before the one it applied).
+  sends it once more when it is back (harmless: the hub keys pages, their text and alarms by id); a newer snapshot
+  of an incident source's event that build queues is not noted in `source_latest`, so a quarantined older one goes
+  again after it and the hub applies it (O5).
 
 The file's own rules, as built (each tested):
 

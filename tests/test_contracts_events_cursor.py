@@ -339,7 +339,9 @@ def test_the_stations_client_sends_a_post_once_more_without_a_word_when_the_conn
 
 def test_the_events_post_is_plain_json_with_a_content_length_and_the_hub_caps_its_size(tmp_path, monkeypatch):
     """Transport: never gzipped, a Content-Length (the hub decodes no chunked body: one without a length reads as
-    {} and is 400), 32 MiB at most (413, here with the cap lowered: the test sends no 32 MiB)."""
+    {} and is 400 `bad_batch`), 32 MiB at most (413 `too_large` with `max_bytes`, here with the cap lowered: the test
+    sends no 32 MiB); a body that is not JSON is 400 `bad_json`. Each answer is, word for word, the station-error
+    vector of its kind (contracts/vectors/station-error/valid/events-*.json)."""
     import http.client
     from sizeup.cloud import hub as hub_mod
     assert hub_mod.MAX_EVENTS_BODY == 32 * 1024 * 1024
@@ -356,12 +358,23 @@ def test_the_events_post_is_plain_json_with_a_content_length_and_the_hub_caps_it
         conn.endheaders()
         conn.send(b"%x\r\n%s\r\n0\r\n\r\n" % (len(raw), raw))
         r = conn.getresponse()
-        assert r.status == 400 and c.errors("station-error", json.loads(r.read())) == []
+        errors = dict(c.vectors("station-error", "valid"))
+        assert r.status == 400 and json.loads(r.read()) == errors["events-bad-batch.json"]
+        conn.close()
+        conn = http.client.HTTPConnection(host, int(port), timeout=10)          # not JSON, with a Content-Length
+        conn.request("POST", "/api/station/events", b"not json {", {"Authorization": f"Bearer {lv.own}",
+                                                                   "Content-Type": "application/json"})
+        r = conn.getresponse()
+        assert r.status == 400 and json.loads(r.read()) == errors["events-bad-json.json"]
         conn.close()
         assert lv.hub.app.hub.seq == 0
+        real = hub_mod.MAX_EVENTS_BODY
         monkeypatch.setattr(hub_mod, "MAX_EVENTS_BODY", len(raw) - 1)
         code, ans = lv.post(post)
         assert code == 413 and c.errors("station-error", ans) == [] and lv.hub.app.hub.seq == 0
+        assert ans == dict(errors["events-too-large.json"], max_bytes=len(raw) - 1,
+                           error=errors["events-too-large.json"]["error"].replace(f"({real // 2 ** 20} MB", "(0 MB"))
+        assert errors["events-too-large.json"]["max_bytes"] == real
         monkeypatch.setattr(hub_mod, "MAX_EVENTS_BODY", len(raw))
         assert lv.post(post)[1]["acked"] == 1
     finally:
@@ -423,7 +436,7 @@ def test_known_deviation_an_event_the_hub_fails_to_apply_is_acked_and_gone(tmp_p
         lv.close()
 
 
-@pytest.mark.parametrize("status", [400, 413])
+@pytest.mark.parametrize("status", [400, 413, "413 with its clip"])
 def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_good(tmp_path, monkeypatch, status):
     """E2. The station takes a 400 or a 413 like an outage: the same oldest rows again, for ever (the backoff only
     spaces the tries). A batch always starts with the oldest row, so one event the hub will never take keeps every
@@ -431,17 +444,23 @@ def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_go
     deletes the outbox. Here five rows wait and the hub (a stub, answering as today's hub words them) refuses any post
     with the third. Fixed (#762): on a 400 / 413 / 422 the station halves the batch until the refused event is alone,
     asks the hub once with an empty batch whether it takes anything at all, moves that event to its quarantine (reason:
-    the hub's `reason`, else `too_large` for a 413 and `http_<status>`), and the rest go in order."""
+    the hub's `reason`, else `too_large` for a 413 and `http_<status>`), and the rest go in order. A single event the
+    hub refuses with a 413 while it has a clip is sent again without it (the station keeps the clip) and taken."""
     poison = "Fireground1-1794990000000"
+    clip = status == "413 with its clip"
+    status = 413 if clip else status
 
     def answer(body):
-        if any(ev["data"].get("id") == poison for ev in body["events"]):
+        if any(ev["data"].get("id") == poison and (ev["audio"] or not clip) for ev in body["events"]):
             return status, {"error": "too large (32 MB max): send smaller batches" if status == 413 else "bad request: x"}
         return acks_all(body)
     stub = StubHub(answer)
     waiting = Outbox(tmp_path / "st" / "outbox.sqlite")       # (in the file before the station starts: one first batch)
     for k in range(1, 6):
-        if k == 3:
+        if k == 3 and clip:
+            waiting.add("traffic", {"id": poison, "source": "Fireground 1", "start": c.T0, "end": c.T0 + 3, "text": ""},
+                        b"RIFF" + b"\x00" * 60)
+        elif k == 3:
             waiting.add("retext", {"id": poison, "text": "x", "status": "done", "confidence": None, "model": "m.bin"})
         else:
             waiting.add("heard", {"system": "p25", "radio_id": f"99000{k}", "alias": "", "at": c.T0, "channel": "x"})
@@ -453,6 +472,12 @@ def test_known_deviation_a_batch_the_hub_always_refuses_blocks_the_outbox_for_go
             assert wait(lambda: len(stub.posts) >= 6, 20)
             assert all(x == [1, 2, 3, 4, 5] for x in seqs())                    # the same five rows, every time
             assert st.link.outbox.pending()[0] == 5 and st.link.sent == 0       # nothing left the station
+        elif clip:
+            assert wait(lambda: st.link.outbox.pending()[0] == 0, 20) and wait(lambda: st.link.sent == 5, 10)
+            took = [ev for p in stub.posts for ev in p["events"] if ev["seq"] == 3]
+            assert [(bool(ev["audio"]), ev["audio_dropped"]) for ev in took][-1] == (False, True)   # without it, taken
+            assert took[0]["audio"] and st.link.outbox.too_large_audio == 1
+            assert st.link.outbox.summary()["n"] == 0                                   # nothing quarantined
         else:
             assert wait(lambda: st.link.outbox.pending()[0] == 0, 20) and wait(lambda: st.link.sent == 4, 10)
             # halved until the refused one is alone; an empty batch to ask whether the hub takes anything; the rest
