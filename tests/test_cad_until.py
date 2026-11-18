@@ -106,17 +106,20 @@ def test_an_until_in_the_past_at_creation_is_refused():
     assert cad.create({"type": "STRU", "emergency": True, "until_at": None})["number"]
 
 
-def test_an_edit_to_before_creation_is_refused_and_an_earlier_until_ends_it():
+def test_an_edit_to_a_past_until_is_refused():
     clock = Clock(local(2026, 10, 7, 12, 0))
     cad = make_cad(clock=clock)
     iid = notif(cad, local(2026, 10, 7, 18, 0))
     clock.t = local(2026, 10, 7, 14, 0)
-    with pytest.raises(CadError, match="before the event was created"):
-        cad.update(iid, {"until_at": local(2026, 10, 7, 11, 0), "operator": "JD"})
-    cad.update(iid, {"until_at": local(2026, 10, 7, 13, 0), "operator": "JD"})   # it ended at 13:00: a person says so
-    assert texts(cad, iid)[-1] == "Edited until: 10/07 13:00"
+    for t in (local(2026, 10, 7, 11, 0), local(2026, 10, 7, 13, 0)):   # before it began; since, but gone by
+        with pytest.raises(CadError, match=r"Until is in the past: check the day \(or Close it\)"):
+            cad.update(iid, {"until_at": t, "operator": "JD"})
+    assert cad.store.incident(iid)["until_at"] == local(2026, 10, 7, 18, 0)
+    assert cad.expire_until() == [] and cad.store.incident(iid)["status"] == "pending"
+    cad.update(iid, {"until_at": local(2026, 10, 8, 9, 0), "operator": "JD"})      # a later day: taken
+    assert texts(cad, iid)[-1] == "Edited until: 10/08 09:00"
+    cad.update(iid, {"until_at": clock.t - 30, "operator": "JD"})                   # the minute being typed
     assert [d["id"] for d in cad.expire_until()] == [iid]
-    assert closing(cad, iid)["text"] == "Event closed: Expired at 14:00 (until 13:00)"
 
 
 def test_an_old_until_before_creation_never_blocks_other_edits_and_expires():
@@ -183,6 +186,101 @@ def test_reopening_an_expired_event_clears_its_passed_until():
     assert cad.expire_until() == [] and cad.store.incident(iid)["status"] == "pending"
 
 
+def test_a_held_or_idle_sweep_commits_nothing():
+    clock = Clock(local(2026, 10, 7, 12, 0))
+    cad = make_cad(clock=clock)
+    held = notif(cad, local(2026, 10, 7, 13, 0))
+    notif(cad, local(2026, 10, 7, 20, 0))                      # not yet
+    cad.attach(held, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    rev = cad.store.rev
+    for _ in range(3):                                         # idle: nothing due
+        assert cad.expire_until() == []
+    assert cad.store.rev == rev
+    clock.t = local(2026, 10, 7, 13, 1)
+    assert [d["closed"] for d in cad.expire_until()] == [False]    # said once: one commit
+    rev = cad.store.rev
+    for _ in range(3):                                         # held, already said: reads only
+        clock.t += 5
+        assert cad.expire_until() == []
+    assert cad.store.rev == rev
+
+
+def test_the_look_uses_its_index_and_a_standby_never_looks(tmp_path):
+    cad = make_cad(tmp_path)
+    try:
+        idx = cad.store.q("SELECT sql FROM sqlite_master WHERE name = 'incidents_until_open'")
+        assert idx and "WHERE until_at IS NOT NULL AND status IN ('pending', 'active')" in idx[0]["sql"]
+        seen = []
+        q = cad.store.q
+        cad.store.q = lambda sql, args=(): (seen.append(sql), q(sql, args))[1]
+        cad.store.expire_until()
+        plan = q("EXPLAIN QUERY PLAN " + seen[0], (1e9,))
+        assert any("incidents_until_open" in r["detail"] for r in plan), plan
+        seen.clear()
+        cad.may_write = lambda: False
+        assert cad.store.expire_until() == [] and seen == []
+    finally:
+        cad.store.q = q
+        cad.may_write = lambda: True
+        cad.shutdown()
+
+
+def test_the_lease_lost_part_way_still_logs_what_was_closed():
+    clock = Clock(local(2026, 10, 7, 12, 0))
+    logs = []
+    cad = make_cad(clock=clock)
+    cad.log = logs.append
+    first, second = notif(cad, local(2026, 10, 7, 12, 30)), notif(cad, local(2026, 10, 7, 12, 40))
+    clock.t = local(2026, 10, 7, 13, 0)
+    one = cad.store._expire_one
+
+    def then_lost(iid, now):
+        out = one(iid, now)
+        cad.may_write = lambda: False                          # the lease runs out after the first commit
+        return out
+    cad.store._expire_one = then_lost
+    done = cad.expire_until()
+    cad.may_write = lambda: True
+    assert [d["id"] for d in done] == [first]
+    assert logs == [f"CAD: {cad.store.incident(first)['number']}: until 10/07 12:30 passed: closed (Expired)"]
+    assert cad.store.incident(first)["status"] == "closed" and cad.store.incident(second)["status"] == "pending"
+    cad.store._expire_one = one                                # the next leader's look
+    assert [d["id"] for d in cad.expire_until()] == [second]
+
+
+def test_an_event_made_non_emergency_drops_a_passed_until():
+    clock = Clock(local(2026, 10, 7, 12, 0))
+    cad = make_cad(clock=clock)
+    a = cad.create({"type": "STRU", "address": "40 Example Rd", "operator": "JD"})["id"]
+    b = cad.create({"type": "STRU", "address": "42 Example Rd", "operator": "JD"})["id"]
+    c = cad.create({"type": "STRU", "address": "44 Example Rd", "operator": "JD"})["id"]
+    for iid in (a, b):
+        cad.update(iid, {"until_at": local(2026, 10, 7, 12, 30), "operator": "JD"})
+    cad.update(c, {"until_at": local(2026, 10, 7, 18, 0), "operator": "JD"})
+    clock.t = local(2026, 10, 7, 13, 0)
+    cad.update(a, {"emergency": False, "operator": "JD"})        # unticked
+    cad.update(b, {"type": "NOTIF", "operator": "JD"})           # a type that is non-emergency
+    cad.update(c, {"emergency": False, "operator": "JD"})        # still to come: kept
+    for iid in (a, b):
+        inc = cad.store.incident(iid)
+        assert (inc["emergency"], inc["until_at"]) == (0, None)
+        assert texts(cad, iid)[-1].endswith("now a non-emergency event; until 12:30 (passed) cleared")
+    assert cad.store.incident(c)["until_at"] == local(2026, 10, 7, 18, 0)
+    assert cad.expire_until() == [] and {cad.store.incident(i)["status"] for i in (a, b, c)} == {"pending"}
+
+
+def test_expired_is_the_hubs_own_disposition():
+    cad = make_cad()
+    L = cad.store.lists
+    assert "EXPIRED" not in L.disposition_codes and L.name("dispositions", EXPIRED) == "Expired"
+    assert next(x for x in L.dispositions if x["code"] == EXPIRED)["system"] is True
+    iid = notif(cad, None)
+    with pytest.raises(CadError, match="not one of the dispositions"):
+        cad.close(iid, {"disposition": EXPIRED, "operator": "JD"})
+    js = (STATIC / "cad.js").read_text()
+    assert "const live = (x) => !x.retired && !x.system;" in js       # off the Close picker
+
+
 # -- the console: the day, and the flags ---------------------------------------------------------------------------
 
 UNTIL = r"""
@@ -208,6 +306,7 @@ def test_the_console_says_the_day_and_flags_a_wrong_or_passed_until():
         [dict(base, until_at=local(2026, 10, 8, 13, 37)), now],              # tomorrow: the day too
         [dict(base, until_at=local(2026, 10, 7, 13, 37), created_at=local(2026, 10, 6, 18, 32)), now],  # began yesterday
         [dict(base, until_at=local(2026, 10, 7, 9, 0)), now],                # before it was created
+        [dict(base, until_at=c - 30, status="closed"), now],                  # inside the minute's grace: no flag
         [dict(base, until_at=local(2026, 10, 7, 12, 38)), now],              # passed, still open (a unit on it)
         [dict(base, until_at=local(2026, 10, 7, 12, 38), status="closed"), now],
         [dict(base, until_at=None), now],
@@ -217,10 +316,10 @@ def test_the_console_says_the_day_and_flags_a_wrong_or_passed_until():
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert [(o or {}).get("text") for o in out] == ["13:37", "Oct 8 13:37", "Oct 7 13:37", "09:00 · before created",
-                                                    "12:38 · passed", "12:38", None]
-    assert [(o or {}).get("warn") for o in out] == [False, False, False, True, True, False, None]
+                                                    "12:36", "12:38 · passed", "12:38", None]
+    assert [(o or {}).get("warn") for o in out] == [False, False, False, True, False, True, False, None]
     assert out[0]["tip"] == "10/07 13:37:00: closes by itself then (Expired)"
-    assert out[3]["tip"].endswith("check the day") and "closes once no unit is on it" in out[4]["tip"]
+    assert out[3]["tip"].endswith("check the day") and "closes once no unit is on it" in out[5]["tip"]
 
 
 def test_the_queue_card_and_the_facts_use_it():
@@ -228,3 +327,7 @@ def test_the_queue_card_and_the_facts_use_it():
     assert "const u = untilInfo(inc);" in js and '`Until ${u.text}`' in js
     assert 'setText($("#d-until"), until ? until.text : "");' in js
     assert "untilInfo(i)?.text" in js                          # a card redrawn when its flag changes
+    # the edit form's Until only on a non-emergency event, and as the Emergency box is ticked
+    assert 'show($("#e-until-w"), !inc.emergency);' in js
+    assert '$("#e-emergency").addEventListener("change", () => show($("#e-until-w"), !$("#e-emergency").checked));' in js
+    assert '<label id="e-until-w"' in (STATIC / "cad.html").read_text()

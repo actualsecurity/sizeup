@@ -931,10 +931,10 @@ class Cad:
 
     def update(self, iid: int, body: dict) -> dict:
         f = self._fields(body, partial=True)
-        if f.get("until_at") is not None:          # an Until before the event began: a wrong day (an unchanged one stays)
-            old = self.store.incident(iid)
-            if f["until_at"] != old["until_at"] and f["until_at"] < old["created_at"]:
-                raise CadError("Until is before the event was created: check the day")
+        if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
+            old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
+            if f["until_at"] != old["until_at"] and f["until_at"] < self.clock() - UNTIL_GRACE_S:
+                raise CadError("Until is in the past: check the day (or Close it)")
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin

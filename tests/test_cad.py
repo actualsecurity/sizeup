@@ -157,8 +157,8 @@ def test_lists_file_has_the_sheets_vocabulary():
                             "RECALL", "RESCUE", "SERVICE", "STRU")
     # the sheet's 51 subtypes are all there (the department has since added more, e.g. GAS-ODOR)
     assert len(L.subtype_codes) >= 51 and L.subtype_codes[:3] == ("CO-COMM", "CO-RESD", "COMM")
-    assert len(L.disposition_codes) == 21 and "NOTIF MADE" in L.disposition_codes
-    assert L.disposition_codes[-1] == "EXPIRED"            # not the sheet's: a passed Until closes with it
+    assert len(L.disposition_codes) == 20 and "NOTIF MADE" in L.disposition_codes
+    assert L.dispositions[-1]["code"] == "EXPIRED"        # not the sheet's: the hub's own, for a passed Until
     # The department's 17 status codes, in its order, then UNMANNED (kept: not in its list, to confirm).
     assert L.status_ids == ("AQ", "AV", "DP", "AK", "RS", "OL", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "DO",
                             "IC", "OS", "UNMANNED")

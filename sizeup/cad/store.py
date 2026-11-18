@@ -57,7 +57,7 @@ from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad import oos as oos_mod
 from sizeup.cad.lists import Lists
-from sizeup.fence import GuardedConnection, refuse
+from sizeup.fence import FencedWrite, GuardedConnection, refuse
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -72,7 +72,8 @@ CLOSED_MAX = 40
 # A non-emergency event's Until enforced (Store.expire_until): closed with this disposition, by this operator.
 EXPIRED = "EXPIRED"
 UNTIL_OPERATOR = "Until"
-UNTIL_GRACE_S = 60.0       # a new event's Until this far in the past still taken (the minute typed is the current one)
+UNTIL_GRACE_S = 60.0       # an Until this far in the past still taken (the minute typed is the current one)
+UNTIL_OPEN = "until_at IS NOT NULL AND status IN ('pending', 'active')"    # incidents_until_open's WHERE, and the look's
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
@@ -534,6 +535,8 @@ class Store:
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
+        # the open events with an Until (expire_until's look, every 5 s: its WHERE says the same), 2026-11-17
+        self.db.execute(f"CREATE INDEX IF NOT EXISTS incidents_until_open ON incidents(until_at) WHERE {UNTIL_OPEN}")
         dcols = {r["name"] for r in self.db.execute("PRAGMA table_info(dispatches)")}
         for col in ("audio_state", "audio_tones"):       # the voice rendered after the answer (#426): old rows keep ''
             if dcols and col not in dcols:
@@ -1454,6 +1457,12 @@ class Store:
                     changes["emergency"] = e
         if changes.get("received_via") and changes["received_via"] not in self.lists.received_codes:
             raise CadError(f"received_via: one of {', '.join(self.lists.received_codes)}")
+        # now a non-emergency event (unticked, or a type that is one) with an Until already passed: expire_until would
+        # close it on its next look, so the Until goes, said on the timeline (a new one is set with Edit)
+        now, passed = self.clock(), None
+        until = changes.get("until_at", inc["until_at"])
+        if changes.get("emergency") == 0 and inc["emergency"] and until is not None and until <= now:
+            passed, changes["until_at"] = until, None
         if not changes:
             return inc
         with self.tx() as db:
@@ -1478,11 +1487,16 @@ class Store:
                 parts.append("remarks updated")
             if "map_layers" in changes:                   # the set itself stays out of the log (#111)
                 parts.append("map layers: " + ("chosen for this event" if changes["map_layers"] else "the default again"))
-            if "until_at" in changes:
+            if passed is not None:
+                parts.append(f"until {_when(passed, now)} (passed) cleared")
+            elif "until_at" in changes:
                 parts.append("until: " + (datetime.fromtimestamp(changes["until_at"], TZ).strftime("%m/%d %H:%M")
                                           if changes["until_at"] else "(none)"))
             if log and parts:
                 self._event(db, iid, "edit", "Edited " + "; ".join(parts), operator)
+            elif passed is not None:                      # a quiet edit (a page's type): this one is said anyway
+                self._event(db, iid, "edit", f"Until {_when(passed, now)} (passed) cleared: now a non-emergency event",
+                            operator)
         return self.incident(iid)
 
     def accept(self, iid: int, operator: str = "") -> dict:
@@ -1621,44 +1635,73 @@ class Store:
         one whose until_at has passed is closed, disposition EXPIRED, "Event closed: Expired at 13:37 (until
         13:37)" on its timeline by UNTIL_OPERATOR. Derived from the stored until_at alone, so a restart, a takeover
         or a sleep only makes it later, never forgotten (Sources' ticker runs it at its start and every TICK_S). A
-        unit still on the event keeps it open (a clock never takes a unit off a call): one line "Until 13:37 passed:
-        open while E60 is on it", and it closes on the sweep after the last one clears. An emergency event or a
-        queued page: never. The leader only (may_write): a standby writes nothing.
+        unit still on the event (anything attached: our rigs, agencies, keyholders) keeps it open (a clock never
+        takes a unit off a call): one line "Until 13:37 passed: open while E60 is on it", and it closes on the sweep
+        after the last one clears. An emergency event or a queued page: never. The leader only (may_write): a
+        standby neither looks nor writes. Reads decide; a transaction only for a write (a held event that was
+        already said costs no commit, no rev). The lease lost part way (FencedWrite): what was committed before it
+        is returned, the rest left to the next leader.
         -> [{id, number, until_at, closed, units (still on it)}] of what it acted on."""
         now = self.clock() if now is None else now
-        rows = self.q("SELECT id FROM incidents WHERE status IN ('pending', 'active') AND emergency = 0 "
-                      "AND until_at IS NOT NULL AND until_at <= ? ORDER BY until_at, id", (now,))
-        if not rows or not self.may_write():
+        if not self.may_write():
             return []
+        rows = self.q(f"SELECT id FROM incidents WHERE {UNTIL_OPEN} AND until_at <= ? AND emergency = 0 "
+                      "ORDER BY until_at, id", (now,))
         out = []
         for r in rows:
-            with self.tx() as db:
-                inc = db.execute("SELECT id, number, until_at, status, emergency FROM incidents WHERE id = ?",
-                                 (r["id"],)).fetchone()
-                if (inc is None or inc["status"] not in ("pending", "active") or inc["emergency"]
-                        or inc["until_at"] is None or inc["until_at"] > now):
-                    continue                                 # changed since the look above
-                until = _when(inc["until_at"], now)
-                on = [a["name"] for a in db.execute(
-                    "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
-                    "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY u.sort, u.id", (inc["id"],))]
-                if on:                                       # said once per set of units, then left to them
-                    text = f"Until {until} passed: open while {', '.join(on)} {'is' if len(on) == 1 else 'are'} on it"
-                    if db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'system' AND text = ?",
-                                  (inc["id"], text)).fetchone() is None:
-                        self._event(db, inc["id"], "system", text, UNTIL_OPERATOR, at=now)
-                        out.append({"id": inc["id"], "number": inc["number"], "until_at": inc["until_at"],
-                                    "closed": False, "units": on})
-                    continue
-                names = ", ".join(self._release_all(db, inc["id"], UNTIL_OPERATOR, now))
-                db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
-                           (now, EXPIRED, inc["id"]))
-                self._event(db, inc["id"], "closed",
-                            f"Event closed: Expired at {_when(now, now)} "
-                            f"(until {until})" + (f"; cleared {names}" if names else ""), UNTIL_OPERATOR, at=now)
-                out.append({"id": inc["id"], "number": inc["number"], "until_at": inc["until_at"], "closed": True,
-                            "units": []})
+            try:
+                d = self._expire_one(r["id"], now)
+            except FencedWrite:                          # not the leader any more: the rest is the next one's
+                break
+            if d is not None:
+                out.append(d)
         return out
+
+    def _on_it(self, db, iid: int) -> list[str]:
+        """The units still on an event (an open assignment), board order."""
+        return [a["name"] for a in db.execute(
+            "SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+            "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY u.sort, u.id", (iid,))]
+
+    def _expire_one(self, iid: int, now: float) -> dict | None:
+        def due(inc) -> bool:
+            return (inc is not None and inc["status"] in ("pending", "active") and not inc["emergency"]
+                    and inc["until_at"] is not None and inc["until_at"] <= now)
+
+        def held_line(inc, on) -> str:
+            return (f"Until {_when(inc['until_at'], now)} passed: open while {', '.join(on)} "
+                    f"{'is' if len(on) == 1 else 'are'} on it")
+
+        def said(db, inc, text) -> bool:
+            return db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'system' AND text = ?",
+                              (inc["id"], text)).fetchone() is not None
+
+        look = "SELECT id, number, until_at, status, emergency FROM incidents WHERE id = ?"
+        with self.lock:                                  # reads first: most looks write nothing
+            inc = self.db.execute(look, (iid,)).fetchone()
+            if not due(inc):
+                return None
+            on = self._on_it(self.db, iid)
+            if on and said(self.db, inc, held_line(inc, on)):
+                return None                              # held, and said so already
+        with self.tx() as db:                            # the same checks again, under the write
+            inc = db.execute(look, (iid,)).fetchone()
+            if not due(inc):
+                return None
+            on = self._on_it(db, iid)
+            d = {"id": iid, "number": inc["number"], "until_at": inc["until_at"], "closed": not on, "units": on}
+            if on:                                       # said once per set of units, then left to them
+                text = held_line(inc, on)
+                if said(db, inc, text):
+                    return None
+                self._event(db, iid, "system", text, UNTIL_OPERATOR, at=now)
+                return d
+            names = ", ".join(self._release_all(db, iid, UNTIL_OPERATOR, now))
+            db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
+                       (now, EXPIRED, iid))
+            self._event(db, iid, "closed", f"Event closed: Expired at {_when(now, now)} (until "
+                        f"{_when(inc['until_at'], now)})" + (f"; cleared {names}" if names else ""), UNTIL_OPERATOR, at=now)
+        return d
 
     def reopen(self, iid: int, operator: str = "") -> dict:
         """A closed or dismissed event back on the boards, its number kept (#89). Closed: Active if a unit

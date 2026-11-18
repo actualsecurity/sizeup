@@ -151,7 +151,7 @@ function untilInfo(inc, now = serverNow()) {
   const day = (t) => toLocalInput(t).slice(0, 10), d = new Date(u * 1000);
   const dated = day(u) !== day(now) || (!!inc.created_at && day(u) !== day(inc.created_at));
   const text = (dated ? `${fmt("short").format(d)} ` : "") + fmt("hm").format(d);
-  const before = !!inc.created_at && u < inc.created_at, passed = !before && u <= now && isOpen(inc);
+  const before = !!inc.created_at && u < inc.created_at - 60, passed = !before && u <= now && isOpen(inc);
   const flag = before ? "before created" : passed ? "passed" : "";
   const tip = before ? `Until ${fmtRecv(u)} is before the event was created (${fmtRecv(inc.created_at)}): check the day`
     : passed ? (inc.emergency ? "Until has passed" : "Until has passed: closes once no unit is on it")
@@ -342,7 +342,7 @@ function isEmergency(t, s) {        // data file event_class: TYPE/SUBTYPE, */SU
   for (const k of keys) if (k in c) return c[k] === "emergency";
   return true;
 }
-const live = (x) => !x.retired;     // retired: named on old events, off the pick lists
+const live = (x) => !x.retired && !x.system;     // retired, or the hub's own (Expired): named on events, off the pick lists
 function subtypesFor(t) {            // the type -> subtype map: only those listed (none, or not in the map: no subtype)
   const m = (L().type_subtypes || {})[t] || [];
   return (L().event_subtypes || []).filter((s) => live(s) && m.includes(s.code));
@@ -3372,6 +3372,7 @@ function openEdit() {
   $("#e-phone").value = inc.phone || "";
   $("#e-via").value = inc.received_via || "";
   $("#e-emergency").checked = !!inc.emergency;
+  show($("#e-until-w"), !inc.emergency);               // an Until is a non-emergency event's (it closes it)
   $("#e-until").value = toLocalInput(inc.until_at);
   $("#e-remarks").value = inc.remarks || "";
   airportForm("e", inc);
@@ -3957,6 +3958,7 @@ $("#d-events-toggle").addEventListener("click", () => timelineFold(!cad.timeline
 $("#c-cancel").addEventListener("click", () => show($("#close-form"), false));
 $("#close-form").addEventListener("submit", closeIncident);
 $("#d-edit").addEventListener("click", openEdit);
+$("#e-emergency").addEventListener("change", () => show($("#e-until-w"), !$("#e-emergency").checked));
 $("#e-type").addEventListener("change", () => {     // a new type offers only its subtypes; back to the event's: as it was
   const inc = selected(), t = $("#e-type").value;
   fillSubtypes($("#e-subtype"), t);
