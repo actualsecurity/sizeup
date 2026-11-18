@@ -172,14 +172,6 @@ def _cpu_pct() -> float | None:
         return None
 
 
-def refused_part(e: HubError) -> str:
-    """What of a state post the hub refused for its shape (Hub._refuse_status: 400 with reason bad_status for the
-    status, bad_live for the talkers / pages): "status" | "live" | "" (another error)."""
-    if getattr(e, "status", 0) != 400:
-        return ""
-    return {"bad_status": "status", "bad_live": "live"}.get(getattr(e, "reason", ""), "")
-
-
 class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
                  client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
@@ -227,7 +219,8 @@ class StationLink:
         self._answer_bad: set[str] = set()      # the answer's fields said to be of another type (said once each)
         # the link's threads that raised and started again, by name: {n, why, at} (the Hub row, Health's hints)
         self.restarts: dict[str, dict] = {}
-        self.refused = ""                       # the hub's last refusal of this station's status (its shape), "" none
+        # what the hub left out of this station's posts for its shape (its answer's "refused" / "reason"): "" none
+        self.refused, self._refused = "", {"status": "", "live": ""}
         self._watch_lock = threading.Lock()
         # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
@@ -348,6 +341,22 @@ class StationLink:
                 if f"{field}!" not in self.__dict__.setdefault("_answer_bad", set()):
                     self._answer_bad.add(f"{field}!")
                     self.log(f"hub link: the hub's {field} not applied: {type(e).__name__}: {str(e)[:120]}")
+
+    def _left_out(self, r, had_status: bool) -> None:
+        """The hub's word on what it left out of this post for its shape (its answer's "refused": ["status", "live"],
+        "reason"; the rest was taken): said once per reason, on the Hub row while it lasts. A post that carried a status
+        and has no word on it clears the status' word; any post taken without a word on the talkers clears theirs."""
+        ref = r.get("refused") if isinstance(r, dict) and isinstance(r.get("refused"), list) else []
+        why = str(r.get("reason") or "?")[:300] if isinstance(r, dict) else "?"
+        for part, sent in (("status", had_status), ("live", True)):
+            if part in ref:
+                text = f"the hub left out this station's {'status' if part == 'status' else 'talkers / pages'}: {why}"
+                if text != self._refused[part]:
+                    self.log(f"hub link: {text}")
+                self._refused[part] = text
+            elif sent:
+                self._refused[part] = ""
+        self.refused = " · ".join(t for t in self._refused.values() if t)
 
     def adopt(self, sid) -> None:
         """The id the hub took this station's post as ("station" in its state answer): this station's id from now on,
@@ -758,11 +767,10 @@ class StationLink:
         backoff = Backoff(first=1.0, fast_cap=3.0, cap=5.0)
         last_status = last_tg = 0.0
         tg_sig = None
-        no_live = False                                 # the hub refused the talkers / pages: left out until a post is taken
         while not self._stop.is_set():
             now = time.time()
-            talking = [] if no_live else self.app.live.state()
-            paging = [] if no_live else self.app.paging_state()   # a page going out now (a hub before #63 ignores it)
+            talking = self.app.live.state()
+            paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
             body: dict = {"at": now, "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
@@ -775,28 +783,14 @@ class StationLink:
                 r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
                 self.apply_answer(r)
-                no_live = False
+                self._left_out(r, "status" in body)
                 if "status" in body:
-                    last_status, self._status_now, self.refused = now, False, ""
+                    last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:
                         last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
                                                 for r in body["status"]["talkgroups"]]
                 backoff.ok()
             except HubError as e:
-                what = refused_part(e)
-                if what:
-                    # the hub refused this post's status (or its talkers): the heartbeat goes at once without it, so
-                    # the hub still hears this station and its answer (its build: auto-update) still comes; the status
-                    # is tried again at its usual pace (a release with a shape the hub refuses updates away from it)
-                    if what == "status":
-                        last_status, self._status_now = now, False
-                    else:
-                        no_live = True
-                    if str(e) != self.refused:
-                        self.refused = str(e)
-                        self.log(f"hub link: the hub refused this station's {what}: {e}; the heartbeat goes on without it")
-                    self._stop.wait(0.2)
-                    continue
                 self._fail(e)
                 self._stop.wait(backoff.fail(e))
             self._live_wake.wait(LIVE_REFRESH_S if talking or paging else STATUS_S)

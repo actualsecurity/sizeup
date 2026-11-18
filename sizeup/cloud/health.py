@@ -162,6 +162,7 @@ CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it be
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
+REFUSED_HINT_S = 600.0           # a part of the station's post left out for its shape (Hub._refused): a hint this long
 LINK_RESTART_HINT_S = 3600.0     # a station link thread that started again: a hint this long (StationLink.restarts)
 STATUS_KEY = b"sizeup-status-token-v1"
 P25_JOB = "Fire/EMS 15"
@@ -820,6 +821,15 @@ class StationHealth:
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
+        sr = getattr(hub, "status_refused", None)
+        if isinstance(sr, dict) and now - float(sr.get("at") or 0) < REFUSED_HINT_S:   # (the hub's own clock)
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"status left out since {_hhmm(sr.get('since'))}: {sr.get('why')} · last "
+                                         f"taken {_hhmm(t) if (t := getattr(hub, 'status_at', None)) else 'never'}"})
+        lv = getattr(hub, "live_refused", None)
+        if isinstance(lv, dict) and now - float(lv.get("at") or 0) < REFUSED_HINT_S:
+            out["hints"].append({"channel": "Station", "level": "warn",
+                                 "text": f"talker / page going out left out at {_hhmm(lv.get('at'))}: {lv.get('why')}"})
         lr = hl.get("link_restarts") if isinstance(hl.get("link_restarts"), dict) else {}
         again = sorted(f"{str(k)[:40]} {v.get('n')}× ({str(v.get('why') or '?')[:40]}, {_hhmm(v['at'] + hub.skew)})"
                        for k, v in list(lr.items())[:12] if isinstance(v, dict) and isinstance(v.get("at"), (int, float))
@@ -996,9 +1006,7 @@ class StationHealth:
             out["silent"] = {"severity": "critical", "title": "Station silent",
                              "text": (f"no word from {name} since {_hhmm(since)} · radios and transcripts not reaching the hub"
                                       if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})")
-                                     + (" · its posts are refused: id mismatch" if mm else "")
-                                     + (f" · its posts are refused: {sr['why']}"
-                                        if isinstance(sr := getattr(self.hub, "status_refused", None), dict) else ""),
+                                     + (" · its posts are refused: id mismatch" if mm else ""),
                              "since": since}
         if silent is None:
             out["silent"] = None                         # undecided: keep as it is

@@ -1,7 +1,9 @@
 """The station's status as the hub takes it (POST /api/station/state "status", StationLink.status): each key the hub
-reads, of the type it reads it as. Checked before the status is stored (Hub._state): a status of another shape is
-refused with a 400 and the last good one stays, so a wrong-typed field can never take a route down that reads it later
-(GET /api/cad/state, /api/state, /api/station/status, Health). contracts/schemas/station-state.schema.json (#774) is
+reads, of the type it reads it as, and the talkers / pages going out beside it (live_clean). Checked before anything is
+stored (Hub._state): a status of another shape is left out (the last good one stays) and a talker / page of another
+shape dropped, the rest of the post taken and the answer saying so ("refused"), so a wrong-typed field can never take a
+route down that reads it later (GET /api/cad/state, /api/state, /api/station/status, Health), and a station of any
+release still hears the hub's build. contracts/schemas/station-state.schema.json (#774) is
 the full description; this is the part the hub depends on, by hand (jsonschema is a dev dependency only).
 
 Lenient where the hub is: a key that is absent is fine (an older station has fewer), unknown keys pass (a newer one has
@@ -129,22 +131,36 @@ def problem(status) -> str | None:
     return None
 
 
-def live_problem(talking, paging) -> str | None:
-    """None when the hub can take a state post's "talking" and "paging"; else why not, as problem() says it
-    ("talking[0].until: a number or null"). What RemoteLive already drops passes as it always did: a list that is not
-    one (as none), an entry that is not an object, a page without a list of pairs, the pages beside no list of talkers
-    (Hub._state takes paging only with talking). An entry it keeps is checked."""
-    if not isinstance(talking, list):
-        return None
-    for name, entries, spec in (("talking", talking, TALKER), ("paging", paging, PAGE)):
-        for i, e in enumerate(entries if isinstance(entries, list) else []):
-            if not isinstance(e, dict) or (name == "paging" and not isinstance(e.get("pairs"), list)):
-                continue
-            if bad := _fields(e, spec, f"{name}[{i}]"):
-                return bad
-            for j, pr in enumerate(e["pairs"] if name == "paging" else []):
-                if not isinstance(pr, dict):
-                    return f"{name}[{i}].pairs[{j}]: an object"
-                if bad := _fields(pr, PAIR, f"{name}[{i}].pairs[{j}]"):
-                    return bad
+def _live_entry(name: str, i: int, e) -> str | None:
+    if not isinstance(e, dict) or (name == "paging" and not isinstance(e.get("pairs"), list)):
+        return None                                 # (RemoteLive drops it as it always did)
+    if bad := _fields(e, TALKER if name == "talking" else PAGE, f"{name}[{i}]"):
+        return bad
+    for j, pr in enumerate(e["pairs"] if name == "paging" else []):
+        if not isinstance(pr, dict):
+            return f"{name}[{i}].pairs[{j}]: an object"
+        if bad := _fields(pr, PAIR, f"{name}[{i}].pairs[{j}]"):
+            return bad
     return None
+
+
+def live_clean(talking, paging) -> tuple:
+    """(talking, paging, why): a state post's talkers and pages going out without the entries the hub can't read (a
+    field of another type than it computes with, e.g. a word for `until`), and why the first was left out (None: none
+    was). The rest is as it came: what RemoteLive already drops (a list that is not one, an entry that is not an
+    object, a page without a list of pairs) it still drops."""
+    why = None
+    out = []
+    for name, entries in (("talking", talking), ("paging", paging)):
+        if not isinstance(entries, list):
+            out.append(entries)
+            continue
+        kept = []
+        for i, e in enumerate(entries):
+            bad = _live_entry(name, i, e)
+            if bad:
+                why = why or bad
+            else:
+                kept.append(e)
+        out.append(kept)
+    return out[0], out[1], why

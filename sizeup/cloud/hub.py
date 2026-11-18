@@ -326,7 +326,8 @@ class Hub:
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
-        self.status_refused: dict | None = None  # the latest status refused for its shape ({at, why, n, since})
+        self.status_refused: dict | None = None  # the latest status left out for its shape ({at, why, n, since})
+        self.live_refused: dict | None = None    # ... and talker / page going out
         self.talkgroups: list[dict] = []
         self.skew = 0.0                          # hub clock - station clock (s)
         self.errors, self.last_error = 0, ""
@@ -642,15 +643,23 @@ class Hub:
             raise ValueError("a JSON object")
         claimed = d["status"].get("id") if isinstance(d.get("status"), dict) else None
         sid = self._claim(p, claimed) if p is not None else ""
-        # a status of another shape than the hub reads (sizeup/cloud/statusshape.py): refused whole, before anything is
-        # taken; the last good one stays (a wrong-typed field stored would break every reader of it until the next)
-        bad = statusshape.problem(d["status"]) if d.get("status") is not None else None
+        # What the hub can't read (sizeup/cloud/statusshape.py: a wrong-typed field stored broke every reader of it until
+        # the next) is left out, never the post: a status of another shape is not taken (the last good one stays), a
+        # talker / page going out of another shape is dropped (the others are taken). The heartbeat, the rest of the
+        # post and the answer (its build: a station of any release still auto-updates) go on; the answer says what was
+        # left out ("refused", "reason").
+        who = sid or (p.id if p is not None else "")
+        refused, why = [], []
+        if d.get("status") is not None and (bad := statusshape.problem(d["status"])):
+            self._refused("status", bad, who)
+            refused.append("status")
+            why.append(bad)
+            d["status"] = None
+        talking, paging, bad = statusshape.live_clean(d.get("talking"), d.get("paging"))
         if bad:
-            return self._refuse_status(bad, sid or (p.id if p is not None else ""))
-        # ... and so are the talkers and the pages going out (a wrong-typed `until` broke the CAD state's readers)
-        bad = statusshape.live_problem(d.get("talking"), d.get("paging"))
-        if bad:
-            return self._refuse_status(bad, sid or (p.id if p is not None else ""), "bad_live")
+            self._refused("live", bad, who)
+            refused.append("live")
+            why.append(bad)
         now = time.time()
         self.last_state = now
         if isinstance(d.get("at"), (int, float)):
@@ -679,8 +688,8 @@ class Hub:
                 self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
             except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
-        if isinstance(d.get("talking"), list):
-            self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
+        if isinstance(talking, list):
+            self.live.update(talking, now, paging if isinstance(paging, list) else None)
         # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
         # station: the id the hub took it as (the station adopts it: StationLink.adopt; a rename never locks it out)
         # services: the admins' service per source (settings radio_services, sizeup/sourcekeys.py): the station tags
@@ -688,21 +697,22 @@ class Hub:
         return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems", sttinput.CAP, POOL_CAP],
                            "pool": self.app.pool_word(sid or (p.id if p is not None else "")),
                            "services": dict(getattr(getattr(self.app, "cad", None), "radio_services", None) or {}),
-                           **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
+                           **({"station": sid or p.id} if p is not None and (sid or p.id) else {}),
+                           **({"refused": refused, "reason": "; ".join(why)} if refused else {})})
 
-    def _refuse_status(self, why: str, sid: str = "", reason: str = "bad_status") -> tuple[int, bytes, str]:
-        """400 {error, reason: bad_status | bad_live}: the station's status (or its talkers / pages going out) is not
-        of the shape the hub reads. Nothing of the post is taken (the last good status and talkers stay; Health's
-        "Station silent" says so once it lasts); logged once per reason an hour. self.status_refused: {at, why, n,
-        since} of the latest, None once a status is taken again."""
+    def _refused(self, part: str, why: str, sid: str = "") -> None:
+        """A part of a state post left out for its shape ("status": the last good one stays; "live": that talker /
+        page): logged once per reason an hour. self.status_refused / live_refused: {at, why, n, since} of the latest;
+        status_refused is None again once a status is taken (Health's hint while it lasts)."""
         now = time.time()
-        r = self.status_refused or {}
-        self.status_refused = {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now}
-        if now - self._refused_said.get((f"{reason}:{why}", sid), 0.0) >= REFUSAL_LOG_S:
-            self._refused_said[(f"{reason}:{why}", sid)] = now
-            self.log(f"hub: station {'status' if reason == 'bad_status' else 'state post'} refused: {why}"
-                     + (f" (station {sid})" if sid else "") + ": nothing of it taken, the last good one kept")
-        return _json(400, {"error": f"bad {'status' if reason == 'bad_status' else 'state'}: {why}", "reason": reason})
+        attr = "status_refused" if part == "status" else "live_refused"
+        r = getattr(self, attr, None) or {}
+        setattr(self, attr, {"at": now, "why": why, "n": int(r.get("n") or 0) + 1, "since": r.get("since") or now})
+        if now - self._refused_said.get((f"{part}:{why}", sid), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[(f"{part}:{why}", sid)] = now
+            self.log(f"hub: station {'status' if part == 'status' else 'talker / page going out'} left out: {why}"
+                     + (f" (station {sid})" if sid else "")
+                     + (": the last good status kept" if part == "status" else "") + "; the rest of the post taken")
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""

@@ -1,6 +1,7 @@
 """The station link and the hub never break on a wrong-typed field from the other side (D5 / D6 of #774's contracts
-harness). Hub (D5): a station status of another shape is refused whole with a 400 (reason bad_status) before it is
-stored, the last good one stays, and every reader of a stored status (the CAD state, the station status the deploy
+harness). Hub (D5): a station status of another shape is left out before it is stored (the last good one stays) and a
+talker / page of another shape dropped; the rest of the post is taken and the 200 answer (its build too) says what was
+left out ("refused": ["status" | "live"], "reason"). Every reader of a stored status (the CAD state, the station status the deploy
 check reads, Health) survives a bad value anyway. Station (D6): a hub answer's field of another type is ignored (the
 last good value stays, said once per field) and no link thread ever dies of one; one that raised starts again and
 shows on the Hub row and on Health. Invented data only."""
@@ -95,44 +96,52 @@ def test_a_status_of_the_shape_the_hub_reads_is_taken(hub):
 
 
 @pytest.mark.parametrize("name,bad", BAD, ids=[n for n, _ in BAD])
-def test_a_wrong_typed_status_is_refused_whole_and_the_last_good_one_stays(hub, name, bad):
+def test_a_wrong_typed_status_is_left_out_the_rest_of_the_post_taken(hub, name, bad):
     assert post(hub, dict(GOOD))[0] == 200
     good, at = hub.app.hub.status, hub.app.hub.status_at
-    code, body = post(hub, dict(GOOD, **bad))
-    assert code == 400 and body["reason"] == "bad_status" and body["error"].startswith("bad status: status.")
-    assert hub.app.hub.status is good and hub.app.hub.status_at == at        # nothing of it taken
-    assert hub.app.hub.status_refused["why"] in body["error"]
+    t0 = time.time()
+    code, body = post(hub, dict(GOOD, **bad), talking=[dict(TALKER, since=t0, talk_since=t0)])
+    assert code == 200 and body["ok"] is True and body["build"] == HUB_SHA and body["caps"]   # the normal answer
+    assert body["refused"] == ["status"] and body["reason"].startswith("status.")
+    assert hub.app.hub.status is good and hub.app.hub.status_at == at        # the last good status kept
+    assert hub.app.hub.last_state >= t0 and len(hub.app.hub.live.state()) == 1   # the heartbeat and talkers taken
+    assert hub.app.hub.status_refused["why"] == body["reason"]
     for path, (c, b) in read_all(hub).items():
         assert c == 200, (path, c, b)
-    assert post(hub, dict(GOOD, name="Test station 2"))[0] == 200          # the next good one is taken
+    code, body = post(hub, dict(GOOD, name="Test station 2"))                # the next good one is taken
+    assert code == 200 and "refused" not in body
     assert hub.app.hub.status["name"] == "Test station 2" and hub.app.hub.status_refused is None
 
 
-def test_a_status_that_is_not_an_object_is_refused_and_a_post_without_one_is_the_heartbeat(hub):
+def test_a_status_that_is_not_an_object_is_left_out_and_a_post_without_one_is_the_heartbeat(hub):
     assert post(hub, dict(GOOD))[0] == 200
     for st in (5, "x", [GOOD]):
         code, body = post(hub, st)
-        assert code == 400 and body["reason"] == "bad_status", st
+        assert code == 200 and body["refused"] == ["status"] and body["reason"] == "status: an object", st
     assert hub.app.hub.status["name"] == "Test station"
-    code, _ = call(hub.url + "/api/station/state", "POST", {"at": time.time(), "talking": [], "paging": []})
-    assert code == 200                              # no status (the talkers only): as always
-    code, _ = post(hub, None)
-    assert code == 200
+    code, body = call(hub.url + "/api/station/state", "POST", {"at": time.time(), "talking": [], "paging": []})
+    assert code == 200 and "refused" not in body                # no status (the talkers only): as always
+    code, body = post(hub, None)
+    assert code == 200 and "refused" not in body
 
 
-def test_a_refused_status_is_logged_once_per_reason_and_said_on_the_silent_alert(hub, monkeypatch):
+def test_a_left_out_status_is_logged_once_per_reason_and_a_health_hint_while_it_lasts(hub, monkeypatch):
     said = []
     monkeypatch.setattr(hub.app.hub, "log", said.append)
+    assert post(hub, dict(GOOD))[0] == 200
     for _ in range(3):
-        assert post(hub, dict(GOOD, outbox=5))[0] == 400
-    assert post(hub, dict(GOOD, radios=5))[0] == 400
-    refused = [s for s in said if "station status refused" in s]
-    assert len(refused) == 2 and "status.outbox: an object" in refused[0] and "status.radios: a list" in refused[1]
+        assert post(hub, dict(GOOD, outbox=5))[1]["refused"] == ["status"]
+    assert post(hub, dict(GOOD, radios=5))[1]["refused"] == ["status"]
+    left = [s for s in said if "station status left out" in s]
+    assert len(left) == 2 and "status.outbox: an object" in left[0] and "status.radios: a list" in left[1]
     assert hub.app.hub.status_refused["n"] == 4
-    h = hub.app.health
-    hub.app.hub.last_state = time.time() - 3600                 # no post taken for an hour: silent
-    alerts, _ = h.conditions(h.model(), time.time())
-    assert "its posts are refused: status.radios: a list" in alerts["silent"]["text"]
+    m = hub.app.health.model()
+    assert any(x["channel"] == "Station" and "status left out since" in x["text"] and "status.radios: a list" in x["text"]
+               for x in m["hints"])
+    alerts, _ = hub.app.health.conditions(m, time.time())
+    assert not alerts.get("silent")                              # (its heartbeat is taken: not silent)
+    assert post(hub, dict(GOOD))[0] == 200
+    assert not any("status left out" in x["text"] for x in hub.app.health.model()["hints"])
 
 
 TALKER = {"key": "fm:FG1:1.00:", "system": "fm", "channel": "FG1", "tg": None, "radio_id": "", "alias": "", "rig": "",
@@ -150,26 +159,37 @@ BAD_LIVE = [
 
 
 @pytest.mark.parametrize("name,bad", BAD_LIVE, ids=[n for n, _ in BAD_LIVE])
-def test_a_wrong_typed_talker_or_page_is_refused_and_the_last_good_ones_stay(hub, name, bad):
+def test_a_wrong_typed_talker_or_page_is_left_out_the_others_and_the_rest_taken(hub, name, bad):
     now = time.time()
-    good = {"talking": [dict(TALKER, since=now, talk_since=now)], "paging": [dict(PAGE, started=now)]}
+    good = {"talking": [dict(TALKER, since=now, talk_since=now, key="a")], "paging": [dict(PAGE, started=now, key="p")]}
     assert post(hub, dict(GOOD), **good)[0] == 200
-    assert len(hub.app.hub.live.state()) == 1 and len(hub.app.hub.live.paging_state()) == 1
-    code, body = post(hub, dict(GOOD, name="Test station 2"), **dict(good, **bad))
-    assert code == 400 and body["reason"] == "bad_live" and body["error"].startswith("bad state: ")
-    assert hub.app.hub.status["name"] == "Test station"                     # nothing of the post taken
-    assert len(hub.app.hub.live.state()) == 1 and len(hub.app.hub.live.paging_state()) == 1
+    which = next(iter(bad))
+    mixed = dict(good, **{which: good[which] + bad[which]})       # one good entry and the bad one
+    code, body = post(hub, dict(GOOD, name="Test station 2"), **mixed)
+    assert code == 200 and body["refused"] == ["live"] and body["reason"].startswith(f"{which}[1].")
+    assert body["build"] == HUB_SHA
+    assert hub.app.hub.status["name"] == "Test station 2"                   # the status taken
+    assert [e["key"] for e in hub.app.hub.live.state()] == ["a"]           # only the bad entry left out
+    assert [p["key"] for p in hub.app.hub.live.paging_state()] == ["p"]
+    assert hub.app.hub.live_refused["why"] == body["reason"]
     for path, (c, b) in read_all(hub).items():
         assert c == 200, (path, c, b)
     ended = {"talking": [dict(TALKER, ended=True, until=now + 30)], "paging": [dict(PAGE, ended=True, until=now + 30)]}
-    assert post(hub, dict(GOOD), **ended)[0] == 200 and len(hub.app.hub.live.state()) == 1
+    code, body = post(hub, dict(GOOD), **ended)
+    assert code == 200 and "refused" not in body and len(hub.app.hub.live.state()) == 1
+
+
+def test_a_bad_status_and_a_bad_talker_in_one_post_both_said(hub):
+    code, body = post(hub, dict(GOOD, outbox=5), talking=[dict(TALKER, until="x")])
+    assert code == 200 and body["refused"] == ["status", "live"]
+    assert body["reason"] == "status.outbox: an object; talking[0].until: a number or null"
 
 
 def test_what_the_live_state_always_dropped_is_still_dropped_not_refused(hub):
     now = time.time()
     for extra in ({"talking": 5}, {"talking": [5, "x"]}, {"paging": 5}, {"paging": [dict(PAGE, started=now, pairs=5)]}):
         code, _ = post(hub, dict(GOOD), **{"talking": [], "paging": [], **extra})
-        assert code == 200, extra
+        assert code == 200 and "refused" not in _, extra
         assert hub.app.hub.live.state() == [] and hub.app.hub.live.paging_state() == []
 
 
@@ -449,7 +469,7 @@ def test_health_hints_a_station_link_thread_that_started_again(tmp_path):
         assert post(hub, dict(GOOD, health={"jobs": {}, "link_restarts": lr}))[0] == 200
         hints = [x for x in hub.app.health.model()["hints"] if x["channel"] == "Station link"]
         assert len(hints) == 1 and "hub-state 3× (TypeError" in hints[0]["text"] and "hub-jobs" not in hints[0]["text"]
-        assert post(hub, dict(GOOD, health={"link_restarts": 5}))[0] == 400
+        assert post(hub, dict(GOOD, health={"link_restarts": 5}))[1]["refused"] == ["status"]
     finally:
         hub.close()
 
@@ -464,11 +484,12 @@ def test_a_caps_file_of_another_shape_is_as_if_none(tmp_path):
     assert make_app(cfg).link.hub_caps == {"p25_systems"}
 
 
-# -- a refused post never cuts the station off: the heartbeat (and the hub's build in its answer) goes on --------------
+# -- a left-out part never cuts a station off: the heartbeat and the hub's build (auto-update) keep coming ---------------
 
 
-def test_a_station_whose_status_the_hub_refuses_keeps_its_heartbeat_and_hears_the_hubs_build(tmp_path, monkeypatch):
+def test_a_station_whose_status_the_hub_leaves_out_keeps_posting_and_says_so_until_it_is_taken(tmp_path, monkeypatch):
     hub = HubRun(hub_cfg(tmp_path))
+    hub.app.hub.build = HUB_SHA
     st = station(station_cfg(tmp_path, hub.url), {})
     said, builds = [], []
     try:
@@ -483,11 +504,12 @@ def test_a_station_whose_status_the_hub_refuses_keeps_its_heartbeat_and_hears_th
         kept = hub.app.hub.status_at
         n, t0 = len(builds), time.time()
         assert wait(lambda: len(builds) >= n + 2 and (hub.app.hub.last_state or 0) > t0, 15)   # heard, and answered
+        assert set(builds) == {HUB_SHA}
         assert hub.app.hub.status_at == kept and isinstance(hub.app.hub.status["radios"], list)
-        assert st.link.connected() and "bad status: status.radios: a list" in st.link.refused
-        assert "bad status: status.radios" in st.link.status_row()["detail"]
-        assert len([s for s in said if "refused this station's status" in s]) == 1
-        monkeypatch.setattr(st.link, "status", real)                     # a good status again: taken
+        assert st.link.connected() and "left out this station's status: status.radios: a list" in st.link.refused
+        assert "status.radios: a list" in st.link.status_row()["detail"]
+        assert len([s for s in said if "left out this station's status" in s]) == 1
+        monkeypatch.setattr(st.link, "status", real)                     # a good status again: taken, the word gone
         assert wait(lambda: hub.app.hub.status_refused is None and hub.app.hub.status_at > kept, 15)
         assert wait(lambda: st.link.refused == "", 10)
     finally:
@@ -495,20 +517,47 @@ def test_a_station_whose_status_the_hub_refuses_keeps_its_heartbeat_and_hears_th
         hub.close()
 
 
-def test_a_station_whose_talkers_the_hub_refuses_keeps_its_heartbeat_without_them(tmp_path, monkeypatch):
+def test_a_station_whose_talker_the_hub_leaves_out_keeps_the_others_and_the_word_clears(tmp_path, monkeypatch):
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {})
     try:
         assert wait(lambda: hub.app.hub.status is not None, 10)
-        monkeypatch.setattr(st.live, "state",
-                            lambda: [dict(TALKER, ended=True, until="soon")])
+        now = time.time()
+        talkers = [dict(TALKER, key="ok", since=now, talk_since=now), dict(TALKER, key="bad", ended=True, until="soon")]
+        monkeypatch.setattr(st.live, "state", lambda: talkers)
         st.link.live_changed()
-        assert wait(lambda: (hub.app.hub.status_refused or {}).get("why", "").startswith("talking[0].until"), 10)
-        t0 = time.time()
-        assert wait(lambda: (hub.app.hub.last_state or 0) > t0, 15) and st.link.connected()
-        assert hub.app.hub.live.state() == []
+        assert wait(lambda: [e["key"] for e in hub.app.hub.live.state()] == ["ok"], 10)
+        assert wait(lambda: "left out this station's talkers / pages: talking[1].until" in st.link.refused, 10)
+        assert st.link.connected()
+        monkeypatch.setattr(st.live, "state", lambda: talkers[:1])
+        st.link.live_changed()
+        assert wait(lambda: st.link.refused == "", 10)                  # (any post taken without the word clears it)
     finally:
         st.link.stop()
+        hub.close()
+
+
+def test_a_station_from_before_this_still_hears_the_hubs_build_with_a_status_the_hub_leaves_out(tmp_path):
+    """A release before this one, posting a status the hub leaves out, as its StationLink._state did: every post is
+    answered 200 with the build (Watch.hub: it auto-updates away), caps and pool; the hub hears it (not silent). Its
+    answer handling, as it was: updates.hub(r.get("build")), then caps / services / pool / station from the dict."""
+    from sizeup.cloud.client import HubClient
+    hub = HubRun(hub_cfg(tmp_path))
+    hub.app.hub.build = HUB_SHA
+    try:
+        c = HubClient(hub.url, TOKEN, timeout=5.0)
+        assert c.request("POST", "/api/station/state", {"at": time.time(), "talking": [], "paging": [],
+                                                        "status": dict(GOOD)})["ok"] is True
+        kept = hub.app.hub.status_at
+        for _ in range(3):
+            t0 = time.time()
+            r = c.request("POST", "/api/station/state",                 # (HubError on anything but a 2xx)
+                          {"at": t0, "talking": [], "paging": [], "status": dict(GOOD, radios=5)}, timeout=5.0)
+            build = r.get("build") if isinstance(r, dict) else None     # (the old station's read)
+            assert build == HUB_SHA and isinstance(r.get("caps"), list) and isinstance(r.get("pool"), dict)
+            assert hub.app.hub.last_state >= t0 and hub.app.hub.status_at == kept
+        c.close()
+    finally:
         hub.close()
 
 
@@ -521,11 +570,3 @@ def test_an_older_updaters_state_file_never_gets_the_status_refused(tmp_path):
     st = Watch(own="1234567", run_dir="", state_path=str(p), log=lambda m: None).state()
     assert st == {"last": {}, "retry": {}, "equivalent": {}, "hold": {}, "failed": {}}
     assert statusshape.problem(dict(GOOD, version={"build": "1234567", "update": st})) is None
-
-
-def test_the_station_reads_the_hubs_refusal_by_its_reason_word():
-    from sizeup.cloud.station import refused_part
-    assert refused_part(HubError("hub said 400: anything", 400, reason="bad_status")) == "status"
-    assert refused_part(HubError("hub said 400: anything", 400, reason="bad_live")) == "live"
-    assert refused_part(HubError("hub said 400: bad status: x", 400)) == ""          # (no reason: another 400)
-    assert refused_part(HubError("hub said 503", 503, reason="bad_status")) == ""

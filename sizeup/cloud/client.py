@@ -32,7 +32,7 @@ class HubError(RuntimeError):
         super().__init__(msg)
         self.status = status       # 0 = never reached the hub (network, TLS, timeout)
         self.retry_after = retry_after   # the hub's Retry-After (a deploy's handoff: 503 + 2 s), seconds
-        self.reason = reason       # the hub's word for a refusal ({error, reason}: "bad_status", ...), "" none
+        self.reason = reason       # the hub's word for a refusal ({error, reason}: "id_mismatch", ...), "" none
 
 
 def retry_after(value) -> float | None:
