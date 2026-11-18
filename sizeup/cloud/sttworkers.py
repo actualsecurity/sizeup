@@ -65,6 +65,7 @@ META_POOL = "stt_pool"
 META_LLM = "stt_llm"            # per GPU worker: its "LLM jobs" switch (JSON {id: bool}; absent: on)
 API = "/api/station/stt/"
 LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
+INFER_MAX_BODY = 32 * 1024     # an LLM job's answer (its 16 KB at most, sizeup/cloud/infer.py) and its counts
 MAX_BODY = 1024 * 1024                  # a result: the text and its words (a 2-minute clip's are ~100 KB)
 TEXT_MAX = 20000
 SEGMENTS_MAX = 1000
@@ -121,6 +122,7 @@ class WorkerRegistry:
         self._written: dict[str, float] = {}
         self._any: tuple[float, bool] = (0.0, False)     # (read at, any active worker): read at most once a second
         self._lock = threading.Lock()
+        self.listeners: list[Callable[[], None]] = []    # called after an admin changes a switch (the LLM lane)
 
     def _q(self, sql: str, params=()) -> list[tuple]:
         try:
@@ -216,6 +218,7 @@ class WorkerRegistry:
                     raise WorkerError(f"classes: {', '.join(new['classes'])}, each true or false")
                 new["classes"][k] = v
         self.mdb.put(META_POOL, json.dumps(new, sort_keys=True))
+        self._switched()
         return old, new
 
     # -- each worker's "LLM jobs" switch (the infer lane, sizeup/cloud/infer.py) -------------------------------------
@@ -242,7 +245,15 @@ class WorkerRegistry:
         old = saved.get(wid, True)
         saved[wid] = on
         self.mdb.put(META_LLM, json.dumps(saved, sort_keys=True))
+        self._switched()
         return old, on
+
+    def _switched(self) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - a listener's trouble never undoes the admin's change
+                self.log(f"stt workers: a switch listener failed: {type(e).__name__}")
 
     # -- who a request is ------------------------------------------------------------------------------------------
 
@@ -502,7 +513,7 @@ class WorkerApi:
                 if m and m.group(2) == "audio":
                     return self._audio(wid, m.group(1))
                 return _json(404, {"error": "not found"})
-            raw = body(MAX_BODY) if body is not None else b""
+            raw = body(INFER_MAX_BODY if path.startswith(API + "infer/") else MAX_BODY) if body is not None else b""
             if raw is None:
                 return _json(413, {"error": "too large"})
             if path.startswith(API + "infer/"):
@@ -521,7 +532,7 @@ class WorkerApi:
                     return _json(403, {"error": "GPU workers only", "reason": "not_a_gpu_worker"})
                 if self.infer is None:
                     return _json(404, {"error": "not found"})
-                return _json(*self.infer.handle(wid, path, d))
+                return _json(*self.infer.handle(wid, path, d, len(raw)))
             if self.infer is not None and gpu:
                 self.infer.seen(wid, d.get("state"), d.get("models"))
             state, model = d.get("state"), d.get("model")

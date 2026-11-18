@@ -279,6 +279,8 @@ class LiveTalk:
             cur = self._fm.get(channel)
             if cur and abs(cur["since"] - since) < 0.01:
                 return
+            if cur is not None:     # the carrier before, its transmission not handled yet (fm_segment): kept as the last
+                self._fm_last[channel] = dict(cur, ended=self.clock())
             self._fm[channel] = {"since": since, "ids": []}
         self.on_change()
 
@@ -300,11 +302,15 @@ class LiveTalk:
             self.on_change()
 
     def fm_segment(self, channel: str, ids: list[str], start: float, end: float) -> None:
-        """A transmission ended with these MDC IDs. One the live decode didn't show is flashed now."""
+        """A transmission ended with these MDC IDs. One the live decode didn't show is flashed now. It comes from the
+        channel's worker (radio/fm.py SegmentWorkers), so the next carrier may already be live: that one is left."""
         now = self.clock()
         with self._lock:
-            cur = self._fm.pop(channel, None)
-            if cur is not None:
+            cur = self._fm.get(channel)
+            if cur is not None and cur["since"] > start + 0.025:
+                cur = None                                  # (a carrier that began after this transmission)
+            elif cur is not None:
+                self._fm.pop(channel, None)
                 self._fm_last[channel] = dict(cur, ended=now)
             last = self._fm_last.get(channel) or {}
             shown = set(last.get("ids") or []) if last and last.get("since", 0) <= start + 1.0 else set()

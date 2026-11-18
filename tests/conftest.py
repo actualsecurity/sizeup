@@ -71,11 +71,79 @@ def pytest_sessionfinish(session):
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
     _leaks.update(json.loads(getattr(node, "workeroutput", {}).get("thread_leaks") or "{}"))
+    if error:
+        _worker_down(node, error)
+
+
+# -- a worker that dies without a traceback (#740) -------------------------------------------------------------------
+# xdist says only "node down: Not properly terminated". A crash in C leaves pytest's faulthandler dump on stderr; a
+# signal whose default action ends the process (SIGALRM, SIGTERM, SIGXCPU, the OOM killer's SIGKILL) or an os._exit
+# leaves nothing. So: in a worker, faulthandler also dumps every thread's stack on the catchable ones before it dies
+# (chain=True: the signal still does what it did); in the controller, the dead worker's exit status is said at once
+# and again in the summary. SIGUSR1, in the controller and in every worker, dumps every thread's stack and goes on: CI
+# sends it to a run still going after 21 min (a stall, .github/workflows/test.yml). The dumps go to a copy of stderr
+# taken at configure time (as pytest's own faulthandler does): fd 2 itself is a capture file while a test runs, lost
+# with the worker. (SIGXFSZ: Python starts with it ignored, so nothing to register.)
+
+_DIE_WITH_STACK = ("SIGTERM", "SIGHUP", "SIGUSR2", "SIGXCPU")      # a worker's: dump, then the signal's own action
+_downs: list[str] = []
+_stack_fd: list[int] = []                    # the stderr copy, open for the process's life
+
+
+def _stack_on_signals(config) -> None:
+    import faulthandler
+    import signal
+    import sys
+    try:
+        fd = os.dup(sys.__stderr__.fileno())
+    except (AttributeError, OSError, ValueError):
+        return
+    _stack_fd.append(fd)
+    want = [("SIGUSR1", False)] + ([(n, True) for n in _DIE_WITH_STACK] if hasattr(config, "workerinput") else [])
+    for name, chain in want:
+        sig = getattr(signal, name, None)
+        if sig is not None and signal.getsignal(sig) == signal.SIG_DFL:
+            try:
+                faulthandler.register(sig, file=fd, all_threads=True, chain=chain)
+            except (ValueError, OSError, RuntimeError, AttributeError):
+                pass
+
+
+def _how_it_ended(node, error) -> str:
+    """The worker process's end: 'killed by SIGALRM', 'exit status 75', or why it isn't known. Waits at most 2 s, and
+    not at all on a Ctrl-C (every worker goes down then)."""
+    import signal
+    popen = getattr(getattr(getattr(node, "gateway", None), "_io", None), "popen", None)
+    if popen is None or "keyboard" in str(error).lower():
+        return "its exit status is not known"
+    try:
+        rc = popen.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        return f"pid {popen.pid} still running 2 s after its channel closed"
+    except OSError as e:
+        return f"its exit status is not known ({e})"
+    if rc is not None and rc < 0:
+        try:
+            return f"killed by {signal.Signals(-rc).name}"
+        except ValueError:
+            return f"killed by signal {-rc}"
+    return f"exit status {rc}"
+
+
+def _worker_down(node, error) -> None:
+    gw = getattr(getattr(node, "gateway", None), "id", "?")
+    line = f"[{gw}] worker down ({error}): {_how_it_ended(node, error)} (#740)"
+    _downs.append(line)
+    tr = node.config.pluginmanager.get_plugin("terminalreporter") if getattr(node, "config", None) else None
+    if tr is not None:
+        tr.write_line(line, red=True)
 
 
 def pytest_terminal_summary(terminalreporter):         # the one summary hook: both reports (a second def would replace this)
     _thread_report(terminalreporter)
     _flaky_report(terminalreporter)
+    for line in _downs:
+        terminalreporter.write_line(line, red=True)
     if _tree["new"]:
         terminalreporter.write_sep("!", f"tests left {len(_tree['new'])} new file(s) in the repo tree (#661): "
                                         "write under tmp_path", red=True)
@@ -433,6 +501,7 @@ def pytest_configure(config):            # replay's markers (imported above) and
     replay.pytest_configure(config)
     config.addinivalue_line("markers", "hand_dispatch_gate: keep the 60 Control refusal of a dispatch by hand (automode)")
     config.addinivalue_line("markers", "flaky(issue): a known flaky test (its GitHub issue): one retry when its call fails")
+    _stack_on_signals(config)                                     # (#740, above)
 
 
 # Known flaky tests: @pytest.mark.flaky(issue=NNN) (the open issue that fixes it; a mark without one is a usage error).

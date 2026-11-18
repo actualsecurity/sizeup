@@ -210,7 +210,7 @@ def test_watched_grants_are_counted_by_what_became_of_them(tmp_path):
     # Settings > Radios: a watched talkgroup's encrypted grants on the system's line, every count in its hover
     js = (TR.parent.parent / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
     assert "(x.watched || []).filter((w) => w.encrypted).map((w) => ` · TG ${w.tg} encrypted ×${w.encrypted}`)" in js
-    assert "+ watched(x)).join" in js and "${w.recording} recorded, ${w.encrypted} encrypted" in js
+    assert "+ watched(x) + split(x)).join" in js and "${w.recording} recorded, ${w.encrypted} encrypted" in js
 
 
 def test_a_config_it_cannot_read_watches_nothing(tmp_path):

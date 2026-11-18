@@ -224,6 +224,9 @@ class Comms:
         self.display = None
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
+        # {talkgroup, channel, system} -> whether the console's state shows such a row whatever its links (the 60 Control
+        # feed's: Feed.shows), set by the CAD. None: every transmission is taken as shown (record() rebuilds the state)
+        self.in_state = None
         # traffic id -> None: a transcript arrived or changed on another P25 system's row (context only; the intel
         # pre-alerts); never called for our rows. Called after the transaction has committed, never under store.lock.
         # May fire again for the same tid (replace re-records, the startup backfill of old rows): a consumer dedupes
@@ -275,7 +278,8 @@ class Comms:
         start = float(t["start"])
         rigs = [r.strip() for r in (t.get("rig") or "").split(",") if r.strip()]
         with self.store.tx() as db:
-            have = db.execute("SELECT 1 FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+            have = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+                              "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
             if have and not replace:
                 return []
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
@@ -330,12 +334,21 @@ class Comms:
             if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
                 db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)
+            linked = db.total_changes
             if not other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
                 self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+            # On no incident, before or after (no link made, to it or to another turn of its call), and no row of the
+            # 60 Control feed, before or after: the console's state shows nothing of it, so it rebuilds nothing
+            # (one rebuild a transmission was most of the hub's CPU per transmission: native-notes FINDINGS §1.6)
+            shown = self.in_state
+            if shown is not None and not out and db.total_changes == linked and not (have and have["linked"]) \
+                    and not shown({"talkgroup": t.get("talkgroup"), "channel": t.get("source") or "", "system": system}) \
+                    and not (have and shown(dict(have))):
+                self.store.quiet_for_state()
         if other:
             if (t.get("text") or "").strip():
                 self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
@@ -347,6 +360,17 @@ class Comms:
             self._trim_changes(kind)
         self._heard(tid)
         return out
+
+    def _quiet_unless_shown(self, db, tid: str) -> None:
+        """In a transaction that changed only this row of radio_traffic (its text, status, other transcript, re-run): the
+        console's state rebuilds nothing for it when the row is on no incident and no row of the 60 Control feed
+        (store.quiet_for_state; as record() does)."""
+        if self.in_state is None:
+            return
+        r = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+                       "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
+        if r is not None and not r["linked"] and not self.in_state(dict(r)):
+            self.store.quiet_for_state()
 
     def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
                     tg, disp: bool) -> None:
@@ -435,6 +459,8 @@ class Comms:
             return
         with self.store.tx() as db:
             self._count(db, source, minute * 60.0, seconds, int(calls), radios)
+            if self.in_state is not None:
+                self.store.quiet_for_state()             # radio_activity: never in the console's state
             if sources.is_context({"system": (sources.parse(source) or ("", 0))[0]}):
                 self.quiet()                             # another system's key-ups: no reader's rev but theirs moves
 
@@ -691,6 +717,7 @@ class Comms:
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         if n and notify:
             if row is not None and sources.other_p25(row):
                 self._heard_context(tid)
@@ -710,6 +737,7 @@ class Comms:
                            (status, model, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
@@ -776,6 +804,7 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def rerun_done(self, tid: str, result: str) -> bool:
@@ -787,6 +816,7 @@ class Comms:
                            (self.clock(), result, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
+                self._quiet_unless_shown(db, tid)
         return bool(n)
 
     def _section(self, name: str) -> dict:
