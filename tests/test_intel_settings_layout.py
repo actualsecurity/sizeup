@@ -266,6 +266,7 @@ def test_every_control_posts_what_it_did(site, browser):
         (check("Listen link"), None, {"action": "set", "key": "listen", "value": not d["settings"]["listen"]}),
         (check("Inference"), None, {"action": "set", "key": "infer", "value": not d["settings"].get("infer")}),
         (check("Local model"), None, {"action": "set", "key": "infer_pd", "value": False}),
+        (check("Corroborate"), None, {"action": "set", "key": "infer_pd_corroborate", "value": False}),
         (check("PII"), None, {"action": "set", "key": "push_pii", "value": not d["settings"]["push_pii"]}),
         (check("Push"), None, {"action": "set", "key": "push", "value": not d["settings"]["push"]}),
         (check("Detection"), None, {"action": "set", "key": "enabled", "value": not d["settings"]["enabled"]}),
@@ -282,7 +283,7 @@ def test_every_control_posts_what_it_did(site, browser):
     if kinds:
         ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
         assert len(d["packs"]) == 5 and nrule > 80                           # every pack's rows, each with its own controls
-        assert kinds[:5] == [6, 19 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        assert kinds[:5] == [7, 19 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
         names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
         assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved

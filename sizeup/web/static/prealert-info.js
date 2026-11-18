@@ -122,7 +122,9 @@ window.PrealertInfo = (() => {
   // the local model's answer (sizeup/intel/backing.py) when it raised or noted this event: what, how sure, why
   function localModel(m) {
     if (!m) return "";
-    return [m.category, pct(m.confidence), m.used === "evidence" ? "evidence only" : "", m.reason].filter((x) => x).join(" · ");
+    // the reason may be cut at its maxLength (120) mid-word by the hub: shown with an ellipsis, never parsed
+    const reason = m.reason && m.reason.length >= 120 ? `${m.reason}…` : m.reason;
+    return [m.category, pct(m.confidence), m.used === "evidence" ? "evidence only" : "", reason].filter((x) => x).join(" · ");
   }
   function why(d) {
     const w = d.why, s = d.summary;

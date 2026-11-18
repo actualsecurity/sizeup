@@ -52,7 +52,10 @@ infer_pd_threshold (0.7):
                               model's "address" if its words are in the trigger (infer.said), never confirmed (set on
                               the row only for the event it raises). Its pushes' title ends in "·m" (push.compose:
                               only an event the model raised carries the rule). The model, its version, the confidence
-                              and the reason: intel_model, More info
+                              and the reason: intel_model, More info. With infer_pd_corroborate (on): pushed only
+                              when the trigger row backs it (a dispatch cue, a rule word of its category, or a place
+                              the locator confirms from its words), else capped at map: the model's confidence is
+                              uncalibrated, and in_progress (often true of what is over) is never used for a push
 
 Threads: consider() is on the engine's thread under its lock and only gates, snapshots and queues; the backend's
 available() and classify() (which may wait on the hub), the site history and the messages, and every answer, are on
@@ -96,19 +99,21 @@ REFRESH_S = 30.0               # the model thread checks the backend's availabil
 WEAPONS = ("none", "knife", "gun", "other", "unknown")
 KEYS = ("category", "confidence", "in_progress", "weapon", "deescalation", "address", "reason")
 ADDRESS_MAX = 80
-REASON_MAX = 120
+REASON_MAX = 120               # the hub may cut it here, mid-word: shown with an ellipsis, never parsed
+NO_ADDRESS = frozenset({"", "none", "unknown", "n/a", "na", "null"})
 WHYS = ("ok", "no_worker", "gaming", "deadline", "invalid")
 COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable")
 SITE_PRECISIONS = ("address", "intersection", "landmark")
 
 SYSTEM = ("You read police radio transcripts (speech-to-text, often misheard) for a fire department that wants an "
           "early warning of calls it may be sent to or must stage for. Answer only from the words given. "
-          "category: one of the listed category names when the trigger transmission (with its context) says such a "
-          "call, else \"none\" (routine traffic, a unit's status, a call already over). confidence: 0 to 1 that the "
-          "category is right. in_progress: the incident is happening now. weapon: the weapon said, \"unknown\" when "
-          "one is hinted but not named, else \"none\". deescalation: the transmission says an incident is calming "
-          "down or under control (a subject in custody, the party gone, no injuries after all). address: the place as "
-          "said in the words (at most 80 characters), or null. reason: at most 120 characters, why.")
+          "category: the one listed category whose definition the trigger transmission (with its context) fits, else "
+          "\"none\". confidence: a number from 0 to 1 that the category is right. in_progress: the incident is "
+          "happening now. weapon: the weapon said, \"unknown\" when one is hinted but not named, else \"none\". "
+          "deescalation: the transmission says an incident is calming down or under control (a subject in custody, "
+          "the scene secure, no injuries after all). address: the place as said in the TRIGGER transmission (at most "
+          "80 characters), or null. reason: at most 120 characters, why.")
+NONE_LINE = "- none: anything else: routine traffic, a unit's status or location, a call already handled."
 
 
 # -- the schema and its check -----------------------------------------------------------------------------------------
@@ -146,33 +151,43 @@ def validate(d, categories) -> dict | None:
     if d["weapon"] not in WEAPONS:
         return None
     addr = d["address"]
+    if isinstance(addr, str) and addr.strip().lower() in NO_ADDRESS:
+        addr = None                            # "none", "unknown", "n/a", "": no address said
     if addr is not None and (not isinstance(addr, str) or len(addr) > ADDRESS_MAX):
         return None
     if not isinstance(d["reason"], str) or len(d["reason"]) > REASON_MAX:
         return None
-    return {**d, "confidence": float(conf)}
+    return {**d, "confidence": float(conf), "address": addr}
+
+
+def category_line(name: str, c) -> str:
+    """ "- weapons: Weapon / shots. A weapon shown, used or reported: ..." (a label alone without a definition)."""
+    label, desc = (c.get("label") or name, c.get("describe") or "") if isinstance(c, dict) else (str(c), "")
+    return f"- {name}: {label}" + (f". {desc}" if desc else "")
 
 
 def messages(categories: dict, trigger: dict, context: list[dict], history: list[str]) -> list[dict]:
     """[system, user], within the hub's limits (MESSAGES_MAX messages, PROMPT_MAX characters in all): the context
     trimmed oldest first, then the site history, never the trigger transmission (clipped only if it alone could not
-    fit). categories: name -> label; trigger / context: {at, text} (context oldest first, the trigger's own time
+    fit). categories: name -> {label, describe} (or a label alone): each a line of the system prompt, its one-line
+    definition from the pack (rules.py "describe"; the worker models score far better with them); trigger / context: {at, text} (context oldest first, the trigger's own time
     apart); history: up to HISTORY_MAX short lines."""
     def clean(t, n: int | None = TEXT_MAX) -> str:
         t = infer_mod.clean_text(str(t or ""), None).strip()        # radio IDs and plate-like tokens out
         return t if n is None or len(t) <= n else t[:n - 1] + "…"
     at = float(trigger.get("at") or 0.0)
-    head = ["Categories:", *(f"- {k}: {v}" for k, v in categories.items()), ""]
+    system = "\n".join([SYSTEM, "", "Categories (name: label. definition):", *(category_line(k, v) for k, v in
+                                                                                 categories.items()), NONE_LINE])
     trig = clean(trigger.get("text"), None)
 
     def build(ctx: list, hist: list, t: str) -> list[dict]:
-        lines = [*head, f"Trigger transmission: {t}"]
+        lines = [f"Trigger transmission: {t}"]
         if ctx:
             lines += ["", "Same talkgroup around it (seconds from the trigger, oldest first):"]
             lines += [f"[{float(c['at']) - at:+.0f} s] {clean(c['text'])}" for c in ctx]
         if hist:
             lines += ["", "Earlier calls at the place heard (newest first):", *(f"- {clean(h, 200)}" for h in hist)]
-        return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "\n".join(lines)}]
+        return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(lines)}]
 
     def size(ms: list[dict]) -> int:
         return sum(len(m["content"]) for m in ms)
@@ -460,6 +475,8 @@ class ModelBacking:
         else:
             head = f"model: PC worker {s['pc']}, rules only"
         text = f"{head} · today {t['asked']} asked · {t['ok']} answered · {t['events']} events · {t['deadline']} timeouts"
+        if t["invalid"]:
+            text += f" · {t['invalid']} invalid"          # answers the schema refused (a confidence outside 0-1 ...)
         title = ("The local model behind the police rules (sizeup/intel/backing.py): only rows the rules left alone. "
                  "Today: " + " · ".join(f"{t[k]} {k}" for k in COUNTS)
                  + (f"\nModel {s['model']} {s['model_version']}".rstrip() if s["model"] else "")
@@ -589,7 +606,7 @@ class ModelBacking:
         if b is self.null:
             self.count("unavailable")
             return []
-        cats = {k: v.get("label") or k for k, v in pack.categories.items()}
+        cats = {k: {"label": v.get("label") or k, "describe": v.get("describe") or ""} for k, v in pack.categories.items()}
         hist: list[str] = []
         p = job["place"]
         if self.history is not None and p is not None and getattr(p, "precision", "") in SITE_PRECISIONS:
@@ -709,6 +726,8 @@ class ModelBacking:
                 return []
             if near == "other":                # another call while one is open on the source: on the card, no push
                 mode = lowest(mode, "map")
+            if c["infer_pd_corroborate"] and not self._corroborated(entry, cat, job["place"]):
+                mode = lowest(mode, "map")     # the model's confidence alone is uncalibrated: on the card, no push
             if engine._deferred(pack, cat, {}, key, at, entry):
                 return []                      # one pre-alert per call: the category it defers to has it
             # scored on its own rule and the trigger row's own hits only (never another row's in the window)
@@ -733,6 +752,17 @@ class ModelBacking:
             rec.update(event_id=ev.id, used="event")
             self.count("events")
             return [ev]
+
+    @staticmethod
+    def _corroborated(entry, cat: str, place) -> bool:
+        """The trigger row itself backs the model up: a dispatch cue, a rule word of the category (under its
+        threshold: else the rules would have raised it), or a place the locator confirms from the trigger's words.
+        Never in_progress, never the model's confidence (both unreliable), never the model's address."""
+        from sizeup.intel import rules as rules_mod
+        if any(w > 0 and r.mode != "shadow" and r.category in (cat, rules_mod.WILD) and not r.id.startswith("model.")
+               for r, w in entry.hits):
+            return True
+        return place is not None and place.precision != "none" and bool(place.confirmed)
 
     @staticmethod
     def _open_there(engine, pack, key: str, cat: str, at: float, tid: str, place, text: str):

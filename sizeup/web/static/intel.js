@@ -255,6 +255,11 @@ window.IntelSettings = (() => {
       field("/day", mnum("infer_pd_day_cap", 0, 20000, 1, "Questions a day at most")),
       field("wait s", mnum("infer_pd_after_s", 0, 60, 1, "Seconds to wait for the transmissions after it (0: ask at once)")),
     ], mused, mst));
+    // its events push only when the transmission backs them (backing.py infer_pd_corroborate): else card and map
+    const [clab, ccb] = sCheck("Corroborate", (mc.infer_pd_corroborate ?? s.infer_pd_corroborate) !== false,
+      "On: a local model's event pushes only when its transmission also has a dispatch cue, a rule word of its category or a confirmed address; otherwise card and map only");
+    ccb.addEventListener("change", () => post({ action: "set", key: "infer_pd_corroborate", value: ccb.checked }, ccb.checked ? "Model events need corroboration" : "Model events push alone"));
+    top.append(line(clab, []));
     // (Bedrock for it: a stub, off by default; no control here until it is built: backing.py BedrockBackend)
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");

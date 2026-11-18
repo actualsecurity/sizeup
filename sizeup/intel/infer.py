@@ -71,13 +71,13 @@ DEFAULTS = {"infer": False, "infer_provider": "bedrock", "infer_model": "anthrop
             # worker when it is there (else rules only); Bedrock for it a stub, off, with its own hard budget
             "infer_pd": True, "infer_pd_pack": "police", "infer_pd_threshold": 0.7, "infer_pd_mode": "push",
             "infer_pd_hour_cap": 60, "infer_pd_day_cap": 500, "infer_pd_min_words": 6, "infer_pd_after_s": 0,
-            "infer_pd_bedrock": False, "infer_pd_bedrock_budget_usd": 0.0}
+            "infer_pd_corroborate": True, "infer_pd_bedrock": False, "infer_pd_bedrock_budget_usd": 0.0}
 LIMITS = {"infer_daily_cap": (0, 10000), "infer_budget_usd": (0, 500), "infer_low": (0, 1), "infer_weight": (0, 1),
           "infer_sample_pct": (0, 100), "infer_usd_in": (0, 100), "infer_usd_out": (0, 500), "infer_agree_min": (0, 1),
           "infer_agree_conf": (0, 1), "infer_pd_threshold": (0, 1), "infer_pd_hour_cap": (0, 1000),
           "infer_pd_day_cap": (0, 20000), "infer_pd_min_words": (1, 50), "infer_pd_after_s": (0, 60),
           "infer_pd_bedrock_budget_usd": (0, 100)}
-BOOLS = ("infer", "infer_agree_push", "infer_pd", "infer_pd_bedrock")
+BOOLS = ("infer", "infer_agree_push", "infer_pd", "infer_pd_corroborate", "infer_pd_bedrock")
 BACKOFF_S = 600.0
 CALL_TIMEOUT_S = 12.0
 PLACE_REASK_S = 600.0

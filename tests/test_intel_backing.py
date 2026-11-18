@@ -122,6 +122,49 @@ def test_scored_on_its_own_rule_and_the_trigger_only_never_another_rows_evidence
     assert [r[0] for r in ev.rules] == ["model.fake"] and ev.what_score == 0.75
 
 
+# -- the model's confidence alone never pushes -------------------------------------------------------------------------
+
+def test_an_uncorroborated_model_event_is_on_the_card_not_pushed_unless_the_setting_is_off():
+    text = "a man waving a machete is shouting at the cars going by on the bridge"      # no cue, no rule word, no place
+    e, sink, b = setup()
+    [ev] = e.feed(row("t1", text, 1000))
+    assert ev.mode == "map" and not sink.pushes[-1][1].would_push
+    e, sink, b = setup(cfg={"infer_pd_corroborate": False})
+    [ev] = e.feed(row("t1", text, 1000))
+    assert ev.mode == "push" and sink.pushes[-1][1].would_push
+
+
+def test_a_dispatch_cue_a_rule_word_or_a_confirmed_place_corroborates():
+    for text in ("respond to the bridge for a man waving a machete at the cars going by",          # a dispatch cue
+                 "a man waving a machete outside the deli at 100 Example Ave right now"):          # a confirmed place
+        e, sink, b = setup()
+        [ev] = e.feed(row("t1", text, 1000))
+        assert ev.mode == "push" and sink.pushes[-1][1].would_push, text
+    # a rule word of the category under its threshold (the MVA rule alone)
+    e, sink, b = setup(B.FakeBackend(answer("mva_injury", 0.9)), packs=full())
+    [ev] = e.feed(row("t1", "there was an MVA on the bridge and the driver is not moving at all", 1000))
+    assert ev.mode == "push"
+    # the model's own address never does (unconfirmed)
+    e, sink, b = setup(B.FakeBackend(answer(address="100 Example Ave")),
+                       locate=lambda t, s: example_locate(t + " maybe", s))
+    [ev] = e.feed(row("t1", "a man with a blade is standing near 100 Example Ave shouting at the cars going by", 1000))
+    assert ev.mode == "map"
+
+
+@pytest.mark.parametrize("said", ["none", "Unknown", "N/A", "", "  "])
+def test_an_address_of_none_unknown_or_n_a_is_no_address(said):
+    e, sink, b = setup(B.FakeBackend(answer("none", 0.1, address=said)))
+    e.feed(row("t1", MACHETE, 1000))
+    assert e.backing.records[-1]["why"] == "ok" and e.backing.records[-1]["address"] == ""
+    assert B.validate(answer(address=said), ["weapons"])["address"] is None
+
+
+def test_invalid_answers_show_in_the_health_line():
+    e, sink, b = setup(B.FakeBackend(answer(confidence=1.7)))
+    e.feed(row("t1", MACHETE, 1000))
+    assert "1 invalid" in e.backing.health_row()["text"]
+
+
 # -- never escalating the rules' events --------------------------------------------------------------------------------
 
 def test_an_answer_landing_in_an_open_rules_event_is_evidence_only():
@@ -366,7 +409,12 @@ def test_the_prompt_the_trigger_its_context_and_the_site_history():
     assert "Trigger transmission: " + MACHETE in u and "[id]" in u and "1234567" not in u
     assert "ABC1234" not in u and "[plate]" in u                                              # infer.clean_text
     assert u.count("] unit ") == 5 and "earlier call" not in u and "school" not in u          # 5, this source, 2 min
-    assert "- weapons: Weapon / shots" in u and "2026-01-02 EMS / sick · transported" in u
+    assert "2026-01-02 EMS / sick · transported" in u and "Categories" not in u
+    # every category with its one-line definition, from the pack's data, in the system prompt
+    pack = e.pack("police")
+    for name, cd in pack.categories.items():
+        assert cd["describe"] and f"- {name}: {cd['label']}. {cd['describe']}" in sys_m["content"]
+    assert "- none: " in sys_m["content"]
 
 
 def test_with_a_wait_the_transmissions_after_it_are_sent_too():
@@ -423,7 +471,7 @@ def test_the_schema_follows_the_packs_categories():
     raw["rules"] = [r for r in raw["rules"] if r["category"] not in ("dispute", "assault")]
     e, sink, b = setup(B.FakeBackend(answer("assault", 0.9)), packs=rules_mod.load_packs([raw]))
     [ev] = e.feed(row("t1", FIGHT, 1000))
-    assert ev.category == "assault" and "- assault: Assault" in b.asked[0][1]["content"]
+    assert ev.category == "assault" and "- assault: Assault" in b.asked[0][0]["content"]
 
 
 def test_no_prompt_or_answer_in_the_logs():
