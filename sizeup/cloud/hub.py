@@ -958,9 +958,10 @@ class Hub:
                     if p is not None and p.id and isinstance(data, dict) and kind in ("traffic", "page_text"):
                         # whose clip it is, on the clip (a pool job never goes back to the station it came from)
                         data = {**data, "origin_station": p.id}
-                    if kind == "source_event" and isinstance(ev.get("qid"), int) and not isinstance(ev["qid"], bool):
-                        # a copy the station's quarantine sends again: applied only over an older snapshot (on_event)
-                        data = {**data, "resent": True}
+                    if kind == "source_event":
+                        # a copy the station's quarantine sends again (its qid): applied only over an older snapshot
+                        # (on_event); said by the hub alone, never taken from the station's data
+                        data = {**data, "resent": isinstance(ev.get("qid"), int) and not isinstance(ev["qid"], bool)}
                     self.app.apply(kind, data, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it

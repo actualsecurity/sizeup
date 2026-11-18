@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 
 import numpy as np
@@ -647,6 +648,25 @@ def test_a_resent_older_snapshot_never_overwrites_a_newer_one_within_the_skew(tm
         assert code == 200 and json.loads(body)["acked"] == rows[0]["seq"]
         assert (report()["type"], report()["location"], report()["units"]) == ("STRU", "14 Example Ave", ["E60", "L31"])
         assert sum("re-sent older report" in m for m in logs) == 1
+        # ... taken (acked, never listed as rejected): through the forwarder, the station's quarantine lets it go
+        ob.ack(rows[0]["seq"])
+        ob.released([q["id"]])                            # (the copy posted by hand above, as the station would)
+        ob.add("source_event", s1, None, at=now)
+        q2 = ob.quarantine(ob.batch(meta=True)[0], "apply_failed", "a hub bug", now=now)
+        assert ob.requeue_due(now=now + 10 ** 5)[0]["superseded"] is False and ob.summary()["n"] == 1
+
+        class Hub:
+            def request(self, method, path, body=None, timeout=None):
+                code, raw, _ = h._events(json.dumps(dict(body, epoch="e-fwd")).encode())
+                assert code == 200
+                return json.loads(raw)
+        link._isolate, link.sent, link.log = None, 0, logs.append
+        link._stop, link.last_ok, link.last_error, link.error_since, link._lock = (
+            threading.Event(), None, "", None, threading.Lock())
+        link.cfg = type("Cfg", (), {"cloud_hub_url": "http://hub.invalid"})()
+        assert link._forward_once(Hub(), Backoff(jitter=lambda a, b: 1.0), now + 10 ** 5) == 0.0
+        assert ob.db.execute("SELECT id FROM quarantine WHERE id = ?", (q2["id"],)).fetchone() is None
+        assert ob.pending()[0] == 0 and (report()["type"], report()["location"]) == ("STRU", "14 Example Ave")
         code, body, _ = h._events(json.dumps(dict(sent, epoch="e-again")).encode())     # (again: said once)
         assert sum("re-sent older report" in m for m in logs) == 1
         # a first send (no qid) of a snapshot 60 s older is still applied: the skew a station's clock may step back

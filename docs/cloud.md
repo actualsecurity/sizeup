@@ -271,7 +271,8 @@ The station treats 400 / 413 / 422 as "refused for good":
   and the hub ignores a report more than 2 min older than the one it applied (`source_reports.seen_at`; within 2 min
   it is applied, so the station's clock stepping back never drops a newer one). A copy the quarantine sends again
   carries its `qid`, and the hub applies it only over an older snapshot, however close (a newer one may have come from a
-  build that didn't note it in `source_latest`).
+  build that didn't note it in `source_latest`). The cost: a re-sent copy that was in fact the newer one, behind only
+  because the station's clock stepped back, is dropped too, and the hub keeps the older report until the feed changes.
 - An alarm the hub takes too late to raise (`alarms.MAX_AGE_S`, 30 min) stays as "late" for 24 h, then clears.
 - A page event whose `page_text` came first still brings its clip.
 
