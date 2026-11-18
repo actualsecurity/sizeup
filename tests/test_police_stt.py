@@ -211,6 +211,8 @@ def test_the_police_profile_and_its_prompt(tmp_path):
 
 class _PromptApp:
     _prompt = App._prompt
+    _base_prompt = App._base_prompt
+    _terms_for_item = App._terms_for_item
     _stt_profile = staticmethod(App._stt_profile)
     _profile_prompt = App._profile_prompt
 
