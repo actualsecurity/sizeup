@@ -3,14 +3,15 @@
 
 The first evening of live police pre-alerts pushed two calls from a neighboring town's PD talkgroup (the pack read
 every MRRS police talkgroup), one of them a barricade on a garbled transmission whose only cue was the word
-"hostage", and each push came minutes after the transmission. Held here:
+"hostage", and each push came minutes after the transmission (speech-to-text's queue, not the engine). Held here:
 
   - the police pack reads Port Chester / Rye / Rye Brook PD only (dispatch, tac, secure); every other MRRS police
     talkgroup of the talkgroups file is neighbor_police's ("Area PD"): the same rules, read from police.json at load,
     at log, so nothing is lost and one switch in Settings raises it;
   - a lone "hostage" / "barricade" is under the threshold; with a second cue it is over, and a dispatch of a
     barricaded subject pushes at once, with no place and no wait;
-  - a call held for its place ("unplaced") goes on the timer RELEASE_S after its call-out, with nothing more heard;
+  - a call held for its place ("unplaced") stays held: the tick (no traffic needed) never pushes it, at RELEASE_S or
+    after; a place after RELEASE_S stays "placed_late" at log (#640's design: the delay was speech-to-text's);
   - a transmission transcribed after newer ones of its source is still read (it was dropped, or raised a KeyError).
 
 Synthetic only (this repository is public): "12 Example Road", "Car 6", invented talkers. Talkgroup numbers are the
@@ -208,52 +209,43 @@ def test_a_lone_word_and_a_cue_in_the_next_transmission_of_the_call_add_up():
 
 
 def test_the_safety_categories_are_never_held_for_a_place():
-    """Even written "place": true, a safety category pushes with no place (the barricade, shots, EDP, dispute)."""
-    raw = json.loads((rules_mod.DATA / "police.json").read_text())
-    for c in raw["categories"].values():
-        if c.get("safety"):
-            c["place"] = True
-    e, sink = engine(packs=rules_mod.load_packs([raw]))
-    e.feed(row("t1", "Respond to 12 Example Road, barricaded subject with a weapon.", e.clock()))
+    """No safety category of any pack is a "place": true one (engine._unplaced holds only those): a barricade or shots
+    with no place push at once, and the tick changes nothing."""
+    for pack in rules_mod.load_packs():
+        for c, cd in pack.categories.items():
+            assert not (cd["safety"] and cd["place"]), (pack.name, c)
+    clock = Clock()
+    e, sink = engine(clock=clock)
+    e.feed(row("t1", "Respond to 12 Example Road, barricaded subject with a weapon.", clock()))
     assert {ev.category for ev, _d in pushed(sink)} == {"barricade", "weapons"}
-    assert all(ev.suppressed == "" for ev in e.events.open_events())
+    assert all(ev.suppressed == "" and ev.precision == "none" for ev in e.events.open_events())
 
 
-# -- a held call goes on the timer ------------------------------------------------------------------------------------
+# -- a held call stays held: no place, no pre-alert (#640) -------------------------------------------------------------
 
 HELD = "Caller states they smell something burning, I'll be notifying the FD."     # fire_call, no address
 
 
-def test_an_unplaced_call_goes_at_release_s_with_nothing_more_heard():
+def test_an_unplaced_call_is_still_not_pushed_at_release_s_with_nothing_more_heard():
+    """The tick runs with no traffic (engine._run waits on its queue at most TICK_S), and never lets a held call go:
+    at RELEASE_S and after it is still "unplaced" at log, then it expires, never pushed."""
     clock = Clock()
     e, sink = engine(clock=clock)
     e.feed(row("c1", HELD, clock()))
     [ev] = e.events.open_events()
-    first = ev.first_at
-    assert (ev.category, ev.suppressed, ev.mode) == ("fire_call", "unplaced", "log") and pushed(sink) == []
-    clock.t = first + RELEASE_S - 1
-    assert e.tick(clock()) == [] and pushed(sink) == []                   # not yet
-    clock.t = first + RELEASE_S
-    [rel] = e.tick(clock())
-    assert rel.id == ev.id
-    [(_p, d)] = pushed(sink)
-    assert rel.pushed_at == first + RELEASE_S and rel.suppressed == "" and rel.mode == "push"
-    assert d.message["body"].startswith("location not heard") and "Burning smell" in d.message["title"]
-    clock.t += 15
-    assert e.tick(clock()) == [] and len(pushed(sink)) == 1               # once
+    assert (ev.category, ev.suppressed, ev.mode) == ("fire_call", "unplaced", "log")
+    for dt in (RELEASE_S - 1, RELEASE_S, RELEASE_S + 15, RELEASE_S * 2):
+        clock.t = ev.first_at + dt
+        e._maybe_tick()                                                   # what _run does on an empty queue
+        [now] = e.events.open_events()
+        assert (now.suppressed, now.mode, now.pushed_at) == ("unplaced", "log", None), dt
+    assert pushed(sink) == []
+    clock.t = ev.until
+    assert [x.status for x in e.tick(clock())] == ["expired"]
+    assert e.events.open_events() == [] and pushed(sink) == []
 
 
-def test_live_the_thread_ticks_with_no_traffic():
-    """Live, the "intel" thread waits on its queue at most TICK_S, then ticks (engine._run): the release needs no row."""
-    clock = Clock()
-    e, sink = engine(clock=clock)
-    e.feed(row("c1", HELD, clock()))
-    clock.t += RELEASE_S + 1
-    e._maybe_tick()                                                       # what _run does on an empty queue
-    assert len(pushed(sink)) == 1
-
-
-def test_a_released_call_is_never_held_again_and_its_place_found_later_pushes_once_more():
+def test_a_place_after_release_s_stays_placed_late_at_log():
     clock = Clock()
     locate = lambda text, scope: (Place("address", 41.0, -73.66, 25.0, "12 Example Rd, Port Chester", "Port Chester",  # noqa: E731
                                         True, 0.8) if "12 example" in text.lower() else None)
@@ -261,21 +253,11 @@ def test_a_released_call_is_never_held_again_and_its_place_found_later_pushes_on
     e.feed(row("c1", HELD, clock(), talker="DISP"))
     clock.t += RELEASE_S
     e.tick(clock())
-    assert len(pushed(sink)) == 1
     clock.t += 60
     e.feed(row("c2", "The burning smell is at 12 Example Road, FD en route.", clock(), talker="DISP"))
     [ev] = e.events.open_events()
-    assert ev.label_full == "12 Example Rd, Port Chester" and ev.suppressed == ""
-    assert len(pushed(sink)) == 2                                         # the place found: one more push
-
-
-def test_a_call_released_at_log_stays_quiet():
-    clock = Clock()
-    e, sink = engine({"intel_packs": {"police": {"mode": "log"}}}, clock=clock)
-    e.feed(row("c1", HELD, clock()))
-    clock.t += RELEASE_S
-    e.tick(clock())
-    assert pushed(sink) == [] and e.events.open_events()[0].mode == "log"
+    assert ev.label_full == "12 Example Rd, Port Chester" and (ev.suppressed, ev.mode) == ("placed_late", "log")
+    assert pushed(sink) == []
 
 
 # -- a transmission transcribed late, after newer ones of its source ---------------------------------------------------

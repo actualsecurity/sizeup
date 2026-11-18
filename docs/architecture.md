@@ -260,8 +260,8 @@ pushed. It never creates an incident.
    are held at log when outside our area or at one of our own accepted emergency incidents (`out_of_area`,
    `near_incident`; never once pushed; a safety category is linked, not held: docs/cloud.md). The police pack's
    events are never linked, and held only in its `fire_call` category (a burning smell, the FD notified) until it
-   has an address in the source's towns (`unplaced`), at most 5 minutes: then it pushes without one; its own safety
-   categories are weapons, barricade, EDP and dispute. The police pack reads Port Chester / Rye / Rye Brook PD only;
+   has an address in the source's towns (`unplaced`); its own safety categories are weapons, barricade, EDP and
+   dispute. The police pack reads Port Chester / Rye / Rye Brook PD only;
    `neighbor_police.json` reads the other MRRS police talkgroups with the same rules (`"rules_from"`), at log.
 3. The window's words go through the locator (`place.py`), held to the source's home towns. Beyond what a page says, it
    reads spoken intersections ("X and Y", "corner of"), blocks ("the 100 block of X", never an exact address), relative
