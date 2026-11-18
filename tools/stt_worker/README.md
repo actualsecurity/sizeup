@@ -4,11 +4,16 @@
 through a local whisper.cpp `whisper-server` and sends the text back. When the PC is gaming, paused or off, the hub
 sends the clips the way it would without the worker (AWS Transcribe, then the station's whisper). Nothing is dropped.
 
+Optionally it also serves a **local LLM** (llama.cpp's `llama-server`, on the same GPU) for the hub's infer lane:
+short JSON classifications for the intel engine, never a cloud model. Clips always come first, and a game gets the
+GPU back at once (see [The local LLM](#the-local-llm-optional)).
+
 - **Connections:** the worker only connects out, to the hub over HTTPS through Cloudflare Access and to
-  `whisper-server` on 127.0.0.1. Nothing on the PC listens on the network.
+  `whisper-server` (and `llama-server`) on 127.0.0.1. Nothing on the PC listens on the network.
 - **Python:** standard library only, Python 3.10 or newer. `worker.toml` needs 3.11+. On 3.10, use `worker.json`
   with the same keys.
-- **Logs:** they hold job ids and timings. They never hold transcripts or the token.
+- **Logs:** they hold job ids, timings and token counts. They never hold transcripts, prompts, the LLM's answers or
+  the token.
 
 ## Windows setup (NVIDIA GPU)
 
@@ -81,6 +86,61 @@ binds it anywhere else.
 
 Leave it running for step 7, then stop it with Ctrl+C.
 
+### 4b. The local LLM (optional): llama.cpp with CUDA and the model
+
+Skip this step for speech-to-text only. What it is for: [The local LLM](#the-local-llm-optional).
+
+llama.cpp release **b12359** (the build of v1.0.0, commit `b1b770d9`), two assets for CUDA 12.4. Both unpack into
+the same folder (they are flat), and together they hold `llama-server.exe` with its DLLs and the CUDA runtime, so you
+don't need the CUDA Toolkit. The build covers the RTX 30 series (sm_86).
+
+| asset | bytes | SHA256 |
+|---|---|---|
+| `llama-b12359-bin-win-cuda-12.4-x64.zip` | 318,976,332 | `E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914` |
+| `cudart-llama-bin-win-cuda-12.4-x64.zip` | 391,443,627 | `8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6` |
+
+```powershell
+$r = 'https://github.com/ggml-org/llama.cpp/releases/download/b12359'
+Invoke-WebRequest "$r/llama-b12359-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cuda.zip"
+Invoke-WebRequest "$r/cudart-llama-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cudart.zip"
+(Get-FileHash "$d\llama-cuda.zip").Hash -eq 'E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914'     # True
+(Get-FileHash "$d\llama-cudart.zip").Hash -eq '8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6'   # True
+Expand-Archive "$d\llama-cuda.zip" "$d\llama"
+Expand-Archive "$d\llama-cudart.zip" "$d\llama" -Force     # -> $d\llama\llama-server.exe and its DLLs
+Remove-Item "$d\llama-cuda.zip", "$d\llama-cudart.zip"
+```
+
+The zip has llama.cpp's other tools too; the worker runs only `llama-server.exe` (which loads
+`llama-server-impl.dll` and the `ggml*.dll` beside it).
+
+The model is **Qwen3-8B, Q4_K_M** (Apache-2.0), pinned to one revision of the official Qwen/Qwen3-8B-GGUF repo
+(5,027,783,488 bytes). Why this one: the PR that added the LLM compares it with Qwen2.5-7B, Llama-3.1-8B and
+Gemma-3-12B on synthetic dispatch traffic (`llm_eval/`).
+
+```powershell
+Invoke-WebRequest https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf `
+  -OutFile "$d\models\Qwen3-8B-Q4_K_M.gguf"
+(Get-FileHash "$d\models\Qwen3-8B-Q4_K_M.gguf").Hash -eq 'D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785'   # True
+```
+
+The worker checks the same hash (`llm_model_sha256`) before it first starts llama-server.
+
+**Fallback, if Qwen3 isn't accurate enough on real traffic:** Gemma-3-12B-it Q4_K_M (Gemma Terms of Use), more
+accurate in the comparison but about 8.3 GB of VRAM (see the budget): bartowski/google_gemma-3-12b-it-GGUF at
+`648e3a36a77c8a9f12d86e741f9dcb9089c769c4`, `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 bytes, SHA256
+`FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B`. Change `-m`, `llm_model` and `llm_model_sha256`
+(and drop `--reasoning off`, which is for Qwen3's thinking).
+
+Try it (Ctrl+C to stop):
+
+```powershell
+& "$d\llama\llama-server.exe" -m "$d\models\Qwen3-8B-Q4_K_M.gguf" --host 127.0.0.1 --port 8180 -c 4096 -ngl 99 -np 1 --jinja --no-webui --no-slots --reasoning off
+```
+
+The output should list the GPU (`ggml_cuda_init: found 1 CUDA devices`) and end with `server is listening on
+http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries a constrained answer
+(`llama-server: ok (...)`). Then add the `llm_*` keys to `worker.toml` (step 5) and the worker runs it from then on.
+
 ### 5. The worker
 
 `worker.py` is pinned to a commit. Check its hash after the download:
@@ -100,6 +160,12 @@ model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4']
+# the local LLM (optional: leave these out for none; see "The local LLM" below)
+llm_url = "http://127.0.0.1:8180"
+llm_model = "qwen3-8b-q4_k_m"
+llm_model_sha256 = "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+llm_server = ['llama\llama-server.exe', '-m', 'models\Qwen3-8B-Q4_K_M.gguf', '--host', '127.0.0.1', '--port', '8180',
+              '-c', '4096', '-ngl', '99', '-np', '1', '--jinja', '--no-webui', '--no-slots', '--reasoning', 'off']
 ```
 
 ### 6. The two tokens
@@ -213,6 +279,56 @@ Register-ScheduledTask -TaskName 'sizeup-whisper-server' -Action $wact -Trigger 
   12 s.
 - **Gaming or pause:** the hub takes back the worker's pre-alert jobs itself when the state changes. A later complete,
   extend or release on them gets 409, which the worker treats as a lost lease.
+- **LLM jobs** (with `llm_url`): claimed on a thread and hub connection of their own (`/api/station/stt/infer/*`,
+  the same tokens), one at a time, never while a pre-alert clip is held. The worker tells the hub its models with every
+  heartbeat (`models: {stt, llm, llm_version}`); `llm` is empty while llama-server isn't answering, and the hub sends
+  it no LLM job then. A hub without the infer lane answers 404: the worker asks again every 10 minutes.
+
+## The local LLM (optional)
+
+The hub's **infer lane** (`sizeup/cloud/infer.py`) asks a worker's local model for short JSON classifications of
+radio traffic for the intel engine. The model runs here, on the gaming PC's GPU, in llama.cpp's `llama-server`, which
+the worker starts, checks and stops. Nothing goes to a cloud model.
+
+- **Clips first:** the hub gives the worker an LLM job only while it holds no pre-alert clip. A pre-alert clip that
+  comes during a generation makes the worker abort the generation (it closes the connection, so llama-server stops)
+  and hand the job back; the hub gives it out again within its deadline (about 15 s).
+- **Constrained output:** each job carries a JSON schema; the worker sends it as `response_format: json_schema`,
+  which llama-server turns into a grammar, so the answer is that JSON or nothing. The worker and the hub check it
+  again; an answer that doesn't match is dropped (the intel engine gets None).
+- **Privacy:** prompts and answers go only between the hub, the worker and llama-server on 127.0.0.1. The worker
+  never logs them (job id, task, times and token counts only). llama-server runs without verbose logs and without its
+  slots endpoint (the worker refuses `-v` and `--slots`).
+- **Its own key:** llama-server answers any web page by default. The worker starts it with a random API key each time
+  (in its environment, not on the command line), so no page in a browser on the PC can use it. `--no-webui` turns off
+  its web page.
+- **Only while online:** LLM jobs come while the worker is online (whisper-server answering, not gaming or paused).
+- **Qwen3 without thinking:** `--reasoning off` (and the worker's `enable_thinking: false`). With thinking on, Qwen3
+  spends its tokens thinking and returns an empty answer.
+- **Pinned:** the worker hashes the GGUF before llama-server's first start and refuses one that isn't
+  `llm_model_sha256` (the hash is remembered in `llm-model.json` until the file changes).
+
+### VRAM budget (12 GB, RTX 3080 Ti)
+
+| what | VRAM |
+|---|---|
+| Windows desktop, browser | 0.5-1 GB |
+| whisper-server, large-v3-turbo q5_0 | about 1 GB |
+| llama-server, Qwen3-8B Q4_K_M: weights 4.8 GB, KV cache at `-c 4096` 0.6 GB, buffers | about 6 GB |
+| **together** | **7.5-8 GB of 12 GB** (about 4 GB free) |
+
+`-np 1` (one slot: the worker sends one job at a time) keeps the KV cache to one context; `-c 4096` covers the system
+prompt, the transmission and the answer with room to spare (`-c 2048` saves about 0.3 GB). The fallback Gemma-3-12B
+needs about 8.3 GB instead of 6: about 10-11 GB together, tight but it fits. A game needs the GPU more than either:
+the worker gives it all back (below).
+
+### Gaming and the LLM
+
+When gaming starts, the worker aborts a generation at once and hands the job back, as it does a clip. After
+`llm_stop_gaming_s` (60 s) of gaming it stops its llama-server, which gives about 6 GB of VRAM back to the game
+(whisper-server keeps its own rule: 10 minutes). When gaming ends, it starts llama-server again; the model takes a few
+seconds to load, and the hub gets LLM jobs from the worker again once its health check passes. llama-server's own GPU
+memory never counts as "another process" in the gaming check.
 
 ## Gaming mode
 
@@ -223,12 +339,12 @@ once. It finishes the job only when it is a short one whose lease ends within 3 
 **Automatic:** every 5 s the worker checks for any of these:
 
 - Windows reports a full-screen game or app (the shell's notification state)
-- a process other than our whisper-server uses more than 1 GB of GPU memory (`nvidia-smi`)
+- a process other than our whisper-server or llama-server uses more than 1 GB of GPU memory (`nvidia-smi`)
 - the GPU is more than 40 % busy while the worker is idle
 
 Two checks in a row start gaming. Gaming ends after 60 s of quiet checks.
 
-- **Our own load:** a check taken while the worker is decoding (or just did) neither counts nor resets.
+- **Our own load:** a check taken while the worker is decoding or generating (or just did) neither counts nor resets.
 - **Windows:** per-process memory often shows as `[N/A]`, so the full-screen check and the load check do the work
   there.
 
@@ -257,6 +373,8 @@ These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
 | `status.json` | the running worker: state, hub link, job counts, GPU (read by `status`) |
 | `worker.log` | the worker's log, errors included (1 MB, 3 old copies) |
 | `whisper-server.log` | whisper-server's output, when the worker starts it (1 MB, 2 old copies) |
+| `llama-server.log` | llama-server's output, when the worker starts it (1 MB, 2 old copies; token counts, never prompts) |
+| `llm-model.json` | the GGUF's checked SHA-256, by path, size and time (so a restart doesn't hash 5 GB again) |
 
 ## Config
 
@@ -281,6 +399,14 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `whisper_fail_max`, `whisper_check_s`, `whisper_timeout_s` | 3, 10, 60 | failures in a row before pausing; health checks while paused |
 | `unauthorized_retry_s` | 300 | retry interval after the hub or Cloudflare refuses |
 | `state_dir`, `log_file` | see Files | `log_file = "-"`: stderr only |
+| `llm_url` | | llama-server, loopback only (e.g. `http://127.0.0.1:8180`); unset: no LLM |
+| `llm_server` | | llama-server's command line; when set, the worker runs it. `--host` 127.0.0.1 only, `--port` = `llm_url`'s, `-m` a local GGUF; `-v`, `--slots`, `--api-key`, `--log-file`, `-hf` refused |
+| `llm_model` | | the label the hub shows (Health), e.g. `qwen3-8b-q4_k_m` |
+| `llm_model_sha256` | | the GGUF's SHA-256: checked before llama-server's first start; a mismatch means no LLM |
+| `llm_process` | `llama-server` | how the GPU check recognises our llama-server |
+| `llm_stop_gaming_s` | 60 | seconds of gaming before the worker stops its llama-server (its VRAM back to the game); 0 at once |
+| `llm_timeout_s`, `llm_check_s`, `llm_fail_max` | 30, 10, 3 | per answer; health checks; failures in a row before no LLM until healthy |
+| `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
 
 ## Troubleshooting
 
@@ -292,6 +418,13 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `gaming (GPU 55% busy)` when nothing runs | Raise `gaming_util_pct` or set `whisper_pid`. |
 | `gaming (a full-screen app)` while watching a full-screen video | Expected. Set `fullscreen_gaming = false` to turn it off. |
 | `another worker (pid N) is running` | A second copy was refused. `status` shows the one that runs. |
+| `llm: ..., model hash mismatch` | The GGUF isn't the pinned one: download it again (step 4b) and check its hash. |
+| `llm: ..., loading` for minutes | Read `llama-server.log`. `CUDA error: out of memory`: something else holds VRAM; lower `-c` or use the fallback model. |
+| `llm: ..., not answering` | llama-server exited or never started: `llama-server.log`; `check` tries a constrained answer. |
+| `the hub has no LLM lane (an older hub)` | The hub predates the infer lane. Clips work as before; the worker asks again every 10 min. |
+| `infer ... not valid under its schema` often, with Qwen3 | Check `--reasoning off` is in `llm_server` (thinking eats the answer). |
+| `infer ... not valid under its schema` | The model's answer didn't match the job's schema; the hub drops it (None). Many: tell the admin. |
+| Health: LLM `none` while online | `status` on the PC: `llm:` says why (loading, gaming stopped it, hash mismatch). |
 
 ## Mac (Metal) later
 
