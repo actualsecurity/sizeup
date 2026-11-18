@@ -14,7 +14,8 @@ Reset to default = drop the override (one item, or a whole section).
     status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
     geo_town_order                 key "_list" -> [towns]
     units                          key CODE -> the unit as edited ({kind, spoken, title, department, spare,
-                                   response, station, retired}); key "_boards" -> the boards' layout
+                                   response, station, status_set (another agency's: its statuses, third party
+                                   or not), retired}); key "_boards" -> the boards' layout
     dispatch_wording               key template name -> text; "lead_in_joint_only" -> {town: text}
     dispatch_tones                 key joint town -> [[Hz, s], ...] | null (not set: PCFD's are played)
     dispatch                       key "tones" -> PCFD's tone groups, "channels" -> [labels], "voice", "speed";
@@ -424,9 +425,13 @@ def overlay(d: dict, ov: dict) -> dict:
     if isinstance(ag, dict) and isinstance(ag.get("sets"), dict):   # a status deleted, a board gone: out of the sets (#219)
         ids = {b.get("id") for b in d.get("unit_boards") or [] if isinstance(b, dict)}
         sets = {k: dict(v, statuses=[c for c in v.get("statuses") or [] if c not in gone_st],
-                        labels={c: t for c, t in (v.get("labels") or {}).items() if c not in gone_st})
+                        labels={c: t for c, t in (v.get("labels") or {}).items() if c not in gone_st},
+                        **({"flow": {c: [x for x in n if x not in gone_st] for c, n in v["flow"].items() if c not in gone_st}}
+                           if isinstance(v.get("flow"), dict) else {}))
                 for k, v in ag["sets"].items() if isinstance(v, dict)}
-        d["agency_status_sets"] = dict(ag, sets=sets, boards={b: x for b, x in (ag.get("boards") or {}).items() if b in ids})
+        d["agency_status_sets"] = dict(ag, sets=sets, boards={b: x for b, x in (ag.get("boards") or {}).items() if b in ids},
+                                       **({"third_party_only": [c for c in ag["third_party_only"] if c not in gone_st]}
+                                          if isinstance(ag.get("third_party_only"), list) else {}))
     return d
 
 
@@ -1213,14 +1218,17 @@ class Editor:
             if isinstance(v, dict) and v.get("deleted"):
                 rows.append(dict(self._unit_row(self.base, code, "", 0, {}, used, base_on, live), state="deleted"))
         return {"rows": rows, "edited": bool(o), "layout_edited": "_boards" in o,
-                "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])]}
+                "stations": [f["name"] for f in getattr(self.cad, "firehouses", [])],
+                "status_sets": [{"id": k, "title": v.get("title") or k, "third_party": bool(v.get("third_party")),
+                                 "statuses": list(L.agency_codes(k))} for k, v in L.agency_status_sets["sets"].items()]}
 
     def _unit_row(self, L, code, board, pos, o, used, base_on, live) -> dict:
         u, info = L.units.get(code, {}), L.unit(code)
         lv = live.get(code) or {}
         return {"code": code, "board": board, "pos": pos, "spoken": u.get("spoken") or "", "title": info["title"],
                 "kind": info["kind"], "department": info["department"], "spare": info["spare"], "response": info["response"],
-                "station": L.station(code),
+                "station": L.station(code), "status_set": L.agency_set(code, board or None),
+                "third_party": L.third_party(code, board or None),
                 "retired": bool(u.get("retired")), "used": used.get(code, 0), "named": info["named"],
                 "state": "added" if code not in base_on and code not in self.base.units else "edited" if code in o else "default",
                 "status": lv.get("status", ""), "incident_number": lv.get("incident_number")}
@@ -1841,6 +1849,12 @@ class Editor:
         if r not in RESPONSES:
             raise CadError(f"response: one of {', '.join(RESPONSES)}")
         out["response"] = r
+        ss = _text(g("status_set"), "status_set", 40, required=False)   # another agency's: its statuses (third party ...)
+        if ss and r == "agency":
+            sets = L.agency_status_sets["sets"]
+            if ss not in sets:
+                raise CadError(f"status_set: one of {', '.join(sets)}")
+            out["status_set"] = ss
         return out
 
     def _same_unit(self, a: dict | None, b: dict | None, code: str) -> bool:
@@ -1849,7 +1863,7 @@ class Editor:
             u = u or {}
             return (u.get("kind", "agency"), (u.get("spoken") or code) if u.get("spoken") != code else code,
                     u.get("title") or "", u.get("department") or "", bool(u.get("spare")), bool(u.get("retired")),
-                    u.get("station") or "",
+                    u.get("station") or "", u.get("status_set") or "",
                     lists_mod.unit_response(u, self.cad.lists.attach_kinds))
         return k(a) == k(b)
 

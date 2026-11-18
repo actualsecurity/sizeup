@@ -184,7 +184,7 @@ def test_lists_file_has_the_sheets_vocabulary():
         "IC": "onscene", "OS": "oos", "UNMANNED": "oos"}
     assert L.status_for("free") == "AV" and L.status_for("dispatched") == "DP" and L.status_for("oos") == "OS"
     to_confirm = {s["code"] for s in L.unit_statuses if s.get("confirm")}
-    assert to_confirm == {"AQ", "AK", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "DO", "IC", "UNMANNED"}
+    assert to_confirm == {"AQ", "AK", "ST", "ET", "OA", "FR", "NR", "CB", "CN", "CE", "IC", "UNMANNED"}
     # The department's colors (CN, CE, DO are black in its sheet: a light grey here, readable on the dark theme).
     bg = {s["code"]: s["bg"] for s in L.unit_statuses}
     assert (bg["AV"], bg["DP"], bg["OL"], bg["ST"], bg["CB"], bg["OS"], bg["CN"]) == (

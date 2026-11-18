@@ -1591,7 +1591,8 @@ function sUnits(panel) {
   const todo = rows.filter((r) => !r.retired && !r.named).length;
   const out = [...sHead("Units", "Main board: PCFD and Rye Brook fire units. Run cards pick them by kind, All PCFD ticks "
     + "PCFD's, the dispatch says them. Mutual aid departments and requests go only when named. Other agencies (EMS, PD, "
-    + "utilities, resources): never on a run card, never dispatched or toned out; attach them when they arrive. Codes are "
+    + "utilities, resources): never on a run card, never dispatched or toned out; added from Assigned. Third party "
+    + "(keyholders, utilities, police): added Dispatched, never Responding, Dispatch other theirs only. Codes are "
     + `the department's. A unit with no name shows as its code, marked unconfirmed${todo ? ` (${todo} now)` : ""}.`, reset)];
   S.boardsOpen = S.boardsOpen || new Set();
   for (const b of S.data.boards) {
@@ -1661,6 +1662,14 @@ function sUnitRow(u, i, n, kinds, boards) {
   const resp = sSelect(S_RESPONSES, u.response, (v) => edit({ response: v }, "answers as " + v.replace("_", " ")), "Answers as");
   resp.title = "Fire: run cards and dispatch. Mutual aid: named only. Other agency: attach only.";
   li.append(spare, resp);
+  const sets = S.data.units.status_sets || [];
+  if (u.response === "agency" && sets.length) {      // its class: EMS, Agency, Third party (keyholder ...): its statuses
+    const cls = sSelect(sets.map((x) => [x.id, x.title]), u.status_set || "",
+      (v) => edit({ status_set: v }, `statuses ${(sets.find((x) => x.id === v) || {}).title || v}`), "Statuses");
+    const cur = sets.find((x) => x.id === u.status_set);
+    cls.title = cur ? `${cur.statuses.join(" ")}${cur.third_party ? ". Third party: added Dispatched, never Responding; no automation" : ""}` : "";
+    li.append(cls);
+  }
   const homes = S.data.units.stations || [];
   if (u.response !== "agency" && homes.length) {             // home firehouse: where the maps draw it (cadmap.js)
     const home = sSelect([["", "Home: not set"], ...homes.map((n) => [n, n])], u.station || "",

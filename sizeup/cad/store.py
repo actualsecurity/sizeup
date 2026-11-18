@@ -984,6 +984,8 @@ class Store:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
             r["status_set"] = self.lists.agency_set(r["name"], r["board"])   # another agency's: its statuses (#219)
+            r["third_party"] = self.lists.third_party(r["name"], r["board"])    # keyholder, utility, police: never Responding on add
+            r["start"] = list(self.lists.start_statuses(r["name"], r["board"]))  # what Add unit puts it on as (DP; DO)
             r["station"] = self.lists.station(r["name"])    # home firehouse: the data file, or Settings
         return rows
 
@@ -1218,6 +1220,8 @@ class Store:
             ok = [L.label(s, u["name"], u["board"]) for s in L.unit_statuses_for(u["name"], u["board"])]
             raise CadError(f"{u['name']} is another agency's unit: {', '.join(ok[:-1])} or {ok[-1]}" if len(ok) > 1
                            else f"{u['name']} is another agency's unit: only {''.join(ok)}")
+        if u["response"] != "agency" and status in L.third_party_only:        # DO: a third party's only
+            raise CadError(f"{L.name('unit_statuses', status)} is for third-party units (keyholders, utilities, police)")
         now = self.clock()
         with self.tx() as db:
             a = db.execute("SELECT * FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (uid,)).fetchone()
@@ -1229,8 +1233,8 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status, u['name'], u['board'])}" \
-                + (f" ({note})" if note and role == "oos" else "")
+            text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' and status not in L.release_on_close else L.status_phrase(status, u['name'], u['board'])}" \
+                + (f" ({status})" if status in L.third_party_only else "") + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
             relieved = []
             if iid is not None and status == L.command_status:      # one line: "Command: E63 (from 2392)"
@@ -1679,10 +1683,15 @@ class Store:
                 if status and self.lists.placeholder(u["name"]):
                     raise CadError(f"{u['name']} is a department placeholder: never {self.lists.name('unit_statuses', status)}")
                 if status:
-                    col = ON_TIMES[self.lists.role(status)]
+                    # Responding / On location (#220): that time, Disp left empty. Another agency's unit put on as
+                    # Dispatched or Dispatch other (a third party's: requested, dispatched by someone else): Disp.
+                    role = self.lists.role(status)
+                    col = ON_TIMES.get(role) or "dispatched_at"
                     db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (now, cur.lastrowid))
                     db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
-                    self._event(db, iid, "status", f"{u['name']} added {self.lists.status_phrase(status, u['name'], u['board'])} (not dispatched)",
+                    said = self.lists.status_phrase(status, u["name"], u["board"])
+                    self._event(db, iid, "status", f"{u['name']} added {said} (not dispatched)" if role in ("enroute", "onscene")
+                                else f"{u['name']} added: {said}" + (f" ({status})" if status in self.lists.third_party_only else ""),
                                 operator, uid, now)
                     self._history(db, uid, u["status"], status, iid, operator, now)
                     if status == self.lists.command_status:

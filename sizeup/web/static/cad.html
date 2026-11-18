@@ -512,7 +512,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 
       <div class="card">
         <div class="card-head"><h2>Assigned</h2><span id="d-cmd" class="dim small"></span><span class="spacer"></span>
-          <button id="o-open" type="button" class="sm" hidden title="Units nobody dispatched: heard responding, or on location (one, or several: E60 E62 L31 RBPD). Nothing said on the air."><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Add unit</button></div>
+          <button id="o-open" type="button" class="sm" hidden title="Units nobody dispatched: heard responding, or on location (one, or several: E60 E62 L31 RBPD). Other agencies: Dispatched; a third party (keyholder, utility, police) never Responding. Nothing said on the air."><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Add unit</button></div>
         <ol id="d-units" class="list on-units"></ol>
         <!-- units that weren't dispatched (one or several, #220): on the event as Responding or On location (POST attach {status}) -->
         <form id="o-form" class="row add-unit" hidden autocomplete="off">
@@ -529,7 +529,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="o-error" class="error"></div>
       </div>
 
-      <!-- non-emergency: units attached, no run card, no dispatch; any event: other agencies (EMS, PD) that show up -->
+      <!-- non-emergency: our units attached, no run card, no dispatch (other agencies: Assigned > Add unit) -->
       <div id="d-attach" class="card" hidden>
         <div class="card-head"><h2 id="a-title">Attach</h2><button class="help" id="a-hint" type="button" aria-label="Help" aria-expanded="false" data-help="Non-emergency: no run card, no dispatch.">?</button></div>
         <div class="row add-unit">
