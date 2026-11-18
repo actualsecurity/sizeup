@@ -1,0 +1,3 @@
+{
+  "jobs": [{"id": "0123456789abcdef", "type": "call", "args": {"fn": "reception_sample_b64", "args": ["0123456789ab"]}}]
+}

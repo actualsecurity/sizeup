@@ -1,0 +1,9 @@
+{
+  "base": "station-jobs/valid/tts.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/jobs/0/args/text"
+    }
+  ]
+}

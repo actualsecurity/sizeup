@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-job-result.schema.json",
+  "title": "Station job result",
+  "description": "The body of POST /api/station/jobs/<id> (StationLink._run_job, sizeup/cloud/station.py): the outcome of one job of station-jobs, read by the hub's caller that waits for it (Hub.call, sizeup/cloud/hub.py). <id> is the job's 16 hex characters. Plain JSON, not gzipped, at most 16 MiB. The hub keeps the whole object and reads `ok`, `error`, `result`, `label` and `audio`. Sent once the job is done, tried 3 times in all (a 5xx or no answer: again after 1 s, then 2 s; a 4xx: given up), then dropped (J2). What `result` is depends on the job, which the body does not name: `$defs` has one schema per function of `call` (result.<fn>) and one for sources_reset; a `tts` job answers with `label` and `audio` instead.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": [
+    "ok"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {
+      "type": "boolean",
+      "description": "true: the job ran. false: it did not, or raised; the hub's caller gets `error` as its failure (a falsy value of any type counts as false)."
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "With ok false: why, for people. An exception is `<Type>: <message>`, cut to 300 characters. Two texts are part of the contract today because the hub looks for the words `not allowed` (D2): `not allowed from the hub: '<fn>'` and `this station doesn't know job '<type>'`."
+    },
+    "result": {
+      "description": "With ok true, for `call` and `sources_reset`: what the function returned, any JSON value (null for most switches that worked)."
+    },
+    "label": {
+      "type": "string",
+      "description": "With ok true, for `tts`: which voice said it, for people (`Voice: ...`)."
+    },
+    "audio": {
+      "type": "string",
+      "pattern": "^UklGR[A-Za-z0-9+/]*={0,2}$",
+      "contentEncoding": "base64",
+      "contentMediaType": "audio/wav",
+      "description": "With ok true, for `tts`: the rendered dispatch, standard base64 of a WAV file as the station's voice wrote it (so it starts with `UklGR`, RIFF). The hub decodes it strictly (validate=True) and takes it only if the bytes start with RIFF; nothing else of the WAV is checked. Anything else: the dispatch goes out as text only."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": false,
+            "description": "The job did not run."
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "result.set_mode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when the dongle was switched, else why not."
+    },
+    "result.set_talkgroup": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when set, else why not."
+    },
+    "result.set_talkgroup_group": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when set, else why not."
+    },
+    "result.retranscribe": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many recordings were queued."
+    },
+    "result.set_channel_prefs": {
+      "$ref": "station-state.schema.json#/$defs/status/properties/channels"
+    },
+    "result.emergency_all_clear": {
+      "type": "boolean",
+      "description": "true when an emergency window was open on the station."
+    },
+    "result.transcribe_now": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many recordings were queued."
+    },
+    "result.catch_up": {
+      "description": "What became of the clips.",
+      "x-complete": true,
+      "type": "object",
+      "required": [
+        "queued",
+        "refused",
+        "hold"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "queued": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$",
+            "description": "A clip id."
+          },
+          "description": "The clips now waiting for whisper (or already there)."
+        },
+        "refused": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "description": "Why: `no recording on the station`, `longer than <n> s`."
+          },
+          "description": "Per clip id, why it can never be read here; the hub gives those up."
+        },
+        "hold": {
+          "type": "string",
+          "description": "Why none was taken now (a station update is waiting); \"\" when they were."
+        }
+      }
+    },
+    "result.set_adsb_receiver": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when set, else why not."
+    },
+    "result.set_antenna_groups": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when saved, else why not; `confirm: <question>` asks the person first."
+    },
+    "result.sources_poll_now": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many adapters were woken; 0 on a station with none."
+    },
+    "result.reception_post": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when done, else why not."
+    },
+    "result.reception_sample_b64": {
+      "type": "string",
+      "pattern": "^(UklGR[A-Za-z0-9+/]*={0,2})?$",
+      "contentEncoding": "base64",
+      "description": "Standard base64 of a WAV file (so it starts with `UklGR`, RIFF); \"\" for no such sample."
+    },
+    "result.set_stt_alert_keys": {
+      "description": "What the station now has.",
+      "x-complete": true,
+      "type": "object",
+      "required": [
+        "ok",
+        "rev"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "const": true,
+          "description": "Always true."
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "The revision it keeps: the one sent."
+        }
+      }
+    },
+    "result.set_stt_terms": {
+      "$ref": "station-state.schema.json#/$defs/status/properties/stt_terms"
+    },
+    "result.sources_reset": {
+      "type": "string",
+      "description": "What was asked of each source, for people: `<source>: reset asked (runs before its next poll)`; the hub keeps 300 characters."
+    }
+  }
+}

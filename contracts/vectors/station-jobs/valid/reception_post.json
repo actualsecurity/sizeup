@@ -1,0 +1,16 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {
+        "fn": "reception_post",
+        "args": [
+          {"action": "start", "system": "east", "jobs": ["East 1"], "sdr": "00000105", "minutes": 15},
+          "",
+          "0123456789ab"
+        ]
+      }
+    }
+  ]
+}

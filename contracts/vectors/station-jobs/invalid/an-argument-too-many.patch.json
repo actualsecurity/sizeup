@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/set_adsb_receiver.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/jobs/0/args/args/-",
+      "value": "from_the_future"
+    }
+  ]
+}

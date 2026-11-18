@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/tts.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/voice/speed",
+      "value": "fast"
+    }
+  ]
+}

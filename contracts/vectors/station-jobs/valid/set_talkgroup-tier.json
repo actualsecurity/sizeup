@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {"fn": "set_talkgroup", "args": [7001, null, null, "alert", "east"]}
+    }
+  ]
+}

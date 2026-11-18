@@ -1,0 +1,9 @@
+{
+  "base": "station-jobs/valid/set_mode.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/jobs/0/id"
+    }
+  ]
+}

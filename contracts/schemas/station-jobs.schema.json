@@ -1,0 +1,1248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-jobs.schema.json",
+  "title": "Station jobs (the long poll's answer)",
+  "description": "The hub's 200 answer to GET /api/station/jobs?wait=<seconds> (Hub._jobs, Jobs.take, sizeup/cloud/hub.py): the work the hub has for the station, read by StationLink._jobs (sizeup/cloud/station.py). The request has no body. `wait` is how long the hub holds the request while it has nothing: a decimal number of seconds, cut to 0..30; missing or not a number is 0. The station always asks wait=25 with a 40 s timeout and asks again as soon as it has an answer. Every open job is in one answer, oldest first, and is handed out once only (J1); `jobs` is empty when the wait ran out or the hub is deploying. The station runs each job on a thread of its own and posts the outcome to POST /api/station/jobs/<id> (station-job-result). It reads `jobs`, and of a job `id`, `type` and `args`.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": [
+    "jobs"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/job"
+      },
+      "description": "The jobs to run now; [] for none."
+    }
+  },
+  "$defs": {
+    "job": {
+      "description": "One job.",
+      "x-complete": true,
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "args"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "16 lower-case hex characters, made by the hub for this job. The outcome goes to POST /api/station/jobs/<id>, a route that takes no other form of id."
+        },
+        "type": {
+          "type": "string",
+          "description": "The kind of job. A station answers one it does not know with ok false and `this station doesn't know job '<type>'`.",
+          "x-known": [
+            "tts",
+            "call",
+            "sources_reset"
+          ]
+        },
+        "args": {
+          "type": "object",
+          "description": "The job's arguments, by `type`: the three objects below (their type is said here, once)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tts",
+                "description": "A dispatch to render."
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/tts"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "call",
+                "description": "A function of the station's App to run."
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "sources_reset",
+                "description": "A reset of an incident source."
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/sources_reset"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tts": {
+      "description": "`tts`: say a dispatch with the station's voice, for a hub without one (Cad._render_remote, sizeup/cad/service.py). The hub waits 20 s. Outcome: `label` and `audio` (station-job-result).",
+      "x-complete": true,
+      "required": [
+        "text",
+        "tones",
+        "repeat",
+        "spoken",
+        "voice"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "The dispatch as text. Empty after trimming, no string, or over 4000 characters: `no dispatch text`."
+        },
+        "tones": {
+          "type": "array",
+          "description": "The tones before the voice: groups in order, each a list of [hz, seconds] pairs; [] for none.",
+          "items": {
+            "type": "array",
+            "description": "One group of tones.",
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "description": "One tone.",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Its frequency, Hz."
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Its length, seconds."
+                }
+              ]
+            }
+          }
+        },
+        "repeat": {
+          "type": "integer",
+          "description": "How often the message is said; the station cuts it to 1..3 and takes 2 for a missing one or 0."
+        },
+        "spoken": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "description": "How the unit is said; \"\" for as written."
+          },
+          "description": "Per unit code, how it is said aloud. Anything but an object is taken as {}."
+        },
+        "voice": {
+          "description": "The voice the hub is set to.",
+          "x-complete": true,
+          "type": "object",
+          "required": [
+            "engine",
+            "voice",
+            "speed",
+            "fallback_voice",
+            "rate_wpm"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "engine": {
+              "type": "string",
+              "description": "The speech engine; the station takes `kokoro` for a missing one.",
+              "x-known": [
+                "kokoro",
+                "say",
+                "polly",
+                "none"
+              ]
+            },
+            "voice": {
+              "type": "string",
+              "description": "The engine's voice name; \"\" for its own default."
+            },
+            "speed": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "The speaking rate as a factor, 1.0 = normal."
+            },
+            "fallback_voice": {
+              "type": "string",
+              "description": "The voice of the fallback engine."
+            },
+            "rate_wpm": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Words per minute for the fallback engine; 0 for the voice's own."
+            }
+          }
+        }
+      }
+    },
+    "sources_reset": {
+      "description": "`sources_reset`: an admin on the hub resets an incident source on the station (Hub.reset_source). The hub waits 30 s. Outcome: `result`, a sentence. Arguments that are no object are taken as {} by the station: every source (J5).",
+      "x-complete": true,
+      "required": [
+        "source",
+        "by"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^([a-z0-9][a-z0-9_-]{0,31})?$",
+          "description": "The source's id; \"\" for every source that can be reset."
+        },
+        "by": {
+          "type": "string",
+          "description": "Who asked, for the station's log; \"\" when the hub does not know."
+        }
+      }
+    },
+    "call": {
+      "description": "`call`: run one function of the station's App (Hub.remote; StationLink._call). The hub waits 12 s (10 s for sources_poll_now). The arguments are positional today: `args` is the list the function is called with, so each function's list is closed at the function's last parameter, and one argument too many is answered ok false with the TypeError's text (J4). `x-names` on each list below gives the parameter each position lands on, checked against the App's signatures; `x-forms` the lengths the hub sends today.",
+      "x-complete": true,
+      "required": [
+        "fn",
+        "args"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "fn": {
+          "type": "string",
+          "description": "The function. The station runs only those of CALLS (sizeup/cloud/station.py) and answers any other with ok false and `not allowed from the hub: '<fn>'`, a text the hub looks for (D2).",
+          "x-known": [
+            "set_mode",
+            "set_talkgroup",
+            "set_talkgroup_group",
+            "retranscribe",
+            "set_channel_prefs",
+            "emergency_all_clear",
+            "transcribe_now",
+            "catch_up",
+            "set_adsb_receiver",
+            "set_antenna_groups",
+            "sources_poll_now",
+            "reception_post",
+            "reception_sample_b64",
+            "set_stt_alert_keys",
+            "set_stt_terms"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "description": "The positional arguments, by `fn`: the lists below (that they are lists is said here, once). A missing or empty one calls the function with its defaults (J5); anything but a list: `args: a list`."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_mode",
+                "description": "The job calls set_mode."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_mode"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_talkgroup",
+                "description": "The job calls set_talkgroup."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_talkgroup"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_talkgroup_group",
+                "description": "The job calls set_talkgroup_group."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_talkgroup_group"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "retranscribe",
+                "description": "The job calls retranscribe."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.retranscribe"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_channel_prefs",
+                "description": "The job calls set_channel_prefs."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_channel_prefs"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "emergency_all_clear",
+                "description": "The job calls emergency_all_clear."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.emergency_all_clear"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "transcribe_now",
+                "description": "The job calls transcribe_now."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.transcribe_now"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "catch_up",
+                "description": "The job calls catch_up."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.catch_up"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_adsb_receiver",
+                "description": "The job calls set_adsb_receiver."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_adsb_receiver"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_antenna_groups",
+                "description": "The job calls set_antenna_groups."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_antenna_groups"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "sources_poll_now",
+                "description": "The job calls sources_poll_now."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.sources_poll_now"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "reception_post",
+                "description": "The job calls reception_post."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.reception_post"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "reception_sample_b64",
+                "description": "The job calls reception_sample_b64."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.reception_sample_b64"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_stt_alert_keys",
+                "description": "The job calls set_stt_alert_keys."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_stt_alert_keys"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "set_stt_terms",
+                "description": "The job calls set_stt_terms."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.set_stt_terms"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "call.set_mode": {
+      "description": "App.set_mode(mode, sdr=None, by=\"person\", confirm=False): give a dongle a job. The hub sends [mode, sdr], and [mode, sdr, \"person\", true] when a person confirmed taking a fire job's dongle for another system's job. Result: null when switched, else a sentence saying why not.",
+      "x-names": [
+        "mode",
+        "sdr",
+        "by",
+        "confirm"
+      ],
+      "x-forms": [
+        2,
+        4
+      ],
+      "minItems": 1,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "mode: the job, as the station's status names it: a channel's label, the county P25 job, another system's job, or Off."
+        },
+        {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "sdr: the dongle's serial; null for the station's first dongle."
+        },
+        {
+          "type": "string",
+          "description": "by: who chose it. The hub sends `person` (a person's choice is never changed by auto-assign).",
+          "x-known": [
+            "person"
+          ]
+        },
+        {
+          "type": "boolean",
+          "description": "confirm: true when the person confirmed the station's question."
+        }
+      ]
+    },
+    "call.set_talkgroup": {
+      "description": "App.set_talkgroup(tg, record=None, main=None, tier=None, system=\"\"): a talkgroup's switches. The hub sends [tg, record, main] for the county system's, and [tg, record, main, tier, system] when a tier or another system is named, but only to a station whose status has `p25_systems` (an older one raises TypeError on five arguments). Result: null, else why not.",
+      "x-names": [
+        "tg",
+        "record",
+        "main",
+        "tier",
+        "system"
+      ],
+      "x-forms": [
+        3,
+        5
+      ],
+      "minItems": 1,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999,
+          "description": "tg: the talkgroup's number."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "record: keep its calls; null leaves it as it is."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "main: on the main list and attached to our incident; null leaves it as it is."
+        },
+        {
+          "description": "tier: another system's talkgroup's tier; null leaves it as it is.",
+          "anyOf": [
+            {
+              "type": "string",
+              "description": "The tier.",
+              "x-known": [
+                "alert",
+                "text",
+                "record",
+                "off",
+                "activity"
+              ]
+            },
+            {
+              "type": "null",
+              "description": "Left as it is."
+            }
+          ]
+        },
+        {
+          "type": "string",
+          "description": "system: the P25 system's name; \"\" for the county's."
+        }
+      ]
+    },
+    "call.set_talkgroup_group": {
+      "description": "App.set_talkgroup_group(group, record=None, main=None): every county talkgroup of one section at once. Result: null, else why not.",
+      "x-names": [
+        "group",
+        "record",
+        "main"
+      ],
+      "x-forms": [
+        3
+      ],
+      "minItems": 1,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "group: the section's name, as the talkgroup list has it."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "record: as in set_talkgroup."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "main: as in set_talkgroup."
+        }
+      ]
+    },
+    "call.retranscribe": {
+      "description": "App.retranscribe(ids=None, as_alt=False): run speech-to-text again. The hub sends [ids], and [ids, true] for the alternative text of a channel set to both engines. [null] is every recording still on the station's disk; so is an empty or missing argument list (J5). Result: how many were queued (an integer).",
+      "x-names": [
+        "ids",
+        "as_alt"
+      ],
+      "x-forms": [
+        1,
+        2
+      ],
+      "minItems": 0,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$",
+            "description": "A clip id."
+          },
+          "description": "ids: the clips; null for every recording on disk."
+        },
+        {
+          "type": "boolean",
+          "description": "as_alt: true when the text is wanted as the alternative, not as the transcript."
+        }
+      ]
+    },
+    "call.set_channel_prefs": {
+      "description": "App.set_channel_prefs(prefs, aws=None, tones=None, squelch=None): the hub's whole map of per-channel choices. The hub sends [prefs, aws, tones], and [prefs, aws, tones, squelch] only to a station whose status has `channels.squelch_ok` (an older one raises TypeError on four arguments). Result: the station's `channels` status object, which the hub puts in place of the one it had.",
+      "x-names": [
+        "prefs",
+        "aws",
+        "tones",
+        "squelch"
+      ],
+      "x-forms": [
+        3,
+        4
+      ],
+      "minItems": 1,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "type": "object",
+          "description": "prefs: per channel key (a label, `tg:<n>`, `p25:<system>:<n>`) the choices that differ from the defaults; {} for none. The station refuses the whole call for one bad entry (ValueError). `p25:` keys are left out for a station whose status has no `p25_systems`.",
+          "additionalProperties": {
+            "type": "object",
+            "description": "One channel's choices.",
+            "x-complete": true,
+            "additionalProperties": true,
+            "properties": {
+              "record": {
+                "type": "boolean",
+                "description": "Keep its recordings."
+              },
+              "transcribe": {
+                "type": "boolean",
+                "description": "Run speech-to-text on it."
+              },
+              "engine": {
+                "type": "string",
+                "description": "Which engine reads it.",
+                "x-known": [
+                  "local",
+                  "aws",
+                  "both"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "description": "aws: whether the hub can take audio for Amazon Transcribe now.",
+          "x-complete": true,
+          "type": "object",
+          "required": [
+            "ok",
+            "why",
+            "reserve"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "description": "The hub can."
+            },
+            "why": {
+              "type": "string",
+              "description": "When not, why, for people; the station keeps 300 characters."
+            },
+            "reserve": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "description": "A channel key."
+              },
+              "description": "Channels that keep Amazon Transcribe past the monthly limit; at most 40 kept."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "description": "A channel key."
+              },
+              "description": "Channels of another system past their own budget. Sent only when there are any, and only to a station whose status has `channels.deny_ok`."
+            },
+            "deny_why": {
+              "type": "string",
+              "description": "Why they are denied, for people. Sent with `deny`."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "tones: the tone pairs named on the hub, per `<a_hz>/<b_hz>` key; {} for none. Each value is the hub's settings entry as it is (name, a_hz, b_hz, ours, ...): not typed here.",
+          "additionalProperties": {
+            "type": "object",
+            "description": "One named pair, as the hub's settings keep it."
+          }
+        },
+        {
+          "type": "object",
+          "description": "squelch: per FM traffic channel label, the squelch numbers set on the hub; {} for none. What does not fit the station's channels is left out there, never refused.",
+          "additionalProperties": {
+            "type": "object",
+            "description": "One channel's squelch.",
+            "x-complete": true,
+            "additionalProperties": true,
+            "properties": {
+              "open_db": {
+                "type": "number",
+                "description": "Opens at this many dB of quieting (4 to 30)."
+              },
+              "close_db": {
+                "type": "number",
+                "description": "Closes under this many dB (2 to 28, under open_db)."
+              },
+              "min_open_s": {
+                "type": "number",
+                "description": "Seconds an opening must last to be kept (0.1 to 2)."
+              }
+            }
+          }
+        }
+      ]
+    },
+    "call.emergency_all_clear": {
+      "description": "App.emergency_all_clear(tg=None, radio_ids=None): an alarm's All clear on the hub closes the emergency window on the station. Result: true when one was open there.",
+      "x-names": [
+        "tg",
+        "radio_ids"
+      ],
+      "x-forms": [
+        2
+      ],
+      "minItems": 0,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999,
+          "description": "tg: the talkgroup the alarm was on."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A radio ID, as digits."
+          },
+          "description": "radio_ids: the alarm's radio IDs."
+        }
+      ]
+    },
+    "call.transcribe_now": {
+      "description": "App.transcribe_now(ids): the hub's fallback when Amazon Transcribe could not read a live clip: the station's whisper at live priority. A station without it answers `not allowed` and the hub sends `retranscribe` instead (D2). Result: how many were queued.",
+      "x-names": [
+        "ids"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$",
+            "description": "A clip id."
+          },
+          "description": "ids: the clips."
+        }
+      ]
+    },
+    "call.catch_up": {
+      "description": "App.catch_up(specs): clips skipped while speech-to-text was behind, to be read once the station's whisper is idle. The hub sends at most 3 a call; the station takes the first 10. A station without it answers `not allowed` and is not asked again for 10 minutes (D2). Result: {queued, refused, hold}.",
+      "x-names": [
+        "specs"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "array",
+          "description": "specs: one per clip, the hub's row for it as it is.",
+          "items": {
+            "description": "One skipped clip. The station reads id, key, source, unit, start and service (the transmission's own fields when it still has it in memory) and ignores the rest; an entry that is no object, or whose id is no clip id, is skipped without a word.",
+            "x-complete": true,
+            "type": "object",
+            "required": [
+              "id",
+              "key",
+              "source",
+              "unit",
+              "start",
+              "service"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$",
+                "description": "The clip's id."
+              },
+              "key": {
+                "type": "string",
+                "description": "Its speech-to-text channel key: a label, `tg:<n>` or `p25:<system>:<n>`. The station keeps 60 characters."
+              },
+              "source": {
+                "type": "string",
+                "description": "The channel's label or the talkgroup's name. The station keeps 60 characters."
+              },
+              "unit": {
+                "type": "string",
+                "description": "Who talked, when known; \"\" otherwise. The station keeps 120 characters."
+              },
+              "start": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "When the transmission started, Unix seconds."
+              },
+              "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long it was, in seconds. Not read by the station."
+              },
+              "service": {
+                "type": "string",
+                "description": "The source's service (fire, police, ...); \"\" for none. The station keeps 16 characters."
+              },
+              "tier": {
+                "type": "string",
+                "description": "The talkgroup's tier; \"\" for none. Not read by the station.",
+                "x-known": [
+                  "alert",
+                  "text",
+                  "record",
+                  "off",
+                  "activity",
+                  ""
+                ]
+              },
+              "tries": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "How often the catch-up tried it before. Not read by the station."
+              },
+              "tried_at": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMaximum": 100000000000,
+                "description": "When it was last tried, Unix seconds; 0 for never. Not read by the station."
+              },
+              "route": {
+                "type": "string",
+                "description": "Where the hub's catch-up sends it: always `whisper` here. Not read by the station.",
+                "x-known": [
+                  "whisper"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "call.set_adsb_receiver": {
+      "description": "App.set_adsb_receiver(serial): the dongle reserved for ADS-B. Result: null, else why not.",
+      "x-names": [
+        "serial"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "serial: the dongle's serial; \"\" for none. (The App also takes null; the hub sends \"\".)"
+        }
+      ]
+    },
+    "call.set_antenna_groups": {
+      "description": "App.set_antenna_groups(raw, confirm=\"\"): all of the station's antenna groups ([] for none). The hub sends [groups], and [groups, confirm] when the person confirmed the station's question. Result: null, else why not; a text starting `confirm: ` is a question to put to the person.",
+      "x-names": [
+        "raw",
+        "confirm"
+      ],
+      "x-forms": [
+        1,
+        2
+      ],
+      "minItems": 1,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "array",
+          "description": "raw: the groups, as the person saved them. The station refuses the whole call for one that is no object, has a bad name, or whose sdrs or jobs are no lists of strings.",
+          "items": {
+            "description": "One antenna group. Keys it does not know are ignored.",
+            "type": "object",
+            "required": [
+              "name",
+              "sdrs",
+              "jobs"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "1 to 24 letters, digits, space . / + & _ -; unique without regard to case."
+              },
+              "sdrs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "A dongle's serial."
+                },
+                "description": "The dongles on this antenna."
+              },
+              "jobs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "A job's name."
+                },
+                "description": "The jobs they are locked to, in order of rank."
+              }
+            }
+          }
+        },
+        {
+          "type": "string",
+          "description": "confirm: the station's question, word for word, as the person confirmed it. The station refuses it if its question has changed since."
+        }
+      ]
+    },
+    "call.sources_poll_now": {
+      "description": "App.sources_poll_now(reason=\"\"): a pre-alert or an airport alert on the hub: the incident-source adapters on the station poll now. Result: how many adapters were woken.",
+      "x-names": [
+        "reason"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 0,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "reason: what happened, for the adapters' logs (the station keeps 40 characters). `phone pre-alert` never wakes one."
+        }
+      ]
+    },
+    "call.reception_post": {
+      "description": "App.reception_post(body, by=\"\", tid=\"\"): start, stop or annotate a reception test on the station. The hub always sends all three, with by \"\": who asked stays on the hub. Result: null, else why not.",
+      "x-names": [
+        "body",
+        "by",
+        "tid"
+      ],
+      "x-forms": [
+        3
+      ],
+      "minItems": 1,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "description": "body: the person's request as posted to the hub. Other keys by action; start: `system`, `job` or `jobs`, `sdr`, `minutes`, `keep_min`, `pause`, `note`; note: `id`, `note`. Not typed here.",
+          "type": "object",
+          "required": [],
+          "additionalProperties": true,
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "What to do. Any other word is answered with why not.",
+              "x-known": [
+                "start",
+                "stop",
+                "note"
+              ]
+            }
+          }
+        },
+        {
+          "type": "string",
+          "description": "by: always \"\" from the hub."
+        },
+        {
+          "type": "string",
+          "pattern": "^([0-9a-f]{12})?$",
+          "description": "tid: the id the hub made for a test being started (12 hex characters); \"\" otherwise."
+        }
+      ]
+    },
+    "call.reception_sample_b64": {
+      "description": "App.reception_sample_b64(sid): one call a reception test captured, to listen to. Result: a string, the base64 of a WAV file, \"\" when there is none. The hub decodes it strictly (validate=True) and takes it only if it starts with RIFF.",
+      "x-names": [
+        "sid"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "sid: the sample's id, from the station's reception status."
+        }
+      ]
+    },
+    "call.set_stt_alert_keys": {
+      "description": "App.set_stt_alert_keys(keys, rev): the sources the hub's pre-alerts push from. Sent only to a station whose status has `stt_alert_rev`, when that differs from the hub's. Result: {ok, rev}.",
+      "x-names": [
+        "keys",
+        "rev"
+      ],
+      "x-forms": [
+        2
+      ],
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "string",
+            "description": "A source key (`fm:<label>`, `p25:<system>:<n>`); the station keeps 64 characters."
+          },
+          "description": "keys: the source keys, sorted. More than 500, or no list, is refused (ValueError)."
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "rev: the revision of that set (station-state `status.stt_alert_rev`). A boolean or a float is refused."
+        }
+      ]
+    },
+    "call.set_stt_terms": {
+      "description": "App.set_stt_terms(payload): the top of the private term lists for whisper's prompt. Sent when the station's status `stt_terms.v` differs from the hub's. Result: {v, sets}, the station's `stt_terms` status object.",
+      "x-names": [
+        "payload"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "description": "payload: every list. The station refuses the whole call (ValueError, its copy kept) for more than 8 sets, a bad name, terms or version.",
+          "x-complete": true,
+          "type": "object",
+          "required": [
+            "v",
+            "sets"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "v": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{12})?$",
+              "description": "The version of all lists together: 12 hex characters, \"\" for none."
+            },
+            "sets": {
+              "type": "object",
+              "description": "Per list name (lower case, digits, underscores; 32 characters at most), the list.",
+              "additionalProperties": {
+                "description": "One list.",
+                "x-complete": true,
+                "type": "object",
+                "required": [
+                  "terms",
+                  "v"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "terms": {
+                    "type": "array",
+                    "maxItems": 400,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100,
+                      "description": "One term, as said on the air."
+                    },
+                    "description": "The terms, the most useful first."
+                  },
+                  "v": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{12}$",
+                    "description": "This list's version: 12 hex characters."
+                  },
+                  "places": {
+                    "type": "boolean",
+                    "description": "Whether the places list is added to it in a prompt; taken as true when absent."
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
