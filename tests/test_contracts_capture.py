@@ -74,32 +74,8 @@ def test_the_schemas_the_harness_skips_for_unknown_keys_are_covered_here():
             assert c.errors(name, inst), file
 
 
-def test_a_patch_that_no_longer_fits_its_base_is_one_named_failure(tmp_path, monkeypatch):
-    """A patched vector whose base has changed under it is left out of the vectors (so nothing is collected wrongly
-    and no other test stumbles over it), is named in `c.UNFIT`, and makes exactly one test fail by its name:
-    test_patched_vectors_are_a_base_and_a_json_patch, which reads every patch file itself."""
-    vectors = tmp_path / "vectors"
-    (vectors / "x" / "valid").mkdir(parents=True)
-    (vectors / "x" / "valid" / "base.json").write_text('{"a": 1}')
-    (vectors / "x" / "valid" / "fits.patch.json").write_text(
-        '{"base": "x/valid/base.json", "patch": [{"op": "replace", "path": "/a", "value": 2}]}')
-    (vectors / "x" / "valid" / "loose.patch.json").write_text(
-        '{"base": "x/valid/base.json", "patch": [{"op": "remove", "path": "/gone"}]}')
-    monkeypatch.setattr(c, "VECTORS", vectors)
-    monkeypatch.setattr(c, "UNFIT", [])
-    assert c.vectors("x", "valid") == [("base.json", {"a": 1}), ("fits.json", {"a": 2})]
-    assert len(c.UNFIT) == 1 and "x/valid/loose.patch.json" in c.UNFIT[0] and "/gone" in c.UNFIT[0]
-    with pytest.raises(AssertionError) as e:
-        c.vector(vectors / "x" / "valid" / "loose.patch.json")
-    assert "loose.patch.json" in str(e.value) and "not in the base" in str(e.value)
-    monkeypatch.undo()
-    for name in c.names():
-        c.vectors(name, "valid"), c.vectors(name, "invalid")
-    assert c.UNFIT == [], "a patched vector no longer fits its base"
-
-
 # What docs/native/capture-split.md 10 "Contract artifacts" says a reader may rely on, row by row (copied from the
-# design at 7e657add; test_the_design_documents_table_is_this_one compares it with the document once that is here).
+# design at 6a777c98; test_the_design_documents_table_is_this_one compares it with the document once that is here).
 REQUIRED = {
     "Spool sidecar, `kind: \"segment\"`": [
         "v", "kind", "id", "seq", "spool_epoch", "channel.label", "channel.kind", "start", "end", "closed_boot", "boot",
@@ -1494,6 +1470,8 @@ def test_capture_matches_a_finished_call_to_its_live_alarm_on_the_station():
     assert match(600.0, 612.0, taken=614.0, step=-3600.0) == ""                # another call, 5 min later: not this alarm's
     assert match(300.0, 312.0, taken=300.0 + 12.0 + 69.9, step=-3600.0) == p25["key"]     # the call's length plus 70 s:
     assert match(300.0, 312.0, taken=300.0 + 12.0 + 70.0, step=-3600.0) == ""             # exactly that is outside
+    # a small step and a slow ingest: the wall test still holds, and it is tried first (the boot rule would miss it)
+    assert match(310.0, 322.0, taken=391.0, step=-3.0) == p25["key"]
     # ... and what it gives is what the sidecar and the hub's take-over need
     side = valid("capture-spool-sidecar")["call-matched-to-its-live-alarm.json"]
     assert side["alarm_key"] == p25["key"] == valid("capture-urgent-item")["alarm-p25-live.json"]["key"]

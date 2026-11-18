@@ -29,7 +29,12 @@ already raised for the same burst keeps that alarm (one press, one alarm). The c
 decoded" check (#163) are as they were: only the decode looks further back.
 
 Cheap on purpose (the station is an i5-6400T): the MDC decode takes a few ms on 1.7 s of audio and
-runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found; tones
+runs at most every 0.2 s for the first 1.5 s of a carrier, and not again once an ID is found. Each step decodes only
+what came since the step before, with ID_OVERLAP_FRAMES before it (a burst that ran across the last step's end is whole
+in it), not the whole buffer again (#706). The first two steps are one decode of the look-back and the buffer
+together, each ID placed by where its sync begins (mdc() gives that: App._mdc_at). The look-back is decoded on every
+carrier: a gate on its quieting saved nothing once it was low enough for a weak radio's emergency (~1 dB over the
+hiss, the squelch shut), and a threshold set higher would lose that alarm again. Tones
 are one FFT per frame, on the paging channel only, while it is open. The IDs found live are handed to
 the finished transmission (ids()), so the row is named even when the burst is cut off its segment;
 a post-ID at release that differs is kept next to it, never instead of it. A key-up window that ends with no ID
@@ -65,11 +70,14 @@ from sizeup.radio.fm import FRAME, RATE, id_burst_frames
 PREROLL_FRAMES = 4      # 0.2 s read before the squelch opened (the start of a key-up burst)
 ID_LOOKBACK_FRAMES = 8  # 0.4 s more before a carrier's buffer, for the ID decode only (a slowly rising carrier, #694)
 LOOKBACK_STEPS = 2      # ... in its first two decode steps (a burst that ran into the pre-roll is whole by then)
+ID_OVERLAP_FRAMES = 8   # each decode step re-reads this much (0.4 s) before what is new: a whole burst (MDC: 0.18 s,
+                        # a double packet 0.27 s; FleetSync 0.05-0.09 s) that ran across the last step's end
 HIST_FRAMES = 64        # a traffic channel's latest frames, open or not: where the look-back comes from
 MDC_WINDOW_S = 1.5      # pre-IDs come in the first second (older radios at key-up, APX 0.3-0.8 s in)
 MDC_EVERY = 4           # decode every 4 frames (0.2 s) of it
 MDC_MIN_FRAMES = 4      # ... once there is this much (a burst is ~175 ms)
-KEEP_S = 30.0           # a transmission's live IDs are kept this long for its finished segment
+KEEP_S = 120.0          # a transmission's live IDs are kept this long for its finished segment (handled on the
+                        # channel's worker, radio/fm.py SegmentWorkers: later than its close when that is busy)
 
 
 @dataclass
@@ -81,6 +89,7 @@ class _Chan:
     t0: float = 0.0                             # when buf[0] began (on the squelch's clock: since + frames)
     hist: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))
     shut: deque = field(default_factory=lambda: deque(maxlen=HIST_FRAMES))   # per hist frame: the squelch was closed
+    upto: int = 0                               # buf frames read by the decode steps so far
     back: list = field(default_factory=list)    # the ID look-back: the channel's frames just before buf (#694)
     old: int = 0                                # ... how many of back + buf began before the pre-roll
     before: list | None = None                  # the IDs in those alone (looked at once, when needed)
@@ -101,6 +110,11 @@ class _Chan:
     alarm: str = ""                             # the emergency alarm raised for this carrier (its key)
     burst: bool = False                         # no ID decoded in the key-up window, but a burst was there
     shown: bool = False                         # LiveTalk told (the squelch keyed: not a noise opening)
+
+
+def _ids(found) -> list[tuple[str, bool]]:
+    """mdc()'s answer as (radio ID, emergency), once each in order (it may also say where each sync begins)."""
+    return list(dict.fromkeys((x[0], bool(x[1])) for x in found))
 
 
 class TapSquelch:
@@ -131,7 +145,7 @@ class TapSquelch:
 
 class LiveTap:
     def __init__(self, kind: Callable[[str], str], paging=None, live=None,
-                 mdc: Callable[[np.ndarray], list[tuple[str, bool]]] | None = None,
+                 mdc: Callable[[np.ndarray], list[tuple]] | None = None,
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] | None = None):
         self.kind, self.paging, self.live, self.mdc, self.clock, self.log = kind, paging, live, mdc, clock, log
         self._ch: dict[str, _Chan] = {}
@@ -242,14 +256,18 @@ class LiveTap:
         past = c.n * FRAME >= MDC_WINDOW_S * RATE
         if not past and (c.n < MDC_MIN_FRAMES or c.n % MDC_EVERY):
             return
-        audio = np.concatenate(c.buf).astype(np.float32)
         c.steps += 1
-        found = self._decode(c, c.buf, audio, back=c.steps <= LOOKBACK_STEPS)
+        back = c.steps <= LOOKBACK_STEPS
+        # what is new since the last step, with ID_OVERLAP_FRAMES before it (#706); the look-back's steps: all of it
+        a = 0 if back else max(0, c.upto - ID_OVERLAP_FRAMES)
+        read = c.buf[a:]
+        c.upto = len(c.buf)
+        found = self._decode(c, read, np.concatenate(read).astype(np.float32), back=back)
         if c.pending and not c.pkey and self.on_emergency is not None:
             # the button, at once: its own alarm (the radio that opened the squelch may be another, with its own ID)
             c.pkey = self.on_emergency(label, c.ptime, list(c.pending)) or "raised"
-        if past:
-            c.burst = not found and any(id_burst_frames(audio))     # once per carrier, at the window's end
+        if past:   # once per carrier, at the window's end: the whole buffer
+            c.burst = not found and any(id_burst_frames(np.concatenate(c.buf).astype(np.float32)))
             c.done = True
         if found:
             c.ids, c.done = list(found), True
@@ -257,7 +275,7 @@ class LiveTap:
                 em = [x for x in found if x[1]]
                 again = all(x in c.looked for x in em) and self._raised(c, em)
                 c.alarm = again or self.on_emergency(label, c.since, list(found)) or "raised"
-                c.heard = (c.back if c.looked else []) + list(c.buf)
+                c.heard = (c.back if c.looked else []) + list(read)     # the frames the decode that found it read
             if c.looked and self.log is not None:   # (how often a burst began before the pre-roll: #694)
                 self.log(f"{label}: radio ID decoded from before the squelch opened (look-back)")
             if c.shown:
@@ -300,7 +318,7 @@ class LiveTap:
         frames; 0: the rise rule, no drop)."""
         n, h, shut = len(c.buf), list(c.hist), list(c.shut)
         c.back, c.old, c.before, c.weak, c.lone, c.steps, c.looked = [], 0, None, 0, [], 0, []
-        c.pending, c.pkey, c.ptime, c.heard = [], "", since, []
+        c.pending, c.pkey, c.ptime, c.heard, c.upto = [], "", since, [], 0
         if len(shut) != len(h) or (n and (len(h) < n or h[-1] is not c.buf[-1])):
             return              # (not the frames the tap saw last: never guess)
         b0 = max(0, len(h) - n - ID_LOOKBACK_FRAMES)
@@ -315,17 +333,24 @@ class LiveTap:
         that began in its look-back and ran on into its pre-roll (#694). One that ended before that is not this
         carrier's; an emergency wholly in frames the squelch was closed for (a weak radio's button) is held apart
         (pending): alarmed on its own, and this carrier's only if it names no other radio (_mine)."""
-        found = list(self.mdc(audio))
         if not (back and c.back):
-            return found
+            return _ids(self.mdc(audio))
         lead = c.back + list(frames)
-        more = [x for x in self.mdc(np.concatenate(lead).astype(np.float32)) if x not in found]
+        got = list(self.mdc(np.concatenate(lead).astype(np.float32)))
+        if all(len(x) > 2 for x in got):
+            # one decode of both (#706): an ID whose sync begins in the carrier's own frames is the one its buffer alone
+            # decodes; one that begins in the look-back, only the look-back's
+            edge = len(c.back) * FRAME / RATE
+            found = _ids([x for x in got if x[2] >= edge])
+        else:                   # (an mdc() that doesn't say where: its buffer decoded on its own)
+            found = _ids(self.mdc(audio))
+        more = [x for x in _ids(got) if x not in found]
         if more:
             if c.before is None:
                 old = (c.back + c.buf)[:c.old]
-                c.before = list(self.mdc(np.concatenate(old).astype(np.float32))) if old else []
+                c.before = _ids(self.mdc(np.concatenate(old).astype(np.float32))) if old else []
                 lone = old[len(old) - c.weak:] if c.weak else []
-                c.lone = [x for x in self.mdc(np.concatenate(lone).astype(np.float32)) if x[1]] if lone else []
+                c.lone = [x for x in _ids(self.mdc(np.concatenate(lone).astype(np.float32))) if x[1]] if lone else []
             lone = [x for x in more if x in c.before and x in c.lone and x not in c.pending]
             if lone:
                 c.pending += lone

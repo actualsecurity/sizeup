@@ -205,10 +205,10 @@ main, its switch goes from `True` to `False` (one line) and its row here is mark
 
 | # | severity | where | what | who |
 |---|---|---|---|---|
-| D1 | low | `sizeup/cloud/client.py:130`, `sizeup/cloud/hub.py:619` | The station writes a float NaN as the bare token `NaN` and the hub reads it: not JSON. A reader that is not Python refuses the whole post; the hub's clock skew for the station becomes NaN. Fix in review: #779 | main session |
+| D1 | low | `sizeup/cloud/client.py:130`, `sizeup/cloud/hub.py:619` | The station writes a float NaN as the bare token `NaN` and the hub reads it: not JSON. A reader that is not Python refuses the whole post; the hub's clock skew for the station becomes NaN. Fixed by #779 (merged 2026-11-18) | main session |
 | D2 | medium | `sizeup/cloud/hub.py:1975-1979`, `1936`, `2285`, `1993`, `372`, `1349`, `2391` | No capability strings from station to hub: the hub infers what a station can do from the presence of status keys (`channels.squelch_ok`, `channels.deny_ok`, `p25_systems`, `stt_alert_rev`, `version`) and from the text `not allowed` in a job's error. Found by reading | main session, with native (the registry step) |
-| D3 | medium | `sizeup/web/server.py:911` | `HEAD` is answered as `GET` without the body on `/api/station/` too. A `HEAD` on the job poll takes the waiting jobs, which are handed out only once. Fix in review: #779 | main session |
-| D4 | low | `docs/nodes.md:245-254` against `sizeup/cloud/hub.py:574`, `576` | The design's route table has no row for `POST /api/station/stt` (each clip's speech-to-text input) and names only the long poll of the jobs, not `POST /api/station/jobs/<id>`. `routes.json` has `radio-receive` and `always`. Fix in review: #779. Found by reading | main session (the document's owner) |
+| D3 | medium | `sizeup/web/server.py:911` | `HEAD` is answered as `GET` without the body on `/api/station/` too. A `HEAD` on the job poll takes the waiting jobs, which are handed out only once. Fixed by #779 (merged 2026-11-18) | main session |
+| D4 | low | `docs/nodes.md:245-254` against `sizeup/cloud/hub.py:574`, `576` | The design's route table has no row for `POST /api/station/stt` (each clip's speech-to-text input) and names only the long poll of the jobs, not `POST /api/station/jobs/<id>`. `routes.json` has `radio-receive` and `always`. Fixed by #779 (merged 2026-11-18). Found by reading | main session (the document's owner) |
 | D5 | high | `sizeup/cloud/hub.py:642` (kept), `644`-`645` (raises: `sizeup/cloud/health.py:612`, `hub.py:392`, `1942`, `1976`, `342`); read again at `health.py:673`, `hub.py:411`, `267`, `277` | The hub does not handle a wrong type in a state post. `status.radios` that is no list of objects, a row's `label` that is no string, `status.channels` or `status.outbox` that is no object: the status is kept first, then the handler raises (the connection is dropped with no answer). Until the next good post `GET /api/station/status` and `GET /api/cad/health` (after `radios: 5`) or `GET /api/cad/state` (after `outbox: 5`) drop their connections too. A talker or a page with `ended` and an `until` that is no number is answered 200 and then drops `GET /api/cad/state` the same way. Fix in review: #782 (the normal 200 with `refused: ["status"]` or `["live"]` and a `reason`; the bad part is left out, the rest of the post is taken) | main session |
 | D6 | high | `sizeup/cloud/station.py:222` (called at `582`), `274`-`280` | The station does not handle a wrong type in the state answer. `caps` that is a number or a boolean raises in `_set_caps` outside the thread's error handling: the hub-state thread ends, and with it the heartbeat, talking now, the status and the hub's build, until the station restarts. `caps` as a string becomes one capability per character. A `pool.ready` or `pool.max_s` that is no number makes `pool_has_room` raise in its caller. Fix in review: #782 (the field is ignored, its last good value kept) | main session |
 
@@ -317,11 +317,12 @@ not decided by the admin. The recommended 30 min is the parameter `max_age_s` of
 `urgent-scenarios.json`, never a constant; the scenarios that depend on it say so. Live P25 emergencies wait for
 #775: their item, key and rules are a slot in the contract and not a working path.
 
-### The decisions that matter most (now the design's)
+### Still to confirm, the top decisions first
 
 The first version of these files listed 33 choices (C1 to C33) for the radio maintainers to confirm and 18 places
 where the design did not fit itself (X1 to X18). The design answered them (`79b788a8`, `6a777c98`) and these files
-follow it everywhere. The ones with the most weight, as they now stand:
+follow it everywhere. The six with the most weight are the design's decisions now; what is left to confirm is that
+these files hold them as meant:
 
 | was | decision | where it is held |
 |---|---|---|
@@ -332,9 +333,7 @@ follow it everywhere. The ones with the most weight, as they now stand:
 | C15 | An item answered with a word the sender does not know, or with none in a 200, gets 5 tries, each after the healthy items and alone, then counts as `rejected`. A rejected alarm still rides the app's lane, with a critical Health item. A lone 422 is final | `Lane`; `test_an_answer_capture_cannot_read_...`, `test_a_lone_422_...` |
 | C11 + C8 | The sidecar always goes first when an item is deleted or its audio dropped, and capture's start removes what such a removal left half done. `seq` is taken before the audio's rename; a number that was ever on disk is never given out again. An item with an emergency id never loses its audio at a bound | `spool.md`; `check_spool`, `Spool` |
 
-### Still to confirm
-
-What these files chose where the design, as of `6a777c98`, says nothing. Each is a proposal for the radio
+Then what these files chose where the design, as of `6a777c98`, says nothing. Each is a proposal for the radio
 maintainers (S9, S10: for whoever writes the sender and the hub's route) until confirmed.
 
 | # | where | chosen here |
@@ -349,7 +348,8 @@ maintainers (S9, S10: for whoever writes the sender and the hub's route) until c
 | S8 | `shadow`, 4.3's table | the app writes as in the `inline` row of the same `urgent-mode`, and the shadow instance writes its own file beside it |
 | S9 | the sender, where the reference had to pick a mechanism | the resend is made durable by putting the row back to `new`; "in doubt" across boots is a wall time that lies in the future; a step of the wall clock is its distance from the boot clock moving by more than 2 s; the 256 bound frees page items first, then the copies of alarms that have a row; a P25 key is `int(at * 1000)` as written (Y1) |
 | S10 | the hub, likewise | "still set" is measured from the END of the radio's last flagged call (or its live grant) to the START of the next; a still-set call's id is recorded under the alarm that is there; "open" in the join rule is unacknowledged, and the two are compared as placed on the hub's clock; a `stale` key stays stale against a later event whatever clock the item's age came from |
-| S11 | `tests/test_contracts_routes.py`, `tests/contracts.py` | #774's wider net now accepts a path that has a row under `designed`, and its vector loader leaves out a patch that no longer fits its base (one named failure, not a collection error). Beside the two one-line changes of the first version |
+| S11 | `tests/test_contracts_routes.py` | #774's wider net accepts a path that has a row under `designed`, so capture's sender (step 8b) can merge with or after the hub's route; the test that a served path must be promoted stays. (A patch that no longer fits its base is #774's `Unfit`: this branch adds nothing to `tests/contracts.py`) |
+| S12 | an urgent item's `data` | the keys of every kind are typed in one object (`$defs/data`), and only which are required follows `kind`: a kind added later must not reuse one of these names with another type |
 
 ### Still ambiguous in the design
 
@@ -361,12 +361,13 @@ Section, text, and what does not fit, as of `6a777c98`. The schemas and models f
 | Y2 | 4, 4.5, 4.2 | "every limit ... is exclusive on the inside"; "more than 15 s past `at_boot`"; "a request that reaches capture after it"; "remembers ... for 10 min" | the three sentences read as inclusive of the limit | the general rule: a status exactly 15 s old is down, a request exactly at `expires_boot` is expired, an id exactly 10 min old is forgotten |
 | Y3 | 4.1 | "Capture crashes": debris is removed, "then `SEQ` is recovered"; "Sequence": recovered from the file names, "debris included" | once the debris is removed its number is no longer on disk | the highest number is read before anything is removed |
 | Y4 | 4.1 | "every `id` matches `CLIP_ID` ... and is at most 200 characters" | `CLIP_ID` allows 121; and a label whose slug starts with `.`, `_` or `-` (`_x`, a label of one odd character) gives an id `CLIP_ID` refuses | the schema holds `id` to `CLIP_ID` |
-| Y5 | 4.3 | the P25 match: "if the wall clock stepped in between, so that test fails, the boot clock decides" | applied whenever the wall test fails, the boot rule (the call's length plus 70 s) takes every grant up to a minute before the call, and "+-10 s" means nothing; how capture knows the clock stepped is not said | only when a step is seen (S9) |
+| Y5 | 4.3 | the P25 match: "if the wall clock stepped in between, so that test fails, the boot clock decides" | applied whenever the wall test fails, the boot rule (the call's length plus 70 s) takes every grant up to a minute before the call, and "+-10 s" means nothing; how capture knows the clock stepped is not said | the wall test first; the boot rule only when the wall test fails and a step is seen (S9) |
 | Y6 | 4.2 | the frame table's `reply` row: `id`, `ok`, `error`, `confirm`, `result` | no `reason`, which the text below it and 10 require | with `reason` |
 | Y7 | 4.3 | a rejected alarm is shown "as not delivered until the hub has it by the other lane" | capture writes `urgent.unsent`, and nothing tells it what the app's lane delivered | `Lane.app_delivered`: the contract needs a notice for it, or the app works the banner out |
 | Y8 | 4.3, 11 H1j | the two-station join rule "holds from the start"; "the hub takes one station until multi-station lands" | while it takes one station the second one's request is a 409: there is nothing to join | the rule is live once a second station is taken |
 | Y9 | 4.3 | `seen` because "notices are off for it"; the item is then "judged on its own": `applied` | what `applied` raises on a channel whose notices are off is the alarm code's levels | not modelled |
 | Y10 | 6 step 8b, 11 | "a client string `/api/station/urgent` under `sizeup/` fails the fail-closed route test until `contracts/routes.json` lists the route as served" | S11 accepts a `designed` row, so that the sender can merge with or after the hub's route | as S11; the promotion test stays |
+| Y11 | 4.3 | the P25 match through a step: "the grant's `event_boot` within the call's length plus 70 s before the moment the ingest took the call (10 s of slack and the ingest's settle wait)" | the 70 s holds the "+-10 s" slack, which is inclusive, and the settle wait, which is a limit: the edge could be either | a limit: exactly the call's length plus 70 s is outside |
 
 ### Running
 

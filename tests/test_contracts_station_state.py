@@ -28,8 +28,8 @@ FINE = {p: 200 for p in (*c.PEOPLE_ROUTES, "/api/station/status")}
 # Each test below states today's behaviour and the fixed one. When a fix lands, flip its line here from True to False
 # (nothing else) and mark the row in contracts/README.md fixed. Checked ahead of time: with #779 merged in and D1 / D3
 # flipped, and with #782 merged in and D5 / D6 flipped, every contract test passes.
-D1_NAN_GOES_ON_THE_WIRE = True                  # #779: a NaN is sent as null and the hub's skew stays finite
-D3_HEAD_ON_THE_JOB_POLL_TAKES_THE_JOBS = True   # #779: HEAD under /api/station/ is 405 and no handler runs
+D1_NAN_GOES_ON_THE_WIRE = False                 # #779: a NaN is sent as null and the hub's skew stays finite
+D3_HEAD_ON_THE_JOB_POLL_TAKES_THE_JOBS = False  # #779: HEAD under /api/station/ is 405 and no handler runs
 D5_HUB_RAISES_ON_A_WRONG_TYPE = True            # #782: 200 with `refused`; the bad part left out, the rest taken
 D6_STATION_RAISES_ON_A_WRONG_TYPE = True        # #782: the field is ignored, its last good value kept, no thread ends
 

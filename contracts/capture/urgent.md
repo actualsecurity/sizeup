@@ -56,6 +56,20 @@ Every limit is exclusive on the inside: under the limit is inside, **exactly the
 | A page's clock runs per revision | a revision unsent 120 s after capture made it (`at_boot`; the **larger** of its boot-clock and wall-clock ages) is `expired`; an `ended` one stays sendable for 10 min. So a wall clock stepped forward can expire a revision early; stepped back it changes nothing; neither ever touches an alarm |
 | On the hub | an item is placed at the hub's own now minus `age_s`, never at a station's time. `age_s` is clamped into [0, 24 h]. `sent_at` only shows how far the station's clock is off |
 
+## The file
+
+`/var/lib/sizeup/state/urgent.sqlite` (`paths.urgent_db` in the wish); its DDL is [`urgent.sql`](urgent.sql).
+
+| Rule | |
+|---|---|
+| One opener | only the holder of `radio.lock` opens it: capture in service mode, the app in inline mode. No second writer, no reader |
+| How the app gets the rows | from capture, never from the file: each `urgent` frame carries the item, and after a reconnect the app asks `urgent_since`, page by page. The app keeps the cursor `(urgent_epoch, n)` and the set of `(key, rev)` it has taken (24 h). Take-over is by `(key, rev)`: an item is taken once, however it arrives |
+| Insert | `INSERT OR IGNORE` on `(key, rev)`. A failed insert is tried again every 5 s while the item is in memory |
+| Checkpoints | by capture only, `PASSIVE`, never while an item waits for its commit; `TRUNCATE` at start |
+| Pruned | `sent` rows the app has taken over, an hour after `sent_at`, never inside the resend window; `expired` and `rejected` rows after 24 h; at most 10,000 rows, the oldest `sent` first. **An unsent alarm is never pruned** |
+| Corrupt or unreadable at start | renamed `urgent.sqlite.bad-<epoch s>`; a new file with a new `urgent_epoch`; a CRITICAL log line; `urgent.resets` and `urgent.reset_at` in the status. The app's cursor starts at 0 for the new epoch; its taken set still holds |
+| Never in it | a token, a body, a transcript. `last_error` holds a status and the hub's `reason` only |
+
 ## The sender
 
 Two kept-alive connections: one carries alarms and nothing else, the other page items; a request never holds both.
@@ -77,6 +91,8 @@ At most 32 items and 64 KiB a request, one request in flight per connection.
 | The send does not wait for the disk | the sender takes the item from memory and waits for its commit at most 50 ms. An item with no row is `durable: false`; a row whose answer came first is written as answered, never left `new` |
 | The memory | at most 256 items: page items, and the copies of items that have a row (those are read back from the file). **An alarm without a row is never dropped to make room**: a page item goes, the oldest first. Alarms without rows are bounded only at 10,000; past that the oldest is written out as a CRITICAL log line and let go |
 | At start | into the senders go every `new` row, the oldest alarm first (a page revision only if it is still sendable), and every alarm row answered at or after the last sighting of the hub's `gen` minus 120 s, as "answered under `hub_gen`" |
+| What stops the sending | any of three: `urgent-mode` not `send`; `hub.forward` false in the wish; a hub that does not list `urgent` in `hub.caps`. Then `urgent.state` is `off`. None of them stops the writing in service mode: the rows and frames are how the app learns of a live alarm at all |
+| `urgent.state` | one word, the first that holds: `off`, `no_credentials`, `no_route`, `refused`, `retrying`, `ok`. A reset of the file is not a state: `resets`, `reset_at` |
 
 ### The resend rule
 
@@ -172,7 +188,9 @@ Each row of the design's table is a test (`tests/test_contracts_capture.py`) or 
 | The station's wall clock steps | nothing: ages are on the boot clock |
 | The station's wall clock stepped back 40 min, and the app's take-over event reaches the hub first | the event raises nothing; the key is only `seen`; capture's item is `applied`. One alarm |
 | A P25 live alarm and its call, the station's clock a minute off the hub's | matched on the station, carried as `alarm_key`. One alarm |
-| The same radio's bit still set on its next calls | no live alarm (no transition), no end-of-call alarm (the hub's 10 min rule) |
+| The same radio's bit still set on its next calls | no live alarm (no transition), no end-of-call alarm (the hub's 10 min rule): the row says "emergency still set" |
+| The wall clock stepped back an hour, then a real new P25 press 30 min later | the boot clock shows 30 min since the last set bit: a transition, an alarm |
+| The wall clock stepped forward an hour, a stuck bit 2 s later | the boot clock shows 2 s: no alarm |
 | Two stations hear one press | two items, one alarm, one push |
 | A page lasts 130 s | each revision has its own 120 s and `ended` has 10 min: it is sent. If it never is, the hub ends the entry after 300 s |
 | The hub answers an alarm with a word capture does not know, again and again | 5 tries, each after the healthy items, then `rejected` with a critical Health item; the app's lane carries the alarm |

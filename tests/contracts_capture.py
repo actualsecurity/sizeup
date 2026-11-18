@@ -873,21 +873,21 @@ def match_call(rows, call: dict, *, wall: float, boottime: float, boot: str) -> 
     `alarm_key`, and the app's end-of-call alarm rides the hub's take-over by it: the hub compares no clocks).
 
     The same system + talkgroup + unit, and the grant's time (`event_at`) inside the call's span (`start` to `end`),
-    10 s either side, the edges included: both are the station's wall clock. If the wall clock stepped between the
-    grant and now (its distance from the boot clock changed), the boot clock decides instead: the grant under the
-    call's length plus 70 s (the slack and the ingest's settle wait) before this moment."""
+    10 s either side, the edges included: both are the station's wall clock. If that test fails because the wall
+    clock stepped between the grant and now (its distance from the boot clock changed, in this boot), the boot clock
+    decides: the grant under the call's length plus 70 s (the slack and the ingest's settle wait) before this moment.
+    Without a step the wall test alone decides, so a grant of an earlier call is never taken for this one's."""
     for row in rows:
         d = row["data"]
         if row["kind"] != "alarm" or d.get("emergency_via") != "P25" \
                 or (d.get("system"), d.get("talkgroup"), str(d.get("radio_id"))) != \
                 (call["system"], call["talkgroup"], str(call["unit"])):
             continue
+        if within(row["event_at"], call["start"] - P25_SLACK_S, call["end"] + P25_SLACK_S):
+            return row["key"]
         stepped = row["boot"] == boot and abs((wall - boottime) - (row["event_at"] - row["event_boot"])) > CLOCK_STEP_S
-        if stepped:
-            back = boottime - row["event_boot"]
-            if 0 <= back and not outside(back, (call["end"] - call["start"]) + P25_SLACK_S + P25_SETTLE_S):
-                return row["key"]
-        elif within(row["event_at"], call["start"] - P25_SLACK_S, call["end"] + P25_SLACK_S):
+        back = boottime - row["event_boot"]
+        if stepped and 0 <= back and not outside(back, (call["end"] - call["start"]) + P25_SLACK_S + P25_SETTLE_S):
             return row["key"]
     return ""
 

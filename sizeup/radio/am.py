@@ -88,7 +88,7 @@ from sizeup import atc_hours
 from sizeup.radio import channelize
 from sizeup.radio.amtones import detone, find_tones
 from sizeup.radio.fm import (FRAME, RATE, SHORT_GAP_FRAMES, STALL_S, STUCK_S, Channel, NfmReceiver,
-                             Segment, _mmss, readable)
+                             Segment, _mmss, finish, readable)
 from sizeup.tz import TZ
 
 AM_RATE = 12000                # rtl_fm's AM output rate (shortfinal's RATE)
@@ -182,6 +182,9 @@ class CarrierSquelch:
         self._n = 0
         self._start = 0.0
         self._last_level = 0.0
+        # A transmission's AGC and tone notch (the most of its close: about 6 ms per second of audio) left to its
+        # worker (Segment.pending, radio/fm.py SegmentWorkers): set by a started AmReceiver, never on the reader
+        self.defer = False
 
     # -- what NoiseSquelch's callers read ------------------------------------------------------------------------------
 
@@ -333,18 +336,22 @@ class CarrierSquelch:
         med = float(np.median(levels or [self.floor_level]))
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
         snr = voice_snr_db(frames, npre, len(frames) - tail)     # #270: measured before the AGC, per segment
-        audio = agc(np.concatenate(frames), med)
-        # a heterodyne's steady tone over the voice (#263): looked for on the carrier (#263: not in the pre-roll and the
-        # tail, which have none), notched out of the whole clip
-        tones = find_tones(audio, RATE, span=(npre * FRAME, (len(frames) - tail) * FRAME))
-        audio = detone(audio, RATE, tones)
-        seg = Segment(start, start + len(frames) * FRAME / RATE, audio, quieting_db=carrier, reason=reason)
+        span = (npre * FRAME, (len(frames) - tail) * FRAME)
+
+        def voice(seg: Segment) -> None:
+            audio = agc(np.concatenate(frames), med)
+            # a heterodyne's steady tone over the voice (#263): looked for on the carrier (#263: not in the pre-roll and
+            # the tail, which have none), notched out of the whole clip
+            tones = find_tones(audio, RATE, span=span)
+            seg.audio = detone(audio, RATE, tones)
+            seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
+        seg = Segment(start, start + len(frames) * FRAME / RATE, np.zeros(0, np.float32), quieting_db=carrier,
+                      reason=reason)
         seg.q_open = seg.q_close = carrier
         seg.hiss_db = self.hiss_db
         seg.weak = carrier < MIN_CARRIER_DB            # type: ignore[attr-defined]
         seg.marginal = not seg.weak and carrier < MARGINAL_DB   # type: ignore[attr-defined]
         seg.preroll_s = npre * FRAME / RATE            # type: ignore[attr-defined]
-        seg.tones = [round(f0, 1) for f0, _spread in tones]   # type: ignore[attr-defined]  (the ones notched out)
         # #270: what the hub needs to tell a weak transmitter from a missing one, per transmission
         seg.carrier_dbfs = round(float(20 * np.log10(max(med, 1e-9))), 1)   # type: ignore[attr-defined]
         seg.snr_db = None if snr is None else round(snr, 1)    # type: ignore[attr-defined]
@@ -353,7 +360,8 @@ class CarrierSquelch:
             seg.first_start, seg.prev_start, seg.split = piece
         elif reason == "key-up":
             seg.first_start = seg.start
-        return seg
+        seg.pending = voice
+        return seg if self.defer else finish(seg)
 
 
 def voice_snr_db(frames: list[np.ndarray], npre: int, end: int) -> float | None:
@@ -585,8 +593,13 @@ class AmReceiver(NfmReceiver):
         subs = []
         for k, mhz in enumerate(self.active):
             ch = Channel(mhz, self.label_for(mhz), self.channel.ctcss)
-            subs.append(Sub(ch, first if k == 0 else CarrierSquelch(open_db=self.open_db, split_s=self.split_s, jump_db=self.jump_db), Upsampler()))
+            subs.append(Sub(ch, first if k == 0 else self._carrier_squelch(), Upsampler()))
         return subs
+
+    def _carrier_squelch(self) -> CarrierSquelch:
+        sq = CarrierSquelch(open_db=self.open_db, split_s=self.split_s, jump_db=self.jump_db)
+        sq.defer = getattr(self, "segments", None) is not None   # started: AGC + notch on its worker (fm.py)
+        return sq
 
     def describe_plan(self) -> str:
         """'126.4 07:00-23:00, 120.8 23:00-07:00 + 124.65 07:00-23:00'."""
@@ -677,7 +690,7 @@ class AmReceiver(NfmReceiver):
 
     def new_squelch(self) -> CarrierSquelch:
         self._up = Upsampler()
-        return CarrierSquelch(open_db=self.open_db, split_s=self.split_s, jump_db=self.jump_db)
+        return self._carrier_squelch()
 
     def _program(self) -> str:
         return "rtl_sdr" if len(self.active) > 1 else "rtl_fm"

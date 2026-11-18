@@ -5,6 +5,7 @@ with its status. The harness is /api/v1's (jsonschema from the dev extras; tests
 side)."""
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -80,6 +81,7 @@ def cases(kind):
 
 @pytest.mark.parametrize("name,file,inst", cases("valid"))
 def test_a_valid_vector_validates(name, file, inst):
+    assert not isinstance(inst, c.Unfit), inst
     assert inst is not c.NOT_JSON, "a valid vector is JSON a strict reader takes"
     assert c.errors(name, inst) == []
     # ... names no key the schema does not, but for the stand-ins for a newer build's
@@ -90,6 +92,7 @@ def test_a_valid_vector_validates(name, file, inst):
 def test_an_invalid_vector_is_refused_for_exactly_one_rule(name, file, inst):
     """One rule each: a vector that breaks two would go on failing after one of them was (wrongly) lifted, and a
     patched one whose base has since changed under it would fail for a reason of its own."""
+    assert not isinstance(inst, c.Unfit), inst
     assert inst is c.NOT_JSON or len(c.errors(name, inst)) == 1, c.errors(name, inst)
 
 
@@ -118,6 +121,23 @@ def test_patched_vectors_are_a_base_and_a_json_patch():
     for gone in ({"op": "remove", "path": "/b/zz"}, {"op": "replace", "path": "/a/5", "value": 1}):
         with pytest.raises(AssertionError):
             c.patched(doc, [gone])                       # a patch that no longer fits its base fails: it never passes
+
+
+def test_a_patch_that_no_longer_fits_is_one_named_failure(tmp_path):
+    """A base re-recorded without a key that a patch removes or replaces: vector() gives an Unfit that names the patch
+    file and the pointer, the two vector tests fail on it by that name, and the file's other tests are still
+    collected."""
+    assert not [inst for kind in ("valid", "invalid") for p in cases(kind) if isinstance(inst := p.values[2], c.Unfit)]
+    base = "station-state/valid/talking-only.json"
+    for n, op in enumerate(({"op": "remove", "path": "/talking/0/no_such_key"},
+                            {"op": "replace", "path": "/no_such/deeper/key", "value": 1},
+                            {"op": "remove", "path": "/talking/99/source"})):
+        f = tmp_path / f"stale-{n}.patch.json"
+        f.write_text(json.dumps({"base": base, "patch": [op]}), encoding="utf-8")
+        got = c.vector(f)
+        assert isinstance(got, c.Unfit) and f.name in got and op["path"] in got and base in got, got
+    f.write_text(json.dumps({"base": base, "patch": [{"op": "add", "path": "/new_key", "value": 1}]}), encoding="utf-8")
+    assert c.vector(f)["new_key"] == 1 and not isinstance(c.vector(f), c.Unfit)
 
 
 def test_no_vector_names_a_machine_or_a_run():

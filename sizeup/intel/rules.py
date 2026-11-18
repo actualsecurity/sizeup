@@ -47,7 +47,18 @@ drive to (an address, intersection, block or landmark) in the source's towns ("t
 burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
 words, or a read-back by the call's talker or units within minutes). "words": the words that tie a later transmission
 to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
-category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
+category of the pack that wins when both would raise for one call (fire_call defers to fire_report). "deescalate":
+phrases (the grammar above) that mark the category's open event on the same source as "de-escalated" (the weapons
+category: "the gun was secured", "the firearm has been recovered"): a note on the event, never a push and never an end
+(engine.py _deescalate). "escalate" / "escalate_not": what says the category is live again after that note (the weapons
+category: "pulled out a gun", "shots fired"; never with "in custody", "for the report", "when we arrived"): such a row
+re-opens the event and pushes it again; any other row that says the category only takes the note off;
+"escalate_always" ("shots fired") does so whatever "escalate_not" says. "cancel_ttl_min": a safety category of a police
+pack that a nameless disregard marks "possibly cancelled" lives at most this long after it, and a second disregard or one
+of the pack's "resolved" phrases ("unfounded", "the caller called back") ends it. A rule's "not" phrases are hard
+(negations, questions, unknowns, toys, the police's own equipment, the past): nothing sets them aside. Its "soft_not"
+phrases are context ("a bat in her bedroom", "a contractor has a hammer"), and its "unless" phrases set those aside
+("pointed a gun at", "swinging it at the clerk").
 
 "describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
 rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone.
@@ -284,12 +295,17 @@ class Rule:
     enabled: bool = True
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None    # the pack's table (None: the words as transcribed only)
+    unless: list = field(default_factory=list)   # phrases that set the "soft_not" phrases aside ("pointed a gun at")
+    soft: list = field(default_factory=list)     # "soft_not": context exclusions ("a bat in her bedroom") "unless" beats
 
     def hit(self, text: str, ws: list[str]) -> bool:
-        """One reading where a phrase is found and no "not" phrase is (see the module's doc)."""
+        """One reading where a phrase is found, no "not" phrase is (never set aside: negations, questions, unknowns),
+        and no "soft_not" phrase is unless an "unless" phrase is (see the module's doc)."""
         if not self.enabled:
             return False
-        return any(any(p.found(t, w) for p in self.any) and not any(p.found(t, w) for p in self.nots)
+        return any(any(p.found(t, w) for p in self.any)
+                   and not any(p.found(t, w) for p in self.nots)
+                   and (not any(p.found(t, w) for p in self.soft) or any(p.found(t, w) for p in self.unless))
                    for t, w in readings(text, ws, self.norm))
 
 
@@ -312,6 +328,9 @@ class Pack:
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None
     area: tuple = ()                  # the towns its events belong to (empty: anywhere)
+    calm: dict = field(default_factory=dict)    # category -> its "deescalate" phrases, compiled
+    rise: dict = field(default_factory=dict)    # category -> ("escalate", "escalate_not", "escalate_always"), compiled
+    resolved: list = field(default_factory=list)   # phrases that end a "possibly cancelled" call with "cancel_ttl_min"
     fd: dict = field(default_factory=dict)    # "fd_present" compiled: {kind: [(any, nots)], priorities} (fd_said)
 
     def in_scope(self, row: dict) -> bool:
@@ -342,6 +361,25 @@ class Pack:
 
     def suppressed(self, text: str, ws: list[str]) -> bool:
         return any(_found(p, text, ws, self.norm) for p in self.suppress)
+
+    def deescalated(self, text: str, ws: list[str]) -> list[str]:
+        """The categories one of whose "deescalate" phrases the text says (either reading)."""
+        return [c for c, ps in self.calm.items() if any(_found(p, text, ws, self.norm) for p in ps)]
+
+    def escalates(self, cat: str, text: str, ws: list[str]) -> bool:
+        """The text says the category is live again ("escalate", and none of "escalate_not")."""
+        yes, no, always = self.rise.get(cat) or ((), (), ())
+        if any(_found(p, text, ws, self.norm) for p in always):
+            return True
+        return (any(_found(p, text, ws, self.norm) for p in yes)
+                and not any(_found(p, text, ws, self.norm) for p in no))
+
+    def resolves(self, text: str, ws: list[str]) -> bool:
+        """The text says a call is over ("resolved": "unfounded", "the caller called back")."""
+        return any(_found(p, text, ws, self.norm) for p in self.resolved)
+
+    def is_safety(self, cat: str) -> bool:
+        return bool(self.category(cat).get("safety"))
 
     def fd_said(self, kind: str, texts) -> bool:
         """One of the texts says it ("fd_present"'s there | add_info | safety): a group's phrase in it and none of
@@ -465,6 +503,12 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
                    "fire_related": bool(cd.get("fire_related")),
                    "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
+                   "deescalate": [p.src for p in _phrases(cd.get("deescalate") or [], f"{name}.{c}.deescalate")],
+                   "escalate": [p.src for p in _phrases(cd.get("escalate") or [], f"{name}.{c}.escalate")],
+                   "escalate_not": [p.src for p in _phrases(cd.get("escalate_not") or [], f"{name}.{c}.escalate_not")],
+                   "escalate_always": [p.src for p in _phrases(cd.get("escalate_always") or [], f"{name}.{c}.escalate_always")],
+                   "cancel_ttl_min": (_num(cd["cancel_ttl_min"], 1, 24 * 60, f"{name}.{c}.cancel_ttl_min")
+                                      if cd.get("cancel_ttl_min") is not None else None),
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
     for c, cd in cats.items():
         if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
@@ -483,7 +527,9 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
         rules.append(Rule(rid, int(r.get("v") or 1), cat, _num(o.get("w", r.get("w", 0.5)), -1, 1, f"rule {rid} weight"),
                           _phrases(r.get("any") or [], f"rule {rid}"), _phrases(r.get("not") or [], f"rule {rid} not"),
                           _mode(o.get("mode", r.get("mode", "push")), f"rule {rid} mode"),
-                          bool(o.get("enabled", r.get("enabled", True))), dict(r), norm))
+                          bool(o.get("enabled", r.get("enabled", True))), dict(r), norm,
+                          _phrases(r.get("unless") or [], f"rule {rid} unless"),
+                          _phrases(r.get("soft_not") or [], f"rule {rid} soft_not")))
     for rid, o in ro.items():                           # an admin's own rule (local.*)
         if rid.startswith("local.") and isinstance(o, dict) and o.get("pack") == name and rid not in seen:
             cat = str(o.get("category") or "")
@@ -495,7 +541,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                               norm))
     if norm is not None:                                # a "not" in heard spelling would miss the fixed reading
         for r in rules:
-            for p in r.nots:
+            for p in [*r.nots, *r.soft]:
                 check_spelling(p, norm, f"rule {r.id} not")
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
@@ -507,7 +553,13 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 mode=_mode(po.get("mode", d.get("mode", "push")), f"{name}.mode"),
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
                 suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
-                area=area(po.get("area") or d.get("area"), f"{name}.area"), fd=fd_present(d.get("fd_present"), name))
+                area=area(po.get("area") or d.get("area"), f"{name}.area"),
+                calm={c: [Phrase(x) for x in cd["deescalate"]] for c, cd in cats.items() if cd["deescalate"]},
+                rise={c: ([Phrase(x) for x in cd["escalate"]], [Phrase(x) for x in cd["escalate_not"]],
+                          [Phrase(x) for x in cd["escalate_always"]])
+                      for c, cd in cats.items() if cd["escalate"] or cd["escalate_always"]},
+                resolved=_phrases(d.get("resolved") or [], f"{name}.resolved"),
+                fd=fd_present(d.get("fd_present"), name))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -580,8 +632,10 @@ def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
                         p.scope, list(p.area),
-                        [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
+                        [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots],
+                          *([[x.src for x in r.unless]] if r.unless else []), *([[x.src for x in r.soft]] if r.soft else [])]
                          for r in p.rules], [x.src for x in p.suppress],
+                        *([[x.src for x in p.resolved]] if p.resolved else []),
                         {k: [[[x.src for x in a], [x.src for x in n]] for a, n in v] if isinstance(v, list)
                          else {c: sorted(ts) for c, ts in v.items()} if isinstance(v, dict) else v
                          for k, v in p.fd.items()},
