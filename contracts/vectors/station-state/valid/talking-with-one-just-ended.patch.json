@@ -1,0 +1,6 @@
+{
+  "base": "station-state/valid/talking-only.json",
+  "patch": [
+    {"op": "add", "path": "/talking/-", "value": {"key": "p25:countynet:grant:4101:990003", "system": "p25", "channel": "Fire Dispatch 1", "tg": 4101, "radio_id": "990003", "alias": "Northfield Ctrl 2", "rig": "", "label": "", "since": 1794989994.0, "talk_since": 1794989994.0, "ended": true, "until": 1794990002.0, "dispatcher": true, "main": true}}
+  ]
+}

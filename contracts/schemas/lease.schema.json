@@ -28,8 +28,7 @@
         {"$ref": "#/$defs/counter", "description": "The lease's own generation, a count."}
       ],
       "items": false,
-      "minItems": 2,
-      "maxItems": 2
+      "minItems": 2
     },
     "ttl_s": {
       "type": "number",

@@ -61,6 +61,40 @@ def test_the_gpu_worker_says_hello_and_its_state_as_the_schemas_say(tmp_path):
         lv.close()
 
 
+def test_the_recorded_worker_vectors_are_what_the_workers_send_now(tmp_path, monkeypatch):
+    """The workers' base vectors are recordings too (scrubbed: tests/contracts.py scrub), written anew by
+    `python -m tests.contracts record`: each has the keys the real writer sends now."""
+    monkeypatch.setattr(stationworker, "OFF_POLL_S", 0.05)
+    lv = c.Live(tmp_path)
+    lv.hub.app.hub.workers.set_pool(stations={c.STATION: True})
+    try:
+        w = gpu_worker(lv, tmp_path)
+        w.hello()
+        w.heartbeat()
+        w.gpu.sample()
+        w.whisper_ok = True
+        w.hello()
+        w.heartbeat()
+        lv.station()
+        whisper = f"station:{c.STATION}"
+        assert wait(lambda: whisper in lv.hub.app.sttpool.workers and len(lv.worker_seen) >= 5, 30)
+        hello, state = seen(lv, "hello"), seen(lv, "state")
+        for rel, now in (("stt-worker-hello/valid/paused-no-gpu.json", hello[0][0]),
+                         ("stt-worker-hello/valid/online-with-gpu.json", hello[1][0]),
+                         ("stt-worker-hello-answer/valid/answer.json", hello[1][1]),
+                         ("stt-worker-state/valid/gpu-worker-paused.json", state[0][0]),
+                         ("stt-worker-state/valid/gpu-worker-online.json", state[1][0]),
+                         ("stt-worker-state/valid/a-stations-whisper-paused.json", next(r for r, _ in state if "load" in r)),
+                         ("stt-worker-state-answer/valid/answer.json", state[1][1])):
+            name = rel.split("/")[0]
+            now = c.scrub(name, now, tmp_path)
+            committed = c.recorded(rel, now)
+            conforms(name, committed)
+            assert c.same_shape(name, now, committed) == [] and set(now) == set(committed), rel
+    finally:
+        lv.close()
+
+
 def test_a_stations_whisper_says_its_state_as_the_schema_says(tmp_path, monkeypatch):
     """The other writer of the state post: a station's whisper in the pool, with its load. (It says `paused` here:
     the test's whisper never comes up. Its claims have no schema yet.)"""

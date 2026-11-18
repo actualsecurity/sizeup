@@ -1,5 +1,5 @@
 {
-  "at": 1794984108.135072,
+  "at": 1794990000.0,
   "talking": [],
   "paging": [],
   "status": {
@@ -24,11 +24,7 @@
         "floor_db": null,
         "min_open_s": 0.3,
         "short_per_min": 0.0,
-        "squelch_default": {
-          "open_db": 10.0,
-          "close_db": 6.0,
-          "min_open_s": 0.3
-        },
+        "squelch_default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
         "channel_kind": "paging"
       },
       {
@@ -48,20 +44,9 @@
         "floor_db": null,
         "min_open_s": 0.3,
         "short_per_min": 0.0,
-        "squelch_default": {
-          "open_db": 10.0,
-          "close_db": 6.0,
-          "min_open_s": 0.3
-        },
+        "squelch_default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
         "channel_kind": "traffic",
-        "keyups": {
-          "n": 0,
-          "no_speech": 0,
-          "tones": {},
-          "bare_s": [],
-          "bare_q": [],
-          "recent": []
-        }
+        "keyups": {"n": 0, "no_speech": 0, "tones": {}, "bare_s": [], "bare_q": [], "recent": []}
       },
       {
         "label": "Tower",
@@ -79,16 +64,7 @@
         "hiss_db": null,
         "floor_db": null,
         "am": true,
-        "freqs": [
-          {
-            "mhz": 118.5,
-            "label": "Tower",
-            "name": "",
-            "open": false,
-            "quieting_db": null,
-            "elsewhere": false
-          }
-        ],
+        "freqs": [{"mhz": 118.5, "label": "Tower", "name": "", "open": false, "quieting_db": null, "elsewhere": false}],
         "now": "118.5"
       },
       {
@@ -136,17 +112,8 @@
     "sdr": {
       "shared": true,
       "mode": "County P25",
-      "modes": [
-        "Paging 1",
-        "Fireground 1",
-        "Tower",
-        "County P25",
-        "East 1",
-        "Off"
-      ],
-      "now": {
-        "Tower": "118.5"
-      },
+      "modes": ["Paging 1", "Fireground 1", "Tower", "County P25", "East 1", "Off"],
+      "now": {"Tower": "118.5"},
       "switching": false,
       "adsb": {
         "serial": "",
@@ -242,46 +209,21 @@
       "groups": [
         {
           "name": "roof",
-          "sdrs": [
-            "00000101",
-            "00000102",
-            "00000103"
-          ],
-          "jobs": [
-            "County P25",
-            "Paging 1",
-            "Fireground 1"
-          ],
-          "usable": [
-            "00000101",
-            "00000102",
-            "00000103"
-          ],
+          "sdrs": ["00000101", "00000102", "00000103"],
+          "jobs": ["County P25", "Paging 1", "Fireground 1"],
+          "usable": ["00000101", "00000102", "00000103"],
           "short": [],
           "unowned": [],
           "conflicts": {}
         }
       ],
-      "no_park": [
-        "Paging 1",
-        "County P25"
-      ],
+      "no_park": ["Paging 1", "County P25"],
       "groups_problem": ""
     },
-    "rerun": {
-      "total": 0,
-      "done": 0,
-      "changed": 0,
-      "failed": 0,
-      "pending": 0
-    },
+    "rerun": {"total": 0, "done": 0, "changed": 0, "failed": 0, "pending": 0},
     "channels": {
       "prefs": {},
-      "aws": {
-        "ok": false,
-        "why": "the hub hasn't said whether it can use AWS yet",
-        "reserve": []
-      },
+      "aws": {"ok": false, "why": "the hub hasn't said whether it can use AWS yet", "reserve": []},
       "tones": 0,
       "squelch": {},
       "squelch_ok": true,
@@ -294,33 +236,14 @@
         "label": "East",
         "title": "East",
         "site": {},
-        "jobs": [
-          {
-            "job": "East 1",
-            "source": 0,
-            "mhz": 770.3125,
-            "span_mhz": 2.4,
-            "sdr": "00000104"
-          }
-        ],
-        "frequencies": [
-          769.90625
-        ],
-        "covered": [
-          769.90625
-        ],
+        "jobs": [{"job": "East 1", "source": 0, "mhz": 770.3125, "span_mhz": 2.4, "sdr": "00000104"}],
+        "frequencies": [769.90625],
+        "covered": [769.90625],
         "state": "absent",
         "detail": "trunk-recorder not installed",
         "last_heard": null,
         "hold_until": null,
-        "cc": {
-          "rate": null,
-          "low_since": null,
-          "last_low": null,
-          "retunes": 0,
-          "last_retune": null,
-          "silent_since": null
-        },
+        "cc": {"rate": null, "low_since": null, "last_low": null, "retunes": 0, "last_retune": null, "silent_since": null},
         "unknown": [],
         "encrypted": [],
         "watched": []
@@ -332,31 +255,13 @@
           "name": "east",
           "label": "East",
           "kind": "system",
-          "jobs": [
-            {
-              "job": "East 1",
-              "mhz": 770.3125,
-              "cc": [
-                769.90625
-              ]
-            }
-          ],
+          "jobs": [{"job": "East 1", "mhz": 770.3125, "cc": [769.90625]}],
           "watch": [],
-          "alert": [
-            {
-              "tg": 7001,
-              "name": "East Dispatch"
-            }
-          ],
+          "alert": [{"tg": 7001, "name": "East Dispatch"}],
           "caveat": ""
         }
       ],
-      "durations": [
-        15,
-        60,
-        240,
-        0
-      ],
+      "durations": [15, 60, 240, 0],
       "keep_min": 10.0,
       "dongles": [
         {
@@ -416,19 +321,14 @@
           "sdr": "00000105",
           "sdr_name": "00000105",
           "was": "Tower",
-          "plan": [
-            "East 1"
-          ],
+          "plan": ["East 1"],
           "minutes": 15,
-          "started": 1794982907.9465652,
-          "ended": 1794983807.9465652,
+          "started": 1794988800.0,
+          "ended": 1794989700.0,
           "status": "done",
           "why": "",
           "note": "",
-          "verdict": {
-            "grade": "good",
-            "hint": ""
-          },
+          "verdict": {"grade": "good", "hint": ""},
           "restored": "Tower restored",
           "restored_ok": true,
           "halves": [
@@ -456,40 +356,21 @@
         }
       ]
     },
-    "stt_terms": {
-      "v": "",
-      "sets": {}
-    },
-    "outbox": {
-      "pending": 0,
-      "oldest": null,
-      "dropped_audio": 0
-    },
+    "stt_terms": {"v": "", "sets": {}},
+    "outbox": {"pending": 0, "oldest": null, "dropped_audio": 0},
     "stt_input": {
       "queued": 0,
       "waiting": 0,
       "bytes": 0,
       "made": 0,
       "sent": 0,
-      "dropped": {
-        "queue": 0,
-        "too_big": 0,
-        "failed": 0,
-        "outbox": 0,
-        "refused": 0
-      },
-      "hub_takes": true,
+      "dropped": {"queue": 0, "too_big": 0, "failed": 0, "outbox": 0, "refused": 0},
+      "hub_takes": false,
       "dropped_pre": 0,
       "dropped_fire": 0,
       "encoder": "",
       "held": false,
-      "worker": {
-        "where": "",
-        "state": "",
-        "detail": "",
-        "unhealthy": false,
-        "in_flight": false
-      }
+      "worker": {"where": "", "state": "", "detail": "", "unhealthy": false, "in_flight": false}
     },
     "pool_worker": {
       "claimed": 0,
@@ -498,23 +379,15 @@
       "preempted": 0,
       "lost": 0,
       "error": "",
-      "state": "paused",
-      "why": "whisper not ready"
+      "state": "off",
+      "why": "this station's whisper isn't in the pool"
     },
     "stt_alert_rev": 0,
     "version": {
       "build": "",
       "hub": "",
-      "update": {
-        "failed": {}
-      },
-      "adapter": {
-        "state": "off",
-        "repo": "",
-        "commit": "",
-        "text": "",
-        "health": []
-      },
+      "update": {"failed": {}},
+      "adapter": {"state": "off", "repo": "", "commit": "", "text": "", "health": []},
       "state": "unknown",
       "text": "version ? (the hub's build isn't known: not updating)"
     },
@@ -544,46 +417,29 @@
       "last_ok": null,
       "error": ""
     },
-    "metrics": {
-      "pending": 1,
-      "dropped": 0,
-      "sent": 1,
-      "rejected": 0,
-      "last_ok": 1794984107.92642,
-      "error": ""
-    },
+    "metrics": {"pending": 0, "dropped": 0, "sent": 0, "rejected": 0, "last_ok": null, "error": ""},
     "health": {
-      "started": 1794984107.9253278,
-      "boot": 1793833924.0,
+      "started": 1794986400.0,
+      "boot": 1794903600.0,
       "host": "st-north",
-      "cpu_pct": null,
-      "load1": 5.02,
-      "cpus": 18,
-      "mem_pct": null,
-      "mem_total": null,
-      "temp_c": null,
+      "cpu_pct": 38.0,
+      "load1": 1.2,
+      "cpus": 4,
+      "mem_pct": 44.0,
+      "mem_total": 17179869184,
+      "temp_c": 51.0,
       "disk_path": "/var/lib/sizeup",
-      "disk_pct": 37.7,
-      "disk_free": 619998588928,
-      "disk_total": 994610155520,
+      "disk_pct": 12.5,
+      "disk_free": 236223201280,
+      "disk_total": 269490393088,
       "recorder": {
         "state": "absent",
         "restarts": 0,
         "detail": "trunk-recorder not installed",
         "expected": true,
-        "cc": {
-          "rate": null,
-          "low_since": null,
-          "last_low": null,
-          "retunes": 0,
-          "last_retune": null,
-          "silent_since": null
-        }
+        "cc": {"rate": null, "low_since": null, "last_low": null, "retunes": 0, "last_retune": null, "silent_since": null}
       },
-      "whisper": {
-        "state": "starting",
-        "detail": ""
-      },
+      "whisper": {"state": "starting", "detail": ""},
       "stt_queue": {
         "queued": 0,
         "urgent": 0,
@@ -591,7 +447,7 @@
         "high": 0,
         "live": 0,
         "low": 0,
-        "ours_ago_s": 0.5,
+        "ours_ago_s": 0.0,
         "rerun": 0,
         "catchup": 0,
         "fallback": 0,
@@ -619,24 +475,9 @@
         "last_error": ""
       },
       "jobs": {
-        "Paging 1": {
-          "state": "down",
-          "restarts": 0,
-          "detail": "cannot start rtl_fm: not installed",
-          "expected": true
-        },
-        "Fireground 1": {
-          "state": "down",
-          "restarts": 0,
-          "detail": "cannot start rtl_fm: not installed",
-          "expected": true
-        },
-        "Tower": {
-          "state": "down",
-          "restarts": 0,
-          "detail": "cannot start rtl_fm: not installed",
-          "expected": true
-        },
+        "Paging 1": {"state": "down", "restarts": 0, "detail": "cannot start rtl_fm: not installed", "expected": true},
+        "Fireground 1": {"state": "down", "restarts": 0, "detail": "cannot start rtl_fm: not installed", "expected": true},
+        "Tower": {"state": "down", "restarts": 0, "detail": "cannot start rtl_fm: not installed", "expected": true},
         "East 1": {
           "state": "absent",
           "restarts": 0,
@@ -648,40 +489,15 @@
       "reception": null,
       "usb": {
         "devices": [
-          {
-            "index": 0,
-            "product": "RTL2838UHIDIR",
-            "serial": "00000101"
-          },
-          {
-            "index": 1,
-            "product": "Blog V4",
-            "serial": "00000102"
-          },
-          {
-            "index": 2,
-            "product": "RTL2838UHIDIR",
-            "serial": "00000103"
-          },
-          {
-            "index": 3,
-            "product": "RTL2838UHIDIR",
-            "serial": "00000104"
-          },
-          {
-            "index": 4,
-            "product": "RTL2838UHIDIR",
-            "serial": "00000105"
-          }
+          {"index": 0, "product": "RTL2838UHIDIR", "serial": "00000101"},
+          {"index": 1, "product": "Blog V4", "serial": "00000102"},
+          {"index": 2, "product": "RTL2838UHIDIR", "serial": "00000103"},
+          {"index": 3, "product": "RTL2838UHIDIR", "serial": "00000104"},
+          {"index": 4, "product": "RTL2838UHIDIR", "serial": "00000105"}
         ],
         "duplicates": []
       },
-      "heard": {
-        "tg:4101": {
-          "at": 1794984107.9465642,
-          "name": "Fire Dispatch 1"
-        }
-      }
+      "heard": {"tg:4101": {"at": 1794990000.0, "name": "Fire Dispatch 1"}}
     },
     "talkgroups": [
       {
@@ -692,7 +508,7 @@
         "record": true,
         "main": true,
         "count": 1,
-        "last": 1794984107.9465642,
+        "last": 1794990000.0,
         "dropped": 0,
         "system": "countynet",
         "source": "p25:countynet:4101",
@@ -708,7 +524,7 @@
         "name": "Fire Ops 2",
         "group": "Fire",
         "encrypted": false,
-        "record": false,
+        "record": true,
         "main": false,
         "count": 0,
         "last": null,

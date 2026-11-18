@@ -34,7 +34,8 @@ def test_there_are_schemas_and_each_has_vectors_both_ways():
         assert c.vectors(name, "valid") and c.vectors(name, "invalid"), f"{name}: valid/ and invalid/ vectors"
     assert {p.name for p in c.VECTORS.iterdir()} == set(NAMES), "a vectors folder without its schema (or the reverse)"
     extra = [str(p.relative_to(c.VECTORS)) for p in c.VECTORS.rglob("*") if p.is_file()
-             and p.parent.name not in ("valid", "invalid") and p.relative_to(c.VECTORS).as_posix() != "lease/order.json"]
+             and (p.parent.name not in ("valid", "invalid") or p.suffix != ".json")
+             and p.relative_to(c.VECTORS).as_posix() != "lease/order.json"]
     assert extra == [], "files in contracts/vectors/ no test reads"
 
 
@@ -86,8 +87,50 @@ def test_a_valid_vector_validates(name, file, inst):
 
 
 @pytest.mark.parametrize("name,file,inst", cases("invalid"))
-def test_an_invalid_vector_is_refused(name, file, inst):
-    assert inst is c.NOT_JSON or c.errors(name, inst) != []
+def test_an_invalid_vector_is_refused_for_exactly_one_rule(name, file, inst):
+    """One rule each: a vector that breaks two would go on failing after one of them was (wrongly) lifted, and a
+    patched one whose base has since changed under it would fail for a reason of its own."""
+    assert inst is c.NOT_JSON or len(c.errors(name, inst)) == 1, c.errors(name, inst)
+
+
+def test_patched_vectors_are_a_base_and_a_json_patch():
+    """A vector that differs from a recorded one in a value or two is written as that: {"base", "patch"} (RFC 6902:
+    add, remove, replace). The base is a plain vector, so re-recording it updates every vector made from it."""
+    files = sorted(c.VECTORS.rglob("*" + c.PATCH))
+    assert len(files) >= 25
+    bases = set()
+    for f in files:
+        doc = c.loads_strict(f.read_text(encoding="utf-8"))
+        assert set(doc) == {"base", "patch"} and (c.VECTORS / doc["base"]).is_file(), f.name
+        assert 1 <= len(doc["patch"]) <= 25 and all(op["op"] in ("add", "remove", "replace") for op in doc["patch"]), f.name
+        assert c.vector(f) != c.vector(c.VECTORS / doc["base"]), f.name
+        bases.add(doc["base"])
+    assert {"station-state/valid/with-status.json", "station-state/valid/with-status-plain.json",
+            "station-state/valid/talking-only.json"} <= bases
+    # no plain vector is big but the recorded bases: a body near a recorded one is a patch, never a copy
+    big = sorted(str(p.relative_to(c.VECTORS)) for p in c.VECTORS.rglob("*.json")
+                 if len(p.read_text(encoding="utf-8")) > 4000)
+    assert big == ["station-state/valid/with-status-plain.json", "station-state/valid/with-status.json"]
+    doc = {"a": [1, 2], "b": {"c": 1}}
+    assert c.patched(doc, [{"op": "add", "path": "/a/-", "value": 3}, {"op": "remove", "path": "/b/c"},
+                           {"op": "replace", "path": "/a/0", "value": 0}, {"op": "add", "path": "/b/x~1y", "value": 1}]) \
+        == {"a": [0, 2, 3], "b": {"x/y": 1}} and doc == {"a": [1, 2], "b": {"c": 1}}
+    for gone in ({"op": "remove", "path": "/b/zz"}, {"op": "replace", "path": "/a/5", "value": 1}):
+        with pytest.raises(AssertionError):
+            c.patched(doc, [gone])                       # a patch that no longer fits its base fails: it never passes
+
+
+def test_no_vector_names_a_machine_or_a_run():
+    """The recorded vectors are scrubbed (tests/contracts.py scrub): no path of a home or temporary folder, and the
+    machine's numbers are the fixed made-up ones."""
+    for f in c.VECTORS.rglob("*.json"):
+        text = f.read_text(encoding="utf-8")
+        assert not re.search(r"/Users/|/home/|/private/|/var/folders|/tmp/|pytest|\.local\b", text), f.name
+    for rel in ("station-state/valid/with-status.json", "station-state/valid/with-status-plain.json"):
+        post = c.vector(c.VECTORS / rel)
+        hl = post["status"]["health"]
+        assert post["at"] == c.T0 and {k: hl[k] for k in c.MACHINE} == c.MACHINE
+        assert (hl["started"], hl["boot"]) == (c.T0 - 3600.0, c.T0 - 86400.0)
 
 
 def test_unknown_keys_are_among_the_valid_vectors_of_every_schema():

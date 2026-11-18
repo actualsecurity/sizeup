@@ -13,7 +13,7 @@
     "error": {"type": "string", "description": "A sentence for people. Fixed text, never the token."},
     "reason": {
       "type": "string",
-      "description": "On a refused request, why, as one word a program can act on. Today: `no_token`, `token_unknown`, `token_revoked`, `token_retired`, `read_only`, `id_mismatch` (all 401), `multi_station_off` (409), `ingest_off` (403); on the workers' routes under /api/station/stt/ a station's token also gets `stations_off` (its whisper is not in the pool) and `gpu_only` (a route for GPU workers alone), both 403. The station cuts it to 40 characters and must take a word it does not know as a plain refusal.",
+      "description": "On a refused request, why, as one word a program can act on. Today: `no_token`, `token_unknown`, `token_revoked`, `token_retired`, `read_only`, `id_mismatch` (all 401), `multi_station_off` (409), `ingest_off` (403); on the workers' routes under /api/station/stt/ a station's token also gets `stations_off` (its whisper is not in the pool) and `gpu_only` (a route for GPU workers alone), both 403. From #782 on (not in the code before it, see `x-known-from`): `bad_status` (400: the status in a state post has a key of the wrong type; nothing of the post is taken) and `bad_live` (400: a talker or a page going out has one). The station cuts it to 40 characters and must take a word it does not know as a plain refusal.",
       "x-known": [
         "no_token",
         "token_unknown",
@@ -25,7 +25,8 @@
         "ingest_off",
         "stations_off",
         "gpu_only"
-      ]
+      ],
+      "x-known-from": {"#782": ["bad_status", "bad_live"]}
     },
     "updating": {"const": true, "description": "On a 503: the hub is deploying or this task is not the leader. The same request works again in seconds."}
   }

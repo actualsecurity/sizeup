@@ -1045,6 +1045,11 @@
               "type": "object",
               "description": "The ADS-B receiver's dongle, decoder and forwarding (adsb_health); only while a dongle is named for it. Not typed here."
             },
+            "link_restarts": {
+              "type": "object",
+              "description": "From #782 on, and only when there are any: per thread of the hub link (`hub-state`, `hub-forward`, ...) that ended on an error and was started again, how often and why. Not sent by the code before #782.",
+              "additionalProperties": {"title": "One thread started again", "description": "A thread of the hub link that ended and was started again.", "x-complete": true, "type": "object", "additionalProperties": true, "properties": {"n": {"type": "integer", "minimum": 0, "description": "How many times."}, "why": {"type": "string", "description": "The last error's type name."}, "at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it last did, Unix seconds."}}}
+            },
             "error": {"type": "string", "description": "Building the report failed: `<Type>: <message>`.", "maxLength": 200}
           }
         },

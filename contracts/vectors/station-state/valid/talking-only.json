@@ -1,5 +1,5 @@
 {
-  "at": 1794984107.998973,
+  "at": 1794990000.0,
   "talking": [
     {
       "key": "p25:countynet:grant:4101:990001",
@@ -10,15 +10,15 @@
       "alias": "",
       "rig": "",
       "label": "",
-      "since": 1794984107.946744,
-      "talk_since": 1794984107.946744,
+      "since": 1794990000.0,
+      "talk_since": 1794990000.0,
       "ended": false,
       "until": null,
       "dispatcher": false,
       "main": true
     },
     {
-      "key": "fm:Fireground 1:1794984107.95:",
+      "key": "fm:Fireground 1:1794990000.00:",
       "system": "fm",
       "channel": "Fireground 1",
       "tg": null,
@@ -26,46 +26,21 @@
       "alias": "",
       "rig": "",
       "label": "",
-      "since": 1794984107.946723,
-      "talk_since": 1794984107.946723,
+      "since": 1794990000.0,
+      "talk_since": 1794990000.0,
       "ended": false,
       "until": null,
       "dispatcher": false,
       "main": true,
       "id_on_release": true
-    },
-    {
-      "key": "p25:countynet:grant:4101:990003",
-      "system": "p25",
-      "channel": "Fire Dispatch 1",
-      "tg": 4101,
-      "radio_id": "990003",
-      "alias": "Northfield Ctrl 2",
-      "rig": "",
-      "label": "",
-      "since": 1794984107.946744,
-      "talk_since": 1794984107.946744,
-      "ended": true,
-      "until": 1794984111.946744,
-      "dispatcher": true,
-      "main": true
     }
   ],
   "paging": [
     {
-      "key": "page:Paging 1:1794984107.95",
+      "key": "page:Paging 1:1794990000.00",
       "channel": "Paging 1",
-      "started": 1794984107.946723,
-      "pairs": [
-        {
-          "a": 716.1,
-          "b": 600.9,
-          "names": [
-            "Northfield · Fire"
-          ],
-          "ours": true
-        }
-      ],
+      "started": 1794990000.0,
+      "pairs": [{"a": 716.1, "b": 600.9, "names": ["Northfield · Fire"], "ours": true}],
       "phase": "tones",
       "ours": true,
       "ended": false,

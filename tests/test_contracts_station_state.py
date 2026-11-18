@@ -26,11 +26,12 @@ FINE = {p: 200 for p in (*c.PEOPLE_ROUTES, "/api/station/status")}
 
 # -- known deviations (contracts/README.md "Known deviations"), pinned as the code is today ------------------------------
 # Each test below states today's behaviour and the fixed one. When a fix lands, flip its line here from True to False
-# (nothing else) and mark the row in contracts/README.md fixed.
+# (nothing else) and mark the row in contracts/README.md fixed. Checked ahead of time: with #779 merged in and D1 / D3
+# flipped, and with #782 merged in and D5 / D6 flipped, every contract test passes.
 D1_NAN_GOES_ON_THE_WIRE = True                  # #779: a NaN is sent as null and the hub's skew stays finite
 D3_HEAD_ON_THE_JOB_POLL_TAKES_THE_JOBS = True   # #779: HEAD under /api/station/ is 405 and no handler runs
-D5_HUB_RAISES_ON_A_WRONG_TYPE = True            # fixed: an HTTP answer, and people's routes go on answering
-D6_STATION_RAISES_ON_A_WRONG_TYPE = True        # fixed: the bad value is ignored and the hub-state thread lives
+D5_HUB_RAISES_ON_A_WRONG_TYPE = True            # #782: 400 bad_status / bad_live, nothing of the post taken
+D6_STATION_RAISES_ON_A_WRONG_TYPE = True        # #782: the field is ignored, its last good value kept, no thread ends
 
 
 @pytest.fixture
@@ -72,12 +73,15 @@ def someone_talks_and_a_page_goes_out(st) -> None:
 
 
 def status_now(lv, st, want=lambda p: True) -> dict:
-    """The station's next post with a status (asked for now, as a job from the hub does) that `want` takes."""
-    n = len(lv.seen)
+    """The station's next post with a status (asked for now, as a job from the hub does) that `want` takes: one the
+    station BUILT after this call (its `at`), never one that was on its way while the test changed something (a post
+    the hub handles late was once taken for the next one)."""
+    asked = time.time()
     st.link._status_now = True
     st.link.live_changed()
-    assert wait(lambda: any("status" in p and want(p) for p in lv.posts()[n:]), 30)
-    return next(p for p in lv.posts()[n:] if "status" in p and want(p))
+    fresh = lambda: [p for p in lv.posts() if p["at"] >= asked and "status" in p and want(p)]   # noqa: E731
+    assert wait(lambda: bool(fresh()), 30)
+    return fresh()[0]
 
 
 def both_variants_conform(lv, st) -> list[dict]:
@@ -140,7 +144,9 @@ def test_a_station_with_everything_posts_what_the_schema_says(live, monkeypatch)
     assert live.hub.app.hub.talkgroups and all("tier_set" in r for r in live.hub.app.hub.talkgroups)
 
 
-MUTATIONS = {       # what a change in the code would put on the wire: each alone must fail the conformance check
+# What a change in the code would put on the wire: each alone must fail the conformance check. These edit a recorded
+# post, not the code; a real change in the code is caught by the two live tests above, which is what they are for.
+MUTATIONS = {
     "a talkgroup row without tier": lambda p: p["status"]["talkgroups"][0].pop("tier"),
     "a new key in health": lambda p: p["status"]["health"].update(new_gauge=1),
     "health.jobs as a list": lambda p: p["status"]["health"].update(jobs=list(p["status"]["health"]["jobs"].values())),
@@ -161,8 +167,9 @@ MUTATIONS = {       # what a change in the code would put on the wire: each alon
 def test_a_change_in_what_the_code_sends_fails_the_check(live, monkeypatch):
     """The check on itself: a real post of the station with everything, changed the way a change in the code would
     change it (a key gone, a key added, a type changed), no longer conforms. Each alone."""
-    st = live.rich_station(monkeypatch)
-    real = status_now(live, st, lambda p: p["status"].get("talkgroups"))
+    live.rich_station(monkeypatch)
+    assert wait(lambda: bool(live.posts()), 30)
+    real = live.posts()[0]                               # the first post: with the status and the talkgroups
     conforms("station-state", real)
     for what, change in MUTATIONS.items():
         post = copy.deepcopy(real)
@@ -174,29 +181,55 @@ def test_a_change_in_what_the_code_sends_fails_the_check(live, monkeypatch):
         pytest.fail(f"not caught: {what}")
 
 
-def test_the_committed_vector_is_shaped_like_what_the_station_sends(live, monkeypatch):
-    """The valid vectors were made from a recording with every name replaced by a made-up one. They and the code must
-    not drift apart: wherever the schema lists an object's keys completely, the vector and a real post of the same
-    variant (the station with everything, with talkgroups) have the same keys, at every depth."""
-    st = live.rich_station(monkeypatch)
-    real = status_now(live, st, lambda p: p["status"].get("talkgroups"))
-    vector = dict(c.vectors("station-state", "valid"))["with-status.json"]
-    doc = c.load("station-state")
-    compared = []
+def test_a_post_built_before_the_test_changed_something_is_never_taken_for_the_next_one(tmp_path, monkeypatch):
+    """The tests' own race, pinned with a slow hub (every state post handled 0.4 s late): the station with everything
+    is set up before its link starts, so its very first post has the antenna group and the reception history; and
+    status_now() returns only a post built after it was asked, so a change made just before is in it."""
+    lv = c.Live(tmp_path, state_delay_s=0.4)
+    try:
+        st = lv.rich_station(monkeypatch)
+        assert wait(lambda: bool(lv.posts()), 30)
+        first = lv.posts()[0]["status"]
+        assert first["sdr"]["sdrs"][0]["group"] == "roof" and first["reception"]["history"][0]["id"] == "r-0001"
+        st.link.live_changed()                           # a post on its way ...
+        st.tg.set(4102, record=False)                    # ... while the test changes a switch
+        after = status_now(lv, st)
+        assert {r["tg"]: r["record"] for r in after["status"]["talkgroups"]}[4102] is False
+    finally:
+        lv.close()
 
-    def same(schema, a, b, path):
-        if isinstance(a, list) and isinstance(b, list) and isinstance(schema.get("items"), dict):
-            for i, (x, y) in enumerate(zip(a, b)):
-                same(schema["items"], x, y, f"{path}[{i}]")
-        if schema.get("x-complete") is True and isinstance(a, dict) and isinstance(b, dict):
-            assert set(a) == set(b), path
-            compared.append(path)
-            for k, sub in schema.get("properties", {}).items():
-                if k in a:
-                    same(sub, a[k], b[k], f"{path}.{k}")
-    assert set(real) == set(vector)
-    same(doc["$defs"]["status"], real["status"], vector["status"], "$.status")
-    assert len(compared) > 40 and "$.status.sdr.sdrs[0]" in compared and "$.status.radios[2]" in compared
+
+def test_the_recorded_status_and_talking_vectors_are_what_the_station_sends_now(live, monkeypatch):
+    """The base vectors (contracts/vectors/station-state/valid/with-status.json, talking-only.json) are recordings of
+    the station with everything, scrubbed (tests/contracts.py scrub). They and the code must not drift apart:
+    wherever the schema lists an object's keys completely, the vector and what the station sends now have the same
+    keys, at every depth. `python -m tests.contracts record` writes them anew from this very run."""
+    st = live.rich_station(monkeypatch)
+    assert wait(lambda: bool(live.posts()), 30)
+    status = c.scrub("station-state", live.posts()[0], live.tmp)             # the first post: with status, nobody talks
+    someone_talks_and_a_page_goes_out(st)
+    assert wait(lambda: any("status" not in p and len(p["talking"]) == 2 and p["paging"] for p in live.posts()), 30)
+    talking = c.scrub("station-state", next(p for p in live.posts() if "status" not in p and len(p["talking"]) == 2
+                                            and p["paging"]), live.tmp)
+    for rel, now in (("station-state/valid/with-status.json", status), ("station-state/valid/talking-only.json", talking)):
+        committed = c.recorded(rel, now)
+        conforms("station-state", committed)
+        assert c.same_shape("station-state", now, committed) == [], rel
+        assert committed["at"] == c.T0 and set(now) == set(committed)
+    assert c.same_shape("station-state", status, c.recorded("station-state/valid/with-status.json", status)) == []
+    assert c.same_shape.compared > 40
+    assert status["status"]["talkgroups"] and (status["talking"], status["paging"]) == ([], [])
+
+
+def test_the_recorded_plain_status_vector_is_what_a_plain_station_sends_now(live):
+    """The same for the plain station's base (with-status-plain.json): no shared dongles, no P25."""
+    live.station()
+    assert wait(lambda: bool(live.posts()), 30)
+    now = c.scrub("station-state", live.posts()[0], live.tmp)
+    committed = c.recorded("station-state/valid/with-status-plain.json", now)
+    conforms("station-state", committed)
+    assert c.same_shape("station-state", now, committed) == [] and c.same_shape.compared > 15
+    assert (committed["status"]["sdr"], committed["status"]["talkgroups"]) == (None, [])
 
 
 # -- the compatibility rule on the real readers ------------------------------------------------------------------------
@@ -318,10 +351,13 @@ def test_hello_answers_what_its_schema_says(live, tmp_path):
 
 
 def test_refusals_and_bad_bodies_are_the_error_envelope(live):
-    known = c.load("station-error")["properties"]["reason"]["x-known"]
+    reason = c.load("station-error")["properties"]["reason"]
+    known = reason["x-known"]
     # the code's own list of reasons, and the three it gives outside that list (the last two: the workers' routes,
-    # tests/test_contracts_routes.py)
-    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}
+    # tests/test_contracts_routes.py); the two that exist from #782 on are listed apart until it is in (D5 below)
+    later = {"bad_status", "bad_live"}                 # (the same test holds before and after #782)
+    assert set(known) - later == (set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}) - later
+    assert later <= set(known) | set(reason.get("x-known-from", {}).get("#782", []))
     reg = live.hub.app.hub.stations
     other = reg.add("st-south", "South firehouse")
     state = dict(c.vectors("station-state", "valid"))["with-status.json"]
@@ -399,85 +435,137 @@ def test_known_deviation_head_on_the_job_poll_takes_the_jobs_and_sends_none(live
         assert head == 405 and [j["id"] for j in got["jobs"]] == [job["id"]]
 
 
-# D5: the invalid vector posted -> the people's routes that then drop their connection (no answer at all) until the next
-# good post. The first five drop the POST's own connection too, AFTER the hub has kept the bad status.
+# D5: the invalid vector posted -> (the path the hub's 400 names once fixed, the people's routes that drop their
+# connection today, with no answer at all, until the next good post). Today every one of them drops the POST's own
+# connection too, AFTER the hub has kept the bad status.
 D5_STATUS = {
-    "radios-not-a-list.json": ["/api/station/status"],
-    "radio-row-null.json": [],
-    "radio-row-label-not-a-string.json": [],
-    "channels-not-an-object.json": [],
-    "outbox-not-an-object.json": ["/api/cad/state"],
+    "radios-not-a-list.json": ("status.radios", ["/api/station/status", "/api/cad/health"]),
+    "radio-row-null.json": ("status.radios[0]", []),
+    "radio-row-label-not-a-string.json": ("status.radios[0].label", []),
+    "channels-not-an-object.json": ("status.channels", []),
+    "outbox-not-an-object.json": ("status.outbox", ["/api/cad/state"]),
 }
-D5_LIVE = {"talker-until-as-a-string.json": ["/api/cad/state"],          # (the POST itself is answered 200)
-           "page-until-as-a-string.json": ["/api/cad/state"]}
+# ... and a talker or a page with `ended` and an `until` that is no number: today the POST is answered 200
+D5_LIVE = {"talker-until-as-a-string.json": ("talking[0].until", ["/api/cad/state"]),
+           "page-until-as-a-string.json": ("paging[0].until", ["/api/cad/state"])}
 
 
-@pytest.mark.parametrize("file", [*D5_STATUS, *D5_LIVE])
-def test_known_deviation_the_hub_raises_on_a_wrong_type_in_a_state_post(live, file):
+@pytest.mark.parametrize("file", list(D5_STATUS))
+def test_known_deviation_the_hub_raises_on_a_wrong_type_in_the_status(live, file):
     """D5. The hub ignores a key it does not know, but a known key of the wrong type is not handled: Hub._state keeps
     the status first and then reads it, raising in the handler (the connection is dropped with no answer), and the
-    routes that read the kept status or the live snapshot drop theirs until the next good post. Fixed: the post gets
-    an HTTP answer, and people's routes go on answering."""
+    routes that read the kept status drop theirs until the next good post. Fixed (#782): 400 {error: "bad status:
+    status.<path>: <what it must be>", reason: bad_status}; nothing of the post is taken; every read answers."""
+    path, down = D5_STATUS[file]
+    hub = live.hub.app.hub
     good = dict(c.vectors("station-state", "valid"))["with-status.json"]
     bad = dict(c.vectors("station-state", "invalid"))[file]
-    assert c.errors("station-state", bad)
     assert live.call("POST", "/api/station/state", dict(good, at=time.time()))[0] == 200 and live.people() == FINE
-    code, _ = live.call("POST", "/api/station/state", dict(bad, at=time.time()))
+    kept, kept_at, last = hub.status, hub.status_at, hub.last_state
+    code, body = live.call("POST", "/api/station/state", dict(bad, at=time.time()))
     after = live.people()
     try:
         if D5_HUB_RAISES_ON_A_WRONG_TYPE:
-            down = D5_STATUS.get(file, D5_LIVE.get(file))
-            assert code == (200 if file in D5_LIVE else 0), (file, code)      # 0: no HTTP answer at all
+            assert code == 0, (file, code)                                    # no HTTP answer at all
             assert after == {**FINE, **{p: 0 for p in down}}, (file, after)
-            if file in D5_STATUS:                                             # ... and the bad status was kept
-                assert c.errors("station-state", {"at": T0, "talking": [], "paging": [], "status": live.hub.app.hub.status})
+            assert hub.status is not kept and hub.status_at > kept_at         # ... and the bad status was kept
+            assert c.errors("station-state", {"at": T0, "talking": [], "paging": [], "status": hub.status})
         else:
-            assert code in (200, 400) and after == FINE, (file, code, after)
-    finally:                                         # the next good post puts the hub right (and before it is closed)
+            assert code == 400 and body["reason"] == "bad_status" and body["error"].startswith(f"bad status: {path}: ")
+            conforms("station-error", body)
+            assert hub.status is kept and hub.status_at == kept_at and hub.last_state == last     # nothing of it taken
+            assert after == FINE
+    finally:                                         # the next good post is taken (and puts the hub right today)
         assert live.call("POST", "/api/station/state", dict(good, at=time.time()))[0] == 200
+        assert live.people() == FINE and hub.status_at > kept_at and hub.status["id"] == c.STATION
+
+
+@pytest.mark.parametrize("file", list(D5_LIVE))
+def test_known_deviation_the_hub_raises_on_a_wrong_type_in_a_talker_or_a_page(live, file):
+    """D5. A talker or a page that has ended, with an `until` that is no number: the post is answered 200 and the
+    snapshot kept, and the console's state route then drops its connection until the next post. Fixed (#782): 400
+    {error: "bad state: talking[0].until: a number or null", reason: bad_live}; the talkers and pages it had stay."""
+    path, down = D5_LIVE[file]
+    before = dict(c.vectors("station-state", "valid"))["talking-only.json"]
+    bad = dict(c.vectors("station-state", "invalid"))[file]
+    assert live.call("POST", "/api/station/state", dict(before, at=time.time()))[0] == 200 and live.people() == FINE
+    talkers = [t["key"] for t in live.hub.app.live.state()]
+    pages = [p["key"] for p in live.hub.app.live.paging_state()]
+    assert len(talkers) == 2 and len(pages) == 1
+    code, body = live.call("POST", "/api/station/state", dict(bad, at=time.time()))
+    after = live.people()
+    try:
+        if D5_HUB_RAISES_ON_A_WRONG_TYPE:
+            assert code == 200 and after == {**FINE, **{p: 0 for p in down}}, (file, code, after)
+        else:
+            assert (code, body) == (400, {"error": f"bad state: {path}: a number or null", "reason": "bad_live"})
+            conforms("station-error", body)
+            assert after == FINE
+            assert [t["key"] for t in live.hub.app.live.state()] == talkers          # what it had is kept
+            assert [p["key"] for p in live.hub.app.live.paging_state()] == pages
+    finally:
+        assert live.call("POST", "/api/station/state", dict(before, at=time.time()))[0] == 200
         assert live.people() == FINE
 
 
-@pytest.mark.parametrize("caps", [5, True])
-def test_known_deviation_a_caps_that_is_no_list_ends_the_stations_state_thread(tmp_path, monkeypatch, caps):
-    """D6. The station ignores a key it does not know, but `caps` of the wrong type raises in StationLink._set_caps,
-    outside the thread's own error handling: the hub-state thread ends, and with it the heartbeat, talking now, the
-    status and the hub's build (so no update either) until the station restarts. Fixed: the value is ignored."""
+# D6: a field of the hub's answer with the wrong type -> what the station does with it today.
+GOOD_POOL = {"on": True, "worker": False, "ready": 1, "max_s": 45.0, "gpu_idle": False, "gpu_idle_n": 0}
+D6_ANSWERS = {
+    "caps a number": ({"caps": 5}, "the hub-state thread ends"),
+    "caps a boolean": ({"caps": True}, "the hub-state thread ends"),
+    "caps a string": ({"caps": "abc"}, "one capability per character"),
+    "pool.ready a string": ({"pool": dict(GOOD_POOL, ready="x")}, "pool_has_room raises"),
+    "pool.max_s a string": ({"pool": dict(GOOD_POOL, max_s="x")}, "pool_has_room raises"),
+}
+
+
+@pytest.mark.parametrize("case", list(D6_ANSWERS))
+def test_known_deviation_the_station_does_not_handle_a_wrong_type_in_the_answer(tmp_path, monkeypatch, capsys, case):
+    """D6. The station ignores a key it does not know, but a known field of the wrong type is not handled. `caps` that
+    is no list raises in StationLink._set_caps, outside the thread's own error handling: the hub-state thread ends,
+    and with it the heartbeat, talking now, the status and the hub's build (so no update either) until the station
+    restarts. `caps` as a string becomes one capability per character. A `pool.ready` or `pool.max_s` that is no
+    number makes pool_has_room raise in whoever asks. Fixed (#782): the field is ignored and its last good value
+    kept, pool_has_room answers a boolean, no thread ends or starts again, and the log says so once per field."""
+    answer, today = D6_ANSWERS[case]
+    field = next(iter(answer))
     died: list[tuple[str, str]] = []
     monkeypatch.setattr(threading, "excepthook", lambda a: died.append((a.thread.name, type(a.exc_value).__name__)))
-    lv = c.Live(tmp_path, answer_with={"caps": caps})
+    lv = c.Live(tmp_path, answer_with={"pool": GOOD_POOL})
     try:
         st = lv.station()
-        state = next(t for t in st.link._threads if t.name == "hub-state")
-        assert wait(lambda: len(lv.seen) >= 1, 30)
-        state.join(5.0 if D6_STATION_RAISES_ON_A_WRONG_TYPE else 0.5)
+        link = st.link
+        state = next(t for t in link._threads if t.name == "hub-state")
+        assert wait(lambda: link.hub_caps == frozenset(CAPS) and link.pool == GOOD_POOL, 30)      # the last good values
+        assert link.pool_has_room(30.0) is True
+        lv.answer_with = {"pool": GOOD_POOL, **answer}                       # from now on the hub answers this
         n = len(lv.seen)
-        st.link.live_changed()
+        link.live_changed()
+        assert wait(lambda: len(lv.seen) > n, 30)
+        if today == "the hub-state thread ends":
+            state.join(5.0 if D6_STATION_RAISES_ON_A_WRONG_TYPE else 0.3)
+        m = len(lv.seen)
+        link.live_changed()
+        posted_again = wait(lambda: len(lv.seen) > m, 0.5 if D6_STATION_RAISES_ON_A_WRONG_TYPE else 30)
         if D6_STATION_RAISES_ON_A_WRONG_TYPE:
-            assert not state.is_alive() and died == [("hub-state", "TypeError")]
-            assert not wait(lambda: len(lv.seen) > n, 0.5)                    # no post ever again
+            if today == "the hub-state thread ends":
+                assert not state.is_alive() and ("hub-state", "TypeError") in died and not posted_again
+                assert link.hub_caps == frozenset(CAPS)
+            elif today == "one capability per character":
+                assert state.is_alive() and link.hub_caps == frozenset("abc")
+            else:
+                assert state.is_alive() and link.pool == answer["pool"]
+                with pytest.raises(ValueError):
+                    link.pool_has_room(5.0)
         else:
-            assert state.is_alive() and died == [] and wait(lambda: len(lv.seen) > n, 30)
-        assert st.link.hub_caps == frozenset()
-    finally:
-        lv.close()
-
-
-def test_known_deviation_other_wrong_types_in_the_answer_are_taken_as_they_are(tmp_path):
-    """D6. `caps` as a string becomes one capability per character, and a `pool.ready` that is no number makes
-    StationLink.pool_has_room raise in whoever asks (the speech-to-text hand-over). Fixed: both are ignored."""
-    lv = c.Live(tmp_path, answer_with={"caps": "abc", "pool": {"on": True, "ready": "x", "max_s": 10}})
-    try:
-        st = lv.station()
-        assert wait(lambda: len(lv.seen) >= 1 and st.link.pool.get("on") is True, 30)
-        if D6_STATION_RAISES_ON_A_WRONG_TYPE:
-            assert st.link.hub_caps == frozenset("abc")
-            st.link.hub_caps = frozenset(CAPS)       # (so that the pool counts as taken: what the question needs)
-            with pytest.raises(ValueError):
-                st.link.pool_has_room(5.0)
-        else:
-            assert st.link.hub_caps == frozenset()
-            st.link.hub_caps = frozenset(CAPS)
-            assert st.link.pool_has_room(5.0) is False
+            assert state.is_alive() and posted_again and not [x for x in died if x[0].startswith("hub-")]
+            assert link.restarts == {}
+            assert link.hub_caps == frozenset(CAPS)                          # caps: the last good set, never {a, b, c}
+            assert link.pool_has_room(30.0) in (True, False) and link.pool_has_room(5.0) in (True, False)
+            if field == "pool":                                              # the bad number: its last good value
+                bad = "ready" if answer["pool"]["ready"] == "x" else "max_s"
+                assert link.pool == GOOD_POOL and link.pool_has_room(30.0) is True
+            said = [ln for ln in capsys.readouterr().out.splitlines() if "hub link: the hub's" in ln and "ignored" in ln]
+            assert len(said) == 1 and field in said[0], said
     finally:
         lv.close()

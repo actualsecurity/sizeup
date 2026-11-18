@@ -8,6 +8,7 @@ import ast
 import copy
 import inspect
 import json
+import os
 import re
 import textwrap
 import time
@@ -58,15 +59,221 @@ def subschema(name: str, pointer: str) -> Draft202012Validator:
 NOT_JSON = type("NotJson", (), {"__repr__": lambda self: "NOT_JSON"})()     # a vector file a strict reader refuses
 
 
-def vectors(name: str, kind: str) -> list[tuple[str, object]]:
-    """[(file name, parsed JSON)] of contracts/vectors/<name>/<kind>/ (kind: valid | invalid). NOT_JSON for a file
-    that is not JSON as a strict reader takes it (an invalid vector may be one: `NaN`)."""
-    out = []
-    for p in sorted((VECTORS / name / kind).glob("*.json")):
+PATCH = ".patch.json"            # a vector written as a base vector and the changes to it (RFC 6902 JSON Patch)
+
+
+def _pointer(doc, path: str):
+    """(the container, the key or index in it) an RFC 6901 JSON Pointer names in doc."""
+    assert path == "" or path.startswith("/"), f"not a JSON Pointer: {path!r}"
+    parts = [x.replace("~1", "/").replace("~0", "~") for x in path.split("/")[1:]]
+    assert parts, "the whole document is replaced by another vector, not by a patch"
+    for part in parts[:-1]:
+        doc = doc[int(part)] if isinstance(doc, list) else doc[part]
+    last = parts[-1]
+    return doc, (len(doc) if last == "-" else int(last)) if isinstance(doc, list) else last
+
+
+def patched(doc, ops: list[dict]):
+    """A copy of doc with an RFC 6902 JSON Patch applied: `add`, `remove` and `replace`, which is all the vectors
+    use. A `remove` or `replace` of what is not there fails, as the RFC says: a patch that no longer fits its base
+    says so instead of passing."""
+    out = copy.deepcopy(doc)
+    for op in ops:
+        assert set(op) <= {"op", "path", "value"} and op.get("op") in ("add", "remove", "replace"), op
+        box, key = _pointer(out, op["path"])
+        there = key < len(box) if isinstance(box, list) else key in box
+        if op["op"] == "add":
+            if isinstance(box, list):
+                box.insert(key, copy.deepcopy(op["value"]))
+            else:
+                box[key] = copy.deepcopy(op["value"])
+        else:
+            assert there, f"{op['op']} {op['path']}: not in the base"
+            if op["op"] == "remove":
+                del box[key]
+            else:
+                box[key] = copy.deepcopy(op["value"])
+    return out
+
+
+def vector(path: Path):
+    """One vector file as the body it stands for. A plain .json file is the body (NOT_JSON when a strict reader refuses
+    it: an invalid vector may be that, `NaN`). A .patch.json file is {"base": a vector's path under contracts/vectors/,
+    "patch": [RFC 6902 operations]}: the base with the patch applied."""
+    text = path.read_text(encoding="utf-8")
+    if not path.name.endswith(PATCH):
         try:
-            out.append((p.name, loads_strict(p.read_text(encoding="utf-8"))))
+            return loads_strict(text)
         except ValueError:
-            out.append((p.name, NOT_JSON))
+            return NOT_JSON
+    doc = loads_strict(text)
+    assert set(doc) == {"base", "patch"} and isinstance(doc["patch"], list) and doc["patch"], f"{path.name}: base, patch"
+    base = VECTORS / doc["base"]
+    assert base.is_file() and not base.name.endswith(PATCH), f"{path.name}: its base is a plain vector, {doc['base']}"
+    return patched(vector(base), doc["patch"])
+
+
+def vectors(name: str, kind: str) -> list[tuple[str, object]]:
+    """[(name.json, the body)] of contracts/vectors/<name>/<kind>/ (kind: valid | invalid), plain and patched alike:
+    `x.patch.json` is listed as `x.json`."""
+    out = [(p.name.removesuffix(PATCH) + ".json" if p.name.endswith(PATCH) else p.name, vector(p))
+           for p in (VECTORS / name / kind).glob("*.json")]
+    assert len({n for n, _ in out}) == len(out), f"{name}/{kind}: a vector both plain and patched"
+    return sorted(out, key=lambda x: x[0])
+
+
+def dump(o, indent: int = 0, root: bool = True) -> str:
+    """JSON as the recorded vectors are written: one line per object or list that fits in 118 columns, so a recorded
+    status is a few hundred lines and a key added to it is a one-line diff."""
+    inline = json.dumps(o, ensure_ascii=False)
+    pad = " " * (indent + 2)
+    if not isinstance(o, (dict, list)) or not o or (not root and len(inline) + indent <= 118):
+        return inline
+    if isinstance(o, list):
+        return "[\n" + ",\n".join(pad + dump(v, indent + 2, False) for v in o) + "\n" + " " * indent + "]"
+    return "{\n" + ",\n".join(f"{pad}{json.dumps(k, ensure_ascii=False)}: {dump(v, indent + 2, False)}"
+                              for k, v in o.items()) + "\n" + " " * indent + "}"
+
+
+# -- recording the base vectors from the real code -----------------------------------------------------------------------
+# `python -m tests.contracts record` runs the tests that record (their names have "recorded" in them) with
+# SIZEUP_CONTRACTS_RECORD=1: each writes what the real code sent, scrubbed, over its base vector. Without it the same
+# tests compare the committed base with what the code sends now.
+
+RECORD_ENV = "SIZEUP_CONTRACTS_RECORD"
+T0 = 1_794_990_000.0             # every recorded post is moved to this moment
+TIME_LIMIT = 100000000000        # a schema's mark of a point in time: Unix seconds below this (never milliseconds)
+MACHINE = {"host": "st-north", "cpu_pct": 38.0, "load1": 1.2, "cpus": 4, "mem_pct": 44.0, "mem_total": 17179869184,
+           "temp_c": 51.0, "disk_path": "/var/lib/sizeup", "disk_pct": 12.5, "disk_free": 236223201280,
+           "disk_total": 269490393088}
+
+
+def _is_time(branches) -> bool:
+    return any(b.get("exclusiveMaximum") == TIME_LIMIT for b, _ in branches)
+
+
+def _retime(node: dict, resolver, inst, move):
+    """inst with every point in time (by its schema) put through move()."""
+    branches = _branches(node, resolver, inst)
+    if isinstance(inst, dict):
+        props: dict[str, tuple[dict, object]] = {}
+        extra = None
+        for b, r in branches:
+            props.update({k: (v, r) for k, v in (b.get("properties") or {}).items()})
+            if isinstance(b.get("additionalProperties"), dict):
+                extra = (b["additionalProperties"], r)
+        return {k: _retime(*(props.get(k) or extra), v, move) if (k in props or extra) else v for k, v in inst.items()}
+    if isinstance(inst, list):
+        items = next(((b["items"], r) for b, r in branches if isinstance(b.get("items"), dict)), None)
+        return [_retime(*items, v, move) if items else v for v in inst]
+    if isinstance(inst, (int, float)) and not isinstance(inst, bool) and _is_time(branches):
+        return move(inst)
+    return inst
+
+
+def scrub(name: str, body: dict, tmp: Path | str = "") -> dict:
+    """A recorded body with everything of this machine, this run and this moment replaced by fixed made-up values, so
+    that a vector says nothing about where it was recorded and a new recording differs only where the code does:
+
+    - time: every point in time (a field whose schema is one) is moved so that the post's `at` is T0, to the whole
+      second; `health.started` is T0 - 3600 and `health.boot` T0 - 86400; the start time inside a talker's and a
+      page's `key` follows;
+    - the machine: MACHINE's keys in `status.health`; `load.cpu_pct` of a station's whisper;
+    - this run: any `detail` naming the test's temporary folder; the Voice row (it depends on the OS); the counters
+      of the metrics link, the speech-to-text queue's `ours_ago_s` and the pool worker's first word; the worker's
+      `model` (the test config's);
+    - the code's own names: the county system's (sizeup.sourcekeys.COUNTY) becomes `countynet`, its dongle job
+      (sizeup.app.P25_MODE) `County P25`."""
+    import sizeup.app as appmod
+    from sizeup import sourcekeys
+    doc = load(name)
+    at = body.get("at") if isinstance(body.get("at"), (int, float)) else None
+    if at is not None:
+        body = _retime(doc, registry().resolver(doc["$id"]), body, lambda t: T0 + round(t - at))
+
+    def words(o):
+        if isinstance(o, dict):
+            return {words(k): words(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [words(v) for v in o]
+        if isinstance(o, str):
+            o = o.replace(sourcekeys.COUNTY, "countynet").replace(appmod.P25_MODE, "County P25")
+            o = re.sub(r"^((?:fm|page):.*?:)\d{9,}\.\d\d(?=:|$)", lambda m: f"{m[1]}{T0:.2f}", o)
+            if tmp and (str(tmp) in o or "pytest" in o):
+                o = "cannot start rtl_fm: not installed" if "rtl_fm" in o else "trunk-recorder not installed" \
+                    if "trunk-recorder" in o else "/var/lib/sizeup"
+        return o
+    body = words(body)
+    st = body.get("status")
+    if isinstance(st, dict):
+        hl = st["health"]
+        hl.update({k: v for k, v in MACHINE.items() if k in hl}, started=T0 - 3600.0, boot=T0 - 86400.0)
+        if isinstance(hl.get("stt_queue"), dict):
+            hl["stt_queue"]["ours_ago_s"] = 0.0
+        st["metrics"].update(pending=0, sent=0, last_ok=None)
+        if st["pool_worker"]["state"] == "off":            # (its first word comes a moment after the first post)
+            st["pool_worker"]["why"] = "this station's whisper isn't in the pool"
+        for row in st["radios"]:
+            if row["label"] == "Voice":
+                row.update(state="off", detail="no voice on this machine")
+    if isinstance(body.get("load"), dict) and "cpu_pct" in body["load"]:
+        body["load"]["cpu_pct"] = 27.5
+    if name.startswith("stt-worker-") and "model" in body:
+        body["model"] = "large-v3-turbo-q5_0" if "version" in body else "small.en-q5_1"
+    import getpass
+    import socket
+    text = json.dumps(body)
+    for mine in (socket.gethostname(), getpass.getuser(), str(tmp), "pytest", "/private/", "/Users/", "/home/"):
+        assert not mine or len(mine) < 3 or mine not in text, f"the recording still names this machine or run: {mine!r}"
+    return body
+
+
+def recorded(rel: str, body) -> object:
+    """The base vector contracts/vectors/<rel>. With SIZEUP_CONTRACTS_RECORD=1 it is first written anew from body
+    (what the real code just sent, scrubbed)."""
+    path = VECTORS / rel
+    if os.environ.get(RECORD_ENV, "") not in ("", "0"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(dump(body) + "\n", encoding="utf-8")
+    return vector(path)
+
+
+def same_shape(name: str, a, b) -> list[str]:
+    """Where two bodies of one schema differ in shape: wherever the schema lists an object's keys completely
+    (x-complete) both must have the same keys, at every depth; and a list on one side is a list on the other. The
+    paths that differ ([] when none), and how many objects were compared, as the last entry's count."""
+    doc = load(name)
+    out: list[str] = []
+    seen = [0]
+
+    def walk(node, resolver, x, y, path):
+        if isinstance(x, list) != isinstance(y, list) or isinstance(x, dict) != isinstance(y, dict):
+            out.append(f"{path}: {type(x).__name__} / {type(y).__name__}")
+            return
+        bx = _branches(node, resolver, x)
+        if isinstance(x, dict):
+            props: dict[str, tuple[dict, object]] = {}
+            extra, complete = None, False
+            for n, r in bx + _branches(node, resolver, y):
+                props.update({k: (v, r) for k, v in (n.get("properties") or {}).items()})
+                complete = complete or n.get("x-complete") is True
+                if isinstance(n.get("additionalProperties"), dict):
+                    extra = (n["additionalProperties"], r)
+            if complete and extra is None:
+                seen[0] += 1
+                if set(x) != set(y):
+                    out.append(f"{path}: {sorted(set(x) ^ set(y))}")
+            for k in set(x) & set(y):
+                sub = props.get(k) or extra
+                if sub:
+                    walk(*sub, x[k], y[k], f"{path}.{k}")
+        elif isinstance(x, list):
+            items = next(((n["items"], r) for n, r in bx if isinstance(n.get("items"), dict)), None)
+            for i, (u, v) in enumerate(zip(x, y)):
+                if items:
+                    walk(*items, u, v, f"{path}[{i}]")
+    walk(doc, registry().resolver(doc["$id"]), a, b, "$")
+    same_shape.compared = seen[0]
     return out
 
 
@@ -382,7 +589,7 @@ SHARED = "contracts-shared-station-token-0123456789"
 DONGLES = [(0, "RTL2838UHIDIR", "00000101"), (1, "Blog V4", "00000102"), (2, "RTL2838UHIDIR", "00000103"),
            (3, "RTL2838UHIDIR", "00000104"), (4, "RTL2838UHIDIR", "00000105")]
 TALKGROUPS = {4101: "Fire Dispatch 1", 4102: "Fire Ops 2"}       # the "county" system's, made up
-PEOPLE_ROUTES = ("/api/state", "/api/cad/state", "/healthz")     # what people's consoles read (no token in the tests)
+PEOPLE_ROUTES = ("/api/state", "/api/cad/state", "/api/cad/health", "/healthz")    # what people's consoles read
 
 
 def _cfg_names() -> dict:
@@ -399,18 +606,23 @@ class Live:
     and as it was answered: `seen` = [(request bytes, status, answer bytes)]; every request to the workers' API
     likewise: `worker_seen` = [(path, request bytes, status, answer bytes)]. answer_with: keys added to every state
     answer (what a newer hub would send); answer_without: keys left out of it (what an older one would not);
-    worker_answer_with: keys added to every JSON answer of the workers' API."""
+    worker_answer_with: keys added to every JSON answer of the workers' API; state_delay_s: every state post is
+    handled this much later (a slow hub: what a loaded machine does to the order of things; for every Live of a run,
+    SIZEUP_CONTRACTS_STATE_DELAY_S=0.4 in the environment: how the tests' own races are looked for)."""
 
     def __init__(self, tmp_path, answer_with: dict | None = None, answer_without: tuple = (),
-                 worker_answer_with: dict | None = None):
+                 worker_answer_with: dict | None = None, state_delay_s: float | None = None):
         from sizeup.cloud.health import status_token
         from tests.test_cloud import HubRun, hub_cfg
         self.tmp = tmp_path
+        if state_delay_s is None:
+            state_delay_s = float(os.environ.get("SIZEUP_CONTRACTS_STATE_DELAY_S") or 0.0)
         self.hub = HubRun(hub_cfg(tmp_path, cloud_token=SHARED, cloud_legacy_station_id=STATION, **_cfg_names()))
         h = self.hub.app.hub
         self.own = h.stations.add(STATION, "North firehouse")
         self.worker = h.workers.add(WORKER, "GPU box")
         self.tokens = {"sz1": self.own, "shared": SHARED, "status": status_token(self.own), "sw1": self.worker}
+        self.answer_with = answer_with          # (may be set later: the hub's answers from then on)
         self.seen: list[tuple[bytes, int, bytes]] = []
         self.worker_seen: list[tuple[str, bytes, int, bytes]] = []
         self.stations: list = []
@@ -418,10 +630,12 @@ class Live:
         real = h._state
 
         def state(raw, p=None):
+            if state_delay_s:
+                time.sleep(state_delay_s)
             code, body, ctype = real(raw, p)
-            if code == 200 and (answer_with or answer_without):
+            if code == 200 and (self.answer_with or answer_without):
                 d = {k: v for k, v in json.loads(body).items() if k not in answer_without}
-                body = json.dumps(dict(d, **(answer_with or {})), separators=(",", ":")).encode()
+                body = json.dumps(dict(d, **(self.answer_with or {})), separators=(",", ":")).encode()
             self.seen.append((raw, code, body))
             return code, body, ctype
         h._state = state
@@ -481,8 +695,9 @@ class Live:
         import sizeup.app as appmod
         from sizeup.config import ChannelCfg
         from sizeup.radio import systems
+        from sizeup.app import make_app
         from sizeup.radio.recorder import TrunkRecorder
-        from tests.test_cloud import station
+        from tests.test_app import FakeWhisper
         from tests.test_p25_systems import make_system
         plugged = list(DONGLES)
         for name, value in (("SWITCH_PAUSE_S", 0.0), ("SDR_WATCH_S", 3600.0), ("SDR_SETTLE_S", 0.0), ("GROUP_HOLD_S", 0.0)):
@@ -503,7 +718,10 @@ class Live:
             p25_tg_info={tg: {"name": name, "group": "Fire", "encrypted": False} for tg, name in TALKGROUPS.items()},
             p25_recorder=str(self.tmp / "no-trunk-recorder") + " --config=config.json",
             p25_recorder_dir=str(work), p25_systems=(system,))
-        st = station(cfg, {})
+        st = make_app(cfg)                 # as tests/test_cloud.py station(), but the link starts once it is set up:
+        st.stt.client = FakeWhisper({})    # no post is ever built from a station half set up
+        st.stt.start()
+        st.live.on_change = st.link.live_changed
         st.paging.on_change = st.link.live_changed
         self.stations.append(st)
         self._apps.append(st)
@@ -523,6 +741,7 @@ class Live:
             "halves": [{"job": "East 1", "seconds": 900.0, "verdict": {"grade": "good", "hint": ""},
                         "cc": {"mhz": 769.90625, "rate": 39.5, "decoded_pct": 98.7, "windows": 300, "dropout_s": 0.0,
                                "retunes": 0}, "talkgroups": [], "voice": {"calls": 4, "err_per_s": 0.2}}]})
+        st.link.start()
         return st
 
     def posts(self) -> list[dict]:
@@ -534,3 +753,16 @@ class Live:
         self.hub.close()
         for app in self._apps:
             app.stop()
+
+
+if __name__ == "__main__":
+    import subprocess
+    import sys
+    if sys.argv[1:] != ["record"]:
+        sys.exit("usage: python -m tests.contracts record    (write the base vectors anew from what the code sends)")
+    repo = ROOT.parent
+    sys.exit(subprocess.call(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-k", "recorded",
+         "tests/test_contracts_station_state.py", "tests/test_contracts_workers.py"],
+        cwd=repo, env={**os.environ, RECORD_ENV: "1", "PYTHONPATH": os.pathsep.join(
+            [str(repo), *filter(None, [os.environ.get("PYTHONPATH")])])}))
