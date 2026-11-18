@@ -207,7 +207,9 @@ window.IntelSettings = (() => {
     ], lst));
     // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
     const inf = d.infer || {};
-    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
+    const owned = !!(d.model || {}).on && ((d.model || {}).cfg || {}).infer_pd !== false;     // backing.py owns the police pack
+    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data"
+      + (owned ? ". Not for the police pack while Local model is on (one model per row)" : ""));
     icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
     const inum = (key, min, max, step, label, tip) => num(s[key] ?? "", min, max, step, set(key), label, tip);
     const model = sInput(s.infer_model || "", 120, "Model id", set("infer_model"), "mono");

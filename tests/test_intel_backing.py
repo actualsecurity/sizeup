@@ -138,14 +138,48 @@ def test_an_answer_landing_in_an_open_rules_event_is_evidence_only():
     assert "·m" not in compose(after, "PD", {"label": "Weapon / shots"})["title"]                  # no marker
 
 
-def test_another_category_on_the_same_source_in_the_window_is_no_second_pushed_event():
+def test_another_category_on_the_same_source_in_the_window_is_no_second_pushed_event_nor_its_record():
     e0, _s, _b = setup()
     e, sink, b = setup(B.FakeBackend(answer(fight_cat(e0), 0.9)), packs=full())
     [ev] = e.feed(row("t1", SHOTS, 1000))
     pushes = len(sink.pushes)
     assert e.feed(row("t2", "there are several people in the street pushing each other near the corner", 1040)) == []
     assert len(e.events.all()) == 1 and len(sink.pushes) == pushes
-    assert e.backing.shown(ev.id)["used"] == "evidence"
+    assert e.backing.shown(ev.id) is None                                   # never recorded against that event
+    assert (e.backing.records[-1]["used"], e.backing.records[-1]["event_id"]) == ("near", None)
+
+
+def test_a_new_call_while_another_is_open_on_the_source_is_its_own_event_on_the_card_not_pushed():
+    e0, _s, _b = setup()
+    cat = fight_cat(e0)
+    e, sink, b = setup(B.FakeBackend(answer(cat, 0.9)), packs=full())
+    [shots] = e.feed(row("t1", SHOTS, 1000))
+    pushes = len(sink.pushes)
+    [ev] = e.feed(row("t2", "new call, two males fighting in the parking lot, one of them is bleeding", 1090))
+    assert ev.id != shots.id and ev.category == cat and ev.mode == "map"
+    assert len(sink.pushes) == pushes + 1 and not sink.pushes[-1][1].would_push
+    assert e.backing.shown(ev.id)["used"] == "event" and e.backing.shown(shots.id) is None
+
+
+def test_another_place_while_a_long_incident_is_open_is_its_own_event_on_the_card():
+    e0, _s, _b = setup()
+    e, sink, b = setup(B.FakeBackend(answer(fight_cat(e0), 0.9)), packs=full())
+    [shots] = e.feed(row("t1", SHOTS, 1000))
+    for i in range(3):                                        # the incident goes on: its event's last_at moves
+        e.feed(row(f"u{i}", "more shots fired at 100 Example Ave, units staging", 1010 + 20 * i))
+    [ev] = e.feed(row("t2", "neighbor says two men are fighting at Sample St and Test Rd, one is bleeding", 1080))
+    assert ev.id != shots.id and ev.label_full == "Sample St & Test Rd, Rye" and ev.mode == "map"
+    assert e.events.get(shots.id).traffic_ids[-1] != "t2"
+
+
+def test_the_models_place_is_set_on_the_row_only_for_an_event_it_raises():
+    def exact(t, s):                                          # a place only for the address alone
+        return example_locate(t, s) if t.strip().lower() in ("100 example ave", "sample st and test rd") else None
+    e, sink, b = setup(B.FakeBackend(answer("weapons", 0.9, address="100 Example Ave")), packs=full(), locate=exact)
+    [ev] = e.feed(row("t1", SHOTS, 1000))
+    e.feed(row("t2", "a caller near 100 Example Ave says the man is still pacing up and down the block", 1030))
+    assert e.backing.records[-1]["used"] == "evidence"
+    assert e.windows[("police", "p25:mrrs:9211")].entries["t2"].place is None
 
 
 def test_out_of_the_window_on_the_source_another_category_is_its_own_event():
@@ -459,6 +493,52 @@ def test_a_backend_future_of_a_bare_dict_still_maps():
     assert len(e.feed(row("t1", MACHETE, 1000))) == 1
 
 
+def test_a_backend_that_waits_never_holds_the_engine():
+    class Slow(B.FakeBackend):
+        def available(self):
+            time.sleep(2)
+            return True
+
+        def classify(self, messages, schema, deadline_s=B.DEADLINE_S):
+            time.sleep(2)
+            return super().classify(messages, schema, deadline_s)
+    clock = Clock(1050)
+    e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=example_locate, thread=False,
+                    clock=clock, packs=police())
+    e.backing = B.ModelBacking(lambda: e.policy.cfg, clock=clock, log=lambda m: None, backend=Slow(answer()),
+                               worker=True)
+    t0 = time.monotonic()
+    assert e.feed(row("t1", MACHETE, 1000)) == []                         # queued, never waited for
+    t1 = time.monotonic()
+    e.backing.status()
+    e.backing.health_row()
+    t2 = time.monotonic()
+    assert t1 - t0 < 0.5 and t2 - t1 < 0.5, (t1 - t0, t2 - t1)
+    time.sleep(0.2)
+    assert e._lock.acquire(timeout=0.5)                                    # the model thread waits without it
+    e._lock.release()
+    end = time.time() + 15
+    while not e.events.all() and time.time() < end:
+        time.sleep(0.05)
+    assert [x.category for x in e.events.all()] == ["weapons"]
+
+
+def test_live_even_an_answer_already_resolved_is_applied_on_the_model_thread():
+    clock = Clock(1050)
+    e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=example_locate, thread=False,
+                    clock=clock, packs=police())
+    e.backing = B.ModelBacking(lambda: e.policy.cfg, clock=clock, log=lambda m: None, backend=B.FakeBackend(answer()),
+                               worker=True)
+    seen = []
+    orig = e.backing._answered
+    e.backing._answered = lambda *a: (seen.append(threading.current_thread().name), orig(*a))[1]
+    e.feed(row("t1", MACHETE, 1000))
+    end = time.time() + 5
+    while not e.events.all() and time.time() < end:
+        time.sleep(0.01)
+    assert seen == ["intel-model"] and [x.category for x in e.events.all()] == ["weapons"]
+
+
 def test_live_the_answer_is_applied_on_the_models_own_thread():
     clock = Clock(1050)
     e = IntelEngine(settings={}, events=MemoryEvents(), sink=RecordingSink(), locate=example_locate, thread=False,
@@ -469,6 +549,9 @@ def test_live_the_answer_is_applied_on_the_models_own_thread():
     orig = e.backing._answered
     e.backing._answered = lambda *a: (seen.append(threading.current_thread().name), orig(*a))[1]
     e.feed(row("t1", MACHETE, 1000))
+    end = time.time() + 5
+    while not b.open and time.time() < end:                   # asked on the model thread, a moment later
+        time.sleep(0.01)
     t = threading.Thread(target=lambda: b.open[0].set_result((answer(), B.meta("ok"))), name="hub-resolver")
     t.start()
     t.join(5)

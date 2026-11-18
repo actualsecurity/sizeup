@@ -35,18 +35,28 @@ The answer (schema "pd_classify" v1, schema()): validated again here (validate()
 de-escalation, never the model. Then, under the engine's lock, a category not "none" with confidence >=
 infer_pd_threshold (0.7):
 
-    an open event already there   the row in an open event, any open event of the source within the pack's window_s
-                                  of the row, or one of this category (or one deferring to it) on the source within the
-                                  merge span, or at the same place: EVIDENCE only, never an escalation. The answer is
-                                  recorded against that event (intel_model, More info) and its hit reported; the event
-                                  itself is not changed: no push, no level, no mode, no marker
-    else                          a new event, raised as a rule's (engine._raise: lifecycle, place, holds, policy, caps;
-                                  mode the lowest of the pack's, the category's and infer_pd_mode), scored on rule
-                                  "model.<backend>" (weight: the confidence) and the trigger row's own hits only (never
-                                  another row's in the window). Its place: the trigger's, through the locator; else the
-                                  model's "address" if its words are in the trigger (infer.said), never confirmed. Its
-                                  pushes' title ends in "·m" (push.compose: only an event the model raised carries the
-                                  rule). The model, its version, the confidence and the reason: intel_model, More info
+    this call's open event    the row in an open event; one of this category (or one deferring to it) on the source
+                              within the merge span; one of this category at the same place; unless the row says it
+                              is a new call or both places are known and differ (engine._raise's own test): EVIDENCE
+                              only, never an escalation. The answer is recorded against that event (intel_model, More
+                              info) and its hit reported; the event itself is not changed: no push, no level, no mode,
+                              no marker
+    the source busy           another open event of the source within the pack's window_s of the row: plausibly this
+                              call (no new-call words, no two known places that differ): nothing raised, the answer
+                              kept as "near" against no event; else (another call) its own event capped at map: on
+                              the card and the map, never a push
+    else                      a new event, raised as a rule's (engine._raise: lifecycle, place, holds, policy, caps;
+                              mode the lowest of the pack's, the category's and infer_pd_mode), scored on rule
+                              "model.<backend>" (weight: the confidence) and the trigger row's own hits only (never
+                              another row's in the window). Its place: the trigger's, through the locator; else the
+                              model's "address" if its words are in the trigger (infer.said), never confirmed (set on
+                              the row only for the event it raises). Its pushes' title ends in "·m" (push.compose:
+                              only an event the model raised carries the rule). The model, its version, the confidence
+                              and the reason: intel_model, More info
+
+Threads: consider() is on the engine's thread under its lock and only gates, snapshots and queues; the backend's
+available() and classify() (which may wait on the hub), the site history and the messages, and every answer, are on
+the "intel-model" thread (ModelBacking's doc).
 
 Health (health_row) and Settings > System > Intel (status): the backend in use, available or not, and today's counts
 (asked, ok, no_worker, gaming, deadline, invalid, events, evidence, capped). Never a prompt or an answer in a log line.
@@ -82,6 +92,7 @@ ASKED_MAX = 5000
 QUEUE_MAX = 200
 KEEP_S = 90 * 86400
 PRUNE_S = 3600.0
+REFRESH_S = 30.0               # the model thread checks the backend's availability this often when idle (Health)
 WEAPONS = ("none", "knife", "gun", "other", "unknown")
 KEYS = ("category", "confidence", "in_progress", "weapon", "deescalation", "address", "reason")
 ADDRESS_MAX = 80
@@ -341,9 +352,15 @@ def defaults() -> dict:
 
 
 class ModelBacking:
-    """The stage (the module's doc). settings(): the intel section (infer.py DEFAULTS' infer_pd* keys). worker: the
-    answers are applied on the "intel-model" thread (live), never the thread that resolves the Future; False: right
-    where they resolve (tests, replay). wait: replay with a real backend: consider() waits for each answer."""
+    """The stage (the module's doc). settings(): the intel section (infer.py DEFAULTS' infer_pd* keys).
+
+    worker (live): consider() runs on the engine's thread under its lock and only gates and snapshots (the trigger,
+    its place, the context so far): a queue put. Everything that may wait (the backend's available() and classify(),
+    the site history, building the messages) and every answer (even a Future already resolved) is on the
+    "intel-model" thread, which takes the engine's lock only to apply one. status() / health_row() read the
+    availability that thread last saw (refreshed every REFRESH_S), never a live call.
+    worker False (tests, replay): the same steps inline, in order. wait (replay with a real backend): each answer is
+    waited for."""
 
     def __init__(self, settings: Callable[[], dict], store=None, clock: Callable[[], float] = time.time,
                  log: Callable[[str], None] = print, tz=None, backend: InferBackend | None = None, worker: bool = False,
@@ -362,6 +379,7 @@ class ModelBacking:
         self.total = {k: 0 for k in COUNTS}    # since start (replay's report: its clock crosses days)
         self.records: list[dict] = []          # without a store (replay, tests)
         self.last_model = {"model": "", "model_version": "", "backend": ""}
+        self.seen = {"backend": "none", "pc": "not checked yet", "at": 0.0}   # what the model thread last saw
         self._lock = threading.Lock()
         self._ready = store is None
         self._pruned = 0.0
@@ -380,15 +398,21 @@ class ModelBacking:
 
     def backend(self, c: dict | None = None) -> InferBackend:
         """The PC worker when it is there; Bedrock only when an admin turned it on with a budget (and it is built: a
-        stub never is); else nothing (rules only)."""
+        stub never is); else nothing (rules only). A live check (available() may wait): the model thread's, or inline
+        (tests, replay); never the engine thread's in live use. What it found is kept for status()."""
         c = self.cfg() if c is None else c
+        named = self._fixed or self.pc
         if self._fixed is not None:
-            return self._fixed if self._fixed.available() else self.null
-        if c["infer_pd"] and self.pc.available():
-            return self.pc
-        if c["infer_pd_bedrock"] and float(c["infer_pd_bedrock_budget_usd"]) > 0 and self.bedrock.available():
-            return self.bedrock
-        return self.null
+            b = self._fixed if self._fixed.available() else self.null
+        elif c["infer_pd"] and self.pc.available():
+            b = self.pc
+        elif c["infer_pd_bedrock"] and float(c["infer_pd_bedrock_budget_usd"]) > 0 and self.bedrock.available():
+            b = self.bedrock
+        else:
+            b = self.null
+        state = "ok" if b is named else ("not built here" if named is self.pc and self.pc.mod() is None else "unavailable")
+        self.seen = {"backend": b.name, "pc": state, "at": self.clock()}
+        return b
 
     def owns(self, pack) -> bool:
         """This stage asks about the pack's rows (infer.py's own stage then never does: one model per row)."""
@@ -409,17 +433,21 @@ class ModelBacking:
             self.total[key] = self.total.get(key, 0) + 1
 
     def status(self) -> dict:
+        """Never a live available() (it may wait on the hub): what the model thread last saw (inline: checked now)."""
         c = self.cfg()
-        b = self.backend(c)
+        if self.worker:
+            self._start()                      # keeps the availability fresh, even with no traffic
+        else:
+            self.backend(c)
+        seen = dict(self.seen)
         with self._lock:
             self._roll(self.clock())
             counts = {k: self.today[k] for k in COUNTS}
         on = bool(c["infer_pd"] or c["infer_pd_bedrock"])
-        named = self._fixed or self.pc
-        return {"on": on, "backend": b.name, "ready": b is not self.null, "model": self.last_model["model"],
-                "model_version": self.last_model["model_version"], "pc": named.state(), "bedrock": {
-                    "on": bool(c["infer_pd_bedrock"]), "budget_usd": c["infer_pd_bedrock_budget_usd"],
-                    "state": self.bedrock.state()}, "today": counts, "cfg": c}
+        return {"on": on, "backend": seen["backend"], "ready": seen["backend"] != "none", "model": self.last_model["model"],
+                "model_version": self.last_model["model_version"], "pc": seen["pc"], "checked_at": seen["at"],
+                "bedrock": {"on": bool(c["infer_pd_bedrock"]), "budget_usd": c["infer_pd_bedrock_budget_usd"],
+                            "state": self.bedrock.state()}, "today": counts, "cfg": c}
 
     def health_row(self) -> dict:
         """Settings > Station > Health's Intel line for the model: what is in use, and today's counts."""
@@ -439,21 +467,22 @@ class ModelBacking:
         return {"pack": "model", "label": "Intel model", "on": s["on"], "level": "ok" if s["ready"] else "off",
                 "text": text, "title": title}
 
-    # -- the gate ---------------------------------------------------------------------------------------------------
+    # -- the gate (the engine's thread, under its lock: cheap, never waits) ------------------------------------------
 
     def consider(self, engine, pack, row: dict, key: str, tid: str, win, at: float, suppressed: bool, hits: list,
                  changed: list, ruled: bool = False) -> list:
-        """Every row the engine read for a pack (after the rules): remembered as context, and asked about when it
-        passes the gate. ruled: a category this row speaks of reached its threshold (raised, deferred, or its mode off:
-        the rules' call either way). The events this made (an inline answer: tests, replay)."""
+        """Every row the engine read for a pack (after the rules): remembered as context, and, when it passes the
+        gate, snapshotted and queued. ruled: a category this row speaks of reached its threshold (raised, deferred, or
+        its mode off: the rules' call either way). The events this made (inline only: tests, replay)."""
         c = self.cfg()
         if pack.name != str(c["infer_pd_pack"]) or not (c["infer_pd"] or c["infer_pd_bedrock"]) or pack.mode == "off":
             return []
         from sizeup.intel import rules as rules_mod
         text = str(row.get("text") or "")
-        src = self.sources.setdefault(key, deque(maxlen=SOURCE_KEEP))
-        if text.strip() and not any(x["tid"] == tid for x in src):
-            src.append({"tid": tid, "at": at, "text": text})
+        with self._lock:
+            src = self.sources.setdefault(key, deque(maxlen=SOURCE_KEEP))
+            if text.strip() and not any(x["tid"] == tid for x in src):
+                src.append({"tid": tid, "at": at, "text": text})
         out = self._due(engine, at)
         if (suppressed or changed or ruled or tid in self.asked or any(r.category == "routine" for r, _w in hits)
                 or len(rules_mod.words(text)) < int(c["infer_pd_min_words"])
@@ -467,9 +496,6 @@ class ModelBacking:
         if capped:
             self.count("capped", now)
             return out
-        if self.backend(c) is self.null:
-            self.count("unavailable", now)
-            return out
         self.asked[tid] = now
         while len(self.asked) > ASKED_MAX:
             self.asked.pop(next(iter(self.asked)))
@@ -478,19 +504,26 @@ class ModelBacking:
         if place is None:
             place = engine._where(pack, row, key, [text], list(entry.who) if entry is not None else [])
         job = {"pack": pack.name, "key": key, "tid": tid, "row": dict(row), "at": at, "place": place,
-               "due": at + float(c["infer_pd_after_s"])}
+               "who": list(entry.who) if entry is not None else [], "due": at + float(c["infer_pd_after_s"])}
         if float(c["infer_pd_after_s"]) > 0:
-            self.pending.append(job)
+            self.pending.append(job)           # its context after it is read when it is due
             return out
-        return out + self._ask(engine, job)
+        return out + self._submit(engine, job)
 
     def _due(self, engine, now: float) -> list:
-        """The held jobs whose wait for later context is over."""
+        """The held jobs whose wait for later context is over: queued like the others."""
         out = []
         for job in [j for j in self.pending if j["due"] <= now]:
             self.pending.remove(job)
-            out += self._ask(engine, job)
+            out += self._submit(engine, job)
         return out
+
+    def _submit(self, engine, job: dict) -> list:
+        """To the model thread (live), or here (tests, replay)."""
+        if not self.worker:
+            return self._ask(engine, job)
+        self._put(("ask", engine, job, None))
+        return []
 
     def tick(self, engine, now: float) -> list:
         out = self._due(engine, now)
@@ -504,21 +537,57 @@ class ModelBacking:
             self.prune(now)
         return out
 
-    # -- asking -----------------------------------------------------------------------------------------------------
+    # -- the model thread -------------------------------------------------------------------------------------------
+
+    def _put(self, item) -> None:
+        try:
+            self._q.put_nowait(item)
+        except queue.Full:
+            self.count("capped")               # more than QUEUE_MAX waiting: this one is not asked
+            return
+        self._start()
+
+    def _start(self) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="intel-model", daemon=True)
+                self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                kind, engine, job, fut = self._q.get(timeout=REFRESH_S)
+            except queue.Empty:
+                try:
+                    self.backend()             # the availability Health reads, kept fresh
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            try:
+                if kind == "ask":
+                    self._ask(engine, job)
+                else:
+                    self._answered(engine, job, fut)
+            except Exception as e:  # noqa: BLE001 - the thread goes on
+                self.log(f"intel: model: {type(e).__name__}")
 
     def context(self, key: str, tid: str, at: float) -> list[dict]:
         """Up to CONTEXT_MAX of the source's transmissions within CONTEXT_S of the trigger (the nearest), oldest first."""
-        near = [x for x in self.sources.get(key, ()) if x["tid"] != tid and abs(float(x["at"]) - at) <= CONTEXT_S]
+        with self._lock:
+            have = list(self.sources.get(key, ()))
+        near = [x for x in have if x["tid"] != tid and abs(float(x["at"]) - at) <= CONTEXT_S]
         near = sorted(near, key=lambda x: abs(float(x["at"]) - at))[:CONTEXT_MAX]
         return sorted(near, key=lambda x: float(x["at"]))
 
     def _ask(self, engine, job: dict) -> list:
+        """The model thread (live): the backend's availability, the site history, the messages, the question."""
         c = self.cfg()
         pack = engine.pack(job["pack"])
+        if pack is None:
+            return []
         b = self.backend(c)
-        if pack is None or b is self.null:
-            if pack is not None:
-                self.count("unavailable")
+        if b is self.null:
+            self.count("unavailable")
             return []
         cats = {k: v.get("label") or k for k, v in pack.categories.items()}
         hist: list[str] = []
@@ -548,13 +617,13 @@ class ModelBacking:
             except Exception:  # noqa: BLE001
                 pass
         if fut.done():
-            return self._answered(engine, job, fut)
+            return self._answered(engine, job, fut)     # here: the model thread (live), or inline (tests, replay)
         self.open[id(fut)] = job
         fut.add_done_callback(lambda f, j=job: self._resolved(engine, j, f))
         return []
 
     def _resolved(self, engine, job: dict, fut: Future) -> None:
-        """On whatever thread resolved it: handed to our own (live), never applied there."""
+        """On whatever thread resolved it: handed to the model thread (live), never applied there."""
         self.open.pop(id(fut), None)
         if not self.worker:
             try:
@@ -562,25 +631,7 @@ class ModelBacking:
             except Exception as e:  # noqa: BLE001
                 self.log(f"intel: model: {type(e).__name__}")
             return
-        try:
-            self._q.put_nowait((engine, job, fut))
-        except queue.Full:
-            self.count("deadline")
-            return
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(target=self._run, name="intel-model", daemon=True)
-            self._thread.start()
-
-    def _run(self) -> None:
-        while True:
-            try:
-                engine, job, fut = self._q.get(timeout=60.0)
-            except queue.Empty:
-                return
-            try:
-                self._answered(engine, job, fut)
-            except Exception as e:  # noqa: BLE001 - the thread goes on
-                self.log(f"intel: model: {type(e).__name__}")
+        self._put(("answer", engine, job, fut))
 
     # -- the answer -------------------------------------------------------------------------------------------------
 
@@ -644,14 +695,20 @@ class ModelBacking:
                 return []                      # spent ("disregard" since) or gone from the window: nothing
             rule = rules_mod.Rule(f"model.{job['backend']}", 1, cat, round(float(ans["confidence"]), 4), [], [],
                                   str(c["infer_pd_mode"]), True, {})
-            if entry.place is None:
-                entry.place = job["place"] or self._model_place(engine, pack, row, key, ans, entry)
-            there = self._open_there(engine, pack, key, cat, at, tid, entry.place)
-            if there is not None:              # the rules' (or an earlier answer's) event: evidence, never escalated
+            place = entry.place or job["place"] or self._model_place(engine, pack, row, key, ans, job)
+            text = str(row.get("text") or "")
+            there, near = self._open_there(engine, pack, key, cat, at, tid, place, text)
+            if there is not None:              # this call's event (the rules' or an earlier answer's): evidence only
                 engine.sink.hit(Hit(tid, rule.id, rule.v, rule.w, cat, pack.name, at, there.id))
                 rec.update(event_id=there.id, used="evidence")
                 self.count("evidence")
                 return []
+            if near == "same":                 # an open event of the source just now, plausibly this call: never a
+                rec.update(event_id=None, used="near")     # second pre-alert, and never recorded against that event
+                self.count("evidence")
+                return []
+            if near == "other":                # another call while one is open on the source: on the card, no push
+                mode = lowest(mode, "map")
             if engine._deferred(pack, cat, {}, key, at, entry):
                 return []                      # one pre-alert per call: the category it defers to has it
             # scored on its own rule and the trigger row's own hits only (never another row's in the window)
@@ -667,6 +724,8 @@ class ModelBacking:
                     what *= 1.0 + max(-1.0, w)
             contrib = [(tid, r, w) for w, r in own] + [(tid, rule, rule.w)]
             entry.hits = [*entry.hits, (rule, rule.w)]     # a new list: the row's own report has its hits already
+            if entry.place is None:
+                entry.place = place            # only now, for the event it raises (_raise reads it)
             ev = engine._raise(pack, row, key, cat, cd, round(what, 4), contrib, mode, win, at, tid)
             engine.sink.hit(Hit(tid, rule.id, rule.v, rule.w, cat, pack.name, at, ev.id if ev is not None else None))
             if ev is None:
@@ -676,32 +735,45 @@ class ModelBacking:
             return [ev]
 
     @staticmethod
-    def _open_there(engine, pack, key: str, cat: str, at: float, tid: str, place):
-        """An open event the answer belongs to (the newest), or None: one with the row in it; any of the source
-        within the pack's window_s of the row; one of this category, or of one deferring to it, on the source within
-        the merge span; one of this category at the same place (any source)."""
+    def _open_there(engine, pack, key: str, cat: str, at: float, tid: str, place, text: str):
+        """(the open event this answer belongs to, or None; "same" / "other" / "" for the source's other open events).
+
+        Belongs to (the newest): one with the row in it; one of this category, or of one deferring to it, on the
+        source within the merge span, unless the row says it is a new call or both places are known and differ
+        (engine._raise would not merge them either); one of this category at the same place (any source).
+        Else, an open event of the source within the pack's window_s of the row (any category): "same" when it is
+        plausibly this call (no new-call words, no two known places that differ), "other" when it is another call."""
+        from sizeup.intel.engine import NEW_CALL, same_place
         span = engine._merge_span(pack)
-        pkey = place.key if place is not None else ""
-        found = []
+        fresh = bool(NEW_CALL.search(text or ""))
+        known = place is not None and place.precision != "none"
+
+        def apart(e) -> bool:
+            return known and e.precision != "none" and not same_place(place, e.place())
+        found, near = [], ""
         for e in engine.events.open_events():
             if e.pack != pack.name:
                 continue
+            ours = e.source_key == key
             if (tid in e.traffic_ids
-                    or (e.source_key == key and (abs(e.last_at - at) <= pack.window_s or (
-                        e.last_at >= at - span and (e.category == cat
-                                                    or pack.category(e.category).get("defer_to") == cat))))
-                    or (pkey and e.category == cat and e.place().key == pkey)):
+                    or (ours and e.last_at >= at - span and not fresh and not apart(e)
+                        and (e.category == cat or pack.category(e.category).get("defer_to") == cat))
+                    or (known and place.key and e.category == cat and e.place().key == place.key and not fresh)):
                 found.append(e)
-        return max(found, key=lambda e: e.last_at) if found else None
+            elif ours and abs(e.last_at - at) <= pack.window_s:
+                near = (near or "other") if fresh or apart(e) else "same"      # "same" wins: never a second pre-alert
+        if found:
+            return max(found, key=lambda e: e.last_at), ""
+        return None, near
 
-    def _model_place(self, engine, pack, row, key, ans, entry):
+    def _model_place(self, engine, pack, row, key, ans, job):
         """The model's "address" only as far as the TRIGGER says it (infer.said: never a word of the context), found
         by the locator (the scrub with the trigger's talkers and IDs), never confirmed."""
         addr = ans.get("address") or ""
         loc = infer_mod.said(addr, str(row.get("text") or "")) if addr else ""
         if not loc:
             return None
-        place = engine._where(pack, row, key, [loc], list(entry.who))
+        place = engine._where(pack, row, key, [loc], list(job.get("who") or []))
         if place is None:
             return None
         place.confirmed = False
