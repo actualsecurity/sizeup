@@ -1272,6 +1272,9 @@ SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
 
 ### The app's API switches (`[mobile]`, #619)
 
+Device push for the app (SNS, per-kind caps and kill switches, the optional `SIZEUP_SNS_*` variables): [mobile-api.md
+section 4.1](mobile-api.md#41-built-in-pr-7-563).
+
 The mobile API (`/api/v1`, [mobile-api.md](mobile-api.md)) is built on this hub, so it is inert until switched on:
 
 ```toml

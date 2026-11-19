@@ -24,6 +24,8 @@ paths:
     $ref: ./paths/units.yaml
   /api/v1/alarms:
     $ref: ./paths/alarms.yaml
+  /api/v1/devices/{id}/push:
+    $ref: ./paths/devices_push.yaml
 components:
   securitySchemes:
     deviceToken:

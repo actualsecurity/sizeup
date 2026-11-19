@@ -417,7 +417,8 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
 - **Cost:** SNS mobile push is free for the first 1M publishes a month, then about $0.50 per million (**from memory,
   check**). APNs and FCM are free. Apple Developer Program $99 a year; Google Play $25 once.
 - **Unverified:** that SNS passes the APNs `interruption-level` / critical `sound` dictionary and
-  `apns-push-type`/`apns-priority` through unchanged. Prove it in the first push PR.
+  `apns-push-type`/`apns-priority` through unchanged, and the FCM v1 message shape (see 4.1: still unproven after PR 7;
+  prove it on a real sandbox build and an Android device).
 
 **Critical alerts.**
 
@@ -452,6 +453,93 @@ devices, about 40 calls) on the Notifier thread.
 - **Listen in the app:** the push deep-links to `/api/v1/listen/<event>`, which returns a fresh short-lived media URL
   ([§5](#5-audio-video-and-maps)). The presigned 20-min Listen link stays for ntfy.
 - Device pushes never touch ntfy topics, so the protected-topic machinery is unaffected.
+
+### 4.1 Built in PR 7 (#563)
+
+Off until switched on: the route flag `push` (code-driven, like the others), the master switch, and a per-kind kill switch.
+No UI change.
+
+> **UNPROVEN until tried on a real sandbox iOS build and a real Android device.** None of this has met Apple, Google or
+> SNS: every test uses a fake SNS. (1) SNS passes the APNs `interruption-level` through unchanged; (2) it passes the
+> critical `sound` dictionary through; (3) it honours the message attributes `AWS.SNS.MOBILE.APNS.PUSH_TYPE`, `...PRIORITY`
+> and `...TTL`; (4) the FCM v1 wrapper in `content.fcm()` (`fcmV1Message` > `message` > `data` / `android`) is written
+> from memory: a wrong key means Android silently receives nothing. Also unproven: that the Critical Alerts entitlement
+> is granted.
+
+| Piece | Where |
+|---|---|
+| `PUT` / `DELETE /api/v1/devices/{id}/push` | `sizeup/api/v1/push.py`. Needs a signed-in device, flag `push`, role `read`; a device registers only itself (another id: 403). Body `{platform: ios\|android, token, environment: sandbox\|production (ios: required), prefs?, quiet?}`, at most 4096 bytes (413 `body_too_large` over it); the token and the SNS endpoint are never answered back |
+| Storage | `push_devices` in `hub.sqlite`, created on the first registration, keyed by device id, no link to the `devices` table. `sizeup.push.service.drop_device(device_id)` removes the SNS endpoint and the row: **not called yet**, it is wired when the sign-in's Revoke lands (#558) |
+| Revoked devices | `PushService.device_active(device_id) -> bool`, supplied by the sign-in (#558), is asked for every device on every send, so a revoked device of an active person gets nothing even while its endpoint row remains. **Without it push fails closed**: `PUT` answers 503 `push_unavailable`, nothing is written, `offer` / `fan_out` send nothing. Rows of revoked devices and gone people are pruned (at every registration and every 10 minutes in a fan-out, at most the 40 rows), which also frees their places under the 40-device cap |
+| SNS client | `sizeup/push/sns.py`: CreatePlatformEndpoint, SetEndpointAttributes, DeleteEndpoint, Publish over `aws.sign` (outbound guard) |
+| Fan-out | `notify.Pushes.fan_out`, called by `KindNotifier.send` before ntfy's own "is there a topic" check, on purpose (devices get a kind's pushes even when it has no ntfy topic); it never raises, so ntfy always sends. Two lanes, each with its own worker: **alerts and dispatch never wait behind intel and status**. One Publish per endpoint, three in flight at a time (a new TLS connection each), one retry of a transient failure (a 5xx or no answer, never a 4xx or a gone endpoint), at most 40 devices, one 30 s deadline per message; only the leader publishes (a handover overlap never pages a phone twice). A stale-endpoint removal deletes only the registration the fan-out read (a fresh re-registration of the device survives). The rate-cap counters are in memory and start at zero after a handover |
+| Token already registered | A phone token that is already an SNS endpoint under another device id (SNS: "Endpoint ... already exists with the same Token, but different attributes", `InvalidParameter`) is taken over: the endpoint's ARN is read from that message, its attributes are updated (Token, Enabled, CustomUserData = this device), and any other row holding that endpoint is removed so the old person's row stops pushing. **The real error text is unproven** until a real SNS test (it is from AWS's documentation) |
+| Content | `sizeup/push/content.py`: an **allow-list, never the caller's free text**. alerts: a headline rebuilt from fixed words (the matched emergency keywords, "EMERGENCY BUTTON (MDC)", "HPN ATC pre-alert", "HPN Alert N", "AIRCRAFT EMERGENCY: SQUAWK 7700"), the units on the CAD's units list (by the list's own name only if it is plain: at most 30 characters of letters, digits and " .'-", no run of four digits, no "@"; else the code alone; an alias, a radio ID or a person-style name is dropped), the channel, the event number (a plain reference, else a random id) and an address of a **strict shape** (the street name is shape-checked only: a name-shaped street WITH a house number can pass, a stated residual for alert addresses and intel places alike; an intel place with no number at all, or with parenthesis text such as "(unconfirmed)", is dropped, never sent; the ", Town" tail must be a town of the county list): house number (required), optional direction, up to three capitalised street-name words, a street type, an optional ", Town", at most 50 characters, nothing else; anything else is generic and the app fetches the place after unlock. status: the alert's fixed sentence without its configured names, a generic body. intel: the title (an optional leading `FYI`, a trailing ` ·m` model mark) only when every part is a loaded rule pack's label (pack or category: admin-controlled data) or a town, else generic; the body only its place, time and level. dispatch: generic until a producer exists. The intel `scrub()` still runs as a net, and a failing text becomes a generic one (a mayday still pages). Payload `{kind, id, title, body}` only. ntfy's text is unchanged |
+
+Who gets what: alerts and dispatch: every active signed-in person's subscribed device; status: admins; **intel (police and
+fire pre-alerts): admins only by default and opt-in per device**. The audience policy `{"intel": {"min_role": "dispatcher"}}`
+(viewer | dispatcher | admin, default admin, set by an admin through the notify `devices` policy and checked before the device's
+own pref, so a device cannot opt in above its role) lowers it; splitting police from fire packs is a follow-up for the admin to
+decide. A device's `prefs` (alerts and status on by default, **intel and dispatch off**) and `quiet` hours (`{from, to, tz}`) are stored
+server-side; quiet hours hold intel and status, never alerts or dispatch. A person who is deactivated or not an operator
+gets nothing. The role comes from the `operators` table, read only (`push/wire.py role_for`): it differs from
+`Settings.standing` on purpose (a deactivated person is a viewer there, nobody here; with no admin yet nobody is elevated, so
+status reaches nobody). The app's sign-in refuses anyone without an `operators` row (#558 / PR 2), so every signed-in person
+has one; `role_for` is read-only on purpose.
+
+**The app is read-only; push registration is its own bookkeeping.** The app never changes CAD or incident data. The one
+allowed write is the app's own device bookkeeping in `hub.sqlite`: sign-in sessions and this PR's `push_devices` (the
+`PUT` / `DELETE /api/v1/devices/{id}/push` routes). Nothing in push writes `cad.sqlite`: `role_for`, `unit_for` and
+`intel_labels` are SELECTs, `fan_out` only reads, and `tests/test_push_readonly.py` fingerprints every table of the real
+`cad.sqlite` and the store's revision around a whole push life (register, replace, real alerts into a fake SNS, the lookups,
+unregister, the revoke hook): unchanged. A device may register or remove only ITS OWN id (the `{id}` must be the token's
+device: 403 otherwise). `PUT` / `DELETE` (and a v1 `PATCH` / `OPTIONS`) go through the same wrapper as `POST` in
+`sizeup/web/server.py`: the drain / fence gate (`refuse`, then `enter` / `leave`), a fenced hub answers 503 and writes
+nothing, and perf accounting applies.
+
+**The request-body hook comes with this PR** (it was hardened on the closed writes branch and is copied from there, without
+the writes code): `sizeup/web/server.py _v1_body` reads exactly `Content-Length` bytes within one 8 s monotonic deadline
+(408), `Content-Length` must be plain ASCII digits, at most 6, once (400 `bad_body`), none or chunked is a 411 (a DELETE may
+have no body), over 16 KB a 413, a short body a 400; a refused request closes the connection, a served one keeps it only if
+the client asked (not HTTP/1.0, not `Connection: close`).
+
+**Wiring with sign-in (#558 / PR 2).** PR 2 exposes `AuthService.device_active(device_id)` (revoked device or inactive
+person) and `AuthService.add_revoke_hook(fn(device))`. At integration, one line each: `device_active=auth.device_active`
+in `push/wire.py wire()` and `auth.add_revoke_hook(drop_device)`. **Until then push is unavailable** (fail closed, no alarming start-up warning, one quiet log line): the `push` flag has no
+production source anyway, and without `device_active` a registration is a 503 `push_unavailable`, nothing is written and nothing
+is sent.
+
+**One rule for every kind.** The producers (alarms, station health, the intel engine) each build a device push only while
+their `notifier.enabled` (an ntfy topic in effect for that kind); the seam itself (`Pushes.fan_out`) does not look at it. So
+the gate is the same for alerts, status and intel, and the device policy (kill switch, caps, audience, prefs) then decides.
+
+Interruption level: `time-sensitive` by default; `critical` plus the `sound` dictionary only for dispatch and an
+emergency alert (priority 5) **and** when `SIZEUP_PUSH_CRITICAL=1` (Apple granted the entitlement). Message attributes
+`AWS.SNS.MOBILE.APNS.PUSH_TYPE=alert`, `...PRIORITY` (10, or 5 for a passive status) and `...TTL=900`. Android: a
+high-priority FCM v1 data message through the SNS `GCM` key. See the UNPROVEN box above and "Could not verify".
+
+Caps and kill switches (the intel `policy` pattern): the settings section `notify`, key `devices`, which an admin sets
+through `POST /api/cad/settings/notify` `{"key": "devices", "action": "set", "policy": {...}}` (or `reset`; range-checked, the
+whole policy replaced):
+`{"off": true, "<kind>": {"on": false, "per_minute": 10, "per_hour": 60, "per_day": 300}}`. Defaults: alerts 10 / 60 / 300,
+intel 6 / 30 / 200, status 4 / 20 / 100, dispatch 10 / 120 / 600 and **`on: false`** (the department's sign-off and the
+entitlement come first, D3). Over a cap the devices are skipped (ntfy is unaffected) and it is logged once a minute. There
+is no Settings screen for these yet (a follow-up): the flag, the master switch or unsetting the SNS variables also stop them.
+Nothing produces a `dispatch` push yet: the kind, its policy and its payload exist so a later change only has to call
+`Pushes.fan_out("dispatch", ...)`.
+
+**Manual steps (a person, once; nothing in the task definition or SSM changes):**
+
+1. Apple: an APNs key (token-based) for the app's bundle id; Google: a Firebase project with FCM v1 and a service-account key.
+2. In SNS (the hub's region) create three platform applications: APNs sandbox, APNs production, FCM (v1).
+3. In the separate `sizeup-aws` repo, grant the hub's task role `sns:CreatePlatformEndpoint`, `sns:SetEndpointAttributes`,
+   `sns:DeleteEndpoint`, `sns:Publish` on those applications and their endpoints, and `sns:GetEndpointAttributes` if wanted.
+4. Give the task the optional variables (not secrets, not in the repo; unset = that platform refuses with 503):
+   `SIZEUP_SNS_APNS_SANDBOX_ARN`, `SIZEUP_SNS_APNS_ARN`, `SIZEUP_SNS_FCM_ARN`, and `SIZEUP_PUSH_CRITICAL=1` only once Apple
+   grants Critical Alerts. A variable whose ARN is for another platform is ignored (a sandbox ARN can't sit in the production
+   slot). `SIZEUP_SNS_ENDPOINT` (loopback only) is for demos and tests with a local fake: never set it on the hub.
+5. Not built here: the `GET /api/v1/listen/{event}` deep link. The Listen links are random S3 keys made per event on the
+   `listen` thread and forgotten once past; a fresh URL for an old event needs a lookup there. PR 8 (media) owns it.
 
 ---
 
@@ -751,7 +839,10 @@ Tracked as a checklist in #556.
 
 - The hub's CPU split today (DVR versus the rest); `perf.py` in production has the answer.
 - Exact Fargate, SNS and image-size numbers (list prices from memory).
-- SNS passthrough of iOS critical and time-sensitive fields.
+- SNS passthrough of iOS `interruption-level`, the critical `sound` dictionary and the `AWS.SNS.MOBILE.APNS.*` message
+  attributes (PUSH_TYPE, PRIORITY, TTL), and the FCM v1 wrapper's shape in `sizeup/push/content.py` `fcm()` (from memory:
+  a wrong key means Android silently receives nothing): all unproven until tried on a real sandbox iOS build and an
+  Android device (#563).
 - OpenFreeMap's terms for native and offline use; the camera sources' redistribution terms.
 - Cloudflare plan features (WAF rate limiting, Access for SaaS); Access path precedence with a Bypass application beside
   the main one (test on staging); whether Access for SaaS OIDC allows public clients and app-link redirect URIs.

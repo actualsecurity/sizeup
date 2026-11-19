@@ -12,7 +12,8 @@ Order, so that a v1 problem never reaches the console (docs/mobile-api.md "Shari
     is rate limited per address, one with a principal per device (limits.py): 429 + Retry-After. Then no principal
     on a device route: 401;
  6. v1's share of concurrent requests: 503 + Retry-After when it is used up;
- 7. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
+ 7. a route with a body (BODY_METHODS): the body is read, at most MAX_BODY (411, 408, 400, 413 otherwise);
+ 8. the handler, inside one try/except (respond): whatever it raises is a 500 in v1's envelope, logged by class only."""
 from __future__ import annotations
 
 import json
@@ -31,6 +32,20 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
+# The request-body hook, shared by every v1 route with a body (push now; writes, if they return, reuse it verbatim):
+# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit, a 413; it raises BodyRefused
+# for a missing, repeated or malformed length or a body that stalls). The handler sees the bytes as Ctx.body.
+MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
+BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")      # the verbs the hook reads a body for
+
+
+class BodyRefused(Exception):
+    """The server's body reader refusing a request: 411 length_required (no Content-Length, or chunked), 408
+    request_timeout (the client stalled), 400 bad_body (it stopped short). The connection is closed."""
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
 
 
 def _pattern(template: str) -> re.Pattern:
@@ -55,11 +70,14 @@ class V1:
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
 
-    def respond(self, method: str, path: str, query: str, headers, peer: str = "") -> tuple[int, bytes, str, dict]:
+    def respond(self, method: str, path: str, query: str, headers, peer: str = "",
+                body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
-        raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
+        raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
+        request body up to a limit (None: over it); called only for a body verb that got past the token, the limits and the
+        busy check."""
         try:
-            return self._respond(method, path, query, headers, peer)
+            return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
             raise                             # the handover signal: the server answers it as a 503
         except Exception as e:                # a v1 failure is v1's: the class only, never a token, header or body
@@ -69,7 +87,7 @@ class V1:
                 pass
             return error(500, "internal", "something went wrong: try again")
 
-    def _respond(self, method, path, query, headers, peer) -> tuple[int, bytes, str, dict]:
+    def _respond(self, method, path, query, headers, peer, body=None) -> tuple[int, bytes, str, dict]:
         if len(path) > MAX_PATH:
             return error(414, "uri_too_long", "path too long")
         if not self.switches.enabled() and not (method in ("GET", "HEAD") and path == "/api/v1/meta"):
@@ -84,7 +102,7 @@ class V1:
                 continue
             if not self.switches.allows(route.flag):
                 return self._absent()
-            return self._serve(route, m.groupdict(), query, headers, peer)
+            return self._serve(route, m.groupdict(), query, headers, peer, body)
         if allowed:
             return error(405, "method_not_allowed", f"{method} is not allowed here",
                          headers={"Allow": ", ".join(sorted(set(allowed)))})
@@ -98,7 +116,8 @@ class V1:
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
 
-    def _serve(self, route: Route, params: dict, query: str, headers, peer: str) -> tuple[int, bytes, str, dict]:
+    def _serve(self, route: Route, params: dict, query: str, headers, peer: str,
+               body=None) -> tuple[int, bytes, str, dict]:
         principal = None
         if route.need == "device":
             principal = self.resolver(headers)
@@ -114,7 +133,15 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads)
+            raw = b""
+            if route.method in BODY_METHODS and body is not None:   # a body: bounded, read only now
+                try:
+                    raw = body(MAX_BODY)
+                except BodyRefused as e:
+                    return error(e.status, e.code, e.message)
+                if raw is None:
+                    return error(413, "body_too_large", f"the body is over {MAX_BODY // 1024} KB")
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.reads, raw)
             # a handler answers (status, object), (status, object, headers) (object None: no body, a 304, #560) or a
             # finished (status, body, content type, headers), which is what errors.error() makes
             res = route.handler(ctx)

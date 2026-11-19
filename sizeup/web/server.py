@@ -34,6 +34,7 @@ it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an 
 (tools/airband_ab.py, curl), are unaffected.
 GET  /api/v1/...                the mobile app's versioned API (sizeup/api/v1, spec in api/openapi/v1/, #557): the hub only
                                (409 on the station), errors always {"error": {"code", "message", "retry_after_s"?}}
+PUT|DELETE /api/v1/devices/{id}/push   a device's push endpoint for the app (#563, sizeup/push/)
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
@@ -140,11 +141,12 @@ from urllib.parse import parse_qsl, urlsplit
 from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
-from sizeup.api.v1.handler import V1
+from sizeup.api.v1.handler import BODY_METHODS, V1, BodyRefused
 from sizeup.web import bundle as bundle_mod
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+V1_BODY_TIMEOUT_S = 8.0                # a v1 body that has not come in this long IN TOTAL: 408 (a dribbling device holds no slot)
 HEALTH_DISMISS = "/api/cad/health/dismiss"   # Health's Dismiss (Hub.dismiss_rejected)
 # Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
 COMMON_PLACES_PATH = "/api/cad/settings/common_places"
@@ -630,8 +632,63 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if station_ui:
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
-            return self._send(*v1.respond(self.command, path, query, self.headers,
-                                          self._client()[0] or self.client_address[0]))
+            out = v1.respond(self.command, path, query, self.headers, self._client()[0] or self.client_address[0],
+                             self._v1_body)
+            if self.command not in ("GET", "HEAD") and (out[0] >= 400 or self.command not in BODY_METHODS):
+                self.close_connection = True     # the body may be unread (refused before it was read, or never read)
+            return self._send(*out)
+
+        def _v1_body(self, limit: int) -> bytes | None:
+            """The body hook of /api/v1 (handler.py; every route with a body reuses it): exactly Content-Length bytes,
+            within V1_BODY_TIMEOUT_S IN TOTAL (a deadline, not a per-read timeout: a client sending a byte at a time
+            holds nothing for long). None: over the limit (413). BodyRefused: no Content-Length or a chunked body
+            (411: the bytes would be left on a kept-alive connection), a bad or repeated Content-Length (400), a
+            client that is too slow (408) or stops short (400). Every refusal closes the connection. DELETE may have
+            no body at all. A whole body read keeps the connection only if the client wanted it kept (not an HTTP/1.0
+            client, not `Connection: close`: http.server's own decision, made before this ran)."""
+            wanted = not self.close_connection        # http.server's choice from the request line and headers
+            self.close_connection = True              # until the whole body has been read, nothing is kept alive
+            if self.headers.get("Transfer-Encoding"):
+                raise BodyRefused(411, "length_required", "send Content-Length: chunked bodies are not accepted")
+            if len(self.headers.get_all("Content-Length") or []) > 1:
+                raise BodyRefused(400, "bad_body", "Content-Length is given more than once")
+            raw_len = self.headers.get("Content-Length")
+            if raw_len is None:
+                if self.command == "DELETE":
+                    self.close_connection = not wanted
+                    return b""
+                raise BodyRefused(411, "length_required", "send a Content-Length header")
+            if not (raw_len.isascii() and raw_len.isdigit() and len(raw_len) <= 6):    # not "1_0", "+5", " 7"
+                raise BodyRefused(400, "bad_body", "Content-Length: a number")
+            n = int(raw_len)
+            if n > limit:
+                return None
+            before = self.connection.gettimeout()
+            deadline = time.monotonic() + V1_BODY_TIMEOUT_S
+            parts, got = [], 0
+            try:
+                while got < n:                        # each read is bounded by what is left of the one deadline
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise BodyRefused(408, "request_timeout", "the body did not arrive in time")
+                    self.connection.settimeout(max(0.1, left))
+                    chunk = self.rfile.read1(n - got)
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                    got += len(chunk)
+            except (TimeoutError, OSError):
+                raise BodyRefused(408, "request_timeout", "the body did not arrive in time") from None
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+            data = b"".join(parts)
+            if len(data) != n:
+                raise BodyRefused(400, "bad_body", "the body is shorter than its Content-Length")
+            self.close_connection = not wanted
+            return data
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -997,9 +1054,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             url = urlsplit(self.path)
             if not v1.handles(url.path):
                 return self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
-            self.close_connection = True     # the body is left unread
             if gate.refuse(write=True):
-                return self._updating()
+                return self._updating()          # (closes the connection: the body is left unread)
+            gate.enter()                         # as POST: the gate counts it, a fenced write is a 503, perf sees it
+            try:
+                self._fenced(self._other_v1)
+            finally:
+                gate.leave()
+                if perf is not None:
+                    self._account()
+
+        def _other_v1(self) -> None:
+            url = urlsplit(self.path)
             if self._admit(url.path):
                 self._v1(url.path, url.query)
 
@@ -1018,8 +1084,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     self.close_connection = True
                 return self._send(code, body, ctype)
             if v1.handles(path):
-                self.close_connection = True     # no POST is served yet: the body is left unread
-                return self._v1(path, urlsplit(self.path).query)
+                return self._v1(path, urlsplit(self.path).query)       # reads its own body, or closes (_v1)
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread
                 return self._send(409, station_says(), "application/json")

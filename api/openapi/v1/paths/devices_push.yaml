@@ -1,0 +1,88 @@
+put:
+  operationId: putDevicePush
+  parameters:
+    - name: id
+      in: path
+      required: true
+      description: The device's own id (the one in its token). Another device's id is a 403.
+      schema: {type: string}
+  summary: Register or replace this device's push endpoint
+  description: >
+    The app sends its APNs or FCM token. For iOS the Apple environment is required: `sandbox` for debug builds,
+    `production` for TestFlight and the store, so a sandbox token never reaches the production service and the
+    reverse. Replaces any earlier registration of the device (preferences and quiet hours included: a missing `prefs`
+    is the defaults: `intel` and `dispatch` off). Push not set up on the hub for that platform, or before the sign-in
+    has supplied `device_active`: 503 `push_unavailable`, nothing stored. The token and the SNS endpoint are never answered back. Needs the `push` feature.
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: ../schemas/PushRegistration.yaml
+        example:
+          platform: ios
+          environment: sandbox
+          token: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          prefs: {alerts: true, intel: true, status: false, dispatch: false}
+          quiet: {from: "22:00", to: "06:00", tz: America/New_York}
+  responses:
+    "200":
+      description: Registered.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/PushDevice.yaml
+          example:
+            device: dev-0001
+            platform: ios
+            environment: sandbox
+            prefs: {alerts: true, intel: true, status: false, dispatch: false}
+            quiet: {from: "22:00", to: "06:00", tz: America/New_York}
+            updated: 1767225600.5
+    default:
+      description: >
+        An error: 400 `bad_request` (a missing or malformed body) or `bad_body` (a body shorter than its
+        Content-Length), 401, 403 `forbidden` (not this device's id),
+        404 `not_found` (the `push` feature is off), 408 `request_timeout`, 409 `push_full`, 411 `length_required`, 413
+        `body_too_large` (over 4096 bytes), 429
+        `rate_limited`, 502 `push_failed` (the push service refused it), 503 `push_unavailable` (push is not set up
+        for this platform, the hub does not push, or the sign-in has not supplied `device_active` yet: nothing is stored) or `busy`. A 429 and a `busy` 503 carry `Retry-After` (seconds, also
+        `retry_after_s` in the body). A request with no `Content-Length` or a chunked body is a 411 `length_required`, an
+        oversize one a 413 `body_too_large`.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+delete:
+  operationId: deleteDevicePush
+  parameters:
+    - name: id
+      in: path
+      required: true
+      description: The device's own id (the one in its token). Another device's id is a 403.
+      schema: {type: string}
+  summary: Remove this device's push endpoint
+  description: >
+    Unregister (sign-out, or push turned off in the app). `removed` is false when the device had no registration.
+    Revoking a device in Settings removes its endpoint the same way.
+  responses:
+    "200":
+      description: Not registered any more.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [device, registered, removed]
+            properties:
+              device: {type: string}
+              registered: {type: boolean, description: Always false.}
+              removed: {type: boolean}
+          example: {device: dev-0001, registered: false, removed: true}
+    default:
+      description: >
+        An error (401, 403 `forbidden`, 404 `not_found` when the `push` feature is off, 429 `rate_limited`, 503
+        `push_unavailable` or `busy`; `Retry-After` on 429 and `busy`). A DELETE needs no body.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Callable, NamedTuple
 
-from . import API_VERSION, reads
+from . import API_VERSION, push, reads
 
 # The oldest app each platform may run (forced upgrades, #566 enforces it). 0.0.0: nothing is refused yet.
 MIN_APP = {"ios": "0.0.0", "android": "0.0.0"}
@@ -47,6 +47,7 @@ class Ctx(NamedTuple):
     features: dict | None = None
     # the read-only facade over the CAD (never the Cad or a CadApi); None where there is no CAD (#560)
     reads: "reads.Reads | None" = None
+    body: bytes = b""          # a PUT / POST body (at most handler.MAX_BODY), read after the token and the limits
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -64,4 +65,6 @@ ROUTES: list[Route] = [
     Route("GET", "/api/v1/incidents/{id}", reads.incident, "device", "reads", "read"),
     Route("GET", "/api/v1/units", reads.units, "device", "reads", "read"),
     Route("GET", "/api/v1/alarms", reads.alarms, "device", "reads", "read"),
+    Route("PUT", "/api/v1/devices/{id}/push", push.put_push, "device", "push", "read"),      # #563
+    Route("DELETE", "/api/v1/devices/{id}/push", push.delete_push, "device", "push", "read"),
 ]

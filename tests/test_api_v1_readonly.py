@@ -22,7 +22,12 @@ from tests.test_settings import post
 # push registration, in hub.sqlite; never the CAD). Empty on purpose: the pull requests that build them add their routes
 # here, each with the reason, and the owner decides the boundary. A route that changes a unit, an acknowledgement, a
 # note, a dispatch or an incident is never allowed here (docs/mobile-api.md "Scope").
-DEVICE_BOOKKEEPING: dict[tuple[str, str], str] = {}
+DEVICE_BOOKKEEPING: dict[tuple[str, str], str] = {
+    ("PUT", "/api/v1/devices/{id}/push"): "a device registers its own push address: one row of its own in the app's "
+                                          "push_devices table in hub.sqlite (#563); nothing in the CAD is written",
+    ("DELETE", "/api/v1/devices/{id}/push"): "a device removes its own push address: its own push_devices row in "
+                                             "hub.sqlite (#563); nothing in the CAD is written",
+}
 
 PEOPLE = {"Bearer t-viewer": "val@example.org", "Bearer t-dispatcher": "jordan@example.org",
           "Bearer t-admin": "casey@example.org", "Bearer t-unknown": "newcomer@example.org",
