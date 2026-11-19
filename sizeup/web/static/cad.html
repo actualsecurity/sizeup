@@ -366,7 +366,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <!-- the incident's view (#797, sizeup-view.js): Details first, always; the board shows Details -->
           <span id="d-tabs" class="seg console-only" role="group" aria-label="Incident view">
             <button type="button" class="sm" data-tab="details" aria-pressed="true">Details</button>
-            <button type="button" class="sm" data-tab="sizeup" aria-pressed="false" title="Incident, pre-plan, hazards, building, map, street view">Size-Up</button>
+            <button type="button" class="sm" data-tab="sizeup" aria-pressed="false" title="The incident with its pre-plan, hazards, building, map, address notes, street view and history">Size-Up</button>
           </span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
@@ -490,6 +490,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <section id="sz-hazards" class="sz-slot sz-hazards" aria-label="Hazards"><h3 class="sz-head">Hazards</h3><div class="sz-none dim small">None found</div></section>
           </div>
           <div class="sz-col">
+            <!-- Building and Street View: placeholders until later parts of #797 fill them -->
             <section id="sz-building" class="sz-slot sz-building" aria-label="Building"><h3 class="sz-head">Building</h3><div class="sz-none dim small">Not on file</div></section>
             <section id="sz-map" class="sz-slot sz-map" aria-label="Map"></section>
             <section id="sz-notes" class="sz-slot sz-notes" aria-label="Address notes"><h3 class="sz-head">Address notes</h3><div class="sz-none dim small">None on file</div></section>

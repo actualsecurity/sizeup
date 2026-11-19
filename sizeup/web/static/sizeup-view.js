@@ -2,13 +2,13 @@
 //
 //   Details      today's view, unchanged; every selectIncident() opens it (cad.tab = "details").
 //   Size-Up      a two-column grid (#d-size) built from the detail's own nodes, MOVED into its slots, never copied: each
-//                module (addr-history.js, preplan.js, preplan-docs.js, roadprojects.js, trains.js, vessels.js, maplayers.js,
-//                weather.js, cadmap.js) keeps writing into the same ids with its own fetches and timers.
+//                module (addr-history.js, preplan.js, preplan-docs.js, roadprojects.js, weather.js, cadmap.js (cameras,
+//                trains, vessels), incident-map.js, cad.js) keeps writing into the same ids with its own fetches and timers.
 //   Moving       each node leaves a comment where it was (park); leaving Size-Up puts them back in reverse order (unpark),
 //                so a node moved out of one already moved (the comments out of the info column) goes home first: exact.
 //   Re-applied   a cad.hook, after every render; it moves only when the view changes. A new selection is Details again.
 //   Empty        a slot with nothing shown says so (.sz-none), kept up by a MutationObserver: modules flip `hidden` late.
-//   The map      its drag handles size Details' grid only (incident-map.js): hidden here, the layout's height.
+//   The map      its drag handles size Details' grid only (incident-map.js): hidden here; the map takes --map-h.
 //   History      folded each time Size-Up opens, not remembered (AddrHistory.refold).
 //   Narrow       one column in the #797 order (cad.css: Incident, Address notes, Map, Hazards, Pre-plan, Building,
 //                Street View, History).
@@ -34,8 +34,14 @@ window.SizeUp = (() => {
     return mark;
   }
   function unpark(node, mark) {
-    mark.parentNode.insertBefore(node, mark);
-    mark.parentNode.removeChild(mark);
+    const home = mark.parentNode;
+    if (!home) {                          // its home was rewritten meanwhile: back into Details' grid, never lost
+      const grid = node.ownerDocument.getElementById("d-grid");
+      if (grid) grid.appendChild(node);
+      return;
+    }
+    home.insertBefore(node, mark);
+    home.removeChild(mark);
   }
   // items: [[node, slot]] -> parked [[node, mark]]; moveOut puts them back, last first
   const moveIn = (items) => items.map(([node, slot]) => [node, park(node, slot)]);
