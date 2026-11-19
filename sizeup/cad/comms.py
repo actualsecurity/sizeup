@@ -147,6 +147,7 @@ OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins up
 CHANGES_RETRY_S = 60.0                # a broken change log is tried again after this long
 CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
+CUTS = ("grant",)    # why a P25 key-up starts where it does when its talker is not the voice channel's (radio_traffic.cut, #819)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
@@ -278,8 +279,8 @@ class Comms:
     def record(self, t: dict, replace: bool = True) -> list[int]:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
         text, status, model, emergency?, evidence?, vocab_v? (the term list that biased its text: sizeup/stt_terms.py),
-        late?}. Returns the event ids it is linked to. replace=False: skip
-        one already logged (the startup backfill). An emergency once logged stays (a later write without the
+        late?, cut? ("grant": a P25 key-up cut where the control channel granted another radio mid-call, #819)}.
+        Returns the event ids it is linked to. replace=False: skip one already logged (the startup backfill). An emergency once logged stays (a later write without the
         flag never clears it), and so does its evidence. late (#747: a P25 call from while sizeup was down): logged
         and linked by its rules like any, told only to on_late_text. Must not be called with store.lock held: the
         hooks (on_text, on_context_text, on_late_text) run on the caller's thread after commit."""
@@ -353,6 +354,9 @@ class Comms:
             vocab_v = str(t.get("vocab_v") or "")[:80]
             if vocab_v or have:                 # (its text written again: the version goes with it)
                 db.execute("UPDATE radio_traffic SET vocab_v = ? WHERE id = ?", (vocab_v, tid))
+            cut = str(t.get("cut") or "")
+            if cut in CUTS:                     # (#819) cut at a mid-call grant: its talker is the granted radio
+                db.execute("UPDATE radio_traffic SET cut = ? WHERE id = ?", (cut, tid))
             if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
                 db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)

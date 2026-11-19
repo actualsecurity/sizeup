@@ -561,6 +561,7 @@
         "fm": {"type": "boolean", "description": "False: the clip needs no FM de-emphasis (decoded P25 voice, AM airband). Absent on an FM channel, which is taken as true. Read when the clip is transcribed again.", "x-hub": "read"},
         "call_id": {"type": "string", "description": "P25: the id of the whole call this key-up is a piece of (trunk-recorder's call name).", "x-hub": "read"},
         "turn": {"type": "integer", "description": "P25: which key-up of the call this is, from 0.", "minimum": 0, "x-hub": "read"},
+        "cut": {"const": "grant", "description": "P25: present only on a key-up cut from its call where the control channel granted another radio while the call was up and the voice channel named no new radio (the grant split, #819): its talker is the granted radio, and where it starts is placed from the audio, not decoded.", "x-hub": "read"},
         "mhz": {"type": "number", "description": "Airband: the frequency it was heard on, MHz, four decimals.", "exclusiveMinimum": 0, "x-hub": "read"},
         "carrier_db": {"type": "number", "description": "Airband: the carrier over the noise floor, dB, one decimal.", "x-hub": "read"},
         "carrier_dbfs": {"type": "number", "description": "Airband: the carrier's level, dBFS, one decimal. Present when measured.", "x-hub": "kept"},

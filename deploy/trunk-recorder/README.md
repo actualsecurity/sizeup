@@ -93,6 +93,26 @@ gets their counts instead (#647), one line per system an hour and when trunk-rec
 calls with at least one cut; with `on`, `N splits`). Settings > Radios shows the same counts since sizeup started in
 the system's hover.
 
+**The grant split (#819), sizeup's own.** A turn can still hold several talkers when the next radio's ID is never
+decoded on the voice channel: the patch has nothing to cut at. The control channel still grants it, and
+trunk-recorder logs `Unit ID externally set from GRANT: <id> ... doesn't match current: <id>` (a grant for the
+talkgroup naming another radio while it records the call). sizeup cuts the turn there (`sizeup/radio/p25.py`
+`plan_grant_cuts`) when the grant is at least 0.5 s into the current talker's turn and no voice-ID cut (a turn's
+start, a `Unit ID changed on Voice Channel` or `would split` line) is within 1 s of it: at the quietest run of 0.15 s
+or more from 1.5 s before the grant to 0.5 s after it, else 0.3 s before the grant. The new part is the granted
+radio's, and its row has `cut: "grant"`. Grant updates repeating the current talker are ignored, grants for one radio
+within 1 s are one, and no part is shorter than 0.4 s. It is set per system and read by sizeup-station only (a change
+restarts no trunk-recorder; it takes effect at sizeup's next start):
+
+```json
+"sizeup": {"grant_split": "log", "grant_split_tune": {"before_s": 1.5, "after_s": 0.5, "latency_s": 0.3, "min_gap_s": 0.15}}
+```
+
+`off` (the default) does nothing. `log` (MRRS) only logs each cut it would make, with no radio ID (`p25 MRRS: grant
+split (log): PD Dispatch: would cut at 3.1 of 6.0 s, gap 0.25 s (-0.4 s from the grant)`), and adds them to the hourly
+line (`..., in 120 calls (2.5% of calls), 3 grant cuts (log)`). `on` makes each part its own row, like the patch's.
+`grant_split_tune` is optional. A call written while sizeup was down (#747) gets its grants from `trunk-recorder.log`.
+
 `pos` (both lists) is the sum of the earlier transmissions' lengths, each from its sample count: exactly where the
 transmission starts in the call WAV, which ffmpeg makes by concatenating them. 5.2.0 runs the call WAV through
 loudnorm by default (a short call then comes out at 192 kHz); that changes its level, never its length. sizeup cuts

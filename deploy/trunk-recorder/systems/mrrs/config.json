@@ -5,6 +5,7 @@
     "split": "log",
     "name": "Metro-25 / MTA MRRS",
     "jobs": ["MRRS 770", "MRRS 773"],
+    "grant_split": "log",
     "site": {
       "name": "Zone 3 Simulcast (southern Westchester)",
       "wacn": "91FE8",
