@@ -16,7 +16,7 @@ properties:
   prefs:
     type: object
     additionalProperties: false
-    description: Which kinds this device gets. Missing keys are the defaults (alerts, intel and status on, dispatch off).
+    description: Which kinds this device gets. Missing keys are the defaults (alerts and status on, intel and dispatch off; intel also needs an admin, or the hub policy's lower minimum role).
     properties:
       alerts: {type: boolean}
       intel: {type: boolean}

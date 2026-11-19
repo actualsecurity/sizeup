@@ -183,7 +183,7 @@ def place_ok(address: str) -> bool:
     """An address a phone may be told, by SHAPE only: a house number, an optional direction, up to three capitalised
     street-name words, a street type, an optional ", Town"; at most 50 characters; nothing after the street type but the
     town, so no digits (no radio ID or split phone number), no parentheses, no trailing words. An address of any other
-    shape ("Main St Jane Doe", "John Smith St" with no house number, an intersection) is the generic body: the app
+    shape ("Example St Jane Doe", "John Smith St" with no house number, an intersection) is the generic body: the app
     fetches the place after unlock. The ", Town" tail must be a town of the county's list (data/westchester_towns.txt, read
     once by sizeup/cad/sources.py county_towns; the lookup is a dict of about 50 names). The street name is checked by
     shape only: a name-shaped street WITH a house number ("123 Casey Rivera Ave") can pass (a stated residual)."""

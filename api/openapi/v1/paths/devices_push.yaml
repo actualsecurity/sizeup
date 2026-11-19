@@ -11,8 +11,8 @@ put:
     The app sends its APNs or FCM token. For iOS the Apple environment is required: `sandbox` for debug builds,
     `production` for TestFlight and the store, so a sandbox token never reaches the production service and the
     reverse. Replaces any earlier registration of the device (preferences and quiet hours included: a missing `prefs`
-    is the defaults, `dispatch` off). Push not set up on the hub for that platform: 503 `push_unavailable`, nothing
-    stored. The token and the SNS endpoint are never answered back. Needs the `push` feature.
+    is the defaults: `intel` and `dispatch` off). Push not set up on the hub for that platform, or before the sign-in
+    has supplied `device_active`: 503 `push_unavailable`, nothing stored. The token and the SNS endpoint are never answered back. Needs the `push` feature.
   requestBody:
     required: true
     content:
@@ -46,7 +46,7 @@ put:
         404 `not_found` (the `push` feature is off), 408 `request_timeout`, 409 `push_full`, 411 `length_required`, 413
         `body_too_large` (over 4096 bytes), 429
         `rate_limited`, 502 `push_failed` (the push service refused it), 503 `push_unavailable` (push is not set up
-        for this platform, or this hub does not push) or `busy`. A 429 and a `busy` 503 carry `Retry-After` (seconds, also
+        for this platform, the hub does not push, or the sign-in has not supplied `device_active` yet: nothing is stored) or `busy`. A 429 and a `busy` 503 carry `Retry-After` (seconds, also
         `retry_after_s` in the body). A request with no `Content-Length` or a chunked body is a 411 `length_required`, an
         oversize one a 413 `body_too_large`.
       content:

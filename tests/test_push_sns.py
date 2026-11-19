@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +43,9 @@ class FakeSns:
         self.endpoints: dict[str, dict] = {}
         self.disabled: set[str] = set()
         self.fail: dict[str, tuple[int, str]] = {}
+        self.publish_errors: list[tuple[int, str]] = []        # consumed one per Publish, before it works again
+        self.publish_delay = 0.0
+        self.strict = False                                     # SNS's "same Token, but different attributes"
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -85,20 +89,31 @@ class FakeSns:
             plat = app.split("/")[1]
             for arn, e in self.endpoints.items():
                 if e["app"] == app and e["token"] == tok:
+                    if self.strict and e.get("user_data") != f.get("CustomUserData"):
+                        return self._err("InvalidParameter", 400, f"Invalid parameter: Token Reason: Endpoint {arn} "
+                                         "already exists with the same Token, but different attributes.")
                     break
             else:
                 arn = f"arn:aws:sns:us-east-1:{ACCT}:endpoint/{plat}/{app.split('/')[2]}/{uuid.uuid4()}"
-                self.endpoints[arn] = {"app": app, "token": tok, "enabled": True}
+                self.endpoints[arn] = {"app": app, "token": tok, "enabled": True, "user_data": f.get("CustomUserData")}
             return 200, (f"<CreatePlatformEndpointResponse {ns}><CreatePlatformEndpointResult>"
                          f"<EndpointArn>{arn}</EndpointArn></CreatePlatformEndpointResult>"
                          f"</CreatePlatformEndpointResponse>")
         if act == "SetEndpointAttributes":
-            self.endpoints[f["EndpointArn"]]["enabled"] = f.get("Attributes.entry.1.value") != "false"
+            attrs = {f[k]: f[k.replace(".key", ".value")] for k in f if k.endswith(".key")}
+            self.endpoints[f["EndpointArn"]]["enabled"] = attrs.get("Enabled") != "false"
+            if "CustomUserData" in attrs:
+                self.endpoints[f["EndpointArn"]]["user_data"] = attrs["CustomUserData"]
             return 200, f"<SetEndpointAttributesResponse {ns}/>"
         if act == "DeleteEndpoint":
             self.endpoints.pop(f["EndpointArn"], None)
             return 200, f"<DeleteEndpointResponse {ns}/>"
         if act == "Publish":
+            if self.publish_delay:
+                time.sleep(self.publish_delay)
+            if self.publish_errors:
+                st, code = self.publish_errors.pop(0)
+                return self._err(code, st)
             arn = f["TargetArn"]
             if arn in self.disabled:
                 return self._err("EndpointDisabled", 400, "Endpoint is disabled")

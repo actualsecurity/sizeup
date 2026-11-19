@@ -93,14 +93,14 @@ def test_the_cads_unit_codes_still_appear(rig, fake, tmp_path):
     assert "Jane" not in title and "P1" not in title
 
 
-LEGIT = ["100 Main St, Rye", "100 Main St, White Plains", "100 S Ridge St", "100 N Ridge St", "12 O'Brien Ave", "2210 Boston Post Rd, Port Chester", "45A Elm Street",
-         "1 Park Ave", "100 Example Ave", "9 Old Kings Hwy", "300 W. Main St"]
-JUNK = ["100 Main St, Jane Doe", "100 Main St, Casey Rivera", "100 Main St, Jane Doe Jr", "100 Main St, Nowhere",
-        "John Smith St", "Casey Rivera Ave", "Mary Jones Road", "Main St Jane Doe", "123 Elm St Casey Rivera",
-        "123 Main St and Jane Doe", "100 Main St 41228", "100 Main St 555 0147", "100 Main St (call 914-555-0123)",
-        "call John Smith at 100 Main", "call John Smith at 100 Main St", "caller says 914-555-0123 100 Example Ave",
-        "Rt 22 & Example Ave", "I-95 NB Exit 8", "Example Ave, 100 blk", "123456 Main St", "100 Main", "",
-        " ".join(["Abcdefgh"] * 7) + " St", "100 " + "Abcdefgh " * 5 + "St", "100 Main St, Jane Doe 41228"]
+LEGIT = ["100 Example St, Rye", "100 Example St, White Plains", "100 S Sample St", "100 N Sample St", "12 O'Brien Ave", "2210 Sample Post Rd, Port Chester", "45A Sample Street",
+         "1 Park Ave", "100 Example Ave", "9 Old Kings Hwy", "300 W. Example St"]
+JUNK = ["100 Example St, Jane Doe", "100 Example St, Casey Rivera", "100 Example St, Jane Doe Jr", "100 Example St, Nowhere",
+        "John Smith St", "Casey Rivera Ave", "Mary Jones Road", "Example St Jane Doe", "123 Sample St Casey Rivera",
+        "123 Example St and Jane Doe", "100 Example St 41228", "100 Example St 555 0147", "100 Example St (call 914-555-0123)",
+        "call John Smith at 100 Example", "call John Smith at 100 Example St", "caller says 914-555-0123 100 Example Ave",
+        "Rt 22 & Example Ave", "I-95 NB Exit 8", "Example Ave, 100 blk", "123456 Example St", "100 Main", "",
+        " ".join(["Abcdefgh"] * 7) + " St", "100 " + "Abcdefgh " * 5 + "St", "100 Example St, Jane Doe 41228"]
 
 
 @pytest.mark.parametrize("address", LEGIT)
@@ -129,9 +129,9 @@ def test_a_rejected_address_is_in_neither_the_title_nor_the_body(rig, fake):
         a = fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]
         assert a == {"title": "MAYDAY \u00b7 26-000015", "body": "Open sizeup for details"}, junk
     rig.now[0] += 100
-    rig.service.deliver("alerts", "MAYDAY", "x", 5, {"incident": "26-000015", "address": "100 N Ridge St"})
+    rig.service.deliver("alerts", "MAYDAY", "x", 5, {"incident": "26-000015", "address": "100 N Sample St"})
     a = fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]
-    assert a == {"title": "MAYDAY \u00b7 26-000015 100 N Ridge St", "body": "100 N Ridge St"}
+    assert a == {"title": "MAYDAY \u00b7 26-000015 100 N Sample St", "body": "100 N Sample St"}
 
 
 @pytest.mark.parametrize("name,sent", [("Engine 64", "X9 (Engine 64)"),
@@ -176,7 +176,7 @@ def test_a_dispatchers_typed_free_text_address_never_reaches_the_phone(rig, fake
     """The incident's address is what a dispatcher typed (sizeup/cad/service.py: up to 200 characters)."""
     cad = make_cad(tmp_path)
     cad.alarms.notifier = cap = Capture()
-    inc = cad.create({"type": "STRU", "address": "call John Smith at 100 Main St", "operator": "Lt. Ruiz"})
+    inc = cad.create({"type": "STRU", "address": "call John Smith at 100 Example St", "operator": "Lt. Ruiz"})
     cad.dispatch(inc["id"], {"unit_ids": [uid(cad, "E64")], "operator": "Lt. Ruiz"})
     t = tx("FG1-7", "mayday mayday", rig="E64", unit="E64 P1", radio_id="6401", at=time.time() + 0.01)
     cad.record_traffic(t)

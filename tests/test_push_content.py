@@ -46,7 +46,7 @@ def alarm_pushes(tmp_path):
     named operator, as the alarms push them."""
     cad = make_cad(tmp_path)
     cad.alarms.notifier = cap = Capture()
-    inc = cad.create({"type": "STRU", "address": "100 S Ridge St", "operator": "Lt. Ruiz"})
+    inc = cad.create({"type": "STRU", "address": "100 S Sample St", "operator": "Lt. Ruiz"})
     cad.dispatch(inc["id"], {"unit_ids": [uid(cad, "E64")], "operator": "Lt. Ruiz"})
     t = tx("FG1-7", "mayday mayday John Smith is down, plate ABC1234, call 914-555-0123, Engine 64, Ladder 31",
            rig="E64", unit="E64 P1", radio_id="4821", at=time.time() + 0.01)
@@ -72,7 +72,7 @@ def test_the_real_alarm_pushes_carry_the_names_the_ntfy_body_has_and_the_phone_g
     # still a useful page: what, which unit, where, and the address as the body
     title = first["aps"]["alert"]["title"]
     assert title.startswith("MAYDAY") and "E64 (Engine 64)" in title
-    assert num in first["aps"]["alert"]["title"] and first["aps"]["alert"]["body"] == "100 S Ridge St"
+    assert num in first["aps"]["alert"]["title"] and first["aps"]["alert"]["body"] == "100 S Sample St"
     assert second["aps"]["alert"]["title"].startswith("Acknowledged: MAYDAY")
 
 
@@ -137,8 +137,8 @@ def test_every_kind_has_a_generic_fallback_when_the_title_itself_fails_the_scrub
 def test_android_gets_the_same_text_and_nothing_more(rig, fake):
     rig.device(1, "view@example.org", platform="android")
     rig.service.deliver("alerts", "MAYDAY", "heard: “John Smith is down”, radio 4821", 5,
-                        {"talker": "radio 4821", "incident": "26-000015", "address": "100 S Ridge St"})
+                        {"talker": "radio 4821", "incident": "26-000015", "address": "100 S Sample St"})
     msg = fake.published()[0]["message"]["GCM"]["fcmV1Message"]["message"]
-    assert msg["data"] == {"kind": "alerts", "id": "26-000015", "title": "MAYDAY · 26-000015 100 S Ridge St",
-                           "body": "100 S Ridge St"}
+    assert msg["data"] == {"kind": "alerts", "id": "26-000015", "title": "MAYDAY · 26-000015 100 S Sample St",
+                           "body": "100 S Sample St"}
     assert_clean(fake)

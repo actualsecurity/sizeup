@@ -82,7 +82,7 @@ def test_the_apps_whole_push_life_writes_nothing_to_the_cad(world):
     else:
         assert put(world, reg)[0] == 200
         assert put(world, {**reg, "prefs": {"dispatch": True, "intel": True, "status": True}})[0] == 200      # a replace
-    who = {"units": [("E64", "")], "incident": "26-000015", "address": "100 Main St"}
+    who = {"units": [("E64", "")], "incident": "26-000015", "address": "100 Example St"}
     world.pushes.notifier(notify.ALERTS).send("MAYDAY", "heard: anything", 5, (), "", who=who)
     world.pushes.notifier(notify.STATUS).send("Station silent 5 min", "x", 3, (), "", who=who)
     world.pushes.notifier(notify.INTEL).send(intel_title(world.cad), "100 Example Ave \u00b7 14:32 \u00b7 high", 4, (), "")
