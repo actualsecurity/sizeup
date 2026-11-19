@@ -583,3 +583,107 @@ def test_a_fold_never_links_a_transmission_a_person_took_off_the_kept_call(tmp_p
     rig.poll()
     assert rig.cad.store.incident(b)["disposition"] == "DUPLICATE"
     assert not rig.cad.store.one("SELECT 1 AS x FROM radio_links WHERE traffic_id = 'tx-e63' AND incident_id = ?", (a,))
+
+
+# -- one call run in two of our towns (the county gives each town's run its own event) ------------------------------------
+
+
+TOWN_A = {"town": "Our Town A", "jurisdiction": "Our FD"}
+TOWN_B = {"town": "Our Town B", "jurisdiction": "Our FD"}
+
+
+@pytest.fixture
+def our_towns(monkeypatch):
+    from sizeup.cad import sources
+    monkeypatch.setattr(sources, "OWN_TOWNS", frozenset({"our town a", "our town b"}))
+
+
+def town_run(rig, ref: str, extra: dict, dt: float = 0, loc: str = ALARM, typ: str = "ALARM/COMM", units=("E62",)):
+    rig.feed.put(ref, type=typ, location=loc, units=units, times={"dispatched": T0 + dt}, extra=extra)
+    rig.poll()
+
+
+def test_one_call_run_in_both_of_our_towns_is_one_incident(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    iid = rig.iid("F0080001")
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E62", "E64"))
+    assert rig.iid("F0080907") == iid and len(rig.incidents()) == 1
+    assert any(t.startswith("Redispatched: Our Town A → Our Town B") for t in lines(rig, iid))
+    assert rig.cad.store.one("SELECT merged_into FROM source_reports WHERE ref = 'F0080001'")["merged_into"] == "F0080907"
+    assert rig.here("E64", "F0080907")
+    rig.at(400)
+    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 390})
+    rig.poll()                                      # the first town's run ending: never the call's end
+    assert rig.cad.store.incident(iid)["status"] == "active"
+
+
+def test_the_earlier_town_s_run_arriving_after_is_said_and_never_rules(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080907", TOWN_B, dt=120)
+    iid = rig.iid("F0080907")
+    rig.at(150)
+    town_run(rig, "F0080001", TOWN_A)
+    assert rig.iid("F0080001") == iid and len(rig.incidents()) == 1
+    assert rig.cad.store.one("SELECT merged_into FROM source_reports WHERE ref = 'F0080001'")["merged_into"] == "F0080907"
+    assert "Also run in Our Town A (County feed)" in lines(rig, iid)
+
+
+def test_one_call_on_a_highway_across_our_town_line_is_one_incident(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
+    iid = rig.iid("F0080101")
+    rig.at(200)
+    town_run(rig, "F0080102", TOWN_B, dt=190, loc="I-998 EB MM 21.9", typ="BRUSH FIRE", units=("E63",))
+    assert rig.iid("F0080102") == iid and len(rig.incidents()) == 1
+
+
+@pytest.mark.parametrize("second", [
+    dict(loc="400 SAMPLE ST"),                                      # another address: two calls
+    dict(extra={"town": "Townville", "jurisdiction": "Townville FD"}),   # a town not ours
+    dict(dt=660),                                                   # dispatched more than 10 min after
+    dict(typ="STRU"),                                               # another kind of call
+])
+def test_two_calls_in_our_two_towns_stay_two_incidents(tmp_path, our_towns, second):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    rig.at(second.get("dt", 120) + 10)
+    town_run(rig, "F0080907", second.get("extra", TOWN_B), dt=second.get("dt", 120), loc=second.get("loc", ALARM),
+             typ=second.get("typ", "ALARM/COMM"), units=("E64",))
+    a, b = rig.iid("F0080001"), rig.iid("F0080907")
+    assert a != b and not any(t.startswith("Redispatched") for t in lines(rig, a) + lines(rig, b))
+
+
+@pytest.mark.parametrize("loc", ["I-998 WB MM 21.6", "I-998 EB MM 22.6", "I-997 EB MM 21.3"])
+def test_two_highway_calls_in_our_two_towns_stay_two_incidents(tmp_path, our_towns, loc):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
+    rig.at(200)
+    town_run(rig, "F0080102", TOWN_B, dt=190, loc=loc, typ="BRUSH FIRE", units=("E64",))
+    assert rig.iid("F0080101") != rig.iid("F0080102")
+
+
+def test_two_open_calls_it_may_be_is_possibly_the_same_never_joined(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    rig.at(60)
+    town_run(rig, "F0080002", TOWN_A, dt=50, units=("E64",))
+    a, b = rig.iid("F0080001"), rig.iid("F0080002")
+    rig.cad.accept(b, {"operator": "Lt. Test"})     # a second call there (held as possibly the same): accepted
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E61",))
+    c = rig.iid("F0080907")
+    assert c not in (a, b) and not any(t.startswith("Redispatched") for t in lines(rig, a) + lines(rig, b))
+    assert any(t.startswith("Possibly the same as") for t in lines(rig, c))
+
+
+def test_the_feed_s_own_merge_still_wins(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    iid = rig.iid("F0080001")
+    rig.at(130)
+    rig.feed.put("F0080907", type="ALARM/COMM", location=ALARM, units=("E64",), times={"dispatched": T0 + 120},
+                 extra=TOWN_B, aliases=("F0080001",))
+    rig.poll()
+    assert rig.iid("F0080907") == iid and not any(t.startswith("Redispatched") for t in lines(rig, iid))

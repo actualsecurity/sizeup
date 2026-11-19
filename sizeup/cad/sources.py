@@ -116,6 +116,14 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                run (_new_run_page): it joins although a page is on the incident only when no page there is nearer in
                time to that run's dispatch than to an earlier run's, it came within SAME_CALL_S of it and names that
                run's place exactly; a second page for one run never does
+    cross town one call run in two of the department's own towns (own_towns: the county gives each town's run its own
+               event number): a live report of a source joins another report of that source (_cross_town) when
+               both towns are ours and differ, both were dispatched within CROSS_TOWN_S, their types are one type
+               family (the mapped TYPE), the place is the same (the same number and street, whatever the town; on a
+               highway the same route and direction, markers within CROSS_TOWN_MILES or the same exit), and the
+               other's incident is accepted (pending, active). Exactly one such call: joined as a re-dispatch
+               ("Redispatched: <town> → <town>", or "Also run in <town>" for an earlier run arriving after), the
+               later run ruling as above. Two or more: "possibly the same", never joined. A feed's own merge wins
     highway    a highway location is its route, direction and mile marker or exit (sizeup/dispatch.py highway: "I-999
                SB MM 5.7", "I-999 NB EXIT 4", a page's "i 999 southbound mile marker 5.7"): the same place only at
                the same marker to the tenth (or the same exit), the same direction when both say one (same_marker),
@@ -592,6 +600,24 @@ def county_towns() -> dict[tuple[str, ...], str]:
             pass
         _COUNTY = out or {(): ""}
     return _COUNTY
+
+
+OWN_TOWNS: frozenset | None = None             # the department's own towns, lower case (set_own_towns; None: its district)
+CROSS_TOWN_S = 10 * 60.0                       # two of our towns' runs of one call: dispatched this close at most
+CROSS_TOWN_MILES = 1.0                         # ... on a highway, their markers this close at most (a town line between)
+
+
+def set_own_towns(names) -> None:
+    """The department's own towns (one call may be run in each of them under its own county event: "cross town")."""
+    global OWN_TOWNS
+    OWN_TOWNS = None if names is None else frozenset(str(n).strip().lower() for n in names if str(n).strip())
+
+
+def own_towns() -> frozenset:
+    if OWN_TOWNS is None:
+        from sizeup.geo.pagegeo import DISTRICT
+        return frozenset(t.lower() for t in DISTRICT)
+    return OWN_TOWNS
 
 
 def set_known_towns(names) -> None:
@@ -1308,6 +1334,31 @@ def later_run(ref: str, data: dict, other_ref: str, other: dict) -> bool:
     if a is not None and b is not None and a != b:
         return a > b
     return True
+
+
+def _report_town(data: dict) -> str:
+    """The town a feed's report is in: its extra "town" when the adapter gives one, else the known town its location
+    names; '' when neither says."""
+    x = (data.get("extra") or {}).get("town") if isinstance(data, dict) else None
+    if isinstance(x, str) and x.strip():
+        return re.sub(r"(?i)^village of\s+", "", x.strip())     # "Village of Sample": the village's own name
+    return _town(str((data or {}).get("location") or ""))
+
+
+def cross_town_place(a: str, b: str) -> bool:
+    """One place for one call run in two of our towns ("cross town"): the same number and street, whatever the town;
+    on a highway the same route and the same direction (both say one), markers within CROSS_TOWN_MILES (a town line
+    lies between two towns' markers) or the same exit."""
+    ha, hb = highway(a), highway(b)
+    if ha is not None or hb is not None:
+        if ha is None or hb is None or ha.route != hb.route or not ha.dir or ha.dir != hb.dir:
+            return False
+        if ha.mile is not None and hb.mile is not None:
+            return abs(ha.mile - hb.mile) <= CROSS_TOWN_MILES
+        return ha.mile is None and hb.mile is None and ha.exit == hb.exit
+    ka, kb = place_key(a), place_key(b)
+    return (ka is not None and kb is not None and ka[0] == kb[0] == "addr" and ka[1] == kb[1]
+            and _same_street(ka[2:], kb[2:]))
 
 
 def _runs(extra: dict) -> list[str]:
@@ -2027,8 +2078,12 @@ class Sources:
             at = min(data["times"].values()) if data["times"] else seen
             inc = self._alias_incident(ev.source, data)
             run = None                                   # another run of a county event open here: that incident
+            cross: list[dict] = []                       # one call in two of our towns (_cross_town): the others
             if inc is None and not data["closed"] and data["times"].get("in_service") is None:   # (a live run only)
                 run = self._same_event(ev.source, ev.event_id, data)
+                if run is None:
+                    cross = self._cross_town(ev.source, ev.event_id, data, label)
+                    run = cross[0] if len(cross) == 1 else None
                 if run is not None:
                     inc = self.store.incident(run["incident_id"])
             similar: list[dict] = []
@@ -2055,11 +2110,14 @@ class Sources:
                                   db=db)
                         db.execute("UPDATE source_reports SET merged_into = ? WHERE source = ? AND ref = ?",
                                    (run["ref"], ev.source, ev.event_id))
+                        if cross:                            # another town's run: said, never silent
+                            self.store._event(db, inc["id"], "feed", f"Also run in {_report_town(data) or '(no town)'} "
+                                              f"({label})", at=self.clock())
                     self.log(f"incident sources: {label}: an earlier run of the county event on {inc['id']}: retired")
                     return inc["id"]
                 self._redispatched(ev.source, run, ev.event_id, inc["id"], data, label,
                                    lambda db: self._put(ev.source, ev.event_id, rank, label, seen, data,
-                                                        incident_id=inc["id"], seen_at=snap, db=db))
+                                                        incident_id=inc["id"], seen_at=snap, db=db), towns=bool(cross))
                 self._apply(inc["id"], was, data, label, rank)
                 self._merge(ev.source, ev.event_id, inc["id"], data, label)
                 self._sweep_pages(inc["id"], self._sweepable(inc["id"]), closed=False)
@@ -2085,7 +2143,12 @@ class Sources:
             if disp is not None and now - disp > MATCH_WINDOW_S:  # still open, first seen late (an outage, a first run)
                 with self.store.tx() as db:
                     self.store._event(db, iid, "feed", f"{label}: first seen {_dur(now - disp)} after its dispatch", at=now)
-            for other in similar:
+            others = list(similar)
+            for r in cross if len(cross) > 1 else []:     # one call in two of our towns, but which: a person picks
+                o = self.store.incident(r["incident_id"])
+                if all(x["id"] != o["id"] for x in others):
+                    others.append(o)
+            for other in others:
                 self._possibly(iid, other)
             self._merge(ev.source, ev.event_id, iid, data, label)
             self._sweep_pages(iid, self._sweepable(iid), closed=False)   # a page card it didn't take (matched from the page)
@@ -2256,7 +2319,40 @@ class Sources:
                 return r
         return None
 
-    def _redispatched(self, source: str, run: dict, ref: str, iid: int, data: dict, label: str, put) -> None:
+    def _cross_town(self, source: str, ref: str, data: dict, label: str) -> list[dict]:
+        """The reports of this source this live report may be another town's run of (the module's "cross town"): every
+        one that fits, on distinct incidents. One: the call; two or more: none joined (each "possibly the same")."""
+        mine = _report_town(data).lower()
+        ours = own_towns()
+        if not mine or mine not in ours:
+            return []
+        disp = self._disp(data)
+        typ = self.cad.map_type(data["type"], label)[0] if data["type"] else ""
+        if disp is None or not typ:
+            return []
+        out: dict[int, dict] = {}
+        for r in self.store.q("SELECT r.* FROM source_reports r JOIN incidents i ON i.id = r.incident_id WHERE "
+                              "r.source = ? AND r.ref != ? AND r.merged_into = '' AND i.status IN ('pending', 'active') "
+                              "ORDER BY r.first_seen DESC", (source, ref)):
+            d = json.loads(r["data"] or "{}")
+            town, t = _report_town(d).lower(), self._disp(d)
+            if (not town or town not in ours or town == mine or t is None or abs(t - disp) > CROSS_TOWN_S
+                    or d.get("closed") or (d.get("times") or {}).get("in_service") is not None):
+                continue
+            if (self.cad.map_type(str(d.get("type") or ""), label)[0] if d.get("type") else "") != typ:
+                continue
+            if cross_town_place(str(data.get("location") or ""), str(d.get("location") or "")):
+                out.setdefault(r["incident_id"], r)
+        if len(out) == 1:                                # another open call of ours there as well: which one?
+            for i in self.store.q("SELECT * FROM incidents WHERE status IN ('pending', 'active') AND created_at "
+                                  "BETWEEN ? AND ?", (disp - CROSS_TOWN_S, disp + CROSS_TOWN_S)):
+                if i["id"] not in out and any(cross_town_place(str(data.get("location") or ""), x) for x in
+                                              (match_address(i), i["place_address"], i["geo_label"]) if x):
+                    out[i["id"]] = {"incident_id": i["id"], "ref": "", "data": "{}"}
+        return list(out.values())
+
+    def _redispatched(self, source: str, run: dict, ref: str, iid: int, data: dict, label: str, put,
+                      towns: bool = False) -> None:
         """Another run of the county event on iid (_same_event): the earlier run's report retired into this one (its
         later reports go to iid and change nothing: merged_into, as an alias's), kept on iid with its run numbers
         (decorate), and one line: "Redispatched: <agency> → <agency>" with the new run numbers. put(db): this run's
@@ -2264,8 +2360,11 @@ class Sources:
         old = json.loads(run["data"] or "{}")
         ox, nx = old.get("extra") or {}, data.get("extra") or {}
         a, b = str(ox.get("jurisdiction") or ""), str(nx.get("jurisdiction") or "")
+        if towns:                                        # one call in two of our towns (_cross_town): the towns
+            a, b = _report_town(old), _report_town(data)
         new = [x for x in _runs(nx) if x not in _runs(ox)]
-        text = (f"Redispatched: {a or '(no agency)'} → {b or '(no agency)'}" if a != b else "Redispatched") \
+        text = (f"Redispatched: {a or ('(no town)' if towns else '(no agency)')} → "
+                f"{b or ('(no town)' if towns else '(no agency)')}" if a != b else "Redispatched") \
             + f" ({label}" + (f": run {', '.join(new)}" if new else "") + ")"
         with self.store.tx() as db:
             put(db)
