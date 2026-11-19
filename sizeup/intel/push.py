@@ -2,17 +2,21 @@
 
     Title  "PD · Smoke / fire reported · Port Chester"         the pack's label, the category's, the town; " ·m" at
                                                                the end when the local model raised it (backing.py)
-    Body   "100 Example Ave · 14:32 · high"                    the gazetteer's address when the words confirm it
-                                                               (user, 2026-11-12), the time, the level; unconfirmed: only
-                                                               the street and block ("Example Ave, 100 blk") and
-                                                               "(unconfirmed)"; a number the transcript says after a
-                                                               plate / ID / unit / DOB word: the street alone (fail
-                                                               closed); "location not heard"
+    Body   "100 Example Ave"                                   line 1, where: the gazetteer's address when the words
+                                                               confirm it (user, 2026-11-12); unconfirmed: only the
+                                                               street and block ("Example Ave, 100 blk") and
+                                                               "(unconfirmed)", the street alone for the 0 block
+                                                               (house numbers under 100: never "0 blk"); a number the
+                                                               transcript says after a plate / ID / unit / DOB word:
+                                                               the street alone (fail closed); "location not heard"
+           "14:32 · high"                                      line 2: the time, the level
     Tags   the category's tag, police_car (a police pack)      Priority: the category's
-    Click  <public url>/radio?view=police&intel=<id>           behind Cloudflare Access
-    FYI    a fire-related event with the FD already there (engine.py _fire): the title starts "FYI · ", the body
-           ends "FD on scene · #26-000123" (fd_text), its priority the pack's fyi / safety priority. The FD
-           cleared (a rekindle): a pre-alert as usual, its body ending "FD here 14:05 · #26-000123"
+    Click  <public url>/radio?view=police&intel=<id>           behind Cloudflare Access (the engine's LiveSink puts
+                                                               the Listen link here instead, and this one on an
+                                                               "Open" button: never a URL in the body)
+    FYI    a fire-related event with the FD already there (engine.py _fire): the title starts "FYI · ", the body's
+           second line ends "FD on scene · #26-000123" (fd_text), its priority the pack's fyi / safety priority. The FD
+           cleared (a rekindle): a pre-alert as usual, its second line ending "FD here 14:05 · #26-000123"
 
 Not among its fields: transcript words, a talker, a roster alias, a radio ID, a plate, a date of birth, a person's
 name. Only the fields above go in, and (push_pii off) scrub() checks the result anyway: any of the event's
@@ -63,7 +67,8 @@ def where_text(ev, doubtful: bool = False) -> str:
         if doubtful:
             where = street
         elif not ev.confirmed or ev.precision == "block":
-            where = f"{street}, {n // 100 * 100} blk"
+            blk = n // 100 * 100
+            where = f"{street}, {blk} blk" if blk else street     # the 0 block (1-99): the street, never "0 blk"
     if not ev.confirmed:
         where += " (unconfirmed)"
     return where
@@ -112,7 +117,8 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
         title += " ·m"                        # the local model raised it, not the rules alone (backing.py)
     where = where_text(ev, doubtful)
     when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
-    body = " · ".join(x for x in (where or "location not heard", when, ev.level, fd) if x)
+    # terse, data-first (two lines on a lock screen): where; then when, the level, the FD
+    body = "\n".join(x for x in (where or "location not heard", " · ".join(x for x in (when, ev.level, fd) if x)) if x)
     tags = [t for t in (cat.get("tag") or "", DOMAIN_TAG.get(ev.domain, "")) if t]
     click = ""
     if public_url and ev.id is not None:
