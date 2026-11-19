@@ -92,18 +92,20 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     merge      a feed's event naming other ids of the same source in its aliases: each alias's report is retired
                (merged_into) with a note on both incidents and in the log. The alias's incident is dismissed when it
                is still queued AND that same source made it (its report then moves onto the event). Made by that
-               source and accepted by automation only (60 Control mode; no person's edit, note, status, alarm, kept
-               transmission, page merge or attachment on it: _worked), while the event's incident is accepted too
-               (pending, active), it is closed DUPLICATE in one transaction with the move: its reports (every
-               feed's), page, automatic radio links and units (status and times as they are, a unit history line,
-               automation's steps for them: _move_units) go onto the event's incident. Otherwise a note ("kept:
-               check it")
+               source and accepted by automation (60 Control mode), only automation's work on it (_worked: decided
+               positively; a person's edit, note, status, alarm, kept transmission, page merge, attachment or an
+               unsigned line of theirs is work), while the event's incident is accepted too (pending, active), it is
+               closed DUPLICATE in one transaction with the move: its report, page, automatic radio links (never one
+               a person took off the kept call) and units (status and times as they are, a unit history line,
+               automation's steps for them: _move_units) go onto the event's incident; another feed's report of it
+               is retired into that feed's report there (never ruling it), else stays on the duplicate. Otherwise a
+               note ("kept: check it")
     same event one county event, one incident, however many runs: a new event of a source whose event number
                (feed_event_number: the report's extra "event_number", else its id without an adapter's "-2", "-3"
                for another run; only an id of one letter and at least RUN_ID_DIGITS digits, so another adapter's
                "T1-2" or "F26-12" is never cut) is that of an open incident's report attaches there, never a new
-               incident: another run number, another agency (a re-dispatch). The current run is the one dispatched
-               last (else the higher run suffix: "-3" over "-2" over none), never the one that arrived last: the
+               incident: another run number, another agency (a re-dispatch). The current run is the higher run
+               suffix ("-3" over "-2" over none; else the one dispatched last), never the one that arrived last: the
                other's report is retired into it (its later reports change nothing: its in service never closes the
                call; an earlier run arriving after is retired at once, silently), both runs' numbers stay on the
                incident (decorate: run_numbers, event_id the event number), "Redispatched: <agency> → <agency>
@@ -114,12 +116,13 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                run (_new_run_page): it joins although a page is on the incident only when no page there is nearer in
                time to that run's dispatch than to an earlier run's, it came within SAME_CALL_S of it and names that
                run's place exactly; a second page for one run never does
-    highway    a highway location is its route, direction and mile marker (sizeup/dispatch.py highway: "I-999 SB MM
-               5.7", a page's "i 999 southbound mile marker 5.7"): the same place only at the same marker to the
-               tenth, the same direction when both say one (same_marker), whatever the town (mutual aid on that road
-               in another town is the same place); one that says no direction against two calls at that marker on
-               both carriageways is "possibly the same" with each; a marker within a mile, or units shared, is
-               "possibly the same", never joined; never a misheard street. A feed incident's own report locations count too (each run's, whatever its address shows: a
+    highway    a highway location is its route, direction and mile marker or exit (sizeup/dispatch.py highway: "I-999
+               SB MM 5.7", "I-999 NB EXIT 4", a page's "i 999 southbound mile marker 5.7"): the same place only at
+               the same marker to the tenth (or the same exit), the same direction when both say one (same_marker),
+               whatever the town (mutual aid on that road in another town is the same place); one that says no
+               direction against two calls there on both carriageways is "possibly the same" with each; a marker
+               within a mile, one said by marker and the other by exit, or units shared, is "possibly the same",
+               never joined; never a misheard street. A feed incident's own report locations count too (each run's, whatever its address shows: a
                person's edit). A page with no place said (no address, street, place phrase or marker) is unlocated:
                never its words as the address (dispatch.place_clause), its text in the remarks
     closed     the feed closed an event (its in-service or cleared time): a queued incident only that event made, and
@@ -1286,23 +1289,24 @@ def feed_event_number(ref: str, data: dict | None = None) -> str:
 
 
 def later_run(ref: str, data: dict, other_ref: str, other: dict) -> bool:
-    """Is (ref, data) a later run of its event than (other_ref, other)? The one dispatched later when both say a
-    dispatch time; else the higher run suffix ("-3" > "-2" > none); else (one id, no times) yes. Never which one arrived
-    last."""
+    """Is (ref, data) a later run of its event than (other_ref, other)? The higher run suffix ("-3" > "-2" > none: the
+    adapter numbers its runs in the order it saw them, whatever time the county stamps on a new run); with the same
+    suffix (two ids tied by extra "event_number"), the one dispatched later; else (no times) yes. Never which one
+    arrived here last."""
     def disp(d: dict):
         t = d.get("times") or {}
         x = t.get("dispatched") or (min(t.values()) if t else None)
         return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
     def suffix(r: str) -> int:
-        m = re.search(r"-(\d{1,2})$", r or "")
-        return int(m.group(1)) if m else 1
+        m = EVENT_ID.fullmatch(r or "")
+        return int(m.group(2)) if m and m.group(2) else 1
 
+    if suffix(ref) != suffix(other_ref):
+        return suffix(ref) > suffix(other_ref)
     a, b = disp(data), disp(other)
     if a is not None and b is not None and a != b:
         return a > b
-    if suffix(ref) != suffix(other_ref):
-        return suffix(ref) > suffix(other_ref)
     return True
 
 
@@ -2183,11 +2187,36 @@ class Sources:
             self.store._event(db, old, "feed", f"{label}: {', '.join(names)} moved to {_ref(i)}", at=now)
         return names
 
+    def _retire_others(self, db, old: int, iid: int, source: str, alias: str) -> None:
+        """A fold (_merge), in its transaction: another feed's live report on the duplicate is retired into that feed's
+        report on the kept call (merged_into: it never rules the kept call, its in service never closes it); with no
+        report of that feed there, it stays on the closed duplicate. Reports already retired stay as they are."""
+        for r in db.execute("SELECT source, ref FROM source_reports WHERE incident_id = ? AND source != ? AND "
+                            "merged_into = '' AND NOT (source = ? AND ref = ?)", (old, PAGING, source, alias)).fetchall():
+            keep = db.execute("SELECT ref FROM source_reports WHERE incident_id = ? AND source = ? AND merged_into = '' "
+                              "ORDER BY rank, first_seen LIMIT 1", (iid, r["source"])).fetchone()
+            if keep is not None:
+                db.execute("UPDATE source_reports SET merged_into = ?, incident_id = ? WHERE source = ? AND ref = ?",
+                           (keep["ref"], iid, r["source"], r["ref"]))
+
+    # Events automation writes with no operator (a feed's lines, the card's creation): anything else unsigned on an
+    # incident is a person's (or unknown): worked
+    AUTO_UNSIGNED = ("created", "feed", "system", "prealert", "auto")
+
     def _worked(self, iid: int) -> bool:
-        """A person worked on this incident (an edit, a note, a unit, an alarm, a transmission linked or kept, a page
-        merged, an attachment, anything done under their name). What automation did (a feed, the page, 60 Control
-        mode: "... · auto") doesn't count."""
+        """Not an incident only automation worked on. Decided positively: automation accepted it (60 Control mode:
+        tracked, its "accept" step not undone), and nothing on it is a person's: no edit, note, alarm, radio linked or
+        kept, page merge, attachment, reopen or close, and every timeline line signed by a feed, the page, the radio or
+        "... · auto" (an unsigned one only of AUTO_UNSIGNED's kinds). Anything else (a blank operator too): worked."""
         one = self.store.one
+        try:
+            auto = (one("SELECT 1 AS x FROM auto_incidents WHERE incident_id = ? AND tracked_at IS NOT NULL", (iid,))
+                    and one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'accept' AND undone_at IS NULL",
+                            (iid,)))
+        except sqlite3.OperationalError:                     # no dispatch mode here: never automation's alone
+            auto = None
+        if not auto:
+            return True
         if (self.manual(iid)
                 or one("SELECT 1 AS x FROM alarms WHERE incident_id = ? LIMIT 1", (iid,))
                 or one("SELECT 1 AS x FROM radio_links WHERE incident_id = ? AND why = 'manual' LIMIT 1", (iid,))
@@ -2205,9 +2234,12 @@ class Sources:
             "SELECT DISTINCT label FROM source_reports WHERE incident_id = ?", (iid,)))}
         for e in self.store.q("SELECT kind, operator FROM events WHERE incident_id = ?", (iid,)):
             op = (e["operator"] or "").strip()
-            if e["kind"] in ("note", "dispatch", "remarks", "edit", "alarm", "upgrade"):
+            if e["kind"] in ("note", "dispatch", "remarks", "edit", "alarm", "upgrade", "reopened", "closed"):
                 return True
-            if op and op not in bots and not op.endswith("· auto"):
+            if not op:
+                if e["kind"] not in self.AUTO_UNSIGNED:
+                    return True
+            elif op not in bots and not op.endswith("· auto"):
                 return True
         return False
 
@@ -2288,12 +2320,14 @@ class Sources:
                         pages += list(json.loads(p[0] or "{}").get("pages") or [])
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE incident_id = ? AND source = ?",
                                (iid, old, PAGING))
-                if fold:                                     # every feed's report, the automatic radio, the units
-                    db.execute("UPDATE source_reports SET incident_id = ? WHERE incident_id = ?", (iid, old))
+                if fold:                                     # another feed's report of it, the automatic radio, units
+                    self._retire_others(db, old, iid, source, a)
                     radio = [x[0] for x in db.execute("SELECT traffic_id FROM radio_links WHERE incident_id = ? AND "
                                                       "why != 'manual'", (old,)).fetchall()]
-                    db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT traffic_id, "
-                               "?, why, unit FROM radio_links WHERE incident_id = ? AND why != 'manual'", (iid, old))
+                    db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT l.traffic_id, "
+                               "?, l.why, l.unit FROM radio_links l WHERE l.incident_id = ? AND l.why != 'manual' AND NOT "
+                               "EXISTS (SELECT 1 FROM radio_link_exclusions x WHERE x.traffic_id = l.traffic_id AND "
+                               "x.incident_id = ?)", (iid, old, iid))  # never one a person took off this call
                     db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why != 'manual'", (old,))
                     for x in radio:
                         self.cad.comms.touch(x)              # (inside its transaction: comms.py)

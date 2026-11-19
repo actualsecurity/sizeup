@@ -60,12 +60,12 @@ def test_event_number_is_the_id_without_an_adapters_run_suffix_only_for_an_event
         assert feed_event_number(never) == "", never
 
 
-def test_the_later_run_is_the_one_dispatched_later_else_the_higher_suffix_never_the_last_to_arrive():
+def test_the_later_run_is_the_higher_suffix_else_the_one_dispatched_later_never_the_last_to_arrive():
     early, late = {"times": {"dispatched": T0}}, {"times": {"dispatched": T0 + 60}}
-    assert later_run("F0000123", late, "F0000123-2", early)          # its own time, whatever its suffix says
-    assert not later_run("F0000123-2", early, "F0000123", late)
+    assert later_run("F0000123-2", early, "F0000123", late)          # the suffix, whatever time a run is stamped with
+    assert not later_run("F0000123", late, "F0000123-2", early)
     assert later_run("F0000123-3", {}, "F0000123-2", {}) and not later_run("F0000123", {}, "F0000123-2", {})
-    assert later_run("F0000123-2", early, "F0000123", early)         # one time: the suffix
+    assert later_run("X2", late, "X1", early) and not later_run("X1", early, "X2", late)   # one suffix: the time
 
 
 def test_a_highway_place_is_its_route_direction_and_mile_marker():
@@ -75,7 +75,10 @@ def test_a_highway_place_is_its_route_direction_and_mile_marker():
     assert highway("Sample Pkwy NB MM 7.25").shown() == "Sample Pkwy NB MM 7.25"
     assert highway("brush fire Sample Parkway northbound mile marker 7.25").route == "Sample Pkwy"   # no call type
     assert highway("southbound on I 999 at mile marker 12.6").dir == "SB"                          # said before it
-    assert highway("12 Example Ave") is None and highway("I-999 SB at exit 9") is None
+    assert highway("12 Example Ave") is None and highway("I-999 SB") is None
+    assert highway("I-999 SB at exit 9").shown() == "I-999 SB exit 9" == highway("I999 SB EXIT 9").shown()
+    assert highway("I-999 north at mile marker 4.1").dir == "NB"
+    assert highway("i 2 cars at marker 3") is None and highway("I-2 at marker 3").route == "I-2"
     assert highway("the Sample Parkway at the Model Parkway interchange, mile marker 0") is None   # whose marker?
     assert same_place("I-999 SB MM 12.6", "I-999 SB MM 12.60 EXAMPLETOWN")
     assert not same_place("I-999 SB MM 12.6", "I-999 SB MM 13.1")              # half a mile on: another place
@@ -99,7 +102,11 @@ def test_a_page_on_a_highway_is_located_by_its_marker_and_an_exit_is_never_a_hou
     d = parse(I999_PAGE)
     assert d.location == "I-999 SB MM 12.6" and d.incident_type == "Brush fire"
     d = parse("Engine 61, brush fire, the Sample Parkway exit 9 to Example Avenue.")
-    assert "9" not in d.location
+    assert d.location == "Sample Pkwy exit 9"                              # never "9 Example Avenue"
+    assert parse("Engine 61, MVA with injuries, I-95 northbound exit 21.").location == "I-95 NB exit 21"
+    assert parse("car fire, the Hutch southbound at exit 19.").location == "Hutch SB exit 19"
+    assert parse("Engine 62, MVA, 684 NB MM 5.3.").location == "I-684 NB MM 5.3"     # a bare number the search knows
+    assert parse("Engine 62, car fire, exit 21 off ramp.").location == "exit 21 off ramp"
 
 
 def test_an_address_said_before_a_highway_is_the_place_and_the_numbers_before_a_marker_are_read_right():
@@ -117,6 +124,13 @@ def test_a_page_s_own_words_are_never_its_address_but_a_place_after_its_type_is(
     assert parse("Port Chester Fire, odor of smoke at the Example Middle School, Engine 61. Time out 0930.").location \
         == "the example middle school"                                         # cut at its unit, never past it
     assert parse("Rye Brook Fire, fire alarm, Example School gym. Engine 63.").location == "example school gym"
+    assert parse("Port Chester Fire, fire alarm at St. Example's Church. Engine 63.").location \
+        == "st. example s church"                                            # an abbreviation's dot: no sentence end
+    assert parse("Port Chester Fire, MVA, Example and Sample. Engine 63.").location == "example and sample"
+    assert parse("Port Chester Fire, brush fire, Sample River. Engine 63.").location == "sample river"
+    assert parse("Port Chester Fire, fire alarm, Example Commons. Engine 63.").location == "example commons"
+    assert parse("Port Chester Fire, mutual aid, structure fire, to Townville. Engine 63.").location == "townville"
+    assert parse("Engine 63. Car fire, smoke and flames. Engine 63.").location == ""
 
 
 def test_a_page_with_no_place_makes_an_unlocated_card_with_its_words_in_the_remarks(tmp_path):
@@ -478,3 +492,94 @@ def test_another_feed_s_report_of_the_same_run_never_lets_a_second_page_for_it_j
     rig.at(210)                                     # one run (two feeds' copies of it), paged again: a person decides
     again = rig.page("p2", ALARM_PAGE.replace("Engine 64", "Engine 63"), fresh=True)
     assert again["id"] != page["id"]
+
+
+# -- the review of #807 ---------------------------------------------------------------------------------------------------
+
+
+def test_a_page_by_exit_and_the_feed_by_exit_join_in_either_order(tmp_path):
+    rig = Rig(tmp_path)
+    page = rig.page(text="Engine 61, MVA with injuries, I-95 northbound exit 21.")
+    rig.at(40)
+    rig.feed.put("F0070001", type="MVA", location="I-95 NB EXIT 21", units=("E61",), times={"dispatched": T0 + 20})
+    rig.poll()
+    assert [i["id"] for i in rig.incidents()] == [page["id"]]
+    rig = Rig(tmp_path / "2")
+    rig.feed.put("F0070002", type="MVA", location="HUTCH SB EXIT 19", units=("E61",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    rig.at(40)
+    assert rig.page(text="Engine 61, car fire, the Hutch southbound at exit 19.")["id"] == inc["id"]
+    rig.at(60)                                      # another exit: its own card
+    assert rig.page("p2", "Engine 63, car fire, the Hutch southbound at exit 30.", fresh=True)["id"] != inc["id"]
+
+
+def test_another_feed_s_report_of_the_duplicate_never_rules_the_kept_call(tmp_path):
+    from tests.fake_feed import FakeFeed
+    rig = AutoRig(tmp_path, FakeFeed(rank=2), FakeFeed(source="county2", label="Second feed", rank=1))
+    a, b = two_accepted(rig)
+    rig.at(260)
+    rig.feeds[1].put("Z555", type="ALARM/COMM", location="400 SAMPLE ST", units=("E63",), times={"dispatched": T0 + 236})
+    rig.poll()
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'Z555'")["incident_id"] == b
+    rig.at(420)
+    rig.feed.change("F0060001", aliases=("F0060555",), units=("E61", "E63"))
+    rig.poll()
+    assert rig.cad.store.incident(b)["disposition"] == "DUPLICATE"
+    z = rig.cad.store.one("SELECT incident_id, merged_into FROM source_reports WHERE ref = 'Z555'")
+    assert z["incident_id"] == b and z["merged_into"] == ""                    # on the closed duplicate, not here
+    rig.at(500)
+    rig.feeds[1].change("Z555", closed=True, times={"in_service": T0 + 490})
+    rig.poll()                                      # its end: never the kept call's
+    assert rig.cad.store.incident(a)["status"] == "active" and rig.here("E63", "F0060001")
+    assert not rig.cad.store.q("SELECT 1 FROM auto_steps WHERE incident_id = ? AND kind IN ('close', 'close?')", (a,))
+
+
+def test_another_feed_s_report_of_the_duplicate_is_retired_into_its_own_report_on_the_kept_call(tmp_path):
+    from tests.fake_feed import FakeFeed
+    rig = AutoRig(tmp_path, FakeFeed(rank=2), FakeFeed(source="county2", label="Second feed", rank=1))
+    a, b = two_accepted(rig)
+    rig.at(260)
+    rig.feeds[1].put("Z001", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E61",), times={"dispatched": T0 + 1})
+    rig.feeds[1].put("Z555", type="ALARM/COMM", location="400 SAMPLE ST", units=("E63",), times={"dispatched": T0 + 236})
+    rig.poll()
+    rig.at(420)
+    rig.feed.change("F0060001", aliases=("F0060555",), units=("E61", "E63"))
+    rig.poll()
+    z = rig.cad.store.one("SELECT incident_id, merged_into FROM source_reports WHERE ref = 'Z555'")
+    assert (z["incident_id"], z["merged_into"]) == (a, "Z001")
+    rig.feeds[1].change("Z555", closed=True, times={"in_service": T0 + 490})
+    rig.poll()
+    assert rig.cad.store.incident(a)["status"] == "active"
+
+
+def test_a_duplicate_a_person_accepted_unsigned_is_never_closed_by_a_merge(tmp_path):
+    rig = Rig(tmp_path)                             # PCFD mode: nothing accepted by automation
+    rig.feed.put("F0060001", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E61",), times={"dispatched": T0})
+    rig.poll()
+    rig.at(240)
+    rig.feed.put("F0060555", type="ALARM/COMM", location="400 SAMPLE ST", units=("E63",), times={"dispatched": T0 + 235})
+    rig.poll()
+    a, b = [i["id"] for i in rig.incidents()]
+    rig.cad.store.accept(a, "Lt. Test")
+    rig.cad.store.accept(b, "")                     # a person, no name given
+    rig.at(420)
+    rig.feed.change("F0060001", aliases=("F0060555",))
+    rig.poll()
+    assert rig.cad.store.incident(b)["status"] in ("pending", "active")
+    assert any(t.endswith("(kept: check it)") for t in lines(rig, b))
+
+
+def test_a_fold_never_links_a_transmission_a_person_took_off_the_kept_call(tmp_path):
+    rig = AutoRig(tmp_path)
+    a, b = two_accepted(rig)
+    rig.radio("tx-e63", rig.clock.t + 5, "60 Control, Engine 63 responding", rig="E63")
+    assert rig.cad.store.one("SELECT 1 AS x FROM radio_links WHERE traffic_id = 'tx-e63' AND incident_id = ?", (b,))
+    with rig.cad.store.tx() as db:
+        db.execute("INSERT INTO radio_link_exclusions (traffic_id, incident_id, at, operator) VALUES ('tx-e63', ?, ?, "
+                   "'Lt. Test')", (a, rig.clock.t))
+    rig.at(420)
+    rig.feed.change("F0060001", aliases=("F0060555",), units=("E61", "E63"))
+    rig.poll()
+    assert rig.cad.store.incident(b)["disposition"] == "DUPLICATE"
+    assert not rig.cad.store.one("SELECT 1 AS x FROM radio_links WHERE traffic_id = 'tx-e63' AND incident_id = ?", (a,))

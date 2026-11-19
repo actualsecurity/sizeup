@@ -170,29 +170,33 @@ def _road(s: str, type_phrase: str = "") -> str:
     return " ".join(rest) if len(rest) >= 2 else ""
 
 
-# A highway location by its mile marker: a feed's "I-999 SB MM 5.7" (or a route, a direction and a decimal marker:
-# "I999 SB 5.7"), a page's "I 999 southbound mile marker 5.7" (speech-to-text: "mild marker", "mile mark").
-# highway() -> MilePlace; the marker is the place (same_marker): one route, the same marker to the tenth, the same
-# direction when both say one. A town (mutual aid on the same road in another town is the same marker), an exit or a
-# name around it never matter, and a number after "exit" is never a house number (EXIT_NUMBER). Route names: the
-# place search's own (sizeup/geo/places.py ROUTE_ALIASES: "Hutchinson River Parkway" and "Hutch" are one road), else
-# "I-N", "US-N", "NY-N", "CR N", "Route N" (a bare "Route N" is never taken for US-N or NY-N: two routes, never joined),
-# or a named road's own words ("Sample Pkwy"; the words of a call type before it are not its name).
+# A highway location by its mile marker or exit: a feed's "I-999 SB MM 5.7" (or a route, a direction and a decimal
+# marker: "I999 SB 5.7"), "I-999 NB EXIT 4", a page's "I 999 southbound mile marker 5.7" (speech-to-text: "mild
+# marker", "mile mark") or "Sample Parkway north at exit 4". highway() -> MilePlace; the place is the marker (or the
+# exit: same_marker): one route, the same marker to the tenth (or the same exit), the same direction when both say
+# one. A town (mutual aid on the same road in another town is the same place) or a name around it never matter, and a
+# number after "exit" is never a house number (EXIT_NUMBER). Route names: the place search's own (sizeup/geo/places.py
+# ROUTE_ALIASES, the roads it knows by name or bare number: one road however it is said), else "I-N", "US-N", "NY-N",
+# "CR N", "Route N" (a "Route N" the place search doesn't know stays its own road: never taken for US-N or NY-N), or a
+# named road's own words ("Sample Pkwy"; the words of a call type before it are not its name).
 NUMBERED = re.compile(r"\b(interstate|i|u\s?s(?:\s+(?:route|rte|rt|highway|hwy))?|nys?(?:\s+(?:state\s+)?(?:route|rte|rt))?"
                       r"|state\s+(?:route|rte|rt|highway|hwy)|sr|county\s+(?:route|rte|road|rd)|cr|route|rte|rt"
-                      r"|highway|hwy)\s*-?\s*(\d{1,3}[a-z]?)\b(?!\.\d|\s*(?:st|nd|rd|th)\b)", re.I)
+                      r"|highway|hwy)(\s*-?\s*)(\d{1,3}[a-z]?)\b(?!\.\d|\s*(?:st|nd|rd|th)\b)", re.I)
 NAMED = re.compile(r"\b(parkway|pkwy|expressway|expy|thruway|twy|turnpike|tpke|highway|hwy)\b", re.I)
 ROUTE_SUFFIX = {"parkway": "Pkwy", "pkwy": "Pkwy", "expressway": "Expy", "expy": "Expy", "thruway": "Thruway",
                 "twy": "Thruway", "turnpike": "Tpke", "tpke": "Tpke", "highway": "Hwy", "hwy": "Hwy"}
 BOUND = {"eastbound": "EB", "westbound": "WB", "northbound": "NB", "southbound": "SB", "eb": "EB", "wb": "WB",
-         "nb": "NB", "sb": "SB"}
-_BOUND = r"(?:eastbound|westbound|northbound|southbound|eb|wb|nb|sb)"
+         "nb": "NB", "sb": "SB", "east": "EB", "west": "WB", "north": "NB", "south": "SB"}
+_BOUND = r"(?:eastbound|westbound|northbound|southbound|eb|wb|nb|sb|east|west|north|south)"
 _MILE = r"(\d{1,3}(?:\.\d{1,2})?)(?!\d|\.\d)"
 MARKER = re.compile(rf"\b(?:mm|mp|milepost|mile\s*post|marker|mark)\s*(?:number\s*)?{_MILE}|\bmile\s+(\d{{1,3}}\.\d{{1,2}})\b"
                     rf"|\b{_BOUND}\s+(\d{{1,3}}\.\d{{1,2}})\b", re.I)
+EXIT = re.compile(r"\b(?:exit|exits|interchange)\s*(?:number\s*|#\s*)?(\d{1,3}[a-z]?)\b", re.I)
+# a spaced "i 2" is a route only when a direction, a marker or an exit follows ("i 2 cars at marker 3" is not one)
+I_SPACED_NEXT = re.compile(rf"\s*,?\s*(?:{_BOUND}|mm|mp|mile|marker|exit|at|near)\b", re.I)
 ROUTE_STOP = {"the", "a", "an", "on", "at", "of", "to", "in", "and", "for", "from", "near", "by", "mile", "marker", "exit",
               "with", "is", "into", "onto", "off", "past", "before", "after", "approaching", *BOUND}
-MARKER_REACH = 60          # the marker this far (characters) after the route's name at most
+MARKER_REACH = 60          # the marker (or exit) this far (characters) after the route's name at most
 BOUND_BEFORE = 16          # a direction this far before the route's name ("southbound on I-999") counts too
 EXIT_NUMBER = re.compile(r"\b(?:exit|exits|interchange)\s+\d{1,3}[a-z]?\b", re.I)
 
@@ -201,24 +205,35 @@ EXIT_NUMBER = re.compile(r"\b(?:exit|exits|interchange)\s+\d{1,3}[a-z]?\b", re.I
 class MilePlace:
     route: str             # "I-999", "Route 9", "Sample Pkwy"
     dir: str               # "EB" ... or ""
-    mile: float
+    mile: float | None     # the marker, None at an exit
+    exit: str = ""         # the exit ("4", "4A"), "" at a marker
     start: int = 0         # where the route's name starts in the text given (the same text, its indices)
 
     def shown(self) -> str:
-        """'I-999 SB MM 5.7'."""
-        return " ".join(x for x in (self.route, self.dir, f"MM {self.mile:g}") if x)
+        """'I-999 SB MM 5.7', 'I-999 NB exit 4'."""
+        at = f"MM {self.mile:g}" if self.mile is not None else f"exit {self.exit}"
+        return " ".join(x for x in (self.route, self.dir, at) if x)
 
 
 _ALIASES: dict[tuple, str] | None = None
+_WORD_MAP: dict[str, str] = {}
+
+
+def _aliases() -> dict[tuple, str]:
+    """The place search's names for its roads (sizeup/geo/places.py ROUTE_ALIASES), as normalised word tuples."""
+    global _ALIASES
+    if _ALIASES is None:
+        from sizeup.geo.places import _ALIAS_LIST, WORD_MAP    # (lazily: the place search's module is heavier)
+        _WORD_MAP.update(WORD_MAP)
+        _ALIASES = {a: r for a, r in _ALIAS_LIST}
+    return _ALIASES
 
 
 def _alias(text: str) -> str:
-    """The place search's name for a road (sizeup/geo/places.py ROUTE_ALIASES), '' when it has none."""
-    global _ALIASES
-    from sizeup.geo.places import _ALIAS_LIST, norm_tokens   # (lazily: the place search's module is heavier)
-    if _ALIASES is None:
-        _ALIASES = {a: r for a, r in _ALIAS_LIST if not (len(a) == 1 and a[0][0].isdigit())}   # never a bare number
-    return _ALIASES.get(tuple(norm_tokens(text)), "")
+    """The place search's name for a road, '' when it has none (never by a bare number: _known)."""
+    al = _aliases()
+    words = tuple(_WORD_MAP.get(w, w) for w in re.findall(r"\d+\.\d+|\d+[a-z]?|[a-z]+", text.lower()))
+    return "" if len(words) == 1 and words[0][0].isdigit() else al.get(words, "")
 
 
 _TYPE_WORDS: set[str] = set()
@@ -232,7 +247,7 @@ def _type_words() -> set[str]:
 
 
 def _numbered(m) -> str:
-    pre, n = " ".join(m.group(1).lower().split()), m.group(2).upper()
+    pre, n = " ".join(m.group(1).lower().split()), m.group(3).upper()
     head = pre.split()[0]
     if head in ("i", "interstate"):
         route = f"I-{n}"
@@ -250,8 +265,8 @@ def _numbered(m) -> str:
 def _named(t: str, m) -> tuple[str, int] | None:
     """A road named by words before its suffix ("the Sample Parkway"): (its name, where it starts), None without a
     name (the place search's own name for a lone word: "the Thruway")."""
-    words = list(re.finditer(r"[a-z]+", t[max(0, m.start() - 48):m.start()], re.I))
     off = max(0, m.start() - 48)
+    words = list(re.finditer(r"[a-z]+", t[off:m.start()], re.I))
     keep: list = []
     stop = _type_words() | ROUTE_STOP
     for w in reversed(words):
@@ -269,55 +284,105 @@ def _named(t: str, m) -> tuple[str, int] | None:
     return " ".join(w.group(0).capitalize() for w in keep) + " " + ROUTE_SUFFIX[suffix], off + keep[0].start()
 
 
+def _known(t: str) -> list[tuple[int, int, str]]:
+    """The roads the place search knows by name ("the Hutch", "Sample River Parkway" when it is one of them) or by a
+    bare number followed by a direction, a marker or an exit ("999 eastbound"): (start, end, route)."""
+    al = _aliases()
+    toks = [(m.start(), m.end(), _WORD_MAP.get(m.group(0), m.group(0)))
+            for m in re.finditer(r"\d+\.\d+|\d+[a-z]?|[a-z]+", t.lower())]
+    words = [w for _, _, w in toks]
+    longest = max((len(a) for a in al), default=0)
+    out = []
+    for i in range(len(toks)):
+        for n in range(min(longest, len(toks) - i), 0, -1):
+            route = al.get(tuple(words[i:i + n]))
+            if route is None:
+                continue
+            if n == 1 and words[i][0].isdigit() and not (i + 1 < len(toks) and I_SPACED_NEXT.match(
+                    t, toks[i][1])):
+                break                                    # a bare number: a road only with a direction, marker, exit
+            out.append((toks[i][0], toks[i + n - 1][1], route))
+            break
+    return out
+
+
 def highway(text: str) -> MilePlace | None:
-    """The first highway with a mile marker the text names ("I-999 SB MM 5.7", "i 999 southbound mile marker 5.7",
-    "I999 SB 5.7", "Sample Pkwy NB MM 3.1"); None without a route or a marker after it, and when another route is
-    named between a route and the marker ("the Sample Parkway at the Model Parkway interchange, mile marker 0": whose
-    marker?). Its start is an index into text as given."""
+    """The first highway with a mile marker or an exit the text names ("I-999 SB MM 5.7", "i 999 southbound mile
+    marker 5.7", "I999 SB 5.7", "Sample Pkwy NB MM 3.1", "I-999 north at exit 4"); None without a route or a marker or
+    exit after it, and when another route is named between a route and the marker ("the Sample Parkway at the Model
+    Parkway interchange, mile marker 0": whose marker?). Its start is an index into text as given."""
     t = (text or "").replace("_", " ").replace("@", " ")    # (the same length: indices hold)
     found: list[tuple[int, int, str]] = []
     for m in NUMBERED.finditer(t):
+        if m.group(1).lower() == "i" and m.group(2).strip(" -") == "" and " " in m.group(2) \
+                and "-" not in m.group(2) and not I_SPACED_NEXT.match(t, m.end()):
+            continue                                     # "i 2 cars": never I-2
         found.append((m.start(), m.end(), _numbered(m)))
     for m in NAMED.finditer(t):
-        if any(s <= m.start() < e for s, e, _ in found) or re.match(r"\s*-?\s*\d", t[m.end():]):
+        if re.match(r"\s*-?\s*\d", t[m.end():]):
             continue                                     # "US Highway 1", "Highway 9": numbered
         got = _named(t, m)
         if got is not None:
             found.append((got[1], m.end(), got[0]))
-    found.sort()
+    found += _known(t)
+    found.sort(key=lambda f: (f[0], -f[1]))
+    kept: list[tuple[int, int, str]] = []
+    for f in found:                                      # one road per words (the longest reading first)
+        if not any(s <= f[0] < e for s, e, _ in kept):
+            kept.append(f)
     pending = False                  # a route named just before, with no marker of its own before this one
-    for k, (start, end, route) in enumerate(found):
-        nxt = found[k + 1][0] if k + 1 < len(found) else len(t)
+    for k, (start, end, route) in enumerate(kept):
+        nxt = kept[k + 1][0] if k + 1 < len(kept) else len(t)
         reach = min(end + MARKER_REACH, nxt)
-        mk = MARKER.search(t, end, reach)
-        if mk is None:
+        mk, ex = MARKER.search(t, end, reach), EXIT.search(t, end, reach)
+        if mk is None and ex is None:
             pending = nxt < end + MARKER_REACH
             continue
         if pending:
             return None
-        said = next(g for g in mk.groups() if g)
-        b = (re.search(rf"\b{_BOUND}\b", t[end:mk.end()], re.I)
+        hit = mk if ex is None or (mk is not None and mk.start() < ex.start()) else ex
+        b = (re.search(rf"\b{_BOUND}\b", t[end:hit.start() if hit is mk else hit.end()], re.I)
              or re.search(rf"\b{_BOUND}\b(?=\W*(?:on\s+|the\s+)*$)", t[max(0, start - BOUND_BEFORE):start], re.I))
-        return MilePlace(route, BOUND[b.group(0).lower()] if b else "", float(said), start)
+        way = BOUND[b.group(0).lower()] if b else ""
+        if hit is mk:
+            if hit.lastindex == 3 and not way:           # "<dir> 5.7": the direction is the marker's own
+                way = BOUND[re.match(_BOUND, hit.group(0), re.I).group(0).lower()]
+            return MilePlace(route, way, float(next(g for g in mk.groups() if g)), "", start)
+        return MilePlace(route, way, None, ex.group(1).upper(), start)
     return None
 
 
+def same_road(a: MilePlace | None, b: MilePlace | None) -> bool:
+    """One route, and one carriageway when both say one."""
+    return a is not None and b is not None and a.route == b.route and (not a.dir or not b.dir or a.dir == b.dir)
+
+
 def same_marker(a: MilePlace | None, b: MilePlace | None) -> bool:
-    """One place on a highway: the same route, the same marker to the tenth, the same direction when both say one."""
-    return (a is not None and b is not None and a.route == b.route and abs(a.mile - b.mile) < 0.05
-            and (not a.dir or not b.dir or a.dir == b.dir))
+    """One place on a highway: the same route, the same marker to the tenth (or the same exit), the same direction
+    when both say one."""
+    if not same_road(a, b):
+        return False
+    if a.mile is not None and b.mile is not None:
+        return abs(a.mile - b.mile) < 0.05
+    return a.mile is None and b.mile is None and a.exit == b.exit
 
 
 def near_marker(a: MilePlace | None, b: MilePlace | None, miles: float = 1.0) -> bool:
-    """The same route and direction (when both say one), the markers at most this far apart: maybe the same call."""
-    return (a is not None and b is not None and a.route == b.route and abs(a.mile - b.mile) <= miles
-            and (not a.dir or not b.dir or a.dir == b.dir))
+    """The same road, the markers at most this far apart, or one said by its marker and the other by an exit (which is
+    where, nobody can tell here): maybe the same call."""
+    if not same_road(a, b):
+        return False
+    if a.mile is not None and b.mile is not None:
+        return abs(a.mile - b.mile) <= miles
+    return (a.mile is None) != (b.mile is None)
 
 
-# The clause parse() falls back on when no street was heard: up to its first sentence break or unit, at most
-# PLACE_CLAUSE_WORDS words, and a place only when something says so: "at" / "on" / "in" before it, "respond to", or a
-# word for a place (PLACE_WORDS). Anything else is the page's own words ("smoke showing", "caller reports ..."): never an
-# address. The event stays unlocated (its page's text is in its remarks).
+# The clause parse() falls back on when no street was heard: up to its first sentence break (never an abbreviation's
+# dot: "St. Mary's") or unit, at most PLACE_CLAUSE_WORDS words, and a place only when something says so: "at" / "on" /
+# "in" before it, "respond to", "to" / "in" before a name written with a capital, a word for a place (PLACE_WORDS),
+# two names joined by "and" (an intersection), or a highway's words (a direction, a mile marker, an exit). Anything
+# else is the page's own words ("smoke showing", "caller reports ..."): never an address. The event stays unlocated
+# (its page's text is in its remarks).
 PLACE_CLAUSE_WORDS = 10
 PLACE_WORDS = {"school", "mall", "center", "centre", "building", "plaza", "park", "station", "church", "temple",
                "synagogue", "mosque", "hospital", "home", "house", "apartments", "apartment", "complex", "hotel",
@@ -325,13 +390,27 @@ PLACE_WORDS = {"school", "mall", "center", "centre", "building", "plaza", "park"
                "club", "office", "offices", "airport", "terminal", "bridge", "pier", "marina", "beach", "hall", "academy",
                "college", "university", "factory", "warehouse", "diner", "deli", "pharmacy", "gym", "pool", "rink",
                "stadium", "theater", "theatre", "condos", "condominiums", "towers", "village", "court", "courts",
-               "intersection", "corner", "playground", "cemetery", "firehouse", "headquarters", "nursing", "residence"}
+               "intersection", "corner", "playground", "cemetery", "firehouse", "headquarters", "nursing", "residence",
+               "river", "lake", "reservoir", "brook", "pond", "creek", "commons", "estates", "gardens", "manor",
+               "ramp", "overpass", "underpass", "tunnel", "trail", "woods", "preserve"}
+ABBREVIATIONS = {"st", "mt", "ft", "ave", "av", "dr", "rd", "ln", "pl", "ct", "blvd", "jr", "sr", "no", "n", "s", "e", "w"}
+NOT_A_PLACE = {"units", "unit", "ems", "police", "lights", "sirens", "caller", "callers", "patient", "patients", "victim",
+               "victims", "people", "person", "persons", "cars", "vehicles", "vehicle", "injuries", "reports", "smoke",
+               "flames", "fire", "standing", "by", "and"}
+HIGHWAY_CUE = re.compile(r"\b(?:(?:north|south|east|west)bound|nb|sb|eb|wb|mile\s*marker|mm|exit)\b", re.I)
 
 
-def place_clause(rest: str, located: bool = False) -> str:
-    """The place the clause after a page's type names, '' when it names none. located: said after "respond to"."""
+def place_clause(rest: str, located: bool = False, named=()) -> str:
+    """The place the clause after a page's type names, '' when it names none. located: said after "respond to".
+    named: the words the page wrote with a capital (lower case): "to Townville" names a place."""
     stop = len(rest)
-    for pat in (r"[.;!?](?:\s|$)", r"\bcross", r"\bbetween\b", r"\btime\s*out\b", r"\btime \d"):
+    for m in re.finditer(r"[.;!?](?=\s|$)", rest):
+        w = re.search(r"(\w+)$", rest[:m.start()])
+        if m.group(0) == "." and w and w.group(1).lower() in ABBREVIATIONS:
+            continue                                     # "st. mary's": never a sentence's end
+        stop = m.start()
+        break
+    for pat in (r"\bcross", r"\bbetween\b", r"\btime\s*out\b", r"\btime \d"):
         mm = re.search(pat, rest)
         if mm:
             stop = min(stop, mm.start())
@@ -344,9 +423,16 @@ def place_clause(rest: str, located: bool = False) -> str:
         loc = loc[prep.end():]
     loc = re.sub(r"\b(?:port chester|rye brook)(?: fire(?: department)?)?\s*$", "", loc).strip(" .,;:")
     words = loc.split()
-    said = located or (prep is not None and prep.group(0).split()[0] in ("at", "on", "in")) \
-        or any(w.strip(",") in PLACE_WORDS for w in words)
-    return loc[:120] if words and len(words) <= PLACE_CLAUSE_WORDS and said else ""
+    if not words or len(words) > PLACE_CLAUSE_WORDS:
+        return ""
+    bare = [w.strip(",.'") for w in words]
+    p = prep.group(0).split()[0] if prep else ""
+    corner = re.fullmatch(r"(?:[a-z']+ ){0,2}[a-z']+ and (?:[a-z']+ ){0,2}[a-z']+", loc) is not None and not any(
+        w in _type_words() or w in NOT_A_PLACE for w in bare if w != "and")
+    said = (located or p in ("at", "on", "in") or any(w in PLACE_WORDS for w in bare) or corner
+            or HIGHWAY_CUE.search(loc) is not None
+            or (p in ("to", "in", "at") and bare[0] in named and bare[0] not in _type_words()))
+    return loc[:120] if said else ""
 
 
 # "Engine 59/63", "Engines 59 / 63 / 65": one unit word for each number (read before "/" is normalised away).
@@ -451,10 +537,11 @@ def parse(text: str, known=None) -> Dispatch:
     masked = UNIT.sub(" , ", t)
     masked = EMD.sub(" , ", masked)
     masked = TIME_OUT.sub(" , ", masked)
-    masked = EXIT_NUMBER.sub(" , ", masked)               # "exit 4 to Sample Avenue": never 4 Sample Avenue
-    a = ADDRESS.search(masked)
-    hw = highway(masked)                                  # a highway's mile marker: the place, unless an address
-    if hw is not None and a is not None and a.start() < hw.start:   # came first ("12 Example Ave, near I-999 MM 4")
+    hw = highway(masked)                                  # a highway's mile marker or exit: the place, unless an
+    # "exit 4 to Sample Avenue": never 4 Sample Avenue (blanked to the same length: hw.start still indexes it)
+    masked = EXIT_NUMBER.sub(lambda m: " ," + " " * (len(m.group(0)) - 2), masked)
+    a = ADDRESS.search(masked)                            # address came first ("12 Example Ave, near I-999 MM 4")
+    if hw is not None and a is not None and a.start() < hw.start:
         hw = None
     if hw is not None:
         a = None
@@ -464,7 +551,7 @@ def parse(text: str, known=None) -> Dispatch:
     for n in re.findall(r"\b(\d{1,3})\b", head):
         if int(n) not in d.numbers:
             d.numbers.append(int(n))
-    if hw is not None:                                    # a highway's mile marker: the place, whatever else is said
+    if hw is not None:                                    # a highway's marker or exit: the place
         d.location = hw.shown()
     elif a:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
@@ -494,7 +581,8 @@ def parse(text: str, known=None) -> Dispatch:
             r = RESPOND.search(t)
             if r:
                 start, located = r.end(), r.group(1).startswith("respond")
-        d.location = place_clause(t[start:], located)
+        named = {w.lower() for w in re.findall(r"\b[A-Z][a-z]+", text)}   # written with a capital: a name
+        d.location = place_clause(t[start:], located, named)
         c = re.search(r"\b(?:cross(?:\s+street)?s?(?:\s+of|\s+is)?|between)\s+(.+?)(?:[.,;]|\s+(?:time|port chester|rye brook)\b|$)", t)
         if c:
             d.cross_street = c.group(1).strip(" .,")
