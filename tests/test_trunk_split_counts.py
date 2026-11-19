@@ -155,9 +155,9 @@ def test_errors_and_watched_grants_ship_as_before():
 
 
 def test_the_system_supervisor_says_its_counts_when_trunk_recorder_is_stopped(tmp_path):
-    """The real drain thread on MRRS's shipped config (split: log); its monotonic clock a fake one."""
+    """The real drain thread on MRRS's shipped config (split: on); its monotonic clock a fake one."""
     mono = [500.0]
-    lines = [start("mrrs", 1), would("mrrs", 1), flip("mrrs", 1), start("mrrs", 2), alias("mrrs", 2)]
+    lines = [start("mrrs", 1), cut("mrrs", 1), flip("mrrs", 1), start("mrrs", 2), alias("mrrs", 2)]
     mrrs, logs = running_mrrs(tmp_path, lines, mono)
     assert mrrs.step(1_763_400_000.0, mono[0])["state"] == "ok"
     mrrs._drain_thread.join(timeout=5)
@@ -165,7 +165,7 @@ def test_the_system_supervisor_says_its_counts_when_trunk_recorder_is_stopped(tm
     mono[0] += 1200
     mrrs.stop("test")
     out = [x for x in logs if "split" in x]
-    assert out == ["p25 mrrs: split (log) last 20 min: 1 would split, 1 ID flips, 1 aliases, in 2 calls "
+    assert out == ["p25 mrrs: split (on) last 20 min: 1 splits, 1 ID flips, 1 aliases, in 2 calls "
                    "(50.0% of calls)"]
     mrrs.stop("again")                                      # nothing ran since: nothing more
     assert [x for x in logs if "split" in x] == out

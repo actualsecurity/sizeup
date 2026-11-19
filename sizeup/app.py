@@ -1634,11 +1634,22 @@ class App:
 
     def _late_dup(self, call: Call) -> bool:
         """A call written while sizeup was down (#747, Call.late) that this app took before the restart after all (the
-        ingest mark is written every few seconds: a crash between two writes): dropped, never a second row."""
+        ingest mark is written every few seconds: a crash between two writes): dropped, never a second row. Each of a
+        call's key-ups is a row of its own (its id "<call id>-t<k>"; split "on" makes more of them, #647): one taken
+        part way (a crash, or a handler that failed after its first parts) brings in only the parts not logged yet
+        (call.late_taken: the ids left out). Rows of the call this cut doesn't make (cut otherwise before): all of it
+        taken, as before."""
         if not getattr(call, "late", False):
             return False
-        ids = {call.id, f"{call.id}-t0"}
-        if not any(t.id in ids for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]):
+        have = {t.id for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+                if t.id == call.id or t.id.startswith(f"{call.id}-t")}
+        if not have:
+            return False
+        ids = [pc.id for pc in split_turns(call)] if call.audio is not None else [call.id]
+        if have <= set(ids) and not set(ids) <= have:
+            call.late_taken = have                       # type: ignore[attr-defined]
+            log(f"p25: {call.label} {call.id}: from while sizeup was down, {len(have)} of its {len(ids)} key-ups taken "
+                f"before the restart: the other {len(ids) - len(have)} now")
             return False
         log(f"p25: {call.label} {call.id}: from while sizeup was down, but taken before the restart: not again")
         self._drop_recorder_files(call, False)
@@ -1656,7 +1667,8 @@ class App:
         flagged = call.emergency or any(t.emergency for t in call.turns)    # trunk-recorder's flag on this call itself
         windows = self.cad.alarms.windows
         emergency, stuck, keep_record = flagged, "", flagged
-        if flagged:
+        taken = getattr(call, "late_taken", None) or set()     # (#747) its key-ups logged before the restart
+        if flagged and not taken:                    # (taken part way: its flag was counted then)
             # 5.2.0's flag is the call's, from the grant that opened it: its first key-up's radio (srcList's own
             # flags, when a later trunk-recorder fills them, name theirs)
             first = next((t for t in call.turns if t.src), None) if call.emergency else None
@@ -1713,6 +1725,8 @@ class App:
             # One row per key-up (issue #62): 60 Control and the unit it's talking to, a unit keying
             # twice, a radio with no ID; each piece is transcribed with only its own talker as the hint.
             for k, pc in enumerate(split_turns(call)):
+                if pc.id in taken:
+                    continue
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig=self.radios.rig_p25(pc.pairs),
                             radio_id=", ".join(src for src, _t in pc.pairs if src))
@@ -1766,7 +1780,10 @@ class App:
         eng = "off" if tier == tiers.RECORD else channels.effective(
             dict(self.channel_pref(key), transcribe=True), self.aws_ok(key)[0])
         if call.audio is not None:
+            taken = getattr(call, "late_taken", None) or set()     # (#747) its key-ups logged before the restart
             for k, pc in enumerate(split_turns(call)):
+                if pc.id in taken:
+                    continue
                 t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
@@ -3028,13 +3045,14 @@ class App:
         """Its priority in the STT input lane to the hub (#677, sizeup/cloud/sttinput.py), from whisper's own classes
         (_stt_priority): PRE the pre-alerts (a page; another system's talkgroup of the alert tier: PD dispatch), FIRE our
         fire traffic (URGENT: Fire/EMS 15, the firegrounds), NORMAL the airband (HIGH) and other live traffic, LOW a
-        talkgroup heard only as context (dropped first when the outbox is pressed). The airband never outranks fire."""
+        talkgroup heard only as context (dropped first when the outbox is pressed). The airband never outranks fire.
+        An alert-tier talkgroup is PRE also when the pre-alerts push from it (PD dispatch: whisper's HIGH then)."""
         from sizeup.cloud import sttinput
         if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page":
             return sttinput.PRE
         p = self._stt_priority(item, key)
-        if p in (CONTEXT, CONTEXT_FALLBACK):                    # an alert-tier talkgroup
-            return sttinput.PRE
+        if p in (CONTEXT, CONTEXT_FALLBACK) or App._stt_class(self, item, key) in (CONTEXT, CONTEXT_FALLBACK):
+            return sttinput.PRE                                 # an alert-tier talkgroup
         if p == URGENT:
             return sttinput.FIRE
         return sttinput.LOW if p == LOW else sttinput.NORMAL

@@ -263,12 +263,13 @@ def test_each_system_starts_its_trunk_recorder_with_its_own_split_mode(tmp_path)
     county.step(100.0)
     ask_system(tmp_path, {0: "pd-a"})
     mrrs.step(101.0)
-    assert [p.kw["env"][trunkrecd.SPLIT_ENV] for p in pop.started] == ["log", "log"]       # the repo's: log everywhere
+    assert [p.kw["env"][trunkrecd.SPLIT_ENV] for p in pop.started] == ["log", "on"]        # the repo's: MRRS cuts
     assert "sizeup" not in json.loads((d.parent.parent / "config.runtime.json").read_text())
+    assert "sizeup" not in json.loads((d / "config.runtime.json").read_text())
     c = json.loads((d / "config.json").read_text())
-    c["sizeup"]["split"] = "on"
+    c["sizeup"]["split"] = "log"
     (d / "config.json").write_text(json.dumps(c))
-    assert trunkrecd.split_mode(["t", "--config=config.json"], d) == "on"
+    assert trunkrecd.split_mode(["t", "--config=config.json"], d) == "log"
     assert trunkrecd.split_mode(["t", "--config=config.json"], d.parent.parent) == "log"
     c["sizeup"]["split"] = "yes"
     (d / "config.json").write_text(json.dumps(c))
@@ -276,7 +277,16 @@ def test_each_system_starts_its_trunk_recorder_with_its_own_split_mode(tmp_path)
     assert trunkrecd.split_mode(["t"], tmp_path / "nowhere") == "log"
 
 
-def test_the_repo_starts_every_system_in_log():
+def test_the_repo_cuts_mrrs_and_only_logs_on_the_county():
+    """#647's review: MRRS "on" (cut where the next talker's ID comes in), the county still "log"."""
     tr = ROOT / "deploy" / "trunk-recorder"
+    want = {"config.json": "log", "mrrs": "on"}
     for conf in [tr / "config.json", *sorted((tr / "systems").glob("*/config.json"))]:
-        assert json.loads(conf.read_text())["sizeup"]["split"] == "log", conf
+        name = conf.name if conf.parent == tr else conf.parent.name
+        assert json.loads(conf.read_text())["sizeup"]["split"] == want.get(name, "log"), conf
+        assert trunkrecd_mode(conf) == want.get(name, "log")
+
+
+def trunkrecd_mode(conf: Path) -> str:
+    from sizeup.radio import trunkrecd
+    return trunkrecd.split_mode(["trunk-recorder", "--config=config.json"], conf.parent)
