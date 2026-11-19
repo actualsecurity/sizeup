@@ -1,0 +1,14 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "source_seen",
+      "data": {"source": "demo", "label": "Demo feed", "rank": 1, "at": 1794990000.0, "ids": ["S1"], "complete": true},
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

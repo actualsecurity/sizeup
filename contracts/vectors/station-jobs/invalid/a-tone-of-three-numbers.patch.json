@@ -1,0 +1,14 @@
+{
+  "base": "station-jobs/valid/tts.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/tones/0/0",
+      "value": [
+        716.1,
+        1.0,
+        2.0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "error": "too large (32 MB max): send smaller batches",
+  "reason": "too_large",
+  "max_bytes": 33554432
+}

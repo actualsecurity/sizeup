@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/traffic-fm.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/id",
+      "value": "Fireground1..1794990000000"
+    }
+  ]
+}

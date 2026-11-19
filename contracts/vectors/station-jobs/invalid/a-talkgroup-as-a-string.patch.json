@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/set_talkgroup.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/0",
+      "value": "4101"
+    }
+  ]
+}

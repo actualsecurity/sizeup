@@ -1,0 +1,58 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "page_text",
+      "data": {
+        "id": "page-0001",
+        "label": "Paging 1",
+        "mhz": 460.1,
+        "start": 1794990000.0,
+        "end": 1794990010.2,
+        "kind": "page",
+        "status": "done",
+        "departments": ["Northfield · Fire"],
+        "quieting_db": 25.0,
+        "tones": [
+          {
+            "kind": "two_tone",
+            "a_hz": 716.1,
+            "b_hz": 600.9,
+            "names": ["Northfield · Fire"],
+            "start": 0.0,
+            "end": 4.05
+          }
+        ],
+        "raw": "Northfield Fire, Engine 5, alarm activation, 12 Example Avenue, cross street Sample Road",
+        "confidence": 0.9,
+        "voice_offset_s": 4.2,
+        "tone_seq": [{"hz": 716.1, "start": 0.0, "dur": 1.0, "role": "A"}, {"hz": 600.9, "start": 1.0, "dur": 3.05, "role": "B"}],
+        "dispatch": {
+          "text": "Northfield Fire, Engine 5, alarm activation, 12 Example Avenue, cross street Sample Road",
+          "departments": [],
+          "incident_type": "Fire alarm",
+          "category": "fire",
+          "type_phrase": "alarm activation",
+          "code": "",
+          "units": ["Engine 5"],
+          "numbers": [],
+          "location": "12 example avenue",
+          "cross_street": "sample road",
+          "time_out": ""
+        },
+        "history": [],
+        "rerun_at": null,
+        "rerun_result": "",
+        "model": "m.bin",
+        "stt": "",
+        "read_twice": false,
+        "vocab_v": ""
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

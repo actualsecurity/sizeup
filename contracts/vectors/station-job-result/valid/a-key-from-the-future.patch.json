@@ -1,0 +1,29 @@
+{
+  "base": "station-job-result/valid/catch_up.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/from_the_future",
+      "value": {
+        "x": [
+          1,
+          {
+            "y": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "add",
+      "path": "/result/from_the_future",
+      "value": {
+        "x": [
+          1,
+          {
+            "y": null
+          }
+        ]
+      }
+    }
+  ]
+}

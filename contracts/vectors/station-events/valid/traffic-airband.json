@@ -1,0 +1,45 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "traffic",
+      "data": {
+        "id": "Tower-1794990000000",
+        "source": "Tower",
+        "start": 1794990000.0,
+        "end": 1794990004.0,
+        "text": "Engine 5 on location, nothing showing",
+        "status": "done",
+        "unit": "",
+        "talkgroup": null,
+        "rig": "",
+        "radio_id": "",
+        "fm": false,
+        "mhz": 118.5,
+        "carrier_db": 14.0,
+        "carrier_dbfs": -38.3,
+        "snr_db": 11.5,
+        "opened": "carrier",
+        "notched_hz": [1004.0],
+        "floor_dbfs": -52.3,
+        "low_energy": false,
+        "stt": "",
+        "vocab_v": "",
+        "stt_prompt_time": false,
+        "stt_wait_s": 0.2,
+        "stt_run_s": 0.4,
+        "stt_class": "high",
+        "raw": "Engine 5 on location, nothing showing",
+        "confidence": 0.9,
+        "model": "m.bin",
+        "attach": true,
+        "pairs": null
+      },
+      "audio": "UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "audio_dropped": false
+    }
+  ]
+}

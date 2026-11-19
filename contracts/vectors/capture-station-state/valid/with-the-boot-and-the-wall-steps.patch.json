@@ -1,7 +1,7 @@
 {
   "base": "station-state/valid/idle.json",
   "patch": [
-    {"op": "add", "path": "/boot", "value": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c"},
+    {"op": "add", "path": "/boot_id", "value": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c"},
     {"op": "add", "path": "/wall_steps", "value": 0}
   ]
 }

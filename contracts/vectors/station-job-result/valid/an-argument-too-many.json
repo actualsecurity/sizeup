@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "error": "TypeError: App.set_adsb_receiver() takes 2 positional arguments but 3 were given"
+}

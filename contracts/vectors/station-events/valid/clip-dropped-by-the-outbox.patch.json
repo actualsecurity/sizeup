@@ -1,0 +1,15 @@
+{
+  "base": "station-events/valid/traffic-fm.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/audio",
+      "value": null
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/audio_dropped",
+      "value": true
+    }
+  ]
+}

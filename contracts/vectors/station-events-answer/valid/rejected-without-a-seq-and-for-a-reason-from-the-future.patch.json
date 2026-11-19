@@ -1,0 +1,26 @@
+{
+  "base": "station-events-answer/valid/answer.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/rejected",
+      "value": [
+        {
+          "i": 1,
+          "seq": null,
+          "type": "",
+          "reason": "malformed",
+          "error": "an event needs a seq (an integer from 1)"
+        },
+        {
+          "i": 0,
+          "seq": 1,
+          "type": "page",
+          "reason": "a_reason_from_the_future",
+          "error": "",
+          "from_the_future": 1
+        }
+      ]
+    }
+  ]
+}

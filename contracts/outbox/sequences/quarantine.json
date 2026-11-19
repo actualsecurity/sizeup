@@ -1,0 +1,1214 @@
+{
+  "description": "The quarantine (#762): the events the hub refused for good, kept on the station in a table of their own. quarantine(row, reason, error) moves a row the forwarder sent out of the outbox into it (the hub's answer listed it under `rejected`, or it was alone in a batch the hub answered 400 / 413 / 422). A page, its text, an alarm and a source_event the hub did not call malformed are critical: requeue_due() puts a copy at the end of the outbox (a new seq, carrying qid) after 600 s, 1800 s after the second refusal, then hourly, never while a copy waits; after 24 h or 8 refusals one is `stuck`. Every other one, and a malformed one, stays `held` and is never sent again. A source_event the feed has a newer snapshot of (source_latest) is dropped instead of sent again. released(qids): the hub took the copy, the row is gone; late(qid): an alarm taken too late to raise, kept as `late`. dismiss(kind) drops a type's stuck and late rows (Health's Dismiss), drop(id | null) one or all (a person), the copy on its way too; strip_audio(seq) leaves a clip off an event too large with it. summary() is what the status says: kinds, states, reasons and errors, never an event's data. The rows survive a restart, the counters are per run.",
+  "steps": [
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [], "stt_inputs": [], "quarantine": [], "source_latest": [], "sqlite_sequence": {}
+      }
+    },
+    {
+      "op": "add", "kind": "page",
+      "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"},
+      "audio": {"bytes": 40, "fill": "a1"}, "at": 1794990000.0, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 1}
+      }
+    },
+    {
+      "op": "add", "kind": "page_text", "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "raw": "Northfield Fire"},
+      "at": 1794990001.0, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
+          ],
+          [
+            2, 1794990001.0, "page_text", "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}",
+            null, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 2}
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990002000", "source": "Fireground 1", "text": ""},
+      "audio": {"bytes": 30, "fill": "b2"}, "at": 1794990002.0, "returns": 3,
+      "after": {
+        "totals": {
+          "pending": 3, "oldest": 1794990000.0, "audio_bytes": 70, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
+          ],
+          [
+            2, 1794990001.0, "page_text", "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}",
+            null, 0, 0, null
+          ],
+          [
+            3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 3}
+      }
+    },
+    {
+      "op": "add", "kind": "source_event",
+      "data": {
+        "source": "east-cad", "event": {"event_id": "E-1001", "kind": "Fire alarm", "address": "12 Example Street"}
+      },
+      "at": 1794990003.0, "returns": 4,
+      "after": {
+        "totals": {
+          "pending": 4, "oldest": 1794990000.0, "audio_bytes": 70, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
+          ],
+          [
+            2, 1794990001.0, "page_text", "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}",
+            null, 0, 0, null
+          ],
+          [
+            3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, null
+          ],
+          [
+            4, 1794990003.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\"}}",
+            null, 0, 0, null
+          ]
+        ],
+        "source_latest": [["east-cad\u001fE-1001", 4, 1794990003.0]], "sqlite_sequence": {"outbox": 4}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 1, "at": 1794990000.0, "type": "page",
+          "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"},
+          "audio": {"bytes": 40, "fill": "a1"}, "audio_dropped": false, "context": false, "qid": null
+        },
+        {
+          "seq": 2, "at": 1794990001.0, "type": "page_text",
+          "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "raw": "Northfield Fire"}, "audio": null,
+          "audio_dropped": false, "context": false, "qid": null
+        },
+        {
+          "seq": 3, "at": 1794990002.0, "type": "traffic",
+          "data": {"id": "Fireground1-1794990002000", "source": "Fireground 1", "text": ""},
+          "audio": {"bytes": 30, "fill": "b2"}, "audio_dropped": false, "context": false, "qid": null
+        },
+        {
+          "seq": 4, "at": 1794990003.0, "type": "source_event",
+          "data": {
+            "source": "east-cad",
+            "event": {"event_id": "E-1001", "kind": "Fire alarm", "address": "12 Example Street"}
+          },
+          "audio": null, "audio_dropped": false, "context": false, "qid": null
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 4, "oldest": 1794990000.0, "audio_bytes": 70, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 3, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794990010.0,
+      "returns": {"id": 1, "kind": "traffic", "tries": 1, "critical": false, "state": "held", "next_at": null},
+      "after": {
+        "totals": {
+          "pending": 3, "oldest": 1794990000.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, null
+          ],
+          [
+            2, 1794990001.0, "page_text", "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}",
+            null, 0, 0, null
+          ],
+          [
+            4, 1794990003.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\"}}",
+            null, 0, 0, null
+          ]
+        ],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 4, "quarantine": 1}
+      }
+    },
+    {
+      "op": "quarantine", "seq": 1, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794990010.0,
+      "returns": {"id": 2, "kind": "page", "tries": 1, "critical": true, "state": "held", "next_at": 1794990610.0},
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990001.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            2, 1794990001.0, "page_text", "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}",
+            null, 0, 0, null
+          ],
+          [
+            4, 1794990003.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\"}}",
+            null, 0, 0, null
+          ]
+        ],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            2, 1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 1, 1794990610.0, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 4, "quarantine": 2}
+      }
+    },
+    {
+      "op": "quarantine", "seq": 2, "reason": "malformed", "error": "BadEvent: bad id 'a1b2c3d4e5'",
+      "now": 1794990010.0,
+      "returns": {"id": 3, "kind": "page_text", "tries": 1, "critical": false, "state": "held", "next_at": null},
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990003.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            4, 1794990003.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\"}}",
+            null, 0, 0, null
+          ]
+        ],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            2, 1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 1, 1794990610.0, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 4, "quarantine": 3}
+      }
+    },
+    {
+      "op": "quarantine", "seq": 4, "reason": "apply_failed", "error": "RuntimeError: the county's words",
+      "now": 1794990010.0,
+      "returns": {
+        "id": 4, "kind": "source_event", "tries": 1, "critical": true, "state": "held", "next_at": 1794990610.0
+      },
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            2, 1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 1, 1794990610.0, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            4, 4, 1794990003.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\"}}",
+            null, 0, 0, "apply_failed", "RuntimeError: the county's words", 1794990010.0, 1794990010.0, 1, 1,
+            1794990610.0, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 4, "quarantine": 4}
+      }
+    },
+    {
+      "op": "ack", "upto": 4, "returns": 0,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "add", "kind": "source_event",
+      "data": {
+        "source": "east-cad",
+        "event": {"event_id": "E-1001", "kind": "Fire alarm", "address": "12 Example Street", "closed": true}
+      },
+      "at": 1794990020.0, "returns": 5,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990020.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            5, 1794990020.0, "source_event",
+            "{\"source\":\"east-cad\",\"event\":{\"event_id\":\"E-1001\",\"kind\":\"Fire alarm\",\"address\":\"12 Example Street\",\"closed\":true}}",
+            null, 0, 0, null
+          ]
+        ],
+        "source_latest": [["east-cad\u001fE-1001", 5, 1794990020.0]],
+        "sqlite_sequence": {"outbox": 5, "quarantine": 4}
+      }
+    },
+    {
+      "op": "batch",
+      "returns": [
+        {
+          "seq": 5, "at": 1794990020.0, "type": "source_event",
+          "data": {
+            "source": "east-cad",
+            "event": {"event_id": "E-1001", "kind": "Fire alarm", "address": "12 Example Street", "closed": true}
+          },
+          "audio": null, "audio_dropped": false
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990020.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "ack", "upto": 5, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": []
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794990300.0, "returns": [],
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794990700.0,
+      "returns": [
+        {"id": 2, "kind": "page", "tries": 1, "superseded": false},
+        {"id": 4, "kind": "source_event", "tries": 1, "superseded": true}
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            6, 1794990700.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, 2
+          ]
+        ],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            2, 1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 1, 1794990610.0, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 6, "quarantine": 4}
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794990800.0, "returns": [],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 6, "at": 1794990700.0, "type": "page",
+          "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"},
+          "audio": {"bytes": 40, "fill": "a1"}, "audio_dropped": false, "context": false, "qid": 2
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 6, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794990900.0,
+      "returns": {"id": 2, "kind": "page", "tries": 2, "critical": true, "state": "held", "next_at": 1794992700.0},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            2, 1, 1794990000.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990900.0, 2, 1, 1794992700.0, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794992600.0, "returns": [],
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794992700.0,
+      "returns": [{"id": 2, "kind": "page", "tries": 2, "superseded": false}],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            7, 1794992700.0, "page",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}",
+            {"bytes": 40, "fill": "a1"}, 0, 0, 2
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 7, "quarantine": 4}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 7, "at": 1794992700.0, "type": "page",
+          "data": {"id": "a1b2c3d4e5", "label": "Paging 1", "kind": "page", "status": "pending"},
+          "audio": {"bytes": 40, "fill": "a1"}, "audio_dropped": false, "context": false, "qid": 2
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "released", "qids": [2], "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992700.0, "audio_bytes": 40, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "ack", "upto": 7, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": []
+      }
+    },
+    {
+      "op": "add", "kind": "alarm",
+      "data": {"id": "Fireground1-1794990030000", "source": "Fireground 1", "end": 1794990030.0},
+      "audio": {"bytes": 20, "fill": "c3"}, "at": 1794990030.0, "returns": 8,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990030.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            8, 1794990030.0, "alarm",
+            "{\"id\":\"Fireground1-1794990030000\",\"source\":\"Fireground 1\",\"end\":1794990030.0}",
+            {"bytes": 20, "fill": "c3"}, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 8, "quarantine": 4}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 8, "at": 1794990030.0, "type": "alarm",
+          "data": {"id": "Fireground1-1794990030000", "source": "Fireground 1", "end": 1794990030.0},
+          "audio": {"bytes": 20, "fill": "c3"}, "audio_dropped": false, "context": false, "qid": null
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990030.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 8, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794990040.0,
+      "returns": {"id": 5, "kind": "alarm", "tries": 1, "critical": true, "state": "held", "next_at": 1794990640.0},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            5, 8, 1794990030.0, "alarm",
+            "{\"id\":\"Fireground1-1794990030000\",\"source\":\"Fireground 1\",\"end\":1794990030.0}",
+            {"bytes": 20, "fill": "c3"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990040.0,
+            1794990040.0, 1, 1, 1794990640.0, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 8, "quarantine": 5}
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794990640.0,
+      "returns": [{"id": 5, "kind": "alarm", "tries": 1, "superseded": false}],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990640.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            9, 1794990640.0, "alarm",
+            "{\"id\":\"Fireground1-1794990030000\",\"source\":\"Fireground 1\",\"end\":1794990030.0}",
+            {"bytes": 20, "fill": "c3"}, 0, 0, 5
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 9, "quarantine": 5}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 9, "at": 1794990640.0, "type": "alarm",
+          "data": {"id": "Fireground1-1794990030000", "source": "Fireground 1", "end": 1794990030.0},
+          "audio": {"bytes": 20, "fill": "c3"}, "audio_dropped": false, "context": false, "qid": 5
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990640.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "late", "qid": 5, "why": "alarm delivered late, not raised (11 min after it ended)", "now": 1794990700.0,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990640.0, "audio_bytes": 20, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            5, 8, 1794990030.0, "alarm",
+            "{\"id\":\"Fireground1-1794990030000\",\"source\":\"Fireground 1\",\"end\":1794990030.0}",
+            {"bytes": 20, "fill": "c3"}, 0, 0, "late", "alarm delivered late, not raised (11 min after it ended)",
+            1794990040.0, 1794990700.0, 1, 1, null, "late"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "ack", "upto": 9, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": []
+      }
+    },
+    {
+      "op": "summary",
+      "returns": {
+        "n": 3, "critical": 1, "evicted": 0, "too_large_audio": 0,
+        "kinds": {
+          "alarm": {
+            "n": 1, "critical": 1, "stuck": 0, "late": 1, "critical_first": 1794990040.0, "minor_first": null,
+            "minor_last": null
+          },
+          "page_text": {
+            "n": 1, "critical": 0, "stuck": 0, "late": 0, "critical_first": null, "minor_first": 1794990010.0,
+            "minor_last": 1794990010.0
+          },
+          "traffic": {
+            "n": 1, "critical": 0, "stuck": 0, "late": 0, "critical_first": null, "minor_first": 1794990010.0,
+            "minor_last": 1794990010.0
+          }
+        },
+        "rows": [
+          {
+            "id": 5, "kind": "alarm", "reason": "late",
+            "error": "alarm delivered late, not raised (11 min after it ended)", "first_at": 1794990040.0,
+            "last_at": 1794990700.0, "tries": 1, "critical": true, "next_at": null, "state": "late"
+          },
+          {
+            "id": 3, "kind": "page_text", "reason": "malformed", "error": "BadEvent: bad id 'a1b2c3d4e5'",
+            "first_at": 1794990010.0, "last_at": 1794990010.0, "tries": 1, "critical": false, "next_at": null,
+            "state": "held"
+          },
+          {
+            "id": 1, "kind": "traffic", "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+            "first_at": 1794990010.0, "last_at": 1794990010.0, "tries": 1, "critical": false, "next_at": null,
+            "state": "held"
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {"op": "close", "after": {}},
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "dismiss", "kind": "alarm", "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "add", "kind": "traffic",
+      "data": {"id": "Fireground1-1794990040000", "source": "Fireground 1", "text": ""},
+      "audio": {"bytes": 50, "fill": "d4"}, "at": 1794990040.0, "returns": 10,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990040.0, "audio_bytes": 50, "context_bytes": 0, "stt_pending": 0,
+          "stt_bytes": 0, "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0,
+          "quarantine_evicted": 0, "too_large_audio": 0
+        },
+        "outbox": [
+          [
+            10, 1794990040.0, "traffic",
+            "{\"id\":\"Fireground1-1794990040000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 50, "fill": "d4"}, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 10, "quarantine": 5}
+      }
+    },
+    {
+      "op": "strip_audio", "seq": 10, "returns": true,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990040.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [
+          [
+            10, 1794990040.0, "traffic",
+            "{\"id\":\"Fireground1-1794990040000\",\"source\":\"Fireground 1\",\"text\":\"\"}", null, 1, 0, null
+          ]
+        ]
+      }
+    },
+    {
+      "op": "strip_audio", "seq": 10, "returns": false,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990040.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "ack", "upto": 10, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": []
+      }
+    },
+    {
+      "op": "add", "kind": "page_text", "data": {"id": "f6a7b8c9d0", "label": "Paging 1", "raw": "Southfield Fire"},
+      "at": 1794991000.0, "returns": 11,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794991000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [
+          [
+            11, 1794991000.0, "page_text",
+            "{\"id\":\"f6a7b8c9d0\",\"label\":\"Paging 1\",\"raw\":\"Southfield Fire\"}", null, 0, 0, null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 11, "quarantine": 5}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 11, "at": 1794991000.0, "type": "page_text",
+          "data": {"id": "f6a7b8c9d0", "label": "Paging 1", "raw": "Southfield Fire"}, "audio": null,
+          "audio_dropped": false, "context": false, "qid": null
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794991000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 11, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794991000.0,
+      "returns": {
+        "id": 6, "kind": "page_text", "tries": 1, "critical": true, "state": "held", "next_at": 1794991600.0
+      },
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            6, 11, 1794991000.0, "page_text",
+            "{\"id\":\"f6a7b8c9d0\",\"label\":\"Paging 1\",\"raw\":\"Southfield Fire\"}", null, 0, 0, "apply_failed",
+            "RuntimeError: a bug on the hub", 1794991000.0, 1794991000.0, 1, 1, 1794991600.0, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 11, "quarantine": 6}
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1795077500.0,
+      "returns": [{"id": 6, "kind": "page_text", "tries": 1, "superseded": false}],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1795077500.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [
+          [
+            12, 1795077500.0, "page_text",
+            "{\"id\":\"f6a7b8c9d0\",\"label\":\"Paging 1\",\"raw\":\"Southfield Fire\"}", null, 0, 0, 6
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 12, "quarantine": 6}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 12, "at": 1795077500.0, "type": "page_text",
+          "data": {"id": "f6a7b8c9d0", "label": "Paging 1", "raw": "Southfield Fire"}, "audio": null,
+          "audio_dropped": false, "context": false, "qid": 6
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1795077500.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 12, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1795077500.0,
+      "returns": {"id": 6, "kind": "page_text", "tries": 2, "critical": true, "state": "stuck", "next_at": null},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            6, 11, 1794991000.0, "page_text",
+            "{\"id\":\"f6a7b8c9d0\",\"label\":\"Paging 1\",\"raw\":\"Southfield Fire\"}", null, 0, 0, "apply_failed",
+            "RuntimeError: a bug on the hub", 1794991000.0, 1795077500.0, 2, 1, null, "stuck"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1795191000.0, "returns": [],
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "drop", "qid": 6, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "add", "kind": "page",
+      "data": {"id": "0a1b2c3d4e", "label": "Paging 1", "kind": "page", "status": "pending"}, "at": 1794992000.0,
+      "returns": 13,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [
+          [
+            13, 1794992000.0, "page",
+            "{\"id\":\"0a1b2c3d4e\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}", null, 0, 0,
+            null
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 13, "quarantine": 6}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 13, "at": 1794992000.0, "type": "page",
+          "data": {"id": "0a1b2c3d4e", "label": "Paging 1", "kind": "page", "status": "pending"}, "audio": null,
+          "audio_dropped": false, "context": false, "qid": null
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "quarantine", "seq": 13, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794992000.0,
+      "returns": {"id": 7, "kind": "page", "tries": 1, "critical": true, "state": "held", "next_at": 1794992600.0},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            7, 13, 1794992000.0, "page",
+            "{\"id\":\"0a1b2c3d4e\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}", null, 0, 0,
+            "apply_failed", "RuntimeError: a bug on the hub", 1794992000.0, 1794992000.0, 1, 1, 1794992600.0, "held"
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 13, "quarantine": 7}
+      }
+    },
+    {
+      "op": "requeue_due", "now": 1794992600.0,
+      "returns": [{"id": 7, "kind": "page", "tries": 1, "superseded": false}],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992600.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [
+          [
+            14, 1794992600.0, "page",
+            "{\"id\":\"0a1b2c3d4e\",\"label\":\"Paging 1\",\"kind\":\"page\",\"status\":\"pending\"}", null, 0, 0, 7
+          ]
+        ],
+        "sqlite_sequence": {"outbox": 14, "quarantine": 7}
+      }
+    },
+    {
+      "op": "batch", "meta": true,
+      "returns": [
+        {
+          "seq": 14, "at": 1794992600.0, "type": "page",
+          "data": {"id": "0a1b2c3d4e", "label": "Paging 1", "kind": "page", "status": "pending"}, "audio": null,
+          "audio_dropped": false, "context": false, "qid": 7
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794992600.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "drop", "qid": 7, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "outbox": [],
+        "quarantine": [
+          [
+            1, 3, 1794990002.0, "traffic",
+            "{\"id\":\"Fireground1-1794990002000\",\"source\":\"Fireground 1\",\"text\":\"\"}",
+            {"bytes": 30, "fill": "b2"}, 0, 0, "apply_failed", "RuntimeError: a bug on the hub", 1794990010.0,
+            1794990010.0, 1, 0, null, "held"
+          ],
+          [
+            3, 2, 1794990001.0, "page_text",
+            "{\"id\":\"a1b2c3d4e5\",\"label\":\"Paging 1\",\"raw\":\"Northfield Fire\"}", null, 0, 0, "malformed",
+            "BadEvent: bad id 'a1b2c3d4e5'", 1794990010.0, 1794990010.0, 1, 0, null, "held"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "quarantine", "seq": 14, "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+      "now": 1794992700.0,
+      "returns": {"id": 7, "kind": "page", "tries": 0, "critical": false, "state": "dropped", "next_at": null},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "summary", "limit": 2,
+      "returns": {
+        "n": 2, "critical": 0, "evicted": 0, "too_large_audio": 1,
+        "kinds": {
+          "page_text": {
+            "n": 1, "critical": 0, "stuck": 0, "late": 0, "critical_first": null, "minor_first": 1794990010.0,
+            "minor_last": 1794990010.0
+          },
+          "traffic": {
+            "n": 1, "critical": 0, "stuck": 0, "late": 0, "critical_first": null, "minor_first": 1794990010.0,
+            "minor_last": 1794990010.0
+          }
+        },
+        "rows": [
+          {
+            "id": 3, "kind": "page_text", "reason": "malformed", "error": "BadEvent: bad id 'a1b2c3d4e5'",
+            "first_at": 1794990010.0, "last_at": 1794990010.0, "tries": 1, "critical": false, "next_at": null,
+            "state": "held"
+          },
+          {
+            "id": 1, "kind": "traffic", "reason": "apply_failed", "error": "RuntimeError: a bug on the hub",
+            "first_at": 1794990010.0, "last_at": 1794990010.0, "tries": 1, "critical": false, "next_at": null,
+            "state": "held"
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    },
+    {
+      "op": "drop", "qid": null, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        },
+        "quarantine": []
+      }
+    },
+    {
+      "op": "summary", "returns": {"n": 0, "critical": 0, "evicted": 0, "too_large_audio": 1, "kinds": {}, "rows": []},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 1
+        }
+      }
+    }
+  ]
+}

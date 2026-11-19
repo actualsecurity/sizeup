@@ -1,0 +1,9 @@
+{
+  "base": "station-events/valid/alt-text.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/events/0/data/model"
+    }
+  ]
+}
