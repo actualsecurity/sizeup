@@ -341,8 +341,9 @@ def highway(text: str) -> MilePlace | None:
         if pending:
             return None
         hit = mk if ex is None or (mk is not None and mk.start() < ex.start()) else ex
-        b = (re.search(rf"\b{_BOUND}\b", t[end:hit.start() if hit is mk else hit.end()], re.I)
+        b = (re.search(rf"\b{_BOUND}\b(?!\s+of\b)", t[end:hit.start() if hit is mk else hit.end()], re.I)
              or re.search(rf"\b{_BOUND}\b(?=\W*(?:on\s+|the\s+)*$)", t[max(0, start - BOUND_BEFORE):start], re.I))
+        # ("north of exit 4": where on the road, never its carriageway)
         way = BOUND[b.group(0).lower()] if b else ""
         if hit is mk:
             if hit.lastindex == 3 and not way:           # "<dir> 5.7": the direction is the marker's own
@@ -379,8 +380,9 @@ def near_marker(a: MilePlace | None, b: MilePlace | None, miles: float = 1.0) ->
 
 # The clause parse() falls back on when no street was heard: up to its first sentence break (never an abbreviation's
 # dot: "St. Mary's") or unit, at most PLACE_CLAUSE_WORDS words, and a place only when something says so: "at" / "on" /
-# "in" before it, "respond to", "to" / "in" before a name written with a capital, a word for a place (PLACE_WORDS),
-# two names joined by "and" (an intersection), or a highway's words (a direction, a mile marker, an exit). Anything
+# "in" before it, "respond to", "to" / "in" before a name written with a capital, "the Town (City, Village) of ...", a
+# name written with a capital after its last comma ("Sample Diner, Townville"), a word for a place (PLACE_WORDS), two
+# names joined by "and" (an intersection), or a highway's words (a direction, a mile marker, an exit). Anything
 # else is the page's own words ("smoke showing", "caller reports ..."): never an address. The event stays unlocated
 # (its page's text is in its remarks).
 PLACE_CLAUSE_WORDS = 10
@@ -429,9 +431,13 @@ def place_clause(rest: str, located: bool = False, named=()) -> str:
     p = prep.group(0).split()[0] if prep else ""
     corner = re.fullmatch(r"(?:[a-z']+ ){0,2}[a-z']+ and (?:[a-z']+ ){0,2}[a-z']+", loc) is not None and not any(
         w in _type_words() or w in NOT_A_PLACE for w in bare if w != "and")
-    said = (located or p in ("at", "on", "in") or any(w in PLACE_WORDS for w in bare) or corner
+    town = re.match(r"(?:the\s+)?(?:city|town|village)\s+of\s+[a-z]", loc) is not None   # "to the Town of Sample"
+    tail = loc.rsplit(",", 1)[1].split() if "," in loc else []                             # "Sample Diner, Townville"
+    said = (located or p in ("at", "on", "in") or any(w in PLACE_WORDS for w in bare) or corner or town
             or HIGHWAY_CUE.search(loc) is not None
-            or (p in ("to", "in", "at") and bare[0] in named and bare[0] not in _type_words()))
+            or (p in ("to", "in", "at") and bare[0] in named and bare[0] not in _type_words())
+            or (bool(tail) and tail[0] in named and tail[0] not in _type_words() and tail[0] not in NOT_A_PLACE
+                and len(tail) <= 3))
     return loc[:120] if said else ""
 
 
@@ -541,13 +547,13 @@ def parse(text: str, known=None) -> Dispatch:
     # "exit 4 to Sample Avenue": never 4 Sample Avenue (blanked to the same length: hw.start still indexes it)
     masked = EXIT_NUMBER.sub(lambda m: " ," + " " * (len(m.group(0)) - 2), masked)
     a = ADDRESS.search(masked)                            # address came first ("12 Example Ave, near I-999 MM 4")
-    if hw is not None and a is not None and a.start() < hw.start:
+    if hw is not None and a is not None and a.start() <= hw.start:   # ("120 North Ridge St": an address)
         hw = None
     if hw is not None:
         a = None
     # Bare numbers before the address are often engines read without the word ("174, 175, Ladder 1");
     # the app checks them against the apparatus roster.
-    head = masked[: hw.start] if hw is not None else masked[: a.start()] if a else ""
+    head = masked[: a.start()] if a else ""                  # (never before a highway: dates, times, run numbers)
     for n in re.findall(r"\b(\d{1,3})\b", head):
         if int(n) not in d.numbers:
             d.numbers.append(int(n))

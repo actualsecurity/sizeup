@@ -91,9 +91,12 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
                  "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). "event_number" (str): the
                  source's own event number when event_id is not it (two ids, one event: another run of it, a
                  re-dispatch); the hub keeps one incident per event number (sizeup/cad/sources.py "same event").
-                 Without it, an event_id of one letter and 5 digits or more with "-2", "-3" ... is read as another run
-                 of the id without it (an adapter whose own ids look like that and are not runs gives event_number:
-                 its event_id). Any other key is kept and its changes are on the timeline, nothing more
+                 "town" (str): the town the event is in, as people write it ("Sample Village"; "Village of" is
+                 dropped): two of the department's own towns' runs of one call, each its own event, are one incident
+                 (sizeup/cad/sources.py "cross town"); without it, the town the location names.
+                 Without event_number, an event_id of one letter and 5 digits or more with "-2", "-3" ... is read as
+                 another run of the id without it (an adapter whose own ids look like that and are not runs gives
+                 event_number: its event_id). Any other key is kept and its changes are on the timeline, nothing more
     first_seen   optional: when the adapter itself first had the event (epoch seconds on the station's clock, as
                  SourceContext.clock gives it). It goes to the hub as the report's first-seen time, which the lead over
                  paging is measured from; without it, or when it is not a time, is later than now or more than

@@ -66,6 +66,7 @@ def test_the_later_run_is_the_higher_suffix_else_the_one_dispatched_later_never_
     assert not later_run("F0000123", late, "F0000123-2", early)
     assert later_run("F0000123-3", {}, "F0000123-2", {}) and not later_run("F0000123", {}, "F0000123-2", {})
     assert later_run("X2", late, "X1", early) and not later_run("X1", early, "X2", late)   # one suffix: the time
+    assert not later_run("F0070021-2", early, "F0070030", late)      # two ids' suffixes never compare: the time
 
 
 def test_a_highway_place_is_its_route_direction_and_mile_marker():
@@ -109,11 +110,18 @@ def test_a_page_on_a_highway_is_located_by_its_marker_and_an_exit_is_never_a_hou
     assert parse("Engine 62, car fire, exit 21 off ramp.").location == "exit 21 off ramp"
 
 
-def test_an_address_said_before_a_highway_is_the_place_and_the_numbers_before_a_marker_are_read_right():
+def test_an_address_said_before_a_highway_is_the_place_and_no_number_before_a_highway_is_a_unit():
     d = parse("Port Chester Fire, car fire, 301, 302, Ladder 31, 12 Example Ave, I-999 northbound mile marker 4.2 nearby.")
     assert d.location == "12 example ave" and d.numbers == [301, 302]
     d = parse("Engine 62,  301   302,  Sample Parkway northbound mile marker 7.25 for a car fire.")
-    assert d.location == "Sample Pkwy NB MM 7.25" and d.numbers == [301, 302]
+    assert d.location == "Sample Pkwy NB MM 7.25" and d.numbers == []      # never a date, a time or a run number
+    d = parse("Engine 62, car fire, 684 north sample street, exit 4.")
+    assert d.location.startswith("684 north sample") and d.numbers == []    # an address where a highway starts: it
+    assert highway("I-999 north of exit 4").dir == ""                      # a position, never the carriageway
+    assert parse("Port Chester Fire, mutual aid, structure fire, to the Town of Sampleton. Engine 63.").location == \
+        "the town of sampleton"
+    assert parse("Port Chester Fire, fire alarm, Sample Diner, Townville. Engine 63.").location == \
+        "sample diner, townville"
 
 
 def test_a_page_s_own_words_are_never_its_address_but_a_place_after_its_type_is():
@@ -585,17 +593,18 @@ def test_a_fold_never_links_a_transmission_a_person_took_off_the_kept_call(tmp_p
     assert not rig.cad.store.one("SELECT 1 AS x FROM radio_links WHERE traffic_id = 'tx-e63' AND incident_id = ?", (a,))
 
 
-# -- one call run in two of our towns (the county gives each town's run its own event) ------------------------------------
+# -- one call run in two of our towns (the county gives each town's run its own event, both live) --------------------------
 
 
 TOWN_A = {"town": "Our Town A", "jurisdiction": "Our FD"}
-TOWN_B = {"town": "Our Town B", "jurisdiction": "Our FD"}
+TOWN_B = {"town": "our town b", "jurisdiction": "Our FD"}          # (as an adapter may write it: shown capitalised)
 
 
 @pytest.fixture
 def our_towns(monkeypatch):
     from sizeup.cad import sources
     monkeypatch.setattr(sources, "OWN_TOWNS", frozenset({"our town a", "our town b"}))
+    monkeypatch.setattr(sources, "STREETS", {})
 
 
 def town_run(rig, ref: str, extra: dict, dt: float = 0, loc: str = ALARM, typ: str = "ALARM/COMM", units=("E62",)):
@@ -603,40 +612,94 @@ def town_run(rig, ref: str, extra: dict, dt: float = 0, loc: str = ALARM, typ: s
     rig.poll()
 
 
-def test_one_call_run_in_both_of_our_towns_is_one_incident(tmp_path, our_towns):
+def live(rig, ref: str) -> bool:
+    return rig.cad.store.one("SELECT merged_into FROM source_reports WHERE ref = ?", (ref,))["merged_into"] == ""
+
+
+def test_one_call_run_in_both_of_our_towns_is_one_incident_with_both_runs_live(tmp_path, our_towns):
     rig = AutoRig(tmp_path)
     town_run(rig, "F0080001", TOWN_A)
     iid = rig.iid("F0080001")
     rig.at(130)
     town_run(rig, "F0080907", TOWN_B, dt=120, units=("E62", "E64"))
     assert rig.iid("F0080907") == iid and len(rig.incidents()) == 1
-    assert any(t.startswith("Redispatched: Our Town A → Our Town B") for t in lines(rig, iid))
-    assert rig.cad.store.one("SELECT merged_into FROM source_reports WHERE ref = 'F0080001'")["merged_into"] == "F0080907"
-    assert rig.here("E64", "F0080907")
-    rig.at(400)
-    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 390})
-    rig.poll()                                      # the first town's run ending: never the call's end
+    assert "Also run in Our Town B (County feed)" in lines(rig, iid)
+    assert live(rig, "F0080001") and live(rig, "F0080907") and rig.here("E64", "F0080907")
+    rig.at(400)                                     # the later run in service, the earlier still live: its own units
+    rig.feed.change("F0080907", closed=True, times={"in_service": T0 + 390})
+    rig.poll()
     assert rig.cad.store.incident(iid)["status"] == "active"
+    assert rig.here("E62", "F0080001") and not rig.here("E64", "F0080001")   # E62 is the other run's too: kept
+    rig.at(700)                                     # the last run over: the call's end
+    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 690})
+    rig.poll()
+    assert rig.cad.store.incident(iid)["status"] == "closed"
 
 
-def test_the_earlier_town_s_run_arriving_after_is_said_and_never_rules(tmp_path, our_towns):
+def test_the_other_town_s_run_arriving_first_then_ours_both_rule(tmp_path, our_towns):
     rig = AutoRig(tmp_path)
-    town_run(rig, "F0080907", TOWN_B, dt=120)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E64",))
     iid = rig.iid("F0080907")
     rig.at(150)
-    town_run(rig, "F0080001", TOWN_A)
+    town_run(rig, "F0080001", TOWN_A, units=("E62", "E64"))
     assert rig.iid("F0080001") == iid and len(rig.incidents()) == 1
-    assert rig.cad.store.one("SELECT merged_into FROM source_reports WHERE ref = 'F0080001'")["merged_into"] == "F0080907"
+    assert live(rig, "F0080001") and live(rig, "F0080907")
+    assert rig.here("E62", "F0080907")              # the units of either run dispatched
     assert "Also run in Our Town A (County feed)" in lines(rig, iid)
+    rig.at(400)
+    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 390})
+    rig.poll()                                      # one run over, the other live: never the call's end
+    assert rig.cad.store.incident(iid)["status"] == "active" and rig.here("E64", "F0080907")
 
 
 def test_one_call_on_a_highway_across_our_town_line_is_one_incident(tmp_path, our_towns):
     rig = AutoRig(tmp_path)
     town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
     iid = rig.iid("F0080101")
-    rig.at(200)
-    town_run(rig, "F0080102", TOWN_B, dt=190, loc="I-998 EB MM 21.9", typ="BRUSH FIRE", units=("E63",))
+    rig.at(200)                                     # the next tenth: the same place, whatever the units
+    town_run(rig, "F0080102", TOWN_B, dt=190, loc="I-998 EB MM 21.4", typ="BRUSH FIRE", units=("E61",))
     assert rig.iid("F0080102") == iid and len(rig.incidents()) == 1
+
+
+def test_markers_further_apart_join_only_with_a_unit_on_both(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
+    rig.at(200)
+    town_run(rig, "F0080102", TOWN_B, dt=190, loc="I-998 EB MM 21.9", typ="BRUSH FIRE", units=("E63", "E61"))
+    assert rig.iid("F0080102") == rig.iid("F0080101")
+
+
+def test_two_crashes_most_of_a_mile_apart_with_no_unit_in_common_are_two_calls(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
+    rig.at(200)
+    town_run(rig, "F0080102", TOWN_B, dt=180, loc="I-998 EB MM 22.1", typ="BRUSH FIRE", units=("E61",))
+    a, b = rig.iid("F0080101"), rig.iid("F0080102")
+    assert a != b and live(rig, "F0080101")
+    assert any(t.startswith("Possibly the same as") for t in lines(rig, b))
+    assert any(t.startswith("Possibly the same as") for t in lines(rig, a))
+
+
+def test_one_address_joins_by_place_only_when_its_street_is_in_one_of_the_two_towns(tmp_path, our_towns):
+    from sizeup.cad.sources import set_streets
+    set_streets({"our town a": ["Example St"], "our town b": ["Sample Ave"]})
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E64",))     # no unit in common: the street says it
+    assert rig.iid("F0080907") == rig.iid("F0080001")
+
+
+@pytest.mark.parametrize("streets", [{"our town a": ["Example St"], "our town b": ["Example St"]}, {}])
+def test_one_street_name_in_both_towns_or_neither_needs_a_unit_on_both(tmp_path, our_towns, streets):
+    from sizeup.cad.sources import set_streets
+    set_streets(streets)
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E64",))
+    a, b = rig.iid("F0080001"), rig.iid("F0080907")
+    assert a != b and any(t.startswith("Possibly the same as") for t in lines(rig, b))
 
 
 @pytest.mark.parametrize("second", [
@@ -650,17 +713,17 @@ def test_two_calls_in_our_two_towns_stay_two_incidents(tmp_path, our_towns, seco
     town_run(rig, "F0080001", TOWN_A)
     rig.at(second.get("dt", 120) + 10)
     town_run(rig, "F0080907", second.get("extra", TOWN_B), dt=second.get("dt", 120), loc=second.get("loc", ALARM),
-             typ=second.get("typ", "ALARM/COMM"), units=("E64",))
+             typ=second.get("typ", "ALARM/COMM"), units=("E62", "E64"))
     a, b = rig.iid("F0080001"), rig.iid("F0080907")
-    assert a != b and not any(t.startswith("Redispatched") for t in lines(rig, a) + lines(rig, b))
+    assert a != b and not any(t.startswith("Also run in") for t in lines(rig, a) + lines(rig, b))
 
 
-@pytest.mark.parametrize("loc", ["I-998 WB MM 21.6", "I-998 EB MM 22.6", "I-997 EB MM 21.3"])
+@pytest.mark.parametrize("loc", ["I-998 WB MM 21.3", "I-998 EB MM 22.6", "I-997 EB MM 21.3"])
 def test_two_highway_calls_in_our_two_towns_stay_two_incidents(tmp_path, our_towns, loc):
     rig = AutoRig(tmp_path)
     town_run(rig, "F0080101", TOWN_A, loc="I-998 EB MM 21.3", typ="BRUSH FIRE", units=("E63",))
     rig.at(200)
-    town_run(rig, "F0080102", TOWN_B, dt=190, loc=loc, typ="BRUSH FIRE", units=("E64",))
+    town_run(rig, "F0080102", TOWN_B, dt=190, loc=loc, typ="BRUSH FIRE", units=("E63",))
     assert rig.iid("F0080101") != rig.iid("F0080102")
 
 
@@ -672,9 +735,9 @@ def test_two_open_calls_it_may_be_is_possibly_the_same_never_joined(tmp_path, ou
     a, b = rig.iid("F0080001"), rig.iid("F0080002")
     rig.cad.accept(b, {"operator": "Lt. Test"})     # a second call there (held as possibly the same): accepted
     rig.at(130)
-    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E61",))
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E62", "E64", "E61"))
     c = rig.iid("F0080907")
-    assert c not in (a, b) and not any(t.startswith("Redispatched") for t in lines(rig, a) + lines(rig, b))
+    assert c not in (a, b) and not any(t.startswith("Also run in") for t in lines(rig, a) + lines(rig, b))
     assert any(t.startswith("Possibly the same as") for t in lines(rig, c))
 
 
@@ -686,4 +749,4 @@ def test_the_feed_s_own_merge_still_wins(tmp_path, our_towns):
     rig.feed.put("F0080907", type="ALARM/COMM", location=ALARM, units=("E64",), times={"dispatched": T0 + 120},
                  extra=TOWN_B, aliases=("F0080001",))
     rig.poll()
-    assert rig.iid("F0080907") == iid and not any(t.startswith("Redispatched") for t in lines(rig, iid))
+    assert rig.iid("F0080907") == iid and not any(t.startswith("Also run in") for t in lines(rig, iid))
