@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "from_the_future": {
+    "x": [
+      1,
+      {
+        "y": null
+      }
+    ]
+  }
+}

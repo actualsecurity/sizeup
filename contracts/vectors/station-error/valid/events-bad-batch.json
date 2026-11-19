@@ -1,0 +1,4 @@
+{
+  "error": "bad request: {epoch, events: [...]}",
+  "reason": "bad_batch"
+}

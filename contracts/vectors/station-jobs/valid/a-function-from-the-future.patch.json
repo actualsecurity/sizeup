@@ -1,0 +1,21 @@
+{
+  "base": "station-jobs/valid/set_mode.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/fn",
+      "value": "from_the_future"
+    },
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args",
+      "value": [
+        1,
+        {
+          "x": 2
+        },
+        null
+      ]
+    }
+  ]
+}

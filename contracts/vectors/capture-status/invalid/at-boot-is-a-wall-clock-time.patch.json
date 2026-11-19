@@ -1,0 +1,4 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [{"op": "replace", "path": "/at_boot", "value": 1900000000.5}]
+}

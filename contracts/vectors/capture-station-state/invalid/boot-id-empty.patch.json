@@ -1,0 +1,4 @@
+{
+  "base": "station-state/valid/idle.json",
+  "patch": [{"op": "add", "path": "/boot_id", "value": ""}, {"op": "add", "path": "/wall_steps", "value": 2}]
+}

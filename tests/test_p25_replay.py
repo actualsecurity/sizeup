@@ -315,7 +315,12 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         put(d, "307-1-call_1", age=200, emergency=True)       # the button, while sizeup was down: 3+ min ago
         ing = run(tmp_path / "p25", mark, [], [], on_call=app._call)
         assert [c.id for c in settle(ing)] == ["307-1-call_1"]
-        assert wait(lambda: rows(app).get("307-1-call_1", {}).get("status") == "done")
+        # (#793) whisper's thread logs the row as "done" (App._to_cad, whose hooks run there and then), and only after
+        # that hands the words to the alarms (App._alarm): wait for the last of these, the mayday on the alarm, never for
+        # the row alone. The alarm itself (the button) was raised before speech-to-text, in _call.
+        words = lambda tid: (app.cad.store.one("SELECT keywords FROM alarms WHERE traffic_id = ?", (tid,))  # noqa: E731
+                             or {}).get("keywords", "[]") != "[]"
+        assert wait(lambda: words("307-1-call_1"), 10)
         r = rows(app)["307-1-call_1"]
         assert r["emergency"] == 1 and r["text"].startswith("mayday")              # in the radio log, as heard
         assert getattr(app.store.loose[0], "late", False) is True and app.has_clip("307-1-call_1")
@@ -345,8 +350,8 @@ def test_a_late_emergency_call_alarms_once_labelled_late_and_raises_no_pre_alert
         # a call live, from someone else: its own alarm, not late, and the pre-alert hooks hear it (the spies are wired)
         put(d, "307-2-call_2", emergency=True, radio=OTHER)
         assert [(c.id, c.late) for c in settle(ing)] == [("307-2-call_2", False)]
-        assert wait(lambda: rows(app).get("307-2-call_2", {}).get("status") == "done")
-        assert wait(lambda: len(app.cad.store.q("SELECT * FROM alarms")) == 2)
+        assert wait(lambda: words("307-2-call_2"), 10)       # (its hooks ran before: see above)
+        assert rows(app)["307-2-call_2"]["status"] == "done" and len(app.cad.store.q("SELECT * FROM alarms")) == 2
         live = app.cad.store.one("SELECT * FROM alarms WHERE traffic_id = '307-2-call_2'")
         assert live["late"] == 0 and LATE not in app.cad.alarms.get(live["id"])["what"]
         assert "307-2-call_2" in got["intel"] and "307-2-call_2" in got["hints"]
@@ -461,7 +466,9 @@ def test_the_hub_alarms_a_late_emergency_from_its_station_once_and_nothing_else(
         assert heard == {"text": [], "late": ["307-8-call_8"]}                    # no pre-alert hook
         # its words again from the station (whisper standing in, a re-run): the same alarm, no second push
         assert post(ev(2, "307-8-call_8", "retext", text="mayday mayday, invented unit trapped", late=True)) == 200
-        assert wait(lambda: row("307-8-call_8").get("text") == "mayday mayday, invented unit trapped", 10)
+        # (#793: the alarm takes the new words after the row and its hooks: wait for that, the last step)
+        assert wait(lambda: alarms()[0]["text"] == "mayday mayday, invented unit trapped", 10)
+        assert row("307-8-call_8")["text"] == "mayday mayday, invented unit trapped"
         assert heard["text"] == [] and len(alarms()) == 1 and len(push.sent) == 1
         # the same event again (the outbox resends): one row, one alarm
         assert post(ev(3, "307-8-call_8", late=True)) == 200

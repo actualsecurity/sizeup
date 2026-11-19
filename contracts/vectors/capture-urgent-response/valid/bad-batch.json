@@ -1,0 +1,4 @@
+{
+  "error": "not a list of 1 to 32 items",
+  "reason": "bad_batch"
+}

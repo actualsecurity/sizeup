@@ -1,0 +1,15 @@
+{
+  "base": "station-job-result/valid/catch_up.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/result/queued",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/result/refused/Fireground1-1794990000000",
+      "value": "no recording on the station"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "base": "capture-urgent-response/valid/the-alarm-applied.json",
+  "patch": [{"op": "replace", "path": "/results/0", "value": {"key": "x:1", "rev": 0, "status": "rejected", "reason": "kind"}}]
+}

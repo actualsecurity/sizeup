@@ -1,0 +1,8 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [
+    {"op": "replace", "path": "/ids", "value": []},
+    {"op": "replace", "path": "/alarm_key", "value": ""},
+    {"op": "add", "path": "/audio_dropped", "value": true}
+  ]
+}

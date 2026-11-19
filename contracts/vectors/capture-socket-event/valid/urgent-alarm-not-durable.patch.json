@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/urgent-alarm.json",
+  "patch": [{"op": "replace", "path": "/n", "value": null}, {"op": "replace", "path": "/durable", "value": false}]
+}

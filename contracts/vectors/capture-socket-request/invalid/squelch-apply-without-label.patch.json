@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/squelch-apply-with-expect.json",
+  "patch": [{"op": "remove", "path": "/args/label"}]
+}

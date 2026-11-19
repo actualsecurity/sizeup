@@ -1,0 +1,11 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/channel/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/audio/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/levels/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/ids/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/capture/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

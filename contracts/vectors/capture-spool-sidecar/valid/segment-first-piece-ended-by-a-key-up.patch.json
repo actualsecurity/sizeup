@@ -1,0 +1,14 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [
+    {"op": "replace", "path": "/reason", "value": "key-up"},
+    {"op": "replace", "path": "/end", "value": 1900000004.2},
+    {"op": "replace", "path": "/audio/samples", "value": 65232},
+    {"op": "replace", "path": "/audio/bytes", "value": 130508},
+    {
+      "op": "replace",
+      "path": "/keyup",
+      "value": {"split": "", "first_start": 1900000000.123, "prev_start": null, "parent": "CHA-1900000000123", "prev": ""}
+    }
+  ]
+}

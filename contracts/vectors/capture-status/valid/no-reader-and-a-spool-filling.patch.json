@@ -1,0 +1,8 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/reader", "value": {"attached": false, "since": 1899999400.0}},
+    {"op": "replace", "path": "/spool/pending", "value": 212},
+    {"op": "replace", "path": "/spool/oldest_s", "value": 600.5}
+  ]
+}

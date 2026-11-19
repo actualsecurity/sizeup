@@ -351,11 +351,25 @@ def test_hello_answers_what_its_schema_says(live, tmp_path):
         fresh.close()
 
 
+def events_post_reasons() -> set[str]:
+    """The `reason` words of the events post's refusals, as sizeup/cloud/hub.py writes them: the second argument of
+    every call of Hub._refused_batch."""
+    import ast
+    import inspect
+    from sizeup.cloud import hub as hub_mod
+    tree = ast.parse(inspect.getsource(hub_mod))
+    out = {n.args[1].value for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+           and n.func.attr == "_refused_batch" and len(n.args) > 1 and isinstance(n.args[1], ast.Constant)}
+    assert out, "no Hub._refused_batch call found"
+    return out
+
+
 def test_refusals_and_bad_bodies_are_the_error_envelope(live):
     known = c.load("station-error")["properties"]["reason"]["x-known"]
-    # the code's own list of reasons, and the three it gives outside that list (the last two: the workers' routes,
-    # tests/test_contracts_routes.py)
-    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"}
+    # the code's own list of reasons, the three it gives outside that list (the workers' routes:
+    # tests/test_contracts_routes.py), and the events post's, read from the hub's code (Hub._refused_batch's callers;
+    # their answers: tests/test_contracts_events_cursor.py)
+    assert set(known) == set(st_mod.REASONS) | {"ingest_off", "stations_off", "gpu_only"} | events_post_reasons()
     reg = live.hub.app.hub.stations
     other = reg.add("st-south", "South firehouse")
     state = dict(c.vectors("station-state", "valid"))["with-status.json"]

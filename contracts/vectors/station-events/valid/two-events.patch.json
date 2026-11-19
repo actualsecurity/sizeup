@@ -1,0 +1,24 @@
+{
+  "base": "station-events/valid/heard.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/events/-",
+      "value": {
+        "seq": 2,
+        "at": 1794990002.0,
+        "type": "activity",
+        "data": {
+          "source": "p25:east:7003",
+          "minute": 29916500,
+          "calls": 2,
+          "radios": [
+            "880001"
+          ]
+        },
+        "audio": null,
+        "audio_dropped": false
+      }
+    }
+  ]
+}

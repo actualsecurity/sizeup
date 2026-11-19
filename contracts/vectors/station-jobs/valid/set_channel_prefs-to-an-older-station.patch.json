@@ -1,0 +1,9 @@
+{
+  "base": "station-jobs/valid/set_channel_prefs.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/jobs/0/args/args/3"
+    }
+  ]
+}

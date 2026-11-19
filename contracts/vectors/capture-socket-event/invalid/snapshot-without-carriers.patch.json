@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/snapshot.json",
+  "patch": [{"op": "remove", "path": "/carriers"}]
+}

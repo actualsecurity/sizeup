@@ -1,0 +1,14 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/wish_seq", "value": 215},
+    {
+      "op": "replace",
+      "path": "/refusals",
+      "value": [
+        {"what": "job", "key": "sdr-d", "reason": "sdr-d is reserved for ADS-B", "wish_seq": 215},
+        {"what": "squelch", "key": "CH A", "reason": "open_db 95 is out of range", "wish_seq": 215}
+      ]
+    }
+  ]
+}

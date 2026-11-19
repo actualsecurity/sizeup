@@ -142,6 +142,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from sizeup.intel import counters as counters_mod
 from sizeup.intel import policy as policy_mod
@@ -1822,8 +1823,15 @@ class LiveSink:
                 self.engine.log(f"intel: listen link: {type(e).__name__}")
                 url = None
             if url:
-                m["body"] = f"{m['body']}\nListen: {url}"
+                # never in the body: a presigned URL is ~1.5 KB (the STS token) and would flood the notification. The
+                # tap plays it, and a "Listen" button; the hub's page (the click it replaces) on an "Open" button.
+                # ntfy buttons are https only (notify.publish): an http hub (a test one) keeps the tap
                 actions = [{"label": "Listen", "url": url}]
+                hub = m.get("click") or ""
+                if not hub or urlsplit(hub).scheme == "https":
+                    m["click"] = url
+                    if hub:
+                        actions.append({"label": "Open", "url": hub})
         kw = {"actions": actions} if actions else {}
         if _takes_done(n):                          # ntfy's answer recorded on the event (events.py delivered())
             kw["done"] = self._delivered(ev.id)

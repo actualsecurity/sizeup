@@ -14,13 +14,13 @@
     {"method": "POST", "path": "/api/station/metrics", "credential": ["sz1", "shared"],
      "role": {"sz1": "always", "sw1": "never"}, "request": null, "response": null},
     {"method": "POST", "path": "/api/station/events", "credential": ["sz1", "shared"],
-     "role": {"sz1": ["radio-receive", "feed-adapter"], "sw1": "never"}, "request": null, "response": null,
+     "role": {"sz1": ["radio-receive", "feed-adapter"], "sw1": "never"}, "request": "station-events", "response": "station-events-answer",
      "note": "By event type: `source_*` events need feed-adapter (and the current lease for health), every other event radio-receive."},
     {"method": "GET", "path": "/api/station/jobs", "credential": ["sz1", "shared"],
-     "role": {"sz1": "always", "sw1": "never"}, "request": null, "response": null,
+     "role": {"sz1": "always", "sw1": "never"}, "request": null, "response": "station-jobs",
      "note": "The long poll: only the jobs for that node and its roles."},
     {"method": "POST", "path": "/api/station/jobs/{id}", "credential": ["sz1", "shared"],
-     "role": {"sz1": "always", "sw1": "never"}, "request": null, "response": null,
+     "role": {"sz1": "always", "sw1": "never"}, "request": "station-job-result", "response": "station-job-result-answer",
      "note": "A job's answer. docs/nodes.md 3 names only the long poll; this row follows it."},
     {"method": "POST", "path": "/api/station/aircraft", "credential": ["sz1", "shared"],
      "role": {"sz1": ["adsb"], "sw1": "never"}, "request": null, "response": null},
@@ -56,5 +56,12 @@
   "reserved": [
     {"prefix": "/api/station/train/", "role": {"sz1": "never", "sw1": ["training"]},
      "note": "Designed for later (docs/nodes.md 3): nothing is served under it today. A route added there needs its rows above first."}
+  ],
+  "designed": [
+    {"method": "POST", "path": "/api/station/urgent", "credential": ["sz1"],
+     "role": {"sz1": ["radio-receive"], "sw1": "never"}, "request": "capture-urgent-request", "response": "capture-urgent-response",
+     "designed": {"design": "docs/native/capture-split.md 4.3, 7.5, 10, 11 (#773)", "body_max_bytes": 65536, "items_max": 32,
+                  "seen": false, "idempotent_by": ["station", "key", "rev"], "not_leader": 503},
+     "note": "Designed, NOT served yet (the hub's work: docs/native/capture-split.md 11, H1). Capture's own sender hands the hub emergency alarms and live pages ahead of the app's lane. Decided: a station's own sz1 token with the radio-receive role (the token stands for the role until roles exist); never sw1, and not the hub's older shared station token: a station still on it runs in urgent-mode write. An item is (station, key, rev), the station from the token. A post here does not count as the station being seen; a hub that is not the leader answers 503 and applies nothing. `designed` rows are not in `routes`: the tests that hold `routes` to the hub's dispatchers do not see them, and a client string for a designed path under sizeup/ is accepted. tests/test_contracts_capture.py holds this row's shape and fails the day the hub serves the path: move the row to `routes` then (its first six keys are a route row's)."}
   ]
 }

@@ -1,0 +1,23 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "source_health",
+      "data": {
+        "source": "demo",
+        "label": "Demo feed",
+        "rank": 1,
+        "state": "ok",
+        "reason": "",
+        "since": null,
+        "at": 1794990000.0,
+        "stopped": false
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

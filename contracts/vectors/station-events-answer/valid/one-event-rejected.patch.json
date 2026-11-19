@@ -1,0 +1,23 @@
+{
+  "base": "station-events-answer/valid/answer.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/applied",
+      "value": 0
+    },
+    {
+      "op": "add",
+      "path": "/rejected",
+      "value": [
+        {
+          "i": 0,
+          "seq": 1,
+          "type": "traffic",
+          "reason": "apply_failed",
+          "error": "RuntimeError: a bug on the hub"
+        }
+      ]
+    }
+  ]
+}

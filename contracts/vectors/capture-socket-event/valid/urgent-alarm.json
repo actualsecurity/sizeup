@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "t": "urgent",
+  "urgent_epoch": "9c2d7e10a4b35f68",
+  "n": 57,
+  "key": "CHA-live-1900000000123",
+  "rev": 0,
+  "kind": "alarm",
+  "at": 1900000000.39,
+  "event_at": 1900000000.123,
+  "event_boot": 5114.09,
+  "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c",
+  "data": {
+    "source": "CH A",
+    "start": 1900000000.123,
+    "radio_id": "7001",
+    "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
+    "unit": "UNIT A",
+    "emergency": true,
+    "emergency_via": "MDC"
+  },
+  "durable": true
+}

@@ -16,6 +16,17 @@
       "exclusiveMaximum": 100000000000,
       "description": "The station's clock when it built this post, Unix seconds with a fraction (never milliseconds: the hub would take them as a clock 50,000 years ahead). The hub keeps (its own clock - at) as this station's clock skew, in seconds; it stamps the snapshot with its own clock."
     },
+    "boot_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "This boot of the station's machine: Linux's /proc/sys/kernel/random/boot_id, null where there is none (macOS) or where the station can't keep `wall_steps` across a restart (no state folder: a `:memory:` outbox); null means the count is unknown across restarts. On every post since #773's clock fields (sizeup/cloud/wallclock.py); a station from before sends none. A new one means the station rebooted and `wall_steps` started again from 0. The hub reads neither yet."
+    },
+    "wall_steps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many times the station's wall clock stepped by more than 5 s in this boot (`boot_id`). It never goes down within one `boot_id` unless the station's saves of it fail (then a restart takes back the last count saved; a failed save is logged and shown once on Health as an outbox note): the station keeps it across a restart of sizeup in its state folder, and a step while sizeup was stopped counts too (the offset against the one saved, beyond 5 s plus 10 % of the time stopped); a reboot starts it from 0. Where there is no `boot_id` (null), it is not kept and starts from 0 at every start. Counted from the same reading as `at`, so a post right after a step carries the new count. A step: (wall clock - CLOCK_BOOTTIME, CLOCK_MONOTONIC on macOS) changed by more than 5 s between two samples at most 5 s apart, or by more than 5 s plus 10 % of the gap between two samples further apart (a stall, the link off); samples once a second. The boot clock's drift (2-5 %) and the wall clock's small corrections (about 2 s, #788) are never a step. Skew samples of one `boot_id` with the same count are comparable (#773, #776)."
+    },
     "talking": {
       "type": "array",
       "description": "Everyone transmitting now, and whoever just finished and was not shown live. The whole list every time ([] when nobody talks). The hub keeps the first 50 entries and drops the snapshot when it is older than 8 s. The hub reads `paging` only when `talking` is present.",
@@ -426,7 +437,7 @@
             },
             "aws": {
               "type": "object",
-              "description": "What the hub last said about Amazon Transcribe, as the station holds it: `ok` (boolean), `why` (text), `reserve` (channel keys), and `deny` when the hub sent one. Not typed here: it is the hub's own words back."
+              "description": "What the hub last said about Amazon Transcribe, as the station holds it: `ok` (boolean), `why` (text), `reserve` (channel keys), `deny` and `promote` when the hub sent them. Not typed here: it is the hub's own words back."
             },
             "tones": {"type": "integer", "minimum": 0, "description": "How many tone-code choices are in force (a count, not the list)."},
             "squelch": {
@@ -439,6 +450,7 @@
               "description": "This station takes squelch settings from the hub. An implicit capability flag: the hub sends them only when it is true."
             },
             "deny_ok": {"const": true, "description": "This station takes `aws.deny` from the hub. An implicit capability flag, like `squelch_ok`."},
+            "promote_ok": {"const": true, "description": "This station takes `aws.promote` from the hub (the county talkgroups an incident is worked on now, transcribed like ours: sizeup/cad/opchannel.py). An implicit capability flag, like `deny_ok`; a station from before it sends none."},
             "sig": {"type": "string", "description": "A short hex digest of everything above (sizeup/channels.py sig), compared for equality only."}
           }
         },
@@ -669,7 +681,7 @@
                 "n": {"type": "integer", "minimum": 0, "description": "Events in the quarantine."},
                 "critical": {"type": "integer", "minimum": 0, "description": "Of them, critical ones (sent again, slowly)."},
                 "evicted": {"type": "integer", "minimum": 0, "description": "Non-critical ones dropped this run to keep the quarantine under its bound."},
-                "too_large_audio": {"type": "integer", "minimum": 0, "description": "Quarantined events whose clip was too large to keep (the event was kept)."},
+                "too_large_audio": {"type": "integer", "minimum": 0, "description": "Clips left off events the hub refused as too large with them (Outbox.strip_audio): the event was sent again without its clip. This run only. Not the outbox's own size limit (that is dropped_audio)."},
                 "kinds": {"type": "object", "description": "Per event type: {n, critical, stuck, late, critical_first, minor_first, minor_last}: the counts, and when the critical and the other ones were first and last refused (Unix seconds or null). Health's alerts are decided from these.", "additionalProperties": {"type": "object"}},
                 "rows": {"type": "array", "description": "The newest quarantined events (at most 10), the critical first: {id, kind, reason, error, first_at, last_at, tries, critical, next_at, state}. `reason` is the hub's (malformed | apply_failed) or the station's own; `error` is empty for an incident source's event (it may quote the county's data).", "items": {"type": "object"}}
               }

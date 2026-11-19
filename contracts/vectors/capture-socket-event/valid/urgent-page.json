@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "t": "urgent",
+  "urgent_epoch": "9c2d7e10a4b35f68",
+  "n": 58,
+  "key": "page:PAGE 1:1900000100.25",
+  "rev": 2,
+  "kind": "page",
+  "at": 1900000104.9,
+  "event_at": 1900000100.25,
+  "event_boot": 5214.22,
+  "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c",
+  "data": {
+    "channel": "PAGE 1",
+    "started": 1900000100.25,
+    "phase": "voice",
+    "ours": true,
+    "ended": false,
+    "until": null,
+    "pairs": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"], "ours": true, "at": 1900000100.25}]
+  },
+  "durable": true
+}

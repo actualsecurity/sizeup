@@ -1,0 +1,4 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [{"op": "replace", "path": "/refusals", "value": [{"what": "job", "key": "sdr-d", "wish_seq": 215}]}]
+}

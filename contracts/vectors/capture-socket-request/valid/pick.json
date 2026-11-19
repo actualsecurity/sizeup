@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-5f3a9c12",
+  "op": "pick",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {"sdr": "sdr-b", "job": "CH A", "confirm": false}
+}

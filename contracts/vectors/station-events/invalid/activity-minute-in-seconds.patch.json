@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/activity.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/minute",
+      "value": 1794990000
+    }
+  ]
+}

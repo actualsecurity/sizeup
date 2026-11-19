@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {"fn": "emergency_all_clear", "args": [4101, ["990001", "990002"]]}
+    }
+  ]
+}

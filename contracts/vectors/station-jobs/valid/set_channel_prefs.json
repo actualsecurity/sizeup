@@ -1,0 +1,21 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {
+        "fn": "set_channel_prefs",
+        "args": [
+          {"Fireground 1": {"transcribe": false}},
+          {
+            "ok": false,
+            "why": "Amazon Transcribe isn't set up here ([stt] aws): the local model is used",
+            "reserve": []
+          },
+          {"832.5/1201.0": {"name": "Southfield FD", "a_hz": 832.5, "b_hz": 1201.0, "ours": false}},
+          {"Fireground 1": {"open_db": 13.0, "min_open_s": 0.5}}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,214 @@
+{
+  "description": "The openers' markers (#791, O1): an Outbox that hands out seqs writes a marker of its own into meta in one synced commit when it opens (or, opened with arm false as the quarantine command opens it, before its first batch), and takes it out at release() or close(), the station's stop in order. A marker left behind by a run that did not stop in order gives the file a new epoch at the next open, before any seq goes out (tests/test_outbox_epoch.py). Released, batch() hands out nothing until resume(); add() still queues. A stop in order keeps the epoch. The markers are counted here, never shown: each holds its opener's random token.",
+  "steps": [
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [], "stt_inputs": [], "quarantine": [], "source_latest": [], "sqlite_sequence": {}
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[1]],
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "add", "kind": "heard", "data": {"system": "p25", "radio_id": "990001"}, "at": 1794990000.0, "returns": 1,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [[1, 1794990000.0, "heard", "{\"system\":\"p25\",\"radio_id\":\"990001\"}", null, 0, 0, null]],
+        "sqlite_sequence": {"outbox": 1}
+      }
+    },
+    {
+      "op": "release",
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[0]],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "batch", "returns": [],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "add", "kind": "heard", "data": {"system": "p25", "radio_id": "990002"}, "at": 1794990001.0, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [
+          [1, 1794990000.0, "heard", "{\"system\":\"p25\",\"radio_id\":\"990001\"}", null, 0, 0, null],
+          [2, 1794990001.0, "heard", "{\"system\":\"p25\",\"radio_id\":\"990002\"}", null, 0, 0, null]
+        ],
+        "sqlite_sequence": {"outbox": 2}
+      }
+    },
+    {
+      "op": "resume",
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "batch",
+      "returns": [
+        {
+          "seq": 1, "at": 1794990000.0, "type": "heard", "data": {"system": "p25", "radio_id": "990001"},
+          "audio": null, "audio_dropped": false
+        },
+        {
+          "seq": 2, "at": 1794990001.0, "type": "heard", "data": {"system": "p25", "radio_id": "990002"},
+          "audio": null, "audio_dropped": false
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[1]],
+      "after": {
+        "totals": {
+          "pending": 2, "oldest": 1794990000.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "ack", "upto": 2, "returns": 2,
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": []
+      }
+    },
+    {"op": "close", "after": {}},
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "arm": false, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[0]],
+      "after": {
+        "totals": {
+          "pending": 0, "oldest": null, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "add", "kind": "heard", "data": {"system": "p25", "radio_id": "990003"}, "at": 1794990002.0, "returns": 3,
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990002.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        },
+        "outbox": [[3, 1794990002.0, "heard", "{\"system\":\"p25\",\"radio_id\":\"990003\"}", null, 0, 0, null]],
+        "sqlite_sequence": {"outbox": 3}
+      }
+    },
+    {
+      "op": "batch",
+      "returns": [
+        {
+          "seq": 3, "at": 1794990002.0, "type": "heard", "data": {"system": "p25", "radio_id": "990003"},
+          "audio": null, "audio_dropped": false
+        }
+      ],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990002.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[1]],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990002.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {"op": "close", "after": {}},
+    {
+      "op": "open", "file": "a", "max_audio_bytes": 1000, "returns": {"epoch": "epoch-1"},
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990002.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    },
+    {
+      "op": "sql", "query": "SELECT COUNT(*) FROM meta WHERE key != 'epoch'", "returns": [[1]],
+      "after": {
+        "totals": {
+          "pending": 1, "oldest": 1794990002.0, "audio_bytes": 0, "context_bytes": 0, "stt_pending": 0, "stt_bytes": 0,
+          "dropped_audio": 0, "dropped_stt": 0, "dropped_stt_pre": 0, "dropped_stt_fire": 0, "quarantine_evicted": 0,
+          "too_large_audio": 0
+        }
+      }
+    }
+  ]
+}

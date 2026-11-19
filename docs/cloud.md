@@ -384,7 +384,13 @@ someone talks or a page goes out; the hub drops a snapshot older than 8 s; a hub
 and every 5 s the station's radio / SDR / STT / voice rows, SDR switches, re-run progress, outbox
 size and its version (also the heartbeat). The talkgroup list goes every 30 s or when a switch
 changes. The hub answers `{ok, build}`: its own build, which the station follows
-([Station updates](#station-updates-it-follows-the-hubs-build)).
+([Station updates](#station-updates-it-follows-the-hubs-build)). Beside `at`, every post carries `boot_id` (Linux's
+boot id; null elsewhere, and with no state folder to keep the count in) and `wall_steps`: how often the wall clock stepped by more than 5 s against the boot clock
+in this boot (sampled every second; #788's 2-5 % drift and ~2 s corrections never count). It is kept across a restart
+of sizeup (`wall_clock.json` beside the outbox, with the clocks' offset: a step while sizeup was stopped counts too),
+so it never goes down within one `boot_id` unless those saves fail (logged, and a note on Health); a reboot starts
+it from 0. `at` and the count come from one reading, so a post right after a step carries it. For judging the clock skew (#773, #776); the hub does not read them yet
+(sizeup/cloud/wallclock.py).
 
 **Hub → station, jobs** (`GET /api/station/jobs?wait=25`, the station's long poll; the answer comes
 back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked up in time:
@@ -3704,13 +3710,15 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 **The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
 no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
-high). Not among its fields: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With
-`push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
+high) on a second line; the 0 block (house numbers under 100) reads as the street alone. Not among its fields:
+transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With `push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
 fails the scrub is not sent (suppressed "scrub", logged without the text). Nothing scrubs what is stored or shown:
 transcripts are kept and shown as heard; only the model's input (`infer.py` `clean_text`) has plates and IDs taken out.
 It opens
-`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
-`Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
+`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, a tap plays the Listen link
+instead, the push has a "Listen" button and the hub's page moves to an "Open" button (ntfy `click` and `view` actions,
+https only, in ntfy's JSON publish); the link is never in the text. The link plays for `listen_expiry_min` and its file
+is uploaded just after the push: a tap after it expired (or before the upload) gets S3's error, so use "Open" then.
 
 **Who sees it:** everyone signed in with a verified sign-in (`sourcekeys.may_see_context`, as for context traffic);
 no one on a station page, an all-in-one or a hub without Access.

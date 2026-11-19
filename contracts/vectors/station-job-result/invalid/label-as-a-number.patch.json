@@ -1,0 +1,10 @@
+{
+  "base": "station-job-result/valid/tts.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/label",
+      "value": 5
+    }
+  ]
+}
