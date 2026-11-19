@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-station-state.schema.json",
-  "title": "Station state post with the boot id and the wall steps",
-  "description": "Designed (docs/native/capture-split.md 4.3 \"Clocks\", 4.5, 11 H1d, #773), not implemented. Today's body of POST /api/station/state (station-state.schema.json, as built and not touched) plus two optional keys the station does not send yet: `boot`, the boot id the post was made under, and `wall_steps`, the wall steps capture counted since that boot (from its status file). With both on every post, each `hub.skew` sample carries them, and the hub may place a call's start by the skew only with samples of the call's own boot that bracket its start with no wall step since (a reboot always counts as one). The default, until a station reports both: the skew path is unavailable, and a flagged call the hub cannot place by its boot age alarms with the label \"emergency still set after All clear\" (the radio maintainers add both keys to the state post in a small PR of their own, before the capture split). Both keys are optional, so every post a station sends today is valid here.",
+  "title": "Station state post with the boot id",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"Clocks\", 4.5, 11 H1d, #773), not implemented. Today's body of POST /api/station/state (station-state.schema.json) plus one optional key: `boot`, the boot id the post was made under. Since #795 the as-built post itself carries `boot_id` (null where there is none) and `wall_steps`, the wall steps counted in that boot; `wall_steps` comes from station-state.schema.json through the `allOf` and is not declared here again. `boot` is this design's name and is kept apart from the as-built `boot_id` (a string, never null) until the capture split settles which one the app sends. With the boot id and `wall_steps` on every post, each `hub.skew` sample carries them, and the hub may place a call's start by the skew only with samples of the call's own boot that bracket its start with no wall step since (a reboot always counts as one). The default, until the hub reads them: the skew path is unavailable, and a flagged call the hub cannot place by its boot age alarms with the label \"emergency still set after All clear\". `boot` is optional, so every post a station sends today is valid here.",
   "x-status": "designed",
   "x-version": 1,
   "allOf": [{"$ref": "station-state.schema.json"}],
   "type": "object",
   "additionalProperties": true,
   "properties": {
-    "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id (`/proc/sys/kernel/random/boot_id`) the post was made under. Opaque: compared for equality only."},
-    "wall_steps": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "The wall steps capture counted since boot `boot` (a change of wall - boot clock by more than 5 s between samples at most 5 s apart), a count. It only rises within one boot; a new `boot` starts it again."}
+    "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id (`/proc/sys/kernel/random/boot_id`) the post was made under. Opaque: compared for equality only."}
   }
 }
