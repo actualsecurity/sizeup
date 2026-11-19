@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -1815,7 +1816,21 @@ def _hub_like(c, loose=()):
                            _lock=threading.Lock(), pages=[], cad=c)
 
 
-def test_the_backfill_and_the_sweep_never_give_a_context_clip_a_talkgroup(tmp_path):
+def _utc(*ymdhm):
+    return datetime(*ymdhm, tzinfo=timezone.utc).timestamp()
+
+
+# "now" for the sweep test below (every clock in it runs from it): the wall clock; 09:36-12:00Z, where a lost clip 3.5
+# days old and the oldest kept one 3.4 days old once fell either side of a UTC midnight; around UTC and New York
+# midnight; just after the two US DST changes (keys are UTC dates: none of these may matter)
+_SWEEP_NOWS = (None, _utc(2026, 11, 19, 9, 37), _utc(2026, 11, 19, 10, 30), _utc(2026, 11, 19, 11, 59),
+               _utc(2026, 11, 19, 12, 1), _utc(2026, 11, 19, 23, 59), _utc(2026, 11, 20, 0, 1),
+               _utc(2026, 11, 20, 4, 59), _utc(2026, 11, 20, 5, 1), _utc(2026, 3, 8, 7, 1), _utc(2026, 11, 1, 6, 1))
+
+
+@pytest.mark.parametrize("fixed_now", _SWEEP_NOWS, ids=lambda t: "wall-clock" if t is None else
+                         datetime.fromtimestamp(t, timezone.utc).strftime("%Y%m%dT%H%MZ"))
+def test_the_backfill_and_the_sweep_never_give_a_context_clip_a_talkgroup(tmp_path, fixed_now):
     from types import SimpleNamespace
     from sizeup.cloud.hub import HubApp
     from sizeup.incidents import Traffic
@@ -1828,10 +1843,12 @@ def test_the_backfill_and_the_sweep_never_give_a_context_clip_a_talkgroup(tmp_pa
     assert HubApp._clip_channels(fake, ["9211-m", "307-m"]) == {"9211-m": ("PD Dispatch", None), "307-m": ("Fire/EMS 15", 307)}
     assert HubApp._clip_known(fake, ["9211-m"])["9211-m"][1] is None
     # the radio log
-    now = time.time()
+    now = time.time() if fixed_now is None else fixed_now
     clock = Clock(now)
     c = cad(tmp_path, clock)
-    _ctx_traffic(c, "9211-r", now - 3.5 * DAY_S)
+    lost, older = now - 3.25 * DAY_S, now - 5 * DAY_S         # among the clips kept; a date folder before all of them
+    _ctx_traffic(c, "9211-r", lost)
+    _ctx_traffic(c, "9211-o", older)
     fake = _hub_like(c)
     assert HubApp._clip_channels(fake, ["9211-r"])["9211-r"] == ("PD Dispatch", None)
     assert HubApp._clip_known(fake, ["9211-r"])["9211-r"][:2] == ("PD Dispatch", None)
@@ -1840,15 +1857,19 @@ def test_the_backfill_and_the_sweep_never_give_a_context_clip_a_talkgroup(tmp_pa
     a = audio_db(tmp_path, s3store(bucket))
     for k in range(5):
         a.put(f"c{k}", WAV1K, at=now - (3 + k / 10) * DAY_S, channel="FG1")
-    a.put("9211-r", WAV1K, at=now - 3.5 * DAY_S, channel="PD Dispatch")
+    a.put("9211-r", WAV1K, at=lost, channel="PD Dispatch")
+    a.put("9211-o", WAV1K, at=older, channel="PD Dispatch")
     while a.upload_pending(limit=100):
         pass
     for k in bucket.modified:
-        bucket.modified[k] = now - 4 * DAY_S
-    a.db.execute("DELETE FROM audio WHERE id = '9211-r'")                  # a restore a little behind
+        bucket.modified[k] = now - 6 * DAY_S
+    a.db.execute("DELETE FROM audio WHERE id IN ('9211-r', '9211-o')")     # a restore a little behind
     a.sweep_orphans(now=now, known=lambda ids: HubApp._clip_known(fake, ids))
     assert a.sweep_restored == 1
     assert a.db.execute("SELECT channel, talkgroup FROM audio WHERE id = '9211-r'").fetchone() == ("PD Dispatch", None)
+    # a date folder older than the oldest clip's is never looked in (the bucket's lifecycle has it): left as it is
+    assert a.db.execute("SELECT 1 FROM audio WHERE id = '9211-o'").fetchone() is None
+    assert any(k.endswith("/9211-o.wav") for k in bucket.objects)
 
 
 def test_the_retention_settings_list_a_context_channel_only_to_a_signed_in_person(tmp_path):
