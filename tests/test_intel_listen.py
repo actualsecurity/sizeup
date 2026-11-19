@@ -245,19 +245,23 @@ class HairyBucket(FakeBucket):
                 "&X-Amz-Signature=deadbeef")
 
 
-def _intel_push(tmp_path, bucket, listen_on=True):
+T0 = 1_790_000_000.0       # a fixed clock: two runs' "HH:MM" never straddle a minute
+WHERE = "Sample St & Test Rd"   # example_locate's intersection, its town in the title
+
+
+def _intel_push(tmp_path, bucket, listen_on=True, hub="https://hub.example"):
     """One intel push through the engine and a fake ntfy: what ntfy got (each request's JSON)."""
     from tests.test_notify import FakeNtfy
     ntfy = FakeNtfy()
     try:
         from tests.test_cad import make_cad
-        cad = make_cad(tmp_path)
+        cad = make_cad(tmp_path, clock=lambda: T0)
         now = cad.clock()
         r = Radio()
         r.add("t1", now, 1.0, 500)
         p = notify.Pushes(ntfy.url, "test-topic-alerts", "", intel_topic="test-topic-intel", log=lambda m: None)
         e = cad.intel
-        e.notifier, e.locate, e.public_url = p.notifier(notify.INTEL), example_locate, "https://hub.example"
+        e.notifier, e.locate, e.public_url = p.notifier(notify.INTEL), example_locate, hub
         if listen_on:
             e.listen = listen(r, bucket, Clock(now + 1))
             e.listen.worker = True                           # the listen thread writes the file after the push
@@ -289,7 +293,7 @@ def test_the_listen_link_is_the_tap_and_a_button_never_in_the_text(tmp_path):
         {k: v for k, v in body.items() if k not in ("click", "actions")})
     assert body["title"].startswith("PD · ") and "\n" not in body["title"]
     where, when = body["message"].split("\n")
-    assert re.fullmatch(r"\d\d:\d\d · \w+", when) and not where.startswith("0 blk") and ", 0 blk" not in where
+    assert where == WHERE and re.fullmatch(r"\d\d:\d\d · \w+", when)
     assert body["tags"] and body["priority"] in range(1, 6)
 
 
@@ -306,6 +310,18 @@ def test_no_audio_no_listen_button_and_the_tap_opens_the_hub(tmp_path, why):
     # the link changes nothing else: same topic, title, text, tags and priority
     assert {k: a[k] for k in ("topic", "title", "message", "tags", "priority")} == \
         {k: b[k] for k in ("topic", "title", "message", "tags", "priority")}
+
+
+@pytest.mark.parametrize("hub", ["", "http://127.0.0.1:8000"])
+def test_without_an_https_hub_page_only_the_listen_button(tmp_path, hub):
+    """No public URL: the tap and one Listen button. An http one (a test hub; ntfy buttons are https only): the tap
+    stays the hub's page, so it is never lost, and the Listen button plays."""
+    b = HairyBucket()
+    [body] = _intel_push(tmp_path, b, hub=hub)
+    url = b.presign(*b.signed[0])
+    assert body["actions"] == [{"action": "view", "label": "Listen", "url": url, "clear": False}]
+    assert body["click"] == url if not hub else body["click"].startswith(f"{hub}/radio?view=police&intel=")
+    assert "http" not in body["message"]
 
 
 def test_a_presigned_url_survives_ntfys_json_publish_exactly(monkeypatch):

@@ -356,13 +356,17 @@ def test_unconfirmed_places_say_so():
 @pytest.mark.parametrize("label, precision, where", [
     ("40 Sample St, Townville", "address", "Sample St (unconfirmed)"),           # the 0 block: the street alone
     ("0 block of Sample St, Townville", "block", "Sample St (unconfirmed)"),
+    ("99 Sample St, Townville", "address", "Sample St (unconfirmed)"),
+    ("100 Sample St, Townville", "address", "Sample St, 100 blk (unconfirmed)"),
     ("140 Sample St, Townville", "address", "Sample St, 100 blk (unconfirmed)"),
+    ("0 block of Sample St, Townville", "block+", "Sample St"),                  # a confirmed block
+    ("40 Sample St, Townville", "address+", "40 Sample St"),                     # a confirmed address: exact
 ])
 def test_the_body_is_two_terse_lines_and_never_a_0_block(label, precision, where):
     from datetime import datetime, timezone
     at = datetime(2026, 1, 2, 17, 51, tzinfo=timezone.utc).timestamp()
-    ev = Event(id=4, domain="police", category="edp", precision=precision, label_full=label, town="Townville",
-               confirmed=False, first_at=at, level="medium", priority=4)
+    ev = Event(id=4, domain="police", category="edp", precision=precision.rstrip("+"), label_full=label,
+               town="Townville", confirmed=precision.endswith("+"), first_at=at, level="medium", priority=4)
     m = push_mod.compose(ev, "PD", {"label": "Welfare check", "tag": "warning"}, "https://hub.example", tz=timezone.utc)
     assert m["title"] == "PD · Welfare check · Townville"                    # the title field, never the body
     assert m["body"] == f"{where}\n17:51 · medium" and " 0 blk" not in f" {m['body']}"
