@@ -261,7 +261,9 @@ class PushService:
             if m is None:
                 raise
             arn = m.group(1).rstrip(".,")
-            if snsmod.endpoint_platform(arn) != snsmod.app_platform(app):      # another platform's endpoint: never reuse
+            # only an endpoint of THIS platform application (same account, region, platform and application name): an
+            # ARN out of an error message is never trusted further than that (it is then set, stored and may be deleted)
+            if not arn.startswith(app.replace(":app/", ":endpoint/") + "/"):
                 raise
         sns.set_attributes(arn, {"Token": token, "Enabled": "true", "CustomUserData": device_id})
         return arn

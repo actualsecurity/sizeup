@@ -222,19 +222,26 @@ def test_an_invalid_parameter_that_is_not_the_existing_token_error_is_still_a_50
     assert (e.value.status, e.value.code) == (502, "push_failed")
 
 
-def test_an_existing_endpoint_of_another_platform_is_never_taken(rig, fake):
-    other = f"arn:aws:sns:us-east-1:123456789012:endpoint/GCM/example-android/abc"
-    fake.fail["CreatePlatformEndpoint"] = (400, "InvalidParameter")
+@pytest.mark.parametrize("arn", [
+    "arn:aws:sns:us-east-1:999999999999:endpoint/GCM/evil/x",                      # other platform, account, app name
+    "arn:aws:sns:us-east-1:123456789012:endpoint/APNS_SANDBOX/other-app/x",        # same account, another application
+    "arn:aws:sns:eu-west-1:123456789012:endpoint/APNS_SANDBOX/example-ios-dev/x",  # another region
+    "arn:aws:sns:us-east-1:999999999999:endpoint/APNS_SANDBOX/example-ios-dev/x",  # another account
+    "arn:aws:sns:us-east-1:123456789012:endpoint/APNS/example-ios-dev/x",          # another platform
+    "arn:aws:sns:us-east-1:123456789012:endpoint/APNS_SANDBOX/example-ios-dev-evil/x"])   # a longer application name
+def test_an_endpoint_arn_out_of_the_error_message_must_be_of_the_configured_application(rig, fake, arn):
     real = fake.answer
 
     def answer(f):
         if f["Action"] == "CreatePlatformEndpoint":
-            return fake._err("InvalidParameter", 400, f"Invalid parameter: Token Reason: Endpoint {other} already exists "
+            return fake._err("InvalidParameter", 400, f"Invalid parameter: Token Reason: Endpoint {arn} already exists "
                                                       "with the same Token, but different attributes.")
         return real(f)
     fake.answer = answer
-    with pytest.raises(svc.PushError):
+    with pytest.raises(svc.PushError) as e:
         rig.device(1, "admin@example.org")
+    assert (e.value.status, e.value.code) == (502, "push_failed")
+    assert "SetEndpointAttributes" not in fake.actions() and "DeleteEndpoint" not in fake.actions()
     assert rig.service.devices.get("dev-0001") is None
 
 
@@ -316,9 +323,12 @@ def test_the_fd_lines_of_an_fyi_body_are_kept_and_nothing_else(rig, fake):
 
 # -- 11. the intel body's place --------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("seg,ok", [("100 Example St", True), ("Example St", True), ("Example St, 100 blk", True),
-                                    ("Example St (unconfirmed)", True), ("Example St, 100 blk (unconfirmed)", True),
-                                    ("12 Sample Ave, Rye", True), ("location not heard", None),
+@pytest.mark.parametrize("seg,ok", [("100 Example St", True), ("Example St, 100 blk", True),
+                                    ("12 Sample Ave, Rye", True), ("Example Ave, 100 blk", True),
+                                    ("Example St", False), ("Example St (unconfirmed)", False),
+                                    ("Example St, 100 blk (unconfirmed)", False), ("John Smith St", False),
+                                    ("Jane Doe Ave (unconfirmed)", False), ("N Jane Doe St", False),
+                                    ("Mary Ann Smith Ave", False), ("Jane Doe Ave, 100 blk (unconfirmed)", False),
                                     ("Jane Doe near Example St", False), ("caller Jane Doe Example St", False),
                                     ("Jane said call 914 555 0147 Example St", False), ("Example St 41228", False),
                                     ("the St", False), ("St", False), ("x" * 80 + " St", False)])
@@ -326,6 +336,16 @@ def test_an_intel_place_segment_is_kept_only_when_it_has_the_address_shape(seg, 
     if ok is None:
         return
     assert content.intel_place_ok(seg) is ok
+
+
+def test_a_street_with_no_number_is_dropped_from_the_body_and_a_numbered_one_kept(rig, fake):
+    rig.device(1, "admin@example.org")
+    rig.service.intel_labels = lambda: LABELS
+    for i, (where, want) in enumerate([("John Smith St", "14:32 \u00b7 high"), ("Example St, 100 blk", "Example St, 100 blk \u00b7 14:32 \u00b7 high"),
+                                       ("Jane Doe Ave (unconfirmed)", "14:32 \u00b7 high")]):
+        rig.now[0] += 100
+        rig.service.deliver("intel", "PD \u00b7 Smoke / fire reported \u00b7 Port Chester", f"{where}\n14:32 \u00b7 high", 4)
+        assert fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]["body"] == want
 
 
 def test_names_beside_a_street_word_do_not_reach_the_phone(rig, fake):

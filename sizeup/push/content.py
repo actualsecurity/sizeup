@@ -225,13 +225,17 @@ STREET_ONLY = re.compile(r"(?:[NSEW]\.?\s+)?(?:[A-Z][A-Za-z'-]{0,24}\s+){1,3}(?:
 
 
 def intel_place_ok(seg: str) -> bool:
-    """A place as sizeup/intel/push.py where_text says it: an exact address (place_ok), or the street alone or with its
-    block ("Example Ave, 100 blk"), each optionally "(unconfirmed)": the same shape rules, at most 60 characters."""
-    s = re.sub(r" \(unconfirmed\)$", "", seg.strip())
-    if not 0 < len(seg) <= 60:
+    """A place as sizeup/intel/push.py where_text says it, kept only if it CARRIES A NUMBER and has the strict shape: an
+    exact address (place_ok: a house number) or a street with its block number ("Example Ave, 100 blk"). A street with no
+    number ("John Smith St", "Mary Ann Smith Ave") is dropped, the body then omits the place; so is any parenthesis text,
+    so the engine's unconfirmed forms ("... (unconfirmed)") are dropped too. At most 60 characters, linear. STATED
+    RESIDUAL: a name-shaped street WITH a number ("123 Casey Rivera Ave", "Casey Rivera Ave, 100 blk") passes: the shape
+    cannot tell a street from a person."""
+    s = seg.strip()
+    if not 0 < len(s) <= 60 or "(" in s:
         return False
-    s = re.sub(r", \d{2,4} blk$", "", s)
-    return place_ok(s) or STREET_ONLY.fullmatch(s) is not None
+    m = re.fullmatch(r"(.+), \d{2,4} blk", s)
+    return STREET_ONLY.fullmatch(m.group(1)) is not None if m else place_ok(s)
 
 
 def _intel_body(body: str) -> str:
