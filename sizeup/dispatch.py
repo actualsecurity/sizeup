@@ -170,6 +170,97 @@ def _road(s: str, type_phrase: str = "") -> str:
     return " ".join(rest) if len(rest) >= 2 else ""
 
 
+# A highway location by its mile marker: a county event's "I-999 SB MM 5.7" or "@I999 SB 05.7 SAMPLE_TOWN", a page's
+# "I 999 southbound mile marker 5.7" (speech-to-text: "mild marker", "mile mark"). highway() -> Highway; the marker is
+# the place (same_marker): one route, the same marker to the tenth, the same direction when both say one. A town, an
+# exit or a name around it never matter, and a number after "exit" is never a house number (EXIT_NUMBER).
+ROUTE = re.compile(r"\b(?:(interstate|i|us|nys|ny|sr|rte|rt|route|cr)\s*-?\s*(\d{1,3}[a-z]?)\b"
+                   r"|((?:[a-z]+\s+){1,3}?)(parkway|pkwy|expressway|expy|thruway|twy|turnpike|tpke|highway|hwy)\b)")
+ROUTE_PREFIX = {"interstate": "I", "i": "I", "us": "US", "nys": "Route", "ny": "Route", "sr": "Route", "rte": "Route",
+                "rt": "Route", "route": "Route", "cr": "CR"}
+ROUTE_SUFFIX = {"parkway": "Pkwy", "pkwy": "Pkwy", "expressway": "Expy", "expy": "Expy", "thruway": "Thruway",
+                "twy": "Thruway", "turnpike": "Tpke", "tpke": "Tpke", "highway": "Hwy", "hwy": "Hwy"}
+BOUND = {"eastbound": "EB", "westbound": "WB", "northbound": "NB", "southbound": "SB", "eb": "EB", "wb": "WB",
+         "nb": "NB", "sb": "SB"}
+_BOUND = r"(?:eastbound|westbound|northbound|southbound|eb|wb|nb|sb)"
+_MILE = r"(\d{1,3}(?:\.\d{1,2})?)(?!\d|\.\d)"
+MARKER = re.compile(rf"\b(?:mm|mp|milepost|mile\s*post|marker|mark)\s*(?:number\s*)?{_MILE}|\bmile\s+(\d{{1,3}}\.\d{{1,2}})\b"
+                    rf"|\b{_BOUND}\s+(\d{{1,3}}\.\d{{1,2}})\b")
+ROUTE_STOP = {"the", "a", "an", "on", "at", "of", "to", "in", "and", "for", "from", "near", "by", "mile", "marker"}
+MARKER_REACH = 60          # the marker this far (characters) after the route's name at most
+EXIT_NUMBER = re.compile(r"\b(?:exit|exits|interchange)\s+\d{1,3}[a-z]?\b")
+
+
+@dataclass(frozen=True)
+class Highway:
+    route: str             # "I-999", "Route 9", "Sample Pkwy"
+    dir: str               # "EB" ... or ""
+    mile: float
+    said: str              # the marker as written ("5.7", "05.7")
+    start: int = 0         # where the route's name starts in the text (lower case, spaces collapsed)
+
+    def shown(self) -> str:
+        """'I-999 SB MM 5.7'."""
+        return " ".join(x for x in (self.route, self.dir, f"MM {self.mile:g}") if x)
+
+
+def highway(text: str) -> Highway | None:
+    """The first highway with a mile marker the text names ("I-999 SB MM 5.7", "i 999 southbound mile marker 5.7",
+    "@I999 SB 05.7 SAMPLE_TOWN", "Sample Pkwy NB MM 3.1"); None without a route or a marker after it, and when
+    another route is named between a route and the marker ("the Sample Parkway at the Model Parkway interchange,
+    mile marker 0": whose marker?)."""
+    t = " ".join((text or "").lower().replace("_", " ").replace("@", " ").split())
+    found = list(ROUTE.finditer(t))
+    pending = False                  # a route named just before, with no marker of its own before this one
+    for k, m in enumerate(found):
+        nxt = found[k + 1].start() if k + 1 < len(found) else len(t)
+        reach = min(m.end() + MARKER_REACH, nxt)
+        mk = MARKER.search(t, m.end(), reach)
+        if mk is None:
+            pending = nxt < m.end() + MARKER_REACH
+            continue
+        if pending:
+            return None
+        if m.group(1):
+            pre = ROUTE_PREFIX[m.group(1)]
+            route = f"{pre}{'-' if pre in ('I', 'US') else ' '}{m.group(2).upper()}"
+        else:
+            words = m.group(3).split()
+            while words and words[0] in ROUTE_STOP:
+                words.pop(0)
+            if not words or any(w in ROUTE_STOP or w.isdigit() for w in words):
+                continue
+            route = " ".join(w.capitalize() for w in words) + " " + ROUTE_SUFFIX[m.group(4)]
+        said = next(g for g in mk.groups() if g)
+        b = re.search(rf"\b{_BOUND}\b", t[m.end():mk.end()])
+        return Highway(route, BOUND[b.group(0)] if b else "", float(said), said, m.start())
+    return None
+
+
+def same_marker(a: Highway | None, b: Highway | None) -> bool:
+    """One place on a highway: the same route, the same marker to the tenth, the same direction when both say one."""
+    return (a is not None and b is not None and a.route == b.route and abs(a.mile - b.mile) < 0.05
+            and (not a.dir or not b.dir or a.dir == b.dir))
+
+
+def near_marker(a: Highway | None, b: Highway | None, miles: float = 1.0) -> bool:
+    """The same route and direction (when both say one), the markers at most this far apart: maybe the same call."""
+    return (a is not None and b is not None and a.route == b.route and abs(a.mile - b.mile) <= miles
+            and (not a.dir or not b.dir or a.dir == b.dir))
+
+
+# The clause parse() falls back on when no street was heard is the call's place only when it reads like one: one
+# phrase of at most PLACE_CLAUSE_WORDS words, no unit in it. Anything else is the page's own words run on ("smoke
+# showing. caller reports ... ladder 9"): never an address. The event stays unlocated (its page's text is in its remarks).
+PLACE_CLAUSE_WORDS = 10
+
+
+def place_clause(loc: str) -> bool:
+    words = loc.split()
+    return (bool(words) and len(words) <= PLACE_CLAUSE_WORDS and not re.search(r"[.;]\s", loc)
+            and UNIT.search(loc) is None)
+
+
 # "Engine 59/63", "Engines 59 / 63 / 65": one unit word for each number (read before "/" is normalised away).
 UNIT_WORDS = ("tower ladder", "engine", "ladder", "tower", "rescue", "squad", "truck", "ambulance", "medic", "tanker")
 UNIT_SLASH = re.compile(rf"\b({'|'.join(UNIT_WORDS)})s?\s+(\d{{1,4}}(?:\s*/\s*\d{{1,4}})+)\b", re.I)
@@ -272,14 +363,19 @@ def parse(text: str, known=None) -> Dispatch:
     masked = UNIT.sub(" , ", t)
     masked = EMD.sub(" , ", masked)
     masked = TIME_OUT.sub(" , ", masked)
-    a = ADDRESS.search(masked)
+    hw = highway(masked)
+    hw_head = masked[: hw.start] if hw is not None else ""
+    masked = EXIT_NUMBER.sub(" , ", masked)               # "exit 4 to Sample Avenue": never 4 Sample Avenue
+    a = None if hw is not None else ADDRESS.search(masked)
     # Bare numbers before the address are often engines read without the word ("174, 175, Ladder 1");
     # the app checks them against the apparatus roster.
-    head = masked[: a.start()] if a else ""
+    head = hw_head if hw is not None else masked[: a.start()] if a else ""
     for n in re.findall(r"\b(\d{1,3})\b", head):
         if int(n) not in d.numbers:
             d.numbers.append(int(n))
-    if a:
+    if hw is not None:                                    # a highway's mile marker: the place, whatever else is said
+        d.location = hw.shown()
+    elif a:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
         after = masked[a.end():]
         crosses = []
@@ -316,7 +412,7 @@ def parse(text: str, known=None) -> Dispatch:
         loc = rest[:stop].strip(" .,;")
         loc = re.sub(r"^(?:at|on|in|of|for|to)\s+", "", loc)
         loc = re.sub(r"\b(?:port chester|rye brook)(?: fire(?: department)?)?\s*$", "", loc).strip(" .,;")
-        d.location = loc[:120]
+        d.location = loc[:120] if place_clause(loc) else ""
         c = re.search(r"\b(?:cross(?:\s+street)?s?(?:\s+of|\s+is)?|between)\s+(.+?)(?:[.,;]|\s+(?:time|port chester|rye brook)\b|$)", t)
         if c:
             d.cross_street = c.group(1).strip(" .,")

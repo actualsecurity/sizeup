@@ -88,7 +88,10 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
                  The hub dismisses a queued incident only this feed made and no person touched; any other gets a note
     extra        adapter-specific fields, JSON-able (str keys; values str, number, bool, list or dict), at most
                  EXTRA_MAX_BYTES as JSON. Keys the hub shows on the incident (EXTRA_SHOWN): "jurisdiction" (str),
-                 "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). Any other key is kept and
+                 "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). "event_number" (str): the
+                 source's own event number when event_id is not it (two ids, one event: another run of it, a
+                 re-dispatch); the hub keeps one incident per event number (sizeup/cad/sources.py "same event"). An
+                 event_id "<id>-2", "-3" ... is read as another run of "<id>" without it. Any other key is kept and
                  its changes are on the timeline, nothing more
     first_seen   optional: when the adapter itself first had the event (epoch seconds on the station's clock, as
                  SourceContext.clock gives it). It goes to the hub as the report's first-seen time, which the lead over
