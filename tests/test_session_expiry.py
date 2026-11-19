@@ -736,4 +736,15 @@ def test_in_a_browser_the_profile_fits_a_phone_and_the_wall_board(console):
     pg.goto(base + "/monitor")
     pg.locator("#me .me-btn").wait_for()
     pg.locator("#me .me-chip").wait_for()
+    # a pop-up blocker, from the menu: the link itself opens it in a new tab (Space too)
+    for key in ("click", " "):
+        pg.evaluate("window.open = () => null")
+        pg.locator("#me .me-btn").click() if key == "click" else (pg.locator("#me .me-btn").focus(), pg.keyboard.press("Enter"))
+        item = pg.locator("#ui-menu a.menu-item", has_text="Re-sign in")
+        item.wait_for()
+        with ctx.expect_page() as tab:
+            item.click() if key == "click" else pg.keyboard.press(" ")
+        assert tab.value.url.split("?")[0].endswith(("/reauth/start", "/reauth")), key
+        tab.value.close()
+        pg.locator("#ui-menu").wait_for(state="detached")
     assert pg.errors == []

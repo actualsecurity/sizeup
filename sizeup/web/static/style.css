@@ -669,7 +669,7 @@
   :where(button.menu-item):where(:hover, :focus-visible):where(:not([aria-disabled="true"])) {
     background-color: var(--hover); border-color: transparent; color: var(--text);
   }
-  :where(button.menu-item):where(:focus-visible) { outline-offset: calc(-1 * var(--focus-w)); }
+  :where(button.menu-item, a.menu-item):where(:focus-visible) { outline-offset: calc(-1 * var(--focus-w)); }
   :where(button.menu-item)[aria-disabled="true"] { opacity: 1; color: var(--dim); cursor: default; }
   :where(button.menu-item.danger-quiet) { color: var(--accent-text); }
   :where(.menu-mark) { display: inline-flex; justify-content: center; inline-size: var(--ico); flex: none; color: var(--ok-text); }
@@ -783,7 +783,9 @@
   :where(.me) { display: inline-flex; align-items: center; gap: var(--s-2); }
   :where(.me:empty) { display: none; }
   /* signed in through Access: who it is is the profile's (its menu, its hover); the read-only Operator field goes */
-  :where(.operator:has(> input.access)) { display: none; }
+  .operator:has(> input.access) { display: none; }
+  /* the weather beside the clock gives way first when the header is full: the profile stays on screen */
+  :where(body > header) > #wx-now { flex: 0 1 auto; overflow: hidden; }
   :where(button.me-btn) { border-radius: 50%; padding: 0; }
   :where(.me-av) {
     display: inline-flex; align-items: center; justify-content: center; inline-size: var(--ctl-sm); block-size: var(--ctl-sm);

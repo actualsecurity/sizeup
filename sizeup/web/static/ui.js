@@ -190,8 +190,10 @@ window.UI = (() => {
       e.stopPropagation();
       const it = M.items[Number(n.dataset.i)];
       if (it && it.href) {                 // a link: its run first (it may take it over), else the link itself
+        if (it.disabled) { e.preventDefault(); return; }
         if (it.run) it.run(e);
-        menuClose(true);
+        if (e.defaultPrevented) menuClose(true);
+        else setTimeout(() => menuClose(true));   // the link opens first (from the menu still in the page)
         return;
       }
       e.preventDefault();
@@ -213,8 +215,9 @@ window.UI = (() => {
         sep.setAttribute("role", "separator");
         return sep;
       }
-      if (it.info) {                       // a line of text: not a choice, not a stop for the keys
-        const t = make("div", "menu-info");
+      if (it.info) {                       // a line of text: not a choice, not a stop for the keys; the menu's
+        const t = make("div", "menu-info");  // description (aria-describedby: read with the first choice)
+        t.id = `ui-menu-info-${i}`;
         t.setAttribute("role", "none");
         t.append(make("span", "menu-text", it.label));
         if (it.hint) t.append(make("span", "menu-hint", it.hint));
@@ -243,6 +246,9 @@ window.UI = (() => {
       if (it.sub) n.append(window.Icon ? Icon("chevron", "sm menu-hint") : make("span", "menu-hint", "▸"));
       return n;
     }));
+    const info = [...el.querySelectorAll(".menu-info")].map((t) => t.id).join(" ");
+    if (info) el.setAttribute("aria-describedby", info);
+    else el.removeAttribute("aria-describedby");
     place();
     const f = focusItems();
     if (f.length) f[at < 0 ? f.length - 1 : Math.min(at || 0, f.length - 1)].focus({ preventScroll: true });
@@ -294,7 +300,8 @@ window.UI = (() => {
     else if (e.key === "ArrowUp") move(i < 0 ? -1 : i - 1);
     else if (e.key === "Home") move(0);
     else if (e.key === "End") move(-1);
-    else if (e.key === "Enter" && cur && cur.href) done = false;   // a link: its own Enter (a click: the menu's)
+    else if (e.key === "Enter" && cur && cur.href && !cur.disabled) done = false;   // a link: its own Enter (a click)
+    else if (e.key === " " && cur && cur.href) f[i].click();          // Space on a link: the same click
     else if (e.key === "Enter" || e.key === " ") choose(cur);
     else if (e.key === "ArrowRight") { if (cur && cur.sub) choose(cur); }
     else if (e.key === "ArrowLeft" || e.key === "Backspace") { if (M.pages.length) choose({ back: true }); }

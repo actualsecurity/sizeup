@@ -19,10 +19,12 @@ window.Profile = (() => {
   ];
 
   const who = () => (typeof cad !== "undefined" && cad.who) || null;
+  // "Ángel Ruiz" -> "ÁR", "Mary Ann Smith" -> "MS", "casey@example.org" -> "C"
   function initials(name) {
     const n = String(name || "").trim().split("@")[0];
-    const words = n.split(/[\s._-]+/).filter((w) => /^[A-Za-z0-9]/.test(w));
-    return words.slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+    const words = n.split(/[\s._-]+/).filter((w) => /^[\p{L}\p{N}]/u.test(w));
+    const pick = words.length > 1 ? [words[0], words[words.length - 1]] : words;
+    return pick.map((w) => [...w][0].toUpperCase()).join("");
   }
   const clock = (ms) => {
     const d = new Date(ms);
@@ -48,7 +50,7 @@ window.Profile = (() => {
     const op = document.getElementById("operator");
     out.push({ info: true, label: w ? (w.callsign ? `${w.name} ${w.callsign}` : w.name) : (op && op.value) || "Not signed in",
                hint: w ? w.role || "" : "",
-               title: w ? w.email : "" });
+               title: w ? (w.name === w.email ? `${w.email} (no name yet: Settings, Users)` : w.email) : "" });
     if (s.level === "out") out.push({ info: true, label: "Signed out", title: SessionWatch.tip() });
     else if (s.until) out.push({ info: true, label: `Sign-in until ${clock(s.until)}`, title: SessionWatch.tip() });
     if (s.access) out.push({ label: "Re-sign in", href: SessionWatch.href(), run: (e) => SessionWatch.reauth(e) });
@@ -59,6 +61,7 @@ window.Profile = (() => {
 
   function render() {
     const w = who(), s = SessionWatch.state();
+    box.hidden = !s.access && !w;          // no Access (local dev, all-in-one): nothing to show yet
     const ini = w ? initials(w.name || w.email) : "";
     const sig = ini || "?";
     if (face.dataset.sig !== sig) {
