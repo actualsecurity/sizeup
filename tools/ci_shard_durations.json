@@ -108,6 +108,7 @@
  "tests/test_sdr_auto_assign.py": 154.2,
  "tests/test_sdr_serial.py": 21.9,
  "tests/test_search_map.py": 13.6,
+ "tests/test_session_expiry.py": 8.0,
  "tests/test_settings.py": 1.2,
  "tests/test_settings_no_redraw.py": 1.1,
  "tests/test_source_reset.py": 13.3,
