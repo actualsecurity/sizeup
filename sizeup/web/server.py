@@ -35,6 +35,11 @@ it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an 
 GET  /api/v1/...                the mobile app's versioned API (sizeup/api/v1, spec in api/openapi/v1/, #557): the hub only
                                (409 on the station), errors always {"error": {"code", "message", "retry_after_s"?}}
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
+GET  /api/session               {"expires_at": unix s | null, "now": unix s}: when the console's Cloudflare Access sign-in
+                               ends (the verified token's exp, nothing else from it; null without Access), for its
+                               warning and re-sign-in (static/session.js, #818); never cached
+GET  /reauth                    a tiny page (static/reauth.html) the console opens to sign in again through Access: it
+                               tells the console (same origin only) and closes; it takes no parameters (no redirect)
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
 GET  /api/station-mode         not the hub (409 there): forwarding to the hub, its status and where each
@@ -588,7 +593,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return
             path, code = urlsplit(self.path).path, int(code) if str(code).isdigit() else 0
             if path == "/healthz" or (code < 400 and (path in ("/api/state", "/api/cad/state", "/api/cad/whoami", "/api/cad/health",
-                                                                   "/api/cad/datasources")
+                                                                   "/api/cad/datasources", "/api/session")
                                                       or path.startswith("/api/station/"))):
                 return
             h = self.headers
@@ -852,6 +857,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return
             if v1.handles(path):
                 return self._v1(path, url.query)
+            if path == "/api/session":           # the console's sign-in warning (#818): when this Access sign-in ends
+                exp = getattr(self.who, "exp", 0.0)
+                return self._send(200, json.dumps({"expires_at": int(exp) if exp > 0 else None, "now": round(time.time(), 3)},
+                                                  separators=(",", ":")).encode(), "application/json",
+                                  {"Cache-Control": "no-store"})
+            if path == "/reauth":                # signed in again through Access (#818): tells the console, closes
+                return self._static("reauth.html")
             if station_ui:
                 if path in ("/", "/index.html", "/station", "/monitor"):
                     return self._static("station.html")

@@ -32,12 +32,13 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import re
 import threading
 import time
 import urllib.request
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.cookies import CookieError, SimpleCookie
 from typing import Callable
 
@@ -68,6 +69,9 @@ class Identity:
     sub: str = ""
     session: str = ""            # which Access login this token is from: its jti / nonce if it has one,
                                  # else when it was issued (iat): one "signed in" each (sizeup/cad/activity.py)
+    # when this token (the Access session it is from) ends, unix s (0: not known). Only for the console's sign-in
+    # warning (GET /api/session, #818): never part of who it is (not compared), never an auth decision here
+    exp: float = field(default=0.0, compare=False)
 
     @property
     def person(self) -> bool:
@@ -84,6 +88,15 @@ def _b64(s: str) -> bytes:
     if not B64URL.fullmatch(s):
         raise AccessError("not base64url")
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _exp(v) -> float:
+    """A verified token's exp as unix s (verify() checked it is a number in time), 0.0 if it won't fit a float."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
 
 
 def _int(s: str) -> int:
@@ -235,7 +248,8 @@ class AccessVerifier:
         email = c.get("email")
         if isinstance(email, str) and "@" in email.strip():
             session = next((str(c[k]) for k in ("jti", "nonce", "iat") if c.get(k) not in (None, "")), "")
-            return Identity(email=email.strip().lower()[:254], sub=str(c.get("sub") or ""), session=session[:64])
+            return Identity(email=email.strip().lower()[:254], sub=str(c.get("sub") or ""), session=session[:64],
+                            exp=_exp(c.get("exp")))
         return Identity(service=str(c.get("common_name") or ""), sub=str(c.get("sub") or ""))
 
     def identify(self, headers) -> Identity | None:

@@ -701,6 +701,16 @@
     z-index: var(--z-toast); background: var(--panel); box-shadow: var(--elev-dialog); pointer-events: none;
   }
 
+  /* ---- the sign-in ending or ended (Cloudflare Access, #818; session.js) -----------------------------------
+     Small, bottom centre, a step above the reconnecting pill; its link opens the re-sign-in pop-up. */
+  :where(.session-pill) {
+    position: fixed; inset-block-end: calc(var(--s-4) + var(--ctl)); inset-inline-start: 50%; transform: translateX(-50%);
+    z-index: var(--z-toast); background: var(--panel); box-shadow: var(--elev-dialog);
+    block-size: auto; min-block-size: var(--ctl-sm); padding-inline: var(--s-3); gap: var(--s-2); font-size: var(--fs-sm);
+  }
+  :where(.session-pill) :where(a) { color: inherit; font-weight: 600; }
+  :where(.reauth) { max-inline-size: 24rem; margin: var(--s-6) auto; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-2); }
+
   /* ---- toast: short feedback, bottom right (role=status) ----------------------------------------- */
   :where(.toasts) {
     position: fixed; inset-inline-end: var(--s-4); inset-block-end: var(--s-4); z-index: var(--z-toast);

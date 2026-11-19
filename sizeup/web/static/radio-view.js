@@ -24,7 +24,8 @@
 window.RadioLive = (() => {
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   const MAX_QUEUE = 15;
-  const st = { on: false, audio: new Audio(), seen: null, queue: [], dropped: 0, blocked: false, playing: null, buttons: [], label: "Live" };
+  const st = { on: false, audio: new Audio(), seen: null, queue: [], dropped: 0, blocked: false, playing: null, buttons: [], label: "Live",
+               held: false };                  // held: signed out, the queue waits (#818)
 
   function paint() {
     for (const b of st.buttons) {
@@ -41,11 +42,14 @@ window.RadioLive = (() => {
     }
   }
   function pump() {
-    if (!st.on || st.playing || !st.queue.length) return paint();
+    if (!st.on || st.playing || st.held || !st.queue.length) return paint();
     st.playing = st.queue.shift();
     st.audio.src = `/api/audio/${encodeURIComponent(st.playing)}.wav`;
     st.audio.play().then(() => { st.blocked = false; paint(); })
-      .catch(() => { st.blocked = true; st.playing = null; paint(); });
+      .catch((e) => {
+        if (e && e.name === "NotSupportedError") return;   // it didn't load: its error event (failed) goes on
+        st.blocked = true; st.playing = null; paint();
+      });
     paint();
   }
   function done() {
@@ -54,7 +58,20 @@ window.RadioLive = (() => {
     pump();
   }
   st.audio.addEventListener("ended", done);
-  st.audio.addEventListener("error", done);
+  // A clip that won't load: the next one, unless the sign-in ended (session.js, #818): then the queue waits, this
+  // one first, until signed in again (it went through the whole queue failing each one).
+  function failed() {
+    if (st.audio.src.startsWith("data:")) return;
+    const id = st.playing;
+    if (!window.SessionWatch || !id) return done();
+    st.playing = null;
+    st.held = true;
+    SessionWatch.check()
+      .then((s) => { if (s === "out") { st.queue.unshift(id); return SessionWatch.whenIn(); } })
+      .then(() => { st.held = false; pump(); });
+  }
+  st.audio.addEventListener("error", failed);
+  st.audio.sessionRetry = false;                   // its own retry, above
 
   function toggle() {
     if (st.on && !st.blocked) {                    // off

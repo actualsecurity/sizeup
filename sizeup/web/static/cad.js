@@ -210,6 +210,7 @@ async function apiCall(method, path, body) {
     try {
       r = await fetch(path, opts);
     } catch (e) {
+      if (window.SessionWatch && SessionWatch.out) throw new Error("Signed out");   // not retried: re-sign in (#818)
       if (method !== "GET" || attempt >= API_RETRY_MS.length) throw e;
     }
     if (r) {
@@ -405,7 +406,18 @@ function stopPlay() {
   if (was) playing("");
 }
 player.addEventListener("ended", stopPlay);
-player.addEventListener("error", stopPlay);
+// A clip that failed because the sign-in ended is played again once signed in (session.js, #818), unless something
+// else was played meanwhile.
+let playFailed = null;
+player.addEventListener("error", () => {
+  playFailed = nowPlaying.url ? { url: nowPlaying.url, btn: nowPlaying.btn } : null;
+  stopPlay();
+});
+player.sessionRetry = () => {
+  const f = playFailed;
+  playFailed = null;
+  if (f && !nowPlaying.url) play(f.url, f.btn && f.btn.isConnected ? f.btn : null);
+};
 function play(url, btn = null) {
   if (!url) return;
   if (nowPlaying.url === url && !player.paused) { player.pause(); return stopPlay(); }

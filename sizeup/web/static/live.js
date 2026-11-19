@@ -26,6 +26,10 @@ const LiveConn = (() => {
   const TEXT = "Reconnecting\u2026 (update in progress)";
   function show() {
     if (since === null || Date.now() - since < LIVE_PILL_MS || typeof document === "undefined" || !document.body) return;
+    if (signedOut()) {                                    // not out of reach: signed out, and session.js says so (#818)
+      if (pill && pill.isConnected) pill.remove();
+      return;
+    }
     if (!pill) {
       pill = document.createElement("div");
       pill.className = "pill reconnect-pill";
@@ -50,6 +54,12 @@ const LiveConn = (() => {
 })();
 if (typeof window !== "undefined") window.LiveConn = LiveConn;
 
+// The console's sign-in ended (session.js, #818): nothing is asked of the hub until it is signed in again (every
+// request would only be redirected to the Access login).
+function signedOut() {
+  return typeof window !== "undefined" && !!window.SessionWatch && window.SessionWatch.out;
+}
+
 // liveMerge(have, msg): the whole state after msg (a whole state, or a delta onto have); null when
 // msg is a delta and there is nothing to put it on (ask for the whole state again).
 function liveMerge(have, msg) {
@@ -64,6 +74,7 @@ function liveMerge(have, msg) {
 
 function liveState(streamUrl, stateUrl, onState) {
   let lastAt = 0, poller = null, errors = 0, polls = 0, state = null, id = "", es = null, reopens = 0, reopenTimer = null;
+  let held = false;                                         // signed out: the stream closed until signed in (#818)
   const got = (msg, newId) => {
     const next = liveMerge(state, msg);
     if (next === null) { id = ""; return; }                // a delta with nothing under it: ask for the whole state
@@ -74,6 +85,7 @@ function liveState(streamUrl, stateUrl, onState) {
     onState(state);
   };
   const poll = async () => {
+    if (signedOut()) return;
     try {
       const r = await fetch(stateUrl + (id ? `?since=${encodeURIComponent(id)}` : ""), { cache: "no-store", credentials: "same-origin" });
       if (r.ok) { polls += 1; got(await r.json(), r.headers.get("X-State-Id") || ""); }
@@ -86,9 +98,12 @@ function liveState(streamUrl, stateUrl, onState) {
   const startPolling = () => { if (!poller) poller = setInterval(poll, LIVE_POLL_MS); };
   const stopPolling = () => { if (poller) { clearInterval(poller); poller = null; } };
   const open = () => {
+    if (held) return;                                       // hold() opens it once signed in again
     reopenTimer = null;
-    es = new EventSource(streamUrl + (id ? `?since=${encodeURIComponent(id)}` : ""));
-    es.onmessage = (ev) => {
+    if (signedOut()) return hold();
+    const src = new EventSource(streamUrl + (id ? `?since=${encodeURIComponent(id)}` : ""));
+    es = src;
+    src.onmessage = (ev) => {
       let data;
       try { data = JSON.parse(ev.data); } catch (err) { console.warn("bad state push:", err); return; }
       errors = 0;
@@ -96,18 +111,31 @@ function liveState(streamUrl, stateUrl, onState) {
       stopPolling();
       got(data, ev.lastEventId || "");
     };
-    es.onerror = () => {
+    src.onerror = () => {
+      if (es !== src) return;                               // closed by hold()
       errors += 1;
+      if (window.SessionWatch) window.SessionWatch.suspect();     // a stream dropped: the sign-in may have ended
       if (errors >= 2) startPolling();
       // EventSource retries a dropped stream by itself, but gives up for good on an answer that isn't the stream
       // (a 502 / 503 / 530 while a deploy hands over): open it again, soon.
-      if (es.readyState === 2 && !reopenTimer) {
+      if (src.readyState === 2 && !reopenTimer) {
         startPolling();
         LiveConn.down(0);
         reopenTimer = setTimeout(open, LIVE_REOPEN_MS[Math.min(reopens++, LIVE_REOPEN_MS.length - 1)]);
       }
     };
   };
+
+  // Signed out (#818): the stream closed (the browser would reopen it into the Access login again and again) and
+  // opened again, after a poll, once signed in.
+  const hold = () => {
+    if (held) return;
+    held = true;
+    if (es) { const old = es; es = null; old.close(); }
+    if (reopenTimer) { clearTimeout(reopenTimer); reopenTimer = null; }
+    window.SessionWatch.whenIn().then(() => { held = false; poll(); open(); });
+  };
+  if (typeof window !== "undefined") window.addEventListener("sizeup:signed-out", hold);
 
   // First paint from a GET without waiting for the stream; the stream then starts from what that had
   // (?since=: not the whole state a second time), or after 3 s whatever the GET is doing.
