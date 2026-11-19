@@ -1822,8 +1822,10 @@ class LiveSink:
                 self.engine.log(f"intel: listen link: {type(e).__name__}")
                 url = None
             if url:
-                m["body"] = f"{m['body']}\nListen: {url}"
-                actions = [{"label": "Listen", "url": url}]
+                # never in the body: a presigned URL is ~1.5 KB (the STS token) and would flood the notification. The
+                # tap plays it; a "Listen" button too, and the hub's page (the click it replaces) on an "Open" button
+                hub, m["click"] = m.get("click") or "", url
+                actions = [{"label": "Listen", "url": url}] + ([{"label": "Open", "url": hub}] if hub else [])
         kw = {"actions": actions} if actions else {}
         if _takes_done(n):                          # ntfy's answer recorded on the event (events.py delivered())
             kw["done"] = self._delivered(ev.id)

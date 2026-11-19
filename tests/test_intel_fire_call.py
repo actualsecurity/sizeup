@@ -72,7 +72,7 @@ def test_a_burning_smell_with_the_fd_notified_is_a_fire_pre_alert_at_the_address
     assert d.would_push and d.message["title"] == "PD · Burning smell / FD notified · Port Chester"
     # the words don't confirm the number (no cross street, no read-back): the push says the street and block (push.py);
     # the event, the console and the More info page have the address
-    assert d.message["body"].startswith("Example Pl, 0 blk (unconfirmed) · ") and "fire" in d.message["tags"]
+    assert d.message["body"].startswith("Example Pl (unconfirmed)\n") and "fire" in d.message["tags"]
     assert "7000123" not in json.dumps(d.message) and "CAR-12" not in json.dumps(d.message)
     assert not [ev for ev, _ch in sink.events if ev.category == "fire_report"]     # one pre-alert, not two
 
@@ -124,7 +124,7 @@ def test_no_address_holds_it_at_log_until_the_read_back_places_it(gaz):
     [ev] = e.events.open_events()
     assert ev.label_full == "40 Example Pl, Port Chester" and ev.mode == "push" and ev.suppressed == ""
     [(_p, d)] = [(p, d) for p, d in sink.pushes if d.would_push]
-    assert d.message["body"].startswith("Example Pl, ")
+    assert d.message["body"].startswith("Example Pl (unconfirmed)\n")      # the 0 block: the street, never "0 blk"
 
 
 def test_a_street_alone_is_no_address(gaz):
