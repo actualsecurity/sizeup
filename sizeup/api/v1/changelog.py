@@ -8,7 +8,8 @@ Storage: hub.sqlite only (the log never writes to cad.sqlite: it only reads it),
 while the `stream` flag is on (a hub with mobile off never creates them), through their own connection behind the fence
 (a fenced task writes nothing):
 
-    mobile_changelog       seq (AUTOINCREMENT: never reused), kind, id, rev, at
+    mobile_changelog       seq (AUTOINCREMENT: not reused within one database; a restored copy can be behind and
+                           reuse a seq, which is why every start has its own epoch, below), kind, id, rev, at
     mobile_changelog_head  the last rev logged per (kind, id): what a change is measured against (rebuilt at each start)
     mobile_changelog_meta  floor (the highest seq pruned)
 
