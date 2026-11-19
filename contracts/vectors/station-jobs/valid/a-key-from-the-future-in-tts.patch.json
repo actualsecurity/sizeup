@@ -1,0 +1,29 @@
+{
+  "base": "station-jobs/valid/tts.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/jobs/0/args/from_the_future",
+      "value": {
+        "x": [
+          1,
+          {
+            "y": null
+          }
+        ]
+      }
+    },
+    {
+      "op": "add",
+      "path": "/jobs/0/args/voice/from_the_future",
+      "value": {
+        "x": [
+          1,
+          {
+            "y": null
+          }
+        ]
+      }
+    }
+  ]
+}

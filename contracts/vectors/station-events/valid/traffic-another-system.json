@@ -1,0 +1,47 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "traffic",
+      "data": {
+        "id": "7001-1794990000_770181250.0-call_2",
+        "source": "East Dispatch",
+        "start": 1794990000.0,
+        "end": 1794990002.0,
+        "text": "Engine 5 on location, nothing showing",
+        "status": "done",
+        "unit": "880001",
+        "talkgroup": 7001,
+        "rig": "",
+        "radio_id": "880001",
+        "fm": false,
+        "call_id": "7001-1794990000_770181250.0-call_2",
+        "turn": 0,
+        "system": "east",
+        "tier": "alert",
+        "ours": false,
+        "source_key": "p25:east:7001",
+        "group": "Police",
+        "service_auto": "police",
+        "service": "police",
+        "dept": "",
+        "stt": "",
+        "vocab_v": "",
+        "stt_prompt_time": false,
+        "stt_wait_s": 0.2,
+        "stt_run_s": 0.4,
+        "stt_class": "context",
+        "raw": "Engine 5 on location, nothing showing",
+        "confidence": 0.9,
+        "model": "m.bin",
+        "attach": false,
+        "pairs": null
+      },
+      "audio": "UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "audio_dropped": false
+    }
+  ]
+}

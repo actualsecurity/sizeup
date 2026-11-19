@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {"fn": "set_mode", "args": ["Fireground 1", "00000101", "person", true]}
+    }
+  ]
+}

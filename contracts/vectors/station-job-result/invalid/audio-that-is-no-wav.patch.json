@@ -1,0 +1,10 @@
+{
+  "base": "station-job-result/valid/tts.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/audio",
+      "value": "T2dnUwACAAAAAAAAAAA="
+    }
+  ]
+}

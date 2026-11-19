@@ -10,6 +10,6 @@
   "additionalProperties": true,
   "properties": {
     "boot": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The boot id (`/proc/sys/kernel/random/boot_id`) the post was made under. Opaque: compared for equality only."},
-    "wall_steps": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "The wall steps capture counted since boot `boot` (a change of wall - boot clock by more than 5 s between samples at most 5 s apart), a count. It only rises within one boot; a new `boot` starts it again."}
+    "wall_steps": {"maximum": 9007199254740991, "description": "The wall steps capture counted since boot `boot` (a change of wall - boot clock by more than 5 s between samples at most 5 s apart), a count. It only rises within one boot; a new `boot` starts it again. Its type (an integer) and its minimum (0) are station-state's, which has carried `wall_steps` as built since #795; this adds only the 2^53 - 1 bound, so a wrong value breaks one rule, not the same rule twice."}
   }
 }

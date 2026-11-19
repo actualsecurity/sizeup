@@ -1,0 +1,25 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "retext",
+      "data": {
+        "id": "Fireground1-1794990000000",
+        "text": "Engine 5 on location, investigating",
+        "status": "done",
+        "confidence": 0.8,
+        "model": "m.bin",
+        "stt_prompt_time": true,
+        "alt": {"text": "Engine 5 on location, nothing showing", "model": "other.bin"},
+        "catchup": true,
+        "vocab_v": "terms-7",
+        "late": true
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

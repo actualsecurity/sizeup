@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/reception_post.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/2",
+      "value": "test-1"
+    }
+  ]
+}

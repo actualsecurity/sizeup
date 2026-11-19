@@ -1,0 +1,33 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "source_event",
+      "data": {
+        "source": "demo",
+        "label": "Demo feed",
+        "rank": 1,
+        "seen_at": 1794990000.0,
+        "first_seen": 1794990000.0,
+        "event": {
+          "source": "demo",
+          "event_id": "S1",
+          "type": "ALARM",
+          "location": "12 Example Ave",
+          "units": ["E5"],
+          "times": {"dispatched": 1794989980.0},
+          "unit_times": {"E5": {"dispatched": 1794989980.0, "responding": 1794989995.0}},
+          "comments": [[1794989990.0, "caller reports smoke"]],
+          "closed": false,
+          "extra": {"jurisdiction": "Northfield"},
+          "aliases": ["S0"]
+        }
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

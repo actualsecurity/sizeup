@@ -1,0 +1,23 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {
+        "fn": "set_stt_terms",
+        "args": [
+          {
+            "v": "3fb1ed939675",
+            "sets": {
+              "county_fire": {
+                "terms": ["Engine one", "Ladder two", "Northfield", "Example Street"],
+                "v": "39f8a61cdc54",
+                "places": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

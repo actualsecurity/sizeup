@@ -1,0 +1,15 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "tts",
+      "args": {
+        "text": "Engine 1 respond to 12 Example Street for a reported alarm",
+        "tones": [[[716.1, 1.0], [600.9, 3.0]]],
+        "repeat": 2,
+        "spoken": {"E1": "Engine 1", "L2": "Ladder 2"},
+        "voice": {"engine": "say", "voice": "Samantha", "speed": 0.92, "fallback_voice": "Samantha", "rate_wpm": 0}
+      }
+    }
+  ]
+}

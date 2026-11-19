@@ -1,0 +1,19 @@
+{
+  "base": "station-jobs/valid/set_mode.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/jobs/-",
+      "value": {
+        "id": "fedcba9876543210",
+        "type": "call",
+        "args": {
+          "fn": "sources_poll_now",
+          "args": [
+            "radio pre-alert"
+          ]
+        }
+      }
+    }
+  ]
+}

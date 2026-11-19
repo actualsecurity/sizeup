@@ -1,0 +1,9 @@
+{
+  "base": "station-events/valid/heard.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/events/0/audio"
+    }
+  ]
+}

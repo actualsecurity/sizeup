@@ -1,0 +1,9 @@
+{
+  "base": "station-jobs/valid/catch_up.json",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/jobs/0/args/args/0/0/id"
+    }
+  ]
+}

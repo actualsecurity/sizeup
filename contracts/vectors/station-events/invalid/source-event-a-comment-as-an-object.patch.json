@@ -1,0 +1,13 @@
+{
+  "base": "station-events/valid/source-event.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/event/comments/0",
+      "value": {
+        "at": 1794989990.0,
+        "text": "x"
+      }
+    }
+  ]
+}

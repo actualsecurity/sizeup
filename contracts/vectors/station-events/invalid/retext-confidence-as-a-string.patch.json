@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/retext.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/confidence",
+      "value": "0.8"
+    }
+  ]
+}

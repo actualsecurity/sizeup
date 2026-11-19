@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-job-result-answer.schema.json",
+  "title": "Station job result answer",
+  "description": "The hub's 200 answer to POST /api/station/jobs/<id> (Hub.handle, sizeup/cloud/hub.py): the result reached the caller that was waiting. The station reads only the status. 404 `no such job (it timed out)`: the hub's caller gave up before the result came, or the result was delivered before (the work was done all the same, J1); 400 `a JSON object` for a body that is JSON but no object, `bad request: ...` for one that is not JSON; 413 `too large` over 16 MiB. Those bodies are station-error objects (`error` alone, no `reason`). The station gives up on any 4xx.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": [
+    "ok"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "ok": {
+      "const": true,
+      "description": "Always true."
+    }
+  }
+}

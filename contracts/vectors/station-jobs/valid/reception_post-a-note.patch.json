@@ -1,0 +1,19 @@
+{
+  "base": "station-jobs/valid/reception_post.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/0",
+      "value": {
+        "action": "note",
+        "id": "ba9876543210",
+        "note": "after the antenna was moved"
+      }
+    },
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/2",
+      "value": ""
+    }
+  ]
+}

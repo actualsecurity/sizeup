@@ -1,0 +1,645 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/station-events.schema.json",
+  "title": "Station events post",
+  "description": "The body of POST /api/station/events, as the station sends it today (StationLink._forward, sizeup/cloud/station.py): the oldest rows of its outbox, in order. Everything the station hears that must not be lost goes this way: pages, transmissions with their clips, new words, radio ids, the incident sources' events. Plain JSON, never gzipped, with a Content-Length; the hub takes at most 32 MiB. A batch is the oldest rows up to 200 events and 4 MiB of data and clips before base64, and always at least one (so one event over 4 MiB goes alone). The hub answers `station-events-answer` with its cursor, and the station then deletes every row up to it; on any other answer it sends the same batch again. Delivery is at least once and in order: the cursor rules are in contracts/README.md and contracts/events/cursor.json. Times are Unix seconds, never milliseconds.",
+  "x-status": "as-built",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["epoch", "station", "events"],
+  "additionalProperties": true,
+  "properties": {
+    "epoch": {"type": "string", "description": "The outbox's identity: 16 lower-case hex characters made at random with the outbox file (Outbox, sizeup/cloud/outbox.py). The hub's cursor counts within one epoch: a post with another epoch than the last one's sets the cursor to 0 and everything in it is applied. So a new outbox file must have a new epoch, and two writers must never share a hub with one each. The hub cuts it to 40 characters and takes a missing one as \"\".", "minLength": 1, "maxLength": 40},
+    "station": {"type": "string", "description": "The station's id, as the hub last named it (else its config's). The hub checks it against the token: another station's id is 401 `id_mismatch`. It keys nothing by it: the cursor is the hub's one, whoever posts. \"\" from a station with no id of its own.", "maxLength": 64},
+    "events": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/event"},
+      "description": "The events, oldest first (the hub sorts them by `seq` before it applies them). The station never posts an empty list; the hub takes one and answers its cursor. The hub answers 400 when this is not a list."
+    }
+  },
+  "$defs": {
+    "event": {
+      "title": "One event",
+      "description": "One row of the station's outbox (sizeup/cloud/outbox.py). An item of `events` that is not an object is not applied and is listed under `rejected` as `malformed` (#762).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["seq", "at", "type", "data", "audio", "audio_dropped"],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "page", "description": "The event is a `page`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/page"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "page_text", "description": "The event is a `page_text`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/page_text"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "traffic", "description": "The event is a `traffic`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/traffic"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "alarm", "description": "The event is a `alarm`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/alarm"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "retext", "description": "The event is a `retext`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/retext"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "rerun", "description": "The event is a `rerun`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/rerun"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "alt_text", "description": "The event is a `alt_text`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/alt_text"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "heard", "description": "The event is a `heard`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/heard"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "activity", "description": "The event is a `activity`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/activity"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "source_event", "description": "The event is a `source_event`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/source_event"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "source_health", "description": "The event is a `source_health`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/source_health"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {"const": "source_seen", "description": "The event is a `source_seen`."}
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {"$ref": "#/$defs/source_seen"}
+            }
+          }
+        }
+      ],
+      "properties": {
+        "seq": {"type": "integer", "description": "The row's number in the outbox: 1 for the first event of an epoch, strictly increasing, never used twice within an epoch (not even after the row is gone). The hub's cursor is the highest `seq` of the epoch it has dealt with: an event at or under it is skipped as delivered before. A gap is not noticed.", "minimum": 1, "maximum": 9007199254740991},
+        "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station queued it, Unix seconds. Sent, never read by the hub."},
+        "type": {"type": "string", "description": "What the event is: it picks the shape of `data`. The hub logs and acks a type it does not know, and applies nothing.", "x-known": ["page", "page_text", "traffic", "alarm", "retext", "rerun", "alt_text", "heard", "activity", "source_event", "source_health", "source_seen"]},
+        "data": {"type": "object", "description": "The event itself, by `type`: see $defs."},
+        "audio": {"type": ["string", "null"], "pattern": "^UklGR[A-Za-z0-9+/]*={0,2}$", "contentEncoding": "base64", "contentMediaType": "audio/wav", "description": "The event's clip: a whole RIFF / WAVE file in base64 (RFC 4648 section 4: the standard alphabet, with padding, no line breaks), so it always starts `UklGR`. null for an event without a clip and for one whose clip the outbox dropped. The station sends PCM, mono, 16-bit, 8000 frames a second (its 16 kHz clip, every other sample). The hub checks none of that: it decodes the base64 without validation and stores the bytes as they are."},
+        "audio_dropped": {"type": "boolean", "description": "The outbox dropped this event's clip to stay under its size cap (`audio` is then null). Sent, never read by the hub."},
+        "qid": {"type": "integer", "minimum": 1, "description": "Present only on a copy of an event the hub refused that the station's quarantine sends again (sizeup/cloud/outbox.py requeue_due, #762): the quarantine row's id. The hub reads it on a `source_event` only (#791): it marks that snapshot `resent`, and a re-sent snapshot older than the one it applied is dropped, however small the gap (a first send keeps the 120 s tolerance). The hub's cursor treats the copy as any event (a new `seq`)."}
+      }
+    },
+    "clip_id": {"type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._-]{0,120}$", "description": "A clip id: a letter or digit, then at most 120 letters, digits, `.`, `_` or `-`, never two dots in a row. The hub fails the event for any other id."},
+    "page": {"title": "page: a page off the air", "description": "A page (or a voice transmission) on a paging channel, the moment its recording is complete and before its transcript (App._page_done, sizeup/app.py). Its `audio` is the clip. The `page_text` of the same id follows.", "$ref": "#/$defs/page_doc"},
+    "page_text": {"title": "page_text: a page's transcript", "description": "The same page again once speech-to-text is done with it (App._transcribed_one, sizeup/app.py): the whole document, now with `raw`, `confidence`, `status`, `model` and `dispatch`. No `audio`. The hub reads `raw`, `confidence`, `status`, `model`, `stt` and `vocab_v` from it; when it never had the `page`, it takes the whole document as the page. It ignores one for a page that is already final.", "$ref": "#/$defs/page_doc"},
+    "traffic": {"title": "traffic: a finished transmission", "description": "A finished transmission with its clip, once speech-to-text is done with it or was not asked (App._transcribed_one, sizeup/app.py). The transmission's own keys; beside the ten it always has, `raw`, `confidence`, `model`, `stt`, `attach` and `pairs` are always there. Its `audio` is the clip.", "$ref": "#/$defs/transmission", "required": ["raw", "confidence", "model", "stt", "attach", "pairs"]},
+    "alarm": {
+      "title": "alarm: an emergency button, ahead of the words",
+      "description": "The emergency button, sent the moment it is known and before speech-to-text (App._alarm_now, sizeup/app.py): the transmission as it is then, so without the keys speech-to-text adds and without `attach`; `pairs` is always a list. Its `audio` is the clip when there is one yet (none for an alarm raised at the key-up of an FM carrier). The `traffic` event of the same id follows with the words. A flag the station found stuck is sent once as an alarm with `emergency` false and `flag_stuck`. The hub stores the clip unless it has it, clears `text`, and raises or updates the alarm.",
+      "$ref": "#/$defs/transmission",
+      "required": ["emergency", "pairs"],
+      "properties": {
+        "pairs": {"type": "array", "description": "An alarm's `pairs` is always a list ([] when it has none), never null."}
+      }
+    },
+    "retext": {
+      "title": "retext: new words for a clip",
+      "description": "New words for a page or a transmission the hub already has: a re-run on the station, the station's whisper standing in for Amazon Transcribe, or a shed clip caught up (App._retext, sizeup/app.py). No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "text", "status", "confidence", "model"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/clip_id", "description": "The clip the words are for. An id the hub does not know changes nothing."},
+        "text": {"type": "string", "description": "The new words; \"\" when nothing was said."},
+        "status": {"type": "string", "description": "Its speech-to-text status now. The hub takes a missing one as `done`.", "x-known": ["pending", "done", "no_speech", "off", "remote", "skipped", "error"]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "The model's confidence, 0 to 1; null without one."},
+        "model": {"type": "string", "description": "The model that wrote the words."},
+        "stt_prompt_time": {"const": true, "description": "Present (true) only when whisper's prompt carried the clip's own time."},
+        "alt": {
+          "title": "The other engine's words",
+          "description": "The other engine's transcript, kept to compare. Present only on a re-run that has one.",
+          "x-complete": true,
+          "type": "object",
+          "required": ["text", "model"],
+          "additionalProperties": true,
+          "properties": {
+            "text": {"type": "string", "description": "The alternative words."},
+            "model": {"type": "string", "description": "The model that wrote them."}
+          }
+        },
+        "catchup": {"const": true, "description": "Present (true) only for a shed clip caught up later: the words may be hours old, so on the hub nothing that alerts hears them."},
+        "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt. Present only when one did. The hub cuts it to 80 characters."},
+        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub nothing that pre-alerts hears them; an emergency still alarms, labelled late."}
+      }
+    },
+    "rerun": {
+      "title": "rerun: a re-run is over",
+      "description": "A re-run of a clip's speech-to-text on the station ended (App._rerun_finish, sizeup/app.py). No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "result", "model"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/clip_id", "description": "The clip that was run again."},
+        "result": {"type": "string", "description": "`changed`, `same` or `failed: <why>`, then notes after `; ` (`changed; catch-up`); at most 300 characters. The hub keeps the first 200.", "maxLength": 300},
+        "model": {"type": "string", "description": "The model that ran; \"\" when none did. The hub keeps the first 80 characters."}
+      }
+    },
+    "alt_text": {
+      "title": "alt_text: the other engine's words",
+      "description": "The station's whisper text as the alternative to the text of record (a re-run with both engines; App._set_alt, sizeup/app.py). No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "text", "model"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/clip_id", "description": "The clip the alternative is for."},
+        "text": {"type": "string", "description": "The alternative words."},
+        "model": {"type": "string", "description": "The model that wrote them. The hub keeps the first 80 characters."}
+      }
+    },
+    "heard": {
+      "title": "heard: a radio id on the air",
+      "description": "A radio id heard on the air, for the hub's radio registry (App._heard, sizeup/app.py). Sent at most once per (system, radio id, alias) in 300 s. No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["system", "radio_id", "alias", "at", "channel"],
+      "additionalProperties": true,
+      "properties": {
+        "system": {"type": "string", "description": "The signalling the id came in. The hub ignores the event, without a word, for any other value.", "x-known": ["p25", "mdc", "fleetsync"]},
+        "radio_id": {"type": "string", "description": "The radio id as decoded: P25 unit id (digits), MDC-1200 (4 hex), FleetSync (`<fleet>-<id>`). Never \"\"."},
+        "alias": {"type": "string", "description": "The alias the P25 system sent for it; \"\" when none."},
+        "at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it was heard, Unix seconds; null when not known."},
+        "channel": {"type": "string", "description": "The channel's label or the talkgroup's name it was heard on."}
+      }
+    },
+    "activity": {
+      "title": "activity: a minute of key-ups on an encrypted talkgroup",
+      "description": "A minute's key-ups on an encrypted talkgroup of another P25 system: counted, never recorded (App._p25_activity, sizeup/app.py). Context: the station holds it back from a hub that has not said `p25_systems` in its `caps`. No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["source", "minute", "calls", "radios"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string", "description": "The talkgroup's source key, `p25:<system>:<talkgroup>`."},
+        "minute": {"type": "integer", "description": "Which minute: Unix time divided by 60, whole.", "minimum": 0, "maximum": 100000000},
+        "calls": {"type": "integer", "description": "How many key-ups in that minute.", "minimum": 0},
+        "radios": {
+          "type": "array",
+          "items": {"type": "string", "description": "One radio id."},
+          "description": "The radio ids that keyed up. The hub keeps the first 40, each cut to 12 characters."
+        }
+      }
+    },
+    "source_event": {
+      "title": "source_event: an incident source's event",
+      "description": "A new or changed event of an external incident source running on the station (sizeup/sources/runner.py). The only event type the hub does not ack when it fails to apply it (see the cursor rules): it is sent again, three deliveries at most. No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["source", "label", "rank", "seen_at", "first_seen", "event"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string", "description": "The adapter's id: a lower-case letter or digit, then at most 31 of a-z, 0-9, `_`, `-`; never `paging`. The hub fails the event otherwise.", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+        "label": {"type": "string", "description": "The adapter's name for people. The hub keeps the first 60 characters."},
+        "rank": {"type": "integer", "description": "The adapter's rank among the sources, 1 the first. The hub takes anything outside 1 to 99 as 1."},
+        "seen_at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station handed this version on, Unix seconds. From #762 on the hub keeps it with the report and ignores a version more than 120 s older than the one it has applied (one sent again from the station's quarantine)."},
+        "first_seen": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station first had the event, Unix seconds: the adapter's own time when it gives a believable one, else `seen_at`. The hub takes it as when the report came."},
+        "event": {"$ref": "#/$defs/feed_event"}
+      }
+    },
+    "source_health": {
+      "title": "source_health: an incident source's health",
+      "description": "How an incident source's adapter is doing: on every change and every 60 s (sizeup/sources/runner.py). The hub keeps the newest by `at`. No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["source", "label", "rank", "state", "reason", "since", "at", "stopped"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string", "description": "The adapter's id: a lower-case letter or digit, then at most 31 of a-z, 0-9, `_`, `-`; never `paging`. The hub fails the event otherwise.", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+        "label": {"type": "string", "description": "The adapter's name for people. The hub keeps the first 60 characters."},
+        "rank": {"type": "integer", "description": "The adapter's rank among the sources, 1 the first. The hub takes anything outside 1 to 99 as 1."},
+        "state": {"type": "string", "description": "The adapter's state. The hub fails the event for a word it does not know.", "x-known": ["ok", "backing_off", "failing", "stale"]},
+        "reason": {"type": "string", "description": "Why, short, for people; \"\" when ok. At most 200 characters; never a secret, an address of a server or a server's own text.", "maxLength": 200},
+        "since": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it entered this state, Unix seconds; null when the adapter does not say."},
+        "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station made this report, Unix seconds. The hub fails the event when it is not a number."},
+        "stopped": {"type": "boolean", "description": "The adapter itself says it has stopped (its own health is `failing`)."}
+      }
+    },
+    "source_seen": {
+      "title": "source_seen: the ids an incident source still lists",
+      "description": "The event ids in an incident source's last good snapshot, every 120 s, so the hub can flag an open report the source no longer lists (sizeup/sources/runner.py). No `audio`.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["source", "label", "rank", "at", "ids", "complete"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string", "description": "The adapter's id: a lower-case letter or digit, then at most 31 of a-z, 0-9, `_`, `-`; never `paging`. The hub fails the event otherwise.", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+        "label": {"type": "string", "description": "The adapter's name for people. The hub keeps the first 60 characters."},
+        "rank": {"type": "integer", "description": "The adapter's rank among the sources, 1 the first. The hub takes anything outside 1 to 99 as 1."},
+        "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the station made this list, Unix seconds."},
+        "ids": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {"type": "string", "description": "One event id."},
+          "description": "The event ids in the snapshot, at most 2000. The hub fails the event when this is not a list."
+        },
+        "complete": {"type": "boolean", "description": "False when the list was cut at 2000: the hub then flags nothing. The hub takes a missing one as true."}
+      }
+    },
+    "page_doc": {
+      "title": "A page",
+      "description": "A page off a paging channel as the station keeps it and sends it (App._page_doc, sizeup/app.py: Page.as_dict of sizeup/radio/page.py plus what the pipeline added). The hub builds its own Page from it (page_from_dict): `id`, `label`, `mhz`, `start`, `end` and `kind` must be there (a missing one fails the event), every other key has a default. The hub does not read `departments`, `read_twice` (it works both out again from `tones` and `raw`), `rerun_result` nor `vocab_v` of a `page` event.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "label", "mhz", "start", "end", "kind", "status", "departments", "quieting_db", "tones", "raw", "confidence", "voice_offset_s", "tone_seq", "dispatch", "history", "rerun_at", "rerun_result", "model", "stt", "read_twice", "vocab_v"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/clip_id", "description": "The page's clip id: 10 hex characters made by the station. The hub ignores a `page` whose id it has already."},
+        "label": {"type": "string", "description": "The paging channel's label."},
+        "mhz": {"type": "number", "description": "The channel's frequency, MHz.", "exclusiveMinimum": 0},
+        "start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the recording starts, Unix seconds, two decimals."},
+        "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it ends, Unix seconds, two decimals. The hub files the clip under this time."},
+        "kind": {"type": "string", "description": "`page`: tones were decoded; `voice`: none were.", "x-known": ["page", "voice"]},
+        "status": {"type": "string", "description": "Where its speech-to-text stands. `pending`: the station's whisper has it; `remote`: the hub is to transcribe it (the channel's engine is Amazon Transcribe); `done` / `no_speech`: final; `no_voice`: tones only; `off` / `skipped` / `error`: not transcribed. The hub takes a missing one as `done`.", "x-known": ["pending", "done", "no_speech", "no_voice", "off", "remote", "skipped", "error"]},
+        "departments": {
+          "type": "array",
+          "items": {"type": "string", "description": "One department's name."},
+          "description": "Every name in `tones`, in order, once each. Sent, never read: the hub works it out from `tones`."
+        },
+        "quieting_db": {"type": "number", "description": "How far the carrier quieted the hiss, dB, one decimal."},
+        "tones": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/tone"},
+          "description": "The tone pairs decoded, in order; [] for a voice page."
+        },
+        "raw": {"type": "string", "description": "The transcript; \"\" until there is one."},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "The model's confidence in the transcript, 0 to 1; null without one."},
+        "voice_offset_s": {"type": "number", "description": "Where the voice starts in the clip, seconds, three decimals; 0 for a voice page.", "minimum": 0},
+        "tone_seq": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/tone_heard"},
+          "description": "Every tone heard, in order."
+        },
+        "dispatch": {
+          "anyOf": [
+            {"$ref": "#/$defs/dispatch"},
+            {"type": "null"}
+          ],
+          "description": "What the station's parser read in `raw`; null before the transcript and when nothing was read."
+        },
+        "history": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/earlier_text"},
+          "description": "The texts it had before, oldest first, at most the last 5."
+        },
+        "rerun_at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When its text was last written again by a re-run, Unix seconds; null when never."},
+        "rerun_result": {"type": "string", "description": "The last re-run's result (see the `rerun` event); \"\" when none. Sent, never read by the hub from a page."},
+        "model": {"type": "string", "description": "The model that wrote `raw`; \"\" before the transcript."},
+        "stt": {"type": "string", "description": "Which engine the hub is to add. \"\": none (the station's whisper alone); `aws`: the hub transcribes the clip with Amazon Transcribe; `both`: the hub adds Amazon Transcribe's text as the alternative; `pool`: handed to the hub's speech-to-text pool.", "x-known": ["", "aws", "both", "pool"]},
+        "read_twice": {"type": ["boolean", "null"], "description": "The message was read twice, from the transcript; null for a voice page. Sent, never read: the hub works it out from `raw`."},
+        "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt; \"\" when none. Read by the hub from a `page_text` only (cut to 80 characters)."},
+        "alt_text": {"type": "string", "description": "The other engine's transcript. Only with `alt_model`."},
+        "alt_model": {"type": "string", "description": "The model that wrote `alt_text`. Present only when there is an alternative; the hub reads `alt_text` only when this is set."},
+        "keyup": {"$ref": "#/$defs/keyup"},
+        "radio_id": {"type": "string", "description": "The radio id(s) decoded on a unit's key-up cut from a page, joined with \", \". Present only when one was decoded."},
+        "unit": {"type": "string", "description": "Who keyed that key-up, as the station names them, joined with \", \". Present only with `radio_id`."}
+      }
+    },
+    "tone": {
+      "title": "One tone pair",
+      "description": "A two-tone pair or a long tone decoded in the page (sizeup/radio/tones.py ToneEvent).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["kind", "a_hz", "b_hz", "names", "start", "end"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {"type": "string", "description": "The hub fails the event without it.", "x-known": ["two_tone", "long_tone"]},
+        "a_hz": {"type": "number", "description": "The first tone, Hz, one decimal. The hub fails the event without it.", "minimum": 0},
+        "b_hz": {"type": ["number", "null"], "minimum": 0, "description": "The second tone, Hz, one decimal; null for a long tone."},
+        "names": {
+          "type": "array",
+          "items": {"type": "string", "description": "One department's name in the station's tone plan."},
+          "description": "Who the station's tone plan says this pair pages; [] when it names nobody."
+        },
+        "start": {"type": "number", "description": "Where the pair starts, seconds into the clip.", "minimum": 0},
+        "end": {"type": "number", "description": "Where the pair ends, seconds into the clip.", "minimum": 0}
+      }
+    },
+    "tone_heard": {
+      "title": "One tone heard",
+      "description": "One tone as heard, in order, whether or not it is part of a pair (sizeup/radio/tones.py ToneDetector.sequence).",
+      "x-complete": true,
+      "type": "object",
+      "required": ["hz", "start", "dur", "role"],
+      "additionalProperties": true,
+      "properties": {
+        "hz": {"type": "number", "description": "Its frequency, Hz, one decimal.", "minimum": 0},
+        "start": {"type": "number", "description": "Where it starts, seconds into the clip.", "minimum": 0},
+        "dur": {"type": "number", "description": "How long it lasts, seconds.", "minimum": 0},
+        "role": {"type": "string", "description": "Its place in a pair; \"\" when it is in none.", "x-known": ["A", "B", "AB", "long", ""]}
+      }
+    },
+    "dispatch": {
+      "title": "A parsed dispatch",
+      "description": "What the station's parser read in the page's words (sizeup/dispatch.py Dispatch). The hub keeps it on the page as it came and parses the words again itself for the CAD.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["text", "departments", "incident_type", "category", "type_phrase", "code", "units", "numbers", "location", "cross_street", "time_out"],
+      "additionalProperties": true,
+      "properties": {
+        "text": {"type": "string", "description": "The words it was parsed from."},
+        "departments": {
+          "type": "array",
+          "items": {"type": "string", "description": "One department named in the words."},
+          "description": "The departments named in the words."
+        },
+        "incident_type": {"type": "string", "description": "The type of call, as the parser names it; \"\" when none was read."},
+        "category": {"type": "string", "description": "The type's category, one lower-case word; \"\" when none."},
+        "type_phrase": {"type": "string", "description": "The words that gave the type."},
+        "code": {"type": "string", "description": "A priority dispatch code as spoken; \"\" when none."},
+        "units": {
+          "type": "array",
+          "items": {"type": "string", "description": "One unit as spoken."},
+          "description": "The apparatus named."
+        },
+        "numbers": {
+          "type": "array",
+          "items": {"type": "string", "description": "One number as spoken."},
+          "description": "Other numbers read in the words."
+        },
+        "location": {"type": "string", "description": "The address, lower case as parsed; \"\" when none."},
+        "cross_street": {"type": "string", "description": "The cross street, lower case; \"\" when none."},
+        "time_out": {"type": "string", "description": "The time spoken at the end, HH:MM; \"\" when none."}
+      }
+    },
+    "earlier_text": {
+      "title": "An earlier text",
+      "description": "A text this page had before a re-run changed it.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["text", "at", "model"],
+      "additionalProperties": true,
+      "properties": {
+        "text": {"type": "string", "description": "The earlier words."},
+        "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it was replaced, Unix seconds."},
+        "model": {"type": "string", "description": "The model that wrote the earlier words; \"\" when not known."}
+      }
+    },
+    "keyup": {
+      "title": "A piece cut at a key-up",
+      "description": "A transmission that is a piece of one recording cut at key-ups (sizeup/radio/fm.py, am.py; App.keyup_link): which recording, and the piece before it.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["parent", "prev", "split"],
+      "additionalProperties": true,
+      "properties": {
+        "parent": {"type": "string", "description": "The clip id of the recording's first piece (the first piece: its own)."},
+        "prev": {"type": "string", "description": "The clip id of the piece before this one; \"\" for the first."},
+        "split": {"type": "string", "description": "Why it was cut from the piece before; \"\" for the first.", "x-known": ["", "gap", "id", "level"]}
+      }
+    },
+    "transmission": {
+      "title": "A transmission",
+      "description": "One finished transmission as the station holds it: every attribute of its Traffic object (sizeup/incidents.py: Traffic.as_dict is the object's whole __dict__ but `raw_audio`). Ten of them are the object's declared fields and are always there; the rest are set along the way by whichever path the transmission took (an FM channel, the airband, a talkgroup of the county P25 system, one of another P25 system, speech-to-text), so most are absent on most transmissions. `x-hub` on each key says what the hub does with it: `required` (the event fails without it), `read` (the hub acts on it by name), `replaced` (the hub writes its own value over it), `kept` (nothing on the hub reads it by name). Whatever it says, the hub KEEPS every key whose name is a lower-case letter followed by at most 30 lower-case letters, digits or underscores, known or not, as an attribute of its own copy, and hands it on to every console in the row; a key with any other name, and `has_audio`, is dropped. So a key added here reaches the consoles the day a station sends it: this list is closed by the tests (`x-complete`), not by the hub.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["id", "source", "start", "end", "text", "status", "unit", "talkgroup", "rig", "radio_id"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"$ref": "#/$defs/clip_id", "description": "The clip id, and the row's id everywhere. An FM or airband channel: `<label without spaces>-<start in ms>`; a P25 call: trunk-recorder's call name, with `-t<k>` when the call has more than one key-up; an alarm raised at the key-up of an FM carrier: `<label without spaces>-live-<start in ms>`. The hub ignores a `traffic` whose id it has already.", "x-hub": "required"},
+        "source": {"type": "string", "description": "Where it was heard: the channel's label, or the talkgroup's name. The hub fails the event without it, and files the clip under it.", "x-hub": "required"},
+        "start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it starts, Unix seconds. The hub fails the event without it.", "x-hub": "required"},
+        "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it ends, Unix seconds. The hub fails the event without it, and files the clip under this time.", "x-hub": "required"},
+        "text": {"type": "string", "description": "The words; \"\" when nothing was said or it was not transcribed. The hub fails the event without it and then writes `raw` over it (\"\" for an alarm).", "x-hub": "required"},
+        "status": {"type": "string", "description": "Where its speech-to-text stands. `done` / `no_speech`: final, from the station's whisper; `remote`: the hub is to transcribe it (see `transcript_pending`); `off`: kept, not transcribed; `skipped`: whisper was busy, it may be caught up later; `error`: whisper failed; `pending`: not transcribed yet (an alarm). The hub takes a missing one as `done`.", "x-known": ["pending", "done", "no_speech", "off", "remote", "skipped", "error"], "x-hub": "read"},
+        "unit": {"type": "string", "description": "Who talked, as the station names them: an alias, a tag or the radio id, joined with \", \"; \"\" when not known. An MDC-1200 emergency adds ` EMERGENCY` to the name.", "x-hub": "read"},
+        "talkgroup": {"type": ["integer", "null"], "minimum": 0, "description": "The P25 talkgroup number; null on an FM or airband channel. With `system` set it is that system's number, never the county's.", "x-hub": "read"},
+        "rig": {"type": "string", "description": "The unit the station's registry gives the radio; \"\" when unknown. The hub writes its own registry's answer over it (\"\" for another P25 system's).", "x-hub": "replaced"},
+        "radio_id": {"type": "string", "description": "The radio id(s) as decoded (P25 unit id, MDC-1200, FleetSync), joined with \", \"; \"\" when none.", "x-hub": "read"},
+        "raw": {"type": "string", "description": "The transcript as speech-to-text wrote it; \"\" when none. The hub takes it as the row's text.", "x-hub": "read"},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "The model's confidence in `raw`, 0 to 1; null without one.", "x-hub": "read"},
+        "model": {"type": "string", "description": "The model that wrote `raw` (a file name), or in its place why there are no words (`pool`, `weak signal (carrier 2.0 dB): not transcribed`, `<model> (skipped: busy ...)`): at most 200 characters.", "x-hub": "read"},
+        "stt": {"type": "string", "description": "Which engine the hub is to add. \"\": none; `aws`: the hub's Amazon Transcribe writes the text (with `transcript_pending`); `both`: the hub adds Amazon Transcribe's text as the alternative.", "x-known": ["", "aws", "both"], "x-hub": "read"},
+        "transcript_pending": {"type": "string", "description": "Present only when the station did not transcribe it and the hub is to: `aws` (Amazon Transcribe on the clip) or `pool` (the hub's speech-to-text pool, in the class `stt_class`). The hub takes any other value as absent.", "x-known": ["aws", "pool"], "x-hub": "read"},
+        "stt_wait_s": {"type": ["number", "null"], "minimum": 0, "description": "How long it waited in the station's whisper queue, seconds, two decimals; null when it never queued. Present once whisper ran.", "x-hub": "read"},
+        "stt_run_s": {"type": "number", "description": "How long whisper ran on it, seconds, two decimals. Present once whisper ran.", "minimum": 0, "x-hub": "read"},
+        "stt_class": {"type": "string", "description": "The class of the whisper queue it ran in, or (with `transcript_pending` `pool`) the class the pool is to take it in.", "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"], "x-hub": "read"},
+        "stt_prompt_time": {"type": "boolean", "description": "Whisper's prompt carried the clip's own time. Present once the station's whisper took it.", "x-hub": "read"},
+        "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt; \"\" when none. Present once the station's whisper took it. The hub cuts it to 80 characters.", "x-hub": "read"},
+        "attach": {"type": "boolean", "description": "`traffic` only, always there: the station's own choice whether this is our traffic (an FM channel, or a talkgroup its Main switch is on; never another P25 system's). The hub takes it as the row's `ours` on a talkgroup and attaches it to the active incident; a missing one makes the hub decide by its own switches.", "x-hub": "read"},
+        "pairs": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "string", "description": "The P25 radio id, digits as a string; \"\" when none was decoded."},
+              {"type": "string", "description": "The alias the system sent for it; \"\" when none."}
+            ],
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "One talker: [radio id, alias]. The hub drops a pair that is not a two-item list."
+          },
+          "description": "The P25 talkers of this key-up, for the hub's own registry lookup. `traffic`: null on a channel that is not P25 (and on another P25 system's, whose radios are never looked up). `alarm`: always a list, [] when none.",
+          "x-hub": "read"
+        },
+        "low_energy": {"type": "boolean", "description": "FM and airband: the clip has less than the least speech whisper needs. Whisper's judge reads it on the station.", "x-hub": "kept"},
+        "keyup": {"$ref": "#/$defs/keyup", "x-hub": "read"},
+        "id_note": {"type": "string", "description": "FM: why a key-up has no radio id. Present only when it has none and a reason is known.", "x-known": ["undecoded", "none", "weak"], "x-hub": "read"},
+        "emergency": {"type": "boolean", "description": "The radio's emergency button: P25 (the call's flag) or an MDC-1200 / FleetSync emergency packet. An `alarm` always carries it: false marks a flag the station found stuck (see `flag_stuck`). The hub takes an alarm without it as true.", "x-hub": "read"},
+        "emergency_via": {"type": "string", "description": "FM: which signalling carried the emergency packet. Present only with an FM emergency.", "x-known": ["MDC", "FleetSync"], "x-hub": "read"},
+        "alarm_key": {"type": "string", "description": "FM: the id of the alarm already raised at the key-up of this carrier (`<label without spaces>-live-<start in ms>`), which this transmission takes over. Present only when there was one.", "x-hub": "read"},
+        "kept": {"type": "string", "description": "P25: why a call on a talkgroup whose Record switch is off was kept. Present only then.", "x-known": ["emergency"], "x-hub": "read"},
+        "late": {"type": "boolean", "description": "P25: true on a call written while sizeup was down and ingested at its next start (#747): it goes to the radio log and speech-to-text like any, no pre-alert hears it, and an emergency still alarms, labelled late. An emergency's alarm mark always carries it (false when live); a transmission only when true.", "x-hub": "read"},
+        "flag_stuck": {"type": "string", "description": "P25: the emergency flag on this call is one the station found stuck (a radio left in emergency mode, a talkgroup held in emergency): who or what it is stuck on, for people. Present only then; never together with `emergency` true.", "x-hub": "read"},
+        "evidence": {"type": "object", "additionalProperties": true, "description": "P25 emergency: trunk-recorder's own record of the call (its JSON, in its own format, with `file` added and `srcList` / `freqList` cut to 200 entries), kept for audit. Present only with a P25 emergency whose record could be read. Not described here: it is another program's format.", "x-hub": "read"},
+        "fm": {"type": "boolean", "description": "False: the clip needs no FM de-emphasis (decoded P25 voice, AM airband). Absent on an FM channel, which is taken as true. Read when the clip is transcribed again.", "x-hub": "read"},
+        "call_id": {"type": "string", "description": "P25: the id of the whole call this key-up is a piece of (trunk-recorder's call name).", "x-hub": "read"},
+        "turn": {"type": "integer", "description": "P25: which key-up of the call this is, from 0.", "minimum": 0, "x-hub": "read"},
+        "mhz": {"type": "number", "description": "Airband: the frequency it was heard on, MHz, four decimals.", "exclusiveMinimum": 0, "x-hub": "read"},
+        "carrier_db": {"type": "number", "description": "Airband: the carrier over the noise floor, dB, one decimal.", "x-hub": "read"},
+        "carrier_dbfs": {"type": "number", "description": "Airband: the carrier's level, dBFS, one decimal. Present when measured.", "x-hub": "kept"},
+        "snr_db": {"type": "number", "description": "Airband: the voice's signal-to-noise ratio, dB, one decimal. Present when measured.", "x-hub": "kept"},
+        "opened": {"type": "string", "description": "Airband: what opened the squelch. Present when measured.", "x-known": ["carrier", "sustained"], "x-hub": "kept"},
+        "notched_hz": {
+          "type": "array",
+          "items": {"type": "number", "description": "One tone, Hz, one decimal.", "minimum": 0},
+          "description": "Airband: the steady tones notched out of the clip. Present only when there were some.",
+          "x-hub": "kept"
+        },
+        "floor_dbfs": {"type": "number", "description": "Airband: the noise floor it was measured against, dBFS, one decimal. Present when measured.", "x-hub": "kept"},
+        "system": {"type": "string", "description": "Another P25 system's transmission (context: never our traffic, never on an incident, no alarm): that system's short name. Absent on everything else. With it the station holds the event back from a hub that has not said `p25_systems` in its `caps`.", "x-hub": "read"},
+        "tier": {"type": "string", "description": "Another P25 system's: the tier its talkgroup had when the call was heard.", "x-known": ["alert", "text", "record"], "x-hub": "read"},
+        "ours": {"type": "boolean", "description": "A P25 row is one of ours. Another P25 system's: always false. The county's: set by the station from `attach` as it sends; the hub writes its own from `attach` over it.", "x-hub": "replaced"},
+        "source_key": {"type": "string", "description": "Another P25 system's: the row's source, `p25:<system>:<talkgroup>`.", "x-hub": "read"},
+        "group": {"type": "string", "description": "Another P25 system's: the talkgroup's group in that system's talkgroups file; \"\" when none.", "x-hub": "read"},
+        "service_auto": {"type": "string", "description": "Another P25 system's: the service its talkgroups file gives the talkgroup, before any choice by an admin. The hub applies its own admins' choice over it.", "x-known": ["fire", "police", "ems", "transit", "air", "other"], "x-hub": "read"},
+        "service": {"type": "string", "description": "Another P25 system's: the service the station used (the admins' choice it had then, else `service_auto`). The hub reads it only when `service_auto` is missing (an older station).", "x-known": ["fire", "police", "ems", "transit", "air", "other"], "x-hub": "read"},
+        "dept": {"type": "string", "description": "Another P25 system's: the talkgroup's department in that system's talkgroups file; \"\" when none.", "x-hub": "read"}
+      }
+    },
+    "feed_event": {
+      "title": "A feed event",
+      "description": "One event of an external incident source as its adapter hands it over (sizeup/sources/__init__.py FeedEvent.as_dict). The station checks it before it is queued and the hub checks it again (FeedEvent.check): at most 60 units of at most 32 characters, 500 comments, 2000 characters a text, 50 aliases, 16 KiB of `extra`, 256 KiB in all.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["source", "event_id", "type", "location", "units", "times", "unit_times", "comments", "closed", "extra", "aliases"],
+      "additionalProperties": true,
+      "properties": {
+        "source": {"type": "string", "description": "The adapter's id, the same as the event's `source` beside it.", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+        "event_id": {"type": "string", "description": "The source's own id of the event, 1 to 64 characters.", "minLength": 1, "maxLength": 64},
+        "type": {"type": "string", "description": "The type of call as the source words it; at most 2000 characters.", "maxLength": 2000},
+        "location": {"type": "string", "description": "The address as the source words it; at most 2000 characters.", "maxLength": 2000},
+        "units": {
+          "type": "array",
+          "maxItems": 60,
+          "items": {"type": "string", "description": "One unit code, 1 to 32 characters.", "minLength": 1, "maxLength": 32},
+          "description": "The units on the event."
+        },
+        "times": {
+          "type": "object",
+          "additionalProperties": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When, Unix seconds."},
+          "description": "The event's times by name, each Unix seconds. The names the hub knows today: `dispatched`, `responding`, `on_location`, `en_route_to`, `out_at`, `in_service`."
+        },
+        "unit_times": {
+          "type": "object",
+          "maxProperties": 60,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When, Unix seconds."},
+            "description": "One unit's times by name, each Unix seconds."
+          },
+          "description": "Each unit's own times, by unit code."
+        },
+        "comments": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the comment was made, Unix seconds."},
+              {"type": "string", "description": "The comment; at most 2000 characters.", "maxLength": 2000}
+            ],
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "One comment: [when, text]."
+          },
+          "description": "The event's comments, oldest first."
+        },
+        "closed": {"type": "boolean", "description": "The source says the event is closed."},
+        "extra": {"type": "object", "additionalProperties": true, "description": "Anything else the adapter gives, JSON values under text keys, at most 16 KiB as JSON. The hub shows `jurisdiction`, `run_numbers` and `group_units` and keeps the rest."},
+        "aliases": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {"type": "string", "description": "Another id of the same event, 1 to 64 characters.", "minLength": 1, "maxLength": 64},
+          "description": "Other event ids of this source that are this event (merged into it)."
+        }
+      }
+    }
+  }
+}
