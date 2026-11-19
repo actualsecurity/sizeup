@@ -61,7 +61,12 @@ window.SizeUp = (() => {
       const none = slot.querySelector(".sz-none");
       if (!none) continue;
       const moved = [...slot.children].filter((c) => c !== none && !c.classList.contains("sz-head"));
-      if (moved.length) show(none, moved.every((c) => c.hidden));
+      if (!moved.length) continue;
+      const empty = moved.every((c) => c.hidden);
+      show(none, empty);
+      // a slot whose cards head themselves (Pre-plan: "Pre-plan", "Site docs"): its own head only over "None on file"
+      const head = slot.querySelector(".sz-head");
+      if (head && "ownHead" in slot.dataset) show(head, empty);
     }
   }
   function apply() {
