@@ -502,6 +502,9 @@
     overflow-clip-margin: 4px; }   /* the "⋯" sits on the row's edge: its focus ring (--focus-w + --focus-off) stays whole */
   .unit-filter { margin-block-end: var(--s-2); gap: var(--s-1); }
   .unit-filter button.talking { border-color: var(--ok); box-shadow: 0 0 0 var(--bw) var(--ok); }
+  /* the incident's operating channels (sizeup/cad/opchannel.py) and its traffic folded under them */
+  .chan-row { margin-block-end: var(--s-2); gap: var(--s-1); align-items: center; }
+  .onchan > summary { cursor: pointer; padding-block: var(--s-1); }
   /* the other engine's text under the transcript, to compare ("both": Settings > Radios > Engine; the ⇄ toggle) */
   .alt-txt { margin-block-start: var(--s-1); padding-inline-start: var(--s-2); border-inline-start: 2px solid var(--line-strong);
     font-size: var(--fs-sm); line-height: var(--lh-sm); }

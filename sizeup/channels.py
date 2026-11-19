@@ -132,20 +132,27 @@ AWS_KEYS_MAX = 16          # channels in the hub's reserve / deny lists (the air
 
 def hub_aws(aws: dict) -> dict:
     """The hub's word on AWS as the station keeps it (set_channel_prefs): ok, why, reserve (channels that keep AWS past
-    our limit) and, when there is one, deny (context channels past their own budget, radio-intel PR 3)."""
+    our limit) and, when there is one, deny (context channels past their own budget, radio-intel PR 3), and promote (the
+    county talkgroups an incident of ours is worked on now: transcribed like Fire/EMS 15, sizeup/cad/opchannel.py)."""
     out = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
            "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:AWS_KEYS_MAX]}
     if aws.get("deny"):
         out.update(deny=[str(k)[:40] for k in aws["deny"]][:AWS_KEYS_MAX], deny_why=str(aws.get("deny_why") or "")[:300])
+    if aws.get("promote"):
+        out["promote"] = [str(k)[:40] for k in aws["promote"] if isinstance(k, str) and k.startswith("tg:")][:AWS_KEYS_MAX]
+        since = aws.get("promote_since") if isinstance(aws.get("promote_since"), dict) else {}
+        out["promote_since"] = {k: float(v) for k, v in since.items() if k in out["promote"]
+                                and isinstance(v, (int, float)) and not isinstance(v, bool)}     # (not in the sig)
     return out
 
 
 def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None,
-        deny=None) -> str:
+        deny=None, promote=None) -> str:
     """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
     AWS past the monthly limit, #195; + the squelch settings; + the context channels past their own AWS budget while
-    ours isn't, radio-intel PR 3) -> the same short signature (hub and station). None of those: the signature from
-    before them."""
+    ours isn't, radio-intel PR 3; + the county talkgroups an incident of ours is worked on now, transcribed like ours:
+    sizeup/cad/opchannel.py) -> the same short signature (hub and station). None of those: the signature from before
+    them."""
     d = {"prefs": {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(overrides.items())}, "aws": bool(aws_ok)}
     if squelch:
         d["squelch"] = {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(squelch.items())}
@@ -155,6 +162,8 @@ def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, 
         d["reserve"] = sorted(str(k) for k in reserve)
     if deny:
         d["deny"] = sorted(str(k) for k in deny)
+    if promote:
+        d["promote"] = sorted(str(k) for k in promote)
     raw = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 

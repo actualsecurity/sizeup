@@ -1456,13 +1456,14 @@ class HubApp(App):
             self.channels_check(force=True)
 
     @staticmethod
-    def _whisper_fallback(job) -> bool:
-        """Does AWS timing out on it send it to the station's whisper? Pages, Fire/EMS 15, the firegrounds and the
-        airband (the ATC pre-alerts, #233; whisper sheds an airband clip that waits 5 min) only (#300): anything else
-        waits for AWS's late answer (usually seconds after the deadline), so a slow AWS never floods the station's
-        whisper with clips nobody is waiting on."""
+    def _whisper_fallback(job, promoted=frozenset()) -> bool:
+        """Does AWS timing out on it send it to the station's whisper? Pages, Fire/EMS 15, the firegrounds, a county
+        talkgroup an incident of ours is worked on now (sizeup/cad/opchannel.py) and the airband (the ATC pre-alerts,
+        #233; whisper sheds an airband clip that waits 5 min) only (#300): anything else waits for AWS's late answer
+        (usually seconds after the deadline), so a slow AWS never floods the station's whisper with clips nobody is
+        waiting on."""
         return (job.kind == "page" or job.channel in STT_FIRST or job.channel in RESERVE_CHANNELS
-                or job.channel in AIRBAND_FIRST)
+                or job.channel in AIRBAND_FIRST or job.channel in promoted)
 
     def _aws_failed(self, job, why: str) -> None:
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
@@ -1473,7 +1474,7 @@ class HubApp(App):
             self._rerun_finish(job.id, f"failed: AWS: {why[:80]}")
             return self.sync()
         late = (job.alt is None and not job.rerun and not job.recovered and why.startswith("AWS timed out")
-                and not self._whisper_fallback(job))
+                and not self._whisper_fallback(job, self.promoted_keys()))
         self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + (
             "" if job.alt is not None else ": waiting for AWS's late answer (whisper is for pages, Fire/EMS 15, the "
                                            "firegrounds and the airband)" if late else ": asking the station's whisper"))
@@ -2096,9 +2097,21 @@ class HubApp(App):
         if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
             kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
-        aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {})}
+        # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
+        # takes them (one from before would never echo them in its signature: a push every 10 s)
+        promote = sorted(self.promoted_keys())[:channels.AWS_KEYS_MAX] \
+            if (_part(self.hub.status, "channels") or {}).get("promote_ok") else []
+        since = self.cad.opchan.promoted_since() if promote else {}
+        aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {}),
+               **({"promote": promote, "promote_since": {k: since[k] for k in promote if k in since}} if promote else {})}
         return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),
-                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny)}
+                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny, promote)}
+
+    def promoted_changed(self) -> None:
+        """An incident's operating channel came or went: the station hears it now (its whisper class, its engine)."""
+        super().promoted_changed()
+        if getattr(self, "hub", None) is not None:
+            self.channels_check(force=True)
 
     def _aws_word_log(self, ok: bool, why: str, reserve: list, deny: list, deny_why: str) -> None:
         """A channel denied AWS (the monthly budget, the breaker; police past its own budget) is said in the log when
