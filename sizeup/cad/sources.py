@@ -2076,7 +2076,7 @@ class Sources:
                     with self.store.tx() as db:
                         db.execute("UPDATE source_reports SET gone_at = NULL WHERE source = ? AND ref = ?",
                                    (ev.source, ev.event_id))
-                self._apply(rep["incident_id"], prev, data, label, rank)
+                self._apply(rep["incident_id"], prev, data, label, rank, report=(ev.source, ev.event_id))
                 self._merge(ev.source, ev.event_id, rep["incident_id"], data, label)
                 if data["closed"] and not (prev or {}).get("closed"):
                     self._feed_closed(rep["incident_id"], ev.source, ev.event_id, label)
@@ -2112,7 +2112,7 @@ class Sources:
                         inc, similar = al, []
             if inc is not None and co is not None:       # another of our towns' run: both live on the call
                 self._co_run(ev.source, ev.event_id, inc["id"], data, label, rank, seen, snap)
-                self._apply(inc["id"], None, data, label, rank, attach=True)
+                self._apply(inc["id"], None, data, label, rank, attach=True, report=(ev.source, ev.event_id))
                 self._merge(ev.source, ev.event_id, inc["id"], data, label)
                 self._sweep_pages(inc["id"], self._sweepable(inc["id"]), closed=False)
                 return inc["id"]
@@ -2491,11 +2491,15 @@ class Sources:
             self.store._event(db, inc["id"], "feed", f"{label} attached{rel}{lead}", at=self.clock())
 
     def _apply(self, iid: int, prev: dict | None, new: dict, label: str, rank: int, attach: bool = False,
-               created: bool = False) -> None:
+               created: bool = False, report: tuple[str, str] | None = None) -> None:
         """A feed's event onto its incident: its fields where it is the authority and no person set them (see
         "authority"), and a timeline entry per change."""
         inc = self.store.incident(iid)
         auth = rank <= (self.authority(iid) or rank)
+        if auth and report is not None:            # one call in two towns: the run first seen sets its fields, never
+            first = self.store.one("SELECT ref FROM source_reports WHERE incident_id = ? AND source = ? AND merged_into "
+                                   "= '' ORDER BY first_seen, ref LIMIT 1", (iid, report[0]))   # both, by turns
+            auth = first is None or first["ref"] == report[1]
         hand = self.manual(iid)                    # a person's edit stands whatever the status, queued too
         old = prev or {"type": "", "location": "", "units": [], "times": {}, "unit_times": {}, "comments": [], "closed": False}
         notes: list[tuple[float, str]] = []
@@ -2724,14 +2728,19 @@ class Sources:
         same type is not enough: a second alarm there later is another call); one match_all found by "misheard" (a
         misheard street, FUZZY_UNITS apparatus shared) up to PAGE_LAG_S after that dispatch (60 Control pages a while
         after the county dispatched); never one the feed has in service."""
-        r = self._best_feed(inc["id"])
-        d = json.loads(r["data"] or "{}") if r else {}
-        ended = (d.get("times") or {}).get("in_service")
-        if d.get("closed") or (ended is not None and ended < at):
-            return False
-        disp = self._disp(d) or (r["first_seen"] if r else None)
+        best = self._best_feed(inc["id"])
+        runs = self.store.q("SELECT * FROM source_reports WHERE incident_id = ? AND source = ? AND merged_into = ''",
+                            (inc["id"], best["source"])) if best else []   # every live run (one call, two towns)
         after = PAGE_LAG_S if inc.get("_misheard") else SAME_CALL_S
-        return disp is not None and -SAME_CALL_S <= at - disp <= after
+        for r in runs or [None]:
+            d = json.loads(r["data"] or "{}") if r else {}
+            ended = (d.get("times") or {}).get("in_service")
+            if d.get("closed") or (ended is not None and ended < at):
+                continue
+            disp = self._disp(d) or (r["first_seen"] if r else None)
+            if disp is not None and -SAME_CALL_S <= at - disp <= after:
+                return True
+        return False
 
     def created_by_page(self, ref: str, iid: int, similar: dict | list | None = None) -> None:
         """The page made its own incident: on its report, and noted "possibly the same" as each near one (page())."""

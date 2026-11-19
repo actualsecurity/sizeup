@@ -510,7 +510,8 @@ class AutoDispatch:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
         L = self.store.lists
-        kept = {n for d in others or [] if not self._over(d) for n in d.get("units") or []}   # another run's
+        kept = {n for d in others or [] if not self._over(d) for n in d.get("units") or []}   # another live run's
+        held = {_key(n) for n in kept}                   # (a co-run's: never released while another run lists it)
         for name in [n for n in (old.get("units") or []) if n not in units and n not in kept]:   # a placeholder unlisted
             u = ours.get(_key(name))
             if u is not None and L.placeholder(u["name"]) and not self._manual(iid, f"unit:{u['name']}"):
@@ -533,6 +534,8 @@ class AutoDispatch:
                 now_t, was = times, otimes
             for k in ("responding", "on_location", "in_service"):
                 t = now_t.get(k)
+                if k == "in_service" and _key(name) in held:
+                    continue                             # another live run lists it: it stays on (the line is the feed's)
                 if t is not None and t != was.get(k) and (live or k != "in_service"):
                     self._unit_step(iid, u, FEED_STATUS[k], t, op, "county", k)
         if others is not None:                           # a co-run: only its own end, once

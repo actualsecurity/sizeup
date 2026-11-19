@@ -750,3 +750,53 @@ def test_the_feed_s_own_merge_still_wins(tmp_path, our_towns):
                  extra=TOWN_B, aliases=("F0080001",))
     rig.poll()
     assert rig.iid("F0080907") == iid and not any(t.startswith("Also run in") for t in lines(rig, iid))
+
+
+def test_a_run_s_end_never_frees_its_one_unit_while_the_other_run_lists_it(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A, units=("E61",))                 # one unit, no per-unit times
+    iid = rig.iid("F0080001")
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E61", "E63"))
+    assert rig.iid("F0080907") == iid and rig.here("E63", "F0080907")
+    rig.at(400)
+    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 390})
+    rig.poll()
+    assert rig.here("E61", "F0080001") and rig.status("E61") != rig.cad.store.lists.free_for("E61", "main")
+    assert rig.cad.store.incident(iid)["status"] == "active"
+    assert any("in service" in t for t in lines(rig, iid))             # the run's end is still on the timeline
+    rig.at(700)
+    rig.feed.change("F0080907", closed=True, times={"in_service": T0 + 690})
+    rig.poll()
+    assert rig.cad.store.incident(iid)["status"] == "closed" and not rig.here("E61", "F0080001")
+
+
+def test_a_run_s_per_unit_end_never_frees_a_unit_the_other_run_lists(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A, units=("E61", "E62"))
+    iid = rig.iid("F0080001")
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E61", "E63"))
+    rig.at(400)
+    rig.feed.change("F0080001", closed=True, times={"in_service": T0 + 390},
+                    unit_times={"E61": {"in_service": T0 + 385}, "E62": {"in_service": T0 + 386}})
+    rig.poll()
+    assert rig.here("E61", "F0080001") and rig.here("E63", "F0080001")   # the other run's
+    assert not rig.here("E62", "F0080001")                              # this run's alone: released
+    assert rig.cad.store.incident(iid)["status"] == "active"
+
+
+def test_the_second_town_s_run_never_rewrites_the_call_s_place(tmp_path, our_towns):
+    rig = AutoRig(tmp_path)
+    town_run(rig, "F0080001", TOWN_A)
+    iid = rig.iid("F0080001")
+    before = rig.cad.store.incident(iid)["address"]
+    rig.at(130)
+    town_run(rig, "F0080907", TOWN_B, dt=120, units=("E62", "E64"))
+    rig.feed.change("F0080907", location="44 EXAMPLE ST")            # the other run's own idea of the place
+    rig.poll()
+    assert rig.cad.store.incident(iid)["address"] == before            # noted, never flip-flopping the call
+    assert any("44 Example St" in t for t in lines(rig, iid))
+    rig.feed.change("F0080001", location="42 EXAMPLE ST")            # the run first seen: as any feed's
+    rig.poll()
+    assert "42" in rig.cad.store.incident(iid)["address"]
