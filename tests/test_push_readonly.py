@@ -46,7 +46,7 @@ def world(request, tmp_path, monkeypatch):
     people(cad)                                            # Casey admin, Jordan dispatcher, Val viewer, Dee deactivated
     logs: list[str] = []
     pushes = notify.Pushes("http://127.0.0.1:9", "example-alerts-topic-0001", "example-status-topic-0002",
-                           settings=lambda: {"devices": {"dispatch": {"on": True}}}, log=lambda m: None, retries=())
+                           settings=lambda: {"devices": {"dispatch": {"on": True}, "intel": {"min_role": "viewer"}}}, log=lambda m: None, retries=())
     env = {"SIZEUP_SNS_APNS_SANDBOX_ARN": f"arn:aws:sns:us-east-1:{ACCT}:app/APNS_SANDBOX/example-ios-dev",
            "SIZEUP_SNS_ENDPOINT": fake.url}
     switches = Switches(lambda: True, lambda: {"push": True})
@@ -75,21 +75,25 @@ def intel_title(cad) -> str:
 def test_the_apps_whole_push_life_writes_nothing_to_the_cad(world):
     before = fingerprint(world.cad.store)
     assert len(before) > 10 and before["__rev__"] is not None           # the audit really saw the CAD's tables
-    reg = {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN, "prefs": {"dispatch": True}}
-    assert put(world, reg)[0] == 200
-    assert put(world, {**reg, "prefs": {"dispatch": True, "status": True}})[0] == 200          # a replace
+    reg = {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN, "prefs": {"dispatch": True, "intel": True}}
+    if world.mode == "unwired":                                          # fail closed: a 503, nothing sent, nothing made
+        assert put(world, reg)[0] == 503
+        assert world.fake.calls == [] and not (world.state / "hub.sqlite").exists()
+    else:
+        assert put(world, reg)[0] == 200
+        assert put(world, {**reg, "prefs": {"dispatch": True, "intel": True, "status": True}})[0] == 200      # a replace
     who = {"units": [("E64", "")], "incident": "26-000015", "address": "100 Main St"}
     world.pushes.notifier(notify.ALERTS).send("MAYDAY", "heard: anything", 5, (), "", who=who)
     world.pushes.notifier(notify.STATUS).send("Station silent 5 min", "x", 3, (), "", who=who)
     world.pushes.notifier(notify.INTEL).send(intel_title(world.cad), "100 Example Ave \u00b7 14:32 \u00b7 high", 4, (), "")
     world.pushes.fan_out("dispatch", "Structure fire", "x", 3, who, "", "inc-1")       # policy on: the builders run
     assert world.service.flush(10)
-    if world.mode == "revoked":
-        assert world.fake.published() == []                             # a revoked device gets nothing at all
+    if world.mode in ("revoked", "unwired"):
+        assert world.fake.published() == []                             # a revoked device, or no device_active: nothing
     else:
         kinds = {p["message"]["APNS_SANDBOX"]["kind"] for p in world.fake.published()}
         assert kinds == {"alerts", "status", "intel", "dispatch"}       # every kind's builder really ran
-    assert (sum("device_active not wired" in m for m in world.logs) >= 1) is (world.mode == "unwired")
+    assert not any("revoked devices keep" in m for m in world.logs)        # no alarming start-up warning
     for email in (CASEY, JORDAN, VAL, "dee@example.org", "stranger@example.org"):
         role_for(world.cad.store, email)
         world.service.role_of(email)
@@ -99,12 +103,16 @@ def test_the_apps_whole_push_life_writes_nothing_to_the_cad(world):
     intel_labels(world.cad.intel)
     world.v1.respond("DELETE", "/api/v1/devices/dev-0001/push", "", {}, "", lambda limit: b"")
     put(world, reg)
-    assert svc.drop_device("dev-0001") is True                                  # the revoke hook
+    assert svc.drop_device("dev-0001") is (world.mode != "unwired")             # the revoke hook (nothing to drop unwired)
     assert fingerprint(world.cad.store) == before                               # not one CAD table, not the revision
 
 
 def test_the_only_thing_push_writes_is_its_own_table_in_hub_sqlite(world):
     import sqlite3
+    if world.mode == "unwired":
+        assert put(world, {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN})[0] == 503
+        assert not (world.state / "hub.sqlite").exists()                 # no table at all
+        return
     put(world, {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN})
     hub = sqlite3.connect(world.state / "hub.sqlite")
     assert hub.execute("SELECT count(*) FROM push_devices").fetchone()[0] == 1

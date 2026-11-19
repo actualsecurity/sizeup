@@ -61,9 +61,8 @@ def wire(pushes, state_dir: str | Path, switches, store, may_write=None, log=pri
                               active=lambda: switches.allows("push"), role_of=lambda e: role_for(store, e),
                               device_active=device_active, log=log, unit_of=lambda c: unit_for(store, c),
                               intel_labels=lambda: intel_labels(intel))
-    if device_active is None:
-        log("push: device_active not wired (#558): revoked devices keep receiving pushes; push stays off until the "
-            "`push` flag has a source and the sign-in wires it")
+    if device_active is None:        # fail closed: no registration (503), nothing sent, until the sign-in supplies it
+        log("push: waiting for the sign-in's device_active: device push is unavailable until then")
     pushes.devices = svc
     service.install(svc)
     return svc

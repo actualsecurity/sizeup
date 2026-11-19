@@ -105,8 +105,10 @@ class PushDevices:
                         json.dumps(quiet, sort_keys=True) if quiet else "", old[0] if old else now, now))
         return self.get(device_id) or {}
 
-    def remove(self, device_id: str) -> dict | None:
-        """Delete the row: the row it was, or None. A hub that never registered anyone writes nothing."""
+    def remove(self, device_id: str, endpoint: str | None = None, updated: float | None = None) -> dict | None:
+        """Delete the row: the row it was, or None. A hub that never registered anyone writes nothing. endpoint / updated:
+        delete only THAT registration (a fan-out that found its endpoint stale must not delete a fresh re-registration
+        of the same device: a different endpoint, or the same one written again since `updated`)."""
         with self._lock:
             db = self._conn(False)
             if db is None:
@@ -114,8 +116,24 @@ class PushDevices:
             r = db.execute(f"SELECT {COLUMNS} FROM {TABLE} WHERE device_id = ?", (device_id,)).fetchone()
             if r is None:
                 return None
+            row = self._row(r)
+            if (endpoint is not None and row["endpoint"] != endpoint) or (updated is not None and row["updated"] > updated):
+                return None
             db.execute(f"DELETE FROM {TABLE} WHERE device_id = ?", (device_id,))
-        return self._row(r)
+        return row
+
+    def remove_others(self, endpoint: str, keep: str) -> list[dict]:
+        """Delete every row except `keep`'s that holds this endpoint (one phone token, one device: the old person's row
+        must stop pushing): the rows it was."""
+        with self._lock:
+            db = self._conn(False)
+            if db is None:
+                return []
+            rs = db.execute(f"SELECT {COLUMNS} FROM {TABLE} WHERE endpoint = ? AND device_id != ?",
+                            (endpoint, keep)).fetchall()
+            if rs:
+                db.execute(f"DELETE FROM {TABLE} WHERE endpoint = ? AND device_id != ?", (endpoint, keep))
+        return [self._row(r) for r in rs]
 
     def close(self) -> None:
         with self._lock:

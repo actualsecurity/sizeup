@@ -32,10 +32,20 @@ def test_a_device_marked_inactive_gets_nothing_of_any_kind(rig, fake):
         assert rig.targets(kind, "MAYDAY", "100 Example Ave") == {"dev-0002"}, kind
 
 
-def test_without_a_predicate_every_registered_device_is_active(rig):
-    rig.device(1, "admin@example.org")
-    assert svc.PushService(rig.service.devices, APPS).device_active("dev-0001") is True
-    assert rig.targets("alerts") == {"dev-0001"}
+def test_without_device_active_push_fails_closed_nothing_registered_nothing_sent(tmp_path, fake):
+    """No device_active from the sign-in yet: PUT is a 503 push_unavailable, nothing is written, offer / deliver send nothing
+    (a revoked or stolen device must not keep getting alerts)."""
+    r = Rig(tmp_path, fake)
+    row = r.device(1, "admin@example.org")                              # registered while wired ...
+    r.service.device_active = None                                      # ... then the sign-in source is gone
+    assert r.service.ready() is False
+    r.service.offer("alerts", "MAYDAY", "100 Example Ave")
+    assert r.service.flush() and r.service.deliver("alerts", "MAYDAY", "x") == 0 and fake.published() == []
+    n = len(fake.calls)
+    with pytest.raises(svc.PushError) as e:
+        r.service.register("dev-0002", "admin@example.org", "ios", "sandbox", "0123456789abcdef" * 2, None, None)
+    assert (e.value.status, e.value.code) == (503, "push_unavailable") and len(fake.calls) == n
+    assert r.service.devices.get("dev-0002") is None and row["device_id"] == "dev-0001"
 
 
 def test_a_task_that_is_not_the_leader_queues_and_publishes_nothing(rig, fake):
@@ -75,14 +85,14 @@ def test_only_a_gone_or_disabled_endpoint_is_removed(rig, fake, code, kept):
 def test_a_stale_endpoint_on_a_fenced_task_is_kept_for_the_leader(rig, fake):
     rig.device(1, "admin@example.org")
     fake.fail["Publish"] = (400, "EndpointDisabled")
-    real = rig.service.unregister
+    real = rig.service.devices.remove
 
-    def fenced(device_id):
+    def fenced(*a, **kw):
         raise FencedWrite("not the leader")
-    rig.service.unregister = fenced
+    rig.service.devices.remove = fenced
     rig.service.deliver("alerts", "MAYDAY", "100 Example Ave")
     assert rig.service.devices.get("dev-0001") is not None and any("stale endpoint kept" in m for m in rig.logs)
-    rig.service.unregister = real
+    rig.service.devices.remove = real
 
 
 def test_unregister_and_drop_device_refuse_on_a_fenced_task(rig):
@@ -202,7 +212,7 @@ def test_a_hub_start_wires_push_and_writes_nothing_of_its_own(tmp_path):
             "admin", "dispatcher", "viewer", None, None]
         assert s.unit_of("E64") is not None and s.unit_of("4821") is None and s.unit_of("J. Doe") is None
         s.offer("alerts", "MAYDAY", "100 Example Ave")                # flag off: nothing queued
-        assert s._q.qsize() == 0
+        assert all(q.qsize() == 0 for q in s._qs.values())
         db = sqlite3.connect(s.devices.path)
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name = 'push_devices'").fetchone() is None
         db.close()

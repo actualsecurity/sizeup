@@ -41,7 +41,7 @@ def rig(tmp_path):
     flags = {"push": True}
     client = snsmod.Sns("us-east-1", fake.url, lambda: CREDS)
     service = svc.PushService(PushDevices(tmp_path / "hub.sqlite"), APPS, client,
-                              role_of=lambda e: "viewer", log=lambda m: None)
+                              role_of=lambda e: "viewer", device_active=lambda d: True, log=lambda m: None)
     svc.install(service)
     switches = Switches(lambda: True, lambda: flags, max_requests=2)       # v1 may serve two at once
     who = lambda h: ME if h.get("Authorization") == BEARER["Authorization"] else None      # noqa: E731
@@ -82,7 +82,7 @@ def test_register_answers_the_device_and_never_the_token_or_the_endpoint(rig):
     conforms(status, body, "PUT", "/api/v1/devices/{id}/push")
     d = json.loads(body)
     assert (d["device"], d["platform"], d["environment"]) == ("dev-0001", "ios", "sandbox")
-    assert d["prefs"] == {"alerts": True, "intel": True, "status": False, "dispatch": False}
+    assert d["prefs"] == {"alerts": True, "intel": False, "status": False, "dispatch": False}      # intel: opt-in
     assert IOS_TOKEN not in body.decode() and "arn:" not in body.decode()
     row = rig.service.devices.get("dev-0001")
     assert row["email"] == "member@example.org" and row["app"].endswith("example-ios-dev") and "token" not in row

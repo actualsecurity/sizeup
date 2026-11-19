@@ -257,37 +257,33 @@ def test_an_intel_push_composed_from_a_transcript_naming_people_carries_none_of_
     assert a["title"] == "PD · Smoke / fire reported · Port Chester" and a["body"].startswith("100 Example Ave · ")
 
 
-# -- device_active is not wired ----------------------------------------------------------------------------------------
+# -- device_active is not wired: fail closed ---------------------------------------------------------------------------------
 
-def test_registering_while_device_active_is_not_wired_warns_once(tmp_path, fake):
+def test_registering_while_device_active_is_not_wired_is_a_503_and_writes_nothing(tmp_path, fake):
     from tests.test_push_sns import APPS, CREDS, IOS_TOKEN
     from sizeup.push import service as svc, sns as snsmod
     from sizeup.push.devices import PushDevices
     logs = []
     s = svc.PushService(PushDevices(tmp_path / "hub.sqlite"), APPS, snsmod.Sns("us-east-1", fake.url, lambda: CREDS),
                         log=logs.append)
-    s.register("dev-0001", "a@example.org", "ios", "sandbox", IOS_TOKEN, None, None)
-    s.register("dev-0002", "b@example.org", "ios", "sandbox", IOS_TOKEN[:-2] + "02", None, None)
-    assert [m for m in logs if "device_active not wired" in m] == ["push: device_active not wired: revoked devices keep "
-                                                                  "receiving pushes"]
-    logs.clear()
-    w = svc.PushService(PushDevices(tmp_path / "w.sqlite"), APPS, snsmod.Sns("us-east-1", fake.url, lambda: CREDS),
-                        device_active=lambda d: True, log=logs.append)
-    w.register("dev-0003", "a@example.org", "ios", "sandbox", IOS_TOKEN[:-2] + "03", None, None)
-    assert not any("device_active" in m for m in logs)
+    with pytest.raises(svc.PushError) as e:
+        s.register("dev-0001", "a@example.org", "ios", "sandbox", IOS_TOKEN, None, None)
+    assert (e.value.status, e.value.code) == (503, "push_unavailable")
+    assert fake.calls == [] and not (tmp_path / "hub.sqlite").exists() and logs == []     # no endpoint, no table, no noise
+    assert s.deliver("alerts", "MAYDAY", "x") == 0 and fake.calls == []
 
 
-def test_the_hub_start_says_device_active_is_not_wired(tmp_path):
+def test_the_hub_start_without_device_active_is_quiet_and_unavailable(tmp_path):
     from sizeup.push.wire import wire
     logs = []
     pushes = notify.Pushes("http://127.0.0.1:9", "", "", settings=lambda: {}, log=lambda m: None)
     try:
-        wire(pushes, tmp_path, type("S", (), {"allows": lambda s, f: False})(), None, log=logs.append, env={})
-        assert any("device_active not wired" in m and "stays off" in m for m in logs)
+        s = wire(pushes, tmp_path, type("S", (), {"allows": lambda s, f: True})(), None, log=logs.append, env={})
+        assert s.ready() is False and len(logs) == 1 and "warn" not in logs[0].lower() and "revoked" not in logs[0]
         logs.clear()
-        wire(pushes, tmp_path, type("S", (), {"allows": lambda s, f: False})(), None, log=logs.append, env={},
-             device_active=lambda d: True)
-        assert logs == []
+        s = wire(pushes, tmp_path, type("S", (), {"allows": lambda s, f: False})(), None, log=logs.append, env={},
+                 device_active=lambda d: True)
+        assert s.ready() is True and logs == []
     finally:
         from sizeup.push import service as svc
         svc.install(None)

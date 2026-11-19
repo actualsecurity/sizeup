@@ -71,11 +71,9 @@ TTL_S = 900                                            # a page older than this 
 URL = re.compile(r"https?://\S+", re.I)
 LISTEN_LINE = re.compile(r"^\s*Listen:.*$", re.I | re.M)
 INCIDENT_NO = re.compile(r"\b\d{2}-\d{6}\b")            # the CAD's event number: a reference, not a radio ID
-INTEL_FIXED = re.compile(r"^(\d{1,2}:\d{2}|low|medium|high|location not heard)$", re.I)
+INTEL_FIXED = re.compile(r"^(\d{1,2}:\d{2}|low|medium|high|location not heard|#\d{2}-\d{6}"
+                         r"|FD (?:on scene|dispatched|there|here(?: \d{1,2}:\d{2})?))$", re.I)
 PHONE = re.compile(r"\b\d{3}[-. ]?\d{3}[-. ]\d{4}\b|\b\d{3}[-.]\d{4}\b")
-PLACE = re.compile(r"^\d+[A-Za-z]?\s+[A-Za-z]|\b(?:st|street|ave|avenue|rd|road|blvd|dr|drive|ln|lane|ct|court|pl|"
-                   r"place|pkwy|parkway|hwy|way|ter|terrace|cir|circle|exit|route|rt|bridge|tpke|turnpike|expy|sq|"
-                   r"square|blk)\b", re.I)
 ID_OK = re.compile(r"[\w.:-]{1,64}")                      # a reference the app may be handed (an event number)
 INTEL_ID = re.compile(r"[?&]intel=([\w.-]{1,40})")
 _OPEN = "Open sizeup for details"
@@ -91,7 +89,6 @@ def _priority(p) -> int:
 
 
 PLAIN = re.compile(r"[A-Za-z0-9 .,:;'\u2019()/#+&%\u00b7\u00d7\u2013\u2014\u2026-]{1,100}")
-LOWER_OK = frozenset({"and", "of", "block", "blk"})        # in an address, besides capitalised words and numbers
 # alarms.KEYWORDS, upper-cased, "..." as the ellipsis
 FIXED_KEYWORDS = ("MAYDAY", "MAY DAY MAY DAY", "EMERGENCY TRAFFIC", "FIREFIGHTER DOWN", "FIRE FIGHTER DOWN",
                   "MEMBER DOWN", "LOST FIREFIGHTER", "LOST FIRE FIGHTER",
@@ -135,7 +132,10 @@ def headline(kind: str, title: str, intel_labels=None) -> str | None:
     if kind == "intel":
         if re.fullmatch(r"\d{1,4} more pre-alerts \(over the hourly limit\)", title):     # the engine's digest
             return title
-        parts = title.split(" \u00b7 ")
+        model = title.endswith(" \u00b7m")              # the local model raised it (sizeup/intel/push.py compose)
+        core = title[:-3] if model else title
+        fyi = core.startswith("FYI \u00b7 ")              # a fire event with the FD already there
+        parts = (core[6:] if fyi else core).split(" \u00b7 ")
         ok = intel_labels is not None and 2 <= len(parts) <= 3 and all(p in intel_labels for p in parts)
         return title if ok else None
     if kind == "status":
@@ -221,10 +221,25 @@ def _who(kind: str, who, unit_of=None):
             w.talker.strip())
 
 
+STREET_ONLY = re.compile(r"(?:[NSEW]\.?\s+)?(?:[A-Z][A-Za-z'-]{0,24}\s+){1,3}(?:%s)\.?" % "|".join(STREET_TYPES))
+
+
+def intel_place_ok(seg: str) -> bool:
+    """A place as sizeup/intel/push.py where_text says it: an exact address (place_ok), or the street alone or with its
+    block ("Example Ave, 100 blk"), each optionally "(unconfirmed)": the same shape rules, at most 60 characters."""
+    s = re.sub(r" \(unconfirmed\)$", "", seg.strip())
+    if not 0 < len(seg) <= 60:
+        return False
+    s = re.sub(r", \d{2,4} blk$", "", s)
+    return place_ok(s) or STREET_ONLY.fullmatch(s) is not None
+
+
 def _intel_body(body: str) -> str:
-    """The pieces of an intel body a phone may get (module doc), in their order, joined as the engine joins them."""
+    """The pieces of an intel body a phone may get (module doc), in their order, joined as the engine joins them: a time,
+    a level, "location not heard", the FD line and event number of an FYI, or a place that passes intel_place_ok (the
+    same shape rule as an alert's address: a name next to a street word is not enough)."""
     segs = [x.strip() for x in LISTEN_LINE.sub("", str(body or "")).replace("\n", " \u00b7 ").split(" \u00b7 ")]
-    return " \u00b7 ".join(x for x in segs if x and not URL.search(x) and (INTEL_FIXED.match(x) or PLACE.search(x)))
+    return " \u00b7 ".join(x for x in segs if x and not URL.search(x) and (INTEL_FIXED.match(x) or intel_place_ok(x)))
 
 
 def device_text(kind: str, title: str, body: str, who=None, unit_of=None, intel_labels=None) -> tuple[str, str, str]:

@@ -167,3 +167,14 @@ def endpoint_platform(endpoint_arn: str) -> str:
     parts = endpoint_arn.split(":", 5)[-1].split("/")
     ok = len(parts) >= 3 and parts[0] == "endpoint" and parts[1] in ("APNS_SANDBOX", "APNS", "GCM")
     return parts[1] if ok else ""
+
+
+def app_platform(app_arn: str) -> str:
+    """APNS_SANDBOX | APNS | GCM from a platform application ARN (arn:aws:sns:r:a:app/APNS/<name>), else ""."""
+    parts = app_arn.split(":", 5)[-1].split("/")
+    return parts[1] if len(parts) >= 3 and parts[0] == "app" else ""
+
+
+def transient(e: "SnsError") -> bool:
+    """Worth one more try: no answer (the network) or an SNS 5xx; never a 4xx, a disabled endpoint or the guard."""
+    return e.code == "Network" or e.status >= 500

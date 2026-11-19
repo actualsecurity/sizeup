@@ -134,7 +134,8 @@ class Rig:
     PEOPLE = {"admin@example.org": "admin", "disp@example.org": "dispatcher", "view@example.org": "viewer"}
 
     def __init__(self, tmp_path, fake, apps=APPS, now=NOON, policy=None):
-        self.now, self.policy, self.logs = [now], policy or {}, []
+        # most tests are about something else than who may get intel: the policy lets every role have it (test_push_intel.py)
+        self.now, self.policy, self.logs = [now], policy if policy is not None else {"intel": {"min_role": "viewer"}}, []
         self.fake = fake
         self.db = tmp_path / "hub.sqlite"
         self.service = svc.PushService(PushDevices(self.db, clock=lambda: self.now[0]), apps,
@@ -145,6 +146,7 @@ class Rig:
 
     def device(self, n: int, email: str, platform="ios", env="sandbox", prefs=None, quiet=None):
         token = IOS_TOKEN[:-2] + f"{n:02d}" if platform == "ios" else FCM_TOKEN + str(n)
+        prefs = {"intel": True, **(prefs or {})}                # the device opted in (the default is off)
         return self.service.register(f"dev-{n:04d}", email, platform, env if platform == "ios" else "", token, prefs,
                                      quiet)
 
@@ -514,7 +516,8 @@ def test_a_hand_started_hub_never_pushes_to_real_phones(tmp_path, monkeypatch):
     r.service = svc.PushService(PushDevices(tmp_path / "hub.sqlite", clock=lambda: NOON), APPS,
                                 # the real SNS address, no override
                                 snsmod.Sns("us-east-1", creds=lambda: CREDS),
-                                role_of=Rig.PEOPLE.get, clock=lambda: NOON, log=r.logs.append)
+                                role_of=Rig.PEOPLE.get, clock=lambda: NOON, log=r.logs.append,
+                                device_active=lambda d: True)
     r.service.devices.put("dev-0001", "admin@example.org", "ios", "production",
                           f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS/example-ios/abc", PROD_APP,
                           dict(svc.DEFAULT_PREFS), None)
@@ -591,7 +594,8 @@ def test_a_broken_device_path_never_changes_what_ntfy_does(monkeypatch):
     p.notifier(notify.ALERTS).flush()
     assert len(ntfy.sent) == 1
     ntfy.sent.clear()
-    p.devices = svc.PushService(PushDevices(Path("/nonexistent/x/hub.sqlite")), APPS, role_of=lambda e: "admin")
+    p.devices = svc.PushService(PushDevices(Path("/nonexistent/x/hub.sqlite")), APPS, role_of=lambda e: "admin",
+                            device_active=lambda d: True)
     assert p.notifier(notify.ALERTS).send("MAYDAY", "x") is True        # nothing registered, nothing wrong
     p.notifier(notify.ALERTS).flush()
     assert len(ntfy.sent) == 1
