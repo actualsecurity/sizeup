@@ -172,6 +172,8 @@ def wire_grant_split(ingest, live, conf: dict | None, workdir: str | Path, state
     path = grant_cuts_path(file_name, str(state_path)) if isinstance(state_path, (str, Path)) and state_path else ""
     if path and ingest.grant_split.mode != "off":
         ingest.grant_count = GrantCount(path, system)
+    elif path and Path(path).is_file():
+        GrantCount(path, system).mark("off")                 # (switched off: its hourly line says nothing of it)
 
 
 def sizeup_block(workdir: str | Path) -> dict:

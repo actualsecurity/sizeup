@@ -101,17 +101,31 @@ talkgroup naming another radio while it records the call). sizeup cuts the turn 
 start, a `Unit ID changed on Voice Channel` or `would split` line) is within 1 s of it: at the quietest run of 0.15 s
 or more from 1.5 s before the grant to 0.5 s after it, else 0.3 s before the grant. The new part is the granted
 radio's, and its row has `cut: "grant"`. Grant updates repeating the current talker are ignored, grants for one radio
-within 1 s are one, and no part is shorter than 0.4 s. It is set per system and read by sizeup-station only (a change
-restarts no trunk-recorder; it takes effect at sizeup's next start):
+within 1 s are one, no part is shorter than 0.4 s, and nothing is cut within 1 s of the call's end. The unit script's
+grants count only for a radio coming back (A, B, A: the GRANT line never names the call's first radio again), and a
+GRANT line with `state: idle` or `samples: 0` (the sink's stale talker) is left out. It is set per system and read by
+sizeup-station only, at its next start. What a change restarts: for another system (`systems/<name>/config.json`) the
+supervisor's digest leaves out the two grant keys, so changing their values restarts no trunk-recorder, but adding or
+removing them (rather than `"off"`) changes the digest and restarts that system's trunk-recorder once; for the county,
+`install-linux.sh` `tr_sig` hashes its whole `config.json`, so any change to its grant keys restarts the whole
+`sizeup-trunk-recorder` service (the county's and the other systems') at the update. The deploy that brought the grant
+split (#821) restarted both: MRRS's trunk-recorder (the old supervisor hashed the rewritten file) and, with
+`trunkrecd.py` changed, the whole service once.
 
 ```json
 "sizeup": {"grant_split": "log", "grant_split_tune": {"before_s": 1.5, "after_s": 0.5, "latency_s": 0.3, "min_gap_s": 0.15}}
 ```
 
-`off` (the default) does nothing. `log` (MRRS) only logs each cut it would make, with no radio ID (`p25 MRRS: grant
-split (log): PD Dispatch: would cut at 3.1 of 6.0 s, gap 0.25 s (-0.4 s from the grant)`), and adds them to the hourly
-line (`..., in 120 calls (2.5% of calls), 3 grant cuts (log)`). `on` makes each part its own row, like the patch's.
-`grant_split_tune` is optional. A call written while sizeup was down (#747) gets its grants from `trunk-recorder.log`.
+`off` (the default) does nothing. `log` (MRRS) only logs each cut it would make, with no radio ID, and with what tuning
+needs: the gap's length, level and kind (digital silence, or a talker's pause), or the no-gap fallback, and the grant's
+source (`p25 MRRS: grant split (log): PD Dispatch: would cut at 3.1 of 6.0 s, gap 0.25 s at -99 dBFS (silence), -0.4 s
+from the grant (log line)`); it adds them to the hourly line (`..., in 120 calls (2.5% of calls), 3 grant cuts (log)`).
+`on` makes each part its own row, like the patch's. `grant_split_tune` is optional (`before_s` up to 3 s). A call
+written while sizeup was down (#747) gets its grants from `trunk-recorder.log`.
+
+Known limit, to tune from the `log` data before `on`: when a terminator is missed, the idle time before the next radio
+keys is not in the WAV, so its grant maps late in the audio by that pause. With a pause of 1.5 s or more the cut lands
+1.2-2.2 s into the next talker, and past about 3.5 s it is missed. `before_s` (up to 3.0) widens the search back.
 
 `pos` (both lists) is the sum of the earlier transmissions' lengths, each from its sample count: exactly where the
 transmission starts in the call WAV, which ffmpeg makes by concatenating them. 5.2.0 runs the call WAV through

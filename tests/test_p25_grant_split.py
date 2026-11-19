@@ -7,7 +7,9 @@ times, made-up radio IDs."""
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
 import wave
 from pathlib import Path
@@ -107,7 +109,8 @@ def test_a_then_b_by_a_grant_alone_is_cut_at_the_gap_and_b_is_credited(tmp_path)
     assert abs(tone_of(pieces[0].audio) - HZ[A]) < 5 and abs(tone_of(pieces[1].audio) - HZ[B]) < 5
     assert pieces[0].end == pieces[1].start and abs(pieces[1].start - (T0 + cuts[0].pos)) < 0.01
     assert said == [f"p25 MRRS: grant split (on): PD Dispatch: cut at {cuts[0].pos:.1f} of 6.0 s, "
-                    f"gap {cuts[0].gap:.2f} s ({cuts[0].pos - 3.55:+.1f} s from the grant)"] and no_ids(said)
+                    f"gap {cuts[0].gap:.2f} s at -99 dBFS (silence), {cuts[0].pos - 3.55:+.1f} s from the grant "
+                    f"(log line)"] and no_ids(said)
 
 
 def test_a_b_and_c_each_get_a_part_and_a_grant_update_of_the_talker_is_no_cut(tmp_path):
@@ -253,7 +256,7 @@ def test_live_talk_keeps_mid_call_grants_and_voice_cuts_at_trunk_recorders_time(
     lt.feed_line(f"SIZEUP-UNIT mrrs {C} call {PD}")       # the unit script's: no time stamp, when it was read
     lt.feed_line(tr_line(t, f"Unit ID externally set from GRANT: {B}\t caching", tg=PD + 1))
     got = lt.cut_events("mrrs", PD, 0, now[0] + 10)
-    assert [(round(a - t, 3), s, k) for a, s, k in got] == [(0.0, B, "grant"), (0.4, C, "grant"), (1.0, C, "voice"),
+    assert [(round(a - t, 3), s, k) for a, s, k in got] == [(0.0, B, "grant"), (0.4, C, "unit"), (1.0, C, "voice"),
                                                          (2.0, A, "voice")]
     assert lt.cut_events("westchester", PD, 0, now[0] + 10) == []
     # a stamp far from the clock (another time zone, a stepped clock): the time it was read
@@ -408,3 +411,96 @@ def test_a_station_runtime_counts_beside_its_state_and_a_bench_does_not(tmp_path
     assert systems.sizeup_block(TR) == {"split": "log"} and systems.sizeup_block(tmp_path / "none") == {}
     from sizeup.radio.p25 import Call
     assert apply_grant_cuts(Call("x", PD, "PD Dispatch", T0, T0 + 1, [], None), []) is False
+
+
+# -- the review's follow-ups (#821) ---------------------------------------------------------------------------------------
+
+def test_the_log_line_says_the_gaps_level_and_kind_the_fallback_and_the_grants_source(tmp_path):
+    d = day_dir(tmp_path)
+    # a talker's pause (low noise) is the only quiet run near the grant: a pause, not silence
+    p = write(d, "9211-20-call_20", audio(("talk", 3.0, A), ("pause", 0.3), ("talk", 2.7, B)), [(A, 0.0)])
+    _c, cuts, said = call_of(p, [(T0 + 3.6, B, "grant")])
+    assert cuts[0].level is not None and -70 < cuts[0].level < -45
+    assert re.search(r"gap 0\.\d\d s at -\d\d dBFS \(pause\), [+-]\d\.\d s from the grant \(log line\)$", said[0])
+    # digital silence
+    p = write(d, "9211-21-call_21", audio(("talk", 3.0, A), ("gap", 0.3), ("talk", 2.7, B)), [(A, 0.0)])
+    _c, cuts, said = call_of(p, [(T0 + 3.6, B, "grant")], mode="log")
+    assert "at -99 dBFS (silence)" in said[0] and "would cut" in said[0] and no_ids(said)
+    # none: the fallback, said as such
+    p = write(d, "9211-22-call_22", audio(("talk", 3.0, A), ("talk", 3.0, B)), [(A, 0.0)])
+    _c, cuts, said = call_of(p, [(T0 + 3.3, B, "grant")])
+    assert cuts[0].level is None and said[0].endswith("no gap: at the grant less its latency, -0.3 s from the grant "
+                                                      "(log line)")
+    # before_s: tunable up to 3.0, the default as it was
+    assert GrantSplit().before_s == 1.5 and GrantSplit.of({"grant_split_tune": {"before_s": 3.0}}).before_s == 3.0
+    assert GrantSplit.of({"grant_split_tune": {"before_s": 3.5}}).before_s == 1.5
+
+
+def test_a_unit_script_grant_counts_only_for_a_radio_coming_back(tmp_path):
+    d = day_dir(tmp_path)
+    pcm = audio(("talk", 2.5, A), ("gap", 0.2), ("talk", 2.5, B), ("gap", 0.3), ("talk", 2.5, A))
+    p = write(d, "9211-23-call_23", pcm, [(A, 0.0)])
+    # B by the GRANT line; A's return logs no GRANT line (trunk-recorder's current is still A): the unit script's does
+    c, cuts, said = call_of(p, [(T0 + 3.0, B, "grant"), (T0 + 3.05, B, "unit"), (T0 + 5.8, A, "unit")])
+    assert [(x.src, x.via) for x in cuts] == [(B, "grant"), (A, "unit")] and [t.src for t in c.turns] == [A, B, A]
+    assert said[1].endswith("(unit script)")
+    # a unit-script grant for a radio the call never credited: never a cut (a grant of the next call, a new key-up)
+    c, cuts, _ = call_of(p, [(T0 + 3.0, B, "unit")])
+    assert cuts == [] and len(c.turns) == 1
+
+
+def test_nothing_is_cut_within_a_second_of_the_calls_end(tmp_path):
+    d = day_dir(tmp_path)
+    p = write(d, "9211-24-call_24", audio(("talk", 5.0, A), ("gap", 0.2), ("talk", 0.8, B)), [(A, 0.0)])
+    # the next call's grant, at this one's end: A's last part is never shaved off
+    c, cuts, _ = call_of(p, [(T0 + 5.6, B, "grant")])
+    assert cuts == [] and len(c.turns) == 1
+    c, cuts, _ = call_of(p, [(T0 + 4.8, B, "grant")])            # 1.2 s from the end: still a cut
+    assert [x.src for x in cuts] == [B]
+
+
+def test_a_grant_line_from_an_idle_sink_is_its_stale_talker_and_left_out(tmp_path):
+    now = [time.time()]
+    lt = LiveTalk(clock=lambda: now[0])
+    t = now[0] - 0.2
+    for msg in (f"Unit ID externally set from GRANT: {B}\t caching, doesn't match current: {A}\t state: idle",
+                f"Unit ID externally set from GRANT: {C}\t caching, doesn't match current: {A}\t samples: 0",
+                f"Unit ID externally set from GRANT: {B}\t caching, doesn't match current: {A}\t state: recording\t "
+                f"samples: 24000"):
+        lt.feed_line(tr_line(t, msg))
+    assert [(s, k) for _a, s, k in lt.cut_events("mrrs", PD, 0, now[0] + 5)] == [(B, "grant")]
+    assert [s for _a, s in lt.grants("mrrs", PD, 0, now[0] + 5)] == [B, C, B]    # (apply_grants' grants as before)
+    log = tmp_path / trunkrecd.LOG
+    log.write_text("\n".join(tr_line(t + k, f"Unit ID externally set from GRANT: {x}\t caching{tail}")
+                             for k, (x, tail) in enumerate([(B, "\t state: IDLE"), (C, "\t samples: 0"),
+                                                            (A, "\t samples: 800")])) + "\n")
+    assert [s for _a, s, _k in LogEvents([log]).events("mrrs", PD, 0, now[0] + 5)] == [A]
+
+
+def test_the_count_writes_its_own_tmp_and_off_says_no_grant_cuts(tmp_path, monkeypatch):
+    path = tmp_path / "p25_grant_cuts.mrrs.json"
+    names = []
+    real = Path.write_text
+    monkeypatch.setattr(Path, "write_text", lambda self, *a, **k: (names.append(self.name), real(self, *a, **k))[1])
+    GrantCount(path, "mrrs").add(1, "log")
+    assert names == [f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"]
+    monkeypatch.undo()
+    assert [x.name for x in tmp_path.iterdir()] == [path.name]
+    # switched off: the file says so (its counts kept), and the hourly line adds no grant cuts
+    systems.wire_grant_split(CallIngest(tmp_path, LABELS, on_call=lambda c: None), LiveTalk(), {"grant_split": "off"},
+                             tmp_path, str(tmp_path / "p25_recorder.mrrs.json"), "mrrs", "mrrs")
+    assert json.loads(path.read_text())["mode"] == "off" and json.loads(path.read_text())["cuts"] == 1
+    from tests.test_trunk_split_counts import start
+    said: list[str] = []
+    sh = trunkrecd.Shipper(said.append, "p25 mrrs")
+    sh.grant_path = str(path)
+    sh.started("on", 0.0)
+    sh.tick(0.0)
+    sh.line(start("mrrs", 1), 1.0)
+    sh.tick(3601.0)
+    assert said == ["p25 mrrs: split (on) last hour: 0 splits, 0 ID flips, 0 aliases, in 1 calls (0.0% of calls)"]
+    # never written when it was never on
+    other = tmp_path / "p25_grant_cuts.east.json"
+    systems.wire_grant_split(CallIngest(tmp_path, LABELS, on_call=lambda c: None), LiveTalk(), {}, tmp_path,
+                             str(tmp_path / "p25_recorder.east.json"), "east", "east")
+    assert not other.exists()

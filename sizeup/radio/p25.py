@@ -491,6 +491,7 @@ GRANT_CUT = "grant_cut"          # Turn.via / Piece.via of a part cut at a mid-c
 GRANT_SPLIT_MODES = ("off", "log", "on")
 GAP_FRAME_S = 0.01               # the gap search's frames
 GAP_BELOW_DB = 20.0              # a gap's frames: this far under the turn's speech level (its loud frames), or silent
+SILENCE_DBFS = -70.0             # a gap this quiet is digital silence (no one keyed); louder: a talker's own pause
 
 
 @dataclass
@@ -498,7 +499,9 @@ class GrantSplit:
     """A system's grant split: its mode and where it cuts. A grant to another radio during the call, settle_s or more
     into the current talker's turn, with no voice-ID cut (a turn's start, the patch's cut or would-cut) within voice_s,
     is cut at the quietest run of min_gap_s or more from before_s before it to after_s after it, else latency_s before
-    it; grants for one radio collapse_s apart are one; no part is ever shorter than min_piece_s."""
+    it; grants for one radio collapse_s apart are one; no part is ever shorter than min_piece_s, and nothing is cut
+    within voice_s of the call's end (the next call's grant). A unit-script grant counts only for a radio coming back:
+    one the call credited before (A, B, A: the GRANT log line never names the call's own first radio)."""
     mode: str = "off"
     before_s: float = 1.5
     after_s: float = 0.5
@@ -509,18 +512,19 @@ class GrantSplit:
     collapse_s: float = 1.0
     min_piece_s: float = 0.4
 
-    TUNE = ("before_s", "after_s", "latency_s", "min_gap_s")
+    TUNE = {"before_s": 3.0, "after_s": 5.0, "latency_s": 5.0, "min_gap_s": 5.0}     # each tunable, and its most
 
     @classmethod
     def of(cls, conf: dict | None) -> GrantSplit:
         """From a config.json's "sizeup" block: "grant_split" (a mode: anything else is off) and optional
-        "grant_split_tune": {before_s, after_s, latency_s, min_gap_s} (seconds, 0-5; anything else keeps the default)."""
+        "grant_split_tune": {before_s (0-3), after_s, latency_s, min_gap_s (0-5)} in seconds; anything else keeps the
+        default."""
         conf = conf if isinstance(conf, dict) else {}
         mode = conf.get("grant_split")
         out = cls(mode if mode in GRANT_SPLIT_MODES else "off")
         tune = conf.get("grant_split_tune")
         for k, v in (tune.items() if isinstance(tune, dict) else ()):
-            if k in cls.TUNE and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 5:
+            if k in cls.TUNE and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= cls.TUNE[k]:
                 setattr(out, k, float(v))
         return out
 
@@ -533,6 +537,18 @@ class GrantCut:
     at: float                  # the grant's time (wall clock)
     expected: float            # where the grant's time falls in the call audio
     gap: float                 # the length of the gap it was put in, 0 when none (expected - latency_s)
+    level: float | None = None  # the gap's mean level, dBFS (None: no gap)
+    via: str = "grant"         # what granted it: "grant" (trunk-recorder's GRANT log line) | "unit" (the unit script)
+
+    def why(self) -> str:
+        """For its log line (tuning: #819): the gap, its level and kind, or the fallback; and the grant's source."""
+        if self.gap and self.level is not None:
+            kind = "silence" if self.level <= SILENCE_DBFS else "pause"
+            where = f"gap {self.gap:.2f} s at {max(self.level, -99.0):.0f} dBFS ({kind})"
+        else:
+            where = "no gap: at the grant less its latency"
+        src = "unit script" if self.via == "unit" else "log line"
+        return f"{where}, {self.pos - self.expected:+.1f} s from the grant ({src})"
 
 
 def _frames_db(audio: np.ndarray, a: int, b: int, rate: int) -> np.ndarray:
@@ -546,8 +562,8 @@ def _frames_db(audio: np.ndarray, a: int, b: int, rate: int) -> np.ndarray:
 
 
 def best_gap(audio: np.ndarray, lo: float, hi: float, aim: float, level_db: float, min_gap_s: float,
-             rate: int = RATE) -> tuple[float, float] | None:
-    """(middle, length) in s of the quietest run of quiet frames (GAP_BELOW_DB under level_db, or under NO_VOICE_DBFS)
+             rate: int = RATE) -> tuple[float, float, float] | None:
+    """(middle, length in s, mean level in dBFS) of the quietest run of quiet frames (GAP_BELOW_DB under level_db, or under NO_VOICE_DBFS)
     at least min_gap_s long between lo and hi; the nearer to aim of two as quiet (to the dB). None: no such run."""
     a, b = max(0, int(lo * rate)), min(len(audio), int(hi * rate))
     db = _frames_db(audio, a, b, rate)
@@ -565,15 +581,15 @@ def best_gap(audio: np.ndarray, lo: float, hi: float, aim: float, level_db: floa
             mid = a / rate + (k + j) / 2 * GAP_FRAME_S
             key = (round(float(db[k:j].mean())), abs(mid - aim))
             if best is None or key < best[0]:
-                best = (key, mid, (j - k) * GAP_FRAME_S)
+                best = (key, mid, (j - k) * GAP_FRAME_S, float(db[k:j].mean()))
         k = j
-    return None if best is None else (best[1], best[2])
+    return None if best is None else (best[1], best[2], best[3])
 
 
 def plan_grant_cuts(call: Call, events: list[tuple[float, str, str]], conf: GrantSplit,
                     rate: int = RATE) -> list[GrantCut]:
-    """Where the grant split cuts this call (the module's doc, GrantSplit): events are (time, radio ID, "grant" |
-    "voice") from the control channel and the voice channel (radio/live.py cut_events). Only a turn with a place in
+    """Where the grant split cuts this call (the module's doc, GrantSplit): events are (time, radio ID, "grant" | "unit"
+    | "voice") from the control channel and the voice channel (radio/live.py cut_events). Only a turn with a place in
     time (Turn.at) and a length, and only in the call's audio."""
     audio = call.audio
     if audio is None or not len(audio):
@@ -581,18 +597,25 @@ def plan_grant_cuts(call: Call, events: list[tuple[float, str, str]], conf: Gran
     turns = sorted((t for t in call.turns if t.at is not None and t.length), key=lambda t: t.pos)
     if not turns:
         return []
-    bounds = [t.pos for t in sorted(call.turns, key=lambda t: t.pos)[1:]]        # every key-up the call has already
+    every = sorted(call.turns, key=lambda t: t.pos)
+    bounds = [t.pos for t in every[1:]] + [len(audio) / rate]   # every key-up the call has already, and its end
     voices = [at for at, _s, kind in events if kind == "voice"]
-    grants = sorted((float(at), str(src)) for at, src, kind in events if kind == "grant" and str(src) not in UNKNOWN_SRC)
+    grants = sorted((float(at), str(src), kind) for at, src, kind in events
+                    if kind in ("grant", "unit") and str(src) not in UNKNOWN_SRC)
     seen: dict[str, float] = {}
     cuts: list[GrantCut] = []
     cur: dict[int, tuple[float, str]] = {}                   # turn -> (its current talker's start, radio)
     levels: dict[int, float] = {}
-    for at, src in grants:
+    for at, src, kind in grants:
+        k = next((i for i, t in enumerate(turns) if t.at <= at < t.at + t.length), None)
+        if kind == "unit":
+            # the unit script's: only a radio coming back (credited before here: a turn's, or an earlier cut's)
+            here = turns[k].pos + (at - turns[k].at) if k is not None else None
+            if here is None or src not in {t.src for t in every if t.src and t.pos < here} | {c.src for c in cuts}:
+                continue
         last, seen[src] = seen.get(src), at
         if last is not None and at - last <= conf.collapse_s:
             continue                                         # the same grant again (an update): one
-        k = next((i for i, t in enumerate(turns) if t.at <= at < t.at + t.length), None)
         if k is None:
             continue                                         # between transmissions, or not in this call
         t = turns[k]
@@ -602,7 +625,7 @@ def plan_grant_cuts(call: Call, events: list[tuple[float, str, str]], conf: Gran
         if src == talker or expected - start < conf.settle_s:
             continue                                         # the current talker again, or its own key-up
         if any(abs(v - at) <= conf.voice_s for v in voices) or any(abs(b - expected) <= conf.voice_s for b in bounds):
-            continue                                         # the voice channel cut there (or would have)
+            continue                                         # the voice channel cut there (or would have), or the end
         lo, hi = max(start + conf.min_piece_s, expected - conf.before_s), min(end - conf.min_piece_s,
                                                                               expected + conf.after_s)
         if hi <= lo:
@@ -616,7 +639,8 @@ def plan_grant_cuts(call: Call, events: list[tuple[float, str, str]], conf: Gran
         pos = round(pos, 2)
         if pos - start < conf.min_piece_s or end - pos < conf.min_piece_s:
             continue
-        cuts.append(GrantCut(pos, src, at, round(expected, 2), round(gap[1], 2) if gap else 0.0))
+        cuts.append(GrantCut(pos, src, at, round(expected, 2), round(gap[1], 2) if gap else 0.0,
+                             round(gap[2], 1) if gap else None, kind))
         cur[k] = (pos, src)
     return cuts
 
@@ -670,13 +694,22 @@ class GrantCount:
         with self._lock:
             self.cuts += n
             self.calls += 1
-            tmp = self.path.with_name(self.path.name + ".tmp")
-            try:
-                tmp.write_text(json.dumps({"v": 1, "system": self.system, "mode": mode, "cuts": self.cuts,
-                                           "calls": self.calls, "at": round(time.time(), 1)}))
-                os.replace(tmp, self.path)
-            except OSError:
-                pass                                         # (a count, never in the way of the call)
+            self._write(mode)
+
+    def mark(self, mode: str) -> None:
+        """The mode alone written (the counts as they are): "off" once the system's grant split is off, so the hourly
+        line says nothing of it."""
+        with self._lock:
+            self._write(mode)
+
+    def _write(self, mode: str) -> None:
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")   # (its own tmp)
+        try:
+            tmp.write_text(json.dumps({"v": 1, "system": self.system, "mode": mode, "cuts": self.cuts,
+                                       "calls": self.calls, "at": round(time.time(), 1)}))
+            os.replace(tmp, self.path)
+        except OSError:
+            pass                                             # (a count, never in the way of the call)
 
 
 class CallIngest:
@@ -882,8 +915,7 @@ class CallIngest:
             for c in cuts:
                 self.on_event(f"p25 {self.name}: grant split ({conf.mode}): {call.label}: "
                               f"{'would cut' if conf.mode == 'log' else 'cut'} at {c.pos:.1f} of {dur:.1f} s, "
-                              + (f"gap {c.gap:.2f} s" if c.gap else "no gap")
-                              + f" ({c.pos - c.expected:+.1f} s from the grant)" + (" (late)" if call.late else ""))
+                              f"{c.why()}" + (" (late)" if call.late else ""))
             if self.grant_count is not None:
                 self.grant_count.add(len(cuts), conf.mode)
             if conf.mode == "on":
