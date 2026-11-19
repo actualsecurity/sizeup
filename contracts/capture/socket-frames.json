@@ -1,0 +1,81 @@
+{
+  "x-version": 1,
+  "x-status": "designed",
+  "description": "Designed (docs/native/capture-split.md 4.2, 10; the framing is #709's, sizeup/cloud/sttencode.py), not implemented. Byte vectors for the live socket's framing, as hex. A frame is `>II` (two unsigned 32-bit big-endian integers: the header's length and the payload's length, in bytes), the header (one JSON object, UTF-8), the payload (raw bytes). `frames`: one whole frame each, with the header and payload it decodes to; the header's bytes here are compact JSON in this key order, but a reader takes any JSON object. `streams`: bytes as a connection delivers them, cut anywhere, with the frames a reader has after each chunk. `refused`: bytes a reader closes the connection on, and why. `limits`: the header's is #709's MAX_HEADER; the payload's is this contract's.",
+  "limits": {"header_max_bytes": 65536, "payload_max_bytes": 1048576},
+  "frames": [
+    {
+      "name": "a client's hello",
+      "header": {"v": 1, "t": "hello", "role": "reader", "contract": 1},
+      "payload_hex": "",
+      "hex": "00000030000000007b2276223a312c2274223a2268656c6c6f222c22726f6c65223a22726561646572222c22636f6e7472616374223a317d"
+    },
+    {
+      "name": "a poke",
+      "header": {"v": 1, "t": "poke", "what": "wish"},
+      "payload_hex": "",
+      "hex": "00000020000000007b2276223a312c2274223a22706f6b65222c2277686174223a2277697368227d"
+    },
+    {
+      "name": "the status changed",
+      "header": {"v": 1, "t": "status", "at": 1900000000.5},
+      "payload_hex": "",
+      "hex": "00000026000000007b2276223a312c2274223a22737461747573222c226174223a313930303030303030302e357d"
+    },
+    {
+      "name": "a frame with a payload (none is sent in version 1; a reader skips it)",
+      "header": {"v": 1, "t": "from_the_future", "at": 1900000001.0},
+      "payload_hex": "00017fff8000ffff",
+      "hex": "0000002f000000087b2276223a312c2274223a2266726f6d5f7468655f667574757265222c226174223a313930303030303030312e307d00017fff8000ffff"
+    },
+    {
+      "name": "a header that is not ASCII (UTF-8, lengths in bytes)",
+      "header": {
+        "v": 1,
+        "t": "reply",
+        "id": "r-1",
+        "ok": false,
+        "reason": "parked",
+        "error": "refused: “parked”",
+        "confirm": false,
+        "at": 1900000200.02
+      },
+      "payload_hex": "",
+      "hex": "0000007e000000007b2276223a312c2274223a227265706c79222c226964223a22722d31222c226f6b223a66616c73652c22726561736f6e223a227061726b6564222c226572726f72223a22726566757365643a20e2809c7061726b6564e2809d222c22636f6e6669726d223a66616c73652c226174223a313930303030303230302e30327d"
+    }
+  ],
+  "streams": [
+    {
+      "name": "two frames in one read",
+      "chunks_hex": [
+        "00000030000000007b2276223a312c2274223a2268656c6c6f222c22726f6c65223a22726561646572222c22636f6e7472616374223a317d00000020000000007b2276223a312c2274223a22706f6b65222c2277686174223a2277697368227d"
+      ],
+      "frames_after_each": [2]
+    },
+    {
+      "name": "a frame cut inside its lengths, its header and before the next frame",
+      "chunks_hex": [
+        "0000003000",
+        "0000007b2276223a312c2274223a22",
+        "68656c6c6f222c22726f6c65223a22726561646572222c22636f6e7472616374223a317d000000",
+        "20000000007b2276223a312c2274223a22706f6b65222c2277686174223a2277697368227d"
+      ],
+      "frames_after_each": [0, 0, 1, 2]
+    }
+  ],
+  "refused": [
+    {
+      "name": "a header one byte over the limit: refused from the lengths alone, nothing read",
+      "hex": "0001000100000000",
+      "why": "too big"
+    },
+    {"name": "a payload one byte over the limit", "hex": "0000000200100001", "why": "too big"},
+    {"name": "a header that is not JSON", "hex": "000000050000000068656c6c6f", "why": "header: not JSON"},
+    {
+      "name": "a header that is JSON and not an object",
+      "hex": "00000003000000005b315d",
+      "why": "header: not an object"
+    },
+    {"name": "a header with NaN", "hex": "00000009000000007b2261223a4e614e7d", "why": "header: not JSON"}
+  ]
+}

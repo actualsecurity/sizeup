@@ -1,0 +1,34 @@
+{
+  "v": 1,
+  "t": "talking",
+  "at": 1900000000.4,
+  "entries": [
+    {
+      "key": "fm:CH A:1900000000.12:7001",
+      "system": "fm",
+      "channel": "CH A",
+      "tg": null,
+      "radio_id": "7001",
+      "alias": "",
+      "since": 1900000000.123,
+      "talk_since": 1900000000.123,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "id_on_release": false
+    },
+    {
+      "key": "p25:examplesys:4101-1900000300:7002",
+      "system": "p25",
+      "channel": "Fire Dispatch 1",
+      "tg": 4101,
+      "radio_id": "7002",
+      "alias": "UNIT B",
+      "since": 1900000300.0,
+      "talk_since": 1900000306.0,
+      "ended": true,
+      "until": 1900000316.0,
+      "dispatcher": false
+    }
+  ]
+}

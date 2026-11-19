@@ -1,0 +1,27 @@
+{
+  "base": "capture-urgent-request/valid/an-alarm.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/items/-",
+      "value": {
+        "key": "page:PAGE 1:1900000100.25",
+        "rev": 2,
+        "kind": "page",
+        "at": 1900000104.9,
+        "event_at": 1900000100.25,
+        "age_s": 4.66,
+        "age_src": "boot",
+        "data": {
+          "channel": "PAGE 1",
+          "started": 1900000100.25,
+          "phase": "voice",
+          "ours": true,
+          "ended": false,
+          "until": null,
+          "pairs": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"], "ours": true, "at": 1900000100.25}]
+        }
+      }
+    }
+  ]
+}

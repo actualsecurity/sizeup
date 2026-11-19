@@ -1,0 +1,8 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/urgent/state", "value": "refused"},
+    {"op": "replace", "path": "/urgent/reason", "value": "token_revoked"},
+    {"op": "replace", "path": "/urgent/last_error", "value": "401 token_revoked"}
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-cursor/valid/channels-in-parallel.json",
+  "patch": [{"op": "remove", "path": "/spool_epoch"}]
+}

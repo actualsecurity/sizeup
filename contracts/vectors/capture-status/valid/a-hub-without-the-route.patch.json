@@ -1,0 +1,7 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/urgent/state", "value": "no_route"},
+    {"op": "replace", "path": "/urgent/last_error", "value": "404 not found"}
+  ]
+}

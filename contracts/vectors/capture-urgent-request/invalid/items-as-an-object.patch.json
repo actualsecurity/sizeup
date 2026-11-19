@@ -1,0 +1,29 @@
+{
+  "base": "capture-urgent-request/valid/an-alarm.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/items",
+      "value": {
+        "0": {
+          "key": "CHA-live-1900000000123",
+          "rev": 0,
+          "kind": "alarm",
+          "at": 1900000000.39,
+          "event_at": 1900000000.123,
+          "age_s": 0.29,
+          "age_src": "boot",
+          "data": {
+            "source": "CH A",
+            "start": 1900000000.123,
+            "radio_id": "7001",
+            "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
+            "unit": "UNIT A",
+            "emergency": true,
+            "emergency_via": "MDC"
+          }
+        }
+      }
+    }
+  ]
+}

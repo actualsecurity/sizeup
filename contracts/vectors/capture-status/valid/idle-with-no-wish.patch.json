@@ -1,0 +1,10 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/wish_seq", "value": 0},
+    {"op": "replace", "path": "/channels", "value": []},
+    {"op": "replace", "path": "/groups", "value": []},
+    {"op": "replace", "path": "/reader", "value": {"attached": false, "since": null}},
+    {"op": "replace", "path": "/p25", "value": {}}
+  ]
+}

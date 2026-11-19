@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/reception-stop.json",
+  "patch": [{"op": "remove", "path": "/args/id"}]
+}

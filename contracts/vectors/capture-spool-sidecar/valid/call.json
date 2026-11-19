@@ -1,0 +1,55 @@
+{
+  "v": 1,
+  "kind": "call",
+  "id": "4101-1900000300_851012500.0-call_17",
+  "seq": 12350,
+  "spool_epoch": "3f9a1c0b7d2e4a61",
+  "start": 1900000300.0,
+  "end": 1900000312.0,
+  "published": 1900000313.6,
+  "closed_boot": 5427.5,
+  "published_boot": 5427.55,
+  "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c",
+  "replayed": false,
+  "system": "examplesys",
+  "talkgroup": 4101,
+  "freq_hz": 851012500.0,
+  "signal_db": -42.0,
+  "noise_db": -71.0,
+  "emergency": false,
+  "encrypted": false,
+  "turns": [
+    {
+      "src": "7001",
+      "pos_s": 0.0,
+      "len_s": 5.2,
+      "time": 1900000300.0,
+      "tag": "UNIT A",
+      "emergency": false,
+      "errors": 0,
+      "via": "srclist"
+    },
+    {
+      "src": "7002",
+      "pos_s": 5.2,
+      "len_s": null,
+      "time": 1900000306.0,
+      "tag": "",
+      "emergency": false,
+      "errors": 2,
+      "via": "grant"
+    }
+  ],
+  "grants_applied": true,
+  "tr": "000000012350-4101-1900000300_851012500.0-call_17.tr",
+  "audio": {
+    "file": "000000012350-4101-1900000300_851012500.0-call_17.wav",
+    "format": "wav",
+    "encoding": "s16le",
+    "rate_hz": 8000,
+    "channels": 1,
+    "samples": 96000,
+    "bytes": 192044
+  },
+  "capture": {"impl": "python", "build": "0123abc", "contract": 1}
+}

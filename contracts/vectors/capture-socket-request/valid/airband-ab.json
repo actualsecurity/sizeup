@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-55ee66ff",
+  "op": "airband_ab",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {"label": "TOWER", "minutes": 30, "phase_s": 60}
+}

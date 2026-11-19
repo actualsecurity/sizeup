@@ -1,0 +1,10 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/urgent/unsent",
+      "value": [{"channel": "CH A", "unit": "UNIT A", "event_at": 1900000000.123, "age_s": 14.2}]
+    }
+  ]
+}

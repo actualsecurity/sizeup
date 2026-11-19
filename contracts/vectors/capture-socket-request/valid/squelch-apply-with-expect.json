@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-11aa22bb",
+  "op": "squelch_apply",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {"label": "CH A", "open_db": 12.0, "close_db": 8.0, "min_open_s": 0.3, "expect": {"open_db": 10.0, "close_db": 7.0}}
+}

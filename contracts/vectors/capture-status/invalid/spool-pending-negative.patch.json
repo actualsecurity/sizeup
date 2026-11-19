@@ -1,0 +1,4 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [{"op": "replace", "path": "/spool/pending", "value": -1}]
+}

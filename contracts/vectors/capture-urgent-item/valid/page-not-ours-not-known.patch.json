@@ -1,0 +1,7 @@
+{
+  "base": "capture-urgent-item/valid/page-voice.json",
+  "patch": [
+    {"op": "replace", "path": "/data/ours", "value": false},
+    {"op": "replace", "path": "/data/pairs/0", "value": {"a_hz": 1232.0, "b_hz": 1082.1, "names": [], "ours": false}}
+  ]
+}

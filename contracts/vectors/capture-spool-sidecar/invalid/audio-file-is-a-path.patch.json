@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [{"op": "replace", "path": "/audio/file", "value": "items/000000012345-CHA-1900000000123.wav"}]
+}

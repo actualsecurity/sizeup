@@ -1,0 +1,8 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/channels/0/run", "value": "shed"},
+    {"op": "replace", "path": "/channels/1/run", "value": "out"},
+    {"op": "replace", "path": "/sdrs/1/noaudio", "value": {"since": 1899999500.0}}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-77cc11dd"},
+    {"op": "replace", "path": "/reason", "value": "interrupted"},
+    {"op": "replace", "path": "/error", "value": "capture stopped while applying this request: look, then ask again under a new id"}
+  ]
+}

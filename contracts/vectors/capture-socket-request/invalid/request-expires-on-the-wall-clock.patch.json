@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/pick.json",
+  "patch": [{"op": "replace", "path": "/expires_boot", "value": 1900000205.0}]
+}

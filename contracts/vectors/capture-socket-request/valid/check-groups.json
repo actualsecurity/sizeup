@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "t": "request",
+  "id": "r-66ff7700",
+  "op": "check",
+  "by": "person",
+  "at": 1900000200.0,
+  "expires_boot": 5330.0,
+  "args": {
+    "what": "groups",
+    "value": [{"name": "roof", "sdrs": ["sdr-a", "sdr-b"], "jobs": ["PAGE 1", "CH A"]}],
+    "confirm": false
+  }
+}

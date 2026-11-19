@@ -66,8 +66,9 @@ def test_every_route_in_the_hubs_code_has_a_row_and_every_row_is_in_the_code():
 
 def test_no_path_under_api_station_is_named_in_the_code_without_a_row():
     """The wider net: any string in sizeup/ or tools/ that starts with /api/station/ (a client's path, a regex, a
-    prefix) is a listed route or the start of one. A route written anywhere before it is listed fails here."""
-    listed = {c.example(r["path"]) for r in ROWS}
+    prefix) is a listed route or the start of one. A route written anywhere before it is listed fails here. A route
+    listed under `designed` (decided, not served yet) counts: its client may be written with or after the hub's side."""
+    listed = {c.example(r["path"]) for r in ROWS + TABLE.get("designed", [])}
     found: dict[str, str] = {}
     for f in sorted((ROOT / "sizeup").rglob("*.py")) + sorted((ROOT / "tools").rglob("*.py")):
         tree = ast.parse(f.read_text(encoding="utf-8"))
