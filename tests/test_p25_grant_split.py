@@ -385,7 +385,8 @@ def test_changing_the_grant_split_restarts_no_trunk_recorder(tmp_path):
     base = sig(conf)
     assert sig({**conf, "sizeup": {**conf["sizeup"], "grant_split": "on"}}) == base
     assert sig({**conf, "sizeup": {**conf["sizeup"], "grant_split_tune": {"latency_s": 0.5}}}) == base
-    assert sig({**conf, "sizeup": {**conf["sizeup"], "split": "on"}}) != base       # the patch's: trunk-recorder's
+    other = "off" if conf["sizeup"].get("split") != "off" else "log"
+    assert sig({**conf, "sizeup": {**conf["sizeup"], "split": other}}) != base      # the patch's: trunk-recorder's
     without = dict(conf, sizeup={k: v for k, v in conf["sizeup"].items() if k != "grant_split"})
     f.write_text(json.dumps(without))
     trunkrecd._SIGS.clear()
