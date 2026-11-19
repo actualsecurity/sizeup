@@ -11,7 +11,7 @@ from sizeup.cad import dispatcher, mapview
 from sizeup.cad import sources as src
 from sizeup.cad.sources import checked_location, match_address, normal_location, same_place, same_place_halved, shown_location, town_label
 from tests.test_incident_sources import T0, Rig, towns
-from tests.test_street_only import open_incidents, possibly
+from tests.test_street_only import open_incidents
 
 STREETS = {"rye brook": ["Example Ave", "Sample Ln", "DeSample Rd", "N Example St"],
            "port chester": ["Exampleton Rd", "Sample Ave", "Specimen St", "North St"],
@@ -301,8 +301,8 @@ def test_a_doubled_number_page_with_no_units_and_the_feeds_placeholder_event_are
 
 
 def test_the_same_call_under_a_second_event_id_is_never_silent(tmp_path, monkeypatch):
-    """Before the adapter kept a pending listing's key, a call could come again under a new id ("...-2"). The hub never
-    joins two events of one source, but it notes them as possibly the same."""
+    """Before the adapter kept a pending listing's key, a call could come again under a new id ("...-2"). One county
+    event, one incident: the second id is another run of it (sources.py "same event"), said on the timeline."""
     _, _, t3 = towns()
     rig = placeholder_rig(tmp_path, monkeypatch)
     rig.feed.put("F0000001", type="ALARM/RESD", location=f"23 SAMPLE LN {snake(t3)}", units=("DPTA",),
@@ -312,8 +312,9 @@ def test_the_same_call_under_a_second_event_id_is_never_silent(tmp_path, monkeyp
     rig.feed.put("F0000001-2", type="ALARM/RESD", location=f"23 SAMPLE LN {snake(t3)}", units=("DPTA", "E60"),
                  times={"dispatched": T0})
     rig.poll()
-    a, b = [i["id"] for i in rig.incidents()]
-    assert possibly(rig, b, a)
+    [a] = [i["id"] for i in rig.incidents()]
+    assert any(e["text"].startswith("Redispatched") for e in rig.cad.store.q(
+        "SELECT text FROM events WHERE incident_id = ?", (a,)))
 
 
 # -- review of #475 ---------------------------------------------------------------------------------------------------

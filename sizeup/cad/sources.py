@@ -90,8 +90,38 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                COMMENT_REPEAT_S), closed
                or reopened, each extra
     merge      a feed's event naming other ids of the same source in its aliases: each alias's report is retired
-               (merged_into) with a note on both incidents and in the log. The alias's incident is dismissed only when
-               it is still queued AND that same source made it (its report then moves onto the event); otherwise a note
+               (merged_into) with a note on both incidents and in the log. The alias's incident is dismissed when it
+               is still queued AND that same source made it (its report then moves onto the event). Made by that
+               source and accepted by automation only (60 Control mode; no person's edit, note, status, alarm, kept
+               transmission, page merge or attachment on it: _worked), while the event's incident is accepted too
+               (pending, active), it is closed DUPLICATE in one transaction with the move: its reports (every
+               feed's), page, automatic radio links and units (status and times as they are, a unit history line,
+               automation's steps for them: _move_units) go onto the event's incident. Otherwise a note ("kept:
+               check it")
+    same event one county event, one incident, however many runs: a new event of a source whose event number
+               (feed_event_number: the report's extra "event_number", else its id without an adapter's "-2", "-3"
+               for another run; only an id of one letter and at least RUN_ID_DIGITS digits, so another adapter's
+               "T1-2" or "F26-12" is never cut) is that of an open incident's report attaches there, never a new
+               incident: another run number, another agency (a re-dispatch). The current run is the one dispatched
+               last (else the higher run suffix: "-3" over "-2" over none), never the one that arrived last: the
+               other's report is retired into it (its later reports change nothing: its in service never closes the
+               call; an earlier run arriving after is retired at once, silently), both runs' numbers stay on the
+               incident (decorate: run_numbers, event_id the event number), "Redispatched: <agency> → <agency>
+               (<feed>: run ...)" on its timeline and the change (units, location, type) as any report's. The new
+               report and the retirement are one transaction (a takeover or a retry never leaves two runs ruling).
+               Never a run first seen over (closed, in service), never an incident closed (a later run is a new
+               call); two events never join on a run number, a place or a time, however near. A page for the new
+               run (_new_run_page): it joins although a page is on the incident only when no page there is nearer in
+               time to that run's dispatch than to an earlier run's, it came within SAME_CALL_S of it and names that
+               run's place exactly; a second page for one run never does
+    highway    a highway location is its route, direction and mile marker (sizeup/dispatch.py highway: "I-999 SB MM
+               5.7", a page's "i 999 southbound mile marker 5.7"): the same place only at the same marker to the
+               tenth, the same direction when both say one (same_marker), whatever the town (mutual aid on that road
+               in another town is the same place); one that says no direction against two calls at that marker on
+               both carriageways is "possibly the same" with each; a marker within a mile, or units shared, is
+               "possibly the same", never joined; never a misheard street. A feed incident's own report locations count too (each run's, whatever its address shows: a
+               person's edit). A page with no place said (no address, street, place phrase or marker) is unlocated:
+               never its words as the address (dispatch.place_clause), its text in the remarks
     closed     the feed closed an event (its in-service or cleared time): a queued incident only that event made, and
                nobody touched, is dismissed; any other gets the timeline line. A page's own card still queued for that
                call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
@@ -136,6 +166,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -147,12 +178,13 @@ from typing import Callable
 from sizeup.cad import pagematch
 from sizeup.cad.fuzzy import SNAP_MARGIN, STREET_SIM, fold, misread, name_sim, snap
 from sizeup.cad.store import OPEN, TZ, CadError
-from sizeup.dispatch import split_joined
+from sizeup.dispatch import highway, near_marker, same_marker, split_joined
 from sizeup.fence import FencedWrite
 from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
 
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
 FEED_SOURCE = "CAD feed"               # incidents.source of one an external feed made
+DUPLICATE = "DUPLICATE"                # the disposition an incident a feed merged away closes with (_merge)
 PAGE_SOURCE = "60 Control page"
 ALERT_SOURCE = "60 Control radio"     # incidents.source of an airport alert level declared on the fire radio (#369)
 MATCH_WINDOW_S = 20 * 60.0
@@ -1007,7 +1039,11 @@ def same_place(a: str, b: str) -> bool:
     """Strict: the same house number and street ('12 Example Ave' = '12 EXAMPLE AVENUE APT 3'), the same intersection,
     or the same named place; never '14 Example Ave', 'S Example Ave' for 'N Example Ave', '12 Main St W' for '12 Main
     St', '12 Park Ave Ext' for '12 Park Ave', 'Example Ave' for '12 Example Ave', an intersection or a named place for a
-    numbered address."""
+    numbered address. Two highway locations by mile marker (sizeup/dispatch.py highway: 'I-999 SB MM 5.7' and 'I999 SB
+    5.7'): the same route and marker, and direction when both say one (same_marker), whatever the town."""
+    ha, hb = highway(a), highway(b)
+    if ha is not None and hb is not None:
+        return same_marker(ha, hb)
     ka, kb = place_key(a), place_key(b)
     if ka is None or kb is None or ka[0] != kb[0]:
         return False
@@ -1229,6 +1265,51 @@ def _dur(s: float) -> str:
 
 def _ref(inc: dict) -> str:
     return f"#{inc['number'] or inc['id']}"
+
+
+# One county event, however many runs (see the module's "same event"): its event number is the report's extra
+# "event_number" when the adapter gives it, else its event id without the "-2", "-3" an adapter adds for another run
+# of one event (another run number, another agency). Only an id of one letter and RUN_ID_DIGITS digits or more, and
+# no other dash ("F0000123", "F0000123-2"): a bare number ("26-12"), a short one ("T1-2", "F26-12": another adapter's
+# own numbering) is never cut.
+RUN_ID_DIGITS = 5
+EVENT_ID = re.compile(rf"([A-Za-z]\d{{{RUN_ID_DIGITS},}})(?:-(\d{{1,2}}))?")
+
+
+def feed_event_number(ref: str, data: dict | None = None) -> str:
+    """The county event a feed's report is a run of ("F0000123" for "F0000123-2"); "" when it can't be told."""
+    x = ((data or {}).get("extra") or {}).get("event_number")
+    if isinstance(x, str) and x.strip():
+        return x.strip()
+    m = EVENT_ID.fullmatch(ref or "")
+    return m.group(1) if m else ""
+
+
+def later_run(ref: str, data: dict, other_ref: str, other: dict) -> bool:
+    """Is (ref, data) a later run of its event than (other_ref, other)? The one dispatched later when both say a
+    dispatch time; else the higher run suffix ("-3" > "-2" > none); else (one id, no times) yes. Never which one arrived
+    last."""
+    def disp(d: dict):
+        t = d.get("times") or {}
+        x = t.get("dispatched") or (min(t.values()) if t else None)
+        return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+    def suffix(r: str) -> int:
+        m = re.search(r"-(\d{1,2})$", r or "")
+        return int(m.group(1)) if m else 1
+
+    a, b = disp(data), disp(other)
+    if a is not None and b is not None and a != b:
+        return a > b
+    if suffix(ref) != suffix(other_ref):
+        return suffix(ref) > suffix(other_ref)
+    return True
+
+
+def _runs(extra: dict) -> list[str]:
+    """'GROUP run' for each run number a report's extra names."""
+    r = extra.get("run_numbers") if isinstance(extra, dict) else None
+    return [f"{g} {n}" for g, n in r.items() if n] if isinstance(r, dict) else []
 
 
 class Sources:
@@ -1530,18 +1611,22 @@ class Sources:
         return self.store.one("SELECT * FROM source_reports WHERE source = ? AND ref = ?", (source, ref))
 
     def _put(self, source: str, ref: str, rank: int, label: str, first_seen: float, data: dict,
-             incident_id: int | None = None, seen_at: float | None = None) -> None:
-        """seen_at: the station's seen_at of this snapshot (a feed's event), kept to refuse an older one (on_event)."""
+             incident_id: int | None = None, seen_at: float | None = None, db=None) -> None:
+        """seen_at: the station's seen_at of this snapshot (a feed's event), kept to refuse an older one (on_event).
+        db: in the caller's transaction."""
+        if db is None:
+            with self.store.tx() as db:
+                self._put(source, ref, rank, label, first_seen, data, incident_id, seen_at, db)
+            return
         now = self.clock()
-        with self.store.tx() as db:
-            db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, data, "
-                       "seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, ref) DO UPDATE SET "
-                       "rank = excluded.rank, label = excluded.label, "
-                       "incident_id = COALESCE(source_reports.incident_id, excluded.incident_id), "
-                       "first_seen = MIN(source_reports.first_seen, excluded.first_seen), updated_at = excluded.updated_at, "
-                       "data = excluded.data, seen_at = COALESCE(excluded.seen_at, source_reports.seen_at)",
-                       (source, ref, rank, label, incident_id, first_seen, now,
-                        json.dumps(data, separators=(",", ":"), default=str), seen_at))
+        db.execute("INSERT INTO source_reports (source, ref, rank, label, incident_id, first_seen, updated_at, data, "
+                   "seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, ref) DO UPDATE SET "
+                   "rank = excluded.rank, label = excluded.label, "
+                   "incident_id = COALESCE(source_reports.incident_id, excluded.incident_id), "
+                   "first_seen = MIN(source_reports.first_seen, excluded.first_seen), updated_at = excluded.updated_at, "
+                   "data = excluded.data, seen_at = COALESCE(excluded.seen_at, source_reports.seen_at)",
+                   (source, ref, rank, label, incident_id, first_seen, now,
+                    json.dumps(data, separators=(",", ":"), default=str), seen_at))
 
     def _units_of(self, iid: int) -> list[str]:
         """The units on an incident now: assignments not cleared, and the units its reports name."""
@@ -1550,6 +1635,40 @@ class Sources:
         for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND merged_into = ''", (iid,)):
             out += list(json.loads(r["data"] or "{}").get("units") or [])
         return out
+
+    def _new_run_page(self, iid: int, location: str, at: float) -> bool:
+        """A page for another run of the county event on iid (_redispatched): a page is on it already, but each one
+        is nearer in time to an earlier run's dispatch than to the latest run's (a page's clock and the feed's differ
+        by a little: a page just before that dispatch is that run's), fewer pages than runs, this one within
+        SAME_CALL_S of the latest run's dispatch, at that run's own place exactly. One page per run: never a second
+        page for the same run."""
+        events: dict[tuple, list] = {}                     # one feed's runs of one county event (another feed's
+        for r in self.store.q("SELECT source, ref, data, first_seen FROM source_reports WHERE incident_id = ? "
+                              "AND source != ?", (iid, PAGING)):   # report of the same run is never a run of its own)
+            d = json.loads(r["data"] or "{}")
+            if key := feed_event_number(r["ref"], d):
+                events.setdefault((r["source"], key), []).append((self._disp(d) or r["first_seen"], d))
+        runs = sorted(max(events.values(), key=len, default=[]), key=lambda x: x[0])
+        if len(runs) < 2:
+            return False
+        disp, d = runs[-1][0], runs[-1][1]
+        pages = [r["first_seen"] for r in self.store.q(
+            "SELECT first_seen FROM source_reports WHERE incident_id = ? AND source = ?", (iid, PAGING))]
+        if len(pages) >= len(runs):
+            return False
+
+        def nearest(p: float) -> float:
+            return min((t for t, _ in runs), key=lambda t: abs(p - t))
+
+        return (all(nearest(p) != disp for p in pages) and abs(at - disp) <= SAME_CALL_S
+                and same_place(location, str(d.get("location") or "")))
+
+    def _feed_locations(self, iid: int) -> list[str]:
+        """The location text of every feed report on the incident (a re-dispatch's earlier run too): what the county
+        says, whatever its address shows now (a person's edit)."""
+        return [loc for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND source != ?",
+                                          (iid, PAGING))
+                if (loc := str(json.loads(r["data"] or "{}").get("location") or "").strip())]
 
     def _has_feed(self, iid: int) -> bool:
         return self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
@@ -1571,10 +1690,17 @@ class Sources:
         taken = {r["incident_id"] for r in self.store.q(
             "SELECT incident_id FROM source_reports WHERE source = ? AND incident_id IS NOT NULL", (source,))}
         here = place_key(location) is not None
+        hw = highway(location)                               # a highway's mile marker: the marker decides
         rows = self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                             f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN))
         rows = [r for r in rows if r["id"] != exclude]       # the report's own incident (rematch_page)
         street = self._on_street(location, at, rows)
+        marks = {r["id"]: [h for h in map(highway, [*(x for x in (match_address(r), r["place_address"], r["geo_label"])
+                                                          if place_key(x) is not None), *self._feed_locations(r["id"])])
+                           if h is not None] for r in rows} if hw else {}
+        # a marker said with no direction, two calls there on both carriageways: which one? "possibly the same", each
+        both_ways = hw is not None and not hw.dir and len({h.dir for hs in marks.values() for h in hs
+                                                           if h.dir and same_marker(hw, h)}) > 1
         exact = here and any(inc["id"] not in taken and any(same_place(location, x) for x in
                              (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
                              for inc in rows)
@@ -1588,12 +1714,25 @@ class Sources:
             common = units_match(units, on)
             theirs = [x for x in (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
+            hws = marks.get(inc["id"]) or []
+            if hws:                                          # on a highway both: its marker (a feed's own text too)
+                same = any(same_marker(hw, h) for h in hws)
             heard = inc["source"] == PAGE_SOURCE and not self._has_feed(inc["id"])   # its location is a page's
             half = here and not same and any(same_place_halved(location, x, source == PAGING, heard) for x in theirs)
             if inc["id"] in taken:                           # this source has it already: another call there, noted
                 if not same:
                     continue
-                score = -1
+                score = 10 + len(common) if source == PAGING and self._new_run_page(inc["id"], location, at) else -1
+            elif hws:                                        # both on a highway by mile marker (never a misheard street)
+                if same and (both_ways or units and on and not common and not (
+                        typ and typ == inc["type"] and abs(inc["created_at"] - at) <= SAME_CALL_S)):
+                    score = -1                               # two calls at one marker (other units, either way): noted
+                elif same:
+                    score = 10 + len(common)
+                elif common or any(near_marker(hw, h) for h in hws):
+                    score = -1                               # near on that highway, or units shared: noted, both kept
+                else:
+                    continue
             elif half:                                       # a doubled house number against its half (#365)
                 if exact or abs(inc["created_at"] - at) > SAME_CALL_S or (typ and inc["type"] and typ != inc["type"]):
                     score = -1                               # that number exists too, too far apart, another type
@@ -1836,6 +1975,11 @@ class Sources:
         self._towns()                                        # the towns and streets the address is written with
         with self._lock:
             rep = self._report(ev.source, ev.event_id)
+            if rep and rep["merged_into"] and rep["merged_into"] in (data.get("aliases") or []):
+                with self.store.tx() as db:                  # a run retired here (_redispatched) the feed itself now
+                    db.execute("UPDATE source_reports SET merged_into = '' WHERE source = ? AND ref = ?",   # keeps:
+                               (ev.source, ev.event_id))     # it rules again, the other retired into it (_merge)
+                rep = self._report(ev.source, ev.event_id)
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
                 into = self._report(ev.source, rep["merged_into"])
                 return into["incident_id"] if into else None
@@ -1878,6 +2022,11 @@ class Sources:
                 return rep["incident_id"]
             at = min(data["times"].values()) if data["times"] else seen
             inc = self._alias_incident(ev.source, data)
+            run = None                                   # another run of a county event open here: that incident
+            if inc is None and not data["closed"] and data["times"].get("in_service") is None:   # (a live run only)
+                run = self._same_event(ev.source, ev.event_id, data)
+                if run is not None:
+                    inc = self.store.incident(run["incident_id"])
             similar: list[dict] = []
             if inc is None:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
@@ -1892,6 +2041,25 @@ class Sources:
                     al = self.alert_incident(ev.source, at, typ, data["location"], sub, heard_aircraft(data))
                     if al is not None and self._same_call(al, data, now, ALERT_WINDOW_S if _is_alert(sub) else SAME_CALL_S):
                         inc, similar = al, []
+            if inc is not None and run is not None:      # a re-dispatch: the same incident, the earlier run retired
+                was = json.loads(run["data"] or "{}")
+                if not later_run(ev.event_id, data, run["ref"], was):
+                    # an earlier run than the one ruling, arriving after it (a restart, the feed's own order): retired
+                    # into it at once, nothing applied (its in service never closes the call)
+                    with self.store.tx() as db:
+                        self._put(ev.source, ev.event_id, rank, label, seen, data, incident_id=inc["id"], seen_at=snap,
+                                  db=db)
+                        db.execute("UPDATE source_reports SET merged_into = ? WHERE source = ? AND ref = ?",
+                                   (run["ref"], ev.source, ev.event_id))
+                    self.log(f"incident sources: {label}: an earlier run of the county event on {inc['id']}: retired")
+                    return inc["id"]
+                self._redispatched(ev.source, run, ev.event_id, inc["id"], data, label,
+                                   lambda db: self._put(ev.source, ev.event_id, rank, label, seen, data,
+                                                        incident_id=inc["id"], seen_at=snap, db=db))
+                self._apply(inc["id"], was, data, label, rank)
+                self._merge(ev.source, ev.event_id, inc["id"], data, label)
+                self._sweep_pages(inc["id"], self._sweepable(inc["id"]), closed=False)
+                return inc["id"]
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
                     self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
@@ -1989,6 +2157,91 @@ class Sources:
         self.cad._prealert_match(self.store.incident(iid))      # the phone pre-alert and the notices it answers
         return iid
 
+    def _move_units(self, db, old: int, iid: int, label: str, now: float) -> list[str]:
+        """In the caller's transaction (_merge): the units automation put on old (a feed's duplicate) moved onto iid as
+        they are: status, times, a unit history line on iid, automation's steps for them (undo there). One on both (a
+        department placeholder too): cleared off old. iid pending -> active, as a dispatch makes it. A line on each."""
+        names = []
+        for a in db.execute("SELECT a.id, a.unit_id, u.name, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+                            "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (old,)).fetchall():
+            if db.execute("SELECT 1 FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL",
+                          (iid, a["unit_id"])).fetchone():
+                db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
+            else:
+                db.execute("UPDATE assignments SET incident_id = ? WHERE id = ?", (iid, a["id"]))
+                db.execute("UPDATE auto_steps SET incident_id = ? WHERE incident_id = ? AND unit_id = ? AND kind IN "
+                           "('assign', 'status') AND undone_at IS NULL", (iid, old, a["unit_id"]))
+                self.store._history(db, a["unit_id"], a["status"], a["status"], iid, label, now,
+                                    f"moved from {_ref(self.store.incident(old))}: the same county event")
+            names.append(a["name"])
+        if names:
+            if db.execute("UPDATE incidents SET status = 'active' WHERE id = ? AND status = 'pending'", (iid,)).rowcount:
+                self.store._event(db, iid, "status", "Event status: active", label, at=now)
+            i, o = self.store.incident(iid), self.store.incident(old)
+            self.store._event(db, iid, "feed", f"{label}: {', '.join(names)} moved here from {_ref(o)} (the same "
+                              "county event)", at=now)
+            self.store._event(db, old, "feed", f"{label}: {', '.join(names)} moved to {_ref(i)}", at=now)
+        return names
+
+    def _worked(self, iid: int) -> bool:
+        """A person worked on this incident (an edit, a note, a unit, an alarm, a transmission linked or kept, a page
+        merged, an attachment, anything done under their name). What automation did (a feed, the page, 60 Control
+        mode: "... · auto") doesn't count."""
+        one = self.store.one
+        if (self.manual(iid)
+                or one("SELECT 1 AS x FROM alarms WHERE incident_id = ? LIMIT 1", (iid,))
+                or one("SELECT 1 AS x FROM radio_links WHERE incident_id = ? AND why = 'manual' LIMIT 1", (iid,))
+                or one("SELECT 1 AS x FROM page_merges WHERE (card_id = ? OR into_id = ?) AND merged_at IS NOT NULL "
+                       "LIMIT 1", (iid, iid))):
+            return True
+        for q in ("SELECT 1 AS x FROM radio_link_kept WHERE incident_id = ? LIMIT 1",
+                  "SELECT 1 AS x FROM attachments WHERE incident_id = ? LIMIT 1"):
+            try:
+                if one(q, (iid,)):
+                    return True
+            except sqlite3.OperationalError:                 # that feature's table not here: nothing of it
+                pass
+        bots = {PAGING_LABEL, "Paging", "Radio", "automation", *(r["label"] for r in self.store.q(
+            "SELECT DISTINCT label FROM source_reports WHERE incident_id = ?", (iid,)))}
+        for e in self.store.q("SELECT kind, operator FROM events WHERE incident_id = ?", (iid,)):
+            op = (e["operator"] or "").strip()
+            if e["kind"] in ("note", "dispatch", "remarks", "edit", "alarm", "upgrade"):
+                return True
+            if op and op not in bots and not op.endswith("· auto"):
+                return True
+        return False
+
+    def _same_event(self, source: str, ref: str, data: dict) -> dict | None:
+        """The report of another run of this county event (event_number: a re-dispatch, another agency or run number)
+        on an open incident, this source's, not retired: the latest seen. None without one."""
+        key = feed_event_number(ref, data)
+        if not key:
+            return None
+        for r in self.store.q(f"SELECT r.* FROM source_reports r JOIN incidents i ON i.id = r.incident_id WHERE "
+                              f"r.source = ? AND r.ref != ? AND r.merged_into = '' AND i.status IN "
+                              f"({','.join('?' * len(OPEN))}) ORDER BY r.first_seen DESC", (source, ref, *OPEN)):
+            if feed_event_number(r["ref"], json.loads(r["data"] or "{}")) == key:
+                return r
+        return None
+
+    def _redispatched(self, source: str, run: dict, ref: str, iid: int, data: dict, label: str, put) -> None:
+        """Another run of the county event on iid (_same_event): the earlier run's report retired into this one (its
+        later reports go to iid and change nothing: merged_into, as an alias's), kept on iid with its run numbers
+        (decorate), and one line: "Redispatched: <agency> → <agency>" with the new run numbers. put(db): this run's
+        report, written in the same transaction (never one run kept without the other retired)."""
+        old = json.loads(run["data"] or "{}")
+        ox, nx = old.get("extra") or {}, data.get("extra") or {}
+        a, b = str(ox.get("jurisdiction") or ""), str(nx.get("jurisdiction") or "")
+        new = [x for x in _runs(nx) if x not in _runs(ox)]
+        text = (f"Redispatched: {a or '(no agency)'} → {b or '(no agency)'}" if a != b else "Redispatched") \
+            + f" ({label}" + (f": run {', '.join(new)}" if new else "") + ")"
+        with self.store.tx() as db:
+            put(db)
+            db.execute("UPDATE source_reports SET merged_into = ?, incident_id = ? WHERE source = ? AND ref = ?",
+                       (ref, iid, source, run["ref"]))
+            self.store._event(db, iid, "feed", text, at=self.clock())
+        self.log(f"incident sources: {label}: another run of the county event on {iid}: the same incident")
+
     def _alias_incident(self, source: str, data: dict) -> dict | None:
         """The open incident one of this event's aliases already has (the event it was merged from)."""
         for a in data.get("aliases") or []:
@@ -2007,10 +2260,17 @@ class Sources:
                 continue
             old = r["incident_id"] if r else None
             now = self.clock()
-            dismiss = False
+            dismiss = fold = False
             if old and old != iid:
                 o = self.store.incident(old)
-                dismiss = o["status"] == "queued" and o["source"] == FEED_SOURCE and o["source_ref"] == f"feed:{source}:{a}"
+                mine = o["source"] == FEED_SOURCE and o["source_ref"] == f"feed:{source}:{a}"
+                dismiss = o["status"] == "queued" and mine
+                # accepted by automation only (60 Control mode), nobody working it: closed as a duplicate of this
+                # one, its reports, page and units moved here (one a person worked on: kept, noted)
+                # (and only into an accepted call: a queued or closed one keeps both, noted)
+                fold = (not dismiss and mine and o["status"] in ("pending", "active")
+                        and self.store.incident(iid)["status"] in ("pending", "active")
+                        and DUPLICATE in self.store.lists.disposition_codes and not self._worked(old))
             pages: list = []
             rank = self._report(source, ref)["rank"]
             with self.store.tx() as db:
@@ -2019,25 +2279,42 @@ class Sources:
                                "data, merged_into) VALUES (?, ?, ?, ?, NULL, ?, ?, '{}', ?)",
                                (source, a, rank, label, now, now, ref))
                 else:                                        # its report moves only with a dismissed (or no) incident
-                    move = old is None or dismiss
+                    move = old is None or dismiss or fold
                     db.execute("UPDATE source_reports SET merged_into = ?, incident_id = ? WHERE source = ? AND ref = ?",
                                (ref, iid if move else old, source, a))
-                if dismiss:                                  # a page on the dismissed one moves with it
+                if dismiss or fold:                          # a page on the dismissed one moves with it
                     for p in db.execute("SELECT data FROM source_reports WHERE incident_id = ? AND source = ?",
                                         (old, PAGING)).fetchall():
                         pages += list(json.loads(p[0] or "{}").get("pages") or [])
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE incident_id = ? AND source = ?",
                                (iid, old, PAGING))
+                if fold:                                     # every feed's report, the automatic radio, the units
+                    db.execute("UPDATE source_reports SET incident_id = ? WHERE incident_id = ?", (iid, old))
+                    radio = [x[0] for x in db.execute("SELECT traffic_id FROM radio_links WHERE incident_id = ? AND "
+                                                      "why != 'manual'", (old,)).fetchall()]
+                    db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT traffic_id, "
+                               "?, why, unit FROM radio_links WHERE incident_id = ? AND why != 'manual'", (iid, old))
+                    db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why != 'manual'", (old,))
+                    for x in radio:
+                        self.cad.comms.touch(x)              # (inside its transaction: comms.py)
+                    if radio:
+                        self.cad.comms.rev += 1
+                    self._move_units(db, old, iid, label, now)
                 if old and old != iid:
                     o, i = self.store.incident(old), self.store.incident(iid)
                     self.store._event(db, iid, "feed", f"{label}: merged {_ref(o)} into this", at=now)
-                    self.store._event(db, old, "feed", f"{label}: merged into {_ref(i)}" + ("" if dismiss else " (kept: check it)"),
-                                      at=now)
-            self.log(f"incident sources: MERGE {label}: event {old or 'none'} -> {iid}" + (", dismissed" if dismiss else ""))
+                    self.store._event(db, old, "feed", f"{label}: merged into {_ref(i)}"
+                                      + ("" if dismiss or fold else " (kept: check it)"), at=now)
+                if fold:                                     # closed in the same transaction as the move
+                    self.store.close_in(db, old, DUPLICATE, label, now)
+            self.log(f"incident sources: MERGE {label}: event {old or 'none'} -> {iid}"
+                     + (", dismissed" if dismiss else ", closed as a duplicate" if fold else ""))
             if dismiss:
                 self.store.dismiss(old, operator=label, reason=f"merged into {_ref(self.store.incident(iid))}")
-                if pages:
-                    self.cad.comms.link_pages(iid, pages)
+            if fold:
+                self.cad.radiolog.units_soon(iid)            # the units moved: their radio since dispatch here
+            if (dismiss or fold) and pages:
+                self.cad.comms.link_pages(iid, pages)
 
     def _attached(self, inc: dict, source: str, label: str, rank: int, seen: float) -> None:
         """A note on the incident: this source has it too, how long after (or before) the one that made it."""
@@ -3167,13 +3444,18 @@ class Sources:
         self._towns()
         ids = [i["id"] for i in incs]
         best: dict[int, dict] = {}
+        runs: dict[tuple, list] = {}                         # (incident, source) -> each report's run numbers
         hand: dict[int, set] = {}
         for i in range(0, len(ids), 500):
             part = ids[i:i + 500]
             marks = ",".join("?" * len(part))
-            for r in self.store.q(f"SELECT incident_id, source, ref, rank, label, data FROM source_reports WHERE source != ? "
-                                  f"AND merged_into = '' AND incident_id IN ({marks}) ORDER BY rank, first_seen", (PAGING, *part)):
-                best.setdefault(r["incident_id"], r)
+            for r in self.store.q(f"SELECT incident_id, source, ref, rank, label, data, merged_into FROM source_reports "
+                                  f"WHERE source != ? AND incident_id IN ({marks}) ORDER BY rank, first_seen", (PAGING, *part)):
+                x = (json.loads(r["data"] or "{}").get("extra") or {}).get("run_numbers")
+                if isinstance(x, dict):
+                    runs.setdefault((r["incident_id"], r["source"]), []).append(x)
+                if not r["merged_into"]:
+                    best.setdefault(r["incident_id"], r)
             for r in self.store.q(f"SELECT incident_id, field FROM manual_edits WHERE incident_id IN ({marks})", part):
                 hand.setdefault(r["incident_id"], set()).add(r["field"])
         for inc in incs:
@@ -3192,7 +3474,16 @@ class Sources:
             loc = (d.get("location") or "").strip()
             if "location" in h and loc and not same_place(loc, match_address(inc)):
                 use["location"] = self.normal(loc, d)        # shown (the button's hover): as it would be stored
-            inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
+            inc["feed"] = {"label": r["label"], "event_id": feed_event_number(r["ref"], d) or r["ref"],
+                           **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
+            every = runs.get((inc["id"], r["source"])) or []
+            if len(every) > 1:                               # a re-dispatch: every run of the event, the earlier first
+                both: dict[str, list] = {}
+                for rn in every:
+                    for g, n in rn.items():
+                        if n and str(n) not in both.setdefault(str(g), []):
+                            both[str(g)].append(str(n))
+                inc["feed"]["run_numbers"] = {g: (v[0] if len(v) == 1 else v) for g, v in both.items() if v}
         self.merge_state(incs)                               # a page card's "Merge into #N" and its undo
         return incs
 
