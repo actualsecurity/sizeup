@@ -338,7 +338,7 @@ def test_the_push_carries_the_exact_address_and_never_transcript_words():
     [(ev, d)] = [(x, d) for x, d in sink.pushes if d.would_push]
     m = d.message
     assert m["title"] == "PD · Smoke / fire reported · Port Chester"
-    assert m["body"].startswith("100 Example Ave · ") and m["body"].endswith("· medium")
+    assert m["body"].startswith("100 Example Ave\n") and m["body"].endswith("· medium")
     assert m["tags"] == ["fire", "police_car"] and m["priority"] == 4
     assert m["click"] == f"https://sizeup.example.org/radio?view=police&intel={ev.id}"
     blob = json.dumps(m).lower()
@@ -350,7 +350,28 @@ def test_unconfirmed_places_say_so():
     ev = Event(id=3, domain="police", category="weapons", precision="address", label_full="100 Example Ave, Rye",
                town="Rye", confirmed=False, first_at=0, level="high", priority=5)
     m = push_mod.compose(ev, "PD", {"label": "Weapon / shots", "tag": "warning"})
-    assert m["body"].startswith("Example Ave, 100 blk (unconfirmed) · ")        # never the house number (H1)
+    assert m["body"].startswith("Example Ave, 100 blk (unconfirmed)\n")        # never the house number (H1)
+
+
+@pytest.mark.parametrize("label, precision, where", [
+    ("40 Sample St, Townville", "address", "Sample St (unconfirmed)"),           # the 0 block: the street alone
+    ("0 block of Sample St, Townville", "block", "Sample St (unconfirmed)"),
+    ("99 Sample St, Townville", "address", "Sample St (unconfirmed)"),
+    ("100 Sample St, Townville", "address", "Sample St, 100 blk (unconfirmed)"),
+    ("140 Sample St, Townville", "address", "Sample St, 100 blk (unconfirmed)"),
+    ("0 block of Sample St, Townville", "block+", "Sample St"),                  # a confirmed block
+    ("40 Sample St, Townville", "address+", "40 Sample St"),                     # a confirmed address: exact
+])
+def test_the_body_is_two_terse_lines_and_never_a_0_block(label, precision, where):
+    from datetime import datetime, timezone
+    at = datetime(2026, 1, 2, 17, 51, tzinfo=timezone.utc).timestamp()
+    ev = Event(id=4, domain="police", category="edp", precision=precision.rstrip("+"), label_full=label,
+               town="Townville", confirmed=precision.endswith("+"), first_at=at, level="medium", priority=4)
+    m = push_mod.compose(ev, "PD", {"label": "Welfare check", "tag": "warning"}, "https://hub.example", tz=timezone.utc)
+    assert m["title"] == "PD · Welfare check · Townville"                    # the title field, never the body
+    assert m["body"] == f"{where}\n17:51 · medium" and " 0 blk" not in f" {m['body']}"
+    assert m["tags"] == ["warning", "police_car"] and m["priority"] == 4
+    assert m["click"] == "https://hub.example/radio?view=police&intel=4"
 
 
 @pytest.mark.parametrize("label, forbidden, why", [
@@ -389,7 +410,7 @@ def test_a_scrubbed_push_is_withheld_and_said_so(pii):
     if pii:
         assert d.would_push and d.suppressed == "" and ev.suppressed == "" and ev.pushed_at == 1050.0
         assert d.message["title"] == "PD · Weapon / shots · Officer Sample"
-        assert d.message["body"].startswith("Example Park · ")
+        assert d.message["body"].startswith("Example Park\n")
     else:
         assert not d.would_push and d.suppressed == "scrub" and ev.suppressed == "scrub" and ev.pushed_at is None
         assert d.message is None
@@ -427,7 +448,7 @@ def test_push_pii_on_lets_pii_through_and_off_withholds_it(label, why):
     d, ev, _logs = sent[True]
     assert d.would_push and ev.pushed_at == 1050.0 and ev.suppressed == ""
     assert d.message == push_mod.compose(ev, "PD", e.pack("police").category("weapons"))
-    assert d.message["title"] == "PD · Weapon / shots · Rye" and d.message["body"].startswith(f"{label} · ")
+    assert d.message["title"] == "PD · Weapon / shots · Rye" and d.message["body"].startswith(f"{label}\n")
     d, ev, logs = sent[False]
     assert not d.would_push and d.suppressed == "scrub" and d.message is None
     assert ev.suppressed == "scrub" and ev.pushed_at is None and ev.push_count == 0
@@ -447,7 +468,7 @@ def test_a_clean_push_is_the_same_whatever_push_pii_says():
         out.append(d.message)
     assert out[0] == out[1]
     m = out[0]
-    assert m["title"] == "PD · Smoke / fire reported · Port Chester" and m["body"].startswith("100 Example Ave · ")
+    assert m["title"] == "PD · Smoke / fire reported · Port Chester" and m["body"].startswith("100 Example Ave\n")
     for word in ("jane", "caller", "officer", "7654321"):
         assert word not in json.dumps(m).lower()
 
@@ -893,7 +914,7 @@ def test_h1_a_number_said_after_an_id_word_is_never_pushed_as_the_address():
     e, sink = engine(locate=plate_locate)
     e.feed(row("t1", "shots fired, suspect vehicle ID 1234 Example Ave", 1000))
     [(_e, d)] = [(x, d) for x, d in sink.pushes if d.would_push]
-    assert "1234" not in d.message["body"] and d.message["body"].startswith("Example Ave · ")
+    assert "1234" not in d.message["body"] and d.message["body"].startswith("Example Ave\n")
     assert push_mod.scrub({"title": "", "body": "ABC 1234 Example Ave"}) == "plate"
 
 
@@ -989,7 +1010,7 @@ def test_l6_the_hash_covers_towns_scope_and_context_factor():
 # -- the #492 re-check: merge, mute and same-job ----------------------------------------------------------------------
 
 def pushed(sink):
-    return [(e.category, d.message["body"].split(" · ")[0]) for e, d in sink.pushes if d.would_push]
+    return [(e.category, d.message["body"].split("\n")[0]) for e, d in sink.pushes if d.would_push]
 
 
 def test_r1_a_new_place_or_a_new_call_is_a_new_incident():

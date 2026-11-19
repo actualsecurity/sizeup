@@ -235,34 +235,123 @@ def test_the_presign_uses_credentials_that_outlive_the_link(monkeypatch):
     assert issued == [1]                                    # 10 min left < 20 min + margin: fetched again
 
 
-def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
+class HairyBucket(FakeBucket):
+    """A presigned URL as S3 gives one: long (the STS token), percent-encoded, with commas and semicolons."""
+
+    def presign(self, key, expires_s, ctype):
+        self.signed.append((key, expires_s, ctype))
+        return (f"https://bucket.example/{key}?response-content-disposition=inline%3B%20filename%3D%22a%2Cb.wav%22"
+                f"&X-Amz-Security-Token=IQoJb3JpZ2luX2Vj%2B%2F{'A' * 1400}%3D%3D&x=a,b;c=d&X-Amz-Expires={expires_s}"
+                "&X-Amz-Signature=deadbeef")
+
+
+T0 = 1_790_000_000.0       # a fixed clock: two runs' "HH:MM" never straddle a minute
+WHERE = "Sample St & Test Rd"   # example_locate's intersection, its town in the title
+
+
+def _intel_push(tmp_path, bucket, listen_on=True, hub="https://hub.example"):
+    """One intel push through the engine and a fake ntfy: what ntfy got (each request's JSON)."""
     from tests.test_notify import FakeNtfy
     ntfy = FakeNtfy()
     try:
         from tests.test_cad import make_cad
-        cad = make_cad(tmp_path)
+        cad = make_cad(tmp_path, clock=lambda: T0)
         now = cad.clock()
         r = Radio()
         r.add("t1", now, 1.0, 500)
-        b = FakeBucket()
-        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", intel_topic="pcfd-xmpl-intel-thread", log=lambda m: None)
+        p = notify.Pushes(ntfy.url, "test-topic-alerts", "", intel_topic="test-topic-intel", log=lambda m: None)
         e = cad.intel
-        e.notifier, e.locate = p.notifier(notify.INTEL), example_locate
-        e.listen = listen(r, b, Clock(now + 1))
-        e.listen.worker = True                               # the listen thread writes the file after the push
+        e.notifier, e.locate, e.public_url = p.notifier(notify.INTEL), example_locate, hub
+        if listen_on:
+            e.listen = listen(r, bucket, Clock(now + 1))
+            e.listen.worker = True                           # the listen thread writes the file after the push
         cad.comms.record({"id": "t1", "start": now, "end": now + 1, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
                           "source_key": "p25:mrrs:9211", "service": "police", "tier": "alert", "unit": "",
                           "text": "shots fired at Sample St and Test Rd", "status": "done", "model": "whisper"})
         e.consider("t1")
         e.drain()
         assert e.notifier.flush(5)
-        [m] = ntfy.got
-        body = m["body"]
-        [act] = body["actions"]
-        assert act["action"] == "view" and act["label"] == "Listen" and act["url"].startswith("https://bucket.example/listen/")
-        assert body["message"].endswith(f"Listen: {act['url']}") and body["topic"] == "pcfd-xmpl-intel-thread"
+        return [m["body"] for m in ntfy.got]
     finally:
         ntfy.close()
+
+
+def test_the_listen_link_is_the_tap_and_a_button_never_in_the_text(tmp_path):
+    """The presigned URL (~1.5 KB with the STS token) floods a notification's text: it goes in ntfy's JSON as the click
+    and a "Listen" view action, the hub's page on an "Open" button; the title and the two terse lines as composed."""
+    b = HairyBucket()
+    [body] = _intel_push(tmp_path, b)
+    [(key, _exp, _ct)] = b.signed
+    url = b.presign(key, _exp, _ct)
+    assert body["topic"] == "test-topic-intel"                               # intel's own topic, never the alerts'
+    assert body["click"] == url                                              # the exact URL: JSON keeps , ; % as they are
+    listen_act, open_act = body["actions"]
+    assert listen_act == {"action": "view", "label": "Listen", "url": url, "clear": False}
+    assert open_act["action"] == "view" and open_act["label"] == "Open"
+    assert open_act["url"].startswith("https://hub.example/radio?view=police&intel=")
+    assert "http" not in body["message"] and "Listen" not in body["message"] and "bucket.example" not in json.dumps(
+        {k: v for k, v in body.items() if k not in ("click", "actions")})
+    assert body["title"].startswith("PD · ") and "\n" not in body["title"]
+    where, when = body["message"].split("\n")
+    assert where == WHERE and re.fullmatch(r"\d\d:\d\d · \w+", when)
+    assert body["tags"] and body["priority"] in range(1, 6)
+
+
+@pytest.mark.parametrize("why", ["no listen", "presign fails"])
+def test_no_audio_no_listen_button_and_the_tap_opens_the_hub(tmp_path, why):
+    class Broken(FakeBucket):
+        def presign(self, key, expires_s, ctype):
+            raise aws.AwsError("presign: no credentials", "NoCredentials", 0)
+    with_link = _intel_push(tmp_path / "a", FakeBucket())
+    without = _intel_push(tmp_path / "b", Broken(), listen_on=why != "no listen")
+    [a], [b] = with_link, without
+    assert "actions" not in b and b["click"].startswith("https://hub.example/radio?view=police&intel=")
+    assert "http" not in b["message"] and "Listen" not in b["message"]
+    # the link changes nothing else: same topic, title, text, tags and priority
+    assert {k: a[k] for k in ("topic", "title", "message", "tags", "priority")} == \
+        {k: b[k] for k in ("topic", "title", "message", "tags", "priority")}
+
+
+@pytest.mark.parametrize("hub", ["", "http://127.0.0.1:8000"])
+def test_without_an_https_hub_page_only_the_listen_button(tmp_path, hub):
+    """No public URL: the tap and one Listen button. An http one (a test hub; ntfy buttons are https only): the tap
+    stays the hub's page, so it is never lost, and the Listen button plays."""
+    b = HairyBucket()
+    [body] = _intel_push(tmp_path, b, hub=hub)
+    url = b.presign(*b.signed[0])
+    assert body["actions"] == [{"action": "view", "label": "Listen", "url": url, "clear": False}]
+    assert body["click"] == url if not hub else body["click"].startswith(f"{hub}/radio?view=police&intel=")
+    assert "http" not in body["message"]
+
+
+def test_a_presigned_url_survives_ntfys_json_publish_exactly(monkeypatch):
+    """ntfy's header form (Actions: view, Listen, <url>) splits on , and ; which a presigned URL is full of: publish()
+    sends JSON, so the URL arrives byte for byte, in the body and never in a header."""
+    seen = {}
+
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b"{}"
+
+    def fake(req, timeout):
+        seen["headers"], seen["data"] = dict(req.header_items()), req.data
+        return R()
+    monkeypatch.setattr(notify, "urlopen", fake)
+    url = HairyBucket().presign("listen/abc.wav", 3600, "audio/wav")
+    notify.publish("https://ntfy.sh", "test-topic-intel", "PD · Welfare check · Townville", "Sample St\n17:51 · medium",
+                   4, ["warning", "police_car"], click=url, actions=[{"label": "Listen", "url": url}])
+    got = json.loads(seen["data"])
+    assert got["click"] == url and got["actions"] == [{"action": "view", "label": "Listen", "url": url, "clear": False}]
+    assert got["message"] == "Sample St\n17:51 · medium" and got["title"] == "PD · Welfare check · Townville"
+    assert got["priority"] == 4 and got["tags"] == ["warning", "police_car"]
+    assert not any(url in str(v) or "X-Amz" in str(v) for v in seen["headers"].values())
+    assert set(k.lower() for k in seen["headers"]) <= {"content-type", "user-agent", "content-length", "host"}
 
 
 def test_no_intel_topic_holds_the_push_and_makes_no_listen_clip(tmp_path):

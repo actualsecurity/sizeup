@@ -282,8 +282,9 @@ pushed. It never creates an incident.
 5. The policy decides whether to push: a mode ladder (off / shadow / log / map / push), a kill switch, quiet hours,
    rate caps and re-push limits (`policy.py`).
 6. The push is composed from an allow-list of fields; with `push_pii` off it is also scrubbed and a failed scrub sends
-   nothing (`push.py`; on by default: no scrub, access to the output is limited instead). It carries
-   a **Listen** link and a ntfy "Listen" button (`listen.py`, `notify.py` `actions`).
+   nothing (`push.py`; on by default: no scrub, access to the output is limited instead). Its **Listen** link is
+   the notification's tap and a ntfy "Listen" button, with the hub's page on an "Open" button (`listen.py`, `notify.py`
+   `click` / `actions`, ntfy's JSON publish); never in the text, which is two terse lines: where, then time and level.
 
 **Listen** (`listen.py`; on by default, needs `SIZEUP_AUDIO_BUCKET`): the event's transmissions plus the same source's
 from 45 s before to 60 s after, stitched into one file (AAC at 24 kbps with ffmpeg, else 8 kHz WAV; the hub image has

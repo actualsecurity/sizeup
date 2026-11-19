@@ -3707,13 +3707,15 @@ never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push
 **The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic only; none set,
 no push): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
-high). Not among its fields: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With
-`push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
+high) on a second line; the 0 block (house numbers under 100) reads as the street alone. Not among its fields:
+transcript words, a talker, a radio ID, a plate, a date of birth, a person's name. With `push_pii` on (the default) nothing is scrubbed: a name or a plate in those fields goes out. With it off, a push that
 fails the scrub is not sent (suppressed "scrub", logged without the text). Nothing scrubs what is stored or shown:
 transcripts are kept and shown as heard; only the model's input (`infer.py` `clean_text`) has plates and IDs taken out.
 It opens
-`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
-`Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
+`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, a tap plays the Listen link
+instead, the push has a "Listen" button and the hub's page moves to an "Open" button (ntfy `click` and `view` actions,
+https only, in ntfy's JSON publish); the link is never in the text. The link plays for `listen_expiry_min` and its file
+is uploaded just after the push: a tap after it expired (or before the upload) gets S3's error, so use "Open" then.
 
 **Who sees it:** everyone signed in with a verified sign-in (`sourcekeys.may_see_context`, as for context traffic);
 no one on a station page, an all-in-one or a hub without Access.
