@@ -189,7 +189,12 @@ def test_refused_requests_write_nothing(keys, hub):  # noqa: F811
     assert put(hub.url + URL + "/map_layers", None, casey, raw=b"{not json")[0] == 400
     assert put(hub.url + URL + "/map_layers", None, casey, raw=b"{" + b" " * prefs_mod.MAX_BODY + b"}")[0] == 413
     assert put(hub.url + URL + "/map_layers", LAYERS, {**casey, "Sec-Fetch-Site": "cross-site"})[0] == 403
-    assert put(hub.url + URL + "/map_layers", LAYERS, {**casey, "Content-Type": "text/plain"})[0] == 403
+    assert put(hub.url + URL + "/map_layers", LAYERS, {**casey, "Content-Type": "text/plain"})[0] == 415
+    assert put(hub.url + URL + "/map_layers", LAYERS, {**casey, "Content-Type": "application/jsonx"})[0] == 415
+    # a device's token is not for the console (#581), whoever is signed in: not here either
+    bearer = {**casey, "Authorization": "Bearer dev-token-made-up"}
+    assert req(hub.url + URL, headers=bearer)[0] == 401
+    assert put(hub.url + URL + "/map_layers", LAYERS, bearer)[0] == 401
     for method in ("PATCH", "DELETE", "POST"):
         assert put(hub.url + URL + "/map_layers", LAYERS, casey, method=method)[0] in (404, 501), method
     # the hub handing over (not the leader, #501): 503, the page sends it again
@@ -199,7 +204,16 @@ def test_refused_requests_write_nothing(keys, hub):  # noqa: F811
     finally:
         cad.may_write = lambda: True
     assert code == 503
+    # ... and the lease lost between the check and the write (the guard refuses the INSERT): 503, nothing written
+    calls = []
+    cad.may_write = lambda: (calls.append(1), len(calls) <= 1)[1]
+    try:
+        code, _ = put(hub.url + URL + "/map_layers", LAYERS, casey)
+    finally:
+        cad.may_write = lambda: True
+    assert code == 503 and len(calls) > 1
     assert cad.store.q("SELECT * FROM person_prefs") == []
+    assert not cad.store.db.in_transaction
 
 
 def test_nobody_signed_in_keeps_them_in_the_browser(tmp_path):
@@ -261,6 +275,11 @@ global.fetch = async (url, opts = {}) => {
   if (url.startsWith("/api/cad/")) return { ok: false, status: 404, json: async () => ({}) };
   const a = method === "GET" ? (gets.length > 1 ? gets.shift() : gets[0]) : (puts.length ? puts.shift() : 200);
   if (a === "throw") throw new TypeError("Failed to fetch");
+  if (a && a.delay !== undefined) {                // an answer that takes a while: after a.delay ms
+    await new Promise((r) => setTimeout(r, a.delay));
+    const status = a.status || 200;
+    return { ok: status >= 200 && status < 300, status, type: "basic", json: async () => a.body || {} };
+  }
   if (typeof a === "number") return { ok: a >= 200 && a < 300, status: a, type: "basic", json: async () => ({}) };
   return { ok: true, status: 200, json: async () => a };
 };
@@ -278,7 +297,7 @@ const out = { calls };
     if (s.ns) { window.__vals[s.ns] = s.value; MePrefs.changed(s.ns); }
     if (s.register) {
       window.__vals[s.register] = s.value;
-      MePrefs.register(s.register, { get: () => window.__vals[s.register], apply: (v) => { window.__applied.push([s.register, v]); },
+      MePrefs.register(s.register, { get: () => window.__vals[s.register], apply: (v) => { window.__applied.push([s.register, v]); window.__vals[s.register] = v === null ? {} : v; },
                                      hadLocal: !!s.hadLocal });
     }
     if (s.fire) fire(s.fire);
@@ -332,8 +351,9 @@ def test_the_hubs_choices_win_over_this_browsers_copy(tmp_path):
 
 @needs_node
 def test_this_browsers_choices_are_sent_once_when_the_hub_has_none(tmp_path):
-    local = {"sizeup.mapLayers": json.dumps({"overview": {"cameras": False}, "hideDown": True}),
-             "sizeup.gisLayers": json.dumps({"hydrants": True, "_open:Parcels": False}),     # (before #111: read once)
+    local = {"sizeup.mapLayers": json.dumps({"overview": {"cameras": False}, "hideDown": True,
+                                             "folds": {"Tab\there": True, " Padded": True, "\u200bZero": False}}),
+             "sizeup.gisLayers": json.dumps({"hydrants": True, "_open:Parcels": False, "_open:": True}),   # (before #111)
              "sizeup.preplanLayer": "1"}
     out = page(tmp_path, {"local": local, "get": HUB, "load": [str(STATIC / "maplayers.js"), str(STATIC / "preplan.js")]})
     sent = {c["url"]: c for c in puts(out)}
@@ -419,6 +439,55 @@ def test_changes_before_the_hub_answers_win_and_nobody_signed_in_stays_local(tmp
     assert puts(out) == [] and out["mode"] == "local"
     assert json.loads(out["after"]["sizeup.mapLayers"])["overview"] == {"signs": True}
     assert "sizeup.prefsOwner" not in out["after"]
+
+
+@needs_node
+def test_a_click_before_the_hub_answers_is_only_that_click(tmp_path):
+    """Never this browser's whole copy over a newer one: another device's change on the hub stays, the click goes on top;
+    on a shared screen the last person's set is not carried over by an early click."""
+    out = page(tmp_path, {"local": {"sizeup.prefsOwner": "7"}, "get": {**HUB, "prefs": {"x": {"o": {"a": False, "b": True}}}},
+                          "steps": [{"register": "x", "value": {"o": {"a": False, "b": False, "c": True}}},
+                                    {"ns": "x", "value": {"o": {"a": True, "b": False, "c": True}}}], "end": 2000})
+    assert [c["body"] for c in puts(out)] == [{"o": {"a": True, "b": True}}]
+    assert out["applied"] == [["x", {"o": {"a": True, "b": True}}]]
+    # someone else's copy here (owner 3), and a click before the hub answers: the click alone, on the defaults
+    out = page(tmp_path, {"local": {"sizeup.prefsOwner": "3"}, "get": HUB,
+                          "steps": [{"register": "x", "value": {"o": {"a": False, "b": False}}, "hadLocal": True},
+                                    {"ns": "x", "value": {"o": {"a": True, "b": False}}}], "end": 2000})
+    assert [c["body"] for c in puts(out)] == [{"o": {"a": True}}] and out["applied"] == [["x", {"o": {"a": True}}]]
+    # the same with maplayers.js: Casey's copy here, Jordan signs in, turns Signs on before the hub answers
+    local = {"sizeup.mapLayers": json.dumps({"overview": {"cameras": False}, "hideDown": True}), "sizeup.prefsOwner": "3"}
+    out = page(tmp_path, {"local": local, "get": HUB, "load": [str(STATIC / "maplayers.js")],
+                          "steps": [{"layer": ["signs", True, "overview"]}], "end": 2000})
+    (p,) = puts(out)
+    assert p["body"] == out["prefs"] == {"overview": {"signs": True}, "incident": {}, "folds": {}, "hideDown": False}
+
+
+@needs_node
+def test_signed_in_again_as_someone_else(tmp_path):
+    """#818's re-sign-in: asked who again first; another person: theirs (Casey's set not inherited); a click during the
+    reload after a 409 is the new person's alone."""
+    out = page(tmp_path, {"local": {"sizeup.prefsOwner": "7"},
+                          "gets": [HUB, {"signed_in": True, "id": 9, "prefs": {}}],
+                          "steps": [{"register": "x", "value": {"a": True}}, {"wait": 0}, {"fire": "sizeup:signed-in"},
+                                    {"wait": 0}], "end": 600000})
+    assert puts(out) == [] and out["applied"] == [["x", None]] and out["after"]["sizeup.prefsOwner"] == "9"
+    out = page(tmp_path, {"local": {"sizeup.prefsOwner": "7"},
+                          "gets": [HUB, {"delay": 500, "body": {"signed_in": True, "id": 9, "prefs": {}}}], "puts": [409],
+                          "steps": [{"register": "x", "value": {"a": True, "b": False}}, {"wait": 0},
+                                    {"ns": "x", "value": {"a": False, "b": False}}, {"wait": 1000},
+                                    {"ns": "x", "value": {"a": False, "b": True}}], "end": 600000})
+    sent = puts(out)
+    assert [(c["person"], c["body"]) for c in sent] == [("7", {"a": False, "b": False}), ("9", {"b": True})]
+
+
+@needs_node
+def test_leaving_while_a_write_is_out_still_sends_the_newest(tmp_path):
+    out = page(tmp_path, {"local": {"sizeup.prefsOwner": "7"}, "get": HUB, "puts": [{"delay": 5000, "status": 200}],
+                          "steps": [{"register": "x", "value": {"a": 1}}, {"wait": 0}, {"ns": "x", "value": {"a": 2}},
+                                    {"wait": 1000}, {"ns": "x", "value": {"a": 3}}, {"fire": "pagehide"}, {"wait": 0}],
+                          "end": 0})
+    assert [(c["body"], c["keepalive"]) for c in puts(out)] == [({"a": 2}, False), ({"a": 3}, True)]
 
 
 @needs_node

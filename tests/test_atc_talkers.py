@@ -639,6 +639,6 @@ def test_the_console_shows_the_talker_like_unit_ids():
         assert c in css, c
     ml = (STATIC / "maplayers.js").read_text()
     assert [i for i, line in enumerate(ml.splitlines()) if "localStorage" in line and not line.lstrip().startswith("//")] \
-        == [83, 118]                                                            # still only its two helpers
+        == [85, 120]                                                            # still only its two helpers
     api = (Path(__file__).resolve().parent.parent / "sizeup" / "cad" / "api.py").read_text()
     assert re.search(r"POST /api/cad/settings/atc\s", api)

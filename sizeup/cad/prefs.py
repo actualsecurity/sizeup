@@ -71,6 +71,7 @@ def _bools(v, what: str, key_ok) -> dict:
 
 
 def _fold_key(k: str) -> bool:
+    """(maplayers.js FOLD_OK says the same, so a browser's old copy never makes the whole set refused)"""
     return 0 < len(k) <= FOLD_MAX and k.isprintable() and k == k.strip()
 
 
@@ -213,11 +214,13 @@ def http_put(prefs: Prefs, who, path: str, raw: bytes | None, expect: str | None
         return _json(e.code, {"error": str(e)})
     if not prefs.store.may_write():            # not the leader (#501): the page sends it again
         return _json(503, {"error": "the hub is handing over: try again"}, {"Retry-After": "2"})
-    oid = prefs.operator_id(email, add=True)
+    oid = prefs.operator_id(email)
+    if expect is not None and expect.strip() != str(oid):      # (checked before anyone is added to the list)
+        return _json(409, {"error": "signed in as someone else: load again"})
+    if oid is None:
+        oid = prefs.operator_id(email, add=True)
     if oid is None:
         return _json(503, {"error": "try again"}, {"Retry-After": "2"})
-    if expect is not None and expect.strip() != str(oid):
-        return _json(409, {"error": "signed in as someone else: load again"})
     try:
         return _json(200, {"ok": True, "prefs": {ns: prefs.put(oid, ns, value)}})
     except PrefsError as e:

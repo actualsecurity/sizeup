@@ -80,6 +80,8 @@ window.MapLayers = (() => {
   // copy (read first: no flash of the defaults; may be missing or refuse: then the hub's, or this page view's).
   // Before #111 one flat set was kept (and gislayers.js its own, "sizeup.gisLayers"): read once as both sets.
   const KEY_RE = /^[a-z][a-z0-9_:-]{0,47}$/;
+  // a group's heading as the hub keeps it (sizeup/cad/prefs.py _fold_key): one bad one would refuse the whole set
+  const FOLD_OK = (k) => k.length > 0 && k.length <= 80 && k === k.trim() && !/[\p{C}\p{Z}]/u.test(k.replace(/ /g, ""));
   // a stored value (drop: then forget it), or null when storage is missing or refuses
   function stored(key, drop = false) { try { const v = localStorage.getItem(key); if (drop) localStorage.removeItem(key); return v; } catch (_) { return null; } }
   // a saved value (this browser's, the hub's; null: none) as the choices
@@ -91,7 +93,7 @@ window.MapLayers = (() => {
         const set = saved[name] && typeof saved[name] === "object" ? saved[name] : flat;
         for (const [k, v] of Object.entries(set)) if (typeof v === "boolean" && KEY_RE.test(k)) p[name][k] = v;
       }
-      if (saved.folds && typeof saved.folds === "object") for (const [k, v] of Object.entries(saved.folds)) if (typeof v === "boolean") p.folds[k] = v;
+      if (saved.folds && typeof saved.folds === "object") for (const [k, v] of Object.entries(saved.folds)) if (typeof v === "boolean" && FOLD_OK(k)) p.folds[k] = v;
       if (typeof saved.hideDown === "boolean") p.hideDown = saved.hideDown;
     }
     return p;
@@ -108,7 +110,7 @@ window.MapLayers = (() => {
         hadLocal = true;
         for (const [k, v] of Object.entries(gis)) {
           if (typeof v !== "boolean") continue;
-          if (k.startsWith("_open:")) p.folds[k.slice(6)] = v;
+          if (k.startsWith("_open:")) { if (FOLD_OK(k.slice(6))) p.folds[k.slice(6)] = v; }
           else for (const name of Object.keys(PROFILES)) if (typeof p[name][`gis:${k}`] !== "boolean") p[name][`gis:${k}`] = v;
         }
       }

@@ -606,7 +606,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.who = None
             if v1.handles(path):             # the app's API: a device's own token is its only door (#619), never Access
                 return True
-            if path.startswith("/api/cad/") and (self.headers.get("Authorization") or "")[:7].lower() == "bearer ":
+            if (path.startswith(("/api/cad/", prefs_mod.PATH))
+                    and (self.headers.get("Authorization") or "")[:7].lower() == "bearer "):
                 # a device's token is not for the console: refused, whoever is signed in, and in the console's own
                 # {"error": ...} shape, not v1's envelope
                 self.close_connection = True
@@ -1031,9 +1032,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         def _put_prefs_now(self, path: str) -> None:
             if not self._admit(path):
                 return
-            if (why := cross_site(self.headers)) or "json" not in (self.headers.get("Content-Type") or ""):
+            if why := cross_site(self.headers):
                 self.close_connection = True     # the body is left unread
-                return self._send(403, json.dumps({"error": why or "a JSON body"}).encode(), "application/json")
+                return self._send(403, json.dumps({"error": why}).encode(), "application/json")
+            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+                self.close_connection = True
+                return self._send(415, b'{"error":"a JSON body (application/json)"}', "application/json")
+            length = self.headers.get("Content-Length")
+            if self.headers.get("Transfer-Encoding") or length is None or not length.strip().isdigit():
+                self.close_connection = True     # a body this server can't measure: never read
+                return self._send(411 if length is None else 400, b'{"error":"Content-Length"}', "application/json")
             raw = self._body(prefs_mod.MAX_BODY)
             if raw is None:
                 self.close_connection = True     # too big: left unread
