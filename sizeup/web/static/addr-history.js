@@ -18,8 +18,8 @@ window.AddrHistory = (() => {
   const CATS = { hazard: "Hazard", access: "Access/Knox", medical: "Medical/O2", animals: "Animals", hoarding: "Hoarding", other: "Other" };
   const PRIO = { 1: "High", 2: "Normal", 3: "Low" };
   const st = { iid: null, sig: "", here: null, seq: 0, open: remembered(), notesSig: "", hereSig: "", readonly: true, inc: null, sizeOpen: false };
-  // Size-Up (#797, sizeup-view.js): History folded each time it opens there, not remembered; Details keeps its own
-  const open = () => (window.SizeUp && SizeUp.on() ? st.sizeOpen : st.open);
+  // In Size-Up, History starts folded each time and is not saved; Details keeps the saved state (OPEN_KEY).
+  const isOpen = () => (window.SizeUp && SizeUp.on() ? st.sizeOpen : st.open);
 
   function remembered() {
     try { return localStorage.getItem(OPEN_KEY) === "1"; } catch (_) { return false; }
@@ -153,10 +153,10 @@ window.AddrHistory = (() => {
     if (!located(inc)) return;
     const h = st.here;
     const tog = $("#d-here-toggle");
-    tog.setAttribute("aria-expanded", String(open()));
-    show($("#d-here-body"), open());
+    tog.setAttribute("aria-expanded", String(isOpen()));
+    show($("#d-here-body"), isOpen());
     show($("#d-here-note"), !st.readonly);
-    const sig = JSON.stringify([inc.id, h, open()]);
+    const sig = JSON.stringify([inc.id, h, isOpen()]);
     if (sig === st.hereSig) return;
     st.hereSig = sig;
     let sum = "…";

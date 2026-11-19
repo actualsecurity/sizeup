@@ -749,7 +749,8 @@ function selectIncident(id) {
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
-  cad.tab = "details";               // Details always opens first (#797)
+  cad.tab = "details";               // Details always opens first (#797); sizeup-view.js apply() also resets it
+                                     // on any change of cad.sel (other ways in): keep both
   render();
   recommend();
   if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });

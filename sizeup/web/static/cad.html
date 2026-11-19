@@ -366,7 +366,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <!-- the incident's view (#797, sizeup-view.js): Details first, always; the board shows Details -->
           <span id="d-tabs" class="seg console-only" role="group" aria-label="Incident view">
             <button type="button" class="sm" data-tab="details" aria-pressed="true">Details</button>
-            <button type="button" class="sm" data-tab="sizeup" aria-pressed="false" title="The incident with its pre-plan, hazards, building, map, address notes, street view and history">Size-Up</button>
+            <button type="button" class="sm" data-tab="sizeup" aria-pressed="false"
+                    title="The incident with its pre-plan, hazards, map, address notes and history">Size-Up</button>
           </span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
@@ -401,7 +402,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         </form>
 
         <div id="d-grid" class="inc-grid">
-          <div>
+          <div id="d-info">
             <div id="d-type" class="d-type"></div>
             <div id="d-addr" class="d-addr"></div>
             <div id="d-cross" class="d-cross"></div>
@@ -486,15 +487,28 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="d-size" class="size-grid" hidden>
           <div class="sz-col">
             <section id="sz-incident" class="sz-slot sz-incident" aria-label="Incident"></section>
-            <section id="sz-preplan" class="sz-slot sz-preplan" aria-label="Pre-plan" data-own-head><h3 class="sz-head">Pre-plan</h3><div class="sz-none dim small">None on file</div></section>
-            <section id="sz-hazards" class="sz-slot sz-hazards" aria-label="Hazards"><h3 class="sz-head">Hazards</h3><div class="sz-none dim small">None found</div></section>
+            <section id="sz-preplan" class="sz-slot sz-preplan" aria-label="Pre-plan" data-own-head>
+              <h3 class="sz-head">Pre-plan</h3>
+              <div class="sz-none dim small">None on file</div>
+            </section>
+            <section id="sz-hazards" class="sz-slot sz-hazards" aria-label="Hazards">
+              <h3 class="sz-head">Hazards</h3>
+              <div class="sz-none dim small">No live feeds nearby</div>
+            </section>
           </div>
           <div class="sz-col">
-            <!-- Building and Street View: placeholders until later parts of #797 fill them -->
-            <section id="sz-building" class="sz-slot sz-building" aria-label="Building"><h3 class="sz-head">Building</h3><div class="sz-none dim small">Not on file</div></section>
+            <!-- Building and Street View: hidden placeholders until later parts of #797 fill them -->
+            <section id="sz-building" class="sz-slot sz-building" aria-label="Building" hidden>
+              <h3 class="sz-head">Building</h3>
+            </section>
             <section id="sz-map" class="sz-slot sz-map" aria-label="Map"></section>
-            <section id="sz-notes" class="sz-slot sz-notes" aria-label="Address notes"><h3 class="sz-head">Address notes</h3><div class="sz-none dim small">None on file</div></section>
-            <section id="sz-street" class="sz-slot sz-street" aria-label="Street View"><h3 class="sz-head">Street View</h3><div class="sz-none dim small">Not loaded</div></section>
+            <section id="sz-notes" class="sz-slot sz-notes" aria-label="Address notes">
+              <h3 class="sz-head">Address notes</h3>
+              <div class="sz-none dim small">None on file</div>
+            </section>
+            <section id="sz-street" class="sz-slot sz-street" aria-label="Street View" hidden>
+              <h3 class="sz-head">Street View</h3>
+            </section>
             <section id="sz-history" class="sz-slot sz-history" aria-label="History here"></section>
           </div>
         </div>

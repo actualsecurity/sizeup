@@ -380,11 +380,11 @@
   .sz-slot:is(.sz-preplan, .sz-hazards, .sz-building, .sz-notes, .sz-street) {
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius);
   }
-  .sz-head { font-weight: 700; }
   .sz-none { margin: 0; }
   .sz-slot > .card { padding: 0; border: 0; background: none; }      /* Assigned, moved in: no card in a card */
   .size-grid .mapbox { block-size: var(--map-h); }
   .size-grid .dmap-handle { display: none; }                          /* the drag sizes Details' grid only */
+  .size-grid .ml-cams-head { flex-wrap: wrap; row-gap: 0; }           /* a slot is narrower than Details' column */
   @container (width < 44rem) {
     .size-grid { display: flex; flex-direction: column; align-items: stretch; }
     .sz-col { display: contents; }
@@ -393,9 +393,7 @@
     .sz-map { order: 3; }
     .sz-hazards { order: 4; }
     .sz-preplan { order: 5; }
-    .sz-building { order: 6; }
-    .sz-street { order: 7; }
-    .sz-history { order: 8; }
+    .sz-history { order: 6; }
   }
 
   /* forms: two columns of stacked fields, one in a narrow column */
