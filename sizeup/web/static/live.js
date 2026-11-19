@@ -135,7 +135,7 @@ function liveState(streamUrl, stateUrl, onState) {
     if (reopenTimer) { clearTimeout(reopenTimer); reopenTimer = null; }
     window.SessionWatch.whenIn().then(() => { held = false; poll(); open(); });
   };
-  if (typeof window !== "undefined") window.addEventListener("sizeup:signed-out", hold);
+  if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("sizeup:signed-out", hold);
 
   // First paint from a GET without waiting for the stream; the stream then starts from what that had
   // (?since=: not the whole state a second time), or after 3 s whatever the GET is doing.

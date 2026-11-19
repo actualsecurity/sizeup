@@ -87,6 +87,34 @@ def test_reauth_is_a_page_that_never_redirects(keys, hub):
     assert '"*"' not in js
 
 
+def test_reauth_start_drops_the_cookie_and_goes_to_reauth_only(keys, hub):
+    """Before the end the cookie is still good: the edge would serve /reauth without a new sign-in (the token's exp is
+    fixed). /reauth/start drops it, so /reauth goes through the Access login."""
+    import urllib.request
+
+    class NoFollow(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):
+            return None
+    opener = urllib.request.build_opener(NoFollow)
+
+    def start(q="", **h):
+        r = urllib.request.Request(hub.url + "/reauth/start" + q, headers={"Cf-Access-Jwt-Assertion": jwt(keys[0]), **h})
+        try:
+            resp = opener.open(r, timeout=10)
+        except urllib.error.HTTPError as e:
+            resp = e
+        return resp.status if hasattr(resp, "status") else resp.code, resp.headers
+    import urllib.error
+    for q in ("", "?next=https://elsewhere.example/", "?redirect_url=//elsewhere.example"):
+        code, h = start(q, **{"Sec-Fetch-Site": "same-origin"})
+        assert code == 302 and h["Location"] == "/reauth", q                     # always there: no open redirect
+        assert h["Set-Cookie"].startswith("CF_Authorization=; Path=/; Max-Age=0;") and "elsewhere" not in str(h)
+        assert h["Cache-Control"] == "no-store"
+    code, h = start(**{"Sec-Fetch-Site": "cross-site"})                       # another site sending someone here
+    assert code == 302 and h["Location"] == "/reauth" and h["Set-Cookie"] is None
+    assert req(hub.url + "/reauth/start")[0] == 401                             # behind Access like the rest
+
+
 def test_without_access_there_is_no_end(tmp_path):
     h = HubRun(hub_cfg(tmp_path))                                           # a hub not set up with Access (local dev)
     try:
@@ -219,7 +247,9 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     o.pillText = env.pill() && env.pill().text();
     o.pillClass = env.pill() && env.pill().className;
     o.pillTitle = env.pill() && env.pill().title;
-    o.link = env.link() && { href: env.link().href, target: env.link().target };
+    o.link = env.link() && { href: env.link().href, target: env.link().target, rel: env.link().rel };
+    o.renewPrevented = env.link().click();
+    o.renewOpened = env.opened.slice();
     await env.advance(8 * 60 * 1000 + 30 * 1000);
     o.at24_5 = env.ctx.SessionWatch.label();
     o.polls = env.sessionCalls().length;
@@ -284,6 +314,11 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     await env.run('fetch("/api/cad/settings/users", { method: "POST" })');
     await flush();
     out.unauthorized.forbidden = env.sessionCalls().length - n2;
+    // the hub itself says 401 to /api/session (the edge let it through: a hub without the team's keys yet): not out
+    await env.advance(30 * 1000);
+    env.respond = () => res(401, { error: "sign in through Cloudflare Access" });
+    out.unauthorized.hub401 = await env.ctx.SessionWatch.check();
+    out.unauthorized.hub401out = env.ctx.SessionWatch.out;
   }
 
   // 4. an audio error (ORB-blocked): signed out; the pop-up; messages; signed in again: the audio plays again
@@ -293,15 +328,23 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     env.run(SESSION);
     await flush();
     const o = out.audio = {};
-    const m = new env.Media();
+    const m = new env.Media();                 // a player with its own retry (cad.js's)
+    m.retries = 0;
+    m.sessionRetry = () => { m.retries++; };
     m.src = m.currentSrc = ORIGIN + "/api/audio/tx-0001.wav";
     await env.ctx.HTMLMediaElement.prototype.play.call(m);
-    const other = new env.Media();             // played before: something else since, not played again
+    const other = new env.Media();             // the same, but something else plays there since: not again
+    other.retries = 0;
+    other.sessionRetry = () => { other.retries++; };
     other.src = ORIGIN + "/api/audio/tx-0002.wav";
     await env.ctx.HTMLMediaElement.prototype.play.call(other);
+    const plain = new env.Media();             // no retry of its own (an alert sound): never played late
+    plain.src = plain.currentSrc = ORIGIN + "/api/audio/tx-0004.wav";
+    await env.ctx.HTMLMediaElement.prototype.play.call(plain);
     env.respond = edge();
     m.dispatchEvent(new Event("error"));
     other.dispatchEvent(new Event("error"));
+    plain.dispatchEvent(new Event("error"));
     await flush();
     other.src = ORIGIN + "/api/audio/tx-0003.wav";
     o.label = env.ctx.SessionWatch.label();
@@ -332,8 +375,25 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     o.pill = !!(env.pill());
     o.resumed = resumed;
     o.events = env.events.slice();
-    o.m = { loads: m.loads, plays: m.plays };
-    o.other = { loads: other.loads, plays: other.plays };
+    o.m = { retries: m.retries, loads: m.loads, plays: m.plays };
+    o.other = { retries: other.retries, loads: other.loads, plays: other.plays };
+    o.plain = { loads: plain.loads, plays: plain.plays };
+  }
+
+  // 4b. the pop-up's message while a check sent before it is still on its way: checked again after it
+  {
+    const env = makeEnv();
+    env.respond = edge();
+    env.run(SESSION);
+    await flush();
+    let release;
+    env.respond = () => new Promise((ok) => { release = () => ok({ status: 0, ok: false, type: "opaqueredirect", json: async () => null }); });
+    await env.advance(61 * 1000);              // the minute's check while signed out: on its way
+    env.respond = signedIn(env, env.clock / 1000 + 24 * 3600);
+    env.message(ORIGIN, { type: "sizeup:signed-in" });
+    release();                                 // the old one answers "out"
+    await flush();
+    out.stale = { out: env.ctx.SessionWatch.out, label: env.ctx.SessionWatch.label() };
   }
 
   // 5. a clip that is just missing (signed in): one check, nothing else
@@ -443,7 +503,8 @@ def test_the_warning_shows_ten_minutes_before_and_counts_down(page, skew):
     assert o["pillText"] == "Sign-in ends in 9 min · Re-sign in"
     assert "err" not in o["pillClass"].split() and "pill" in o["pillClass"].split()
     assert o["pillTitle"].startswith("Cloudflare Access sign-in ends at ")
-    assert o["link"] == {"href": "/reauth", "target": "_blank"}
+    assert o["link"] == {"href": "/reauth/start", "target": "_blank", "rel": "noopener"}     # still signed in: renew
+    assert o["renewPrevented"] is True and o["renewOpened"] == [["/reauth/start", "sizeup-reauth", "popup,width=520,height=640"]]
     assert o["at24_5"] == "Sign-in ends in 1 min"
     assert o["polls"] >= 5                                         # load, every 5 min
     assert o["after"] == "Signed out" and "err" in o["afterClass"].split()
@@ -464,7 +525,7 @@ def test_a_redirected_fetch_is_signed_out_and_then_nothing_goes_out(page):
 
 
 def test_a_401_checks_once_and_a_403_not_at_all(page):
-    assert page["unauthorized"] == {"first": 1, "again": 0, "out": False, "forbidden": 0}
+    assert page["unauthorized"] == {"first": 1, "again": 0, "out": False, "forbidden": 0, "hub401": "unknown", "hub401out": False}
 
 
 def test_an_audio_error_signs_out_and_re_sign_in_plays_it_again(page):
@@ -476,8 +537,13 @@ def test_an_audio_error_signs_out_and_re_sign_in_plays_it_again(page):
     assert o["ignored"] == 0 and o["stillOut"] is True              # another origin, another shape: nothing
     assert o["checked"] == 1 and o["out"] is False and o["after"] == "" and o["pill"] is False
     assert o["resumed"] is True and o["events"][-1] == "sizeup:signed-in"
-    assert o["m"] == {"loads": 1, "plays": 2}                       # the failed clip, again
-    assert o["other"] == {"loads": 0, "plays": 1}                   # something else plays there now: left alone
+    assert o["m"] == {"retries": 1, "loads": 0, "plays": 1}         # its own retry: the failed clip, again
+    assert o["other"] == {"retries": 0, "loads": 0, "plays": 1}     # something else plays there now: left alone
+    assert o["plain"] == {"loads": 0, "plays": 1}                   # no retry of its own: not played late
+
+
+def test_a_message_during_an_older_check_checks_again(page):
+    assert page["stale"] == {"out": False, "label": ""}
 
 
 def test_a_missing_clip_is_not_a_sign_in_matter(page):

@@ -1154,7 +1154,8 @@ Access sends every request it lets through to the origin with a signed JWT
 * **warns before it ends** (#818): how long a sign-in lasts is the Access application's *Session Duration*
   (Zero Trust → Access → Applications → sizeup), not a sizeup setting; the console reads the token's `exp`
   (`GET /api/session`), shows "Sign-in ends in 9 min · Re-sign in" from 10 min before and "Signed out · Re-sign in"
-  after, and *Re-sign in* signs in again in a pop-up (`/reauth`) without reloading the page or its audio.
+  after, and *Re-sign in* signs in again in a pop-up (`/reauth`; before the end `/reauth/start` first drops the
+  still-good `CF_Authorization` cookie, as nothing renews a token early) without reloading the page or its audio.
 
 Without both keys (all-in-one, the station, local dev, a hub not set up yet) nothing changes: the
 Operator field is typed or picked, as before. The hub logs which it is at startup.

@@ -40,6 +40,8 @@ GET  /api/session               {"expires_at": unix s | null, "now": unix s}: wh
                                warning and re-sign-in (static/session.js, #818); never cached
 GET  /reauth                    a tiny page (static/reauth.html) the console opens to sign in again through Access: it
                                tells the console (same origin only) and closes; it takes no parameters (no redirect)
+GET  /reauth/start              before the sign-in ends: drops the Access cookie (a page of this hub's own, by
+                               Sec-Fetch-Site) and -> /reauth, so the edge signs in again; reads no parameters
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
 GET  /api/station-mode         not the hub (409 there): forwarding to the hub, its status and where each
@@ -800,10 +802,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             code, body, ctype = fresh()[:3]
             return self._send(code, body, ctype, h)
 
-        def _redirect(self, where: str) -> None:
+        def _redirect(self, where: str, headers: dict | None = None) -> None:
             self.answered = True
             self.send_response(302)
             self.send_header("Location", where)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", "0")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -864,6 +868,14 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                   {"Cache-Control": "no-store"})
             if path == "/reauth":                # signed in again through Access (#818): tells the console, closes
                 return self._static("reauth.html")
+            if path == "/reauth/start":
+                # before the sign-in ends its cookie is still good, so the edge would hand /reauth over without a new
+                # sign-in (the token's exp is fixed): it is dropped first, then /reauth goes through the Access login
+                # (silently while the team's session lasts). Always to /reauth, nothing read from the request; dropped
+                # only for this hub's own page (or a typed address), not when another site sends someone here.
+                site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                ours = site in ("", "same-origin", "none")
+                return self._redirect("/reauth", {"Set-Cookie": DROP_ACCESS_COOKIE} if ours else None)
             if station_ui:
                 if path in ("/", "/index.html", "/station", "/monitor"):
                     return self._static("station.html")
@@ -1441,6 +1453,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     return Handler
 
 
+# /reauth/start (#818): the Access app cookie (sizeup/cloud/access.py COOKIE) dropped, so the edge signs in again
+DROP_ACCESS_COOKIE = "CF_Authorization=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=None"
 ADAPTER_PASSWORD = "/api/cad/adapter-password"
 ADAPTER_PASSWORD_BODY = 65536   # two values of at most 4 KB each, JSON-escaped
 PROFILE_WAIT_S = 60.0   # POST /api/cad/perf/profile answers with the profile up to this long; longer: 202, then GET

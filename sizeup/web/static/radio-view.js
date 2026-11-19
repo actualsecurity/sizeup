@@ -25,7 +25,7 @@ window.RadioLive = (() => {
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   const MAX_QUEUE = 15;
   const st = { on: false, audio: new Audio(), seen: null, queue: [], dropped: 0, blocked: false, playing: null, buttons: [], label: "Live",
-               held: false };                  // held: signed out, the queue waits (#818)
+               held: false, gen: 0 };          // held: signed out, the queue waits (#818); gen: each time it is turned on
 
   function paint() {
     for (const b of st.buttons) {
@@ -62,16 +62,19 @@ window.RadioLive = (() => {
   // one first, until signed in again (it went through the whole queue failing each one).
   function failed() {
     if (st.audio.src.startsWith("data:")) return;
-    const id = st.playing;
+    const id = st.playing, gen = st.gen;
     if (!window.SessionWatch || !id) return done();
     st.playing = null;
     st.held = true;
     SessionWatch.check()
-      .then((s) => { if (s === "out") { st.queue.unshift(id); return SessionWatch.whenIn(); } })
+      .then((s) => {
+        if (s !== "out") return;
+        if (st.gen === gen && st.on) st.queue.unshift(id);   // turned off and on meanwhile: not the old backlog
+        return SessionWatch.whenIn();
+      })
       .then(() => { st.held = false; pump(); });
   }
   st.audio.addEventListener("error", failed);
-  st.audio.sessionRetry = false;                   // its own retry, above
 
   function toggle() {
     if (st.on && !st.blocked) {                    // off
@@ -81,7 +84,7 @@ window.RadioLive = (() => {
       st.playing = null;
       return paint();
     }
-    if (!st.on) { st.on = true; st.dropped = 0; st.seen = null; }   // from now on, not the backlog
+    if (!st.on) { st.on = true; st.dropped = 0; st.seen = null; st.gen++; }   // from now on, not the backlog
     st.audio.src = SILENT_WAV;                     // unlock sound with this click (Safari)
     st.audio.play().then(() => { st.blocked = false; pump(); }).catch(() => { st.blocked = true; paint(); });
     paint();

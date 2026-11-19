@@ -10,20 +10,25 @@
 //            after a re-sign-in. WARN_S before it ends: "Sign-in ends in 9 min · Re-sign in".
 //   ended    one failed same-origin fetch (a TypeError, a 401), an audio error or stall on /api/..., a dropped
 //            stream (live.js) makes one check of /api/session with redirect: "manual" — an opaque redirect (the
-//            edge sending it to the login) or a 401 / 403 is signed out: "Signed out · Re-sign in". Meanwhile
+//            edge sending it to the login) is signed out: "Signed out · Re-sign in" (a 401 / 403 from the hub itself
+//            is not: the edge let it through, e.g. a hub just started without the team's keys yet). Meanwhile
 //            same-origin fetches fail at once without going out (no storm of redirects), live.js stops polling
 //            and holds the stream, the "Reconnecting…" pill stays away, and the live player holds its queue.
-//   again    "Re-sign in" opens /reauth in a pop-up (blocked: the link opens it in a new tab); after Access signs
-//            in there, it says so (postMessage to this origin, BroadcastChannel) and closes. A message only makes
-//            this page check /api/session again: nothing in it is trusted. Signed in again: the stream resumes
-//            (window event sizeup:signed-in, whenIn()), and audio that failed meanwhile is tried again.
+//   again    "Re-sign in" opens a pop-up (blocked: the link opens it in a new tab): before the end /reauth/start
+//            (the hub drops the still-good Access cookie, so the edge really signs in again: the token's exp is fixed,
+//            nothing renews it), after it /reauth. After Access signs in there, /reauth says so (postMessage to this
+//            origin, BroadcastChannel) and closes. A message only makes this page check /api/session again: nothing
+//            in it is trusted. Signed in again: the stream resumes (window event sizeup:signed-in, whenIn()), and a
+//            player that asks for it (element.sessionRetry, cad.js's) plays its failed clip again.
 //
 // Without Access (all-in-one, local dev) expires_at is null: no warning; the checks still find nothing wrong.
 "use strict";
 
 const SessionWatch = (() => {
   const SESSION_URL = "/api/session";
-  const REAUTH_URL = "/reauth";
+  const REAUTH_URL = "/reauth";             // signed out: Access asks for the sign-in on the way
+  const NOT_OURS = /^\/api\/(v1|station)\//;  // the app's API (device tokens) and the station's: not this sign-in
+  const RENEW_URL = "/reauth/start";        // still signed in: the hub drops the cookie first (server.py)
   const MSG = "sizeup:signed-in";
   const CHANNEL = "sizeup-session";
   const WARN_S = 600;                    // the warning shows this long before the sign-in ends
@@ -36,8 +41,7 @@ const SessionWatch = (() => {
   const hasWindow = typeof window !== "undefined";
   const nativeFetch = hasWindow && window.fetch ? window.fetch.bind(window) : null;
   const st = { deadline: 0, out: false, inflight: null, lastCheck: 0, lastSuspect: -Infinity, waiters: [], failed: new Map(),
-               pill: null, text: null, popup: null, started: false };
-  const wants = new WeakMap();           // a media element -> the src play() was last asked for
+               pill: null, text: null, link: null, href: "", popup: null, started: false };
   const seenEvents = new WeakSet();      // a media error seen once (the element's listener and the page's)
   const watched = new WeakSet();
 
@@ -52,7 +56,7 @@ const SessionWatch = (() => {
   // console's sign-in)
   function ours(x) {
     const u = url(x);
-    return !!u && u.origin === location.origin && !u.pathname.startsWith("/api/v1/") && !u.pathname.startsWith("/api/station/");
+    return !!u && u.origin === location.origin && !NOT_OURS.test(u.pathname);
   }
   function mediaOurs(m) {
     const u = url(m.currentSrc || m.src || "");
@@ -60,10 +64,11 @@ const SessionWatch = (() => {
   }
 
   // -- the check ------------------------------------------------------------------------------------------------
-  // "ok" (signed in: exp read), "out" (the edge redirected, or the hub said 401 / 403), "unknown" (out of reach,
-  // an older hub without /api/session, an answer that isn't the one asked for: nothing changes)
-  function check() {
-    if (st.inflight) return st.inflight;
+  // "ok" (signed in: exp read), "out" (the edge redirected to the Access login), "unknown" (out of reach, an older
+  // hub without /api/session, a 401 / 403 from the hub itself, an answer that isn't the one asked for: nothing
+  // changes). fresh: a check sent after now (a re-sign-in just happened), not one already on its way.
+  function check(fresh = false) {
+    if (st.inflight) return fresh ? st.inflight.then(() => check()) : st.inflight;
     st.inflight = (async () => {
       let r;
       try {
@@ -71,7 +76,7 @@ const SessionWatch = (() => {
       } catch (_) {
         return "unknown";
       }
-      if (r.type === "opaqueredirect" || r.status === 401 || r.status === 403) { signedOut(); return "out"; }
+      if (r.type === "opaqueredirect") { signedOut(); return "out"; }
       if (!r.ok) return "unknown";
       let d = null;
       try { d = await r.json(); } catch (_) { /* not ours */ }
@@ -115,13 +120,7 @@ const SessionWatch = (() => {
     const t = now();
     for (const [m, f] of st.failed) {
       if (t - f.at > RETRY_MAX_MS || m.src !== f.src) continue;   // old, or something else plays there now
-      try {
-        if (typeof m.sessionRetry === "function") m.sessionRetry();
-        else {
-          m.load();
-          if (f.play) m.play().catch(() => {});
-        }
-      } catch (_) { /* gone */ }
+      try { m.sessionRetry(); } catch (_) { /* gone */ }
     }
     st.failed.clear();
   }
@@ -156,14 +155,17 @@ const SessionWatch = (() => {
       p.setAttribute("role", "status");
       st.text = document.createElement("span");
       const a = document.createElement("a");
-      a.href = REAUTH_URL;
       a.target = "_blank";
+      a.rel = "noopener";
       a.textContent = "Re-sign in";
       a.addEventListener("click", reauth);
       p.append(st.text, " · ", a);
+      st.link = a;
       st.pill = p;
     }
     st.pill.classList.toggle("err", st.out);
+    const href = st.out ? REAUTH_URL : RENEW_URL;
+    if (st.href !== href) st.link.href = st.href = href;
     if (st.text.textContent !== text) st.text.textContent = text;
     const tip = st.out
       ? "Cloudflare Access sign-in ended. Re-sign in opens a small window; this page and its audio keep going."
@@ -171,9 +173,10 @@ const SessionWatch = (() => {
     if (st.pill.title !== tip) st.pill.title = tip;
     if (!st.pill.isConnected) document.body.append(st.pill);
   }
-  // Re-sign in: /reauth in a pop-up; blocked (null), the link's own default opens it in a new tab
+  // Re-sign in: in a pop-up; blocked (null), the link's own default opens it in a new tab. The pop-up keeps its
+  // opener (to post back): it goes only to this hub and the Access login.
   function reauth(ev) {
-    const w = window.open(REAUTH_URL, "sizeup-reauth", "popup,width=520,height=640");
+    const w = window.open(st.out ? REAUTH_URL : RENEW_URL, "sizeup-reauth", "popup,width=520,height=640");
     if (w) {
       ev.preventDefault();
       st.popup = w;
@@ -181,7 +184,7 @@ const SessionWatch = (() => {
   }
   function message(ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.type !== MSG) return;
-    check();
+    check(true);
   }
 
   // -- watching what fails --------------------------------------------------------------------------------------
@@ -206,7 +209,7 @@ const SessionWatch = (() => {
     if (seenEvents.has(ev) || !m || typeof m.load !== "function" || !mediaOurs(m)) return;
     seenEvents.add(ev);
     if (ev.type === "stalled") return suspect();
-    if (m.sessionRetry !== false) st.failed.set(m, { src: m.src, play: wants.get(m) === m.src, at: now() });
+    if (typeof m.sessionRetry === "function") st.failed.set(m, { src: m.src, at: now() });   // its own retry only
     check().then((s) => { if (s !== "out") st.failed.delete(m); });
   }
   function watch(m) {
@@ -223,7 +226,6 @@ const SessionWatch = (() => {
     const nativePlay = P.play;
     const play = function play() {
       watch(this);
-      wants.set(this, this.src);
       return nativePlay.apply(this, arguments);
     };
     play.sessionWrapped = true;
@@ -254,7 +256,7 @@ const SessionWatch = (() => {
     window.addEventListener("message", message);
     try {
       const ch = new BroadcastChannel(CHANNEL);
-      ch.onmessage = (ev) => { if (ev.data && ev.data.type === MSG) check(); };
+      ch.onmessage = (ev) => { if (ev.data && ev.data.type === MSG) check(true); };
     } catch (_) { /* no BroadcastChannel: focus checks */ }
     window.addEventListener("focus", look);
     document.addEventListener("visibilitychange", look);
