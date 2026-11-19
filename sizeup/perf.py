@@ -65,7 +65,7 @@ TOP_N = 40
 # for every thread name that is not a plain string (keyword or positional, through a spawn helper too) and fails on one
 # that is not listed.
 DYNAMIC = ("ntfy-", "stream-", "aws-stt-", "source-", "datasource-", "nfm-", "segment-", "http-", "updating-",
-           "aircraft-feed-")
+           "aircraft-feed-", "push-")      # (push-: the device push lanes and pool, sizeup/push/service.py)
 _UNNAMED = re.compile(r"Thread-\d+(?: \((.+)\))?")
 _COUNTER = re.compile(r"(?:[-_ ]\d+)+$")
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.()<>-]")
