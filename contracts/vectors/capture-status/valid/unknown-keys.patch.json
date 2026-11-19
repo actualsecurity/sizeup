@@ -1,0 +1,13 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/channels/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/sdrs/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/spool/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/urgent/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/reader/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/p25/examplesys/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/channels/0/squelch/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

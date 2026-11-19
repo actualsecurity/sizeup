@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/poke-wish.json",
+  "patch": [{"op": "remove", "path": "/what"}]
+}

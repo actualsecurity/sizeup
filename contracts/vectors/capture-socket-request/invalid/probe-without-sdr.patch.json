@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/probe.json",
+  "patch": [{"op": "remove", "path": "/args/sdr"}]
+}

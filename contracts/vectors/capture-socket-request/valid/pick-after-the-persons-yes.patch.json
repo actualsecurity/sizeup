@@ -1,0 +1,9 @@
+{
+  "base": "capture-socket-request/valid/pick.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-5f3a9c13"},
+    {"op": "replace", "path": "/args/confirm", "value": true},
+    {"op": "replace", "path": "/at", "value": 1900000204.0},
+    {"op": "replace", "path": "/expires_boot", "value": 5334.0}
+  ]
+}

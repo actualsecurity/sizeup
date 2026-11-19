@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/pick.json",
+  "patch": [{"op": "replace", "path": "/args", "value": {"sdr": "sdr-b", "job": "Off"}}]
+}

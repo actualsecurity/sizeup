@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-66ff7700"},
+    {"op": "replace", "path": "/reason", "value": "held"},
+    {"op": "replace", "path": "/error", "value": "sdr-d is held for the ADS-B receiver"}
+  ]
+}

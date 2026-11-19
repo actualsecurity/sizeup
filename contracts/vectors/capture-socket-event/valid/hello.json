@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "t": "hello",
+  "at": 1900000000.0,
+  "contract": 1,
+  "impl": "python",
+  "build": "0123abc",
+  "pid": 4242,
+  "started": 1899990000.0,
+  "spool_epoch": "3f9a1c0b7d2e4a61",
+  "urgent_epoch": "9c2d7e10a4b35f68",
+  "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c"
+}

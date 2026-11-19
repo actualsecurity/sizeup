@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-wish.schema.json",
+  "title": "Capture wish file",
+  "description": "Designed (docs/native/capture-split.md 4.4, #773), not implemented. `state/radio_wish.json`: the DESIRED state of radio capture and nothing else, written by the app (its only writer) with tmp + rename whenever it changes, read by capture on a `poke` and every 0.5 s. Level-triggered: a capture that starts alone runs what the file says. Nothing here needs an answer (that is a request on the socket) and nothing here is observed (that is the status file). Capture ignores a key it does not know; a file that is missing, unreadable or not an object leaves the last accepted wish running (never \"everything off\"); a part that fails validation is not applied, the rest is, and the status lists it under `refusals`. It carries no secret and no URL, and nothing capture executes: those come from the root-owned config, because the `sizeup` user can write this file. No key at any depth has `token`, `secret` or `password` in its name, in any case (`$defs/no-secrets`).",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["v", "seq", "mode", "paths", "channels", "dongles"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The wish's version, 1."},
+    "seq": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "A counter the app keeps in the file itself: the previous wish's plus 1. The status reports the `wish_seq` capture runs."},
+    "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When the app wrote the file, Unix seconds."},
+    "pid": {"type": "integer", "minimum": 1, "maximum": 4194304, "description": "The writing app's process id."},
+    "build": {"type": "string", "description": "The writing app's build."},
+    "mode": {"type": "string", "description": "Which capture this wish is for: `service` or `shadow` (the shadow instance of the migration). Capture leaves a wish for a mode it does not know unapplied.", "x-known": ["service", "shadow"]},
+    "paths": {
+      "title": "Data directories",
+      "description": "Where capture keeps data. Data directories only: no program path. Each is absolute; one left out is the station default.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {"spool": {"type": "string", "pattern": "^/", "description": "The spool directory. Default /var/lib/sizeup/spool."}, "urgent_db": {"type": "string", "pattern": "^/", "description": "The urgent file. Default /var/lib/sizeup/state/urgent.sqlite."}, "clips": {"type": "string", "pattern": "^/", "description": "The app's clips directory (same filesystem as the spool: audio moves by hard link)."}, "captures": {"type": "string", "pattern": "^/", "description": "The captures directory."}, "state": {"type": "string", "pattern": "^/", "description": "The state directory (`radio.lock`, capture's own state files)."}, "recorder_dir": {"type": "string", "pattern": "^/", "description": "trunk-recorder's working directory."}}
+    },
+    "hub": {
+      "title": "The hub link, as the app sees it",
+      "description": "What the urgent senders need to know about the hub. No secret and no URL: capture reads the hub's URL from the root-owned config. A key named `url`, `hub_url` or `access_id` here (in any case) is not a wish a writer may send; capture ignores one and says so in `wish_problem`.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "forward": {"type": "boolean", "description": "The hub link is on. false (all-in-one, or the link switched off): capture writes urgent rows and sends nothing."},
+        "station": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$", "description": "The station id the hub assigned (`StationLink.adopt`): the `station` of an urgent request."},
+        "caps": {"type": "array", "description": "The hub's capability strings, as its state answer gave them. Capture sends only while `urgent` is among them.", "items": {"type": "string", "description": "A capability string.", "x-known": ["urgent"]}}
+      },
+      "propertyNames": {"not": {"pattern": "^([Uu][Rr][Ll]|[Hh][Uu][Bb]_[Uu][Rr][Ll]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Ii][Dd])$"}}
+    },
+    "channels": {
+      "type": "array",
+      "description": "The channel set.",
+      "items": {
+        "title": "One channel of the set",
+        "description": "One `[[radio.channels]]` entry, as the app's config has it.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["label", "kind", "mhz"],
+        "additionalProperties": true,
+        "properties": {
+          "label": {"type": "string", "minLength": 1, "description": "The channel's label: its name everywhere (jobs, sidecars, frames, the status)."},
+          "kind": {"type": "string", "description": "The channel's kind. Capture does not run a channel whose kind it does not know and reports a refusal.", "x-known": ["traffic", "paging", "airband"]},
+          "mhz": {"type": "number", "exclusiveMinimum": 0, "description": "The frequency, MHz."},
+          "gain_db": {"type": ["number", "null"], "description": "The tuner gain, dB; null for automatic."},
+          "device": {"type": "string", "description": "The serial of the dongle the config pins the channel to; \"\" for none."},
+          "open_db": {"type": "number", "description": "The quieting needed to open, dB, as configured. `squelch[label]`, when there, is what runs."},
+          "drop_db": {"type": ["number", "null"], "description": "End a transmission this far under its own level, dB; null for none."},
+          "hang_s": {"type": ["number", "null"], "minimum": 0, "description": "The squelch hang once a transmission has had tones or speech, seconds; null: by kind."},
+          "continue_s": {"type": ["number", "null"], "minimum": 0, "description": "How long after a close the carrier may come back and still be the same page, seconds; null: by kind."},
+          "keyups": {"type": "string", "description": "The key-up cutting mode, as configured; \"\" for none."},
+          "split_s": {"type": "number", "minimum": 0, "description": "Key-ups: the shortest gap that cuts, seconds; 0 for the default."},
+          "jump_db": {"type": ["number", "null"], "description": "Key-ups: the level jump that cuts, dB; null for the default."},
+          "schedule": {"type": "array", "description": "Airband (#260): the frequency by the time of day, as [minute of the local day, MHz] in time order; [] for `mhz` all day.", "items": {"type": "array", "minItems": 2, "maxItems": 2}},
+          "also": {"type": "array", "description": "Airband (#275): other frequencies on the same dongle, as [MHz, from, until, label], from and until in minutes of the local day or null; [] for none.", "items": {"type": "array", "minItems": 4, "maxItems": 4}},
+          "record": {"type": "boolean", "default": true, "description": "false: nothing is kept of this channel. Its sidecars carry ids, levels and the alarm, with `audio` null."}
+        }
+      }
+    },
+    "airband": {
+      "title": "Airband settings",
+      "description": "The owner rule for a frequency two dongles hear (`config.airband_owner` today) belongs here too; the design does not name its key, so it is not typed.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {"multichannel": {"type": "boolean", "description": "Receive a dongle's `also` frequencies at once through the channelizer (#275)."}}
+    },
+    "squelch": {
+      "type": "object",
+      "description": "The squelch values to run, by channel label, already fitted by the app. Applied live, no restart.",
+      "additionalProperties": {
+        "title": "Squelch values",
+        "description": "One channel's squelch.",
+        "x-complete": true,
+        "type": "object",
+        "required": ["open_db", "close_db", "min_open_s"],
+        "additionalProperties": true,
+        "properties": {"open_db": {"type": "number", "description": "The squelch opens at this much quieting, dB."}, "close_db": {"type": "number", "description": "The squelch closes below this much quieting, dB."}, "min_open_s": {"type": "number", "minimum": 0, "description": "The shortest opening kept, seconds."}}
+      }
+    },
+    "tones": {
+      "title": "The tone plan",
+      "description": "For the live page: the names a pair shows, and which names are ours.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "plan": {
+          "type": "array",
+          "description": "The known pairs.",
+          "items": {
+            "title": "One pair of the plan",
+            "description": "A tone pair and who it pages.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["a_hz", "b_hz", "names"],
+            "additionalProperties": true,
+            "properties": {"a_hz": {"type": "number", "exclusiveMinimum": 0, "description": "The first tone, Hz."}, "b_hz": {"type": "number", "exclusiveMinimum": 0, "description": "The second tone, Hz."}, "names": {"type": "array", "description": "Who it pages, by name.", "items": {"type": "string"}}}
+          }
+        },
+        "ours": {"type": "array", "description": "The names that are this department's own.", "items": {"type": "string"}}
+      }
+    },
+    "aliases": {"type": "object", "description": "{radio id: name}: the alias an alarm's `unit` gets.", "additionalProperties": {"type": "string", "description": "The radio's name."}},
+    "dongles": {
+      "title": "Dongles",
+      "description": "What each dongle should do, as people chose it. What capture decides itself (auto-assigned jobs, stand-ins, dongles out for no audio, loans) is not here: it is in the status.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "jobs": {
+          "type": "object",
+          "description": "{serial: the job that dongle should run}. A job whose dongle another app holds, or that is parked, is no error: it shows as `held`, `shed` or `waiting`.",
+          "additionalProperties": {
+            "title": "One dongle's job",
+            "description": "The job a person picked.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["job"],
+            "additionalProperties": true,
+            "properties": {"job": {"type": "string", "minLength": 1, "description": "A channel's label, the P25 job, a system job, or `Off`."}, "by": {"type": "string", "description": "Who chose it. `person` here: what auto-assign decides is capture's own.", "x-known": ["person"]}}
+          }
+        },
+        "groups": {
+          "type": "array",
+          "description": "The antenna groups as saved.",
+          "items": {
+            "title": "One antenna group",
+            "description": "An antenna group as saved (`groups.parse`'s shape), parks included.",
+            "x-complete": true,
+            "type": "object",
+            "required": ["name", "sdrs", "jobs"],
+            "additionalProperties": true,
+            "properties": {"name": {"type": "string", "minLength": 1, "description": "The group's name."}, "sdrs": {"type": "array", "description": "The serials of its dongles, in order.", "items": {"type": "string"}}, "jobs": {"type": "array", "description": "Its jobs, the most important first.", "items": {"type": "string"}}, "parked": {"type": "array", "description": "The jobs of the group a person parked; [] or absent for none.", "items": {"type": "string"}}}
+          }
+        },
+        "reserved": {
+          "title": "Reserved dongles",
+          "description": "Serials set aside for other decoders: never given a job.",
+          "x-complete": true,
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {"adsb": {"type": "string", "description": "The ADS-B decoder's dongle, a serial; \"\" for none."}, "ais": {"type": "string", "description": "The AIS decoder's dongle, a serial; \"\" for none."}}
+        },
+        "listed": {"type": "array", "description": "The serials the config lists (`[radio] sdrs`); [] with `auto`.", "items": {"type": "string"}},
+        "auto": {"type": "boolean", "description": "Use whatever dongles are plugged in (`[radio] sdrs = \"auto\"`)."},
+        "auto_assign": {"type": "boolean", "description": "Give unassigned dongles jobs (`[radio] auto_assign`)."},
+        "order": {"type": "array", "description": "The order auto-assign hands jobs out in (`[radio] auto_assign_order`).", "items": {"type": "string"}},
+        "ignore": {"type": "array", "description": "Serials never shown or used (`[radio] sdr_ignore`).", "items": {"type": "string"}},
+        "start_mode": {"type": "string", "description": "What a shared dongle does at startup (`[radio] start_mode`); \"\" for none."}
+      }
+    },
+    "p25": {
+      "title": "P25",
+      "description": "The county recorder and each system's directory, name, label, sources and jobs, and the talkgroup labels and unit aliases for `parse_call`. The design names only `talkgroups`; the rest is not typed here.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "talkgroups": {
+          "type": "object",
+          "description": "{system short name: {talkgroup number as decimal digits: facts}}: what the reception test needs to know of a talkgroup, resolved by the app.",
+          "additionalProperties": {
+            "type": "object",
+            "description": "One system's talkgroups, by number.",
+            "propertyNames": {"pattern": "^(0|[1-9][0-9]{0,9})$"},
+            "additionalProperties": {
+              "title": "One talkgroup's facts",
+              "description": "Resolved by the app from its Settings.",
+              "x-complete": true,
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {"alert": {"type": "boolean", "description": "It is an alert talkgroup."}, "kept": {"type": "boolean", "description": "Its calls are kept."}, "encrypted": {"type": "boolean", "description": "It is encrypted."}}
+            }
+          }
+        }
+      }
+    },
+    "metrics": {"type": "boolean", "description": "Sample the `floor` and `cc` signal records (spool items of kind `metrics`)."},
+    "spool": {
+      "title": "Spool bounds",
+      "description": "The spool's bounds with their defaults (contracts/capture/spool.md).",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "max_age_h": {"type": "number", "exclusiveMinimum": 0, "description": "Unacknowledged items older than this lose their audio, hours. Default 12."},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "The spool's size bound, bytes. Default 2147483648."},
+        "max_items": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Sidecars go only past this many items. Default 50000."},
+        "min_free_bytes": {"type": "integer", "maximum": 9007199254740991, "minimum": 0, "description": "The free-space reserve of the spool's filesystem, bytes: under it capture publishes sidecars without audio. Default 268435456."},
+        "sync_s": {"type": "number", "exclusiveMinimum": 0, "description": "How often what was published is synced to disk, seconds. Default 5."}
+      }
+    }
+  },
+  "if": {"type": "object"},
+  "then": {"$ref": "#/$defs/no-secrets"},
+  "$defs": {
+    "no-secrets": {"title": "No secret at any depth", "description": "No key of this object, or of any object or list inside it, is named like a secret: `token`, `secret` or `password` anywhere in the name, in any case.", "propertyNames": {"not": {"pattern": "[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]"}}, "additionalProperties": {"$ref": "#/$defs/no-secrets"}, "items": {"$ref": "#/$defs/no-secrets"}}
+  }
+}

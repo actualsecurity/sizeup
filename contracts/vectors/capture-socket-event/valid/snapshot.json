@@ -1,0 +1,44 @@
+{
+  "v": 1,
+  "t": "snapshot",
+  "at": 1900000000.2,
+  "carriers": [
+    {
+      "ch": "CH A",
+      "state": "up",
+      "since": 1900000000.123,
+      "continuing": false,
+      "holding": false,
+      "quieting_db": 31.0,
+      "queued": 0
+    },
+    {
+      "ch": "PAGE 1",
+      "state": "down",
+      "since": 1899999000.0,
+      "continuing": false,
+      "holding": false,
+      "quieting_db": null,
+      "queued": 0
+    }
+  ],
+  "talking": [
+    {
+      "key": "fm:CH A:1900000000.12:7001",
+      "system": "fm",
+      "channel": "CH A",
+      "tg": null,
+      "radio_id": "7001",
+      "alias": "",
+      "since": 1900000000.123,
+      "talk_since": 1900000000.123,
+      "ended": false,
+      "until": null,
+      "dispatcher": false,
+      "id_on_release": false
+    }
+  ],
+  "paging": [],
+  "status_at": 1900000000.0,
+  "spool_seq": 12344
+}

@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/urgent-delivered.json",
+  "patch": [{"op": "remove", "path": "/rev"}]
+}

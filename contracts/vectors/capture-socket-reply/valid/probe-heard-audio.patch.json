@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-reply/valid/applied.json",
+  "patch": [{"op": "replace", "path": "/id", "value": "r-44dd55ee"}, {"op": "add", "path": "/result", "value": "audio"}]
+}

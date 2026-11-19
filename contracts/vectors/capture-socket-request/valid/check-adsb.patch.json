@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/check-groups.json",
+  "patch": [{"op": "replace", "path": "/args", "value": {"what": "adsb", "value": "sdr-d"}}]
+}

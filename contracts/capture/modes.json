@@ -1,0 +1,102 @@
+{
+  "x-version": 1,
+  "x-status": "designed",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"The two mode files together\", 6, #773), not implemented. The two one-word files that switch the capture split, and what every combination of them means. `combinations` is the design's table written out: its seven rows cover nine combinations (the `shadow` row stands for three). Per combination: `decodes`, who decodes a key-up (`app`, `capture`, and `shadow` for the shadow instance beside the app); `writes`, who writes the urgent item and into which file ([] for nobody: today's path); `sends`, every lane that sends a live alarm to the hub and the process that runs it (`urgent`: the urgent senders; `outbox`: the app's own lane, by take-over or as today); `app_down`, what happens to a key-up alarm while the app is not running. `urgent_mode_in_effect` is what the status file reports as `urgent.mode`: in service mode capture treats `off` as `write`. tests/contracts_capture.py `combination` is the same rule as code, and the tests hold the two to each other.",
+  "files": {
+    "capture-mode": {
+      "path": "/etc/sizeup/capture-mode",
+      "words": ["inline", "shadow", "service"],
+      "default": "inline",
+      "note": "Root-owned, one word. `inline` is today's one process and what unit tests use."
+    },
+    "urgent-mode": {
+      "path": "/etc/sizeup/urgent-mode",
+      "words": ["off", "write", "send"],
+      "default": "off",
+      "note": "Root-owned, one word. `write`: rows and frames, the app takes over, the urgent senders send nothing. Service mode needs `write` or `send`."
+    }
+  },
+  "combinations": [
+    {
+      "capture_mode": "inline",
+      "urgent_mode": "off",
+      "urgent_mode_in_effect": "off",
+      "decodes": ["app"],
+      "writes": [],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "inline",
+      "urgent_mode": "write",
+      "urgent_mode_in_effect": "write",
+      "decodes": ["app"],
+      "writes": [{"by": "app", "file": "urgent.sqlite"}],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "inline",
+      "urgent_mode": "send",
+      "urgent_mode_in_effect": "send",
+      "decodes": ["app"],
+      "writes": [{"by": "app", "file": "urgent.sqlite"}],
+      "sends": [{"lane": "urgent", "by": "app"}, {"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "shadow",
+      "urgent_mode": "off",
+      "urgent_mode_in_effect": "off",
+      "decodes": ["app", "shadow"],
+      "writes": [{"by": "shadow", "file": "urgent-shadow.sqlite"}],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "shadow",
+      "urgent_mode": "write",
+      "urgent_mode_in_effect": "write",
+      "decodes": ["app", "shadow"],
+      "writes": [{"by": "app", "file": "urgent.sqlite"}, {"by": "shadow", "file": "urgent-shadow.sqlite"}],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "shadow",
+      "urgent_mode": "send",
+      "urgent_mode_in_effect": "send",
+      "decodes": ["app", "shadow"],
+      "writes": [{"by": "app", "file": "urgent.sqlite"}, {"by": "shadow", "file": "urgent-shadow.sqlite"}],
+      "sends": [{"lane": "urgent", "by": "app"}, {"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": false, "written": false, "sent": "nothing to send"}
+    },
+    {
+      "capture_mode": "service",
+      "urgent_mode": "off",
+      "urgent_mode_in_effect": "write",
+      "decodes": ["capture"],
+      "writes": [{"by": "capture", "file": "urgent.sqlite"}],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": true, "written": true, "sent": "when the app is back"}
+    },
+    {
+      "capture_mode": "service",
+      "urgent_mode": "write",
+      "urgent_mode_in_effect": "write",
+      "decodes": ["capture"],
+      "writes": [{"by": "capture", "file": "urgent.sqlite"}],
+      "sends": [{"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": true, "written": true, "sent": "when the app is back"}
+    },
+    {
+      "capture_mode": "service",
+      "urgent_mode": "send",
+      "urgent_mode_in_effect": "send",
+      "decodes": ["capture"],
+      "writes": [{"by": "capture", "file": "urgent.sqlite"}],
+      "sends": [{"lane": "urgent", "by": "capture"}, {"lane": "outbox", "by": "app"}],
+      "app_down": {"decoded": true, "written": true, "sent": "by capture"}
+    }
+  ]
+}

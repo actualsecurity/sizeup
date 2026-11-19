@@ -1,0 +1,10 @@
+{
+  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "patch": [
+    {"op": "replace", "path": "/key", "value": "CHA-1900000000123"},
+    {"op": "replace", "path": "/at", "value": 1900000006.5},
+    {"op": "replace", "path": "/age_s", "value": 6.4},
+    {"op": "add", "path": "/data/end", "value": 1900000006.473},
+    {"op": "replace", "path": "/data/ids/0/from", "value": "audio"}
+  ]
+}

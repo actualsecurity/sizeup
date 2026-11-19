@@ -1,0 +1,8 @@
+{
+  "base": "capture-spool-sidecar/valid/call.json",
+  "patch": [
+    {"op": "add", "path": "/alarm_key", "value": "p25-examplesys-4101-7001-1900000300000"},
+    {"op": "replace", "path": "/emergency", "value": true},
+    {"op": "replace", "path": "/turns/0/emergency", "value": true}
+  ]
+}

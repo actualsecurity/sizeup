@@ -1,0 +1,4 @@
+{
+  "base": "capture-wish/valid/service.json",
+  "patch": [{"op": "add", "path": "/dongles/jobs/sdr-a/api_Token", "value": "example-not-a-real-secret"}]
+}

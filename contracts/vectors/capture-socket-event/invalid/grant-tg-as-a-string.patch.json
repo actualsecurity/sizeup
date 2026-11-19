@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/grant.json",
+  "patch": [{"op": "replace", "path": "/tg", "value": "7001"}]
+}

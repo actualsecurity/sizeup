@@ -1,0 +1,980 @@
+{
+  "x-version": 1,
+  "x-status": "designed",
+  "description": "Designed (docs/native/capture-split.md 4.3 \"Idempotency, on the hub\", 11 H1a to H1k, #773), not implemented. The hub's rules for `POST /api/station/urgent` as a table a test can run: each scenario is a list of steps and what the hub must answer and hold. tests/contracts_capture.py `Hub` is the reference model that passes it; the hub's route, and the stub hub the station's tests use, must give the same answers. A step has `at` (seconds on the HUB's clock since the scenario began; the hub's clock then reads `params.t0` + `at`) and one of: `urgent` (a request's items: each names an entry of `items`, with keys to replace; `data` is merged; `station` defaults to st-north and `sent_at` to the hub's clock) with `expect` (the status per item, in order; or `expect_http` for a request refused whole, with `reason`; `off_contract`: a body no conforming sender makes, which the hub must survive); `event` (one event of the app's lane, /api/station/events: its `start` and `end` are the STATION's wall clock, which need not be the hub's); `hello` (GET /api/station/hello; `gen_changed` says whether its `gen` is another than the last one answered); `ack`, `all_clear` (a person acknowledges, or clears, the alarm that hangs on this traffic id); `state_paging` (the `paging` list of the app's state post); `hub` (`handoff`: stop leading; `lead`: lead again, with a new generation; `{restore_s: n}`: crash and come back from a replica n seconds old); `holds` (what holds at that moment). `then` is what holds at the end, in the same words: `alarms`, `pushes`, `notices` (how many); `traffic_ids` (what each alarm hangs on); `push_age_s` (the first push's age); `still_set` (how often an alarm was marked \"emergency still set\"); `sources` (the stations of the first alarm); `states` (st-north's keys in the dedupe store: `raised`, `stale`, `seen`); `pages`, and `page` (the live page under its key: `rev`, `phase`, `ended`, `live`, `expires_in_s`). `params.max_age_s` is A7, NOT DECIDED by the admin: 1800 is the recommended rule, and a scenario that depends on it says so (`depends_on`). Every limit is exclusive on the inside (exactly the limit is outside); a slack written +- is inclusive.",
+  "params": {
+    "t0": 1900000000.0,
+    "max_age_s": 1800,
+    "max_age_s_decided": false, "age_margin": 1.1,
+    "repeat_s": 120,
+    "stuck_within_s": 600,
+    "p25_slack_s": 10,
+    "page_live_max_s": 300,
+    "request_max_items": 32,
+    "request_max_bytes": 65536,
+    "age_clamp_s": 86400
+  },
+  "items": {
+    "alarm": {
+      "key": "CHA-live-1900000000123",
+      "rev": 0,
+      "kind": "alarm",
+      "at": 1900000000.39,
+      "event_at": 1900000000.123,
+      "age_s": 0.29,
+      "age_src": "boot",
+      "data": {
+        "source": "CH A",
+        "start": 1900000000.123,
+        "radio_id": "7001",
+        "ids": [{"id": "7001", "system": "mdc", "emergency": true, "from": "live"}],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "MDC"
+      }
+    },
+    "p25": {
+      "key": "p25-examplesys-4101-7001-1900000300000",
+      "rev": 0,
+      "kind": "alarm",
+      "at": 1900000300.02,
+      "event_at": 1900000300.0,
+      "age_s": 0.08,
+      "age_src": "boot",
+      "data": {
+        "source": "Fire Dispatch 1",
+        "start": 1900000300.0,
+        "radio_id": "7001",
+        "ids": [],
+        "unit": "UNIT A",
+        "emergency": true,
+        "emergency_via": "P25",
+        "system": "examplesys",
+        "talkgroup": 4101,
+        "key_time": "grant"
+      }
+    },
+    "page": {
+      "key": "page:PAGE 1:1900000100.25",
+      "rev": 0,
+      "kind": "page",
+      "at": 1900000101.9,
+      "event_at": 1900000100.25,
+      "age_s": 1.66,
+      "age_src": "boot",
+      "data": {
+        "channel": "PAGE 1",
+        "started": 1900000100.25,
+        "phase": "tones",
+        "ours": true,
+        "ended": false,
+        "until": null,
+        "pairs": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"], "ours": true, "at": 1900000101.9}]
+      }
+    },
+    "future": {
+      "key": "x:1",
+      "rev": 0,
+      "kind": "from_the_future",
+      "at": 1900000000.39,
+      "event_at": 1900000000.123,
+      "age_s": 0.29,
+      "age_src": "boot",
+      "data": {}
+    }
+  },
+  "scenarios": [
+    {
+      "name": "the first (station, key) of an alarm, then the same key again",
+      "design": "4.3 idempotency rows 1, 2",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 0.9,
+          "urgent": [{"item": "alarm", "age_s": 0.79}],
+          "expect": ["duplicate"],
+          "note": "capture retried: its answer was lost"
+        }
+      ],
+      "then": {
+        "alarms": 1,
+        "pushes": 1,
+        "notices": 0,
+        "traffic_ids": ["CHA-live-1900000000123"],
+        "states": {"CHA-live-1900000000123": "raised"}
+      }
+    },
+    {
+      "name": "the app's take-over, an alarm event with id = key",
+      "design": "4.3 idempotency row 3",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 4.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000000.39
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-live-1900000000123"]}
+    },
+    {
+      "name": "the finished transmission takes the alarm over; the key stays in the store",
+      "design": "4.3 idempotency row 4",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 4.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000000.39
+          }
+        },
+        {
+          "at": 8.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {"at": 9.0, "urgent": [{"item": "alarm", "age_s": 8.9}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "the app's lane first, the transmission took the alarm over, it was acknowledged, then the urgent item",
+      "design": "4.3 idempotency row 5; 11 H1k",
+      "steps": [
+        {
+          "at": 0.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000000.39
+          }
+        },
+        {
+          "at": 7.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {"at": 9.0, "ack": "CHA-1900000000123"},
+        {
+          "at": 10.0,
+          "urgent": [{"item": "alarm", "age_s": 9.9}],
+          "expect": ["duplicate"],
+          "note": "the events lane wrote the key as raised: without that, a second alarm and a second push"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"], "states": {"CHA-live-1900000000123": "raised"}}
+    },
+    {
+      "name": "the take-over event arrives after the transmission already took the alarm over",
+      "design": "4.3 idempotency rows 3, 4",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 7.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {
+          "at": 7.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000000.39
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "an alarm raised at the close with key = the transmission's id, then the app's events for it",
+      "design": "4.3 idempotency row 6",
+      "steps": [
+        {"at": 6.6, "urgent": [{"item": "alarm", "key": "CHA-1900000000123", "age_s": 6.5}], "expect": ["applied"]},
+        {
+          "at": 7.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {
+          "at": 7.2,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "the same, the app's lane first",
+      "design": "4.3 idempotency row 6",
+      "steps": [
+        {
+          "at": 7.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {
+          "at": 7.2,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {"at": 9.0, "urgent": [{"item": "alarm", "key": "CHA-1900000000123", "age_s": 8.9}], "expect": ["duplicate"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"]}
+    },
+    {
+      "name": "late, under the age limit: raised and pushed with its age",
+      "design": "4.3 idempotency row 7; A7 (recommended)",
+      "depends_on": "max_age_s",
+      "steps": [{"at": 1740.0, "urgent": [{"item": "alarm", "age_s": 1740.0}], "expect": ["applied"]}],
+      "then": {"alarms": 1, "pushes": 1, "notices": 0, "push_age_s": 1740.0}
+    },
+    {
+      "name": "exactly the age limit is outside it: 1979 s is applied, 1980 s (30 min x 1.1) is stale",
+      "design": "4 (every limit is exclusive on the inside); 4.3 the age cutoff with its 10 % margin; 11 H1i, H1k",
+      "depends_on": "max_age_s",
+      "steps": [
+        {
+          "at": 1979.0,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 1979.0}],
+          "expect": ["applied"],
+          "note": "an alarm 31.5 real min old, its boot-clock age 4.7 % over: still raised and pushed"
+        },
+        {"at": 1980.0, "urgent": [{"item": "alarm", "age_s": 1980.0}], "expect": ["stale"]}
+      ],
+      "then": {
+        "alarms": 1,
+        "pushes": 1,
+        "notices": 1,
+        "states": {"CHA-live-1900000000123": "stale", "CHA-live-1900000030000": "raised"}
+      }
+    },
+    {
+      "name": "older than the age limit: stale, a late notice, no push; and no later event raises it",
+      "design": "4.3 idempotency row 10, the three states; 11 H1k; A7 (recommended)",
+      "depends_on": "max_age_s",
+      "steps": [
+        {"at": 2040.0, "urgent": [{"item": "alarm", "age_s": 2040.0}], "expect": ["stale"]},
+        {"at": 2041.0, "holds": {"stale_src": {"CHA-live-1900000000123": "boot"}}},
+        {
+          "at": 2055.0,
+          "urgent": [{"item": "alarm", "age_s": 2055.0}],
+          "expect": ["duplicate"],
+          "note": "the key is recorded as stale"
+        },
+        {
+          "at": 2060.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000000.39
+          }
+        },
+        {
+          "at": 2061.0,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900002060.0,
+            "end": 1900002060.5
+          },
+          "note": "an event whose wall time looks fresh: the item was stale on a boot-clock age, and that wins"
+        }
+      ],
+      "then": {"alarms": 0, "pushes": 0, "notices": 1, "states": {"CHA-live-1900000000123": "stale"}}
+    },
+    {
+      "name": "an age that is negative, and one over 24 h, are clamped",
+      "design": "7.5 the new hub route",
+      "depends_on": "max_age_s",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm", "age_s": -5}], "expect": ["applied"], "off_contract": true},
+        {
+          "at": 0.5,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 1000000000.0}],
+          "expect": ["stale"]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "notices": 1, "push_age_s": 0.0}
+    },
+    {
+      "name": "the station's wall clock stepped back 40 min: the app's lane first with a wall time that looks old, then the item",
+      "design": "4.3 the three states, idempotency row 8; 6 end-to-end; 11 H1k",
+      "depends_on": "max_age_s",
+      "steps": [
+        {
+          "at": 1.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1899997601.2,
+            "end": 1899997601.5
+          },
+          "note": "the alarm code's age gate: nothing raised. The key is only `seen`"
+        },
+        {"at": 1.6, "holds": {"alarms": 0, "pushes": 0, "states": {"CHA-live-1900000000123": "seen"}}},
+        {
+          "at": 2.0,
+          "urgent": [{"item": "alarm", "age_s": 1.2}],
+          "expect": ["applied"],
+          "note": "judged on its own boot-clock age. `duplicate` here would lose the alarm"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "notices": 0, "states": {"CHA-live-1900000000123": "raised"}}
+    },
+    {
+      "name": "the same, the item first and the old-looking event after it",
+      "design": "4.3 the three states",
+      "depends_on": "max_age_s",
+      "steps": [
+        {"at": 1.3, "urgent": [{"item": "alarm", "age_s": 1.2}], "expect": ["applied"]},
+        {
+          "at": 1.5,
+          "event": {
+            "type": "alarm",
+            "id": "CHA-live-1900000000123",
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1899997601.2,
+            "end": 1899997601.5
+          }
+        },
+        {
+          "at": 8.0,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": true,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["CHA-1900000000123"], "states": {"CHA-live-1900000000123": "raised"}}
+    },
+    {
+      "name": "a traffic event that carries the alarm_key and no emergency first, then the item",
+      "design": "4.3 the three states, idempotency row 9; 11 H1k",
+      "steps": [
+        {
+          "at": 0.3,
+          "event": {
+            "type": "traffic",
+            "id": "CHA-1900000000123",
+            "alarm_key": "CHA-live-1900000000123",
+            "emergency": false,
+            "radio_id": "7001",
+            "source": "CH A",
+            "start": 1900000000.123,
+            "end": 1900000006.473
+          }
+        },
+        {"at": 0.35, "holds": {"alarms": 0, "states": {"CHA-live-1900000000123": "seen"}}},
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "states": {"CHA-live-1900000000123": "raised"}}
+    },
+    {
+      "name": "a P25 live alarm, then its call's end-of-call alarm, which carries the live alarm's key",
+      "design": "4.3 idempotency row 11; Q-I; #775",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 304.0,
+          "event": {
+            "type": "alarm",
+            "id": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0
+          }
+        },
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0,
+            "end": 1900000312.0
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"], "still_set": 0}
+    },
+    {
+      "name": "the end-of-call alarm first, then the live item of the same press",
+      "design": "4.3 idempotency row 11, the other order",
+      "steps": [
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0,
+            "end": 1900000312.0
+          }
+        },
+        {"at": 315.0, "urgent": [{"item": "p25", "age_s": 14.98}], "expect": ["duplicate"]}
+      ],
+      "then": {
+        "alarms": 1,
+        "pushes": 1,
+        "traffic_ids": ["4101-1900000300_851012500.0-call_17"],
+        "states": {"p25-examplesys-4101-7001-1900000300000": "raised"}
+      }
+    },
+    {
+      "name": "the same press with the station's clock 60 s ahead of the hub's, the live item first",
+      "design": "4.3 idempotency row 11; 6 end-to-end; 11 H1k",
+      "steps": [
+        {
+          "at": 300.1,
+          "urgent": [{"at": 1900000360.02, "event_at": 1900000360.0, "data": {"start": 1900000360.0}, "item": "p25"}],
+          "expect": ["applied"],
+          "sent_at": 1900000360.1
+        },
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000360.0,
+            "end": 1900000372.0
+          },
+          "note": "matched on the station and carried as alarm_key: the hub compares no clocks"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "the same press with the station's clock 60 s ahead, the call first",
+      "design": "4.3 idempotency row 11; 11 H1k",
+      "steps": [
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000360.0,
+            "end": 1900000372.0
+          }
+        },
+        {
+          "at": 315.0,
+          "urgent": [
+            {
+              "at": 1900000360.02,
+              "event_at": 1900000360.0,
+              "data": {"start": 1900000360.0},
+              "item": "p25",
+              "age_s": 14.98
+            }
+          ],
+          "expect": ["duplicate"],
+          "sent_at": 1900000375.0
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"]}
+    },
+    {
+      "name": "an end-of-call event with no alarm_key (an older capture): the live grant exactly 10 s before the call's span",
+      "design": "4.3 idempotency row 11, the fallback; 11 H1d",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 324.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000310.0,
+            "end": 1900000322.0
+          },
+          "note": "+-10 s is inclusive; station time against station time"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"], "still_set": 0}
+    },
+    {
+      "name": "the same with the grant 10.5 s before the span: not that call's, and the bit is still set",
+      "design": "4.3 idempotency rows 11, 12",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 324.5,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000310.5,
+            "end": 1900000322.5
+          }
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["p25-examplesys-4101-7001-1900000300000"], "still_set": 1}
+    },
+    {
+      "name": "the same radio's next call 300 s later with the bit still set: it joins the open alarm, nothing new is raised",
+      "design": "4.3 idempotency row 12; 11 H1d, H1k",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0,
+            "end": 1900000312.0
+          }
+        },
+        {
+          "at": 626.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000612_851012500.0-call_31",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000612.0,
+            "end": 1900000624.0
+          },
+          "note": "312 s after the radio's last flag by the hub's clock, its alarm open: it joins as \"emergency still set\""
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "traffic_ids": ["4101-1900000300_851012500.0-call_17"], "still_set": 1}
+    },
+    {
+      "name": "an All clear ends the press window: the bit still set after it raises an alarm labelled emergency still set after All clear",
+      "design": "4.3 idempotency row 12 (the radio maintainers' wording); 6 end-to-end",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0,
+            "end": 1900000312.0
+          }
+        },
+        {"at": 320.0, "all_clear": "4101-1900000300_851012500.0-call_17"},
+        {
+          "at": 626.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000612_851012500.0-call_31",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000612.0,
+            "end": 1900000624.0
+          }
+        }
+      ],
+      "then": {"alarms": 2, "pushes": 2, "still_set": 0, "labels": ["", "emergency still set after All clear"]}
+    },
+    {
+      "name": "599.75 s after the last flag by the hub's clock is still set; exactly 600 s is a new press",
+      "design": "4.3 idempotency row 12; 4 (every limit is exclusive on the inside); 11 H1k",
+      "steps": [
+        {"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]},
+        {
+          "at": 314.0,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000300_851012500.0-call_17",
+            "alarm_key": "p25-examplesys-4101-7001-1900000300000",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000300.0,
+            "end": 1900000312.0
+          }
+        },
+        {
+          "at": 913.75,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900000612_851012500.0-call_31",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900000911.0,
+            "end": 1900000923.0
+          }
+        },
+        {"at": 914.0, "holds": {"alarms": 1, "pushes": 1, "still_set": 1}},
+        {
+          "at": 1513.75,
+          "event": {
+            "type": "alarm",
+            "id": "4101-1900001523_851012500.0-call_58",
+            "radio_id": "7001",
+            "source": "Fire Dispatch 1",
+            "system": "examplesys",
+            "talkgroup": 4101,
+            "start": 1900001523.0,
+            "end": 1900001535.0
+          }
+        }
+      ],
+      "then": {
+        "alarms": 2,
+        "pushes": 2,
+        "traffic_ids": ["4101-1900000300_851012500.0-call_17", "4101-1900001523_851012500.0-call_58"],
+        "still_set": 1
+      }
+    },
+    {
+      "name": "the same radio pressing again while its alarm is open, acknowledged or not: it joins",
+      "design": "4.3 idempotency row 13",
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 30.4,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 0.3}],
+          "expect": ["applied"],
+          "note": "taken; the alarm code's same-radio rule joins it to the open alarm"
+        },
+        {"at": 40.0, "ack": "CHA-live-1900000000123"},
+        {
+          "at": 60.4,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000060000", "age_s": 0.3}],
+          "expect": ["applied"]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "states": {"CHA-live-1900000030000": "raised", "CHA-live-1900000060000": "raised"}}
+    },
+    {
+      "name": "another station while the hub takes one",
+      "design": "4.3 idempotency row 14",
+      "steps": [
+        {
+          "at": 0.4,
+          "urgent": [{"item": "alarm"}],
+          "expect": [],
+          "station": "st-south",
+          "expect_http": 409,
+          "reason": "multi_station_off"
+        }
+      ],
+      "then": {"alarms": 0, "pushes": 0}
+    },
+    {
+      "name": "two stations hear one press 2 s apart: two items, one alarm, one push",
+      "design": "4.3 idempotency row 14; 6 end-to-end; 11 H1j",
+      "hub": {"multi_station": true},
+      "steps": [
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {
+          "at": 2.4,
+          "urgent": [{"item": "alarm"}],
+          "expect": ["applied"],
+          "station": "st-south",
+          "note": "its own key in the store (keyed by station), joined to the open alarm of that radio on that channel"
+        },
+        {"at": 3.0, "urgent": [{"item": "alarm", "age_s": 0.89}], "expect": ["duplicate"], "station": "st-south"}
+      ],
+      "then": {"alarms": 1, "pushes": 1, "sources": ["st-north", "st-south"]}
+    },
+    {
+      "name": "two stations, the same radio placed exactly 120 s apart: REPEAT_S is outside itself, a second alarm",
+      "design": "4.3 idempotency row 14; 4 (every limit is exclusive on the inside)",
+      "hub": {"multi_station": true},
+      "steps": [
+        {"at": 1.0, "urgent": [{"item": "alarm", "age_s": 0}], "expect": ["applied"]},
+        {
+          "at": 121.0,
+          "urgent": [{"item": "alarm", "key": "CHA-live-1900000030000", "age_s": 0}],
+          "expect": ["applied"],
+          "station": "st-south"
+        }
+      ],
+      "then": {"alarms": 2, "pushes": 2, "sources": ["st-north"]}
+    },
+    {
+      "name": "a page: a higher rev is applied, an equal one a duplicate, a lower one stale",
+      "design": "4.3 idempotency row 15",
+      "steps": [
+        {"at": 101.9, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {"at": 104.9, "urgent": [{"item": "page", "rev": 2, "data": {"phase": "voice"}}], "expect": ["applied"]},
+        {"at": 105.0, "urgent": [{"item": "page", "rev": 1}], "expect": ["stale"]},
+        {"at": 105.1, "urgent": [{"item": "page", "rev": 2, "data": {"phase": "voice"}}], "expect": ["duplicate"]}
+      ],
+      "then": {
+        "alarms": 0,
+        "pushes": 0,
+        "page": {"key": "page:PAGE 1:1900000100.25", "rev": 2, "phase": "voice", "ended": false, "live": true}
+      }
+    },
+    {
+      "name": "a page whose `ended` never comes ends on the hub by itself, 300 s after its last revision",
+      "design": "4.3 idempotency row 15; 6 end-to-end; 11 H1e, H1k",
+      "steps": [
+        {"at": 100.0, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {"at": 399.5, "holds": {"page": {"key": "page:PAGE 1:1900000100.25", "live": true}}},
+        {"at": 400.0, "holds": {"page": {"key": "page:PAGE 1:1900000100.25", "live": false, "ended": false}}}
+      ],
+      "then": {"pages": 1}
+    },
+    {
+      "name": "an `ended` revision ends the entry; its `until` is used only by its distance from `sent_at`",
+      "design": "4.3 idempotency row 15",
+      "steps": [
+        {"at": 100.0, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {
+          "at": 231.0,
+          "urgent": [{"item": "page", "rev": 3, "data": {"ended": true, "until": 1900003841.0}}],
+          "expect": ["applied"],
+          "sent_at": 1900003831.0,
+          "note": "the station's clock is an hour off: only until - sent_at (10 s) counts"
+        }
+      ],
+      "then": {"page": {"key": "page:PAGE 1:1900000100.25", "rev": 3, "ended": true, "live": false, "expires_in_s": 10.0}}
+    },
+    {
+      "name": "the app's state post for the same page merges by key: the later to arrive wins",
+      "design": "4.3 idempotency row 16",
+      "steps": [
+        {"at": 101.9, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {
+          "at": 102.0,
+          "state_paging": [
+            {
+              "key": "page:PAGE 1:1900000100.25",
+              "channel": "PAGE 1",
+              "started": 1900000100.25,
+              "pairs": [{"a": 600.9, "b": 716.1, "names": ["Example Co 1"], "ours": true}],
+              "phase": "voice",
+              "ours": true,
+              "ended": false,
+              "until": null,
+              "page_id": ""
+            }
+          ]
+        }
+      ],
+      "then": {"pages": 1, "page": {"key": "page:PAGE 1:1900000100.25", "phase": "voice", "ended": false}}
+    },
+    {
+      "name": "the finished page ends the live entry at once",
+      "design": "4.3 idempotency row 17",
+      "steps": [
+        {"at": 101.9, "urgent": [{"item": "page"}], "expect": ["applied"]},
+        {"at": 140.0, "event": {"type": "page", "id": "PAGE1-1900000100250", "live_key": "page:PAGE 1:1900000100.25"}}
+      ],
+      "then": {"page": {"key": "page:PAGE 1:1900000100.25", "ended": true, "live": false}}
+    },
+    {
+      "name": "an unknown kind is rejected and the rest of the request is taken",
+      "design": "4.3 idempotency row 18",
+      "steps": [
+        {
+          "at": 0.4,
+          "urgent": [{"item": "future"}, {"item": "alarm"}],
+          "expect": ["rejected", "applied"],
+          "reasons": ["kind", null]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    },
+    {
+      "name": "an alarm and a page in one request: the sender never builds it, the hub takes it",
+      "design": "4.3 idempotency, the route",
+      "steps": [
+        {
+          "at": 104.9,
+          "urgent": [{"item": "alarm", "age_s": 104.8}, {"item": "page", "age_s": 3.0}],
+          "expect": ["applied", "applied"]
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 1, "pages": 1}
+    },
+    {
+      "name": "a request during a handoff applies nothing; the first retry after it is the first delivery",
+      "design": "4.3 the hub's hot/cold handoff; 11 H1k",
+      "steps": [
+        {"at": 0.2, "hub": "handoff"},
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": [], "expect_http": 503},
+        {"at": 0.9, "urgent": [{"item": "alarm", "age_s": 0.79}], "expect": [], "expect_http": 503},
+        {"at": 3.0, "hub": "lead"},
+        {"at": 3.1, "urgent": [{"item": "alarm", "age_s": 2.99}], "expect": ["applied"], "gen_changed": true}
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    },
+    {
+      "name": "a hub back from a replica 30 s old says so in its hello, and takes the alarm again",
+      "design": "4.3 the sender, the resend rule and the 50 s hello; 11 H1a, H1k",
+      "steps": [
+        {"at": 0.1, "hello": true},
+        {"at": 0.4, "urgent": [{"item": "alarm"}], "expect": ["applied"]},
+        {"at": 10.0, "hub": {"restore_s": 30}},
+        {"at": 50.1, "hello": true, "gen_changed": true, "note": "an idle sender learns of the restore here"},
+        {
+          "at": 50.2,
+          "urgent": [{"item": "alarm", "age_s": 50.1}],
+          "expect": ["applied"],
+          "note": "the first push already left: the hub cannot know, and pushes again"
+        }
+      ],
+      "then": {"alarms": 1, "pushes": 2}
+    },
+    {
+      "name": "a request that is not well formed is refused whole",
+      "design": "4.3 the route, answers; 7.5",
+      "steps": [
+        {"at": 0.4, "urgent": [], "expect": [], "expect_http": 422, "reason": "bad_batch"},
+        {
+          "at": 0.5,
+          "urgent": [{"item": "alarm"}, {"item": "page", "rev": -1}],
+          "expect": [],
+          "expect_http": 422,
+          "reason": "bad_batch",
+          "note": "nothing of it is applied, the good item neither: the sender cuts it to single items"
+        },
+        {"at": 0.6, "urgent": [{"item": "alarm", "age_s": 0.5}], "expect": ["applied"]}
+      ],
+      "then": {"alarms": 1, "pushes": 1}
+    },
+    {"name": "a P25 radio in emergency for 35 min with the app down: its calls arrive in a burst, ending 35, 28, 21, 14, 7, 1 min ago", "design": "4.3 the press window (second review); 6 end-to-end; 11 H1d, H1k", "depends_on": "max_age_s", "steps": [{"at": 7200.0, "event": {"type": "alarm", "id": "4101-1900005088_851012500.0-call_1", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005088.0, "end": 1900005100.0}}, {"at": 7200.5, "event": {"type": "alarm", "id": "4101-1900005508_851012500.0-call_2", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005508.5, "end": 1900005520.5}}, {"at": 7201.0, "event": {"type": "alarm", "id": "4101-1900005929_851012500.0-call_3", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900005929.0, "end": 1900005941.0}}, {"at": 7201.5, "event": {"type": "alarm", "id": "4101-1900006349_851012500.0-call_4", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900006349.5, "end": 1900006361.5}}, {"at": 7202.0, "event": {"type": "alarm", "id": "4101-1900006770_851012500.0-call_5", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900006770.0, "end": 1900006782.0}}, {"at": 7202.5, "event": {"type": "alarm", "id": "4101-1900007130_851012500.0-call_6", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900007130.5, "end": 1900007142.5}}, {"at": 7203.0, "holds": {"alarms": 1, "pushes": 1, "still_set": 4}}], "then": {"alarms": 1, "pushes": 1, "still_set": 4, "traffic_ids": ["4101-1900005508_851012500.0-call_2"], "push_age_s": 1680.0}},
+    {"name": "a flag on a talkgroup whose notices are off arms nothing: the same radio on a dispatch talkgroup 5 min later is an alarm", "design": "4.3 the press window, step 3 (second review); 6 end-to-end; 11 H1k", "hub": {"off_channels": ["Fire Tac 9"]}, "steps": [{"at": 10.0, "event": {"type": "alarm", "id": "4109-1899999998_851062500.0-call_3", "radio_id": "7001", "source": "Fire Tac 9", "system": "examplesys", "talkgroup": 4109, "start": 1899999998.0, "end": 1900000008.0}}, {"at": 10.5, "holds": {"alarms": 0}}, {"at": 310.0, "event": {"type": "alarm", "id": "4101-1900000298_851012500.0-call_9", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000298.0, "end": 1900000308.0}}], "then": {"alarms": 1, "pushes": 1, "still_set": 0}},
+    {"name": "All clear, then 20 real min later a new press with the station's clock stepped 15 min behind: an alarm, labelled a new press", "design": "4.3 the press window (second review): the hub's receive time, never two station wall times; 6 end-to-end; 11 H1k", "steps": [{"at": 12.0, "event": {"type": "alarm", "id": "4101-1900000000_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000000.0, "end": 1900000012.0}}, {"at": 30.0, "all_clear": "4101-1900000000_851012500.0-call_17"}, {"at": 1212.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_40", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0}, "note": "the calls' own times 5 min apart; the hub received them 20 min apart"}], "then": {"alarms": 2, "pushes": 2, "labels": ["", ""]}},
+    {"name": "the same 20 min later without the All clear: a new press, by the hub's clock", "design": "4.3 the press window (second review); 11 H1k", "steps": [{"at": 12.0, "event": {"type": "alarm", "id": "4101-1900000000_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000000.0, "end": 1900000012.0}}, {"at": 1212.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_40", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0}}], "then": {"alarms": 2, "pushes": 2, "still_set": 0, "labels": ["", ""]}},
+    {"name": "a reboot with the wall clock 1 h fast: the reloaded alarm is stale on a wall-sourced age, then the app's take-over raises it", "design": "4.3 the three states, stale_src (second review); 6 end-to-end; 11 H1k", "depends_on": "max_age_s", "steps": [{"at": 5.0, "urgent": [{"item": "alarm", "age_s": 3700.0, "age_src": "wall"}], "expect": ["stale"]}, {"at": 5.5, "holds": {"stale_src": {"CHA-live-1900000000123": "wall"}}}, {"at": 6.0, "urgent": [{"item": "alarm", "age_s": 3701.0, "age_src": "wall"}], "expect": ["duplicate"], "note": "a retry of the item is still a duplicate"}, {"at": 7.0, "event": {"type": "alarm", "id": "CHA-live-1900000000123", "radio_id": "7001", "source": "CH A", "start": 1899999885.0, "end": 1899999885.4}, "note": "its true times, 2 min old: judged on its own"}, {"at": 12.0, "event": {"type": "traffic", "id": "CHA-1899999885000", "alarm_key": "CHA-live-1900000000123", "emergency": true, "radio_id": "7001", "source": "CH A", "start": 1899999885.0, "end": 1899999892.0}}], "then": {"alarms": 1, "pushes": 1, "notices": 1, "traffic_ids": ["CHA-1899999885000"], "states": {"CHA-live-1900000000123": "raised"}}},
+    {"name": "a hub restored to after the events lane's seen and before its upgrade to raised takes the resend: applied", "design": "6 the stub's restore puts back the whole state (second review); 11 H1k", "steps": [{"at": 1.0, "event": {"type": "traffic", "id": "CHA-1900000000123", "alarm_key": "CHA-live-1900000000123", "emergency": false, "radio_id": "7001", "source": "CH A", "start": 1900000000.123, "end": 1900000006.473}}, {"at": 40.0, "urgent": [{"item": "alarm", "age_s": 1.2}], "expect": ["applied"]}, {"at": 50.0, "hub": {"restore_s": 30}}, {"at": 50.5, "holds": {"alarms": 0, "states": {"CHA-live-1900000000123": "seen"}}}, {"at": 60.0, "urgent": [{"item": "alarm", "age_s": 21.2}], "expect": ["applied"], "gen_changed": true, "note": "a store kept by first sighting said raised here: the alarm was lost"}], "then": {"alarms": 1, "pushes": 2, "states": {"CHA-live-1900000000123": "raised"}}},
+    {"name": "two stations, the first alarm acknowledged at 4 s, the second station's item at 9 s: one push", "design": "4.3 idempotency row 14, open = not ended or cleared (second review); 6 end-to-end; 11 H1j, H1k", "hub": {"multi_station": true}, "steps": [{"at": 1.0, "urgent": [{"item": "alarm", "age_s": 0.5}], "expect": ["applied"]}, {"at": 4.0, "ack": "CHA-live-1900000000123"}, {"at": 9.0, "urgent": [{"item": "alarm", "key": "CHA-live-1900000000124", "age_s": 7.6}], "expect": ["applied"], "station": "st-south"}], "then": {"alarms": 1, "pushes": 1, "sources": ["st-north", "st-south"]}},
+    {"name": "an ended page stays ended: a later state post that still lists it does not make it live", "design": "4.3 idempotency row 16, ended is final (second review); 11 H1e, H1k", "steps": [{"at": 1.0, "urgent": [{"item": "page", "data": {"ended": true}}], "expect": ["applied"]}, {"at": 2.0, "state_paging": [{"key": "page:PAGE 1:1900000100.25", "channel": "PAGE 1", "phase": "voice", "ended": false}]}], "then": {"pages": 1, "page": {"key": "page:PAGE 1:1900000100.25", "ended": true, "live": false}}},
+    {"name": "a disregard call from before the All clear, its event after it: attached to the cleared alarm, no push", "design": "4.3 the press window, a call from before the All clear (third review); 6 end-to-end; 11 H1d, H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000630_851012500.0-call_29", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000630.0, "end": 1900000660.0, "boot": "b-st", "sent_boot_id": "b-st", "sent_boot": 20000.0, "start_boot": 19910.0}, "note": "started 50 s before the clear; the boot age (90 s) places it at 630, U = 19 s: before the clear"}], "then": {"alarms": 1, "pushes": 1, "before_clear": 1, "still_set": 0}},
+    {"name": "the same disregard call with no boot age and a stale skew: the hub is unsure, an alarm labelled emergency still set after All clear", "design": "4.3 a call from before the All clear, when unsure (third review); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 500.0, "skew": {"station_at": 1900000500.0, "boot": "b-st", "wall_steps": 3}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000630_851012500.0-call_29", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000630.0, "end": 1900000660.0, "boot": "b-st"}, "note": "the skew is 220 s old: no placing"}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0, "labels": ["", "emergency still set after All clear"], "approximate": [false, true]}},
+    {"name": "the same placed by the skew: samples of the call's own boot before and after its start, no wall step, the newest 20 s old: attached", "design": "4.3 a call from before the All clear, the skew path's conditions (final verification); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 600.0, "skew": {"station_at": 1900000600.0, "boot": "b-st", "wall_steps": 3}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 700.0, "skew": {"station_at": 1900000700.0, "boot": "b-st", "wall_steps": 3}}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000630_851012500.0-call_29", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000630.0, "end": 1900000660.0, "boot": "b-st"}, "note": "U = 5 s + 2 x 0 s"}], "then": {"alarms": 1, "pushes": 1, "before_clear": 1}},
+    {"name": "a skew whose wall_steps changed after the call started does not place it: an alarm", "design": "4.3 a call from before the All clear (third review); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 600.0, "skew": {"station_at": 1900000600.0, "boot": "b-st", "wall_steps": 3}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 700.0, "skew": {"station_at": 1900000700.0, "boot": "b-st", "wall_steps": 4}}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000630_851012500.0-call_29", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000630.0, "end": 1900000660.0, "boot": "b-st"}}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0}},
+    {"name": "a call started inside U of the All clear: unsure, an alarm", "design": "4.3 a call from before the All clear: at least U before (third review); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000676_851012500.0-call_30", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000676.0, "end": 1900000690.0, "boot": "b-st", "sent_boot_id": "b-st", "sent_boot": 20000.0, "start_boot": 19956.0}, "note": "placed at 676, U = 14.4 s: not before 665.6"}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0, "labels": ["", "emergency still set after All clear"], "approximate": [false, false]}},
+    {"name": "a real new press 3 s after the All clear, the hub unsure: an alarm, labelled", "design": "4.3 a call from before the All clear: a real new press is never attached (third review); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 700.0, "event": {"type": "alarm", "id": "4101-1900000683_851012500.0-call_31", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000683.0, "end": 1900000695.0}}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0, "labels": ["", "emergency still set after All clear"]}},
+    {"name": "a real new press 20 s after the All clear, with a boot age: an alarm", "design": "4.3 a call from before the All clear (third review); 6 end-to-end; 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}, "note": "the radio's first call joins its live alarm"}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 715.0, "event": {"type": "alarm", "id": "4101-1900000700_851012500.0-call_32", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000700.0, "end": 1900000712.0, "boot": "b-st", "sent_boot_id": "b-st", "sent_boot": 20000.0, "start_boot": 19985.0}}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0}},
+    {"name": "an events-lane alarm with no boot age is pushed with the hub's now minus the station's end, labelled approximate", "design": "11 H1i, H1m (third review); 11 H1k", "steps": [{"at": 10.0, "event": {"type": "alarm", "id": "CHA-live-1900000000123", "radio_id": "7001", "source": "CH A", "start": 1900000000.12, "end": 1900000000.39}}, {"at": 20.0, "event": {"type": "alarm", "id": "CHB-live-1900000005000", "radio_id": "7002", "source": "CH B", "start": 1900000005.0, "end": 1900000005.4, "boot": "b-st", "event_boot": 19990.0, "sent_boot_id": "b-st", "sent_boot": 20000.0}}], "then": {"alarms": 2, "pushes": 2, "approximate": [true, false]}},
+    {"name": "a reboot between the call and its post, the new boot's clock 40 s ahead, a real press 3 s after the All clear: an alarm and a push", "design": "4.3 a call from before the All clear, the skew path's conditions (final verification, loss sequence i); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 700.0, "skew": {"station_at": 1900000740.0, "boot": "b-new", "wall_steps": 0}}, {"at": 710.0, "skew": {"station_at": 1900000750.0, "boot": "b-new", "wall_steps": 0}}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000683_851012500.0-call_33", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000683.0, "end": 1900000695.0, "boot": "b-st", "start_boot": 9000.0, "sent_boot_id": "b-new", "sent_boot": 30.0}, "note": "no boot age (the request is of another boot), and the samples are of the new boot: the hub is unsure"}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0, "labels": ["", "emergency still set after All clear"]}},
+    {"name": "an older station with no boot age and no wall_steps, its clock stepped back 30 s after the skew sample and before a real press 3 s after the All clear: an alarm and a push", "design": "4.3 a call from before the All clear, the skew path's conditions (final verification, loss sequence ii); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}}, {"at": 600.0, "skew": {"station_at": 1900000600.0}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 700.0, "skew": {"station_at": 1900000700.0}}, {"at": 720.0, "event": {"type": "alarm", "id": "4101-1900000653_851012500.0-call_34", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000653.0, "end": 1900000665.0}, "note": "its station start reads 653: a placed start 27 s before the clear, which the skew path must never believe"}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0}},
+    {"name": "a sample of the call's boot only before its start, none after: not placed, an alarm", "design": "4.3 the skew path: a sample at or after the start (final verification); 11 H1k", "steps": [{"at": 300.1, "urgent": [{"item": "p25"}], "expect": ["applied"]}, {"at": 314.0, "event": {"type": "alarm", "id": "4101-1900000300_851012500.0-call_17", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000300.0, "end": 1900000312.0, "alarm_key": "p25-examplesys-4101-7001-1900000300000"}}, {"at": 620.0, "skew": {"station_at": 1900000620.0, "boot": "b-st", "wall_steps": 1}}, {"at": 680.0, "all_clear": "4101-1900000300_851012500.0-call_17"}, {"at": 725.0, "event": {"type": "alarm", "id": "4101-1900000630_851012500.0-call_29", "radio_id": "7001", "source": "Fire Dispatch 1", "system": "examplesys", "talkgroup": 4101, "start": 1900000630.0, "end": 1900000660.0, "boot": "b-st"}}], "then": {"alarms": 2, "pushes": 2, "before_clear": 0}},
+    {"name": "notices off: the app's take-over is suppressed, recorded and final; capture's item is applied with no alarm", "design": "4.3 the store's suppressed state (final verification, e6bfc5f6); 11 H1a, H1b, H1k", "hub": {"off_channels": ["CH A"]}, "steps": [{"at": 0.5, "event": {"type": "alarm", "id": "CHA-live-1900000000123", "radio_id": "7001", "source": "CH A", "start": 1900000000.12, "end": 1900000000.39}}, {"at": 0.6, "holds": {"alarms": 0, "states": {"CHA-live-1900000000123": "suppressed"}}}, {"at": 1.0, "urgent": [{"item": "alarm"}], "expect": ["duplicate"]}, {"at": 2.0, "urgent": [{"item": "alarm", "key": "CHA-live-1900000001000", "age_s": 0.5}], "expect": ["applied"], "note": "received and recorded; the admin's setting: no alarm"}], "then": {"alarms": 0, "pushes": 0, "states": {"CHA-live-1900000000123": "suppressed", "CHA-live-1900000001000": "suppressed"}}}
+  ]
+}

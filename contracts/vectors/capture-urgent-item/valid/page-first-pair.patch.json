@@ -1,0 +1,9 @@
+{
+  "base": "capture-urgent-item/valid/page-voice.json",
+  "patch": [
+    {"op": "replace", "path": "/rev", "value": 0},
+    {"op": "replace", "path": "/at", "value": 1900000101.9},
+    {"op": "replace", "path": "/age_s", "value": 1.66},
+    {"op": "replace", "path": "/data/phase", "value": "tones"}
+  ]
+}

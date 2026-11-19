@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [{"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}}]
+}

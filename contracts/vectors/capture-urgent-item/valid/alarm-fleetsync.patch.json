@@ -1,0 +1,7 @@
+{
+  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "patch": [
+    {"op": "replace", "path": "/data/emergency_via", "value": "FleetSync"},
+    {"op": "replace", "path": "/data/ids/0/system", "value": "fleetsync"}
+  ]
+}

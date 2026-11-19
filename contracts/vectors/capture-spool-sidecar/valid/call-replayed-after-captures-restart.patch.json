@@ -1,0 +1,11 @@
+{
+  "base": "capture-spool-sidecar/valid/call.json",
+  "patch": [
+    {"op": "replace", "path": "/replayed", "value": true},
+    {"op": "replace", "path": "/grants_applied", "value": false},
+    {"op": "replace", "path": "/turns/1/via", "value": "srclist"},
+    {"op": "replace", "path": "/published", "value": 1900000400.0},
+    {"op": "replace", "path": "/closed_boot", "value": 5513.9},
+    {"op": "replace", "path": "/published_boot", "value": 5513.95}
+  ]
+}

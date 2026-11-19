@@ -1,0 +1,7 @@
+{
+  "base": "capture-socket-request/valid/pick.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/args/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

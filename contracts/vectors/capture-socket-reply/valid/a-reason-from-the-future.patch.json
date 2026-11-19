@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-5f3a9c12"},
+    {"op": "replace", "path": "/reason", "value": "from_the_future"},
+    {"op": "replace", "path": "/error", "value": "refused"}
+  ]
+}

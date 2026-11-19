@@ -32,7 +32,7 @@ def table_names(heading: str) -> list[str]:
 
 
 def test_the_designed_schemas_say_so():
-    assert {n for n in c.names() if c.load(n)["x-status"] == "designed"} == set(DESIGNED)
+    assert {n for n in c.names() if c.load(n)["description"].startswith("Designed (docs/nodes.md")} == set(DESIGNED)
 
 
 def test_the_roles_are_the_design_documents():

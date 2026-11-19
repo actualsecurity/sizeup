@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "v": 1,
+  "station": "st-north",
+  "gen": 412,
+  "results": [{"key": "CHA-live-1900000000123", "rev": 0, "status": "applied"}]
+}

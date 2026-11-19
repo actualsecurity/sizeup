@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "kind": "metrics",
+  "id": "metrics-1900000260000",
+  "seq": 12349,
+  "spool_epoch": "3f9a1c0b7d2e4a61",
+  "published": 1900000320.02,
+  "published_boot": 5434.02,
+  "boot": "b1946ac9-2f0e-4c1d-9a77-0d1e2f3a4b5c",
+  "records": [
+    {"k": "floor", "s": "CH A", "at": 1900000260.0, "kind": "traffic", "n": 60, "hiss": -41.5},
+    {"k": "cc", "s": "examplesys", "at": 1900000260.0, "n": 60, "state": "ok"}
+  ]
+}

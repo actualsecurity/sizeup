@@ -1,0 +1,7 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/urgent/mode", "value": "write"},
+    {"op": "replace", "path": "/urgent/state", "value": "off"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/reason", "value": "confirm"},
+    {"op": "replace", "path": "/confirm", "value": true},
+    {"op": "replace", "path": "/error", "value": "CH A is a fire job: move it off sdr-a anyway?"}
+  ]
+}

@@ -48,7 +48,7 @@ def test_the_schema_is_2020_12_and_says_what_it_is(name):
     assert doc["$id"] == f"{ID_BASE}{name}.schema.json"
     assert doc["title"] and len(doc["description"]) > 80
     assert doc["x-status"] in c.STATUSES and isinstance(doc["x-version"], int) and doc["x-version"] >= 1
-    assert doc["description"].startswith("Designed (docs/nodes.md") == (doc["x-status"] == "designed")
+    assert doc["description"].startswith("Designed (docs/") == (doc["x-status"] == "designed")
 
 
 @pytest.mark.parametrize("name", NAMES)

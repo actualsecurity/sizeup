@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/spool-item-complete.json",
+  "patch": [{"op": "replace", "path": "/seq", "value": 0}]
+}
