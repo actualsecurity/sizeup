@@ -3,7 +3,8 @@ load), incidents (active and recent, cursor pages), one incident, units and alar
 CAD method that writes, and the API layer never opens a database (everything goes through the Cad's own methods).
 
 Same rules as the console, for the person the device token names (principal.py):
-  - a person's role is Settings.standing(email)["may"] (viewer < dispatcher < admin), as the console's `_may`; every
+  - a person's role is Settings.standing_readonly(email)["may"] (standing() without person()'s INSERT: a GET never
+    writes) (viewer < dispatcher < admin), as the console's `_may`; every
     read here is the least role, "read", so a viewer gets all of it, and what a role may not see is left out where
     the console leaves it out: premise notes and pre-plan points by category/kind (`for_incident(inc, may)`), another
     P25 system's radio rows unless sourcekeys.may_see_context (the thread's request context is the person's);
@@ -121,9 +122,10 @@ class Reads:
     # -- the person -----------------------------------------------------------------------------------------------
 
     def may(self, principal) -> str:
-        """The person's standing as the console reads it (CadApi._may): viewer | dispatcher | admin."""
+        """The person's standing as the console reads it (CadApi._may): viewer | dispatcher | admin. Read only: an
+        unknown email is a viewer and is never added to the CAD."""
         try:
-            return self._cad.settings.standing(principal.email)["may"]
+            return self._cad.settings.standing_readonly(principal.email)["may"]
         except CadError:                    # as CadApi._may: the least (not reused: it takes the console's Identity)
             return "viewer"
 
