@@ -2,7 +2,7 @@
   "ver": 2,
   "sizeup": {
     "label": "MRRS",
-    "split": "log",
+    "split": "on",
     "name": "Metro-25 / MTA MRRS",
     "jobs": ["MRRS 770", "MRRS 773"],
     "site": {

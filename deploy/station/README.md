@@ -720,7 +720,10 @@ channel, and the Fire/EMS 15 row stays "ok" through the update.
   says `trunk-recorder: unchanged, left running` or `trunk-recorder: (re)started`. A change of `[p25] recorder` or
   `recorder_dir` in `/etc/sizeup/config.toml` restarts trunk-recorder by itself within a second. After editing
   `/var/lib/sizeup/trunk-recorder/config.json` by hand (it is remade from the repo at the next update):
-  `sudo systemctl restart sizeup-trunk-recorder`.
+  `sudo systemctl restart sizeup-trunk-recorder`. Another system's (MRRS's) `config.json` or `talkgroups.csv` is not
+  in `tr_sig`: the service and the county's trunk-recorder stay up, and that system's supervisor restarts only its own
+  trunk-recorder, between calls: while it records one it waits (`p25 mrrs: MRRS's config changed: trunk-recorder
+  restarts after its call ...`), 5 min at most, then restarts anyway and says so (#647).
 * **Checking it.** `sizeup-station status` has a `p25:` line (the service, its state, the dongle, trunk-recorder's
   pid); `doctor` checks it runs; `sizeup-station logs` includes it (`journalctl -u sizeup-trunk-recorder`: one line per
   start, stop and exit). `python3 -I /usr/local/lib/sizeup/trunkrecd.py print` shows the command line it would run.

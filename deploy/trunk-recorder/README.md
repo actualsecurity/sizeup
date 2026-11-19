@@ -87,6 +87,14 @@ leading pieces (a cut under ~1.5 s into a transmission) and the `ID flip` / `ID 
 turns, MRRS goes `on` first, then the county. A bench's own unpatched build ignores the setting: such transmissions
 stay merged unless a grant names the next radio.
 
+Now: **MRRS `on`** (`systems/mrrs/config.json`), the county `log`. With `on` each talker of a call is its own
+`srcList` entry, so sizeup makes one row per talker as it does for a key-up after a terminator: `<call id>-t<k>`,
+its own clip, speech-to-text (PD Dispatch: the alert tier's class, the pre-alert lane), radio log row and pre-alert
+hooks. Rolling back is `"split": "log"` in the same file. A change to a system's `config.json` (or `talkgroups.csv`)
+alone restarts only that system's trunk-recorder (the county's is restarted only when its own files, `trunkrecd.py`,
+its unit or a build change: `install-linux.sh` `tr_sig`), and only between calls: the supervisor waits while it
+records one, 5 min at most (`trunkrecd.py` `OpenCalls`, `CONFIG_WAIT_S`), on top of the updater's own quiet moment.
+
 Those lines are info level and name radios, so they stay in `trunk-recorder.log`; the station log (and CloudWatch)
 gets their counts instead (#647), one line per system an hour and when trunk-recorder stops, counts only:
 `p25 mrrs: split (log) last hour: 3 would split, 1 ID flips, 2 aliases, in 120 calls (2.5% of calls)` (the % is the

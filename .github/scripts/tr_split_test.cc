@@ -110,7 +110,7 @@ struct Got {
   std::string log;
 };
 
-static const long RA = 9900101, RA2 = 9900111, RB = 9900202, RV = 9900303, RG = 9900909; // invented radio IDs
+static const long RA = 9900101, RA2 = 9900111, RB = 9900202, RC = 9900404, RV = 9900303, RG = 9900909; // invented radio IDs
 static const int W = 200; // samples per work() call
 
 static Got run(const char *mode, bool conventional, long grant, int n, const std::vector<Tag> &tags) {
@@ -228,6 +228,16 @@ int main() {
   // the same input, stock and log: one transmission credited to the later radio; log says where it would cut
   expect("off: stock", run("off", false, RA, 20000, t), {{RB, 20000}}, nullptr, "would split");
   expect("log: stock, logged", run("log", false, RA, 20000, t), {{RB, 20000}}, "would split: prev 9900101 -> new 9900202, 10050 samples into transmission");
+
+  // A, then B, then C back to back with no terminator (MRRS split on, #647): three transmissions, each cut where the
+  // next talker's ID came in, each credited to its own radio; the second cut names B as the one before C
+  t.clear(); every(t, RA, 0, 10000); every(t, RB, 10050, 20000); every(t, RC, 20100, 30000);
+  expect("three talkers back to back", run("on", false, RA, 30000, t), {{RA, 10050}, {RB, 10050}, {RC, 9900}},
+         "Unit ID changed on Voice Channel, ext: 9900404\tprevious: 9900202");
+  expect("three talkers back to back, the first cut", run("on", false, RA, 30000, t),
+         {{RA, 10050}, {RB, 10050}, {RC, 9900}}, "Unit ID changed on Voice Channel, ext: 9900202\tprevious: 9900101");
+  // log: stock (one transmission, the last radio's), the two cuts it would have made logged
+  expect("three talkers, log", run("log", false, RA, 30000, t), {{RC, 30000}}, "would split: prev 9900202 -> new 9900404");
 
   // B's ID and a terminator in one window, B first: A to B's ID, B to the window's end (B heard once, then the end)
   t.clear(); every(t, RA, 0, 10000); t.push_back({10050, "src_id", RB}); t.push_back({10120, "terminate", 1});
