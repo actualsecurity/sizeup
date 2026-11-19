@@ -1,0 +1,7 @@
+{
+  "base": "capture-urgent-response/valid/bad-batch.json",
+  "patch": [
+    {"op": "replace", "path": "/error", "value": "that is another station's id"},
+    {"op": "replace", "path": "/reason", "value": "id_mismatch"}
+  ]
+}

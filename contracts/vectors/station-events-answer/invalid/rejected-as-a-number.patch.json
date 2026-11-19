@@ -1,0 +1,10 @@
+{
+  "base": "station-events-answer/valid/answer.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/rejected",
+      "value": 1
+    }
+  ]
+}

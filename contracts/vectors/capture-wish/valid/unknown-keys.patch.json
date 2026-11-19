@@ -1,0 +1,12 @@
+{
+  "base": "capture-wish/valid/service.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/hub/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/channels/0/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/dongles/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/spool/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/dongles/jobs/sdr-a/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/paths/from_the_future", "value": "/var/lib/sizeup/new"}
+  ]
+}

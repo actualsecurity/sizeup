@@ -41,6 +41,7 @@ from sizeup.cad.oos import OosNotices
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING, PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
+from sizeup.cad.opchannel import OpChannels
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
@@ -298,6 +299,11 @@ class Cad:
         self.auto = AutoDispatch(self, clock=clock, log=log)
         self.sources.on_possibly = self.auto.possibly
         self.radiolog = RadioLog(self)
+        # The county talkgroup an incident is worked on when it isn't ours (sizeup/cad/opchannel.py): from dispatch's
+        # words, the feed, its units' radios or a person; its traffic goes on the incident, promoted in speech-to-text
+        self.opchan = OpChannels(self)
+        self.comms.channel_links = self.opchan.rule_links
+        self.comms.on_pages_linked = lambda iid, ids: [self.opchan.heard(t) for t in ids]
         # A unit put on an incident (by a person, the feed or the radio): the radio log again for it, back to the
         # incident's dispatch (#370), off this thread
         self.store.on_assigned = lambda iid, names: self.radiolog.units_soon(iid)
@@ -504,6 +510,8 @@ class Cad:
                 "radio_folders": radiofolders.rev(self.radio_folders),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
+                # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
+                "op_channels": [{"tg": tg, "name": n} for tg, n in sorted(self.opchan.names().items())],
             })
         st = self._state[1]
         now = self.clock()
@@ -538,6 +546,7 @@ class Cad:
         self.intel.consider(tid)                          # radio pre-alerts (sizeup/intel): queued, never waits
         try:
             self.radiolog.consider(tid)
+            self.opchan.heard(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
             self.log(f"CAD: radio log: {type(e).__name__}")
         try:
@@ -559,6 +568,7 @@ class Cad:
         minutes old: no pre-alert, status suggestion, dispatch step, possible incoming or airport alert level from it."""
         try:
             self.radiolog.consider(tid)
+            self.opchan.heard(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
             self.log(f"CAD: radio log: {type(e).__name__}")
 
@@ -598,6 +608,10 @@ class Cad:
         except Exception as e:  # noqa: BLE001 - the report stands whatever this does
             self.log(f"CAD: dispatch scope: {type(e).__name__}")
         self.auto.on_feed(iid)
+        try:
+            self.opchan.scan_feed(iid)                    # the feed names the talkgroup it is worked on (opchannel.py)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: operating channel: {type(e).__name__}")
         return iid
 
     def dispatch_mode(self, body: dict) -> dict:
@@ -882,8 +896,10 @@ class Cad:
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
         by = self.comms.for_incidents([i["id"] for i in incs], limit)
+        chans = self.opchan.of([i["id"] for i in incs])
         units = self.store.units()
         for i in incs:
+            i["channels"] = chans.get(i["id"], [])          # its operating channels (opchannel.py)
             i["tag_units"] = self.tag_order(i["id"], units)
             rows = by.get(i["id"], [])
             for r in rows:
@@ -1829,6 +1845,10 @@ class Cad:
         """A transcribed transmission from the monitor: logged, and linked to the events its rig
         (or its tactical channel) was on. Returns the event ids."""
         iids = self.comms.record(t, replace=replace)
+        try:
+            self.opchan.after_record(t, iids)            # a move to another talkgroup heard (opchannel.py)
+        except Exception as e:  # noqa: BLE001 - the transmission stands whatever this does
+            self.log(f"CAD: operating channel: {type(e).__name__}")
         if iids and replace:
             nums = [r["number"] or str(r["id"]) for r in self.store.q(
                 f"SELECT id, number FROM incidents WHERE id IN ({','.join('?' * len(iids))})", iids)]
@@ -2229,6 +2249,27 @@ class Cad:
         if r.get("error"):
             raise CadError(r["error"])
         return dict(r, incident_id=iid, number=inc["number"])
+
+    def incident_channel(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>/channel {talkgroup, remove?, operator}: a person puts the incident on a county
+        talkgroup it is worked on (its traffic goes on it from the call's dispatch; sizeup/cad/opchannel.py), or takes
+        one off (no rule puts it back)."""
+        inc = self.store.incident(iid)
+        tg = body.get("talkgroup")
+        if isinstance(tg, bool) or not isinstance(tg, int):
+            raise CadError("talkgroup: a number")
+        op = _text(body, "operator", OPERATOR_MAX)
+        if _bool(body, "remove"):
+            if not self.opchan.remove(iid, tg, op):
+                raise CadError("not a channel of this event")
+        else:
+            if tg not in self.opchan.names():
+                raise CadError(f"talkgroup {tg}: not a county fire talkgroup this event can be moved to")
+            if inc["status"] == "dismissed":
+                raise CadError("a dismissed event")
+            from sizeup.cad.opchannel import LEAD_S
+            self.opchan.assign(iid, tg, "manual", self.radiolog.dispatched_at(iid) - LEAD_S, operator=op)
+        return {"channels": self.opchan.of([iid])[iid], "incident_id": iid, "number": inc["number"]}
 
     def unlink_traffic(self, iid: int, body: dict) -> dict:
         """POST /api/cad/incident/<id>/unlink {traffic_id, operator}: "Remove from 26-000007" in a

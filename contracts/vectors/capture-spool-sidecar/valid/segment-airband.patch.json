@@ -1,0 +1,45 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "TOWER-1900000200000"},
+    {"op": "replace", "path": "/channel", "value": {"label": "TOWER", "kind": "airband", "mhz": 118.575, "mod": "am"}},
+    {"op": "replace", "path": "/start", "value": 1900000200.0},
+    {"op": "replace", "path": "/end", "value": 1900000203.0},
+    {"op": "replace", "path": "/published", "value": 1900000203.05},
+    {"op": "replace", "path": "/closed_boot", "value": 5317.0},
+    {"op": "replace", "path": "/published_boot", "value": 5317.05},
+    {
+      "op": "replace",
+      "path": "/levels",
+      "value": {
+        "quieting_db": 14.2,
+        "carrier_dbfs": -31.0,
+        "floor_dbfs": -45.2,
+        "snr_db": 11.8,
+        "opened": "carrier",
+        "weak": false,
+        "marginal": false,
+        "preroll_s": 0.15,
+        "notched_hz": [1004.0]
+      }
+    },
+    {"op": "replace", "path": "/ids", "value": []},
+    {"op": "replace", "path": "/alarm_key", "value": ""},
+    {"op": "replace", "path": "/bursts", "value": 0},
+    {"op": "replace", "path": "/bursts_audio", "value": null},
+    {"op": "replace", "path": "/id_burst_seen", "value": false},
+    {
+      "op": "replace",
+      "path": "/audio",
+      "value": {
+        "file": "000000012345-TOWER-1900000200000.wav",
+        "format": "wav",
+        "encoding": "s16le",
+        "rate_hz": 16000,
+        "channels": 1,
+        "samples": 48000,
+        "bytes": 96044
+      }
+    }
+  ]
+}

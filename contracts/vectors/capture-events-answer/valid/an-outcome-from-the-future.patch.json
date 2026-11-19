@@ -1,0 +1,7 @@
+{
+  "base": "capture-events-answer/valid/with-the-outcomes.json",
+  "patch": [
+    {"op": "replace", "path": "/outcomes/0/outcome", "value": "from_the_future"},
+    {"op": "add", "path": "/outcomes/1/from_the_future", "value": 1}
+  ]
+}

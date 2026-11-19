@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {"fn": "set_stt_alert_keys", "args": [["fm:Paging 1", "p25:east:7001"], 4242]}
+    }
+  ]
+}

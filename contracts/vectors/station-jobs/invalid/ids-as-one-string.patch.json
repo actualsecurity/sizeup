@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/retranscribe.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/0",
+      "value": "Fireground1-1794990000000"
+    }
+  ]
+}

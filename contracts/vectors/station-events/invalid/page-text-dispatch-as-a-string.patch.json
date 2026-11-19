@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/page-text.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/dispatch",
+      "value": "Engine 5"
+    }
+  ]
+}

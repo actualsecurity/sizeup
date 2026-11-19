@@ -1,0 +1,13 @@
+{
+  "base": "station-jobs/valid/set_mode.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args",
+      "value": {
+        "mode": "Fireground 1",
+        "sdr": null
+      }
+    }
+  ]
+}

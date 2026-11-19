@@ -1,0 +1,82 @@
+{
+  "v": 1,
+  "seq": 214,
+  "at": 1900000000.0,
+  "pid": 3131,
+  "build": "0456def",
+  "mode": "service",
+  "paths": {
+    "spool": "/var/lib/sizeup/spool",
+    "urgent_db": "/var/lib/sizeup/state/urgent.sqlite",
+    "clips": "/var/lib/sizeup/clips",
+    "captures": "/var/lib/sizeup/captures",
+    "state": "/var/lib/sizeup/state",
+    "recorder_dir": "/var/lib/sizeup/trunk-recorder"
+  },
+  "hub": {"forward": true, "station": "st-north", "caps": ["urgent"]},
+  "channels": [
+    {
+      "label": "CH A",
+      "kind": "traffic",
+      "mhz": 450.0125,
+      "gain_db": 40.0,
+      "device": "",
+      "open_db": 10.0,
+      "drop_db": null,
+      "hang_s": null,
+      "continue_s": null,
+      "keyups": "",
+      "split_s": 0,
+      "jump_db": null,
+      "schedule": [],
+      "also": [],
+      "record": true
+    },
+    {
+      "label": "PAGE 1",
+      "kind": "paging",
+      "mhz": 460.1,
+      "gain_db": 40.0,
+      "device": "sdr-b",
+      "open_db": 10.0,
+      "drop_db": null,
+      "hang_s": 1.5,
+      "continue_s": 3.0,
+      "keyups": "",
+      "split_s": 0,
+      "jump_db": null,
+      "schedule": [],
+      "also": [],
+      "record": true
+    },
+    {
+      "label": "TOWER",
+      "kind": "airband",
+      "mhz": 118.575,
+      "gain_db": 36.4,
+      "device": "",
+      "open_db": 3.5,
+      "schedule": [[420, 118.575], [1380, 120.8]],
+      "also": [[121.9, null, null, "GROUND"]],
+      "record": true
+    }
+  ],
+  "airband": {"multichannel": true},
+  "squelch": {"CH A": {"open_db": 12.0, "close_db": 8.0, "min_open_s": 0.3}},
+  "tones": {"plan": [{"a_hz": 600.9, "b_hz": 716.1, "names": ["Example Co 1"]}], "ours": ["Example Co 1"]},
+  "aliases": {"7001": "UNIT A", "7002": "UNIT B"},
+  "dongles": {
+    "jobs": {"sdr-a": {"job": "CH A", "by": "person"}, "sdr-c": {"job": "Off", "by": "person"}},
+    "groups": [{"name": "roof", "sdrs": ["sdr-a", "sdr-b"], "jobs": ["PAGE 1", "CH A"], "parked": []}],
+    "reserved": {"adsb": "sdr-d", "ais": ""},
+    "listed": [],
+    "auto": true,
+    "auto_assign": true,
+    "order": ["PAGE 1", "CH A", "TOWER"],
+    "ignore": [],
+    "start_mode": ""
+  },
+  "p25": {"talkgroups": {"examplesys": {"4101": {"alert": true, "kept": true, "encrypted": false}}}},
+  "metrics": true,
+  "spool": {"max_age_h": 12, "max_bytes": 2147483648, "max_items": 50000, "min_free_bytes": 268435456, "sync_s": 5}
+}

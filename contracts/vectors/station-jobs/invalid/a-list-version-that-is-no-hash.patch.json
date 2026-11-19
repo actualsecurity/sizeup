@@ -1,0 +1,10 @@
+{
+  "base": "station-jobs/valid/set_stt_terms.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args/args/0/sets/county_fire/v",
+      "value": "7"
+    }
+  ]
+}

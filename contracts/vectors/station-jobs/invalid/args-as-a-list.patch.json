@@ -1,0 +1,12 @@
+{
+  "base": "station-jobs/valid/sources_reset.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/jobs/0/args",
+      "value": [
+        "east-cad"
+      ]
+    }
+  ]
+}

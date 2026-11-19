@@ -1,0 +1,8 @@
+{
+  "base": "capture-urgent-item/valid/alarm-raised-live.json",
+  "patch": [
+    {"op": "add", "path": "/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/data/from_the_future", "value": {"x": [1, {"y": null}]}},
+    {"op": "add", "path": "/data/ids/0/from_the_future", "value": {"x": [1, {"y": null}]}}
+  ]
+}

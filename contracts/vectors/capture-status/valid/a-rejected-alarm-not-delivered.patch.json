@@ -1,0 +1,19 @@
+{
+  "base": "capture-status/valid/running.json",
+  "patch": [
+    {"op": "replace", "path": "/urgent/rejected", "value": 1},
+    {
+      "op": "replace",
+      "path": "/urgent/unsent",
+      "value": [
+        {
+          "key": "CHA-live-1900000000123",
+          "channel": "CH A",
+          "unit": "UNIT A",
+          "event_at": 1900000000.123,
+          "age_s": 14.2
+        }
+      ]
+    }
+  ]
+}

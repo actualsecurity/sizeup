@@ -1,0 +1,14 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "rerun",
+      "data": {"id": "Fireground1-1794990000000", "result": "changed", "model": "m.bin"},
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "base": "station-events/valid/page-text.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/events/0/data/alt_text",
+      "value": "Northfield Fire, Engine 5, alarm activation"
+    },
+    {
+      "op": "add",
+      "path": "/events/0/data/alt_model",
+      "value": "other.bin"
+    },
+    {
+      "op": "add",
+      "path": "/events/0/data/keyup",
+      "value": {
+        "parent": "page-0001",
+        "prev": "",
+        "split": ""
+      }
+    },
+    {
+      "op": "add",
+      "path": "/events/0/data/radio_id",
+      "value": "7301"
+    },
+    {
+      "op": "add",
+      "path": "/events/0/data/unit",
+      "value": "7301"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/stt",
+      "value": "both"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/rerun_at",
+      "value": 1794990060.0
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/rerun_result",
+      "value": "changed"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/history",
+      "value": [
+        {
+          "text": "Northfield Fire",
+          "at": 1794990060.0,
+          "model": "m.bin"
+        }
+      ]
+    }
+  ]
+}

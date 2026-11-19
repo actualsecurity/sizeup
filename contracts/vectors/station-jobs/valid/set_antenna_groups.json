@@ -1,0 +1,12 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {
+        "fn": "set_antenna_groups",
+        "args": [[{"name": "roof", "sdrs": ["00000101", "00000102"], "jobs": ["Paging 1", "Fireground 1"]}]]
+      }
+    }
+  ]
+}

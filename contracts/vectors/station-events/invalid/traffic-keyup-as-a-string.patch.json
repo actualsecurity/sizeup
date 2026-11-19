@@ -1,0 +1,10 @@
+{
+  "base": "station-events/valid/traffic-fm-cut-at-a-key-up.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/keyup",
+      "value": "gap"
+    }
+  ]
+}

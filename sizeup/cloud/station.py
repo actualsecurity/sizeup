@@ -25,6 +25,9 @@
                        which it adopts (adopt(): its events, status, logs and metrics say it from then
                        on), so an admin's rename on the hub (Settings > Station > Stations) never locks
                        it out. Its config's [station] id goes up too ("config_id")
+                       Beside `at` on every post: this boot's id and the wall clock's steps over 5 s
+                       ("boot_id", "wall_steps": sizeup/cloud/wallclock.py; the count kept across a restart in
+                       wall_clock.json beside the outbox), for the hub to judge its clock skew
                        ... and the admins' service per source ("services": sizeup/sourcekeys.py), kept beside the
                        outbox (hub_services.json) so a station starting while the hub is away tags as it did
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
@@ -83,8 +86,9 @@ from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.metrics import MetricsLink
 from sizeup.cloud import sttinput
-from sizeup.cloud.outbox import Outbox, open_outbox
+from sizeup.cloud.outbox import NOTES_KEPT, Outbox, open_outbox
 from sizeup.cloud.vessellink import VesselForwarder
+from sizeup.cloud.wallclock import FILE as WALL_FILE, WallSteps
 from sizeup.tts import VoiceCfg
 
 LIVE_REFRESH_S = 2.0     # while someone is talking the snapshot is re-sent this often (the hub drops one older than 8 s)
@@ -265,8 +269,14 @@ class StationLink:
         # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
         # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
         self.logs = LogShipper(cfg, self._client, log, app=app)
+        # the wall clock's steps and this boot (sizeup/cloud/wallclock.py; every state post, #773 / #788): sampled on the
+        # metrics sampler's 1 s tick; kept on the app (the link going off and on) and beside the outbox (a restart)
+        if not isinstance(getattr(app, "wall_clock", None), WallSteps):
+            app.wall_clock = WallSteps(log, path=self._caps_file.with_name(WALL_FILE) if self._caps_file else None,
+                                       note=lambda text: self._outbox_note(text))
+        self.wall: WallSteps = app.wall_clock
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
-        self.metrics_link = MetricsLink(app, cfg, self._client, log)
+        self.metrics_link = MetricsLink(app, cfg, self._client, log, tick=self.wall.sample)
         # each transmission's / page's speech-to-text input: made off the radio path, into the outbox's own lane
         # (held while whisper is behind: the FLAC is made once it caught up, #677)
         self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
@@ -285,6 +295,11 @@ class StationLink:
             log(f"hub link: {n} event(s) still queued from before, sending them first")
 
     # -- the app's side ---------------------------------------------------------------------------
+
+    def _outbox_note(self, text: str) -> None:
+        """A short note in the outbox's own notes: on Health (\"Station outbox\") for a day, from the status."""
+        ob = self.outbox
+        ob.notes = (list(getattr(ob, "notes", None) or []) + [{"at": time.time(), "text": text[:120]}])[-NOTES_KEPT:]
 
     hub_caps: frozenset = frozenset()       # what the hub says it knows ("caps" in its answers): "p25_systems" (#409)
 
@@ -606,6 +621,7 @@ class StationLink:
         self.logs.stop()
         self.metrics_link.stop()
         self.pool_worker.stop()
+        self.wall.stop()                      # (the step count saved: a restart carries it on)
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -937,10 +953,14 @@ class StationLink:
         last_status = last_tg = 0.0
         tg_sig = None
         while not self._stop.is_set():
-            now = time.time()
+            # `at` and the wall clock's step count from one look (wallclock.py): a post right after a step carries
+            # the new count, and a stalled 1 s sampler never hides a step between posts (its save: left to the tick)
+            at, steps = self.wall.sample(save=False)
+            now = time.time() if at is None else at
             talking = self.app.live.state()
             paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
-            body: dict = {"at": now, "talking": talking, "paging": paging}
+            body: dict = {"at": now, "boot_id": self.wall.post_boot_id, "wall_steps": steps,
+                          "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
                 sig = [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier")) for r in tgs]

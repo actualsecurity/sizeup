@@ -1,0 +1,4 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [{"op": "replace", "path": "/closed_boot", "value": 1900000006.47}]
+}

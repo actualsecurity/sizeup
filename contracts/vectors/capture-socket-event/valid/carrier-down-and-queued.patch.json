@@ -1,0 +1,9 @@
+{
+  "base": "capture-socket-event/valid/carrier-up.json",
+  "patch": [
+    {"op": "replace", "path": "/state", "value": "down"},
+    {"op": "replace", "path": "/at", "value": 1900000006.47},
+    {"op": "replace", "path": "/queued", "value": 1},
+    {"op": "replace", "path": "/quieting_db", "value": null}
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/capture-socket-reply.schema.json",
+  "title": "Live socket reply",
+  "description": "Designed (docs/native/capture-split.md 4.2, #773), not implemented. Capture's answer to one request (capture-socket-request.schema.json), on the same connection, as a frame with `t` `reply` and the request's `id`. `ok` true: capture has applied it (the app then records it in the wish, which is what makes it outlive a restart of capture). `ok` false: nothing was changed, and there are two fields, as the station routes' answers have: `reason`, one word for the client to act on, and `error`, text for a person, which no client parses. `confirm` true (with `reason` `confirm`) means the refusal only needs the person's yes: `error` is the question, and the yes is a new request under a new id with `args.confirm` true. A repeated id gets this same reply again. No reply ever carries a secret.",
+  "x-status": "designed",
+  "x-version": 1,
+  "x-complete": true,
+  "type": "object",
+  "required": ["v", "t", "id", "ok", "at"],
+  "additionalProperties": true,
+  "properties": {
+    "v": {"const": 1, "description": "The frame's version, 1."},
+    "t": {"const": "reply", "description": "Always `reply`."},
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The request's `id`."},
+    "ok": {"type": "boolean", "description": "true: applied (or answered, for an op that changes nothing). false: refused, nothing changed."},
+    "reason": {"type": "string", "description": "With `ok` false: why, as one word for the client to act on. `stale` (a squelch apply whose `expect` is not what runs), `expired` (it arrived at or after `expires_boot`), `unsupported` (an op capture does not know), `forbidden` (a viewer's request; `credentials` from a peer that is not uid 0), `parked`, `taken` (another app holds the dongle), `held`, `busy`, `invalid`, `confirm` (it needs the person's yes). A client takes a word it does not know as a plain refusal.", "x-known": ["stale", "expired", "unsupported", "forbidden", "parked", "taken", "held", "busy", "invalid", "interrupted", "confirm"]},
+    "error": {"type": "string", "description": "With `ok` false: why, as text for a person (`refused: parked`; with `confirm`, the question). No client parses it."},
+    "confirm": {"type": "boolean", "description": "With `ok` false: true (with `reason` `confirm`) when the refusal only needs the person's yes."},
+    "result": {"description": "With `ok` true, for an op that returns something: `urgent_since` (`$defs/urgent-since-result`), `snapshot` (capture-socket-event.schema.json `$defs/snapshot`), `probe` (`audio` or `none`). The reply does not name its op: the client knows it by `id`."},
+    "at": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When capture answered, Unix seconds."}
+  },
+  "if": {
+    "type": "object",
+    "properties": {"ok": {"const": false, "description": "`ok` is false."}},
+    "required": ["ok"]
+  },
+  "then": {"required": ["reason", "error", "confirm"]},
+  "$defs": {
+    "urgent-since-result": {
+      "title": "The result of urgent_since",
+      "description": "One page of the urgent rows above the asked cursor.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["urgent_epoch", "rows", "memory", "memory_last", "more"],
+      "additionalProperties": true,
+      "properties": {
+        "urgent_epoch": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The urgent file's epoch now, 16 hex characters. Not the one asked for: the file was reset and the rows are from 0."},
+        "rows": {"type": "array", "description": "The rows above the cursor in `n` order, at most `limit`, while the frame stays within 65,536 bytes; each with `durable` true and at most 49,152 bytes (trimmed past that, `data.trimmed`).", "maxItems": 500, "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}},
+        "more": {"type": "boolean", "description": "A row or a memory item was left out to keep the frame within 65,536 bytes, or past `limit`: ask again from the last `n` given, with `memory_after: memory_last`."},
+        "memory": {"type": "array", "description": "The items capture holds that have no row (yet), after `memory_after`, in the order capture made them, each with `n` null, `durable` false and its `m`. They move no cursor. They go first (they are the ones at risk); no count limit, the frame's 65,536 bytes bound them.", "items": {"$ref": "capture-urgent-item.schema.json#/$defs/held"}}, "memory_last": {"type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "The `m` of the last memory item given (the asked `memory_after` when none was): the next page's `memory_after`."}
+      }
+    }
+  }
+}

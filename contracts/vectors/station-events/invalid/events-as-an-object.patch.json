@@ -1,0 +1,12 @@
+{
+  "base": "station-events/valid/heard.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events",
+      "value": {
+        "1": {}
+      }
+    }
+  ]
+}

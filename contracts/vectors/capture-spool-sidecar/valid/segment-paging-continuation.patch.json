@@ -1,0 +1,34 @@
+{
+  "base": "capture-spool-sidecar/valid/segment-with-an-emergency-id.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "PAGE1-1900000100250"},
+    {"op": "replace", "path": "/channel", "value": {"label": "PAGE 1", "kind": "paging", "mhz": 460.1, "mod": "nfm"}},
+    {"op": "replace", "path": "/start", "value": 1900000100.25},
+    {"op": "replace", "path": "/end", "value": 1900000131.25},
+    {"op": "replace", "path": "/published", "value": 1900000131.3},
+    {"op": "replace", "path": "/closed_boot", "value": 5245.2},
+    {"op": "replace", "path": "/published_boot", "value": 5245.25},
+    {"op": "replace", "path": "/cont", "value": true},
+    {"op": "replace", "path": "/hold_until", "value": 1900000134.25},
+    {"op": "replace", "path": "/breaks", "value": [[12.4, 13.1]]},
+    {"op": "replace", "path": "/ids", "value": []},
+    {"op": "replace", "path": "/alarm_key", "value": ""},
+    {"op": "replace", "path": "/bursts", "value": 0},
+    {"op": "replace", "path": "/bursts_audio", "value": null},
+    {"op": "replace", "path": "/id_burst_seen", "value": false},
+    {"op": "replace", "path": "/tones_live", "value": [{"a_hz": 600.9, "b_hz": 716.1, "at": 1900000101.9}]},
+    {
+      "op": "replace",
+      "path": "/audio",
+      "value": {
+        "file": "000000012345-PAGE1-1900000100250.wav",
+        "format": "wav",
+        "encoding": "s16le",
+        "rate_hz": 16000,
+        "channels": 1,
+        "samples": 496000,
+        "bytes": 992044
+      }
+    }
+  ]
+}

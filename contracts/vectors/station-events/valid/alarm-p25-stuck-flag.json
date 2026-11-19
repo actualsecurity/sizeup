@@ -1,0 +1,29 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "alarm",
+      "data": {
+        "id": "4102-1794990120_476075000.0-call_7",
+        "source": "Fire Ops 2",
+        "start": 1794990000.0,
+        "end": 1794990002.0,
+        "text": "",
+        "status": "pending",
+        "unit": "990003",
+        "talkgroup": 4102,
+        "rig": "",
+        "radio_id": "990003",
+        "emergency": false,
+        "flag_stuck": "990003",
+        "late": false,
+        "pairs": []
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

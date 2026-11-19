@@ -1,0 +1,16 @@
+{
+  "base": "station-events/valid/traffic-p25.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/pairs",
+      "value": [
+        [
+          "990001",
+          "990001",
+          "E5"
+        ]
+      ]
+    }
+  ]
+}

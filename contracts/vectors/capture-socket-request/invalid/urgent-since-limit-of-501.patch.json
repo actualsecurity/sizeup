@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-request/valid/urgent-since.json",
+  "patch": [{"op": "replace", "path": "/args/limit", "value": 501}]
+}

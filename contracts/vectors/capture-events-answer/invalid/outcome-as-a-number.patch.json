@@ -1,0 +1,4 @@
+{
+  "base": "capture-events-answer/valid/with-the-outcomes.json",
+  "patch": [{"op": "replace", "path": "/outcomes/0/outcome", "value": 1}]
+}

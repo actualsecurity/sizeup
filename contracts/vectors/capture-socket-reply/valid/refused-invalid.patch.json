@@ -1,0 +1,8 @@
+{
+  "base": "capture-socket-reply/valid/refused-parked.json",
+  "patch": [
+    {"op": "replace", "path": "/id", "value": "r-66ff7700"},
+    {"op": "replace", "path": "/reason", "value": "invalid"},
+    {"op": "replace", "path": "/error", "value": "a dongle is in two groups"}
+  ]
+}

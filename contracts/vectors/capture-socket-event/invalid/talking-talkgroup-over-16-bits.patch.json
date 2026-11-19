@@ -1,0 +1,4 @@
+{
+  "base": "capture-socket-event/valid/talking.json",
+  "patch": [{"op": "replace", "path": "/entries/1/tg", "value": 65536}]
+}

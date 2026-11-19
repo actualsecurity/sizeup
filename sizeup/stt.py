@@ -371,6 +371,27 @@ class SttQueue:
                     return e[2]
         return None
 
+    def raise_channel(self, channel: str, priority: int = URGENT, since: float | None = None) -> int:
+        """A channel's waiting live and context clips heard since `since` (the move to it) raised to `priority` (a county
+        talkgroup an incident of ours is now worked on, sizeup/cad/opchannel.py: no longer shed as context), each behind
+        what already waits in that class (a fresh seq: never ahead of Fire/EMS 15's). Never a late clip (#747/#753: after
+        every live one), a re-run, a catch-up, or anything when `since` isn't known. How many."""
+        if since is None:
+            return 0
+        n = 0
+        with self._cv:
+            for e in sorted(self._items, key=lambda x: x[1]):
+                item = e[2]
+                start = getattr(item, "start", None)
+                if e[4] != channel or e[0] not in (LIVE, LOW) or e[0] <= priority or getattr(item, "late", False) \
+                        or not isinstance(start, (int, float)) or start < since:
+                    continue
+                e[0], e[1] = priority, next(self._seq)
+                n += 1
+            if n:
+                self._cv.notify()
+        return n
+
     def withdraw(self, priority: int = CATCHUP) -> list:
         """Every waiting item of that class taken out (the station is about to update): the items."""
         with self._cv:
@@ -580,6 +601,9 @@ class Transcriber:
 
     def promote(self, match: Callable[[object], bool], priority: int = RERUN):
         return self._q.promote(match, priority)
+
+    def raise_channel(self, channel: str, priority: int = URGENT, since: float | None = None) -> int:
+        return self._q.raise_channel(channel, priority, since)
 
     def withdraw_catchup(self) -> list:
         return self._q.withdraw(CATCHUP)
