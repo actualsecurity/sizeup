@@ -652,7 +652,16 @@
     min-inline-size: 14rem; max-inline-size: min(28rem, calc(100vw - 2 * var(--s-4)));
     max-block-size: min(70vh, 32rem); overflow-y: auto; overscroll-behavior: contain;
   }
-  :where(button.menu-item) {
+  :where(a.menu-item) {                 /* a link in a menu (Re-sign in): a row like the buttons */
+    display: flex; align-items: center; min-block-size: var(--ctl); text-decoration: none;
+    border: var(--bw) solid transparent; border-radius: var(--radius-s);
+  }
+  :where(a.menu-item):where(:hover, :focus-visible) { background-color: var(--hover); color: var(--text); }
+  :where(.menu-info) {                  /* a line of text in a menu (who is signed in): not a choice */
+    display: flex; align-items: baseline; gap: var(--s-2); padding: var(--s-1) var(--s-2) var(--s-1) calc(var(--s-1) + var(--ico) + var(--s-2));
+    color: var(--text-2);
+  }
+  :where(button.menu-item, a.menu-item) {
     justify-content: flex-start; gap: var(--s-2); inline-size: 100%; padding-inline: var(--s-1) var(--s-2);
     font-weight: 400; text-align: start; white-space: normal;
     color: var(--text); background-color: transparent; border-color: transparent;
@@ -701,14 +710,6 @@
     z-index: var(--z-toast); background: var(--panel); box-shadow: var(--elev-dialog); pointer-events: none;
   }
 
-  /* ---- the sign-in ending or ended (Cloudflare Access, #818; session.js) -----------------------------------
-     Small, bottom centre, a step above the reconnecting pill; its link opens the re-sign-in pop-up. */
-  :where(.session-pill) {
-    position: fixed; inset-block-end: calc(var(--s-4) + var(--ctl)); inset-inline-start: 50%; transform: translateX(-50%);
-    z-index: var(--z-toast); background: var(--panel); box-shadow: var(--elev-dialog);
-    block-size: auto; min-block-size: var(--ctl-sm); padding-inline: var(--s-3); gap: var(--s-2); font-size: var(--fs-sm);
-  }
-  :where(.session-pill) :where(a) { color: inherit; font-weight: 600; }
   :where(.reauth) { max-inline-size: 24rem; margin: var(--s-6) auto; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-2); }
 
   /* ---- toast: short feedback, bottom right (role=status) ----------------------------------------- */
@@ -778,14 +779,30 @@
   :where(.operator) :where(input, select) { inline-size: 10rem; }
   :where(.clock) { font-size: var(--fs-sm); color: var(--text-2); }
   :where(.clock) b { font-size: var(--fs-lg); font-weight: 600; color: var(--text); margin-inline: var(--s-1); }
+  /* the profile button (profile.js, #818): a round avatar, its ring the sign-in's state; the chip beside it */
+  :where(.me) { display: inline-flex; align-items: center; gap: var(--s-2); }
+  :where(.me:empty) { display: none; }
+  /* signed in through Access: who it is is the profile's (its menu, its hover); the read-only Operator field goes */
+  :where(.operator:has(> input.access)) { display: none; }
+  :where(button.me-btn) { border-radius: 50%; padding: 0; }
+  :where(.me-av) {
+    display: inline-flex; align-items: center; justify-content: center; inline-size: var(--ctl-sm); block-size: var(--ctl-sm);
+    border-radius: 50%; font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.02em; color: var(--text);
+    background: var(--raised); box-shadow: 0 0 0 var(--bw) var(--line-strong);
+  }
+  :where(button.me-btn.warn) .me-av { box-shadow: 0 0 0 calc(2 * var(--bw)) var(--warn); }
+  :where(button.me-btn.err) .me-av { box-shadow: 0 0 0 calc(2 * var(--bw)) var(--err); }
+  :where(a.me-chip) { text-decoration: none; }
+  :where(a.me-chip):where(:hover, :focus-visible) { text-decoration: underline; }
   @container hdr (width < 1700px) {
     :where(#runcards-open, #alerts .nav, a[href="/monitor"]) .lbl { display: none; }
     :where(#runcards-open, #alerts .nav, a[href="/monitor"]) { inline-size: var(--ctl); padding-inline: 0; }
   }
   @container hdr (width < 1500px) {
+    :where(.me-more) { display: none; }   /* the sign-in chip: "9 min" (Re-sign in: the chip itself, its hover, the menu) */
     :where(#clock-date, #clock-z, .operator > .dim) { display: none; }
   }
-  @container hdr (width < 1240px) {
+  @container hdr (width < 1340px) {     /* (1240 before the profile button, #818) */
     :where(.cad-title, .station, .brand-name) { display: none; }
   }
   @container hdr (width < 1100px) {

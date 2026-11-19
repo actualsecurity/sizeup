@@ -4291,6 +4291,7 @@ async function loadWho(fresh) {
   input.closest("label").title = tip;
   renderOperators();
   applyRoles();
+  if (typeof window !== "undefined" && window.dispatchEvent) window.dispatchEvent(new CustomEvent("sizeup:who"));   // profile.js
 }
 
 // Roles (user, 2026-10-08: "admins should be able to set users, dispatchers should not, but first

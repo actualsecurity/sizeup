@@ -992,6 +992,7 @@
   html.board :is(.ov-card, .ov-ne, .ov-page) { cursor: default; }
   html.board .ov-page .dim { display: none; }          /* "Accept / Dismiss": the console's, not the board's */
   html.board :is(.feed-more, .menu-btn) { display: none; }
+  html.board .menu-btn.me-btn { display: inline-flex; }       /* but the profile (#818): its sign-in */
   html.board .ov-grid { grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); }
   html.board .ov-view { block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter)); }
   .b-sec { margin-block-start: var(--s-3); }
@@ -1031,6 +1032,7 @@
     body.cad > header > .pill { order: 2; }
     body.cad > header > .spacer { order: 3; }
     body.cad > header > .clock { order: 4; }
+    body.cad > header > .me { order: 4; }
     body.cad > header > .tabs { order: 6; }
     body.cad > header > :is(#alerts, #sound, #fullscreen, .nav) { order: 7; }
     body.cad > header > .operator { order: 8; flex: 1 1 6rem; }

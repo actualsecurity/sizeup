@@ -8,7 +8,8 @@ on the end of an auth session?"
                 stream checks /api/session with redirect: "manual" (an opaque redirect = the edge sending it to the
                 Access login = signed out); signed out, no requests go out and live.js holds its stream; "Re-sign in"
                 opens /reauth in a pop-up whose message (this origin only) makes the page check again, then the
-                stream resumes and the failed audio plays again.
+                stream resumes and the failed audio plays again. profile.js draws it in the header: the avatar's ring,
+                the chip beside it, its menu (in a browser below).
 
 The page's half runs session.js / live.js / reauth.js under node with a small fake DOM: the shapes are the browser's
 (the HAR of a real expiry: every request a 302 at Cloudflare's edge to the Access login, fetches a TypeError,
@@ -217,8 +218,10 @@ function makeEnv() {
   env.run = (src) => vm.runInContext(src, ctx);
   env.message = (origin, data) => { const e = new Event("message"); e.origin = origin; e.data = data; winT.dispatchEvent(e); };
   env.sessionCalls = () => env.calls.filter((c) => c.url.startsWith("/api/session"));
-  env.pill = () => body.children.find((c) => typeof c === "object" && c.className.includes("session-pill")) || null;
-  env.link = () => env.pill().children.find((c) => typeof c === "object" && c.tagName === "A");
+  // Re-sign in clicked (the header's link, profile.js): prevented = the pop-up took it over
+  env.click = () => { const e = { prevented: false, preventDefault() { this.prevented = true; } };
+                      const opened = env.ctx.SessionWatch.reauth(e); return { opened, prevented: e.prevented }; };
+  env.changes = () => env.events.filter((t) => t === "sizeup:session").length;
   return env;
 }
 const res = (status, data, type = "basic") => Promise.resolve({ status, ok: status >= 200 && status < 300, type,
@@ -239,17 +242,20 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     env.respond = signedIn(env, exp, skew);
     env.run(SESSION);
     await flush();
-    const o = out[`warn_${skew}`] = { at0: env.ctx.SessionWatch.label(), pill0: !!env.pill() };
+    const o = out[`warn_${skew}`] = { at0: env.ctx.SessionWatch.label(), state0: env.ctx.SessionWatch.state() };
     await env.advance(14 * 60 * 1000);
     o.at14 = env.ctx.SessionWatch.label();
     await env.advance(2 * 60 * 1000);
     o.at16 = env.ctx.SessionWatch.label();
-    o.pillText = env.pill() && env.pill().text();
-    o.pillClass = env.pill() && env.pill().className;
-    o.pillTitle = env.pill() && env.pill().title;
-    o.link = env.link() && { href: env.link().href, target: env.link().target, rel: env.link().rel };
-    o.renewPrevented = env.link().click();
+    o.state16 = env.ctx.SessionWatch.state();
+    o.tip16 = env.ctx.SessionWatch.tip();
+    o.href16 = env.ctx.SessionWatch.href();
+    o.changes16 = env.changes();
+    o.renew = env.click();
     o.renewOpened = env.opened.slice();
+    await env.advance(60 * 1000);
+    o.state17 = env.ctx.SessionWatch.state();
+    o.changes17 = env.changes();
     await env.advance(8 * 60 * 1000 + 30 * 1000);
     o.at24_5 = env.ctx.SessionWatch.label();
     o.polls = env.sessionCalls().length;
@@ -257,7 +263,8 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     env.respond = edge();
     await env.advance(60 * 1000);
     o.after = env.ctx.SessionWatch.label();
-    o.afterClass = env.pill() && env.pill().className;
+    o.afterState = env.ctx.SessionWatch.state();
+    o.afterHref = env.ctx.SessionWatch.href();
     o.check = env.sessionCalls().at(-1).init;
     o.checkUrl = env.sessionCalls().at(-1).url;
   }
@@ -353,11 +360,11 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     env.ctx.SessionWatch.whenIn().then(() => { resumed = true; });
     // Re-sign in: a pop-up (the link's own new tab not followed)
     env.openReturns = { closed: false };
-    o.prevented = env.link().click();
+    o.click = env.click();
     o.opened = env.opened.slice();
     // a pop-up blocker: the link opens it in a new tab
     env.openReturns = null;
-    o.blockedPrevented = env.link().click();
+    o.blocked = env.click();
     // the pop-up's message: only this origin and only its shape
     env.respond = signedIn(env, env.clock / 1000 + 24 * 3600);
     const c0 = env.sessionCalls().length;
@@ -372,7 +379,7 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     o.checked = env.sessionCalls().length - c0;
     o.out = env.ctx.SessionWatch.out;
     o.after = env.ctx.SessionWatch.label();
-    o.pill = !!(env.pill());
+    o.level = env.ctx.SessionWatch.state().level;
     o.resumed = resumed;
     o.events = env.events.slice();
     o.m = { retries: m.retries, loads: m.loads, plays: m.plays };
@@ -467,6 +474,7 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     o.polls = env.calls.filter((c) => c.url.startsWith("/api/cad/state")).length - n0;
     o.streamsWhileOut = env.es.length;
     o.pill = env.body.children.filter((c) => typeof c === "object").map((c) => c.className);
+    o.level = env.ctx.SessionWatch.state().level;
     // signed in again (another tab's /reauth)
     env.respond = (url) => url.startsWith("/api/session") ? res(200, { expires_at: env.clock / 1000 + 3 * 3600, now: env.clock / 1000 })
                                                          : res(200, { time: 1 });
@@ -497,17 +505,21 @@ def page(tmp_path_factory):
 @pytest.mark.parametrize("skew", [0, 3600])
 def test_the_warning_shows_ten_minutes_before_and_counts_down(page, skew):
     o = page[f"warn_{skew}"]
-    assert o["at0"] == "" and o["pill0"] is False                  # 25 min left: nothing
+    assert o["at0"] == "" and o["state0"]["level"] == "" and o["state0"]["access"] is True   # 25 min left: nothing
     assert o["at14"] == ""                                         # 11 min left: still nothing
     assert o["at16"] == "Sign-in ends in 9 min"
-    assert o["pillText"] == "Sign-in ends in 9 min · Re-sign in"
-    assert "err" not in o["pillClass"].split() and "pill" in o["pillClass"].split()
-    assert o["pillTitle"].startswith("Cloudflare Access sign-in ends at ")
-    assert o["link"] == {"href": "/reauth/start", "target": "_blank", "rel": "noopener"}     # still signed in: renew
-    assert o["renewPrevented"] is True and o["renewOpened"] == [["/reauth/start", "sizeup-reauth", "popup,width=520,height=640"]]
+    assert {k: o["state16"][k] for k in ("level", "left", "access")} == {"level": "warn", "left": 9, "access": True}
+    assert o["state16"]["until"] > 0
+    assert o["tip16"].startswith("Cloudflare Access sign-in ends at ")
+    assert o["href16"] == "/reauth/start"                          # still signed in: renew
+    assert o["renew"] == {"opened": True, "prevented": True}
+    assert o["renewOpened"] == [["/reauth/start", "sizeup-reauth", "popup,width=520,height=640"]]
+    # the header is told on a change (the minutes), not on every tick
+    assert o["state17"]["left"] == 8 and o["changes17"] == o["changes16"] + 1
     assert o["at24_5"] == "Sign-in ends in 1 min"
     assert o["polls"] >= 5                                         # load, every 5 min
-    assert o["after"] == "Signed out" and "err" in o["afterClass"].split()
+    assert o["after"] == "Signed out" and o["afterState"]["level"] == "out" and o["afterState"]["until"] == 0
+    assert o["afterHref"] == "/reauth"
     assert o["check"] == {"redirect": "manual", "cache": "no-store", "credentials": "same-origin"}
     assert o["checkUrl"].startswith("/api/session?t=")             # cache-busting
 
@@ -531,11 +543,11 @@ def test_a_401_checks_once_and_a_403_not_at_all(page):
 def test_an_audio_error_signs_out_and_re_sign_in_plays_it_again(page):
     o = page["audio"]
     assert o["label"] == "Signed out" and o["checks"] == 2
-    assert o["prevented"] is True                                   # the pop-up opened: the link not followed
+    assert o["click"] == {"opened": True, "prevented": True}       # the pop-up opened: the link not followed
     assert o["opened"] == [["/reauth", "sizeup-reauth", "popup,width=520,height=640"]]
-    assert o["blockedPrevented"] is False                           # blocked: the link opens /reauth in a new tab
+    assert o["blocked"] == {"opened": False, "prevented": False}   # blocked: the link opens /reauth in a new tab
     assert o["ignored"] == 0 and o["stillOut"] is True              # another origin, another shape: nothing
-    assert o["checked"] == 1 and o["out"] is False and o["after"] == "" and o["pill"] is False
+    assert o["checked"] == 1 and o["out"] is False and o["after"] == "" and o["level"] == ""
     assert o["resumed"] is True and o["events"][-1] == "sizeup:signed-in"
     assert o["m"] == {"retries": 1, "loads": 0, "plays": 1}         # its own retry: the failed clip, again
     assert o["other"] == {"retries": 0, "loads": 0, "plays": 1}     # something else plays there now: left alone
@@ -563,7 +575,7 @@ def test_live_holds_the_stream_while_signed_out_and_resumes(page):
     o = page["live"]
     assert o["streams"] == 1 and o["out"] is True and o["closed"] is True
     assert o["polls"] == 0 and o["streamsWhileOut"] == 1           # 60 s signed out: nothing asked of the hub
-    assert o["pill"] == ["pill session-pill err"]                  # "Signed out", not "Reconnecting…"
+    assert o["pill"] == [] and o["level"] == "out"                # "Signed out" (the header), not "Reconnecting…"
     assert o["outAfter"] is False and o["pollsAfter"] == 1 and o["streamsAfter"] == 2
 
 
@@ -606,14 +618,39 @@ def test_in_a_browser_warned_signed_out_and_back_without_a_reload(console, keys)
     shots = os.environ.get("SIZEUP_SHOTS")                    # a directory: the PR's screenshots
     reqs = []
     pg.on("request", lambda r: reqs.append(r.url))
+    pg.set_viewport_size({"width": 1920, "height": 900})
     pg.goto(base + "/cad")
-    pill = pg.locator(".session-pill")
-    pill.wait_for()
-    text = lambda: " ".join(pill.inner_text().split())
-    assert text() in ("Sign-in ends in 5 min · Re-sign in", "Sign-in ends in 4 min · Re-sign in")
+    # the profile button, top right: the person's initials; 5 min left: an amber ring and the chip beside it
+    me, chip = pg.locator("#me .me-btn"), pg.locator("#me .me-chip")
+    chip.wait_for()
+    text = lambda loc: " ".join(loc.inner_text().split())
+    assert text(chip) in ("5 min \u00b7 Re-sign in", "4 min \u00b7 Re-sign in")
+    assert pg.locator("label.operator").is_hidden()                       # who it is: the profile's now
+    assert chip.get_attribute("href") == "/reauth/start"
+    assert "warn" in me.get_attribute("class").split() and text(me.locator(".me-av")) == "C"
+    assert "Cloudflare Access sign-in ends at" in me.get_attribute("title")
+    box, hdr = me.bounding_box(), pg.locator("body > header").bounding_box()
+    assert box["x"] + box["width"] > hdr["width"] - 60                   # at the right end of the header
+    assert pg.locator(".session-pill").count() == 0                       # no bottom-centre pill any more
     if shots:
-        pg.screenshot(path=f"{shots}/session-ending.png")
-    pg.evaluate("window.__loaded = 1")                         # gone if the page reloads
+        pg.screenshot(path=f"{shots}/profile-ending.png", clip={"x": 1220, "y": 0, "width": 700, "height": 160})
+    # its menu: who, until when, Re-sign in; Esc closes it and gives the focus back
+    me.click()
+    menu = pg.locator("#ui-menu")
+    menu.wait_for()
+    lines = [" ".join(t.split()) for t in menu.locator(".menu-info, .menu-item").all_inner_texts()]
+    assert lines[0].startswith("casey@example.org") and lines[1].startswith("Sign-in until ") and lines[2] == "Re-sign in"
+    assert "Preferences" not in " ".join(lines)                          # not built yet: hidden
+    if shots:
+        pg.screenshot(path=f"{shots}/profile-menu.png", clip={"x": 1420, "y": 0, "width": 500, "height": 200})
+    pg.keyboard.press("Escape")
+    menu.wait_for(state="detached")
+    assert pg.evaluate("document.activeElement.classList.contains('me-btn')")
+    me.click()
+    menu.wait_for()
+    pg.mouse.click(300, 400)                                              # a click outside closes it
+    menu.wait_for(state="detached")
+    pg.evaluate("window.__loaded = 1")                                    # gone if the page reloads
 
     # the sign-in ends: Cloudflare's edge sends every request to the Access login
     seen = []
@@ -624,27 +661,79 @@ def test_in_a_browser_warned_signed_out_and_back_without_a_reload(console, keys)
     pg.route(lambda url: url.startswith(base), edge)
     # the open stream goes on (it was let in before); the next clip played fails (the edge's redirect)
     pg.evaluate("new Audio('/api/audio/tx-0001.wav').play().catch(() => {})")
-    pg.locator(".session-pill.err").wait_for(timeout=10000)   # one check: an opaque redirect
-    assert text() == "Signed out · Re-sign in"
-    assert pg.locator(".reconnect-pill").count() == 0          # not "Reconnecting…"
+    pg.locator("#me .me-btn.err").wait_for(timeout=10000)                 # one check: an opaque redirect
+    assert text(chip) == "Signed out \u00b7 Re-sign in" and "err" in chip.get_attribute("class").split()
+    assert chip.get_attribute("href") == "/reauth"
+    assert pg.locator(".reconnect-pill").count() == 0                     # not "Reconnecting…"
     n0 = len(seen)
     pg.wait_for_timeout(8000)
-    assert len(seen) - n0 <= 1                                 # signed out: nothing more goes out (a check a minute)
+    assert len(seen) - n0 <= 1                                            # signed out: nothing more goes out
     if shots:
-        pg.screenshot(path=f"{shots}/session-signed-out.png")
+        pg.screenshot(path=f"{shots}/profile-signed-out.png", clip={"x": 1220, "y": 0, "width": 700, "height": 160})
 
-    # Re-sign in: /reauth in a pop-up, as after Access signed in again (a new cookie); it tells the page and closes
-    pg.unroute(lambda url: url.startswith(base))
+    # Re-sign in from the menu: /reauth in a pop-up, as after Access signed in again (a new cookie); it tells the
+    # page and closes
     pg.unroute_all()
     ctx.add_cookies([{"name": "CF_Authorization", "value": jwt(keys[0], exp=int(time.time()) + 24 * 3600), "url": base}])
     at_click = len(reqs)
+    # by keys this time: Enter on the button opens the menu on its first choice (Re-sign in), Enter follows it
+    me.focus()
+    pg.keyboard.press("Enter")
+    item = pg.locator("#ui-menu a.menu-item", has_text="Re-sign in")
+    item.wait_for()
+    assert item.get_attribute("href") == "/reauth"
+    assert pg.evaluate("document.activeElement.textContent.trim()") == "Re-sign in"
     with ctx.expect_page() as popup_info:
-        pg.locator(".session-pill a").click()
+        pg.keyboard.press("Enter")
     popup = popup_info.value
     popup.wait_for_event("close", timeout=10000)
-    pill.wait_for(state="detached")
-    assert pg.evaluate("window.__loaded") == 1                 # the same page: nothing reloaded
+    chip.wait_for(state="hidden")
+    assert "err" not in me.get_attribute("class").split() and "warn" not in me.get_attribute("class").split()
+    assert pg.evaluate("window.__loaded") == 1                            # the same page: nothing reloaded
     assert pg.evaluate("SessionWatch.out") is False
     after = reqs[at_click:]
     assert any("/api/cad/state" in u for u in after) and any("/api/cad/stream" in u for u in after)   # resumed
+    assert pg.errors == []
+
+
+def test_in_a_browser_the_profile_fits_a_phone_and_the_wall_board(console):
+    import os
+    ctx, pg, base = console
+    shots = os.environ.get("SIZEUP_SHOTS")
+    # a laptop: the chip folds to the minutes (Re-sign in: the chip itself, its hover, the menu); still on screen
+    pg.goto(base + "/cad")
+    chip, me = pg.locator("#me .me-chip"), pg.locator("#me .me-btn")
+    chip.wait_for()
+    pg.locator("label.operator").wait_for(state="hidden")                 # whoami in, the stream on: the header as
+    pg.wait_for_function("document.querySelector('#conn').textContent === 'Live'")   # it stays
+    pg.wait_for_timeout(300)
+    assert " ".join(chip.inner_text().split()) in ("5 min", "4 min") and chip.get_attribute("aria-label").endswith(": Re-sign in")
+    for out in (False, True):
+        if out:      # (the state as signed out, drawn: what fits is the question here)
+            pg.evaluate("SessionWatch._st.out = true; window.dispatchEvent(new CustomEvent('sizeup:session'))")
+            pg.locator("#me .me-btn.err").wait_for()
+        b = me.bounding_box()
+        assert b["x"] + b["width"] <= 1280 and pg.evaluate("document.documentElement.scrollWidth") <= 1280, out
+    pg.set_viewport_size({"width": 390, "height": 844})
+    pg.goto(base + "/cad")
+    chip.wait_for()
+    assert pg.evaluate("document.documentElement.scrollWidth") <= 390     # no sideways scroll
+    assert " ".join(chip.inner_text().split()) in ("5 min", "4 min")          # folded: Re-sign in in its hover / menu
+    for loc in (chip, pg.locator("#me .me-btn")):
+        b = loc.bounding_box()
+        assert b["x"] >= 0 and b["x"] + b["width"] <= 390
+    if shots:
+        pg.screenshot(path=f"{shots}/profile-phone.png", clip={"x": 0, "y": 0, "width": 390, "height": 140})
+    pg.locator("#me .me-btn").click()
+    m = pg.locator("#ui-menu")
+    m.wait_for()
+    b = m.bounding_box()
+    assert b["x"] >= 0 and b["x"] + b["width"] <= 390
+    if shots:
+        pg.screenshot(path=f"{shots}/profile-phone-menu.png", clip={"x": 0, "y": 0, "width": 390, "height": 320})
+    # the wall board has the same header: the button there too
+    pg.set_viewport_size({"width": 1280, "height": 800})
+    pg.goto(base + "/monitor")
+    pg.locator("#me .me-btn").wait_for()
+    pg.locator("#me .me-chip").wait_for()
     assert pg.errors == []

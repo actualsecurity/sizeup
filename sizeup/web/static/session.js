@@ -7,10 +7,11 @@
 //
 //   ending   GET /api/session {expires_at, now}: the verified token's exp (the hub's clock; the HttpOnly cookie can't
 //            be read here). Asked on load, every POLL_MS, when the page is looked at again (focus / visible) and
-//            after a re-sign-in. WARN_S before it ends: "Sign-in ends in 9 min · Re-sign in".
+//            after a re-sign-in. WARN_S before it ends: the header's profile button (profile.js) gets an amber ring
+//            and "9 min · Re-sign in" beside it.
 //   ended    one failed same-origin fetch (a TypeError, a 401), an audio error or stall on /api/..., a dropped
 //            stream (live.js) makes one check of /api/session with redirect: "manual" — an opaque redirect (the
-//            edge sending it to the login) is signed out: "Signed out · Re-sign in" (a 401 / 403 from the hub itself
+//            edge sending it to the login) is signed out: a red ring, "Signed out · Re-sign in" (a 401 / 403 from the hub itself
 //            is not: the edge let it through, e.g. a hub just started without the team's keys yet). Meanwhile
 //            same-origin fetches fail at once without going out (no storm of redirects), live.js stops polling
 //            and holds the stream, the "Reconnecting…" pill stays away, and the live player holds its queue.
@@ -41,7 +42,7 @@ const SessionWatch = (() => {
   const hasWindow = typeof window !== "undefined";
   const nativeFetch = hasWindow && window.fetch ? window.fetch.bind(window) : null;
   const st = { deadline: 0, out: false, inflight: null, lastCheck: 0, lastSuspect: -Infinity, waiters: [], failed: new Map(),
-               pill: null, text: null, link: null, href: "", popup: null, started: false };
+               shown: "", popup: null, started: false };
   const seenEvents = new WeakSet();      // a media error seen once (the element's listener and the page's)
   const watched = new WeakSet();
 
@@ -142,45 +143,39 @@ const SessionWatch = (() => {
     if (left > WARN_S * 1000) return "";
     return `Sign-in ends in ${Math.max(1, Math.ceil(left / 60000))} min`;
   }
-  function render() {
-    if (typeof document === "undefined" || !document.body) return;
-    const text = label();
-    if (!text) {
-      if (st.pill && st.pill.isConnected) st.pill.remove();
-      return;
-    }
-    if (!st.pill) {
-      const p = document.createElement("div");
-      p.className = "pill session-pill";
-      p.setAttribute("role", "status");
-      st.text = document.createElement("span");
-      const a = document.createElement("a");
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.textContent = "Re-sign in";
-      a.addEventListener("click", reauth);
-      p.append(st.text, " · ", a);
-      st.link = a;
-      st.pill = p;
-    }
-    st.pill.classList.toggle("err", st.out);
-    const href = st.out ? REAUTH_URL : RENEW_URL;
-    if (st.href !== href) st.link.href = st.href = href;
-    if (st.text.textContent !== text) st.text.textContent = text;
-    const tip = st.out
-      ? "Cloudflare Access sign-in ended. Re-sign in opens a small window; this page and its audio keep going."
-      : `Cloudflare Access sign-in ends at ${clock(st.deadline)}. Re-sign in opens a small window; this page and its audio keep going.`;
-    if (st.pill.title !== tip) st.pill.title = tip;
-    if (!st.pill.isConnected) document.body.append(st.pill);
+  // the state for the header's profile button (profile.js): level "" | "warn" (WARN_S or less left) | "out"; left:
+  // whole minutes left (at least 1) while warning; until: when it ends, this machine's ms (0: not known / no Access);
+  // access: the console is behind Access (an end is known, or it has ended)
+  function state(t = now()) {
+    const left = st.deadline ? st.deadline - t : Infinity;
+    const level = st.out ? "out" : left <= WARN_S * 1000 ? "warn" : "";
+    return { level, left: level === "warn" ? Math.max(1, Math.ceil(left / 60000)) : 0, until: st.out ? 0 : st.deadline,
+             access: st.out || !!st.deadline, label: label(t) };
   }
-  // Re-sign in: in a pop-up; blocked (null), the link's own default opens it in a new tab. The pop-up keeps its
-  // opener (to post back): it goes only to this hub and the Access login.
+  // the hover text: what it is, when it ends
+  function tip() {
+    if (st.out) return "Cloudflare Access sign-in ended. Re-sign in opens a small window; this page and its audio keep going.";
+    if (!st.deadline) return "";
+    return `Cloudflare Access sign-in ends at ${clock(st.deadline)}. Re-sign in opens a small window; this page and its audio keep going.`;
+  }
+  // where Re-sign in goes: before the end /reauth/start, after it /reauth
+  const href = () => (st.out ? REAUTH_URL : RENEW_URL);
+  // the header's profile (profile.js) draws it: told on every change (sizeup:session), and asked on each tick
+  function render() {
+    if (!hasWindow) return;
+    const s = state(), key = `${s.level}|${s.left}|${s.until}`;
+    if (key === st.shown) return;
+    st.shown = key;
+    window.dispatchEvent(new CustomEvent("sizeup:session"));
+  }
+  // Re-sign in (a click on a link to href()): in a pop-up; blocked (null), the link's own default opens it in a new
+  // tab. The pop-up keeps its opener (to post back): it goes only to this hub and the Access login. true: opened.
   function reauth(ev) {
-    const w = window.open(st.out ? REAUTH_URL : RENEW_URL, "sizeup-reauth", "popup,width=520,height=640");
-    if (w) {
-      ev.preventDefault();
-      st.popup = w;
-    }
+    const w = window.open(href(), "sizeup-reauth", "popup,width=520,height=640");
+    if (!w) return false;
+    if (ev && ev.preventDefault) ev.preventDefault();
+    st.popup = w;
+    return true;
   }
   function message(ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.type !== MSG) return;
@@ -265,7 +260,7 @@ const SessionWatch = (() => {
   }
 
   return {
-    start, check, suspect, whenIn, label,
+    start, check, suspect, whenIn, label, state, tip, href, reauth,
     get out() { return st.out; },
     // tests: the state, as-is
     _st: st,
