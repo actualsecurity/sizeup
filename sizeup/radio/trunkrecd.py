@@ -123,6 +123,11 @@ FLAP_HOLD_S = (30.0, 120.0, 300.0, 600.0)   # ... then started no sooner than th
 LONG_ABSENCE_S = 60.0             # gone longer than this: the watchdog's hour of restarts is forgotten at the return
 STOP_S = 8.0                      # SIGTERM, then this long, then SIGKILL
 STALE_S = 15.0                    # a status older than this: the service isn't running
+# Another system's config.json / talkgroups.csv changed by an update (#647: its "split"), its dongles the same: its
+# trunk-recorder restarts between calls (OpenCalls), never in the middle of one it records. Waited for at most:
+CONFIG_WAIT_S = 300.0             # (the updater's own QUIET_MAX_S) then it restarts anyway, said in the journal
+CALL_STALE_S = 120.0              # a call with no line of its own this long is over (its end line missed)
+CALL_AFTER_S = 5.0                # a call just concluded: its WAV and JSON still being written
 
 # The watchdog (#547). The defaults, and why:
 WATCH_SCAN_S = 30.0               # the capture directory looked at this often (only directories that changed are listed)
@@ -456,6 +461,49 @@ def watched_talkgroups(workdir: str | Path) -> dict[int, str]:
         except (OSError, ValueError, TypeError):
             pass
     return {t: names.get(t, "") for t in tgs}
+
+
+class OpenCalls:
+    """The calls a running trunk-recorder records now, from its output (line()): one opens with its "Starting P25
+    Recorder" line and ends with its "Concluding Recorded Call" or "Stopping P25 Recorder" line, each by log_header's
+    system and call number. busy() says why a restart now would cut one off ("" none): one open (and not silent for
+    CALL_STALE_S), or one concluded under CALL_AFTER_S ago (trunk-recorder writes its files after that line)."""
+
+    def __init__(self):
+        self.open: dict[tuple[str, int], float] = {}    # (system, call number) -> its last line (monotonic)
+        self.ended: float | None = None
+        self._lock = threading.Lock()
+
+    def line(self, line: str, now: float) -> None:
+        if "TG:" not in line:
+            return
+        m = SPLIT_HEAD.search(ANSI.sub("", line))
+        if not m:
+            return
+        k = (m["sys"], int(m["call"]))
+        with self._lock:
+            if "Starting P25 Recorder" in line:
+                self.open[k] = now
+            elif "Concluding Recorded Call" in line or "Stopping P25 Recorder" in line:
+                self.open.pop(k, None)
+                self.ended = now
+            elif k in self.open:
+                self.open[k] = now
+
+    def busy(self, now: float) -> str:
+        with self._lock:
+            for k in [k for k, at in self.open.items() if now - at > CALL_STALE_S]:
+                del self.open[k]
+            if self.open:
+                return f"{len(self.open)} call(s) recording"
+            if self.ended is not None and 0 <= now - self.ended < CALL_AFTER_S:
+                return "a call's files being written"
+            return ""
+
+    def clear(self) -> None:
+        with self._lock:
+            self.open.clear()
+            self.ended = None
 
 
 class Watchdog:
@@ -1003,6 +1051,7 @@ class Supervisor:
         self.status: dict = {"state": "off", "detail": "", "since": None}
         self.watchdog = Watchdog()                  # #547: running but no longer working: restarted
         self.shipper = Shipper(self.log, self.tag)  # #547: its own lines worth seeing, into the journal
+        self.calls_open = OpenCalls()               # the calls it records now (a config change waits for them, #647)
         self._wcfg: dict | None = None              # the watchdog's limits ([p25] watchdog_*), as last read
 
     tag = "p25"                 # its lines in the journal
@@ -1181,6 +1230,7 @@ class Supervisor:
     def _drain(self, p, workdir: str) -> None:
         """Everything it says, into trunk-recorder.log (capped: LOG_MAX_BYTES, one previous file kept), which sizeup reads
         as it grows; the unit script's grant lines come the same way (its stdout is trunk-recorder's)."""
+        self.calls_open.clear()                          # (a new trunk-recorder: none of the last one's calls)
         try:
             self.shipper.watch(watched_talkgroups(workdir))  # its config's reception "watch" list, as it starts
         except Exception:  # noqa: BLE001 - a config it can't read watches nothing; the drain must still run
@@ -1211,6 +1261,7 @@ class Supervisor:
                     t = self.mono()                  # the watchdog's and the shipper's tick()'s clock
                     self.watchdog.line(line, t)
                     self.shipper.line(line, t)
+                    self.calls_open.line(line, t)
                 except Exception:  # noqa: BLE001 - the drain must never stop (trunk-recorder would block on its output)
                     pass
         if log is not None:
@@ -1236,6 +1287,7 @@ class Supervisor:
             self._drain_thread.join(timeout=2)
             self._drain_thread = None
         self.running, self.started_at = None, None
+        self.calls_open.clear()
         try:
             self.shipper.split_flush(self.mono())       # (#647) its split counts so far, after its last lines
         except Exception:  # noqa: BLE001 - a count, never in the way of a stop
@@ -1433,10 +1485,12 @@ def lower_priority(pid: int, setpriority=None) -> None:
 class SystemSupervisor(Supervisor):
     """One more system's trunk-recorder (#409): the sources of <recorder_dir>/systems/<name>/config.json that sizeup
     gave a dongle (wanted_system), each dongle claimed under its own job. Restarted when its dongles, its config.json
-    or its talkgroups.csv change; never because of the county's. Every dongle it is asked to use must be free and
-    plugged in: one held by another app, or gone, and nothing starts (said in the status). One unplugged while it
-    runs stops it ("absent"); it starts again, with "dongles back after m:ss", once every one is back (#592:
-    _unplugged, _coming_back)."""
+    or its talkgroups.csv change; never because of the county's. A new config.json or talkgroups.csv alone (an update:
+    #647's "split") restarts it between calls: while it records one (OpenCalls) the restart waits, CONFIG_WAIT_S at
+    most (_config_wait); the update itself waited for the station's quiet moment already. Every dongle it is asked to
+    use must be free and plugged in: one held by another app, or gone, and nothing starts (said in the status). One
+    unplugged while it runs stops it ("absent"); it starts again, with "dongles back after m:ss", once every one is
+    back (#592: _unplugged, _coming_back)."""
 
     def __init__(self, name: str, config: str = CONFIG, state: str = STATE, status_path: str = STATUS, **kw):
         super().__init__(config, system_state_path(name, state), system_status_path(name, status_path), **kw)
@@ -1462,6 +1516,8 @@ class SystemSupervisor(Supervisor):
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
         self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when, monotonic)
         self.county_done = None                      # ... the wish seq it has waited for (once per move, never again)
+        self.config_since: float | None = None       # (#647) its config changed while it ran: since (monotonic) ...
+        self.config_why = ""                         # ... and the call it waits for, as said ("" none)
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
@@ -1508,9 +1564,12 @@ class SystemSupervisor(Supervisor):
         sdr = sources_sdr(w["sources"])
         key = (sdr, tuple(r["argv"]), r["workdir"], _file_sig(d / "config.json", d / "talkgroups.csv")) if w["on"] else None
         label = w["label"] or self.name
-        if self.proc is not None and self.running != key:
-            self.stop(f"sizeup switched {label} off" if not w["on"] else f"{label}: its dongles or its config changed")
+        if self.proc is not None and self.running != key and not self._config_wait(key, label):
+            self.stop(f"sizeup switched {label} off" if not w["on"] else
+                      f"{label}: its config changed" if self._config_only(key) else f"{label}: its dongles changed")
             self.backoff, self.next_start = BACKOFF_S[0], 0.0
+        if self.running == key or self.proc is None:
+            self.config_since, self.config_why = None, ""
         county = wanted(self.county_state)
         if self.proc is not None and county["on"] and county["sdr"] and county["sdr"] in self.claims_held:
             # The county's trunk-recorder was given one of this system's dongles: this one stops at once and lets
@@ -1550,10 +1609,43 @@ class SystemSupervisor(Supervisor):
                 self.ran_key = key
                 went = self._went(now)
                 self.status.update(detail=self.status.get("detail", "") + went, restarts=self.restarts)
+        if self.config_since is not None and self.proc is not None:
+            self.status["config_wait"] = self.config_why     # (#647) restarting for its new config after this
         self.status["watchdog"] = self.watchdog.report(self._m, self._wcfg)
         self.status["at"] = now
         self._write()
         return self.status
+
+    def _config_only(self, key) -> bool:
+        """What runs differs from what is wanted only by its config.json / talkgroups.csv (an update's), the same
+        dongles, command line and directory."""
+        return key is not None and self.running is not None and key[:3] == self.running[:3]
+
+    def _config_wait(self, key, label: str) -> bool:
+        """(#647) Its config changed under a running trunk-recorder, its dongles the same (an update installed a new
+        config.json: "split", its talkgroups): True while the restart waits for the calls it records now (OpenCalls),
+        CONFIG_WAIT_S at most, so an update never cuts a call in the middle. Anything else (switched off, other
+        dongles) is never held: False."""
+        if not self._config_only(key):
+            return False
+        m = self._m
+        if self.config_since is None:
+            self.config_since = m
+        why = self.calls_open.busy(m)
+        waited = m - self.config_since
+        if why and waited < CONFIG_WAIT_S:
+            if not self.config_why:
+                self.log(f"{self.tag}: {label}'s config changed: trunk-recorder restarts after its call ({why}; "
+                         f"{CONFIG_WAIT_S / 60:.0f} min at most)")
+            self.config_why = why
+            return True
+        if why:
+            self.log(f"{self.tag}: {label}'s config changed {waited:.0f} s ago: restarting trunk-recorder now, "
+                     f"{why} (waited {CONFIG_WAIT_S / 60:.0f} min at most)")
+        elif self.config_why:
+            self.log(f"{self.tag}: {label}: its call is over after {waited:.0f} s: restarting for its new config")
+        self.config_since, self.config_why = None, ""
+        return False
 
     def _unplugged(self, now: float, w: dict, base: dict) -> bool:
         """#592: a dongle unplugged under a running trunk-recorder need not make it exit: it can stay up, saying and
