@@ -7,6 +7,7 @@
     "squelch": {"Fireground 1": {"open_db": 13.0, "min_open_s": 0.5}},
     "squelch_ok": true,
     "deny_ok": true,
+    "promote_ok": true,
     "sig": "d26d8cf926e1"
   }
 }

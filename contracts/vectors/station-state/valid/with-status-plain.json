@@ -1,5 +1,7 @@
 {
   "at": 1794990000.0,
+  "boot_id": "5f0c9a3e-7b1d-4e2a-9c6f-0d8b2a4e1c37",
+  "wall_steps": 0,
   "talking": [],
   "paging": [],
   "status": {
@@ -78,6 +80,7 @@
       "squelch": {},
       "squelch_ok": true,
       "deny_ok": true,
+      "promote_ok": true,
       "sig": "0b022a41e225"
     },
     "p25_systems": [],

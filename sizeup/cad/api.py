@@ -169,6 +169,8 @@ POST /api/cad/incident/<id>/auto-undo     {step, operator?}  an automatic step (
                                           auto.steps) taken back: the unit (or the close) is then a person's
 POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an automatic radio-log link (mention / fireground,
                                           #311) confirmed: its audio and row are kept like any on the event
+POST /api/cad/incident/<id>/channel       {talkgroup, remove?, operator?}  the county talkgroup the event is worked on
+                                          (sizeup/cad/opchannel.py): its traffic goes on it; remove: off for good
 POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
                                           sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
 POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?, audio?} -> {text, kind, audio_url, audio_note, remarks,
@@ -396,6 +398,7 @@ class NeedsConfirm(CadError):
 JSON = "application/json"
 MAX_BODY = 65536
 INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?")
+INCIDENT_CHANNEL = re.compile(r"/api/cad/incident/(\d{1,9})/channel")          # its operating channel (opchannel.py)
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
 PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
@@ -451,6 +454,7 @@ ADMIN_READS = {
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
                 r"|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?)?"), "dispatch"),      # events, notes, dispatches, radio links
+    (INCIDENT_CHANNEL, "dispatch"),                                         # an event's operating channel (opchannel.py)
     (DISPATCH_MODE, "dispatch"),                                            # 60 Control / PCFD dispatching (#311)
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
@@ -703,6 +707,9 @@ def _toggles(b) -> str:
 
 DOES = (
     (re.compile(r"/api/cad/incident"), _created),
+    (INCIDENT_CHANNEL, lambda m, b, o, c: (f"{'Removed' if b.get('remove') else 'Added'} channel TG {_clip(b.get('talkgroup'), 12)} "
+                                           f"on {_number(c, int(m.group(1))) or 'event ' + m.group(1)}",
+                                           _number(c, int(m.group(1))))),
     (INCIDENT, _on_incident),
     (UNIT, _unit_status),
     (DISPATCH_MODE, lambda m, b, o, c: (f"Dispatch mode: {o.get('label') or _clip(b.get('mode'), 20)}", "")),
@@ -1399,6 +1406,8 @@ class CadApi:
                 raise CadError(str(e)) from None
         if path == "/api/cad/incident":
             return c.create(body)
+        if m := INCIDENT_CHANNEL.fullmatch(path):
+            return c.incident_channel(int(m.group(1)), body)
         if m := INCIDENT.fullmatch(path):
             iid, action = int(m.group(1)), m.group(2)
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,

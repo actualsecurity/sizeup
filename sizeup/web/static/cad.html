@@ -610,7 +610,10 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <a id="d-radio-all" class="nav sm" href="#radio" title="This incident in Radio"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">All</span></a>
         </div>
         <div id="d-radio-units" class="row unit-filter" role="group" aria-label="Show one unit"></div>
+        <div id="d-radio-chan" class="row chan-row" aria-label="Channels" hidden></div>
         <ol id="d-radio" class="list log radio-log"></ol>
+        <details id="d-radio-onchan" class="onchan" hidden><summary class="dim small"></summary>
+          <ol id="d-radio-onchan-list" class="list log radio-log"></ol></details>
       </div>
 
       <!-- folded to start, with the count and the latest entry (#107); remembered per browser (cad.js timelineFold).

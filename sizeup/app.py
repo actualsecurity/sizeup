@@ -167,6 +167,7 @@ NOAUDIO_SINCE_MIN = 1577836800.0   # (2020-01-01) a saved "since" before this, o
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
+PROMOTE_CACHE_S = 5.0             # the CAD of record's promoted talkgroups (sizeup/cad/opchannel.py) read this often
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
@@ -682,6 +683,8 @@ class App:
         self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
         # ... and each FM / airband channel's frequency, for its hover there (#607)
         self.cad.source_freqs = lambda: {c.label: f"{c.mhz:g}" for c in self.cfg.channels}
+        # an incident's operating channel came or went (sizeup/cad/opchannel.py): speech-to-text reads the set again
+        self.cad.opchan.on_change = self.promoted_changed
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
@@ -2834,8 +2837,37 @@ class App:
         return self.aws.available(key)
 
     def stt_engine(self, key: str) -> str:
-        """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS)."""
-        return channels.effective(self.channel_pref(key), self.aws_ok(key)[0])
+        """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS). A county
+        talkgroup an incident of ours is worked on now (sizeup/cad/opchannel.py) is transcribed, and by Amazon Transcribe
+        while AWS can take it (within the monthly limit: never its reserve), like Fire/EMS 15."""
+        p = self.channel_pref(key)
+        if key in _promoted(self):
+            p = dict(p, transcribe=True, engine="aws" if p.get("engine", "local") == "local" else p["engine"])
+        return channels.effective(p, self.aws_ok(key)[0])
+
+    _promo_cache: tuple = (0.0, frozenset())
+
+    def promoted_keys(self) -> frozenset:
+        """The county talkgroups transcribed like ours now ("tg:N"): an incident of ours is worked on them
+        (sizeup/cad/opchannel.py). A station: the hub's word (set_channel_prefs' aws.promote); the CAD of record: its
+        own, read at most every PROMOTE_CACHE_S."""
+        if self.forwarding():
+            return frozenset((getattr(self, "_hub_aws", None) or {}).get("promote") or ())
+        at, keys = self._promo_cache
+        if at and time.monotonic() - at < PROMOTE_CACHE_S:
+            return keys
+        try:
+            op = getattr(getattr(self, "cad", None), "opchan", None)
+            keys = frozenset(channels.tg_key(tg) for tg in op.promoted()) if op is not None else frozenset()
+        except Exception as e:  # noqa: BLE001 - none promoted then: the class it had
+            log(f"speech-to-text: operating channels: {type(e).__name__}: {e}")
+            keys = frozenset()
+        self._promo_cache = (time.monotonic(), keys)
+        return keys
+
+    def promoted_changed(self) -> None:
+        """An incident's operating channel came or went: read again at once (the hub pushes its station: HubApp)."""
+        self._promo_cache = (0.0, frozenset())
 
     def _stt(self, item, audio: np.ndarray, eng: str, key: str, late: bool = False) -> None:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input). late: a
@@ -3075,6 +3107,8 @@ class App:
         (URGENT), the airband pre-alerts (HIGH), other live traffic (LIVE), and last a talkgroup heard only as
         context (LOW: not "main" in Settings > Radios), which is shed when whisper is behind."""
         if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page" or key in STT_FIRST:
+            return URGENT
+        if key in _promoted(self):             # a county talkgroup an incident of ours is worked on now (opchannel.py)
             return URGENT
         if key in AIRBAND_FIRST:
             return HIGH
@@ -3698,7 +3732,13 @@ class App:
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
                 "reserve": [str(k) for k in (d.get("reserve") or [])],
                 **({"deny": [str(k) for k in d["deny"]], "deny_why": str(d.get("deny_why") or "")}
-                   if d.get("deny") else {})}
+                   if d.get("deny") else {}),
+                # the promoted talkgroups (sizeup/cad/opchannel.py) as last sent: a restart keeps them (the same sig, and
+                # nothing raised again when the hub's next push agrees)
+                **({"promote": [str(k) for k in d["promote"]],
+                    "promote_since": {str(k): float(v) for k, v in (d.get("promote_since") or {}).items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)}}
+                   if d.get("promote") else {})}
 
     def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None,
                           squelch: dict | None = None) -> dict:
@@ -3719,7 +3759,13 @@ class App:
         if isinstance(aws, dict):
             new = channels.hub_aws(aws)
             if new != self._hub_aws:
+                up = set(new.get("promote") or ()) - set(self._hub_aws.get("promote") or ())
                 self._hub_aws = new
+                for k in sorted(up):                   # promoted: what waits as context since the move goes with it
+                    n = self.stt.raise_channel(k, URGENT, (new.get("promote_since") or {}).get(k)) \
+                        if hasattr(self.stt, "raise_channel") else 0
+                    log(f"speech-to-text: {k} transcribed like ours (an incident is worked on it)"
+                        + (f"; {n} waiting clip(s) raised" if n else ""))
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
                 changed = True
         if changed:
@@ -3732,8 +3778,9 @@ class App:
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
+                "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
-                                    self._sq_ov, self._hub_aws.get("deny"))}
+                                    self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 
     # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/radio/fm.py) ---------------------------
 
@@ -5856,6 +5903,15 @@ class App:
         audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
         path, note = self.cad._render(text, tones=[])
         return (self.cad._audio_url(path), note) if path else (None, note)
+
+
+def _promoted(app) -> frozenset:
+    """app.promoted_keys(), or none (a stand-in App without it: the class it always had)."""
+    fn = getattr(app, "promoted_keys", None)
+    try:
+        return fn() if fn is not None else frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
 
 
 def channels_reserve(app) -> tuple:

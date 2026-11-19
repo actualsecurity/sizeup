@@ -426,8 +426,11 @@ class MetricsLink:
     is the app's (app.metrics), kept across the link going off and on."""
 
     def __init__(self, app, cfg, client: Callable[[float], object], log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, tick: Callable[[], None] | None = None):
+        """tick: called on the sampler's thread every TICK_S too, before the sampler (the station's wall-clock step
+        count, sizeup/cloud/wallclock.py); it must be quick and never raise."""
         self.app, self.cfg, self.log, self.clock = app, cfg, log, clock
+        self.tick = tick
         self.station = str(getattr(cfg, "station_id", "") or "")   # the id the hub assigns, once it has (StationLink.adopt)
         if getattr(app, "metrics", None) is None:
             app.metrics = Collector(clock=clock)
@@ -458,6 +461,11 @@ class MetricsLink:
 
     def _sample(self) -> None:
         while not self._stop.wait(TICK_S):
+            if self.tick is not None:
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 - (it never raises; and never in the sampler's way)
+                    pass
             try:
                 self.sampler.tick()
             except Exception as e:  # noqa: BLE001 - the metrics never take anything down

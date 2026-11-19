@@ -192,7 +192,7 @@ def scrub(name: str, body: dict, tmp: Path | str = "") -> dict:
     - time: every point in time (a field whose schema is one) is moved so that the post's `at` is T0, to the whole
       second; `health.started` is T0 - 3600 and `health.boot` T0 - 86400; the start time inside a talker's and a
       page's `key` follows;
-    - the machine: MACHINE's keys in `status.health`; `load.cpu_pct` of a station's whisper;
+    - the machine: MACHINE's keys in `status.health`; `load.cpu_pct` of a station's whisper; a post's `boot_id`;
     - this run: any `detail` naming the test's temporary folder; the Voice row (it depends on the OS); the counters
       of the metrics link, the speech-to-text queue's `ours_ago_s` and the pool worker's first word; the worker's
       `model` (the test config's);
@@ -230,6 +230,8 @@ def scrub(name: str, body: dict, tmp: Path | str = "") -> dict:
         for row in st["radios"]:
             if row["label"] == "Voice":
                 row.update(state="off", detail="no voice on this machine")
+    if "boot_id" in body:                                   # (this machine's boot; null on macOS: the station's form)
+        body["boot_id"] = "5f0c9a3e-7b1d-4e2a-9c6f-0d8b2a4e1c37"
     if isinstance(body.get("load"), dict) and "cpu_pct" in body["load"]:
         body["load"]["cpu_pct"] = 27.5
     if name.startswith("stt-worker-") and "model" in body:
