@@ -8,8 +8,9 @@
 //                Drawn on the call's map (and the large map) with an icon per kind and the label; the list beside the
 //                map (#d-preplan): "Knox box · Front door left", a click centres the map on it.
 //   The layer    "Pre-plan" in every map's Layers box (maplayers.js MapLayers.addGroup): off until a viewer turns it on
-//                (theirs, every map: localStorage PREF_KEY, in a try), every point in the viewport from LAYER_ZOOM, by
-//                bbox (GET /api/cad/preplan?bbox=, padded; ETag: the browser revalidates), again only when the map
+//                (theirs, every map: on the hub, me-prefs.js "preplan", #823; localStorage PREF_KEY this browser's
+//                copy, in a try), every point in the viewport from LAYER_ZOOM, by bbox (GET /api/cad/preplan?bbox=,
+//                padded; ETag: the browser revalidates), again only when the map
 //                leaves the box it asked for or a write moves the generation. Nothing per frame: map events and pushes.
 //   The order    its own source and layers, under the route lines, the rigs' lines and the firehouses (BELOW: the
 //                rigs and the call pins are DOM marks, over every map layer), over the county layers.
@@ -161,10 +162,20 @@ window.Preplan = (() => {
   function prefOn() {
     try { return localStorage.getItem(PREF_KEY) === "1"; } catch (_) { return false; }
   }
-  function setPref(on) {
+  function keepPref(on) {
     st.layerOn = !!on;
     try { localStorage.setItem(PREF_KEY, on ? "1" : "0"); } catch (_) { /* this page view only */ }
     for (const m of maps) { m.box = null; m.refresh(); }
+  }
+  function setPref(on) {
+    keepPref(on);
+    if (window.MePrefs) MePrefs.changed("preplan");               // the person's, on the hub (#823)
+  }
+  // the hub's for the person signed in (me-prefs.js: {layer}; null: off), this browser's copy written (#823)
+  if (window.MePrefs) {
+    let had = false;
+    try { had = localStorage.getItem(PREF_KEY) !== null; } catch (_) { /* none */ }
+    MePrefs.register("preplan", { get: () => ({ layer: st.layerOn }), apply: (v) => keepPref(!!(v && v.layer)), hadLocal: had });
   }
   const pstate = () => (window.cad && cad.state && cad.state.preplan) || { gen: 0, restricted: [] };
   const mayMore = () => { const w = window.cad && cad.who; return !w || !w.enforced || w.may !== "viewer"; };

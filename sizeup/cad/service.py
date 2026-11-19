@@ -26,6 +26,7 @@ from typing import Callable
 from sizeup import polly, sourcekeys, tiers
 from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
+from sizeup.cad.prefs import Prefs
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTHER_LIMIT, PAGE, PAGE_MAX, SOURCES_MAX,
@@ -246,6 +247,7 @@ class Cad:
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
         self.activity = Activity(self.store, lambda m: self.log(m))
+        self.prefs = Prefs(self.store, self.settings)        # each person's own console choices (#823)
         self.settings.startup()
         n = self.store.sync_units()
         if n:
