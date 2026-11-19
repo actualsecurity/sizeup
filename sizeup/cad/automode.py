@@ -126,6 +126,12 @@ CREATE TABLE IF NOT EXISTS auto_steps (
   undone_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS auto_steps_incident ON auto_steps(incident_id);
+CREATE TABLE IF NOT EXISTS auto_runs (         -- co-runs: one call run in two of our towns, each run's report as last
+  incident_id INTEGER NOT NULL,                 -- processed (sources.py "cross town": both live on one incident)
+  ref TEXT NOT NULL,
+  seen TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (incident_id, ref)
+);
 CREATE TABLE IF NOT EXISTS auto_possibly (     -- incidents sources.py noted "possibly the same" (both ways)
   incident_id INTEGER NOT NULL,
   other_id INTEGER NOT NULL,
@@ -270,6 +276,10 @@ class AutoDispatch:
         row = self._tracking(iid)
         auto = self.mode() == "60control"
         first = row is None
+        runs = self._co_runs(iid, src) if row is not None else []
+        if len(runs) > 1:                                # one call run in two of our towns: every run rules
+            self._on_co_runs(iid, row, src, runs, auto)
+            return False
         seen = json.dumps(data, separators=(",", ":"))
         if first:
             if self.store.incident(iid)["status"] != "queued":
@@ -299,6 +309,56 @@ class AutoDispatch:
         with self.store.tx() as db:
             db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?", (seen, src, iid))
         return first
+
+    def _co_runs(self, iid: int, src: str) -> list[tuple[str, dict, str]]:
+        """The live reports of one source on the incident: two or more only for one call run in two of our towns
+        (sources.py "cross town"; a re-dispatch or a merge retires the other report). [(ref, data, label)]."""
+        return [(r["ref"], json.loads(r["data"] or "{}"), r["label"] or "County feed") for r in self.store.q(
+            "SELECT ref, data, label FROM source_reports WHERE incident_id = ? AND source = ? AND merged_into = '' "
+            "ORDER BY first_seen, ref", (iid, src))]
+
+    def _on_co_runs(self, iid: int, row: dict, src: str, runs: list, auto: bool) -> None:
+        """Co-runs: each run against what was last processed of it (auto_runs; the run processed alone before its
+        partner joined: auto_incidents.seen; a new one: nothing, so the units it lists are dispatched), applied with the
+        others beside it (_apply others: a run's in service releases what it alone lists; the call closes only when
+        every run is over)."""
+        base = json.loads(row["seen"] or "{}")
+        seen = {r["ref"]: json.loads(r["seen"] or "{}")
+                for r in self.store.q("SELECT ref, seen FROM auto_runs WHERE incident_id = ?", (iid,))}
+        for ref, data, label in runs:
+            prev = seen.get(ref, base if base.get("event_id") == ref else {})
+            others = [d for r, d, _ in runs if r != ref]
+            if auto and row["tracked_at"] is not None and self.store.incident(iid)["status"] in ("pending", "active"):
+                live = self._seen_open(iid, src if base.get("event_id") == ref else f"{src}#{ref}", data)
+                self._started(iid)
+                self._apply(iid, prev, data, label, live, others=others)
+            with self.store.tx() as db:
+                db.execute("INSERT OR REPLACE INTO auto_runs (incident_id, ref, seen) VALUES (?, ?, ?)",
+                           (iid, ref, json.dumps(data, separators=(",", ":"))))
+        best = self._best(iid)[0] or {}
+        with self.store.tx() as db:
+            db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?",
+                       (json.dumps(best, separators=(",", ":")), src, iid))
+
+    @staticmethod
+    def _over(d: dict) -> bool:
+        return bool(d.get("closed")) or (d.get("times") or {}).get("in_service") is not None
+
+    def _run_over(self, iid: int, t: float, op: str, label: str, listed, others) -> None:
+        """A co-run in service while another run of the call is still live: the units it alone lists released (in
+        service, undoable; a placeholder off this call), the call left open for the other run."""
+        ours = self._ours()
+        keys = {_key(n) for n in listed or []}
+        still = {_key(n) for d in others for n in d.get("units") or []}
+        for r in self.store.q("SELECT u.id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                              "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (iid,)):
+            mine = [k for k in keys if ours.get(k, {}).get("id") == r["id"]]
+            if not mine or any(k in still for k in mine) or self._manual(iid, f"unit:{r['name']}"):
+                continue
+            if self.store.lists.placeholder(r["name"]):
+                self.store.placeholder_off_call(iid, r["id"], op, f"{label} in service")
+            else:
+                self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
 
     def _seen_open(self, iid: int, src: str, data: dict) -> bool:
         """The invariant (seventh review): automation releases units and closes an incident only from a source whose
@@ -402,7 +462,9 @@ class AutoDispatch:
         return self.store.one("SELECT i.* FROM auto_possibly p JOIN incidents i ON i.id = p.other_id WHERE p.incident_id = ? "
                               "AND i.status IN ('pending', 'active') ORDER BY i.id LIMIT 1", (iid,))
 
-    def _apply(self, iid: int, old: dict, new: dict, label: str, live: bool = True) -> None:
+    def _apply(self, iid: int, old: dict, new: dict, label: str, live: bool = True, others=None) -> None:
+        """others: the other live runs of a co-run call (_on_co_runs): what they list stays; the call closes only when
+        every run is over."""
         op = f"{label} · auto"
         inc = self.store.incident(iid)
         ours = self._ours()
@@ -448,7 +510,9 @@ class AutoDispatch:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
         L = self.store.lists
-        for name in [n for n in (old.get("units") or []) if n not in units]:   # a placeholder the feed no longer lists
+        kept = {n for d in others or [] if not self._over(d) for n in d.get("units") or []}   # another live run's
+        held = {_key(n) for n in kept}                   # (a co-run's: never released while another run lists it)
+        for name in [n for n in (old.get("units") or []) if n not in units and n not in kept]:   # a placeholder unlisted
             u = ours.get(_key(name))
             if u is not None and L.placeholder(u["name"]) and not self._manual(iid, f"unit:{u['name']}"):
                 self.store.placeholder_off_call(iid, u["id"], op, f"{label} no longer lists it")
@@ -470,9 +534,22 @@ class AutoDispatch:
                 now_t, was = times, otimes
             for k in ("responding", "on_location", "in_service"):
                 t = now_t.get(k)
+                if k == "in_service" and _key(name) in held:
+                    continue                             # another live run lists it: it stays on (the line is the feed's)
                 if t is not None and t != was.get(k) and (live or k != "in_service"):
                     self._unit_step(iid, u, FEED_STATUS[k], t, op, "county", k)
-        if times.get("in_service") is not None or new.get("closed"):
+        if others is not None:                           # a co-run: only its own end, once
+            if self._over(new) and not self._over(old):
+                t = times.get("in_service") or self.clock()
+                if any(not self._over(d) for d in others):
+                    if live:
+                        self._run_over(iid, t, op, label, units, [d for d in others if not self._over(d)])
+                elif live:
+                    every = list(dict.fromkeys([*units, *(n for d in others for n in d.get("units") or [])]))
+                    self._close(iid, t, op, label, every)
+                else:
+                    self._ask_close(iid, t, op, label)
+        elif times.get("in_service") is not None or new.get("closed"):
             if live:
                 self._close(iid, times.get("in_service") or self.clock(), op, label, units)
             else:

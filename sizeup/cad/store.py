@@ -1664,12 +1664,17 @@ class Store:
             raise CadError(f"disposition: {disposition!r} is not one of the dispositions")
         now = self.clock()
         with self.tx() as db:
-            names = ", ".join(self._release_all(db, iid, operator, now))
-            db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
-                       (now, disposition, iid))
-            self._event(db, iid, "closed", f"Event closed: {self.lists.name('dispositions', disposition)}"
-                        + (f"; cleared {names}" if names else ""), operator, at=now)
+            self.close_in(db, iid, disposition, operator, now)
         return self.incident(iid)
+
+    def close_in(self, db, iid: int, disposition: str, operator: str, now: float) -> None:
+        """close() in the caller's transaction (sizeup/cad/sources.py _merge: a duplicate closed with the move of its
+        units, one transaction); the caller has checked the status and the disposition."""
+        names = ", ".join(self._release_all(db, iid, operator, now))
+        db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
+                   (now, disposition, iid))
+        self._event(db, iid, "closed", f"Event closed: {self.lists.name('dispositions', disposition)}"
+                    + (f"; cleared {names}" if names else ""), operator, at=now)
 
     def expire_until(self, now: float | None = None) -> list[dict]:
         """A non-emergency event's Until (a closure, a hydrant out of service, a notification) enforced: every open
