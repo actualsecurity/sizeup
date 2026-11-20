@@ -34,7 +34,6 @@ from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTH
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
-from sizeup.cad.hydrants import Hydrants
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
@@ -438,9 +437,6 @@ class Cad:
         # Site documents (#459, sizeup/cad/preplan_docs.py): a building's floor plans (on the call's map) and other
         # documents; .store: where their bytes are (sizeup/docstore.py; the app sets it)
         self.preplan_docs = PreplanDocs(self)
-        # Hydrants (#799, sizeup/cad/hydrants.py): the department's overlay on the county's hydrant layer (status, flow,
-        # class ...): the gis serves the layer through it (the app sets gis.overlays), each open call gets its nearest
-        self.hydrants = Hydrants(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -473,7 +469,6 @@ class Cad:
             incs = self._with_radio(self.store.incidents())
             self.premise.decorate(incs)
             self.preplan.decorate(incs)                   # its building's pre-plan points (#456)
-            self.hydrants.decorate(incs)                  # its nearest hydrants, the out-of-service ones (#799)
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
@@ -507,7 +502,6 @@ class Cad:
                 # the settings' own version: the Settings page reloads when it moves, not with every call (settings.js)
                 "settings_rev": self.settings.settings_rev(),
                 "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
-                "hydrants": self.hydrants.state(),        # #799: the overlay's write generation (the maps fetch the layer again)
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
                         "channels": sorted(self.atc_talkers.channels)},

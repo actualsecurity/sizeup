@@ -762,7 +762,6 @@ class App:
         # System shows every camera with where it falls (cad.camera_area).
         self.roads.gis = self.gis
         self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
-        self.gis.overlays["hydrants"] = self.cad.hydrants   # the department's hydrant data over the county's (#799)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.section("camera_wall")
         self.cad.camera_area = self.roads.settings_rows

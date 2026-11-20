@@ -32,7 +32,7 @@ const S = {
 // else), Hub link this machine's forwarding (not on the hub). #settings/health and #settings/system/health still land
 // on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
-  ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["hydrants", "Hydrants"], ["system", "System"]];
+  ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
 const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["workers", "STT workers"], ["logs", "Logs"], ["adapter", "Adapter"],
   ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
@@ -451,7 +451,6 @@ function sRoute() {
     RadiosPanel.mount($("#settings-radios"), { operator });
   }
   if (sec === "radios") sRadioTab();
-  if (sec === "hydrants" && window.Hydrants) Hydrants.mount($("#s-hydrants"));   // hydrants.js (#799): its own list
   if (S.data) {
     sRender(true);
     [S.sig, S.sigLive] = sSigs(S.data, sec);          // (drawn as it is: the load that follows redraws only what is new)

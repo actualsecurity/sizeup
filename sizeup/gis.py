@@ -214,8 +214,7 @@ DEFAULT_LAYERS: tuple[Layer, ...] = (
           style={"color": "--err", "radius": 4.5, "label": "HYD_NUMBER", "labelzoom": 17}, minzoom=14, refresh="monthly",
           fields=(("FIRENAME", "Fire district"), ("HYD_NUMBER", "Hydrant no."), ("MUNCIPALIT", "Municipality")),
           licence=COUNTY_TERMS, page=f"{_HUB}b1766f745f954027936f74e7b0d2de65_147", asof="as of Oct 2015",
-          note="Positions from the departments that contributed them (some partial); flow, class and status: the department's "
-               "(Settings > Hydrants, #799)", hazard=True),
+          note="Positions from the departments that contributed them (some partial); no flow or size data", hazard=True),
     # The county's copy of NYSDEC's PBS registry carries the facility, its address and PBS number only (no tank count,
     # product or gallons: those are in DEC's own PBS database, by the PBS number). The mark: a drum in the warning
     # color, a third larger than the hydrant's, so a fuel site is unmistakable (#111).
@@ -668,10 +667,6 @@ class Gis:
         # the stations the Trains layer draws now ([{name, lat, lon}]; app.py: Trains.stations); none: nothing is marked
         self.train_stations: Callable[[], list[dict]] = lambda: []
         self._trains: tuple = ()                   # as last seen: ((name key, lat, lon), ...)
-        # A layer's department overlay (#799: sizeup/cad/hydrants.py for "hydrants"): key -> an object with .gen (moves
-        # on each of its writes) and .apply(key, features) -> the features as the pages get them. The cached file stays
-        # the county's; the overlay is applied when served (the whole layer: the hydrants are never tiled).
-        self.overlays: dict[str, object] = {}
         # The disk cache read (#251): load=False leaves it to load_cache(), which the app calls from its background
         # loader, so the CAD serves while 28 layers are parsed; until then every layer says "loading".
         self.cache_loaded = False
@@ -1080,22 +1075,6 @@ class Gis:
 
     # -- what the pages get -----------------------------------------------------------------------------------
 
-    def _over(self, key: str):
-        return self.overlays.get(key)
-
-    def _rev(self, key: str):
-        """The layer's rev as the pages see it: with an overlay, its generation too ("12.1763...")."""
-        ov = self._over(key)
-        rev = self.status[key]["rev"]
-        return f"{rev}.{ov.gen}" if ov is not None else rev
-
-    def overlay_changed(self, key: str) -> None:
-        """An overlay's write (its gen moved): the catalog's rev moves, so every page fetches the layer again."""
-        with self._lock:
-            if key in self.layers:
-                self.rev += 1
-                self._bytes.pop(key, None)
-
     def public(self) -> dict:
         self._trains_now()
         with self._lock:
@@ -1103,38 +1082,25 @@ class Gis:
             for key, layer in self.layers.items():
                 st = self.status[key]
                 layers.append(layer.public() | {"kind": self.kind(key), "at": st["at"], "n": st["n"], "bytes": st["bytes"],
-                                                "error": st["error"], "updated": st["updated"], "rev": self._rev(key),
+                                                "error": st["error"], "updated": st["updated"], "rev": st["rev"],
                                                 "checked": st["checked"], "how": st["how"],
                                                 "loading": self.configured and st["at"] is None and not st["error"]
                                                            or (self.configured and not self.cache_loaded)})
             return {"configured": self.configured, "source": SOURCE, "attribution": ATTRIBUTION, "link": LINK_URL,
                     "terms": TERMS_URL, "rev": self.rev, "bbox": list(self.bbox), "layers": layers}
 
-    def _served(self, key: str, feats: list[dict]) -> tuple[list[dict], bool]:
-        """(the features with the layer's overlay applied (#799), True); the county's as they are and False if it fails."""
-        ov = self._over(key)
-        if ov is None:
-            return feats, True
-        try:
-            return ov.apply(key, feats), True
-        except Exception as e:  # noqa: BLE001 - the county's layer still shows
-            self.log(f"gis: {key}: overlay not applied ({type(e).__name__}: {e})")
-            return feats, False
-
-    def _layer_bytes(self, key: str) -> tuple[int | str, bytes, bytes]:
+    def _layer_bytes(self, key: str) -> tuple[int, bytes, bytes]:
         stations = self._trains_for(key)
         with self._lock:
-            rev = self._rev(key)
             cur = self._bytes.get(key)
-            if cur is not None and cur[0] == rev:
+            if cur is not None and cur[0] == self.status[key]["rev"]:
                 return cur
-            feats = list(self.data[key])
-        feats, whole = self._served(key, self._marked(key, feats, stations))
+            rev, feats = self.status[key]["rev"], list(self.data[key])
+        feats = self._marked(key, feats, stations)
         body = json.dumps({"type": "FeatureCollection", "key": key, "rev": rev, "features": feats}, separators=(",", ":")).encode()
         cur = (rev, body, gzip.compress(body, 6))
-        if whole:                                  # (a failed overlay's: never kept, the next request tries again)
-            with self._lock:
-                self._bytes[key] = cur
+        with self._lock:
+            self._bytes[key] = cur
         return cur
 
     def features(self, key: str) -> list[dict]:
@@ -1147,7 +1113,6 @@ class Gis:
         return self._marked(key, feats, stations)
 
     def features_in(self, key: str, bbox) -> list[dict]:
-        """The county's features touching the box (an overlay is not applied: the served tiles are, get())."""
         stations = self._trains_for(key)
         with self._lock:
             feats = [f for f, b in zip(self.data[key], self._boxes[key]) if b and _touches(b, bbox)]
@@ -1179,14 +1144,9 @@ class Gis:
             except ValueError as e:
                 return 400, json.dumps({"error": str(e)}).encode(), JSON, {}
             feats = self.features_in(key, bbox)                   # (a new rev first when the Trains layer's stations changed)
-            if self._over(key) is not None:                       # (the overlay's points may be anywhere: all, then the box)
-                w, s, e, n = bbox
-                feats = [f for f in self._served(key, self.features(key))[0] if (b := geometry_bbox(f.get("geometry") or {}))
-                         and _touches(b, (w, s, e, n))]
-            rev = self._rev(key)
-            body = json.dumps({"type": "FeatureCollection", "key": key, "rev": rev, "bbox": list(bbox), "features": feats},
+            body = json.dumps({"type": "FeatureCollection", "key": key, "rev": st["rev"], "bbox": list(bbox), "features": feats},
                               separators=(",", ":")).encode()
-            etag = f'W/"{key}-{rev}-{hashlib.sha1(bbox_s.encode()).hexdigest()[:10]}"'
+            etag = f'W/"{key}-{st["rev"]}-{hashlib.sha1(bbox_s.encode()).hexdigest()[:10]}"'
             ttl, gz = TILE_TTL_S, None
         else:
             rev, body, gz = self._layer_bytes(key)

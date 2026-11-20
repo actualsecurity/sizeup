@@ -634,25 +634,4 @@
     }
     .stv-empty { inset-inline-start: 50%; }
   }
-
-  /* ---- hydrants (#799, hydrants.js): the class mark, the legend, the card's actions, the move bar ---- */
-  .hy-mark {
-    display: inline-flex; align-items: center; justify-content: center; flex: none; min-inline-size: var(--s-5);
-    block-size: var(--s-4); padding-inline: var(--s-0); border-radius: var(--radius-s); background: var(--hy, var(--dim));
-    color: var(--bg); font-size: var(--fs-2xs); font-weight: 700; line-height: var(--lh-2xs);
-    box-shadow: 0 0 0 var(--bw) var(--line-strong);
-  }
-  .hy-mark.down { background: var(--bg); color: var(--err); box-shadow: 0 0 0 var(--bw) var(--err); }
-  .hy-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding-inline-start: var(--s-6); }
-  .hy-key { display: inline-flex; align-items: center; gap: var(--s-0); color: var(--text-2); }
-  .hy-line { display: flex; align-items: center; gap: var(--s-2); }
-  .hy-acts { gap: var(--s-1); margin-block-start: var(--s-1); }
-  .hy-hist summary { cursor: pointer; }
-  .hy-hist-list { margin: var(--s-1) 0 0; padding-inline-start: var(--s-4); max-block-size: calc(var(--s-8) * 5); overflow-y: auto; }
-  .hy-drag { cursor: grab; filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.9)); }
-  .hy-drag .hy-mark { min-inline-size: var(--s-6); block-size: var(--s-6); }
-  .hy-movebar {
-    inset-block-start: auto; inset-block-end: var(--s-4); inset-inline-start: 50%; transform: translateX(-50%);
-    display: flex; align-items: center; gap: var(--s-2); inline-size: min(30rem, calc(100% - var(--s-4)));
-  }
 }
