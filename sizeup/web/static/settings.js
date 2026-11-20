@@ -56,8 +56,8 @@ const S_RC_SERVICES = {
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
-  ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["event_class", "Emergency rules"],
-  ["geo_town_order", "Town order"], ["place_names", "Place names"]];
+  ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["location_qualifiers", "Location qualifiers"],
+  ["event_class", "Emergency rules"], ["geo_town_order", "Town order"], ["place_names", "Place names"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
   ["enroute", "Responding (first en route)"], ["onscene", "On location (first on scene)"], ["oos", "Unavailable (out of service)"]];
 const S_RESPONSES = [["fire", "Fire"], ["mutual_aid", "Mutual aid"], ["agency", "Other agency"]];
@@ -967,6 +967,8 @@ function sListTable(sec) {
       + "unconfirmed: change it, or Confirm. Available frees the unit and clears it off its call. Unavailable takes it out "
       + "of service and asks why. Dispatched, Responding and On location stamp the times. The rest keep it committed.",
     event_types: "The type's color on the queue, the board and the records.",
+    location_qualifiers: "Where at a location, in front of the address. Name: the pick list. Short: the text (IFO 12 Sample St). "
+      + "Spoken: what the dispatch voice says and what pages are heard as. Never moves a point on the map.",
   }[sec];
   const partial = (sec === "event_types" || sec === "event_subtypes") ? sSubtypeMap() : null;
   return sCard(sCardHead(title, info, sHelp(about), reset), partial, ol, sAddForm(sec));
@@ -1080,6 +1082,14 @@ function sItemRow(sec, x, i, n) {
     const flag = x.role === "oos" ? "unavailable" : x.role === "free" ? "available" : "committed";
     li.append(el("span", `chip s-flag ${flag}`, flag));
   }
+  if (sec === "location_qualifiers") {
+    const short = sInput(x.short || "", 12, "Short", (v) => { if (v && v !== x.short) edit({ short: v }, "short form changed"); }, "s-qshort");
+    short.title = "As the text shows it: IFO 12 Sample St";
+    const spoken = sInput(x.spoken || "", 40, "Spoken", (v) => { if (v && v !== x.spoken) edit({ spoken: v }, "spoken form changed"); }, "s-qspoken");
+    spoken.title = "As the dispatch voice says it, and pages are heard: in front of";
+    short.disabled = spoken.disabled = deleted;
+    li.append(short, spoken);
+  }
   if (x.help) li.append(Help.button(x.help, `${x.name}: definition`));     // the FAA wording and the like (#105)
   li.append(sState(x.state, x.retired));
   if (x.confirm && !deleted) {
@@ -1126,13 +1136,20 @@ function sAddForm(sec) {
     extra.role = sSelect(S_ROLES, "", null, "What it does");
     f.append(extra.bg, extra.fg, extra.role);
   }
+  if (sec === "location_qualifiers") {
+    extra.short = sInput("", 12, "Short (IFO)", null, "s-qshort");
+    extra.spoken = sInput("", 40, "Spoken (in front of)", null, "s-qspoken");
+    f.append(extra.short, extra.spoken);
+  }
   const add = el("button", "primary", "Add");
   add.type = "submit";
   f.append(add);
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const item = { name: name.value.trim() };
-    for (const [k, inp] of Object.entries(extra)) item[k] = k === "role" ? inp.value : inp.value.toUpperCase();
+    for (const [k, inp] of Object.entries(extra)) {
+      item[k] = k === "role" || k === "short" ? inp.value.trim() : k === "spoken" ? inp.value.trim().toLowerCase() : inp.value.toUpperCase();
+    }
     await sPost(sec, { action: "add", code: code.value.trim(), item }, `${code.value.trim()} added`);
   });
   return f;

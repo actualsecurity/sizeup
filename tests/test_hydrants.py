@@ -548,7 +548,11 @@ out.lineBare = H.line({ number: "9002", cls: null, gpm: null, status: "unknown",
 out.keys = H.LEGEND.map((l) => l[0]);
 out.fc = [H.flowCheck(12000, 80, 10), H.flowCheck(1000, 60, 60), H.flowCheck(3000, null, null), H.flowCheck(1000, 80, 10),
           H.flowCheck(900, 70, null), H.flowCheck(1000, 80, 60)];
-
+const tok = H.atToken("IFO @sam", 8);
+out.tok = tok;
+out.take = H.takeAt("IFO @sam", tok, { label: "Sample Market", lat: 41, lon: -73.6, kind: "place", sub: "Sampletown" }, []);
+out.noTok = [H.atToken("a@b", 3), H.atToken("@ x", 3), H.atToken("@Sample Market x", 16, [{ label: "Sample Market" }])];
+out.named = H.named("rear of @Sample Market", [{ label: "Sample Market" }, { label: "Gone" }]).map((p) => p.label);
 out.down = H.DOWN;
 console.log(JSON.stringify(out));
 """
@@ -574,7 +578,9 @@ def test_the_map_helpers_in_node(tmp_path):
     assert fc[2]["error"] == "" and "unusually high" in fc[2]["notes"][0]
     assert fc[3]["error"] == "" and "under 20 psi" in fc[3]["notes"][0]
     assert "One pressure" in fc[4]["notes"][0] and fc[5] == {"error": "", "notes": []}
-
+    assert out["tok"] == {"text": "sam", "start": 4, "end": 8}
+    assert out["take"]["value"] == "IFO @Sample Market " and out["take"]["places"][0]["label"] == "Sample Market"
+    assert out["noTok"] == [None, None, None] and out["named"] == ["Sample Market"]
 
 
 def test_the_script_wires_the_layer_card_editor_and_settings():
@@ -914,6 +920,43 @@ def test_the_flow_test_checks_on_csv_import(cad):
     assert [w["line"] for w in pv["warnings"]] == [4] and "unusually high" in pv["warnings"][0]["warning"]
 
 
+# -- Location: the "@" places (text + references), never the hydrant's point ------------------------------------------------
+
+def test_the_location_keeps_its_places_and_never_moves_the_hydrant(cad):
+    h = cad.hydrants
+    before = h.index()["by_key"]["c990001"]
+    far = {"label": "Sample Market", "lat": LAT0 + 0.004, "lon": LON0 + 0.004, "kind": "place", "sub": "Sampletown"}
+    out = h.edit("c990001", {"location": "IFO @Sample Market", "location_places": [far]})
+    hh = out["hydrant"]
+    assert hh["location"] == "IFO @Sample Market" and hh["location_places"][0]["label"] == "Sample Market"
+    assert (hh["lat"], hh["lon"]) == (before["lat"], before["lon"]) and hh["nudge_m"] is None      # never moved
+    assert by_key(served(cad.gis)[0])["c990001"]["geometry"]["coordinates"] == [LON0, LAT0]
+    # a place no longer named in the text goes; one never named is not kept
+    out = h.edit("c990001", {"location": "Rear of the lot"})
+    assert out["hydrant"]["location_places"] == []
+    out = h.edit("c990001", {"location": "near the gate", "location_places": [far]})
+    assert out["hydrant"]["location_places"] == []
+    with pytest.raises(hy.CadError, match="places"):
+        h.edit("c990001", {"location": "@X", "location_places": [{"label": "X"}]})
+    # the CSV has the text only; an import keeps the places still named in it
+    h.edit("c990002", {"location": "across from @Sample Market", "location_places": [far]})
+    r = next(r for r in rows_of(h.csv({})[0]) if r["key"] == "c990002")
+    assert r["location"] == "across from @Sample Market" and "location_places" not in r
+    h.import_csv({"action": "apply", "csv": "key,location\nc990002,rear of @Sample Market\n"})
+    assert h.one("c990002")["hydrant"]["location_places"][0]["label"] == "Sample Market"
+    assert h.index()["by_key"]["c990002"]["lat"] == pytest.approx(LAT0 + DLAT)
+
+
+def test_a_table_from_831_gets_the_new_column(tmp_path):
+    import sqlite3
+    c = make_cad(tmp_path)
+    db = sqlite3.connect(str(tmp_path / "cad.sqlite"))
+    db.execute("ALTER TABLE hydrants DROP COLUMN location_places")             # the table as #831 made it
+    db.commit()
+    db.close()
+    c2 = make_cad(tmp_path)
+    wire(c2, fake_gis())
+    assert c2.hydrants.edit("c990001", {"location": "IFO @A", "location_places": [{"label": "A", "lat": 41.0, "lon": -73.66}]})["changed"]
 
 
 def saved_raw(c, key, **cols):

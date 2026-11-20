@@ -50,6 +50,8 @@
   .s-said { flex: 1 1 7rem; min-inline-size: 6rem; }
   .s-title { flex: 1 1 9rem; min-inline-size: 7rem; }
   .s-dept { flex: 0 1 7rem; }
+  .s-qshort { flex: 0 1 6rem; min-inline-size: 4.5rem; }       /* a location qualifier's short and spoken forms */
+  .s-qspoken { flex: 1 1 9rem; min-inline-size: 7rem; }
   .s-row.unit select { max-inline-size: 10rem; }
   .s-code-in { inline-size: 9rem; }
   .s-num { inline-size: 6rem; }

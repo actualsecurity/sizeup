@@ -279,6 +279,67 @@ function flash(node, msg) {
 function L() {
   return (cad.state && cad.state.lists) || {};
 }
+// Where at a location (Settings > Lists > Location qualifiers): shown by its short form in front of the address
+// ("IFO 12 Sample St"), its name on hover; a retired one still on the events that have it. Never a map point.
+function qualOf(code) {
+  return code ? (L().location_qualifiers || []).find((q) => q.code === code) || null : null;
+}
+function qualText(code, text) {
+  const q = qualOf(code);
+  return [code ? (q ? q.short : code) : "", (text || "").trim()].filter(Boolean).join(" ");
+}
+function qualTitle(code, text) {
+  const q = qualOf(code);
+  return q ? `${q.name} ${(text || "").trim()}`.trim() : "";
+}
+function locText(inc) {                 // an event's location as shown: "IFO 12 Sample St"
+  return inc.address ? qualText(inc.location_qualifier, inc.address) : "";
+}
+// The qualifier picker in front of a location box: none, the active ones, the record's own even retired.
+function qualSelect(sel, code) {
+  const none = el("option", "", "—");
+  none.value = "";
+  none.title = "No qualifier: at the address";
+  const opts = (L().location_qualifiers || []).filter((q) => !q.retired).map((q) => {
+    const o = el("option", "", q.name);
+    o.value = q.code;
+    o.title = `${q.short} · said "${q.spoken}"`;
+    return o;
+  });
+  sel.replaceChildren(none, ...opts);
+  keepOption(sel, code || "", (qualOf(code) || {}).name || code);
+  return sel;
+}
+// A qualifier typed in front of the address ("IFO ", "across from "): into the picker, off the text (the place search
+// and the map read the address alone). Only while the picker says none; the hub splits a typed one the same way.
+function qualSplit(text) {
+  const forms = [];
+  for (const q of (L().location_qualifiers || []).filter((x) => !x.retired)) {
+    for (const f of [q.name, q.spoken, q.short, q.code]) forms.push([f, q.code]);
+  }
+  forms.sort((a, b) => b[0].length - a[0].length);
+  const low = text.toLowerCase();       // "across " is the start of "across from": wait for the next word
+  if (forms.some(([f]) => low.length <= f.length && `${f.toLowerCase()} `.startsWith(low))) return null;
+  for (const [f, code] of forms) {
+    const head = text.slice(0, f.length + 1);
+    if (head.length === f.length + 1 && head.slice(0, -1).toLowerCase() === f.toLowerCase() && /[\s,:]/.test(head.slice(-1))) {
+      const rest = text.slice(f.length).replace(/^[\s,:]+/, "");
+      // a one-word form only before a house number or an "@" place ("Side Hill Rd", "Near Rd" are streets): as the hub
+      if (f.trim().includes(" ") || /^[\d@]/.test(rest)) return { code, rest };
+    }
+  }
+  return null;
+}
+function qualTyped(input, sel) {
+  input.addEventListener("input", () => {
+    if (sel.value) return;
+    const m = qualSplit(input.value);
+    if (!m) return;
+    sel.value = m.code;
+    input.value = m.rest;
+    input.dispatchEvent(new Event("input"));
+  });
+}
 function nameOf(list, code) {
   const x = (L()[list] || []).find((i) => i.code === code);
   return x ? x.name : code;
@@ -592,7 +653,8 @@ function fillQueueItem(li, inc) {
     sc.title = scopeTip(inc.scope);
     type.append(sc);
   }
-  const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
+  const addr = el("div", "qa" + (inc.address ? "" : " dim"), locText(inc) || "No location");
+  if (inc.location_qualifier) addr.title = qualTitle(inc.location_qualifier, inc.address);
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
@@ -676,7 +738,7 @@ function queueExtra(i) {              // what the queue card shows from the call
 function renderQueue() {
   const all = incidents();
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
-  const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
+  const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.location_qualifier, i.id === cad.sel, i.emergency,
     i.until_at, untilInfo(i)?.text, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
     i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed],
     i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i)]);
@@ -833,7 +895,8 @@ function renderDetail() {
   type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#E0A030");
   const addr = $("#d-addr");
   addr.className = "d-addr" + (inc.address ? "" : " dim");
-  setText(addr, inc.address || "No location");
+  setText(addr, locText(inc) || "No location");
+  addr.title = inc.location_qualifier ? qualTitle(inc.location_qualifier, inc.address) : "";
   setText($("#d-cross"), inc.cross_street ? `Cross: ${inc.cross_street}` : "");
   setText($("#d-geo"), inc.lat != null ? `Map: ${inc.geo_label || `${inc.lat.toFixed(5)}, ${inc.lon.toFixed(5)}`}`
     : unconfirmed(inc) ? "Location unconfirmed: not on the map" : "No map point");
@@ -3427,6 +3490,7 @@ function openNew() {
   cad.rec = null;
   $("#new-form").reset();
   newAddr.set("", null);
+  qualSelect($("#f-qual"), "");
   cad.emergTouched = false;
   fillSubtypes($("#f-subtype"), "");
   airportForm("f", Object.fromEntries(AirportLayer.FIELDS.map((k) => [k, ""])));
@@ -3456,7 +3520,7 @@ async function createIncident(e) {
     caller_name: $("#f-name").value.trim(), caller_address: $("#f-caddr").value.trim(), phone: $("#f-phone").value.trim(),
     received_via: $("#f-via").value, remarks: $("#f-remarks").value.trim(), emergency: $("#f-emergency").checked,
     until_at: $("#f-emergency").checked ? null : fromLocalInput($("#f-until").value),
-    operator: operator(), ...newAddr.geo(),
+    operator: operator(), ...newAddr.geo(), location_qualifier: $("#f-qual").value,
   };
   airportBody("f", body);
   if (!body.type) { $("#f-type").focus(); return flash($("#f-error"), "Pick a type"); }
@@ -3495,6 +3559,7 @@ function openEdit() {
   keepSubtype($("#e-subtype"), inc.type, inc.subtype);
   editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1,
                                                 place: inc.place || "", street_address: inc.place_address || "" } : null);
+  qualSelect($("#e-qual"), inc.location_qualifier || "");
   $("#e-cross").value = inc.cross_street || "";
   $("#e-name").value = inc.caller_name || "";
   $("#e-caddr").value = inc.caller_address || "";
@@ -3519,9 +3584,11 @@ async function saveEdit(e) {
     operator: operator() };
   airportBody("e", body);
   if ($("#e-emergency").checked !== !!inc.emergency) body.emergency = $("#e-emergency").checked;
+  if ($("#e-qual").value !== (inc.location_qualifier || "")) body.location_qualifier = $("#e-qual").value;   // never the point
   const addr = $("#e-address").value.trim();
   if (addr !== (inc.address || "") || (editAddr.picked && editAddr.picked.kind !== "current")) {
     body.address = addr;
+    body.location_qualifier = $("#e-qual").value;      // with the address (another address without one: it goes)
     Object.assign(body, editAddr.geo());
   }
   try {
@@ -3741,7 +3808,7 @@ async function renderRecords() {
     const [h, a] = await Promise.all([api("GET", "/api/cad/history"), api("GET", "/api/cad/admin")]);
     syncList($("#db-rows"), h.incidents, {
       key: (i) => String(i.id),
-      sig: (i) => JSON.stringify([i.status, i.type, i.subtype, i.address, i.disposition, i.units, i.closed_at, cad.listSig.length,
+      sig: (i) => JSON.stringify([i.status, i.type, i.subtype, i.address, i.location_qualifier, i.disposition, i.units, i.closed_at, cad.listSig.length,
                                   canDo("dispatch")]),
       make: () => {
         const tr = el("tr", "ev");
@@ -3760,7 +3827,7 @@ async function renderRecords() {
         st.append(stBadge(el("span"), es.name, es.bg));
         const act = el("td", "act");        // a closed one: "⋯" Reopen, from here too (older than the queue's 24 h, #89)
         if (!isOpen(i) && canDo("dispatch")) act.append(UI.menu.button(`Actions: ${i.number}`, () => closedMenuItems(i), { key: `db-closed:${i.id}` }));
-        tr.replaceChildren(el("td", "num", i.number), type, el("td", "loc", i.address || "—"), el("td", "t", fmtRecv(i.created_at)),
+        tr.replaceChildren(el("td", "num", i.number), type, el("td", "loc", locText(i) || "—"), el("td", "t", fmtRecv(i.created_at)),
           el("td", "t", fmtRecv(i.closed_at)), st, el("td", "", i.disposition ? nameOf("dispositions", i.disposition) : ""),
           el("td", "", (i.units || []).join(", ")), el("td", "", i.received_via ? nameOf("received_via", i.received_via) : ""), act);
       },
@@ -4029,6 +4096,8 @@ function renderTalking() {
 
 const newAddr = addressBox($("#f-address"), $("#f-geo"), $("#f-sugg"), { cross: $("#f-cross"), map: true });
 const editAddr = addressBox($("#e-address"), $("#e-geo"), $("#e-sugg"), { cross: $("#e-cross") });
+qualTyped($("#f-address"), $("#f-qual"));
+qualTyped($("#e-address"), $("#e-qual"));
 $("#f-caddr-same").addEventListener("click", () => { callerSameAsLocation(); $("#f-caddr").focus(); });
 $("#f-caddr").addEventListener("keydown", (e) => {     // ↓ in the empty field: same as the location
   if (e.key === "ArrowDown" && !$("#f-caddr").value.trim() && $("#f-address").value.trim()) { e.preventDefault(); callerSameAsLocation(); }
