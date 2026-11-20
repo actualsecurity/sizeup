@@ -23,6 +23,9 @@
     if (window.opener && !window.opener.closed) window.opener.postMessage(MSG, location.origin);
   } catch (_) { /* the opener went elsewhere */ }
   const close = typeof document !== "undefined" && document.getElementById ? document.getElementById("reauth-close") : null;
-  if (close) close.addEventListener("click", () => window.close());
+  if (close) close.addEventListener("click", () => {
+    window.close();
+    setTimeout(() => { close.hidden = true; }, 200);   // a tab script may not close: "Signed in" stays, no dead button
+  });
   setTimeout(() => window.close(), 150);
 })();

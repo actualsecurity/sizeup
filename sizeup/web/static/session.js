@@ -35,7 +35,11 @@ const SessionWatch = (() => {
   const CHANNEL = "sizeup-session";       // BroadcastChannel: this origin's tabs only (reauth.js says so on it)
   const STORE_KEY = "sizeup:signed-in";   // the same through localStorage's storage event (no BroadcastChannel)
   const POPUP = "width=520,height=640";   // a small window (sized: a pop-up in every browser)
-  const BLANK_MS = [5000, 12000];          // the pop-up still on its first, blank page then: sent again, then given up
+  // A pop-up shows its first, blank page until a page of the sign-in commits: a chain of redirects (all of Access's,
+  // when its session is still good) looks blank all along. Still blank at RESEND_MS: sent to /reauth (never
+  // /reauth/start again: the cookie may be dropped already, and the login carries on from /reauth); still blank at
+  // GIVE_UP_MS and no login in progress (signed in, not out): closed, and Re-sign in opens a tab for STUCK_MS.
+  const RESEND_MS = 8000, GIVE_UP_MS = 30000, STUCK_MS = 60 * 60 * 1000;
   const WARN_S = 600;                    // the warning shows this long before the sign-in ends
   const POLL_MS = 5 * 60 * 1000;         // asked again this often (a re-sign-in elsewhere moves exp)
   const OUT_POLL_MS = 60 * 1000;         // signed out: asked this often (signed in again in another tab)
@@ -178,41 +182,45 @@ const SessionWatch = (() => {
   // keeps its opener only so this page can close it; the way back never needs it (BroadcastChannel, storage).
   // true: opened.
   function reauth(ev) {
-    if (st.stuck) return false;                       // a pop-up stuck on its blank page last time: a tab this time
+    if (now() < (st.stuckUntil || 0)) return false;   // a pop-up stuck on its blank page lately: a tab this time
     closePopup();
     const w = window.open(new URL(href(), location.href).href, "_blank", POPUP);
-    if (!w) return false;
+    if (!w || w.closed) return false;                 // blocked (some blockers hand back a closed window)
     if (ev && ev.preventDefault) ev.preventDefault();
     st.popup = w;
     watchPopup(w);
     return true;
   }
-  // A pop-up that never leaves its blank first page (#826: a browser left it "Untitled", about:blank): asked to load
-  // its address once more, then closed, and the next Re-sign in opens a tab instead. While it is on the blank page
-  // (or back on this hub) it is this origin and can be read; on the Access login it can't (it has moved on).
-  function blank(w) {
-    try { return !w.closed && w.location.href === "about:blank"; } catch (_) { return false; }
+  // A pop-up that never leaves its blank first page (#826: a browser left it "Untitled", about:blank). While it is on
+  // that page (or back on this hub) it is this origin and can be read; on the Access login it can't (moved on).
+  function at(w) {
+    try { return w && !w.closed ? w.location.href : ""; } catch (_) { return "elsewhere"; }
   }
   function watchPopup(w) {
-    const url = new URL(href(), location.href).href;
     setTimeout(() => {
-      if (st.popup !== w || !blank(w)) return;
-      try { w.location.replace(url); } catch (_) { /* moved on meanwhile */ }
-      setTimeout(() => {
-        if (st.popup !== w || !blank(w)) return;
-        st.stuck = true;
+      if (st.popup !== w || at(w) !== "about:blank") return;
+      try { w.location.replace(new URL(REAUTH_URL, location.href).href); } catch (_) { /* moved on meanwhile */ }
+      setTimeout(async () => {
+        if (st.popup !== w || at(w) !== "about:blank") return;
+        if ((await check()) === "out") return;        // its cookie dropped: a login in progress there, left alone
+        if (st.popup !== w || at(w) !== "about:blank") return;
+        st.stuckUntil = now() + STUCK_MS;
         closePopup();
-      }, BLANK_MS[1] - BLANK_MS[0]);
-    }, BLANK_MS[0]);
+      }, GIVE_UP_MS - RESEND_MS);
+    }, RESEND_MS);
   }
-  // signed in again: the pop-up this page opened is closed from here too (the pop-up's own close() can be refused)
   function closePopup() {
     const w = st.popup;
     st.popup = null;
     try { if (w && !w.closed) w.close(); } catch (_) { /* gone */ }
   }
+  // signed in again (any /reauth of this origin): checked; the pop-up this page opened is closed from here too when it
+  // is back on /reauth (its own close() can be refused), never while it is on the Access login (another tab's signal)
   function signal() {
-    closePopup();
+    const w = st.popup;
+    let home = "";
+    try { home = w && !w.closed ? w.location.pathname : ""; } catch (_) { /* elsewhere: on the login */ }
+    if (home === REAUTH_URL) closePopup();
     check(true);
   }
   function message(ev) {
