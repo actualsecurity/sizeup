@@ -748,10 +748,8 @@ def test_the_layer_as_the_county_serves_it_keeps_ids_and_draws_every_hydrant(tmp
     assert len(feats) == len(COUNTY) and all(f["properties"]["_k"] == f"c{f['id']}" for f in feats)
 
 
-def test_a_copy_without_ids_still_draws_every_hydrant_and_is_fetched_again(tmp_path):
-    """The hub's cached copy from before (no ids): every hydrant still served (not editable) until it is fetched again,
-    which the cache's signature makes happen at once."""
-    import hashlib
+def test_a_copy_without_ids_still_draws_every_hydrant(tmp_path):
+    """The hub's cached copy from before (no ids): every hydrant still served (not editable) until it is fetched again."""
     noid = [{k: v for k, v in json.loads(json.dumps(f)).items() if k != "id"} for f in COUNTY]
     c = make_cad(tmp_path)
     g = fake_gis(noid)
@@ -763,18 +761,48 @@ def test_a_copy_without_ids_still_draws_every_hydrant_and_is_fetched_again(tmp_p
     real = json.loads((Path(__file__).parent / "fixtures" / "wcgis" / "hydrants.geojson").read_text())["features"]
     set_layer(g, "hydrants", real)
     assert len(served(g)[0]["features"]) == len(real) > 0
-    # a cache written with the old signature (no ids asked for) is not read: the layer is fetched again
+
+
+def test_a_fresh_hub_with_the_cache_from_before_serves_it_and_fetches_again_at_once(tmp_path):
+    """A new hub task with the copy #831's hub saved (the old signature, no ids; checks.json saying it was looked at just
+    now): every hydrant served from it at once, the layer due at once (not in a month), then fetched whole with ids; the
+    Settings list counts every county hydrant with no overlay row."""
+    import hashlib
     layer = next(l for l in DEFAULT_LAYERS if l.key == "hydrants")
-    g2 = Gis(layers=(layer,), cache_dir=tmp_path / "gis2", fetch=arcgis_like(COUNTY), log=lambda m: None, load=False)
-    old = {"url": layer.url, "bbox": [round(x, 4) for x in g2.layer_bbox(layer)], "where": layer.where,
+    clock = [1.8e9]
+    fetch = arcgis_like(COUNTY)
+    g = Gis(layers=(layer,), cache_dir=tmp_path / "gis", fetch=fetch, log=lambda m: None, load=False, clock=lambda: clock[0])
+    old = {"url": layer.url, "bbox": [round(x, 4) for x in g.layer_bbox(layer)], "where": layer.where,
            "fields": [f for f, _ in layer.fields], "simplify_m": layer.simplify_m}
     sig = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()[:16]
-    assert sig != g2._signature(layer)
-    (tmp_path / "gis2").mkdir()
-    (tmp_path / "gis2" / "hydrants.geojson").write_text(json.dumps(
-        {"type": "FeatureCollection", "features": noid, "sizeup": {"at": 1.0, "signature": sig}}))
-    g2.load_cache()
-    assert g2.status["hydrants"]["at"] is None and g2.due() == ["hydrants"]
+    assert sig == g._signature(layer, ids=False) != g._signature(layer)
+    noid = [{k: v for k, v in json.loads(json.dumps(f)).items() if k != "id"} for f in COUNTY]
+    (tmp_path / "gis").mkdir()
+    (tmp_path / "gis" / "hydrants.geojson").write_text(json.dumps(
+        {"type": "FeatureCollection", "features": noid, "sizeup": {"at": clock[0] - 3600, "signature": sig, "how": "full"}}))
+    (tmp_path / "gis" / "checks.json").write_text(json.dumps({"layers": {"hydrants": {"checked": clock[0] - 60, "how": "full"}}}))
+    g.load_cache()
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert len(served(g)[0]["features"]) == len(COUNTY)                      # served from the old copy meanwhile
+    assert g.due() == ["hydrants"]                                           # and due now, not in a month
+    assert fetch.asked == []
+    assert g.refresh("hydrants") and g.status["hydrants"]["how"] == "full"
+    assert all(f.get("id") for f in g.data["hydrants"])
+    lst = c.hydrants.listing({})
+    assert lst["counts"]["all"] == lst["total"] == len(COUNTY) and lst["counts"]["edited"] == 0 and lst["counts"]["unkeyed"] == 0
+    assert json.loads((tmp_path / "gis" / "hydrants.geojson").read_text())["sizeup"]["signature"] == g._signature(layer)
+
+
+def test_no_cache_at_all_is_fetched_at_once(tmp_path):
+    layer = next(l for l in DEFAULT_LAYERS if l.key == "hydrants")
+    g = Gis(layers=(layer,), cache_dir=tmp_path / "gis", fetch=arcgis_like(COUNTY), log=lambda m: None, load=False)
+    g.load_cache()
+    assert g.status["hydrants"]["at"] is None and g.due() == ["hydrants"]
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert c.hydrants.listing({})["counts"]["all"] == 0                       # (nothing yet: the catalog says loading)
+    assert g.refresh("hydrants") and c.hydrants.listing({})["counts"]["all"] == len(COUNTY)
 
 
 def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
