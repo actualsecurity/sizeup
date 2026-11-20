@@ -38,7 +38,7 @@ const SessionWatch = (() => {
   // A pop-up shows its first, blank page until a page of the sign-in commits: a chain of redirects (all of Access's,
   // when its session is still good) looks blank all along. Still blank at RESEND_MS: sent to /reauth (never
   // /reauth/start again: the cookie may be dropped already, and the login carries on from /reauth); still blank at
-  // GIVE_UP_MS and no login in progress (signed in, not out): closed, and Re-sign in opens a tab for STUCK_MS.
+  // GIVE_UP_MS and still signed in (no login going on there): closed, and Re-sign in opens a tab for STUCK_MS.
   const RESEND_MS = 8000, GIVE_UP_MS = 30000, STUCK_MS = 60 * 60 * 1000;
   const WARN_S = 600;                    // the warning shows this long before the sign-in ends
   const POLL_MS = 5 * 60 * 1000;         // asked again this often (a re-sign-in elsewhere moves exp)
@@ -202,7 +202,7 @@ const SessionWatch = (() => {
       try { w.location.replace(new URL(REAUTH_URL, location.href).href); } catch (_) { /* moved on meanwhile */ }
       setTimeout(async () => {
         if (st.popup !== w || at(w) !== "about:blank") return;
-        if ((await check()) === "out") return;        // its cookie dropped: a login in progress there, left alone
+        if ((await check(true)) !== "ok") return;     // dropped (a login going on there) or not known: left alone
         if (st.popup !== w || at(w) !== "about:blank") return;
         st.stuckUntil = now() + STUCK_MS;
         closePopup();
