@@ -700,14 +700,17 @@ def test_in_a_browser_the_profile_fits_a_phone_and_the_wall_board(console):
     import os
     ctx, pg, base = console
     shots = os.environ.get("SIZEUP_SHOTS")
-    # a laptop: the chip folds to the minutes (Re-sign in: the chip itself, its hover, the menu); still on screen
+    # a laptop: the chip still on screen (folded to the minutes when the header is full: Re-sign in is the chip itself,
+    # its hover, the menu)
     pg.goto(base + "/cad")
     chip, me = pg.locator("#me .me-chip"), pg.locator("#me .me-btn")
     chip.wait_for()
     pg.locator("label.operator").wait_for(state="hidden")                 # whoami in, the stream on: the header as
     pg.wait_for_function("document.querySelector('#conn').textContent === 'Live'")   # it stays
     pg.wait_for_timeout(300)
-    assert " ".join(chip.inner_text().split()) in ("5 min", "4 min") and chip.get_attribute("aria-label").endswith(": Re-sign in")
+    # (folded to the minutes only when the header needs the room: measured, hdrfit.js)
+    assert " ".join(chip.inner_text().split()) in ("5 min", "4 min", "5 min \u00b7 Re-sign in", "4 min \u00b7 Re-sign in")
+    assert chip.get_attribute("aria-label").endswith(": Re-sign in")
     for out in (False, True):
         if out:      # (the state as signed out, drawn: what fits is the question here)
             pg.evaluate("SessionWatch._st.out = true; window.dispatchEvent(new CustomEvent('sizeup:session'))")

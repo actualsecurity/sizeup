@@ -231,7 +231,7 @@
   .wx-trend.falling { color: var(--text-2); }
   .wx-tides-in .wx-marine { white-space: normal; }
   .d-tides .wx-tides-body, .b-marine .wx-tides-body { min-inline-size: 0; }
-  @container hdr (width < 1100px) { .wx-now { display: none; } }
+  body > header.fold-wx > .wx-now { display: none; }          /* the header's fold (hdrfit.js): the weather gives way */
   .ap-line { color: var(--info); overflow-wrap: anywhere; }
   .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
@@ -1026,12 +1026,12 @@
   /* a phone: the header is two rows, the same on every view (brand, state, clock / views, tools) */
   @media (max-width: 640px) {
     html.cad { scroll-padding-block-start: calc(2 * var(--ctl) + var(--s-4)); }
-    body.cad > header { flex-wrap: wrap; row-gap: var(--s-1); padding-block: var(--s-1); }
+    body.cad > header { flex-wrap: wrap; row-gap: var(--s-1); padding-block: var(--s-1); --hdr-rows: 2; }   /* (hdrfit.js folds to keep it two) */
     body.cad > header::after { content: ""; flex-basis: 100%; order: 5; }
     body.cad > header > :is(.brand, .cad-title, .station) { order: 1; }
-    body.cad > header > .pill { order: 2; }
+    body.cad > header > :is(.pill, .dmode) { order: 2; }
     body.cad > header > .spacer { order: 3; }
-    body.cad > header > .clock { order: 4; }
+    body.cad > header > :is(.wx-now, .clock) { order: 4; }
     body.cad > header > .me { order: 4; }
     body.cad > header > .tabs { order: 6; }
     body.cad > header > :is(#alerts, #sound, #fullscreen, .nav) { order: 7; }

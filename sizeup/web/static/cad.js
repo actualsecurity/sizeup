@@ -449,7 +449,7 @@ function renderConn() {
   else if (cad.live && cad.live.mode() === "polling") {
     pill.className = "pill ok"; setText(pill, "Polling");
     pill.title = "Stream blocked on this network: polling every 2 s";
-  } else { pill.className = "pill ok"; setText(pill, "Live"); pill.title = ""; }
+  } else { pill.className = "pill ok"; setText(pill, "Live"); pill.title = "Live"; }   // (its words when folded to a dot)
   document.body.classList.toggle("stale", !!cad.lastMsgAt && age > LOST_AFTER_MS);
 }
 function renderClock() {              // the same clock on the console and the board: date, local time, Zulu
@@ -4005,14 +4005,14 @@ function renderCloud() {
   if (c.role === "hub") {
     pill.className = "pill " + (c.state === "ok" ? "ok" : "err");
     setText(pill, c.state === "ok" ? "Station online" : `Station ${c.word || "offline"}`);
-    pill.title = c.detail || "";
+    pill.title = c.detail || pill.textContent;           // (all of it when the header cuts it short or makes it a dot)
     return;
   }
   // (Settings > Station > Hub link switches forwarding on and off: no cloud, no pill and no banner)
   pill.className = "pill " + (c.state === "ok" ? "ok" : "warn");
   setText(pill, c.state === "ok" ? "Hub connected" : c.state === "starting" ? "Hub connecting"
     : c.blocked ? "Hub not sending" : "Hub unreachable");
-  pill.title = c.detail || "";
+  pill.title = c.detail || pill.textContent;
   const url = c.hub_url || "the hub";
   if (banner.dataset.url !== url) {
     banner.replaceChildren("Station console · changes stay local · CAD of record: ",

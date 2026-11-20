@@ -784,8 +784,6 @@
   :where(.me:empty) { display: none; }
   /* signed in through Access: who it is is the profile's (its menu, its hover); the read-only Operator field goes */
   .operator:has(> input.access) { display: none; }
-  /* the weather beside the clock gives way first when the header is full: the profile stays on screen */
-  :where(body > header) > #wx-now { flex: 0 1 auto; overflow: hidden; }
   :where(button.me-btn) { border-radius: 50%; padding: 0; }
   :where(.me-av) {
     display: inline-flex; align-items: center; justify-content: center; inline-size: var(--ctl-sm); block-size: var(--ctl-sm);
@@ -796,21 +794,36 @@
   :where(button.me-btn.err) .me-av { box-shadow: 0 0 0 calc(2 * var(--bw)) var(--err); }
   :where(a.me-chip) { text-decoration: none; }
   :where(a.me-chip):where(:hover, :focus-visible) { text-decoration: underline; }
-  @container hdr (width < 1700px) {
-    :where(#runcards-open, #alerts .nav, a[href="/monitor"]) .lbl { display: none; }
-    :where(#runcards-open, #alerts .nav, a[href="/monitor"]) { inline-size: var(--ctl); padding-inline: 0; }
+  /* the fold (hdrfit.js): measured, as many of these steps as it takes to fit, in this order; each one comes back when
+     there is room again. The profile button, the local time and the sign-in chip ("9 min") never go. */
+  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], #fullscreen, #hub-cad) .lbl { display: none; }
+  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], #fullscreen, #hub-cad) { inline-size: var(--ctl); padding-inline: 0; }
+  :where(body > header.fold-brand) :where(.brand-name, .station) { display: none; }
+  :where(body > header.fold-title) .cad-title { display: none; }
+  :where(body > header.fold-resign) .me-more { display: none; }   /* "9 min": Re-sign in is the chip itself, its hover, the menu */
+  /* (the weather: cad.css, beside its own rule) */
+  :where(body > header.fold-date) :where(#clock-date, .operator > .dim) { display: none; }
+  :where(body > header.fold-zulu) #clock-z { display: none; }
+  :where(body > header.fold-tabs) .tabs .tab .lbl { display: none; }
+  :where(body > header.fold-tabs) .tabs .tab { padding-inline: var(--s-2); }
+  /* a long state cut short (its whole text on hover); then a good state as a dot in its color: trouble keeps its words */
+  :where(body > header.fold-chips) > :where(.pill:not(.pa-badge), .station) {
+    display: inline-block; max-inline-size: 9rem; overflow: hidden; text-overflow: ellipsis;
+    line-height: calc(var(--tag-h) - 2 * var(--bw));
   }
-  @container hdr (width < 1500px) {
-    :where(.me-more) { display: none; }   /* the sign-in chip: "9 min" (Re-sign in: the chip itself, its hover, the menu) */
-    :where(#clock-date, #clock-z, .operator > .dim) { display: none; }
+  :where(body > header.fold-chips) .operator :is(input, select) { inline-size: 7rem; }
+  :where(body > header.fold-dots) > :where(.pill:is(.ok, .off, .tx-off)) {
+    inline-size: var(--s-3); block-size: var(--s-3); padding: 0; border-radius: 50%; color: transparent;
+    background: var(--c-dot, currentColor);
   }
-  @container hdr (width < 1340px) {     /* (1240 before the profile button, #818) */
-    :where(.cad-title, .station, .brand-name) { display: none; }
-  }
-  @container hdr (width < 1100px) {
-    :where(.tabs .tab, #fullscreen, #sound) .lbl { display: none; }
-    :where(.tabs .tab) { padding-inline: var(--s-2); }
-  }
+  :where(body > header.fold-dots) > :where(.pill.ok) { --c-dot: var(--ok); border-color: var(--ok); }
+  :where(body > header.fold-dots) > :where(.pill:is(.off, .tx-off)) { --c-dot: transparent; }
+  :where(body > header.fold-links) > :where(#runcards-open, a[href="/monitor"]) { display: none; }   /* as on a phone */
+  :where(body > header.fold-tight) { column-gap: var(--s-1); }
+  :where(body > header.fold-tight) .tabs .tab { padding-inline: var(--s-1); }
+  /* last: the texts (the state chips, the weather, the operator) may shrink, cut, rather than push the clock and the
+     profile off; never a control */
+  :where(body > header.fold-squeeze) > :where(.pill, .station, .wx-now, .operator) { flex-shrink: 1; min-inline-size: var(--s-3); overflow: hidden; }
 
   /* ---- the cloud banner, the read-only banner ------------------------------------------------------ */
   :where(.cloud-banner, .role-banner) { margin: var(--s-2) var(--gutter) 0; }
