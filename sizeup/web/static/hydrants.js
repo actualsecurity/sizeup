@@ -62,12 +62,45 @@ window.Hydrants = (() => {
       ["case", ["in", ["coalesce", ["get", "_st"], ""], ["literal", DOWN]], " · OOS", ["has", "_cls"], ["concat", " · ", ["get", "_cls"]], ""]];
   }
   const fmtDist = (m) => `${Math.round(m)} m`;
+  // the flow test's checks (sizeup/cad/hydrants.py check: the hub refuses the errors too): {error, notes}
+  const FLOW_HIGH = 2500, RATED_MAX = 10000;
+  function flowCheck(flow, s, r) {
+    const notes = [];
+    if (s != null && r != null) {
+      if (r >= s) return { error: "Residual must be under the static pressure", notes };
+      if (r < 20) notes.push("Residual under 20 psi: rated flow extrapolated");
+    } else if (flow != null && (s != null || r != null)) notes.push("One pressure only: class from the observed flow");
+    if (flow != null) {
+      if (flow > FLOW_HIGH) notes.push(`${flow} gpm is unusually high: check`);
+      const rated = ratedGpm(flow, s, r);
+      if (rated > RATED_MAX) return { error: `Rates ${rated} gpm at 20 psi (over ${RATED_MAX}): check the flow and pressures`, notes };
+    }
+    return { error: "", notes };
+  }
   // a call's row: "9001 · A 1200 gpm · OOS · 40 m"
   function line(h) {
     const cls = h.cls ? `${h.cls}${h.gpm != null ? ` ${h.gpm} gpm` : ""}` : "";
     return [h.number || "?", cls, SHORT[h.status] || "", h.dist_m != null ? fmtDist(h.dist_m) : ""].filter(Boolean).join(" · ");
   }
-  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
+  // the "@words" being typed at the caret of the Location box (the comment box's rule, cad.js placeTokenAt): {text, start, end}
+  function atToken(value, pos, taken = []) {
+    const before = value.slice(0, pos), at = before.lastIndexOf("@");
+    if (at < 0 || (at > 0 && !/\s/.test(before[at - 1]))) return null;
+    const text = before.slice(at + 1);
+    if (!text.trim() || /^\s/.test(text) || text.length > 60 || /[@\n]/.test(text)) return null;
+    if (taken.some((p) => text.toLowerCase().startsWith(p.label.toLowerCase()))) return null;
+    return { text, start: at, end: pos };
+  }
+  // a picked place into the text: "IFO @sam" -> "IFO @Sample Market ", and the refs still named in it
+  function takeAt(value, tok, p, places) {
+    const after = value.slice(tok.end).replace(/^[A-Za-z0-9.-]*/, "");
+    const lead = value.slice(0, tok.start) + "@" + p.label + (after.startsWith(" ") ? "" : " ");
+    const ref = { label: p.label, lat: p.lat, lon: p.lon, kind: p.kind || "place", sub: p.sub || "", source: p.source || "" };
+    const next = [...places.filter((x) => x.label !== p.label), ref];
+    return { value: lead + after, caret: lead.length, places: next };
+  }
+  const named = (text, places) => places.filter((p) => text.toLowerCase().includes(`@${p.label.toLowerCase()}`));
+  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, flowCheck, atToken, takeAt, named, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
   if (typeof document === "undefined") return api_;
 
   // ---- the marks: the county sprite's hydrant in each class's colour --------------------------------------------------
@@ -144,7 +177,33 @@ window.Hydrants = (() => {
   const when = (t) => (t ? new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "");
   const st = { seq: 0, move: null, gen: null };
 
-  function lines(h) {
+  // the Location text with each picked "@place" a chip: a click shows that place on this map (never the hydrant moved)
+  function locationEl(h, gm) {
+    const box = el("div", "hy-loc");
+    const ps = named(h.location, h.location_places || []).sort((a, b) => b.label.length - a.label.length);
+    let rest = h.location;
+    while (rest) {
+      let best = null;
+      for (const p of ps) {
+        const i = rest.toLowerCase().indexOf(`@${p.label.toLowerCase()}`);
+        if (i >= 0 && (!best || i < best.i)) best = { i, p };
+      }
+      if (!best) { box.append(rest); break; }
+      if (best.i) box.append(rest.slice(0, best.i));
+      const b = el("button", "chip place-tag");
+      b.type = "button";
+      if (window.Icon) b.append(Icon("locate"));
+      b.append(best.p.label);
+      b.title = `${best.p.label}${best.p.sub ? `, ${best.p.sub}` : ""}: show it on the map`;
+      const p = best.p;
+      b.addEventListener("click", (e) => { e.stopPropagation(); if (gm) gm.map.easeTo({ center: [p.lon, p.lat], zoom: Math.max(gm.map.getZoom(), 18), duration: 400 }); });
+      box.append(b);
+      rest = rest.slice(best.i + best.p.label.length + 1);
+    }
+    return box;
+  }
+
+  function lines(h, gm) {
     const out = [];
     const cl = el("div", "hy-line");
     cl.append(mark(h.cls, h.status));
@@ -163,8 +222,8 @@ window.Hydrants = (() => {
       if (dates.length) s.append(el("span", "dim", ` · ${dates.join(" · ")}`));
       out.push(s);
     }
-    const where = [h.location, h.district].filter(Boolean);           // (the town is the card's subtitle)
-    if (where.length) out.push(where.join(" · "));
+    if (h.location) out.push(locationEl(h, gm));                       // "IFO @Sample Market": a chip per place
+    if (h.district) out.push(h.district);                              // (the town is the card's subtitle)
     const kit = [h.thread ? THREADS[h.thread] || h.thread : "", h.outlets, h.main_in ? `${h.main_in}" main` : ""].filter(Boolean);
     if (kit.length) out.push(kit.join(" · "));
     const own = [h.owner ? OWNERS[h.owner] || h.owner : "", h.asset_id ? `Asset ${h.asset_id}` : "", h.body_color ? `${h.body_color} body` : ""].filter(Boolean);
@@ -191,7 +250,7 @@ window.Hydrants = (() => {
     const quick = { key, number: props._no || props.HYD_NUMBER || "", cls: props._cls || null, gpm: props._gpm ?? null,
                     status: props._st || "unknown", missing: !!props._miss, hub: !!props._hub, district: props.FIRENAME || "" };
     const draw = (h, more) => {
-      const ls = lines(h);
+      const ls = lines(h, gm);
       if (more) ls.push(...more);
       gm.control.close();
       gm.control.showInfo(`Hydrant ${h.number || "?"}`, h.town || (h.hub ? "Added here" : ""), ls,
@@ -253,16 +312,94 @@ window.Hydrants = (() => {
   const FORM = [   // [field, label, kind, extra]
     ["number", "Number", "text", 20], ["status", "Status", "select", STATUS], ["status_reason", "Reason", "text", 200],
     ["status_since", "Since", "date"], ["status_until", "Expected back", "date"],
-    ["flow_gpm", "Flow (gpm)", "number", [0, 20000, 1]], ["flow_date", "Flow test", "date"],
-    ["static_psi", "Static psi", "number", [0, 300, 0.1]], ["residual_psi", "Residual psi", "number", [0, 300, 0.1]],
+    ["flow_gpm", "Flow (gpm)", "number", [1, 5000, 1]], ["flow_date", "Flow test", "date"],
+    ["static_psi", "Static psi", "number", [1, 300, 0.1]], ["residual_psi", "Residual psi", "number", [0, 300, 0.1]],
     ["nfpa_class", "Class", "select", null], ["thread", "Thread", "select", THREADS], ["outlets", "Outlets", "text", 60],
-    ["main_in", "Main (in)", "number", [0, 60, 0.1]], ["owner", "Owner", "select", OWNERS], ["body_color", "Body colour", "text", 30],
+    ["main_in", "Main (in)", "number", [2, 24, 0.5]], ["owner", "Owner", "select", OWNERS], ["body_color", "Body colour", "text", 30],
     ["asset_id", "Asset id", "text", 40], ["location", "Location", "text", 120], ["inspected", "Inspected", "date"],
     ["notes", "Notes", "textarea", 500],
   ];
   const TIPS = { flow_gpm: "Flow as tested (with both pressures: the class uses the flow at 20 psi residual), or the rated capacity",
                  outlets: "e.g. 2x2.5, 1x4.5", number: "Empty: the county's", nfpa_class: "Empty: from the flow (NFPA 291)",
                  location: "Street, side, landmark", status_until: "Expected back in service" };
+
+  // The Location box: "@" finds a common place, a business or an address (GET /api/cad/places, nearest the hydrant first:
+  // the comment box's search); a picked one is written "@<label>" and kept with the text as a reference. Never the
+  // hydrant's point. Empty: the nearest address or place as the placeholder, "Use" fills it in.
+  function locationBox(lab, inp, h, at) {
+    const wrap = el("div", "hy-locbox");
+    const list = el("ol", "sugg note-sugg");
+    list.hidden = true;
+    list.setAttribute("role", "listbox");
+    inp.setAttribute("role", "combobox");
+    inp.setAttribute("aria-autocomplete", "list");
+    const pt = at ? [at[1], at[0]] : h.lat != null ? [h.lat, h.lon] : null;
+    const L = { places: [...(h.location_places || [])], items: [], idx: 0, tok: null, seq: 0, timer: null };
+    inp.hyPlaces = () => named(inp.value, L.places);
+    const close = () => { L.items = []; list.hidden = true; inp.setAttribute("aria-expanded", "false"); };
+    const take = (p) => {
+      const t = takeAt(inp.value, L.tok, p, L.places);
+      inp.value = t.value;
+      L.places = t.places;
+      inp.setSelectionRange(t.caret, t.caret);
+      close();
+    };
+    const draw = () => {
+      if (!L.items.length) return close();
+      list.replaceChildren(...L.items.map((p, i) => {
+        const li = el("li", i === L.idx ? "on" : "");
+        li.setAttribute("role", "option");
+        li.append(...(typeof suggestionHead === "function" ? suggestionHead(p) : [el("b", "", p.label)]));
+        if (p.sub) li.append(el("span", "town", p.sub));
+        li.addEventListener("mousedown", (e) => { e.preventDefault(); take(p); });
+        return li;
+      }), el("li", "hint dim small", "Tab take · Esc close"));
+      list.hidden = false;
+      inp.setAttribute("aria-expanded", "true");
+    };
+    inp.addEventListener("input", () => {
+      L.tok = atToken(inp.value, inp.selectionStart ?? inp.value.length, named(inp.value, L.places));
+      clearTimeout(L.timer);
+      if (!L.tok || L.tok.text.trim().length < 2) return close();
+      const q = L.tok.text.trim(), my = ++L.seq;
+      L.timer = setTimeout(async () => {
+        try {
+          const r = await api("GET", `/api/cad/places?q=${encodeURIComponent(q)}&limit=6${pt ? `&near=${pt[0]},${pt[1]}` : ""}`);
+          if (my !== L.seq) return;
+          L.items = (r.places || []).filter((p) => p.lat != null && p.lon != null);
+          L.idx = 0;
+          draw();
+        } catch (_) { close(); }
+      }, 180);
+    });
+    inp.addEventListener("keydown", (e) => {
+      if (!L.items.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); L.idx = (L.idx + (e.key === "ArrowDown" ? 1 : -1) + L.items.length) % L.items.length; draw(); }
+      else if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); take(L.items[L.idx]); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    inp.addEventListener("blur", () => setTimeout(close, 150));
+    wrap.append(inp, list);
+    if (!inp.value && pt) {                    // the nearest address or place: a suggestion only
+      api("GET", `/api/cad/geocode/here?lat=${pt[0]}&lon=${pt[1]}`).then((d) => {
+        const p = (d && (d.address || d.place)) || null;
+        if (!p || !p.label || inp.value) return;
+        inp.placeholder = `near ${p.label}`;
+        const use = el("button", "sm quiet", "Use");
+        use.type = "button";
+        use.title = `Fill in "near @${p.label}"`;
+        use.addEventListener("click", () => {
+          inp.value = "near ";
+          L.tok = { text: "", start: 5, end: 5 };
+          take({ ...p, lat: p.lat, lon: p.lon });
+          use.remove();
+        });
+        wrap.append(use);
+      }).catch(() => { /* no geocoder here: no suggestion */ });
+    }
+    lab.append(wrap);
+    return inp;
+  }
 
   // h: a hydrant ({key, ...}); at: [lon, lat] for a new one (no key)
   function editor(h, at) {
@@ -301,16 +438,25 @@ window.Hydrants = (() => {
       if (k === "number" && !isNew && !h.hub && !(h.number && h.number !== h.county_number)) inp.value = "";
       if (k === "number" && !h.hub) inp.placeholder = h.county_number || "";
       if (TIPS[k]) lab.title = TIPS[k];
-      lab.append(inp);
+      if (k === "location") locationBox(lab, inp, h, at);
+      else lab.append(inp);
       inputs[k] = inp;
       form.append(lab);
     }
     const cls = el("div", "hy-line hy-cls small");
+    const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    for (const k of ["flow_date", "inspected"]) inputs[k].max = today;          // never in the future (the hub checks too)
+    let fc = { error: "", notes: [] };
     const showCls = () => {
       const n = (x) => (inputs[x].value === "" ? null : Number(inputs[x].value));
-      const g = ratedGpm(n("flow_gpm"), n("static_psi"), n("residual_psi"));
+      const s = n("static_psi"), r = n("residual_psi"), flow = n("flow_gpm");
+      fc = flowCheck(flow, s, r);
+      const g = s != null && r != null ? ratedGpm(flow, s, r) : ratedGpm(flow, null, null);
       const c = inputs.nfpa_class.value || classOf(g);
-      cls.replaceChildren(mark(c, inputs.status.value), el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : "No class (no flow)"));
+      const parts = [mark(c, inputs.status.value), el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : "No class (no flow)")];
+      if (fc.error) parts.push(el("span", "error", fc.error));
+      for (const t of fc.notes) parts.push(el("span", "warn", t));
+      cls.replaceChildren(...parts);
     };
     for (const k of ["flow_gpm", "static_psi", "residual_psi", "nfpa_class", "status"]) inputs[k].addEventListener("input", showCls);
     showCls();
@@ -340,7 +486,18 @@ window.Hydrants = (() => {
     document.body.append(ov);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      showCls();
+      if (fc.error) { setText(err, fc.error); return; }
+      const fl = Number(inputs.flow_gpm.value);
+      if (inputs.flow_gpm.value !== "" && fl > FLOW_HIGH && String(fl) !== String(h.flow_gpm ?? "")
+          && !(await UI.confirm(`${fl} gpm is unusually high for one hydrant. Save it anyway?`, { ok: "Save", danger: false }))) return;
+      if (inputs.status_since.value && inputs.status_until.value && inputs.status_until.value < inputs.status_since.value) {
+        setText(err, "Expected back is before Since"); return;
+      }
       const body = { operator: operator() };
+      const lp = inputs.location.hyPlaces ? inputs.location.hyPlaces() : [];
+      if (JSON.stringify(lp) !== JSON.stringify(named(inputs.location.value, h.location_places || []))
+          || inputs.location.value.trim() !== (h.location || "")) body.location_places = lp;
       for (const [k, , kind] of FORM) {
         const v = inputs[k].value.trim();
         const was = h[k] === null || h[k] === undefined ? (k === "status" ? "unknown" : "") : String(h[k]);
@@ -348,12 +505,13 @@ window.Hydrants = (() => {
         if (isNew ? v !== "" && !(k === "status" && v === "unknown") : v !== cmp) body[k] = kind === "number" && v !== "" ? Number(v) : v;
       }
       try {
+        let out = null;
         if (isNew) {
-          await api("POST", "/api/cad/hydrants", { ...body, lat: at[1], lon: at[0] });
-          UI.toast("Hydrant added");
+          out = await api("POST", "/api/cad/hydrants", { ...body, lat: at[1], lon: at[0] });
+          UI.toast("Hydrant added", "ok", ((out && out.warnings) || []).join(" · "));
         } else if (Object.keys(body).length > 1) {
-          await api("POST", `/api/cad/hydrants/${encodeURIComponent(h.key)}`, body);
-          UI.toast(`Hydrant ${h.number || h.key} saved`);
+          out = await api("POST", `/api/cad/hydrants/${encodeURIComponent(h.key)}`, body);
+          UI.toast(`Hydrant ${h.number || h.key} saved`, "ok", ((out && out.warnings) || []).join(" · "));
         }
         UI.dialog.close(ov);
         changed();
@@ -612,6 +770,11 @@ window.Hydrants = (() => {
     if (pv.errors.length) {
       const ol = el("ol", "hy-errs small");
       for (const e of pv.errors) ol.append(el("li", "error", `Line ${e.line}${e.key ? ` (${e.key})` : ""}: ${e.error}`));
+      card.append(ol);
+    }
+    if ((pv.warnings || []).length) {
+      const ol = el("ol", "hy-errs small");
+      for (const w of pv.warnings) ol.append(el("li", "warn", `Line ${w.line}${w.key ? ` (${w.key})` : ""}: ${w.warning}`));
       card.append(ol);
     }
     if (pv.preview.length) {

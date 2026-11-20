@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import re
 import threading
@@ -82,22 +83,68 @@ FIELDS: dict[str, tuple[str, object]] = {
     "status_reason": ("text", 200),
     "status_since": ("date", None),
     "status_until": ("date", None),   # expected back
-    "flow_gpm": ("int", (0, 20000)),
+    "flow_gpm": ("int", (1, 5000)),      # observed at the test (one hydrant: well under this); over 2500 a warning
     "flow_date": ("date", None),
-    "static_psi": ("float", (0.0, 300.0)),
+    "static_psi": ("float", (1.0, 300.0)),
     "residual_psi": ("float", (0.0, 300.0)),
     "nfpa_class": ("enum", tuple(c for c, _, _ in CLASSES)),   # "" : from the flow
     "thread": ("enum", tuple(THREADS)),
     "outlets": ("text", 60),          # "2x2.5, 1x4.5"
-    "main_in": ("float", (0.0, 60.0)),
+    "main_in": ("float", (2.0, 24.0)),
     "owner": ("enum", tuple(OWNERS)),
     "body_color": ("text", 30),
     "asset_id": ("text", 40),
-    "location": ("text", 120),        # street / where it stands
+    "location": ("text", 160),        # where it stands: "IFO @Sample Market", "rear of @12 Sample St" (location_places)
     "inspected": ("date", None),
     "notes": ("text", 500),
 }
-AUDITED = (*FIELDS, "lat", "lon", "removed")
+AUDITED = (*FIELDS, "location_places", "lat", "lon", "removed")
+FLOW_HIGH = 2500                      # an observed flow over this: "unusually high: check" (allowed)
+RATED_MAX = 10000                     # a rated flow (at 20 psi) over this: refused (a typo in the flow or the pressures)
+OUTLET = re.compile(r"(?:(\d{1,2})\s*[x×*]\s*)?(\d(?:\.\d{1,3})?|\d?½)\s*(?:\"|in\b|inch(?:es)?\b)?\s*([A-Za-z][A-Za-z ]{0,19})?")
+
+
+def outlets_ok(text: str) -> None:
+    """"2x2.5, 1x4.5 steamer": each a count (1-6) and a size in inches (1-6), a word after it; CadError otherwise."""
+    for part in re.split(r"[,;/+]", text or ""):
+        part = part.strip()
+        if not part:
+            continue
+        m = OUTLET.fullmatch(part)
+        if not m:
+            raise CadError(f"outlets: count x size in inches, e.g. 2x2.5, 1x4.5 (not \"{part[:20]}\")")
+        n = int(m.group(1) or 1)
+        size = m.group(2)
+        size = float(size.replace("½", "") or 0) + (0.5 if "½" in size else 0)
+        if not (1 <= n <= 6 and 1 <= size <= 6):
+            raise CadError(f"outlets: {part[:20]}: 1-6 outlets of 1-6 inches")
+
+
+def check(rec: dict, today: str) -> list[str]:
+    """The rules across fields, on a hydrant as it would be saved (CadError: refused); the warnings (allowed)."""
+    warn = []
+    flow, s, r = rec.get("flow_gpm"), rec.get("static_psi"), rec.get("residual_psi")
+    if s is not None and r is not None:
+        if r >= s:
+            raise CadError("residual_psi: under the static pressure")
+        if r < 20:
+            warn.append("Residual under 20 psi: the rated flow is extrapolated")
+    elif flow is not None and (s is not None or r is not None):
+        warn.append("One pressure only: the class is from the observed flow")
+    if flow is not None:
+        if flow > FLOW_HIGH:
+            warn.append(f"Flow {flow} gpm is unusually high: check")
+        rated = rated_gpm(flow, s, r)
+        if rated is not None and rated > RATED_MAX:
+            raise CadError(f"flow_gpm: {flow} gpm at {s:g}/{r:g} psi rates {rated} gpm at 20 psi, over {RATED_MAX}: check the flow "
+                           "and the pressures")
+    for k in ("flow_date", "inspected"):
+        if rec.get(k) and rec[k] > today:
+            raise CadError(f"{k}: not in the future")
+    if rec.get("status_since") and rec.get("status_until") and rec["status_until"] < rec["status_since"]:
+        raise CadError("status_until: on or after status_since")
+    outlets_ok(rec.get("outlets") or "")
+    return warn
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hydrants (
@@ -116,6 +163,8 @@ CREATE TABLE IF NOT EXISTS hydrants (
   nfpa_class TEXT,                      -- set by an admin; NULL: from the flow
   thread TEXT, outlets TEXT NOT NULL DEFAULT '', main_in REAL, owner TEXT, body_color TEXT NOT NULL DEFAULT '',
   asset_id TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', inspected TEXT, notes TEXT NOT NULL DEFAULT '',
+  location_places TEXT NOT NULL DEFAULT '[]', -- the "@" places in location (the comment box's: label, lat, lon ...); never
+                                        -- the hydrant's point
   created_by TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
   updated_by TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
 );
@@ -124,7 +173,7 @@ CREATE INDEX IF NOT EXISTS hydrants_county ON hydrants(county_id);
 TEXT_COLS = {"number", "status_reason", "outlets", "body_color", "asset_id", "location", "notes"}   # NOT NULL '' columns
 # a hydrant with no overlay row: what each column would be
 DEFAULTS = {k: ("unknown" if k == "status" else "" if k in TEXT_COLS else None) for k in FIELDS} | {
-    "lat": None, "lon": None, "removed": 0}
+    "lat": None, "lon": None, "removed": 0, "location_places": "[]"}
 
 
 # ---- pure helpers ---------------------------------------------------------------------------------------------------
@@ -249,6 +298,9 @@ class Hydrants:
         with self.store.lock:
             if self.store.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'incidents'").fetchone():
                 self.store.db.executescript(SCHEMA)
+                have = {r[1] for r in self.store.db.execute("PRAGMA table_info(hydrants)")}
+                if "location_places" not in have:      # a table from #831
+                    self.store.db.execute("ALTER TABLE hydrants ADD COLUMN location_places TEXT NOT NULL DEFAULT '[]'")
 
     # -- the county layer and the merge -------------------------------------------------------------------------------
 
@@ -450,6 +502,7 @@ class Hydrants:
             if k not in out or k == "number":
                 out[k] = r.get(k, "" if k in TEXT_COLS else None)
         out["number"] = it["number"]
+        out["location_places"] = _places(r.get("location_places"))
         out["status"] = it["status"]
         return out
 
@@ -594,8 +647,15 @@ class Hydrants:
         if g is not None and hasattr(g, "overlay_changed"):
             g.overlay_changed(LAYER)
 
-    def _fields(self, body: dict) -> dict:
-        return {k: clean(k, body.get(k)) for k in FIELDS if k in body}
+    def _fields(self, body: dict, row: dict | None = None) -> dict:
+        """The fields the body sets, cleaned; location_places (the "@" places the comment box's picker took) kept only
+        when its "@label" is in the location text (the comment box's rule: Cad._note_places), as JSON."""
+        f = {k: clean(k, body.get(k)) for k in FIELDS if k in body}
+        if "location_places" in body or "location" in f:
+            text = f["location"] if "location" in f else (row or {}).get("location") or ""
+            raw = body["location_places"] if "location_places" in body else _places((row or {}).get("location_places"))
+            f["location_places"] = json.dumps(type(self.cad)._note_places(raw, text or ""), separators=(",", ":"))
+        return f
 
     def _bounds(self) -> tuple | None:
         g = getattr(self.cad, "gis", None)
@@ -633,6 +693,12 @@ class Hydrants:
         Editor._audit(db, now, op, SECTION, it["key"], {k: r.get(k) for k in diff}, diff)
         return sorted(diff)
 
+    def _today(self) -> str:
+        from datetime import datetime
+
+        from sizeup.cad.store import TZ
+        return datetime.fromtimestamp(self.cad.clock(), TZ).date().isoformat()
+
     def _stored(self, f: dict) -> dict:
         return {k: ("" if v is None and k in TEXT_COLS else v) for k, v in f.items()}
 
@@ -640,7 +706,7 @@ class Hydrants:
         """POST /api/cad/hydrants/<key> {fields ..., lat?, lon? (a move), action?: remove | restore | reset_position}."""
         it = self._item_or_404(key)
         op = str(body.get("operator") or "")[:320]
-        f = self._stored(self._fields(body))
+        f = self._stored(self._fields(body, it["row"]))
         act = str(body.get("action") or "")
         if act == "remove":
             f["removed"] = 1
@@ -658,13 +724,14 @@ class Hydrants:
             f.update(lat=lat, lon=lon)
         if it["missing"] and "lat" in f and f["lat"] is None:
             raise CadError("reset_position: the county no longer has this hydrant")
+        warn = check({**DEFAULTS, **(it["row"] or {}), **f}, self._today()) if any(k in FIELDS for k in f) else []
         now = self.cad.clock()
         with self.store.tx() as db:
             changed = self._write(db, it, f, op, now)
         if changed:
             self._bump()
         it = self.index()["by_key"][key]
-        return {"ok": True, "hydrant": self.shown(it), "changed": changed}
+        return {"ok": True, "hydrant": self.shown(it), "changed": changed, "warnings": warn}
 
     def create(self, body: dict) -> dict:
         """POST /api/cad/hydrants {lat, lon, number?, fields ...}: a hydrant the county lacks (a private one, a new one)."""
@@ -673,6 +740,7 @@ class Hydrants:
         lat, lon = point(body.get("lat"), body.get("lon"))
         self._check_point(None, lat, lon)
         f = self._stored(self._fields(body))
+        warn = check({**DEFAULTS, **f}, self._today())
         op = str(body.get("operator") or "")[:320]
         now = self.cad.clock()
         with self.store.tx() as db:
@@ -686,7 +754,7 @@ class Hydrants:
             Editor._audit(db, now, op, SECTION, key, None, {k: r[k] for k in AUDITED if r.get(k) not in (None, "", 0)} | {
                 "lat": lat, "lon": lon})
         self._bump()
-        return {"ok": True, "hydrant": self.shown(self.index()["by_key"][key]), "key": key}
+        return {"ok": True, "hydrant": self.shown(self.index()["by_key"][key]), "key": key, "warnings": warn}
 
     # -- CSV ------------------------------------------------------------------------------------------------------------
 
@@ -750,6 +818,8 @@ class Hydrants:
         idx = self.index()
         changes, errors, seen, new = [], [], set(), []
         new_at: list = []
+        warnings: list = []
+        today = self._today()
         unchanged = rows = 0
         for line, row in enumerate(rd, start=2):
             if line - 1 > MAX_IMPORT_ROWS:
@@ -761,6 +831,10 @@ class Hydrants:
             key = cells.get("key", "").strip()
             try:
                 f = {k: clean(k, cells[k]) for k in writable if k in FIELDS}
+                if "location" in f and key:                # plain text in the file: the "@" places still named in it kept
+                    it0 = idx["by_key"].get(key) if KEY_RE.fullmatch(key) else None
+                    old = _places((it0["row"] or {}).get("location_places")) if it0 else []
+                    f["location_places"] = json.dumps(type(self.cad)._note_places(old, f["location"] or ""), separators=(",", ":"))
                 f = self._stored(f)
                 if "removed" in writable:
                     f["removed"] = 1 if cells["removed"].strip().lower() in ("yes", "y", "1", "true", "removed") else 0
@@ -777,6 +851,8 @@ class Hydrants:
                     there = self.near(f["lat"], f["lon"], n=1, within=SAME_M)
                     if there or any(metres(a, b, f["lat"], f["lon"]) <= SAME_M for a, b in new_at):
                         raise CadError(f"a hydrant within {SAME_M:g} m already ({there[0]['key'] if there else 'this file'})")
+                    for w in check({**DEFAULTS, **f}, today):
+                        warnings.append({"line": line, "key": "", "warning": w})
                     new_at.append((f["lat"], f["lon"]))
                     new.append((line, f))
                     continue
@@ -800,6 +876,9 @@ class Hydrants:
                 r = it["row"] or DEFAULTS
                 base = {k: r.get(k, DEFAULTS[k]) for k in f}
                 diff = {k: (base[k], v) for k, v in f.items() if base[k] != v}
+                if any(k in FIELDS for k in diff):
+                    for w in check({**DEFAULTS, **(it["row"] or {}), **f}, today):
+                        warnings.append({"line": line, "key": key, "warning": w})
                 if diff:
                     changes.append({"key": key, "number": it["number"], "line": line, "changes": diff, "_it": it,
                                     "_f": {k: v for k, (_, v) in diff.items()}})
@@ -810,7 +889,7 @@ class Hydrants:
         out = {"rows": rows,
                "changed": len(changes), "unchanged": unchanged, "new": len(new), "errors": errors[:200],
                "error_count": len(errors), "ignored": ignored, "columns": sorted(writable),
-               "read_only": [h for h, c in zip(head, cols) if c in self.READ_ONLY]}
+               "read_only": [h for h, c in zip(head, cols) if c in self.READ_ONLY], "warnings": warnings[:200]}
         out["preview"] = [{"key": c["key"], "number": c["number"], "line": c["line"],
                            "changes": {k: list(v) for k, v in c["changes"].items()}} for c in changes[:500]]
         out["preview"] += [{"key": "(new)", "number": f.get("number") or "", "line": ln,
@@ -839,6 +918,14 @@ class Hydrants:
             self._bump()
         out["applied"] = True
         return out
+
+
+def _places(v) -> list[dict]:
+    try:
+        out = json.loads(v) if isinstance(v, str) and v else (v or [])
+    except ValueError:
+        return []
+    return out if isinstance(out, list) else []
 
 
 def _num_key(n: str) -> tuple:

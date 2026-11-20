@@ -321,9 +321,9 @@ def test_bad_values_are_refused(cad, body, err):
 
 
 def test_dates_as_a_spreadsheet_saves_them(cad):
-    out = cad.hydrants.edit("c990001", {"flow_date": "6/30/2027", "inspected": "2026-11-01T00:00", "status_since": "11/2/2026 0:00"})
+    out = cad.hydrants.edit("c990001", {"flow_date": "6/30/2026", "inspected": "2026-11-01T00:00", "status_since": "11/2/2026 0:00"})
     hh = out["hydrant"]
-    assert (hh["flow_date"], hh["inspected"], hh["status_since"]) == ("2027-06-30", "2026-11-01", "2026-11-02")
+    assert (hh["flow_date"], hh["inspected"], hh["status_since"]) == ("2026-06-30", "2026-11-01", "2026-11-02")
 
 
 def test_the_labels_and_formula_guard_are_read(cad):
@@ -546,6 +546,13 @@ out.dist = H.fmtDist(42.4);
 out.line = H.line({ number: "9001", cls: "A", gpm: 1200, status: "oos", dist_m: 40 });
 out.lineBare = H.line({ number: "9002", cls: null, gpm: null, status: "unknown", dist_m: 120 });
 out.keys = H.LEGEND.map((l) => l[0]);
+out.fc = [H.flowCheck(12000, 80, 10), H.flowCheck(1000, 60, 60), H.flowCheck(3000, null, null), H.flowCheck(1000, 80, 10),
+          H.flowCheck(900, 70, null), H.flowCheck(1000, 80, 60)];
+const tok = H.atToken("IFO @sam", 8);
+out.tok = tok;
+out.take = H.takeAt("IFO @sam", tok, { label: "Sample Market", lat: 41, lon: -73.6, kind: "place", sub: "Sampletown" }, []);
+out.noTok = [H.atToken("a@b", 3), H.atToken("@ x", 3), H.atToken("@Sample Market x", 16, [{ label: "Sample Market" }])];
+out.named = H.named("rear of @Sample Market", [{ label: "Sample Market" }, { label: "Gone" }]).map((p) => p.label);
 out.down = H.DOWN;
 console.log(JSON.stringify(out));
 """
@@ -566,6 +573,14 @@ def test_the_map_helpers_in_node(tmp_path):
     assert "_cls" in json.dumps(out["label"]) and "_no" in json.dumps(out["label"])
     assert out["line"] == "9001 · A 1200 gpm · OOS · 40 m" and out["lineBare"] == "9002 · 120 m"
     assert out["keys"] == ["AA", "A", "B", "C", "unk", "down"]
+    fc = out["fc"]
+    assert "over 10000" in fc[0]["error"] and "under the static" in fc[1]["error"]
+    assert fc[2]["error"] == "" and "unusually high" in fc[2]["notes"][0]
+    assert fc[3]["error"] == "" and "under 20 psi" in fc[3]["notes"][0]
+    assert "One pressure" in fc[4]["notes"][0] and fc[5] == {"error": "", "notes": []}
+    assert out["tok"] == {"text": "sam", "start": 4, "end": 8}
+    assert out["take"]["value"] == "IFO @Sample Market " and out["take"]["places"][0]["label"] == "Sample Market"
+    assert out["noTok"] == [None, None, None] and out["named"] == ["Sample Market"]
 
 
 def test_the_script_wires_the_layer_card_editor_and_settings():
@@ -858,3 +873,87 @@ def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
         browser.close()
         pw.stop()
         ws.shutdown()
+
+
+# -- the flow test's checks (server, CSV, form: the hub refuses what the form does) ---------------------------------------
+
+@pytest.mark.parametrize("body,err", [
+    ({"flow_gpm": 0}, "flow_gpm"), ({"flow_gpm": 5001}, "flow_gpm"), ({"flow_gpm": 12000}, "flow_gpm"),
+    ({"static_psi": 0}, "static_psi"), ({"static_psi": 301}, "static_psi"), ({"residual_psi": -1}, "residual_psi"),
+    ({"flow_gpm": 1000, "static_psi": 60, "residual_psi": 60}, "under the static"),
+    ({"flow_gpm": 1000, "static_psi": 60, "residual_psi": 70}, "under the static"),
+    ({"flow_gpm": 5000, "static_psi": 100, "residual_psi": 80}, "over 10000"),      # rates ~10,600 at 20 psi
+    ({"main_in": 1}, "main_in"), ({"main_in": 30}, "main_in"),
+    ({"outlets": "2x2.5, 9x4.5"}, "outlets"), ({"outlets": "1x12"}, "outlets"), ({"outlets": "lots of them"}, "outlets"),
+    ({"flow_date": "2099-01-01"}, "not in the future"), ({"inspected": "2099-01-01"}, "not in the future"),
+    ({"status_since": "2026-11-10", "status_until": "2026-11-01"}, "status_until"),
+])
+def test_the_flow_test_checks_refuse(cad, body, err):
+    with pytest.raises(hy.CadError, match=err):
+        cad.hydrants.edit("c990001", body)
+    assert cad.store.q("SELECT * FROM hydrants") == []
+
+
+def test_the_flow_test_checks_warn(cad):
+    h = cad.hydrants
+    out = h.edit("c990001", {"flow_gpm": 3000})
+    assert out["changed"] == ["flow_gpm"] and any("unusually high" in w for w in out["warnings"])
+    out = h.edit("c990002", {"flow_gpm": 1000, "static_psi": 80, "residual_psi": 10})
+    assert any("under 20 psi" in w for w in out["warnings"]) and out["hydrant"]["gpm"] == hy.rated_gpm(1000, 80, 10)
+    out = h.edit("c990003", {"flow_gpm": 900, "static_psi": 70})
+    assert any("One pressure" in w for w in out["warnings"]) and out["hydrant"]["gpm"] == 900 and out["hydrant"]["cls"] == "B"
+    assert h.edit("c990004", {"outlets": "2 x 2½\", 1x4.5 steamer", "main_in": 8, "flow_date": cad.hydrants._today()})["changed"]
+    # a later edit is checked against what is saved: residual over the saved static
+    with pytest.raises(hy.CadError, match="under the static"):
+        h.edit("c990002", {"residual_psi": 85})
+
+
+def test_the_flow_test_checks_on_csv_import(cad):
+    text = ("key,flow_gpm,static_psi,residual_psi,main_in,flow_date\n"
+            "c990001,12000,80,10,,\n"                                       # over the hard limit
+            "c990002,1000,60,65,,\n"                                         # residual over static
+            "c990003,3000,,,8,\n"                                            # high: a warning, allowed
+            "c990004,,,,40,\n"                                               # main too big
+            "c990005,800,,,,2099-12-31\n")                                   # a test in the future
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": text})
+    assert {e["line"] for e in pv["errors"]} == {2, 3, 5, 6}
+    assert [w["line"] for w in pv["warnings"]] == [4] and "unusually high" in pv["warnings"][0]["warning"]
+
+
+# -- Location: the "@" places (text + references), never the hydrant's point ------------------------------------------------
+
+def test_the_location_keeps_its_places_and_never_moves_the_hydrant(cad):
+    h = cad.hydrants
+    before = h.index()["by_key"]["c990001"]
+    far = {"label": "Sample Market", "lat": LAT0 + 0.004, "lon": LON0 + 0.004, "kind": "place", "sub": "Sampletown"}
+    out = h.edit("c990001", {"location": "IFO @Sample Market", "location_places": [far]})
+    hh = out["hydrant"]
+    assert hh["location"] == "IFO @Sample Market" and hh["location_places"][0]["label"] == "Sample Market"
+    assert (hh["lat"], hh["lon"]) == (before["lat"], before["lon"]) and hh["nudge_m"] is None      # never moved
+    assert by_key(served(cad.gis)[0])["c990001"]["geometry"]["coordinates"] == [LON0, LAT0]
+    # a place no longer named in the text goes; one never named is not kept
+    out = h.edit("c990001", {"location": "Rear of the lot"})
+    assert out["hydrant"]["location_places"] == []
+    out = h.edit("c990001", {"location": "near the gate", "location_places": [far]})
+    assert out["hydrant"]["location_places"] == []
+    with pytest.raises(hy.CadError, match="places"):
+        h.edit("c990001", {"location": "@X", "location_places": [{"label": "X"}]})
+    # the CSV has the text only; an import keeps the places still named in it
+    h.edit("c990002", {"location": "across from @Sample Market", "location_places": [far]})
+    r = next(r for r in rows_of(h.csv({})[0]) if r["key"] == "c990002")
+    assert r["location"] == "across from @Sample Market" and "location_places" not in r
+    h.import_csv({"action": "apply", "csv": "key,location\nc990002,rear of @Sample Market\n"})
+    assert h.one("c990002")["hydrant"]["location_places"][0]["label"] == "Sample Market"
+    assert h.index()["by_key"]["c990002"]["lat"] == pytest.approx(LAT0 + DLAT)
+
+
+def test_a_table_from_831_gets_the_new_column(tmp_path):
+    import sqlite3
+    c = make_cad(tmp_path)
+    db = sqlite3.connect(str(tmp_path / "cad.sqlite"))
+    db.execute("ALTER TABLE hydrants DROP COLUMN location_places")             # the table as #831 made it
+    db.commit()
+    db.close()
+    c2 = make_cad(tmp_path)
+    wire(c2, fake_gis())
+    assert c2.hydrants.edit("c990001", {"location": "IFO @A", "location_places": [{"label": "A", "lat": 41.0, "lon": -73.66}]})["changed"]
