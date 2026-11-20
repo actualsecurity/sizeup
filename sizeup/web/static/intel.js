@@ -4,7 +4,8 @@
 //   IntelCard.column(list, state, deps)   the console's 60 Control column: one row per open event at map or push
 //                                         (the state's "intel": {open}; only for a signed-in viewer). Category · town,
 //                                         the place (hollow "?" when unconfirmed), WHAT / WHERE, play its clips,
-//                                         Useful / Noise, Dismiss (dispatchers), More info (its page,
+//                                         Useful / Noise / Wrong place, Dismiss (dispatchers): icon buttons, named
+//                                         in their hovers; More info (its page,
 //                                         /cad#prealert/intel/<id>: prealert-info.js). deps: {api, operator, time,
 //                                         readonly, more}
 //   IntelSettings.mount(card)             Settings > System > Intel: the kill switch, caps, each pack's mode and
@@ -21,6 +22,16 @@ window.IntelCard = (() => {
     return n;
   }
   const pct = (x) => `${Math.round((x || 0) * 100)}%`;
+  // a card's icon action (icons.js Icon.button; its name as text where there are no icons): "…" while busy
+  function iconBtn(icon, name, title, busy, fn, cls = "") {
+    const x = window.Icon ? Icon.button(icon, name, title, cls) : el("button", `mini ${cls}`, name);
+    x.type = "button";
+    if (!window.Icon) x.title = title;
+    if (busy) x.replaceChildren("…");
+    x.disabled = busy;
+    x.addEventListener("click", fn);
+    return x;
+  }
   function play(id, b) {
     if (st.audio) st.audio.pause();
     if (st.playing === id) { st.playing = ""; b.textContent = "▶"; return; }
@@ -75,7 +86,7 @@ window.IntelCard = (() => {
     }
     li.append(src);
     const more = () => {
-      const m = el("a", "nav mini aa-more", "More info");
+      const m = el("a", "nav mini quiet aa-more", "More info");
       m.href = window.PrealertInfo ? PrealertInfo.href("intel", e.id) : `#prealert/intel/${e.id}`;
       m.title = "Its page: the full transcripts and their audio, the place, site history, the outcome";
       m.addEventListener("click", (ev) => ev.stopPropagation());
@@ -100,20 +111,16 @@ window.IntelCard = (() => {
         st.busy.delete(e.id);
       }
     };
-    const b = (text, title, fn, cls = "mini") => {
-      const x = el("button", cls, busy ? "…" : text);
-      x.type = "button";
-      x.title = title;
-      x.disabled = busy;
-      x.addEventListener("click", fn);
-      return x;
-    };
-    row.append(b("Useful", "It was real", act("feedback", { verdict: "useful" }, "Noted: useful")),
-      b("Noise", "Nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise")),
-      b("Wrong place", "The place is wrong", act("feedback", { verdict: "wrong_place" }, "Noted: wrong place")));
+    // icon buttons (a narrow column never cuts their names short): the name is the aria-label, the hover says it all
+    const b = (icon, name, title, fn, cls = "") => iconBtn(icon, name, title, busy, fn, cls);
+    const acts = el("span", "aa-acts");             // (they wrap together, under More info, in a narrow column)
+    acts.append(b("thumbs-up", "Useful", "It was real", act("feedback", { verdict: "useful" }, "Noted: useful")),
+      b("volume-x", "Noise", "Nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise")),
+      b("map-pin-off", "Wrong place", "The place is wrong", act("feedback", { verdict: "wrong_place" }, "Noted: wrong place")));
     if (typeof canDo !== "function" || canDo("dispatch")) {
-      row.append(b("Dismiss", "Off the list (logged as noise)", act("dismiss", {}, ""), "mini pa-dismiss"));
+      acts.append(b("x", "Dismiss", "Off the list (logged as noise)", act("dismiss", {}, ""), "pa-dismiss"));
     }
+    row.append(acts);
     li.append(row);
     return li;
   }

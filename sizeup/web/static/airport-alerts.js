@@ -90,7 +90,7 @@ window.AirportAlerts = (() => {
 
   // the pre-alert's own page (prealert-info.js): every viewer may open it
   function moreInfo(a) {
-    const m = el("a", "nav mini aa-more", "More info");
+    const m = el("a", "nav mini quiet aa-more", "More info");
     m.href = window.PrealertInfo ? PrealertInfo.href("airport", a.id) : `#prealert/airport/${a.id}`;
     m.title = "Its page: the transmissions and their audio, the place, site history, the outcome";
     m.addEventListener("click", (ev) => ev.stopPropagation());
@@ -180,9 +180,12 @@ window.AirportAlerts = (() => {
       row.append(el("span", "aa-ack", `Acknowledged${d.acknowledged.by ? ` · ${d.acknowledged.by}` : ""}`));
       acc.hidden = true;
     }
-    const dis = el("button", "mini pa-dismiss", busy ? "…" : "Dismiss");
+    // Dismiss: the × as on the radio pre-alert cards (icons.js Icon.button: named, its hover says what it does)
+    const DIS = "Nothing to it: take it off the list (logged)";
+    const dis = window.Icon ? Icon.button("x", "Dismiss", DIS, "pa-dismiss") : el("button", "mini pa-dismiss", "Dismiss");
     dis.type = "button";
-    dis.title = "Nothing to it: take it off the list (logged)";
+    if (!window.Icon) dis.title = DIS;
+    if (busy) dis.replaceChildren("…");
     acc.disabled = dis.disabled = busy;
     const act = (what) => async (ev) => {
       ev.stopPropagation();
@@ -203,7 +206,9 @@ window.AirportAlerts = (() => {
     };
     acc.addEventListener("click", act("accept"));
     dis.addEventListener("click", act("dismiss"));
-    row.append(acc, dis);
+    const acts = el("span", "aa-acts");             // (they wrap together, under More info, in a narrow column)
+    acts.append(acc, dis);
+    row.append(acts);
     li.append(row);
     return li;
   }
