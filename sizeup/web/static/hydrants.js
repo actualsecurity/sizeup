@@ -180,6 +180,11 @@ window.Hydrants = (() => {
   // the Location text with each picked "@place" a chip: a click shows that place on this map (never the hydrant moved)
   function locationEl(h, gm) {
     const box = el("div", "hy-loc");
+    if (h.location_qualifier && typeof qualText === "function") {   // "IFO": where at it (its name on hover)
+      const q = el("span", "hy-qual", qualText(h.location_qualifier, ""));
+      q.title = qualTitle(h.location_qualifier, "");
+      box.append(q, " ");
+    }
     const ps = named(h.location, h.location_places || []).sort((a, b) => b.label.length - a.label.length);
     let rest = h.location;
     while (rest) {
@@ -328,6 +333,15 @@ window.Hydrants = (() => {
   // hydrant's point. Empty: the nearest address or place as the placeholder, "Use" fills it in.
   function locationBox(lab, inp, h, at) {
     const wrap = el("div", "hy-locbox");
+    // [qualifier ▾] in front (Settings > Lists > Location qualifiers): "IFO" + "@Sample Market"; typed "IFO " goes in it
+    const qs = typeof qualSelect === "function" ? qualSelect(el("select", "loc-qual"), h.location_qualifier || "") : null;
+    if (qs) {
+      qs.setAttribute("aria-label", "Where at the location");
+      qs.title = "Where at the location";
+      inp.hyQual = qs;
+      qualTyped(inp, qs);
+      wrap.append(qs);
+    }
     const list = el("ol", "sugg note-sugg");
     list.hidden = true;
     list.setAttribute("role", "listbox");
@@ -387,10 +401,12 @@ window.Hydrants = (() => {
         inp.placeholder = `near ${p.label}`;
         const use = el("button", "sm quiet", "Use");
         use.type = "button";
+        const near = qs && [...qs.options].some((o) => o.value === "NEAR") && !qs.value;   // the list's Near, else the words
         use.title = `Fill in "near @${p.label}"`;
         use.addEventListener("click", () => {
-          inp.value = "near ";
-          L.tok = { text: "", start: 5, end: 5 };
+          if (near) qs.value = "NEAR";
+          inp.value = near ? "" : "near ";
+          L.tok = { text: "", start: inp.value.length, end: inp.value.length };
           take({ ...p, lat: p.lat, lon: p.lon });
           use.remove();
         });
@@ -500,6 +516,8 @@ window.Hydrants = (() => {
         setText(err, "Expected back is before Since"); return;
       }
       const body = { operator: operator() };
+      const q = inputs.location.hyQual ? inputs.location.hyQual.value : (h.location_qualifier || "");
+      if (q !== (h.location_qualifier || "")) body.location_qualifier = q;           // never the hydrant's point
       const lp = inputs.location.hyPlaces ? inputs.location.hyPlaces() : [];
       if (JSON.stringify(lp) !== JSON.stringify(named(inputs.location.value, h.location_places || []))
           || inputs.location.value.trim() !== (h.location || "")) body.location_places = lp;
@@ -728,7 +746,7 @@ window.Hydrants = (() => {
         if (h.removed) no.append(el("span", "chip", "removed"));
         tr.append(no, el("td", "", h.town || ""), el("td", DOWN.includes(h.status) ? "err" : h.status === "restricted" ? "warn" : "",
           h.status === "unknown" ? "" : STATUS[h.status] + (h.status_reason ? `: ${h.status_reason}` : "")),
-          el("td", "", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : ""), el("td", "", h.location || ""),
+          el("td", "", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : ""), el("td", "", typeof qualText === "function" ? qualText(h.location_qualifier, h.location) : h.location || ""),
           el("td", "mono", h.asset_id || ""), el("td", "dim small", h.by ? `${h.by} ${when(h.updated_at)}` : ""));
         tr.title = `${h.key}${h.district ? ` · ${h.district}` : ""}`;
         const open = () => editor(h);

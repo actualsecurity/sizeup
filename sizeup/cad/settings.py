@@ -8,7 +8,8 @@ Reset to default = drop the override (one item, or a whole section).
 
     event_types, event_subtypes,   key CODE -> the item as edited ({"name", "color", "retired": true...});
     dispositions, received_via,              {"deleted": true}: a default item removed (only if never used)
-    unit_statuses                  key "_order" -> [codes]: the list's order
+    unit_statuses,                 key "_order" -> [codes]: the list's order
+    location_qualifiers            (a qualifier: {"name", "short", "spoken"}: "In front of", "IFO", "in front of")
     event_class                    key TYPE | TYPE/SUBTYPE | */SUBTYPE -> emergency | non-emergency | null (a default rule removed)
     type_subtypes                  key TYPE -> [the subtypes it allows] ([]: no subtype)
     status_flow                    key STATUS | "*" -> [next statuses] (the incident's unit buttons) | null (removed)
@@ -249,11 +250,11 @@ WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
-               "unit_statuses": ("role", "bg", "fg")}
+               "unit_statuses": ("role", "bg", "fg"), "location_qualifiers": ("short", "spoken")}
 LIST_CODE = {"event_types": CODE, "event_subtypes": CODE, "dispositions": LONG_CODE, "received_via": LONG_CODE,
-             "unit_statuses": LONG_CODE}
+             "unit_statuses": LONG_CODE, "location_qualifiers": CODE}
 LIST_TITLES = {"event_types": "Event types", "event_subtypes": "Event subtypes", "dispositions": "Dispositions",
-               "received_via": "Received via", "unit_statuses": "Unit statuses"}
+               "received_via": "Received via", "unit_statuses": "Unit statuses", "location_qualifiers": "Location qualifiers"}
 WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("upgrade", "Upgrade"),
            ("full_response", "Full department response"), ("remarks", "Dispatcher remarks"), ("lead_in", "Lead-in"),
            ("lead_in_joint", "Lead-in with a joint department"), ("new_no_location", "First dispatch, no location"),
@@ -675,6 +676,10 @@ class Editor:
                     k = t if sec == "event_types" else s
                     if k:
                         out[k] = out.get(k, 0) + 1
+        elif sec == "location_qualifiers":             # events and hydrants that have one
+            add(q("SELECT location_qualifier AS k, COUNT(*) AS n FROM incidents GROUP BY location_qualifier"))
+            if q("SELECT 1 FROM sqlite_master WHERE name = 'hydrants'"):
+                add(q("SELECT location_qualifier AS k, COUNT(*) AS n FROM hydrants GROUP BY location_qualifier"))
         elif sec == "unit_statuses":
             add(q("SELECT status AS k, COUNT(*) AS n FROM units GROUP BY status"))
             add(q("SELECT old_status AS k, COUNT(*) AS n FROM unit_history GROUP BY old_status"))
@@ -1400,7 +1405,15 @@ class Editor:
         out = {"name": _text(raw.get("name"), "name", 60)}
         for f in LIST_FIELDS[sec]:
             v = raw.get(f)
-            if f == "role":
+            if f == "short":                      # a location qualifier's text ("IFO") and words ("in front of")
+                out[f] = _text(v, "short", lists_mod.QUAL_SHORT_MAX)
+                if not lists_mod.QUAL_SHORT.fullmatch(out[f]):
+                    raise CadError("short: letters, digits, / & . - (IFO)")
+            elif f == "spoken":
+                out[f] = " ".join(_text(v, "spoken", lists_mod.QUAL_SPOKEN_MAX).split()).lower()
+                if not lists_mod.QUAL_SPOKEN.fullmatch(out[f]):
+                    raise CadError("spoken: words as said, letters only (in front of)")
+            elif f == "role":
                 if v not in (None, "") + ROLES:
                     raise CadError(f"role: one of {', '.join(ROLES)} (or none: committed)")
                 if v:

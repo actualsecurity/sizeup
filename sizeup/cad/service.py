@@ -983,6 +983,22 @@ class Cad:
         if h:
             f["lat"], f["lon"], f["geo_label"] = h["lat"], h["lon"], h["label"]
 
+    def _qualifier(self, body: dict, f: dict, old: dict | None = None) -> None:
+        """Where at the location (location_qualifier, Settings > Lists > Location qualifiers): a code of the list, or as
+        picked or typed (its short form, name or spoken form); the one the event has stays even retired. None given and
+        the address typed with one in front ("IFO 12 Sample St", "across from 40 Example Ave"): taken off the address,
+        which alone is geocoded. Never the point: the address places the event, the qualifier only says where at it."""
+        keep = (old or {}).get("location_qualifier") or ""
+        if "location_qualifier" in body:
+            try:
+                f["location_qualifier"] = self.lists.qualifier_code(_text(body, "location_qualifier", 60), keep)
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        if f.get("address") and not f.get("location_qualifier"):
+            code, rest = self.lists.split_qualifier(f["address"])
+            if code:
+                f["location_qualifier"], f["address"] = code, rest
+
     @staticmethod
     def _place(f: dict, old: dict | None = None) -> None:
         """A named place's location (#204): the address is shown "<street address> @ <place>" ("40 Example Rd @
@@ -1010,6 +1026,7 @@ class Cad:
         f = self._fields(body, partial=False)
         if f.get("until_at") is not None and f["until_at"] < self.clock() - UNTIL_GRACE_S:
             raise CadError("Until is in the past: check the day (or leave it empty)")   # it would expire at once
+        self._qualifier(body, f)
         self._place(f)
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
@@ -1026,6 +1043,8 @@ class Cad:
                 del f["until_at"]                    # the same minute back (the form has no seconds): no change at all
             elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
                 raise CadError("Until is in the past: check the day (or Close it)")
+        if "location_qualifier" in body or f.get("address"):
+            self._qualifier(body, f, self.store.incident(iid))
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
@@ -1423,7 +1442,8 @@ class Cad:
         return dispatcher.compose(kind, department=lead, incident=inc,
                                   units=[u["spoken"] or u["name"] for u in units], phrase=self._phrase(inc["type"], inc["subtype"]),
                                   at=self.clock(), full=full, already=already, info=info, new_phrase=new_phrase,
-                                  wording=L.wording, remarks=remarks), tones
+                                  wording=L.wording, remarks=remarks,
+                                  qualifier=(L.qualifier(inc.get("location_qualifier") or "") or {}).get("spoken", "")), tones
 
     def _dispatchable(self, inc: dict) -> None:
         if inc["status"] == "queued":
@@ -2652,6 +2672,9 @@ class Cad:
              "address_raw": raw, "cross_street": cross[:200], "remarks": remarks,
              "lat": geo.get("lat") if sure else None, "lon": geo.get("lon") if sure else None,
              "geo_label": (geo.get("label") or "")[:200] if sure else "", "geo_alts": json.dumps(alts) if alts else ""}
+        q = getattr(inc, "qualifier", "") or ""        # where at it, as heard ("across from"): an active one of the list
+        if q and f["address"] and q in self.lists.qualifier_phrases().values():
+            f["location_qualifier"] = q
         if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
             f.update(airport.fields(" ".join(inc.page_text)))
         old = self.store.by_source_ref(ref)
@@ -2706,6 +2729,7 @@ class Cad:
                 (k not in ("type", "subtype", "type_note", "geo_alts") and v not in (None, "") and old[k] in (None, ""))}
         if "address" not in fill:                      # the text an address came from goes only with that address
             fill.pop("address_raw", None)
+            fill.pop("location_qualifier", None)       # ... and where at it (as heard with it)
         if old["geo_alts"] and sure:                   # the repeat confirmed what the first reading couldn't (#176)
             fill.update(address=f["address"], address_raw=f["address_raw"], cross_street=f["cross_street"], lat=f["lat"], lon=f["lon"],
                         geo_label=f["geo_label"], geo_alts="")

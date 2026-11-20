@@ -1179,5 +1179,11 @@
   .hy-import { padding: var(--s-2) var(--s-3); }
   .hy-locbox { position: relative; display: flex; align-items: center; gap: var(--s-1); }
   .hy-locbox input { flex: 1; min-inline-size: 0; }
+  /* a location: [qualifier ▾] [address] (Settings > Lists > Location qualifiers) */
+  .locq { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  .locq > input { flex: 1; min-inline-size: 0; }
+  .locq > select.loc-qual { flex: 0 0 auto; max-inline-size: 9rem; }
+  .hy-locbox > select.loc-qual { flex: 0 0 auto; max-inline-size: 9rem; }
+  .hy-qual { font-weight: 600; }
   .hy-errs, .hy-diff { margin: 0; padding-inline-start: var(--s-5); max-block-size: calc(var(--s-8) * 8); overflow-y: auto; }
 }
