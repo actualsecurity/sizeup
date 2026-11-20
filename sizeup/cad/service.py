@@ -2849,7 +2849,9 @@ class Cad:
 
     def map_type(self, raw: str, label: str = "") -> tuple[str, str, str]:
         """An external feed's event type -> (TYPE, SUBTYPE, note): one of our codes as it is ("STRU", "ALARM/COMM"),
-        else read like a page's type (runcards.from_page); one nobody maps leaves the type to the operator."""
+        else a type moved under another as a subtype (moved_type: "DRILL" once Drill is retired and a Drill subtype of
+        Notification), else read like a page's type (runcards.from_page); one nobody maps leaves the type to the
+        operator."""
         raw = (raw or "").strip()
         if not raw:
             return "", "", ""
@@ -2859,6 +2861,9 @@ class Cad:
             return typ.strip(), sub.strip(), ""
         except ValueError:
             pass
+        moved = self.moved_type(typ)
+        if moved[0]:
+            return moved[0], moved[1], f"type from {label or 'the feed'}: {raw}"[:200] if sub.strip() else ""
         from sizeup.dispatch import parse
         d = parse(f"respond to {raw}")
         typ, sub, note = runcards.from_page(d.incident_type, d.category, re.sub(r"[/,]", " ", raw))
@@ -2870,6 +2875,29 @@ class Cad:
             except ValueError:
                 continue
         return "", "", f"type from {label or 'the feed'}: {raw}"[:200]
+
+    def moved_type(self, code: str) -> tuple[str, str]:
+        """A type the department moved under another as a subtype in Settings > Lists (Drill retired or deleted as a
+        type, a Drill subtype added to Notification): code is that old type (retired, or one of the data file's types
+        deleted since) and exactly one active type allows an active subtype whose code or name is the old type's code
+        or name -> (TYPE, SUBTYPE). Else ("", ""): an active type, a word that was never a type, or two types offering
+        it (a person picks). No table: the lists say it, so a feed that still sends the old code follows the move."""
+        L = self.lists
+        code = (code or "").strip().upper()
+        if not code or code in L.type_codes:
+            return "", ""
+        base = getattr(getattr(self, "settings", None), "base", None)
+        was = next((x for x in L.event_types if x["code"] == code and x.get("retired")), None) or next(
+            (x for x in getattr(base, "event_types", ()) if x["code"] == code), None)
+        if was is None:
+            return "", ""
+
+        def squash(s) -> str:
+            return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
+        keys = {squash(code), squash(was.get("name"))} - {""}
+        hits = [(t, s) for t in L.type_codes for s in L.subtypes_for(t)
+                if squash(s) in keys or squash(L.name("event_subtypes", s)) in keys]
+        return hits[0] if len(hits) == 1 else ("", "")
 
 
 def fire_state(inc: dict, ours: list, feeds: list) -> tuple[str, float | None]:
