@@ -321,9 +321,9 @@ def test_bad_values_are_refused(cad, body, err):
 
 
 def test_dates_as_a_spreadsheet_saves_them(cad):
-    out = cad.hydrants.edit("c990001", {"flow_date": "6/30/2027", "inspected": "2026-11-01T00:00", "status_since": "11/2/2026 0:00"})
+    out = cad.hydrants.edit("c990001", {"flow_date": "6/30/2026", "inspected": "2026-11-01T00:00", "status_since": "11/2/2026 0:00"})
     hh = out["hydrant"]
-    assert (hh["flow_date"], hh["inspected"], hh["status_since"]) == ("2027-06-30", "2026-11-01", "2026-11-02")
+    assert (hh["flow_date"], hh["inspected"], hh["status_since"]) == ("2026-06-30", "2026-11-01", "2026-11-02")
 
 
 def test_the_labels_and_formula_guard_are_read(cad):
@@ -546,6 +546,9 @@ out.dist = H.fmtDist(42.4);
 out.line = H.line({ number: "9001", cls: "A", gpm: 1200, status: "oos", dist_m: 40 });
 out.lineBare = H.line({ number: "9002", cls: null, gpm: null, status: "unknown", dist_m: 120 });
 out.keys = H.LEGEND.map((l) => l[0]);
+out.fc = [H.flowCheck(12000, 80, 10), H.flowCheck(1000, 60, 60), H.flowCheck(3000, null, null), H.flowCheck(1000, 80, 10),
+          H.flowCheck(900, 70, null), H.flowCheck(1000, 80, 60)];
+
 out.down = H.DOWN;
 console.log(JSON.stringify(out));
 """
@@ -566,6 +569,12 @@ def test_the_map_helpers_in_node(tmp_path):
     assert "_cls" in json.dumps(out["label"]) and "_no" in json.dumps(out["label"])
     assert out["line"] == "9001 · A 1200 gpm · OOS · 40 m" and out["lineBare"] == "9002 · 120 m"
     assert out["keys"] == ["AA", "A", "B", "C", "unk", "down"]
+    fc = out["fc"]
+    assert "over 10000" in fc[0]["error"] and "under the static" in fc[1]["error"]
+    assert fc[2]["error"] == "" and "unusually high" in fc[2]["notes"][0]
+    assert fc[3]["error"] == "" and "under 20 psi" in fc[3]["notes"][0]
+    assert "One pressure" in fc[4]["notes"][0] and fc[5] == {"error": "", "notes": []}
+
 
 
 def test_the_script_wires_the_layer_card_editor_and_settings():
@@ -695,3 +704,252 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
         browser.close()
         pw.stop()
         ws.shutdown()
+
+
+# -- #831 in production: every hydrant gone from the maps ------------------------------------------------------------------
+# The county's f=geojson gives a feature no "id" unless the object id field is among the outFields (checked against the
+# live service, 2026-11-20); the hub asked for the shown fields only, so its copy had no ids, and the merge dropped every
+# feature without one: an empty layer. These run the layer as the county really answers, with an empty overlay (the
+# default in production).
+
+def arcgis_like(features):
+    """A fetch answering as the county's MapServer does: the description (objectIdField OBJECTID), and each query page with
+    only the outFields asked for, and the feature "id" only when OBJECTID is one of them."""
+    from tests.test_gis import arcgis_answer
+    info = {"name": "Fire Hydrants", "geometryType": "esriGeometryPoint", "maxRecordCount": 1000, "capabilities": "Map,Query,Data",
+            "objectIdField": "OBJECTID", "fields": [{"name": n, "type": t} for n, t in (
+                ("OBJECTID", "esriFieldTypeOID"), ("DISTRICT", "esriFieldTypeString"), ("MUNCIPALIT", "esriFieldTypeString"),
+                ("HYD_NUMBER", "esriFieldTypeString"), ("FIRENAME", "esriFieldTypeString"))]}
+    full = [{"type": "Feature", "id": f["id"], "geometry": f["geometry"], "properties": {"OBJECTID": f["id"], **f["properties"]}}
+            for f in features]
+    url = next(l.url for l in DEFAULT_LAYERS if l.key == "hydrants")
+    asked = []
+
+    def fetch(u, timeout, limit):
+        asked.append(u)
+        code, h, body = arcgis_answer(u, {"hydrants": {"url": url, "info": info, "features": full}})
+        if "/query" in u and code == 200:
+            from urllib.parse import parse_qs, urlsplit
+            out = (parse_qs(urlsplit(u).query).get("outFields") or ["*"])[0]
+            if out != "*" and "OBJECTID" not in out.split(","):
+                doc = json.loads(body)
+                for f in doc["features"]:
+                    f.pop("id", None)
+                body = json.dumps(doc).encode()
+        return code, h, body
+    fetch.asked = asked
+    return fetch
+
+
+def test_the_layer_as_the_county_serves_it_keeps_ids_and_draws_every_hydrant(tmp_path):
+    fetch = arcgis_like(COUNTY)
+    g = Gis(layers=tuple(l for l in DEFAULT_LAYERS if l.key == "hydrants"), cache_dir=tmp_path / "gis", fetch=fetch,
+            log=lambda m: None)
+    assert g.refresh("hydrants")
+    q = next(u for u in fetch.asked if "/query" in u)
+    assert "OBJECTID" in q                                                   # asked for: the county gives ids only then
+    assert sorted(f["id"] for f in g.data["hydrants"]) == [f["id"] for f in COUNTY]
+    assert all("OBJECTID" not in f["properties"] for f in g.data["hydrants"])   # (only the shown fields kept)
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert c.store.q("SELECT * FROM hydrants") == []                         # the overlay empty: production's default
+    feats = served(g)[0]["features"]
+    assert len(feats) == len(COUNTY) and all(f["properties"]["_k"] == f"c{f['id']}" for f in feats)
+
+
+def test_a_copy_without_ids_still_draws_every_hydrant(tmp_path):
+    """The hub's cached copy from before (no ids): every hydrant still served (not editable) until it is fetched again."""
+    noid = [{k: v for k, v in json.loads(json.dumps(f)).items() if k != "id"} for f in COUNTY]
+    c = make_cad(tmp_path)
+    g = fake_gis(noid)
+    wire(c, g)
+    feats = served(g)[0]["features"]
+    assert len(feats) == len(COUNTY) and all("_k" not in f["properties"] for f in feats)
+    assert c.hydrants.listing({})["counts"]["unkeyed"] == len(COUNTY)
+    # the recorded fixture (the county's real shape: no ids) through an empty overlay: every feature
+    real = json.loads((Path(__file__).parent / "fixtures" / "wcgis" / "hydrants.geojson").read_text())["features"]
+    set_layer(g, "hydrants", real)
+    assert len(served(g)[0]["features"]) == len(real) > 0
+
+
+def test_a_fresh_hub_with_the_cache_from_before_serves_it_and_fetches_again_at_once(tmp_path):
+    """A new hub task with the copy #831's hub saved (the old signature, no ids; checks.json saying it was looked at just
+    now): every hydrant served from it at once, the layer due at once (not in a month), then fetched whole with ids; the
+    Settings list counts every county hydrant with no overlay row."""
+    import hashlib
+    layer = next(l for l in DEFAULT_LAYERS if l.key == "hydrants")
+    clock = [1.8e9]
+    fetch = arcgis_like(COUNTY)
+    g = Gis(layers=(layer,), cache_dir=tmp_path / "gis", fetch=fetch, log=lambda m: None, load=False, clock=lambda: clock[0])
+    old = {"url": layer.url, "bbox": [round(x, 4) for x in g.layer_bbox(layer)], "where": layer.where,
+           "fields": [f for f, _ in layer.fields], "simplify_m": layer.simplify_m}
+    sig = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()[:16]
+    assert sig == g._signature(layer, ids=False) != g._signature(layer)
+    noid = [{k: v for k, v in json.loads(json.dumps(f)).items() if k != "id"} for f in COUNTY]
+    (tmp_path / "gis").mkdir()
+    (tmp_path / "gis" / "hydrants.geojson").write_text(json.dumps(
+        {"type": "FeatureCollection", "features": noid, "sizeup": {"at": clock[0] - 3600, "signature": sig, "how": "full"}}))
+    (tmp_path / "gis" / "checks.json").write_text(json.dumps({"layers": {"hydrants": {"checked": clock[0] - 60, "how": "full"}}}))
+    g.load_cache()
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert len(served(g)[0]["features"]) == len(COUNTY)                      # served from the old copy meanwhile
+    assert g.due() == ["hydrants"]                                           # and due now, not in a month
+    assert fetch.asked == []
+    assert g.refresh("hydrants") and g.status["hydrants"]["how"] == "full"
+    assert all(f.get("id") for f in g.data["hydrants"])
+    lst = c.hydrants.listing({})
+    assert lst["counts"]["all"] == lst["total"] == len(COUNTY) and lst["counts"]["edited"] == 0 and lst["counts"]["unkeyed"] == 0
+    assert json.loads((tmp_path / "gis" / "hydrants.geojson").read_text())["sizeup"]["signature"] == g._signature(layer)
+
+
+def test_no_cache_at_all_is_fetched_at_once(tmp_path):
+    layer = next(l for l in DEFAULT_LAYERS if l.key == "hydrants")
+    g = Gis(layers=(layer,), cache_dir=tmp_path / "gis", fetch=arcgis_like(COUNTY), log=lambda m: None, load=False)
+    g.load_cache()
+    assert g.status["hydrants"]["at"] is None and g.due() == ["hydrants"]
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert c.hydrants.listing({})["counts"]["all"] == 0                       # (nothing yet: the catalog says loading)
+    assert g.refresh("hydrants") and c.hydrants.listing({})["counts"]["all"] == len(COUNTY)
+
+
+def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
+    """#831's regression in the browser: the county's layer as fetched (ids and, from an old copy, none), nothing in the
+    overlay: every hydrant rendered on the map, grey (no flow data)."""
+    import threading
+    sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
+    from sizeup.web.server import WebServer
+    c = make_cad(tmp_path)
+    g = Gis(layers=tuple(l for l in DEFAULT_LAYERS if l.key in ("hydrants", "municipalities")), cache_dir=tmp_path / "gis",
+            fetch=arcgis_like(COUNTY[:3]), log=lambda m: None, load=False)
+    g.cache_loaded = True
+    assert g.refresh("hydrants")
+    set_layer(g, "municipalities", TOWNS)
+    g.data["hydrants"] += [{k: v for k, v in hyd(990006 + i, f"90{i}", 0.3 + i * 0.3, dlon=0.0006).items() if k != "id"}
+                           for i in range(2)]                                # two from an old copy, with no id
+    g._boxes["hydrants"] = [geometry_bbox(f["geometry"]) for f in g.data["hydrants"]]
+    with g._lock:
+        g._changed("hydrants")
+    wire(c, g)
+    scene = {"timezone": "America/New_York", "home": {"center": [LON0 + 0.0003, LAT0 + 0.0009], "zoom": 17.0},
+             "glyphs": "https://tiles.invalid/fonts/{fontstack}/{range}.pbf"}
+    ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False, cad=CadApi(c), gis=g)
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001
+        pw.stop()
+        ws.shutdown()
+        pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+    try:
+        pg = browser.new_page(viewport={"width": 1400, "height": 900})
+        pg.set_default_timeout(15000)
+        pg.route(lambda url: not url.startswith(base), lambda route: route.abort())
+        errors, console = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.on("console", lambda m: console.append(m.text) if m.type == "error" and "Failed to load" not in m.text else None)
+        pg.goto(base + "/cad")
+        pg.wait_for_function("() => window.GisLayers && GisLayers.catalog() && [...GisLayers.maps].length > 0")
+        pg.evaluate("""() => { MapLayers.setLayer('gis:hydrants', true);
+            const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            gm.map.jumpTo({ center: cad.scene.home.center, zoom: cad.scene.home.zoom }); }""")
+        pg.wait_for_function("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            return gm && gm.map.getLayer('gis-hydrants-pt')
+              && gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).length >= 5; }""")
+        drawn = pg.evaluate("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            return gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).map((f) => Hydrants.imageFor(f.properties)); }""")
+        assert len(drawn) == 5 and set(drawn) == {"hy-unk"}, drawn
+        assert errors == [] and not [m for m in console if "Expected" in m or "expression" in m.lower()], (errors, console)
+    finally:
+        browser.close()
+        pw.stop()
+        ws.shutdown()
+
+
+# -- the flow test's checks (server, CSV, form: the hub refuses what the form does) ---------------------------------------
+
+@pytest.mark.parametrize("body,err", [
+    ({"flow_gpm": 0}, "flow_gpm"), ({"flow_gpm": 5001}, "flow_gpm"), ({"flow_gpm": 12000}, "flow_gpm"),
+    ({"static_psi": 0}, "static_psi"), ({"static_psi": 301}, "static_psi"), ({"residual_psi": -1}, "residual_psi"),
+    ({"flow_gpm": 1000, "static_psi": 60, "residual_psi": 60}, "under the static"),
+    ({"flow_gpm": 1000, "static_psi": 60, "residual_psi": 70}, "under the static"),
+    ({"flow_gpm": 5000, "static_psi": 100, "residual_psi": 80}, "over 10000"),      # rates ~10,600 at 20 psi
+    ({"main_in": 1}, "main_in"), ({"main_in": 30}, "main_in"),
+    ({"outlets": "2x2.5, 9x4.5"}, "outlets"), ({"outlets": "1x12"}, "outlets"), ({"outlets": "lots of them"}, "outlets"),
+    ({"flow_date": "2099-01-01"}, "not in the future"), ({"inspected": "2099-01-01"}, "not in the future"),
+    ({"status_since": "2026-11-10", "status_until": "2026-11-01"}, "status_until"),
+])
+def test_the_flow_test_checks_refuse(cad, body, err):
+    with pytest.raises(hy.CadError, match=err):
+        cad.hydrants.edit("c990001", body)
+    assert cad.store.q("SELECT * FROM hydrants") == []
+
+
+def test_the_flow_test_checks_warn(cad):
+    h = cad.hydrants
+    out = h.edit("c990001", {"flow_gpm": 3000})
+    assert out["changed"] == ["flow_gpm"] and any("unusually high" in w for w in out["warnings"])
+    out = h.edit("c990002", {"flow_gpm": 1000, "static_psi": 80, "residual_psi": 10})
+    assert any("under 20 psi" in w for w in out["warnings"]) and out["hydrant"]["gpm"] == hy.rated_gpm(1000, 80, 10)
+    out = h.edit("c990003", {"flow_gpm": 900, "static_psi": 70})
+    assert any("One pressure" in w for w in out["warnings"]) and out["hydrant"]["gpm"] == 900 and out["hydrant"]["cls"] == "B"
+    assert h.edit("c990004", {"outlets": "2 x 2½\", 1x4.5 steamer", "main_in": 8, "flow_date": cad.hydrants._today()})["changed"]
+    # a later edit is checked against what is saved: residual over the saved static
+    with pytest.raises(hy.CadError, match="under the static"):
+        h.edit("c990002", {"residual_psi": 85})
+
+
+def test_the_flow_test_checks_on_csv_import(cad):
+    text = ("key,flow_gpm,static_psi,residual_psi,main_in,flow_date\n"
+            "c990001,12000,80,10,,\n"                                       # over the hard limit
+            "c990002,1000,60,65,,\n"                                         # residual over static
+            "c990003,3000,,,8,\n"                                            # high: a warning, allowed
+            "c990004,,,,40,\n"                                               # main too big
+            "c990005,800,,,,2099-12-31\n")                                   # a test in the future
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": text})
+    assert {e["line"] for e in pv["errors"]} == {2, 3, 5, 6}
+    assert [w["line"] for w in pv["warnings"]] == [4] and "unusually high" in pv["warnings"][0]["warning"]
+
+
+
+
+def saved_raw(c, key, **cols):
+    """Data saved before today's rules (the previous release allowed it): written straight into the table."""
+    c.hydrants.edit(key, {"notes": "x"})
+    c.store.db.execute(f"UPDATE hydrants SET {', '.join(f'{k} = ?' for k in cols)} WHERE key = ?", (*cols.values(), key))
+    c.store.db.commit()
+    c.hydrants._bump()
+
+
+def test_data_saved_before_the_rules_never_blocks_another_edit(cad):
+    h = cad.hydrants
+    saved_raw(cad, "c990001", flow_gpm=1000, static_psi=60, residual_psi=60, flow_date="2099-06-30", main_in=30.0)
+    out = h.edit("c990001", {"status": "oos", "status_reason": "Broken stem"})           # marking it OOS always works
+    assert out["changed"] == ["status", "status_reason"] and any(w.startswith("Saved data: residual") for w in out["warnings"])
+    with pytest.raises(hy.CadError, match="under the static"):                             # touching the pressures: checked
+        h.edit("c990001", {"residual_psi": 61})
+    assert h.edit("c990001", {"residual_psi": 40})["changed"] == ["residual_psi"]
+    # the CSV: a row with an unrelated column, and the whole export read back (main 30 in, from before the 2-24 rule)
+    pv = h.import_csv({"action": "preview", "csv": "key,notes\nc990001,Checked\n"})
+    assert pv["error_count"] == 0 and pv["changed"] == 1
+    pv = h.import_csv({"action": "preview", "csv": h.csv({})[0].decode("utf-8-sig")})
+    assert pv["error_count"] == 0 and pv["changed"] == 0
+    pv = h.import_csv({"action": "preview", "csv": "key,main_in\nc990001,31\n"})            # a new out-of-range value: refused
+    assert pv["error_count"] == 1
+
+
+@pytest.mark.parametrize("text", ["2X2.5", "2x2 1/2, 1x4 1/2", "2-2.5", "2×2½, 1x4.5 steamer", "1x5\" Storz", "4.5"])
+def test_outlets_as_people_write_them(cad, text):
+    assert cad.hydrants.edit("c990001", {"outlets": text})["hydrant"]["outlets"]
+
+
+def test_clearing_one_pressure_classes_from_the_observed_flow(cad):
+    h = cad.hydrants
+    h.edit("c990001", {"flow_gpm": 1000, "static_psi": 80, "residual_psi": 60})
+    assert h.one("c990001")["hydrant"]["cls"] == "AA"                                     # rated at 20 psi
+    out = h.edit("c990001", {"residual_psi": ""})
+    assert out["hydrant"]["gpm"] == 1000 and out["hydrant"]["cls"] == "A" and any("One pressure" in w for w in out["warnings"])
+    assert not any("under 20" in w for w in h.edit("c990002", {"flow_gpm": 500, "static_psi": 18, "residual_psi": 10})["warnings"])

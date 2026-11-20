@@ -16,7 +16,7 @@ import pytest
 
 from sizeup import gis as gis_mod
 from sizeup.config import ConfigError, load
-from sizeup.gis import (BACKOFF_S, DEFAULT_LAYERS, PAGE, TILE_MAX_DEG, Gis, Layer, contains, fetch_features, geometry_bbox,
+from sizeup.gis import (IDS, BACKOFF_S, DEFAULT_LAYERS, PAGE, TILE_MAX_DEG, Gis, Layer, contains, fetch_features, geometry_bbox,
                         parse_bbox, query_url, simplify_line, tidy_feature, tidy_geometry)
 from tests.test_access import AUD, TEAM, jwks, jwt, keys, req  # noqa: F401  (fixtures)
 from tests.test_cloud import HubRun, hub_cfg
@@ -227,7 +227,9 @@ def test_a_refresh_reads_the_layer_through_our_box_and_caches_it_on_disk(tmp_pat
         q = parse_qs(urlsplit(next(u for u in f.urls if u.startswith(BY_KEY[key].url + "/query?"))).query)
         box = BY_KEY[key].bbox or g.bbox
         assert q["geometry"] == [",".join(str(x) for x in box)]
-        assert q["outFields"] == [",".join(n for n, _ in BY_KEY[key].fields)]
+        # (a layer in IDS also asks for its object id: the county gives a feature's id only then, #831)
+        oid = [f.fixtures[key]["info"].get("objectIdField") or "OBJECTID"] if key in IDS else []
+        assert q["outFields"] == [",".join([n for n, _ in BY_KEY[key].fields] + oid)]
     assert g.due() == []
     assert any("features" in m and "MB" in m for m in g.logs)
     # a restart reads the cache and fetches nothing until each layer is due

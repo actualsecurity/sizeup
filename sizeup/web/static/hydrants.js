@@ -62,12 +62,27 @@ window.Hydrants = (() => {
       ["case", ["in", ["coalesce", ["get", "_st"], ""], ["literal", DOWN]], " · OOS", ["has", "_cls"], ["concat", " · ", ["get", "_cls"]], ""]];
   }
   const fmtDist = (m) => `${Math.round(m)} m`;
+  // the flow test's checks (sizeup/cad/hydrants.py check: the hub refuses the errors too): {error, notes}
+  const FLOW_HIGH = 2500, RATED_MAX = 10000;
+  function flowCheck(flow, s, r) {
+    const notes = [];
+    if (s != null && r != null) {
+      if (r >= s) return { error: "Residual must be under the static pressure", notes };
+      if (r < 20 && s > 20 && flow != null) notes.push("Residual under 20 psi: rated flow extrapolated");
+    } else if (flow != null && (s != null || r != null)) notes.push("One pressure only: class from the observed flow");
+    if (flow != null) {
+      if (flow > FLOW_HIGH) notes.push(`${flow} gpm is unusually high: check`);
+      const rated = ratedGpm(flow, s, r);
+      if (rated > RATED_MAX) return { error: `Rates ${rated} gpm at 20 psi (over ${RATED_MAX}): check the flow and pressures`, notes };
+    }
+    return { error: "", notes };
+  }
   // a call's row: "9001 · A 1200 gpm · OOS · 40 m"
   function line(h) {
     const cls = h.cls ? `${h.cls}${h.gpm != null ? ` ${h.gpm} gpm` : ""}` : "";
     return [h.number || "?", cls, SHORT[h.status] || "", h.dist_m != null ? fmtDist(h.dist_m) : ""].filter(Boolean).join(" · ");
   }
-  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
+  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, flowCheck, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
   if (typeof document === "undefined") return api_;
 
   // ---- the marks: the county sprite's hydrant in each class's colour --------------------------------------------------
@@ -253,11 +268,11 @@ window.Hydrants = (() => {
   const FORM = [   // [field, label, kind, extra]
     ["number", "Number", "text", 20], ["status", "Status", "select", STATUS], ["status_reason", "Reason", "text", 200],
     ["status_since", "Since", "date"], ["status_until", "Expected back", "date"],
-    ["flow_gpm", "Flow (gpm)", "number", [0, 20000, 1]], ["flow_date", "Flow test", "date"],
-    ["static_psi", "Static psi", "number", [0, 300, 0.1]], ["residual_psi", "Residual psi", "number", [0, 300, 0.1]],
+    ["flow_gpm", "Flow (gpm)", "number", [1, 5000, 1]], ["flow_date", "Flow test", "date"],
+    ["static_psi", "Static psi", "number", [1, 300, 0.1]], ["residual_psi", "Residual psi", "number", [0, 300, 0.1]],
     ["nfpa_class", "Class", "select", null], ["thread", "Thread", "select", THREADS], ["outlets", "Outlets", "text", 60],
-    ["main_in", "Main (in)", "number", [0, 60, 0.1]], ["owner", "Owner", "select", OWNERS], ["body_color", "Body colour", "text", 30],
-    ["asset_id", "Asset id", "text", 40], ["location", "Location", "text", 120], ["inspected", "Inspected", "date"],
+    ["main_in", "Main (in)", "number", [2, 24, 0.5]], ["owner", "Owner", "select", OWNERS], ["body_color", "Body colour", "text", 30],
+    ["asset_id", "Asset id", "text", 40], ["location", "Location", "text", 160], ["inspected", "Inspected", "date"],
     ["notes", "Notes", "textarea", 500],
   ];
   const TIPS = { flow_gpm: "Flow as tested (with both pressures: the class uses the flow at 20 psi residual), or the rated capacity",
@@ -298,6 +313,9 @@ window.Hydrants = (() => {
       }
       const v = h[k];
       inp.value = v === null || v === undefined ? (k === "status" ? "unknown" : "") : String(v);
+      if (kind === "number" && inp.value !== "" && (Number(inp.value) < Number(inp.min) || Number(inp.value) > Number(inp.max))) {
+        inp.removeAttribute("min"); inp.removeAttribute("max");      // saved before today's limits: the hub allows it untouched
+      }
       if (k === "number" && !isNew && !h.hub && !(h.number && h.number !== h.county_number)) inp.value = "";
       if (k === "number" && !h.hub) inp.placeholder = h.county_number || "";
       if (TIPS[k]) lab.title = TIPS[k];
@@ -306,11 +324,19 @@ window.Hydrants = (() => {
       form.append(lab);
     }
     const cls = el("div", "hy-line hy-cls small");
+    const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    for (const k of ["flow_date", "inspected"]) inputs[k].max = today;          // never in the future (the hub checks too)
+    let fc = { error: "", notes: [] };
     const showCls = () => {
       const n = (x) => (inputs[x].value === "" ? null : Number(inputs[x].value));
-      const g = ratedGpm(n("flow_gpm"), n("static_psi"), n("residual_psi"));
+      const s = n("static_psi"), r = n("residual_psi"), flow = n("flow_gpm");
+      fc = flowCheck(flow, s, r);
+      const g = s != null && r != null ? ratedGpm(flow, s, r) : ratedGpm(flow, null, null);
       const c = inputs.nfpa_class.value || classOf(g);
-      cls.replaceChildren(mark(c, inputs.status.value), el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : "No class (no flow)"));
+      const parts = [mark(c, inputs.status.value), el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : "No class (no flow)")];
+      if (fc.error) parts.push(el("span", "error", fc.error));
+      for (const t of fc.notes) parts.push(el("span", "warn", t));
+      cls.replaceChildren(...parts);
     };
     for (const k of ["flow_gpm", "static_psi", "residual_psi", "nfpa_class", "status"]) inputs[k].addEventListener("input", showCls);
     showCls();
@@ -340,6 +366,16 @@ window.Hydrants = (() => {
     document.body.append(ov);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      showCls();
+      const flowEdited = ["flow_gpm", "static_psi", "residual_psi"].some((k) => inputs[k].value.trim() !== String(h[k] ?? ""));
+      if (fc.error && flowEdited) { setText(err, fc.error); return; }     // (saved before the rule, untouched: the hub allows it)
+      const fl = Number(inputs.flow_gpm.value);
+      if (inputs.flow_gpm.value !== "" && fl > FLOW_HIGH && String(fl) !== String(h.flow_gpm ?? "")
+          && !(await UI.confirm(`${fl} gpm is unusually high for one hydrant. Save it anyway?`, { ok: "Save", danger: false }))) return;
+      if (inputs.status_since.value && inputs.status_until.value && inputs.status_until.value < inputs.status_since.value
+          && (inputs.status_since.value !== (h.status_since || "") || inputs.status_until.value !== (h.status_until || ""))) {
+        setText(err, "Expected back is before Since"); return;
+      }
       const body = { operator: operator() };
       for (const [k, , kind] of FORM) {
         const v = inputs[k].value.trim();
@@ -348,12 +384,13 @@ window.Hydrants = (() => {
         if (isNew ? v !== "" && !(k === "status" && v === "unknown") : v !== cmp) body[k] = kind === "number" && v !== "" ? Number(v) : v;
       }
       try {
+        let out = null;
         if (isNew) {
-          await api("POST", "/api/cad/hydrants", { ...body, lat: at[1], lon: at[0] });
-          UI.toast("Hydrant added");
+          out = await api("POST", "/api/cad/hydrants", { ...body, lat: at[1], lon: at[0] });
+          UI.toast("Hydrant added", "ok", ((out && out.warnings) || []).join(" · "));
         } else if (Object.keys(body).length > 1) {
-          await api("POST", `/api/cad/hydrants/${encodeURIComponent(h.key)}`, body);
-          UI.toast(`Hydrant ${h.number || h.key} saved`);
+          out = await api("POST", `/api/cad/hydrants/${encodeURIComponent(h.key)}`, body);
+          UI.toast(`Hydrant ${h.number || h.key} saved`, "ok", ((out && out.warnings) || []).join(" · "));
         }
         UI.dialog.close(ov);
         changed();
@@ -612,6 +649,11 @@ window.Hydrants = (() => {
     if (pv.errors.length) {
       const ol = el("ol", "hy-errs small");
       for (const e of pv.errors) ol.append(el("li", "error", `Line ${e.line}${e.key ? ` (${e.key})` : ""}: ${e.error}`));
+      card.append(ol);
+    }
+    if ((pv.warnings || []).length) {
+      const ol = el("ol", "hy-errs small");
+      for (const w of pv.warnings) ol.append(el("li", "warn", `Line ${w.line}${w.key ? ` (${w.key})` : ""}: ${w.warning}`));
       card.append(ol);
     }
     if (pv.preview.length) {

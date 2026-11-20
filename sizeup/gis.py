@@ -123,6 +123,11 @@ PARCELS_BBOX = (-73.77, 40.94, -73.63, 41.07)
 # a little further, in case either side moves its point to the far end of a platform.
 SAME_STATION_M = 250.0
 SAME_NAME_M = 1000.0
+# Layers whose features must carry the service's object id (#799: the hydrant overlay, sizeup/cad/hydrants.py, keys each
+# county hydrant by it). The county's f=geojson gives a feature no "id" unless the object id field is among the outFields
+# (checked 2026-11-20: outFields=FIRENAME,HYD_NUMBER,MUNCIPALIT -> no id): for these it is asked for, and it is part of
+# the cache's signature, so a copy fetched without ids is fetched again.
+IDS = frozenset({"hydrants"})
 GEOM_KIND = {"esriGeometryPoint": "point", "esriGeometryMultipoint": "point", "esriGeometryPolyline": "line",
              "esriGeometryPolygon": "polygon"}
 
@@ -882,7 +887,8 @@ class Gis:
     def _full(self, key: str, layer: Layer, info: dict) -> tuple[list, set, int | None, str]:
         """The whole layer: (features, the ids left out, the newest edit, "")."""
         ef = info["edit_field"]
-        raw = fetch_features(self.fetch, layer, self.layer_bbox(layer), min(PAGE, max(1, info["max"])), extra=(ef,))
+        raw = fetch_features(self.fetch, layer, self.layer_bbox(layer), min(PAGE, max(1, info["max"])),
+                             extra=(ef, self._oid(layer, info)))
         feats, seen, skipped, edit_max = [], set(), set(), None
         for f in raw:
             e = self._edit_of(f, ef)
@@ -908,7 +914,8 @@ class Gis:
         ef, bbox = info["edit_field"], self.layer_bbox(layer)
         since = int(meta["edit_max"]) - EDIT_SLACK_MS
         where = f"({layer.where or '1=1'}) AND {ef} >= {arcgis_time(since)}"
-        raw = fetch_features(self.fetch, layer, bbox, min(PAGE, max(1, info["max"])), where=where, extra=(ef,))
+        raw = fetch_features(self.fetch, layer, bbox, min(PAGE, max(1, info["max"])), where=where,
+                             extra=(ef, self._oid(layer, info)))
         ids = fetch_ids(self.fetch, layer, bbox)
         with self._lock:
             cur = list(self.data[key])
@@ -965,10 +972,18 @@ class Gis:
 
     # -- the disk cache --------------------------------------------------------------------------------------
 
-    def _signature(self, layer: Layer) -> str:
-        """What a cached file must have been fetched with to still be this layer's."""
+    @staticmethod
+    def _oid(layer: Layer, info: dict) -> str:
+        """The object id field, asked for with the shown ones on a layer in IDS (else the county gives no feature id)."""
+        return info.get("oid") or "OBJECTID" if layer.key in IDS else ""
+
+    def _signature(self, layer: Layer, ids: bool = True) -> str:
+        """What a cached file must have been fetched with to still be this layer's. ids=False: as a copy of a layer in
+        IDS was before it asked for the object id (#831: served until it is fetched again, at once)."""
         doc = {"url": layer.url, "bbox": [round(x, 4) for x in self.layer_bbox(layer)], "where": layer.where,
                "fields": [f for f, _ in layer.fields], "simplify_m": layer.simplify_m}
+        if layer.key in IDS and ids:                      # fetched with the object id
+            doc["ids"] = True
         if layer.drop_ours:                               # which features were left out is part of the cache
             doc["drop_ours"] = sorted(self.ours)
         return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
@@ -992,6 +1007,7 @@ class Gis:
 
     def _load(self) -> None:
         self._paced = time.monotonic()
+        again = []                                        # a copy without the ids now asked for: served, fetched at once
         for key, layer in self.layers.items():
             self._pace()
             p = self._path(key)
@@ -1002,8 +1018,12 @@ class Gis:
                 meta = doc.get("sizeup") or {}
                 feats = doc.get("features")
                 at = meta.get("at")
-                if meta.get("signature") != self._signature(layer) or not isinstance(feats, list) or not isinstance(at, (int, float)):
+                old = layer.key in IDS and meta.get("signature") == self._signature(layer, ids=False)
+                if (meta.get("signature") != self._signature(layer) and not old) or not isinstance(feats, list) \
+                        or not isinstance(at, (int, float)):
                     continue                              # fetched for another config: fetch afresh
+                if old:
+                    again.append(key)
                 if at > self.clock() + 60:
                     continue
                 boxes = []
@@ -1023,6 +1043,14 @@ class Gis:
                 self._changed(key)
             except (OSError, ValueError, TypeError, AttributeError, KeyError) as e:
                 self.log(f"gis: cache {p.name} not read ({type(e).__name__}); fetching afresh")
+        try:
+            self._load_checks()
+        finally:
+            for key in again:                             # (its signature differs: the refresh downloads it whole)
+                self.status[key]["next"] = 0.0
+                self.log(f"gis: {key}: the cached copy has no feature ids; served, and fetched again now")
+
+    def _load_checks(self) -> None:
         # the looks since (an unchanged layer's: its data file isn't written again for one)
         p = self._checks_path()
         if p is None or not p.is_file():
