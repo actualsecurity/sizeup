@@ -864,6 +864,7 @@ function renderDetail() {
   renderMap(inc);
   if (window.Preplan) Preplan.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its building's points (#456)
   if (window.PreplanDocs) PreplanDocs.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its site documents (#459)
+  if (window.Hydrants) Hydrants.card(inc);                       // its nearest hydrants, the out-of-service ones (#799)
   renderOnUnits(inc);
   renderAddUnit(inc);
   // Attach: a non-emergency event's own units, no dispatch. Other agencies (EMS, PD, utilities, keyholders) are added from

@@ -29,6 +29,10 @@
 //   A click      on a feature opens the same small box the highway layers use (the control's showInfo):
 //                the configured fields, as the county names them, the layer's sub line, and the source.
 //   Attribution  "Westchester County GIS" on the group and in the map's corner (the sources' attribution).
+//   Hydrants     (#799, hydrants.js) the layer comes with the department's overlay: each mark in its NFPA 291 class's
+//                colour (grey: no flow data), out of service a hollow mark with an X placed first; the number and the
+//                class letter as its label; a click opens the hydrant's card (admins: edit, move, remove); a legend
+//                under its toggle.
 "use strict";
 
 window.GisLayers = (() => {
@@ -60,11 +64,12 @@ window.GisLayers = (() => {
   // ---- the catalog and the layers' data: one copy for every map on the page ----------------------------------------
   const store = { cat: null, timer: null, soon: null, loading: null, layers: {}, subs: new Set() };
   const layersOf = (cat) => ((cat && cat.layers) || []);
-  async function loadCatalog() {
-    if (store.loading) return store.loading;
+  // force: past the browser's copy (max-age 5 min): a write to a layer's overlay (hydrants.js, #799) moved its rev
+  async function loadCatalog(force) {
+    if (store.loading) { if (force) store.again = true; return store.loading; }
     store.loading = (async () => {
       try {
-        const r = await fetch("/api/cad/gis", { credentials: "same-origin" });
+        const r = await fetch("/api/cad/gis", { credentials: "same-origin", cache: force ? "no-cache" : "default" });
         if (!r.ok) throw new Error(`${r.status}`);
         const d = await r.json();
         const was = store.cat;
@@ -86,6 +91,7 @@ window.GisLayers = (() => {
         }
       } finally {
         store.loading = null;
+        if (store.again) { store.again = false; loadCatalog(true); }
       }
     })();
     return store.loading;
@@ -211,11 +217,14 @@ window.GisLayers = (() => {
       // the mark: small at the layer's first zoom, full two zooms up; placed only where it fits (a dense block
       // thins out), its label beside it when there is room for that too
       const minzoom = l.minzoom || 0, size = num(s.size, 1), f = labelField(l);
-      const layout = { ...base.layout, "icon-image": ours(icon, `${icon}-ours`), "icon-allow-overlap": false, "icon-ignore-placement": false,
+      const hyd = l.key === "hydrants" && window.Hydrants;           // #799: by class and status (hydrants.js)
+      const layout = { ...base.layout, "icon-image": hyd ? Hydrants.iconExpr() : ours(icon, `${icon}-ours`), "icon-allow-overlap": false,
+                       "icon-ignore-placement": false,
                        "icon-padding": 1, "icon-size": ["interpolate", ["linear"], ["zoom"], minzoom, 0.55 * size, minzoom + 2, size] };
+      if (hyd) layout["symbol-sort-key"] = Hydrants.sortExpr();
       if (glyphs && f) {
         const lz = Math.max(minzoom, num(s.labelzoom, LABEL_ZOOM));
-        Object.assign(layout, { "text-field": ["step", ["zoom"], "", lz, ["to-string", ["get", f]]], "text-font": ["Noto Sans Regular"],
+        Object.assign(layout, { "text-field": ["step", ["zoom"], "", lz, hyd ? Hydrants.labelExpr() : ["to-string", ["get", f]]], "text-font": ["Noto Sans Regular"],
                                 "text-size": 11, "text-anchor": "left", "text-offset": [0.95 * size + 0.25, 0], "text-optional": true,
                                 "text-max-width": 8 });
       }
@@ -275,6 +284,7 @@ window.GisLayers = (() => {
           this.map.addImage(id, iconImage(shape, color((l.style || {}).color, token("--ok", "#3FB86B"))), { pixelRatio: 2 });
           this.map.addImage(`${id}-ours`, iconImage(shape, token("--accent", "#C8102E")), { pixelRatio: 2 });
         }
+        if (l.key === "hydrants" && window.Hydrants) Hydrants.addImages(this.map, shape);   // by class and status (#799)
       } catch (e) { console.error("county GIS mark", l.key, e); return ""; }
       return id;
     }
@@ -405,6 +415,7 @@ window.GisLayers = (() => {
     }
 
     show(l, props) {
+      if (l.key === "hydrants" && window.Hydrants && props._k) return Hydrants.show(this, props);   // the hydrant's card (#799)
       const fields = (l.fields && l.fields.length ? l.fields : Object.keys(props).filter((k) => !k.startsWith("_")).map((k) => [k, k]));
       const rows = [];
       let title = "";
@@ -477,6 +488,7 @@ window.GisLayers = (() => {
         const tip = [l.note, l.trains_field && this.trainsOn() ? "Stations the Trains layer shows are drawn there, not here too" : ""];
         if (tip.some(Boolean)) lab.title = tip.filter(Boolean).join(". ");
         fold.append(lab);
+        if (l.key === "hydrants" && window.Hydrants && this.isOn(l) && l.at) fold.append(Hydrants.legend(this));   // #799
         if (l.style && l.style.height) any3d = true;
       }
       if (any3d) {

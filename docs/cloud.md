@@ -2606,6 +2606,31 @@ key = "hydrants"
 on = true                        # one line changes one thing
 ```
 
+### Hydrants: the department's data over the county layer (#799)
+
+`sizeup/cad/hydrants.py`. The county layer has hydrant points and numbers only (as of 2015). The department's own
+data is an overlay in the hub's CAD database (the `hydrants` table, replicated by Litestream with the rest of the
+CAD; never in the repo): status (in service, out of service, restricted, dry) with reason and dates, flow and the
+pressures, the NFPA 291 class (taken from the flow at 20 psi residual, or set by hand), thread, outlets, main, owner,
+body colour, the water company's asset id, location, inspection date, notes, a nudged point, hydrants the county
+lacks, and county hydrants removed from the maps.
+
+- **The key.** The county layer has no hydrant id (its fields: OBJECTID, DISTRICT, MUNCIPALIT, HYD_NUMBER, FIRENAME),
+  and numbers repeat within a district, so a county hydrant is `c<OBJECTID>`. The overlay also keeps an anchor (the
+  district, number and point when it was first edited). If the county ever renumbers its ids, each overlay is bound
+  again by that anchor (the same district and number within 150 m, or the same point within 3 m). If no hydrant
+  matches, the overlay is kept and flagged "missing from county". Hub hydrants are `h<n>`.
+- **Served as the layer.** `Gis.overlays["hydrants"]` applies the overlay when the layer is served. The cached county
+  file is unchanged, and a failed merge serves the county's layer as it is. The rev and ETag include the overlay's
+  write generation, so every page fetches the layer again after an edit (the state push carries
+  `hydrants.gen`).
+- **Who.** Admins edit (WRITES). Everyone signed in sees the marks, the card and a call's nearest hydrants. The
+  list and the CSV are for admins (ADMIN_READS). Every change is in the Settings audit log (section `hydrants`,
+  key: the hydrant's key). That log is also the hydrant's history in its card. Hydrant data is no secret:
+  anyone signed in can read the cards and that log.
+- **CSV.** The export has every overlay column, keyed by `key`. An import changes only the columns the file has
+  (an empty cell clears that field) and shows a preview first. If any row is in error, nothing is applied.
+
 ## Metro-North trains (the MTA)
 
 > "Metro-North New Haven Line runs through Port Chester and Rye (stations, grade crossings, catenary).

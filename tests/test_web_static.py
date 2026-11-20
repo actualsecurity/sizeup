@@ -128,7 +128,9 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js"),      # (#456)
                                   ("/api/cad/stt/corrections", '"/api/cad/stt/corrections"', "stt-fix.js"),   # the STT
                                   ("/api/cad/stt/corrections.jsonl", '"/api/cad/stt/corrections.jsonl"', "stt-fix.js"),
-                                  ("/api/cad/intel", '"/api/cad/intel"', "intel.js")):     # the pre-alert rules (#411)
+                                  ("/api/cad/intel", '"/api/cad/intel"', "intel.js"),      # the pre-alert rules (#411)
+                                  ("/api/cad/hydrants", "`/api/cad/hydrants?", "hydrants.js"),            # Settings > Hydrants (#799)
+                                  ("/api/cad/hydrants.csv", "`/api/cad/hydrants.csv?", "hydrants.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
@@ -137,6 +139,7 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     # which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
                                 "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
+                                "/api/cad/hydrants", "/api/cad/hydrants.csv",       # the hydrant list and its CSV (#799)
                                 "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
                                 "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
