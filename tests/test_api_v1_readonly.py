@@ -35,7 +35,8 @@ def resolver(headers):
 
 
 def make_v1(cad):
-    return V1(switches=Switches(lambda: True, lambda: {"reads": True}), resolver=resolver, cad=cad,
+    # (stream on too: the change log's routes then reach their own fail-closed 503, not a flag-off 404)
+    return V1(switches=Switches(lambda: True, lambda: {"reads": True, "stream": True}), resolver=resolver, cad=cad,
               limits=Limits(clock=_ticks()))
 
 
@@ -91,9 +92,17 @@ def cad(tmp_path):
     return c
 
 
+# The change log's routes (#561) answer 503 here, as in production: they fail closed until sign-in supplies the feed's
+# visibility and device checks (#652). This guard calls them to prove the unwired answer writes nothing; the log's own
+# read-only proof, with a live feed and recorder, is tests/test_api_v1_changes.py::
+# test_the_log_only_reads_cad_sqlite_nothing_is_ever_written_to_it (it fingerprints every table of cad.sqlite).
+FAIL_CLOSED = {"/api/v1/changes", "/api/v1/stream"}
+
+
 def all_gets(cad):
     """Every GET route of the table, as a (path, query) to call."""
-    paths = {"/api/v1/snapshot": "", "/api/v1/incidents": "limit=2", "/api/v1/units": "limit=5", "/api/v1/alarms": ""}
+    paths = {"/api/v1/snapshot": "", "/api/v1/incidents": "limit=2", "/api/v1/units": "limit=5", "/api/v1/alarms": "",
+             "/api/v1/changes": "", "/api/v1/stream": ""}
     out = []
     for r in ROUTES:
         if r.method != "GET" or r.path == "/api/v1/meta":
@@ -113,6 +122,9 @@ def test_no_read_changes_a_byte_of_the_cad_for_any_kind_of_person(cad, token):
     v1 = make_v1(cad)
     for path, query in all_gets(cad):
         status = v1.respond("GET", path, query, {"Authorization": token})[0]
+        if path in FAIL_CLOSED:
+            assert status == 503, (path, status)
+            continue
         assert status in (200, 404), (path, status)
         if "999999" not in path:
             assert status == 200, path

@@ -138,6 +138,8 @@ import json
 import mimetypes
 import re
 import secrets
+import select
+import socket
 import threading
 import time
 import zlib
@@ -150,6 +152,7 @@ from urllib.parse import parse_qsl, urlsplit
 from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
+from sizeup.api.v1.changelog import STREAM_WRITE_S, ChangeLog, Feed, cad_follow
 from sizeup.api.v1.handler import V1
 from sizeup.cad import prefs as prefs_mod
 from sizeup.web import bundle as bundle_mod
@@ -557,6 +560,14 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
     # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/. mobile: its switches (#619)
     v1 = V1(switches=mobile, resolver=mobile_resolver, log=access_log, cad=getattr(cad, "cad", None))
+    if cad is not None and role != "station" and getattr(cad.cad.store, "path", ":memory:") != ":memory:":
+        # the change log (#561): hub.sqlite beside the CAD's database, made on first use while the `stream` flag is on;
+        # one line into the CAD (its commits poke the recorder, which does nothing with the flag off)
+        v1.changes = Feed(ChangeLog(Path(cad.cad.store.path).parent / "hub.sqlite",
+                                    gate.fence.ok if gate.fence is not None else None),
+                          cad_follow(cad.cad.store), lambda: v1.switches.allows("stream"),
+                          fence_ok=gate.fence.ok if gate.fence is not None else None, report=access_log)
+        v1.changes.attach(cad.cad.store)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -642,8 +653,52 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if station_ui:
                 self.close_connection = True     # a POST's body is left unread
                 return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
-            return self._send(*v1.respond(self.command, path, query, self.headers,
-                                          self._client()[0] or self.client_address[0]))
+            r = v1.respond(self.command, path, query, self.headers, self._client()[0] or self.client_address[0])
+            if getattr(r[1], "sse", False):          # /api/v1/stream (#561): headers now, events until it ends
+                return self._v1_stream(*r)
+            return self._send(*r)
+
+        def _v1_stream(self, status: int, body, ctype: str, headers: dict) -> None:
+            """SSE for the app: a client that takes no bytes for STREAM_WRITE_S is dropped; the stream ends with a
+            drain, a lost lease (the body's own checks too) and gives its slot back whatever happens."""
+            try:
+                self.answered = True
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                if self.command == "HEAD":
+                    return
+                if perf is not None:
+                    threading.current_thread().name = "http-stream"
+                self.connection.settimeout(STREAM_WRITE_S)
+
+                def write(raw: bytes) -> None:
+                    self.wfile.write(raw)
+                    self.wfile.flush()
+
+                # the app closed its end: its slot is free at once, not at the next heartbeat
+                def gone() -> bool:
+                    try:
+                        if not select.select([self.connection], [], [], 0)[0]:
+                            return False
+                        return self.connection.recv(1, socket.MSG_PEEK) == b""
+                    except BlockingIOError:
+                        return False
+                    except (OSError, ValueError):
+                        return True
+
+                def stop() -> bool:          # (a lost lease is the body's own check: its close reason is "handover")
+                    return gate.draining.is_set() or gone()
+                try:
+                    body.run(write, stop)
+                except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                    pass
+            finally:
+                body.close()
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -1492,6 +1547,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             gz = assets.gz(a) if len(a["body"]) >= GZIP_MIN and compressible(a["ctype"]) and accepts_gzip(self.headers) else None
             self._send(200, a["body"], a["ctype"], {"ETag": a["etag"], "Cache-Control": cc}, gz=gz)
 
+    Handler.v1 = v1                  # (WebServer.drain: the change log's last batch is written)
     return Handler
 
 
@@ -1591,6 +1647,8 @@ class WebServer:
                 self.cad_broadcaster.stop()
             if self.perf is not None:
                 self.perf.profile_cancel()       # (a profile's answer is waiting on it)
+            if getattr(self.httpd.RequestHandlerClass.v1, "changes", None) is not None:
+                self.httpd.RequestHandlerClass.v1.changes.close()    # the app's streams end; the last batch is written
             if not self.gate.wait_idle(wait_s):
                 print(f"sizeup: {self.gate.inflight} request(s) still in flight after {wait_s:.0f} s: stopping anyway", flush=True)
             self.httpd.shutdown()

@@ -24,6 +24,10 @@ paths:
     $ref: ./paths/units.yaml
   /api/v1/alarms:
     $ref: ./paths/alarms.yaml
+  /api/v1/changes:
+    $ref: ./paths/changes.yaml
+  /api/v1/stream:
+    $ref: ./paths/stream.yaml
 components:
   securitySchemes:
     deviceToken:

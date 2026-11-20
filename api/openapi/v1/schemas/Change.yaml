@@ -1,0 +1,25 @@
+type: object
+required: [seq, epoch, kind, id, rev, at]
+description: >
+  A reference to an object that changed, never the object: the app fetches it when it sees a rev it does not have, and
+  drops duplicates by (kind, id, rev). `rev` is empty when the object is gone.
+properties:
+  seq:
+    type: integer
+    minimum: 1
+    description: The change log's sequence number, which is the cursor.
+  epoch:
+    type: string
+    description: The log's epoch. A different one means start over from a snapshot.
+  kind:
+    type: string
+    enum: [incident, unit]
+    description: An unknown kind is read as other and ignored.
+  id:
+    type: string
+  rev:
+    type: string
+    description: The object's content hash (16 hex digits), or an empty string when it is gone.
+  at:
+    type: number
+    description: Unix seconds the change was recorded.

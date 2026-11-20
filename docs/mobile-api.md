@@ -384,10 +384,10 @@ declared type. So: **foreground stream + background push + cursor resume.**
 
 | State | Mechanism |
 |---|---|
-| App in foreground | `GET /api/v1/stream?after=<cursor>` (SSE). Typed events `{kind: incident\|unit\|alarm\|prealert\|…, id, rev, op: upsert\|delete, data}`, each with `id: <cursor>`; resume with `Last-Event-ID`. A heartbeat comment every 15 s (not 1 s state pushes). Filtered per principal (role, sourcekeys) |
+| App in foreground | `GET /api/v1/stream?after=<seq>&epoch=<e>` (SSE). Events `change` = a reference `{seq, epoch, kind: incident\|unit, id, rev, at, server_time}` (no payload, no `op`: a deletion is an empty `rev`), each with `id: <epoch>-<seq>`; resume with `Last-Event-ID`. An `event: heartbeat` every 15 s (not 1 s state pushes). Filtered per principal (kinds, and a visibility predicate PR 2 supplies: until then the feed is not served) |
 | Backgrounded or killed | APNs/FCM ([§4](#4-pushes-to-the-app)). The push carries a reference (kind, id), not the object |
 | Back to foreground | `GET /api/v1/changes?after=<cursor>&limit=500`, then reopen the stream. `410 {oldest}` means the cursor is too old: resnapshot with `GET /api/v1/snapshot` (active incidents, units, open alarms) |
-| Bad network | The same `changes` endpoint as a long poll (`&wait=25`, under Cloudflare's 100 s) |
+| Bad network | The same `changes` endpoint as a long poll (`&wait=25`, under Cloudflare's 100 s) (planned, not in #561) |
 
 **Why not reuse the console's `Broadcaster`:** its ids reset on every handoff; it holds no history; its payload is the
 UI blob, the same for every viewer; and it pushes every second even when idle, which costs a phone radio wake-ups.
@@ -395,13 +395,38 @@ UI blob, the same for every viewer; and it pushes every second even when idle, w
 **Why not WebSockets:** nothing needs client-to-server streaming, SSE already passes the Cloudflare Tunnel in
 production, and native SSE clients are small (URLSession bytes, OkHttp-sse).
 
-**One change log** (`sizeup/changes.py`), built once and shared with the planned `/api/feed/v1`: references
-`(seq, at, kind, id)` hydrated at read time, an epoch, 7-day retention, 410 when a cursor is too old, 409 on an epoch
+**One change log** (`sizeup/api/v1/changelog.py`), built once and shared with the planned `/api/feed/v1`: references
+`(seq, epoch, kind, id, rev, at)` hydrated at read time, an epoch, 7-day retention, 410 when a cursor is too old, 409 on an epoch
 change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/events`, `/api/v1/changes` and
 `/api/v1/stream` are three views of it with different scopes and hydrators.
 
-- The epoch lives in the database, not the process, so it survives handoffs.
+- The epoch is new at every start of the hub (a random token held in memory): a cursor from an earlier run answers 409
+  and the app resnapshots once, so a restore (Litestream may give back a hub.sqlite a second behind) can never hand a
+  phone a seq it already has. The log never writes to cad.sqlite.
 - Writes to it are batched off the request path, and none happen at startup (the startup-writes rule, PR #507).
+- **As built (#561):** `sizeup/api/v1/changelog.py` (the log, the recorder, the feed), `changes.py`, `stream.py`, `rev.py`.
+  The log lives in `hub.sqlite`; kinds so far are `incident` and `unit` (the radio log, alarms and positions are not
+  logged); a deletion is a row with an empty `rev`. `410 cursor_too_old` carries `oldest` (the smallest cursor still
+  served), `409 epoch_changed` the new `epoch`. Events: `hello`, `change`, `heartbeat`, `close`.
+  **DEVIATION from the design:** the SSE `id` and `Last-Event-ID` carry `<epoch>-<seq>` (not a bare cursor), so
+  EventSource's automatic resume gets epoch validation; the plain `after` + `epoch` form still works, and a seq with no
+  epoch (`after=57`, `Last-Event-ID: 57`) is a 400 `bad_cursor`. A device over its two streams gets the newest: its oldest is
+  closed with reason `superseded` (the global cap is the only 429).
+  `rev` is a hash of the whole row: a confirmation oracle only for a row someone could already guess, no practical attack.
+  The log's `rev` equals the reads' `rev`: `cad_follow` hashes the output of the reads' serializers
+  (`incident_summary`, `unit` through `rev_of`), never a raw row, so a log entry's `(kind, id, rev)` is the `rev` of that
+  object in `GET /api/v1/incidents` (list items and the snapshot) and `GET /api/v1/units`. A column the API does not show
+  (a unit's notes, a caller's name) is not a change. The single-incident GET serves a bigger object (chronology, building
+  notes, the person's role view), so its `rev` is its own: the app treats a log entry as "refetch the detail" and never
+  compares revs across the two. The summary carries the newest chronology event's id (`last_event_id`), so a note or any
+  other event on a call is a log entry for that incident. The reads' lists have a 1 s rebuild floor, so the log can
+  announce a change up to about a second before a list GET shows it: a client that gets a change event refetches the
+  single object (the detail GET is not cached; a list refetch may be one rebuild late).
+  **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view (the log takes kinds per
+  consumer for it), `meta.epoch` (still null), and per-person filtering: `Feed.visible` fails closed, so `changes` and
+  `stream` answer 503 `unavailable` until PR 2's resolver supplies a predicate from the person's role and sourcekeys (and
+  a `valid(principal)` check that cuts a revoked device off mid-stream). Both must be wired before the `stream` flag is
+  turned on. Details: [cloud.md](cloud.md#the-apps-change-log-apiv1changes-and-apiv1stream-561).
 - **Unverified:** which sources besides `radio_changes.seq` already have a monotonic sequence.
 
 ---
@@ -699,9 +724,9 @@ writes. `/me` is PR 2's.
 - **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
   read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
   incident read is uncached.
-- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
-  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
-  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+- **Cost.** The lists come from caches keyed on `store.rev` with a 1 s rebuild floor (also rebuilt without a write when
+  an incident or unit list is 30 s old, for the closed-in-the-last-day window, and alarms after 1 s), rebuilt by one
+  request at a time (a burst of writes costs one rebuild a second; a failed build is remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
   only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---
@@ -745,7 +770,7 @@ Tracked as a checklist in #556.
 | Change-log writes add Litestream frames and S3 cost | Batched off the request path, references only, created lazily, positions never logged |
 | Real data in the public spec or fixtures | Synthetic examples, a CI denylist from secrets, PRs grepped for exact strings |
 | No staging today, so app review hits production | Staging before the first external TestFlight build; the review account only on staging |
-| Handoffs mid-stream | 503 + Retry-After already exists. The cursor is database-backed, so a reconnect after a handoff resumes instead of resnapshotting |
+| Handoffs mid-stream | 503 + Retry-After already exists. The epoch is new at every hub start, so a reconnect after a handoff is one 409 and a resnapshot (not a silent gap after a restore) |
 
 ## Could not verify
 

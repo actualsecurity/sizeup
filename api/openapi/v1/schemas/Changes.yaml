@@ -1,0 +1,22 @@
+type: object
+required: [epoch, cursor, head, more, changes, server_time]
+properties:
+  epoch:
+    type: string
+  cursor:
+    type: integer
+    minimum: 0
+    description: Ask for after=cursor next.
+  head:
+    type: integer
+    minimum: 0
+    description: The log's newest seq.
+  more:
+    type: boolean
+    description: The page was full, so ask again with the cursor.
+  changes:
+    type: array
+    items:
+      $ref: ./Change.yaml
+  server_time:
+    type: number

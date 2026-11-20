@@ -119,7 +119,8 @@ def test_no_principal_is_a_401_and_a_flag_off_is_a_404(cad, path):
 
 def test_the_routes_need_a_device_the_reads_flag_and_the_least_role():
     from sizeup.api.v1.routes import ROUTES
-    mine = [r for r in ROUTES if r.path != "/api/v1/meta"]
+    own = ("/api/v1/meta", "/api/v1/changes", "/api/v1/stream")      # (the change log's routes are #561's)
+    mine = [r for r in ROUTES if r.path not in own]
     assert {r.path for r in mine} == {"/api/v1/snapshot", "/api/v1/incidents", "/api/v1/incidents/{id}",
                                       "/api/v1/units", "/api/v1/alarms"}
     assert all((r.method, r.need, r.flag, r.role) == ("GET", "device", "reads", "read") for r in mine)
