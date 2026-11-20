@@ -6,7 +6,9 @@ Each directory <recorder_dir>/systems/<name>/ (the repo's deploy/trunk-recorder/
                      block trunk-recorder never sees: {"label": the system as shown ("MRRS"), "name": its full name,
                      "jobs": one dongle job per source, in order (["MRRS 770", "MRRS 773"]), "site": facts as listed,
                      "reception": the reception test's (#410, sizeup/radio/reception.py): {"watch": the talkgroups it
-                     is about, "antenna": what to try when it is weak, "caveat": what a test can't show}}
+                     is about, "antenna": what to try when it is weak, "caveat": what a test can't show},
+                     "split": the patch's voice-ID cut (#638, trunk-recorder's), "grant_split" / "grant_split_tune": the
+                     grant split's (#819, sizeup/radio/p25.py GrantSplit: sizeup's only)}
     talkgroups.csv   trunk-recorder's talkgroups, plus a "Tier" column (sizeup/tiers.py); "Tag" is the UI group
 
 Adding a talkgroup is one line in that file; adding a system is one directory. Nothing here is logic about a system.
@@ -39,7 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sizeup import sourcekeys as sources, tiers
-from sizeup.radio.trunkrecd import CALL_KINDS, SYSTEMS, SplitTally, call_line, covers, split_line, system_dirs
+from sizeup.radio.trunkrecd import (CALL_KINDS, LOG, SYSTEMS, SplitTally, call_line, covers, grant_cuts_path, split_line,
+                                    system_dirs)
 
 GRANT = re.compile(r"SIZEUP-UNIT (?P<sys>\S+) (?P<src>-?\d+) call (?P<tg>\d+)")
 ACTIVITY_MAX = 500           # encrypted key-ups remembered per system
@@ -76,6 +79,7 @@ class P25System:
     site: dict = field(default_factory=dict)
     reception: dict = field(default_factory=dict)     # the reception test's (#410): {watch, antenna, caveat, alert}
     probe_only: bool = False                          # a probe-only system (#436, sizeup/radio/probes.py): never a job
+    grant: dict = field(default_factory=dict)         # its "sizeup" block's grant split keys (#819: wire_grant_split)
 
     @property
     def jobs(self) -> tuple[str, ...]:
@@ -146,7 +150,39 @@ def load(directory: Path) -> P25System:
     cap = cap if cap.is_absolute() else (directory / cap)
     return P25System(name, label, str(mine.get("name") or label), os.path.abspath(directory), os.path.abspath(cap),
                      sources, freqs, read_talkgroups(tgf, name), dict(mine.get("site") or {}),
-                     dict(mine.get("reception") or {}) if isinstance(mine.get("reception"), dict) else {})
+                     dict(mine.get("reception") or {}) if isinstance(mine.get("reception"), dict) else {},
+                     grant={k: mine[k] for k in GRANT_KEYS if k in mine})
+
+
+GRANT_KEYS = ("grant_split", "grant_split_tune")
+
+
+def wire_grant_split(ingest, live, conf: dict | None, workdir: str | Path, state_path, file_name: str,
+                     system: str) -> None:
+    """The grant split (#819, sizeup/radio/p25.py) of one system's calls: its mode and tuning from its config.json
+    "sizeup" block (conf), a live call's events from its LiveTalk, a late one's (#747) from its trunk-recorder.log
+    (in workdir), and with the station's service (state_path: its state file's) the count its supervisor says hourly
+    (trunkrecd.grant_cuts_path(file_name))."""
+    from sizeup.radio.live import LogEvents
+    from sizeup.radio.p25 import GrantCount, GrantSplit
+    ingest.grant_split = GrantSplit.of(conf)
+    ingest.cut_events = live.cut_events
+    log = Path(workdir) / LOG
+    ingest.log_events = LogEvents([log.with_name(log.name + ".1"), log]).events
+    path = grant_cuts_path(file_name, str(state_path)) if isinstance(state_path, (str, Path)) and state_path else ""
+    if path and ingest.grant_split.mode != "off":
+        ingest.grant_count = GrantCount(path, system)
+    elif path and Path(path).is_file():
+        GrantCount(path, system).mark("off")                 # (switched off: its hourly line says nothing of it)
+
+
+def sizeup_block(workdir: str | Path) -> dict:
+    """The "sizeup" block of the config.json in workdir (the county's trunk-recorder's), {} with none readable."""
+    try:
+        d = json.loads((Path(workdir) / "config.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return d["sizeup"] if isinstance(d, dict) and isinstance(d.get("sizeup"), dict) else {}
 
 
 def discover(base: str | Path | None, taken_tgs=(), taken_jobs=(), problems: list[str] | None = None,
@@ -326,6 +362,8 @@ class Runtime:
         self.ingest.record_all = False                    # a talkgroup that isn't in its file is never taken
         self.ingest.grants = self.live.grants
         self.ingest.alias_of = lambda src: self.live.aliases.get(src, "")
+        wire_grant_split(self.ingest, self.live, system.grant, system.dir, getattr(recorder, "state_path", None),
+                         system.name, system.name)
         self.probe = None                     # sizeup/radio/reception.py Probe while a reception test runs (#410)
         recorder.on_line = self._line
 

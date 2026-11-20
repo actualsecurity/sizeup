@@ -45,6 +45,17 @@ the unit script) name the radio that keyed at that moment, apply_grants() names 
 and splits a transmission that the voice channel ran into the next one (no terminator decoded:
 trunk-recorder then credits the whole transmission to the later radio).
 
+The grant split (#819). A turn the voice channel credits to one radio can still hold several talkers: the next radio's
+ID was never decoded on the voice channel, so the patch (#638) had nothing to cut at. The control channel did grant it:
+trunk-recorder logs "Unit ID externally set from GRANT: <new> ... doesn't match current" (a grant or grant update for
+the talkgroup naming another radio while it records the call's transmission), and apply_grants() leaves a turn with an
+ID alone. Per system, config.json "sizeup": {"grant_split": "off" | "log" | "on"} (GrantSplit, default off):
+plan_grant_cuts() cuts the turn where such a grant came, at the quietest gap near it (a new key-up starts with ~0.2 s
+of no speech) or, with none, the grant's time less its latency; the new part is the granted radio's (Turn.via
+GRANT_CUT, the row's cut "grant"). "log" only logs each cut it would make and counts it for trunk-recorder's hourly
+split line (GrantCount, trunkrecd.Shipper); "on" makes the parts rows like the patch's (#816). Audio gaps alone never
+cut: a talker's own pauses are as long.
+
 The P25 emergency button (issue #128): the call JSON's top-level "emergency" (1 when the control channel
 granted the call as an emergency: trunk-recorder 5.2.0 takes it from the grant that set the call up, so it
 is the call's first key-up) and each srcList entry's "emergency" (always 0 in 5.2.0, which writes false
@@ -95,7 +106,7 @@ class Turn:
     length: float | None = None   # s of audio; None = until the next turn
     at: float | None = None       # wall-clock start (estimated: srcList "time" is whole seconds)
     errors: int = 0               # freqList error_count
-    via: str = "srclist"          # srclist | grant (talker named by a live grant) | split (cut at a grant)
+    via: str = "srclist"          # srclist | grant (talker named by a live grant) | split (cut at a grant) | grant_cut (#819)
     emergency: bool = False       # srcList "emergency": this key-up was an emergency (P25 emergency button)
 
 
@@ -476,6 +487,232 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
     return out
 
 
+# The grant split (#819, the module's doc). Times in s.
+GRANT_CUT = "grant_cut"          # Turn.via / Piece.via of a part cut at a mid-call grant: its talker is the granted radio
+GRANT_SPLIT_MODES = ("off", "log", "on")
+GAP_FRAME_S = 0.01               # the gap search's frames
+GAP_BELOW_DB = 20.0              # a gap's frames: this far under the turn's speech level (its loud frames), or silent
+SILENCE_DBFS = -70.0             # a gap this quiet is digital silence (no one keyed); louder: a talker's own pause
+
+
+@dataclass
+class GrantSplit:
+    """A system's grant split: its mode and where it cuts. A grant to another radio during the call, settle_s or more
+    into the current talker's turn, with no voice-ID cut (a turn's start, the patch's cut or would-cut) within voice_s,
+    is cut at the quietest run of min_gap_s or more from before_s before it to after_s after it, else latency_s before
+    it; grants for one radio collapse_s apart are one; no part is ever shorter than min_piece_s, and nothing is cut
+    within voice_s of the call's end (the next call's grant). A unit-script grant counts only for a radio coming back:
+    one the call credited before (A, B, A: the GRANT log line never names the call's own first radio)."""
+    mode: str = "off"
+    before_s: float = 1.5
+    after_s: float = 0.5
+    latency_s: float = 0.3
+    min_gap_s: float = 0.15
+    settle_s: float = 0.5
+    voice_s: float = 1.0
+    collapse_s: float = 1.0
+    min_piece_s: float = 0.4
+
+    TUNE = {"before_s": 3.0, "after_s": 5.0, "latency_s": 5.0, "min_gap_s": 5.0}     # each tunable, and its most
+
+    @classmethod
+    def of(cls, conf: dict | None) -> GrantSplit:
+        """From a config.json's "sizeup" block: "grant_split" (a mode: anything else is off) and optional
+        "grant_split_tune": {before_s (0-3), after_s, latency_s, min_gap_s (0-5)} in seconds; anything else keeps the
+        default."""
+        conf = conf if isinstance(conf, dict) else {}
+        mode = conf.get("grant_split")
+        out = cls(mode if mode in GRANT_SPLIT_MODES else "off")
+        tune = conf.get("grant_split_tune")
+        for k, v in (tune.items() if isinstance(tune, dict) else ()):
+            if k in cls.TUNE and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= cls.TUNE[k]:
+                setattr(out, k, float(v))
+        return out
+
+
+@dataclass
+class GrantCut:
+    """One cut plan_grant_cuts() makes (or would): where in the call audio, for which radio, why there."""
+    pos: float                 # s into the call audio
+    src: str                   # the granted radio: the next part's talker
+    at: float                  # the grant's time (wall clock)
+    expected: float            # where the grant's time falls in the call audio
+    gap: float                 # the length of the gap it was put in, 0 when none (expected - latency_s)
+    level: float | None = None  # the gap's mean level, dBFS (None: no gap)
+    via: str = "grant"         # what granted it: "grant" (trunk-recorder's GRANT log line) | "unit" (the unit script)
+
+    def why(self) -> str:
+        """For its log line (tuning: #819): the gap, its level and kind, or the fallback; and the grant's source."""
+        if self.gap and self.level is not None:
+            kind = "silence" if self.level <= SILENCE_DBFS else "pause"
+            where = f"gap {self.gap:.2f} s at {max(self.level, -99.0):.0f} dBFS ({kind})"
+        else:
+            where = "no gap: at the grant less its latency"
+        src = "unit script" if self.via == "unit" else "log line"
+        return f"{where}, {self.pos - self.expected:+.1f} s from the grant ({src})"
+
+
+def _frames_db(audio: np.ndarray, a: int, b: int, rate: int) -> np.ndarray:
+    """Each GAP_FRAME_S frame's level (dBFS) of audio[a:b] (whole frames only)."""
+    f = max(1, int(round(GAP_FRAME_S * rate)))
+    n = (b - a) // f
+    if n <= 0:
+        return np.zeros(0)
+    x = np.asarray(audio[a:a + n * f], dtype=np.float64).reshape(n, f)
+    return 20 * np.log10(np.sqrt((x ** 2).mean(axis=1)) + 1e-9)
+
+
+def best_gap(audio: np.ndarray, lo: float, hi: float, aim: float, level_db: float, min_gap_s: float,
+             rate: int = RATE) -> tuple[float, float, float] | None:
+    """(middle, length in s, mean level in dBFS) of the quietest run of quiet frames (GAP_BELOW_DB under level_db, or under NO_VOICE_DBFS)
+    at least min_gap_s long between lo and hi; the nearer to aim of two as quiet (to the dB). None: no such run."""
+    a, b = max(0, int(lo * rate)), min(len(audio), int(hi * rate))
+    db = _frames_db(audio, a, b, rate)
+    quiet = db <= max(NO_VOICE_DBFS, level_db - GAP_BELOW_DB)
+    need = int(np.ceil(min_gap_s / GAP_FRAME_S - 1e-9))
+    best, k, n = None, 0, len(db)
+    while k < n:
+        if not quiet[k]:
+            k += 1
+            continue
+        j = k
+        while j < n and quiet[j]:
+            j += 1
+        if j - k >= need:
+            mid = a / rate + (k + j) / 2 * GAP_FRAME_S
+            key = (round(float(db[k:j].mean())), abs(mid - aim))
+            if best is None or key < best[0]:
+                best = (key, mid, (j - k) * GAP_FRAME_S, float(db[k:j].mean()))
+        k = j
+    return None if best is None else (best[1], best[2], best[3])
+
+
+def plan_grant_cuts(call: Call, events: list[tuple[float, str, str]], conf: GrantSplit,
+                    rate: int = RATE) -> list[GrantCut]:
+    """Where the grant split cuts this call (the module's doc, GrantSplit): events are (time, radio ID, "grant" | "unit"
+    | "voice") from the control channel and the voice channel (radio/live.py cut_events). Only a turn with a place in
+    time (Turn.at) and a length, and only in the call's audio."""
+    audio = call.audio
+    if audio is None or not len(audio):
+        return []
+    turns = sorted((t for t in call.turns if t.at is not None and t.length), key=lambda t: t.pos)
+    if not turns:
+        return []
+    every = sorted(call.turns, key=lambda t: t.pos)
+    bounds = [t.pos for t in every[1:]] + [len(audio) / rate]   # every key-up the call has already, and its end
+    voices = [at for at, _s, kind in events if kind == "voice"]
+    grants = sorted((float(at), str(src), kind) for at, src, kind in events
+                    if kind in ("grant", "unit") and str(src) not in UNKNOWN_SRC)
+    seen: dict[str, float] = {}
+    cuts: list[GrantCut] = []
+    cur: dict[int, tuple[float, str]] = {}                   # turn -> (its current talker's start, radio)
+    levels: dict[int, float] = {}
+    for at, src, kind in grants:
+        k = next((i for i, t in enumerate(turns) if t.at <= at < t.at + t.length), None)
+        if kind == "unit":
+            # the unit script's: only a radio coming back (credited before here: a turn's, or an earlier cut's)
+            here = turns[k].pos + (at - turns[k].at) if k is not None else None
+            if here is None or src not in {t.src for t in every if t.src and t.pos < here} | {c.src for c in cuts}:
+                continue
+        last, seen[src] = seen.get(src), at
+        if last is not None and at - last <= conf.collapse_s:
+            continue                                         # the same grant again (an update): one
+        if k is None:
+            continue                                         # between transmissions, or not in this call
+        t = turns[k]
+        start, talker = cur.get(k, (t.pos, t.src))
+        expected = t.pos + (at - t.at)
+        end = t.pos + t.length
+        if src == talker or expected - start < conf.settle_s:
+            continue                                         # the current talker again, or its own key-up
+        if any(abs(v - at) <= conf.voice_s for v in voices) or any(abs(b - expected) <= conf.voice_s for b in bounds):
+            continue                                         # the voice channel cut there (or would have), or the end
+        lo, hi = max(start + conf.min_piece_s, expected - conf.before_s), min(end - conf.min_piece_s,
+                                                                              expected + conf.after_s)
+        if hi <= lo:
+            continue                                         # no room for a part on either side
+        if k not in levels:
+            db = _frames_db(audio, int(t.pos * rate), int(end * rate), rate)
+            levels[k] = float(np.percentile(db, 90)) if len(db) else NO_VOICE_DBFS
+        aim = expected - conf.latency_s
+        gap = best_gap(audio, lo, hi, aim, levels[k], conf.min_gap_s, rate)
+        pos = gap[0] if gap else min(max(aim, lo), hi)
+        pos = round(pos, 2)
+        if pos - start < conf.min_piece_s or end - pos < conf.min_piece_s:
+            continue
+        cuts.append(GrantCut(pos, src, at, round(expected, 2), round(gap[1], 2) if gap else 0.0,
+                             round(gap[2], 1) if gap else None, kind))
+        cur[k] = (pos, src)
+    return cuts
+
+
+def apply_grant_cuts(call: Call, cuts: list[GrantCut], aliases: dict[str, str] | None = None,
+                     alias_of: Callable[[str], str] = lambda src: "") -> bool:
+    """Make plan_grant_cuts()'s cuts: each a turn of its own from its pos (via GRANT_CUT, the granted radio's), the turn
+    it was cut from shortened. True if anything changed."""
+    if not cuts:
+        return False
+    aliases = aliases or {}
+    out: list[Turn] = []
+    for t in sorted(call.turns, key=lambda t: t.pos):
+        mine = sorted((c for c in cuts if t.length and t.pos < c.pos < t.pos + t.length), key=lambda c: c.pos)
+        if not mine:
+            out.append(t)
+            continue
+        end = t.pos + t.length
+        t.length = round(mine[0].pos - t.pos, 2)
+        out.append(t)
+        for i, c in enumerate(mine):
+            nxt = mine[i + 1].pos if i + 1 < len(mine) else end
+            tag = alias_of(c.src) or ""
+            out.append(Turn(c.pos, talker_name(c.src, tag, aliases), c.src, tag, round(nxt - c.pos, 2),
+                            (t.at + (c.pos - t.pos)) if t.at is not None else None, 0, GRANT_CUT))
+    call.turns = out
+    call.units = []
+    for t in call.turns:
+        if t.talker and (not call.units or call.units[-1] != t.talker):
+            call.units.append(t.talker)
+    return True
+
+
+class GrantCount:
+    """The grant split's cuts (made, or would be in "log") of one system, kept for trunk-recorder's supervisor
+    (trunkrecd.Shipper says them in its hourly split line): {"v": 1, "system", "mode", "cuts", "calls", "at"} in
+    path, cumulative (kept over sizeup's restarts), written (tmp + rename) at each cut call."""
+
+    def __init__(self, path: str | Path, system: str = ""):
+        self.path, self.system = Path(path), system
+        self.cuts = self.calls = 0
+        self._lock = threading.Lock()
+        try:
+            d = json.loads(self.path.read_text())
+            if isinstance(d, dict) and d.get("v") == 1:
+                self.cuts, self.calls = (int(d.get(k) or 0) for k in ("cuts", "calls"))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def add(self, n: int, mode: str) -> None:
+        with self._lock:
+            self.cuts += n
+            self.calls += 1
+            self._write(mode)
+
+    def mark(self, mode: str) -> None:
+        """The mode alone written (the counts as they are): "off" once the system's grant split is off, so the hourly
+        line says nothing of it."""
+        with self._lock:
+            self._write(mode)
+
+    def _write(self, mode: str) -> None:
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")   # (its own tmp)
+        try:
+            tmp.write_text(json.dumps({"v": 1, "system": self.system, "mode": mode, "cuts": self.cuts,
+                                       "calls": self.calls, "at": round(time.time(), 1)}))
+            os.replace(tmp, self.path)
+        except OSError:
+            pass                                             # (a count, never in the way of the call)
+
+
 class CallIngest:
     """Poll a trunk-recorder capture dir; on_call(Call) for each new call on our talkgroups. mark_path: where the
     high-water mark is kept (#747, the module's doc: calls written while sizeup was down); None: none kept, every
@@ -499,6 +736,12 @@ class CallIngest:
         # JSON alone says who talked.
         self.grants: Callable[[str, int, float, float], list[tuple[float, str]]] | None = None
         self.alias_of: Callable[[str], str] = lambda src: ""
+        # The grant split (#819): its mode, the events of a live call (LiveTalk.cut_events) and of one from while sizeup
+        # was down (LogEvents.events: trunk-recorder's log), and where its cuts are counted. Set by the app.
+        self.grant_split = GrantSplit()
+        self.cut_events: Callable[[str, int, float, float], list[tuple[float, str, str]]] | None = None
+        self.log_events: Callable[[str, int, float, float], list[tuple[float, str, str]]] | None = None
+        self.grant_count: GrantCount | None = None
         # The high-water mark (#747): (mtime, path under the capture dir) of the newest sidecar on_call took, and the
         # sidecars at or before it not taken yet (their WAV still coming) as the last scan found them
         self.mark_path = Path(mark_path) if mark_path else None
@@ -648,12 +891,38 @@ class CallIngest:
             except (OSError, ValueError, EOFError, wave.Error) as e:   # EOFError: empty/truncated WAV
                 self.on_event(f"p25: skipped {wav.name}: {type(e).__name__} {e}")
                 continue
+            if self.grant_split.mode in ("log", "on") and call.turns and not call.encrypted:
+                self._grant_split(call)
             if len(self._keys) > 1000:                       # (scan() called without poll(): nothing to keep)
                 self._keys.clear()
             self._keys[call.wav_path] = key
             calls.append(call)
         self._behind = behind
         return calls
+
+    def _grant_split(self, call: Call) -> None:
+        """The grant split (#819) on a call: its cuts planned from the live events (a late call's from trunk-recorder's
+        log), a line each (no radio ID), counted, and made when it is "on"."""
+        conf = self.grant_split
+        events = self.log_events if call.late else self.cut_events
+        if events is None:
+            return
+        try:
+            cuts = plan_grant_cuts(call, events(call.system, call.talkgroup, call.start - conf.before_s - GRANT_SLACK_S,
+                                                call.end + GRANT_SLACK_S), conf)
+            if not cuts:
+                return
+            dur = len(call.audio) / RATE if call.audio is not None else 0.0
+            for c in cuts:
+                self.on_event(f"p25 {self.name}: grant split ({conf.mode}): {call.label}: "
+                              f"{'would cut' if conf.mode == 'log' else 'cut'} at {c.pos:.1f} of {dur:.1f} s, "
+                              f"{c.why()}" + (" (late)" if call.late else ""))
+            if self.grant_count is not None:
+                self.grant_count.add(len(cuts), conf.mode)
+            if conf.mode == "on":
+                apply_grant_cuts(call, cuts, self.aliases, self.alias_of)
+        except Exception as e:                               # the call as trunk-recorder wrote it is still the record
+            self.on_event(f"p25: grant split not applied to {call.label}: {type(e).__name__} {e}")
 
     def poll(self) -> list[Call]:
         """One look: each new call to on_call, the mark moved past each one it took (never one it raised on), the

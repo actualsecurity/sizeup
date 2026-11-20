@@ -296,8 +296,8 @@ in `sizeup/` queues (`App._emit`, the incident sources' runner) and every type `
 |---|---|---|---|
 | `page` | 22 / 27 | a page off a paging channel, once its recording is complete | yes |
 | `page_text` | 22 / 27 | the same document again with its transcript | no |
-| `traffic` | 16 / 50 | a finished transmission: the Traffic object's attributes, with `attach` and `pairs` | yes |
-| `alarm` | 12 / 49 | an emergency button, ahead of the words: the same object as it is then, without `attach` | when there is one |
+| `traffic` | 16 / 51 | a finished transmission: the Traffic object's attributes, with `attach` and `pairs` | yes |
+| `alarm` | 12 / 50 | an emergency button, ahead of the words: the same object as it is then, without `attach` | when there is one |
 | `retext` | 5 / 10 | new words for a clip the hub has | no |
 | `rerun` | 3 / 3 | a re-run ended: `changed`, `same`, `failed: why` | no |
 | `alt_text` | 3 / 3 | the other engine's words, to compare | no |
@@ -315,16 +315,16 @@ the hand-over to the pool), and the hub's word that Amazon Transcribe is up. Tha
 key of every sub-schema but five of a page's (below), which is what `x-complete` on them rests on.
 
 **A transmission's keys.** `traffic` and `alarm` carry "whatever attributes the Traffic object has": ten declared
-fields and 40 that one path or another sets. The schema names all 50 (`$defs/transmission`), with type and unit, and
+fields and 41 that one path or another sets. The schema names all 51 (`$defs/transmission`), with type and unit, and
 the run reaches each: an FM transmission (`low_energy`, the speech-to-text keys), a piece cut at a key-up (`keyup`,
 `id_note`), an MDC emergency packet (`emergency`, `emergency_via`, `alarm_key`), a P25 call (`fm`, `call_id`, `turn`,
-`pairs`, `ours`), a P25 emergency with trunk-recorder's record (`evidence`), a flag found stuck on a talkgroup whose
+`pairs`, `ours`), a P25 key-up cut at a mid-call grant (`cut`, #819), a P25 emergency with trunk-recorder's record (`evidence`), a flag found stuck on a talkgroup whose
 Record is off (`kept`, `flag_stuck`), the airband (`mhz`, `carrier_db`, `carrier_dbfs`, `snr_db`, `opened`,
 `notched_hz`, `floor_dbfs`), another P25 system (`system`, `tier`, `source_key`, `group`, `service_auto`, `service`,
 `dept`), a call of it from while sizeup was down (`late`, #753), and the hub's engines (`stt`, `transcript_pending`, `stt_class`). Under the run there is a wider net: every
 attribute assigned on a transmission anywhere in `sizeup/app.py` and `sizeup/stt.py` must be one the schema names.
 
-`x-hub` on each of the 50 says what the hub does with it, and `test_which_keys_of_a_transmission_the_hub_reads` holds
+`x-hub` on each of the 51 says what the hub does with it, and `test_which_keys_of_a_transmission_the_hub_reads` holds
 it to the hub: each recorded transmission is applied on a real hub as it is, without each key, and with each key
 changed.
 
