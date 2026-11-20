@@ -57,8 +57,6 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <!-- the profile button and the sign-in's state (profile.js, session.js, #818) -->
   <span id="me" class="me"></span>
 </header>
-<!-- the header folds to fit, measured (hdrfit.js): first, so it fits from the first paint -->
-<script src="/static/hdrfit.js"></script>
 <div id="cloud-banner" class="notice info cloud-banner" hidden></div>
 <div id="role-banner" class="notice role-banner" role="status" hidden></div>
 <!-- the alert banners, under the header on the console and the board: the NWS alerts (weather.js, #132). Never
@@ -773,6 +771,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/vendor/maplibre-gl.js"></script>
 <!-- bundle js cad -->
 <script src="/static/session.js"></script>
+<script src="/static/hdrfit.js"></script>
 <script src="/static/map-style.js"></script>
 <script src="/static/airport.js"></script>
 <script src="/static/me-prefs.js"></script>

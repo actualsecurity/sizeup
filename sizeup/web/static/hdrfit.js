@@ -7,8 +7,10 @@
 //   STEPS     cumulative, each a class on the header (fold-<step>); what each one hides or condenses is in style.css
 //             and cad.css (".fold-"): tool labels, the brand name, the page name, "· Re-sign in", the weather, the
 //             date, Zulu, the tabs' labels, long state chips cut short, good-state chips as dots, the Run cards and
-//             Monitor links (as on a phone), tighter gaps, and last the texts may shrink (never a control). The profile button, the local time and the
-//             sign-in chip ("9 min") never go. A cut chip or a dot keeps its whole text on hover.
+//             Monitor links (as on a phone), tighter gaps, and last the state texts may shrink (never a control). The
+//             profile button, the local time and the sign-in chip ("9 min") never go. A cut chip or a dot keeps its
+//             whole text on hover and for a screen reader (it is only clipped). Who is talking takes only the room
+//             left: it never folds anything (the header would reshuffle on every key-up).
 //   room      the spacers' width; any overflow (the header's scrollWidth past its clientWidth), less than none.
 //   when      the window resizes (zoom too); the header's content changes (a MutationObserver: a microtask, so before
 //             the paint; a value set to what it already was is no change); a ticking text (the clock, a ringing phone's
@@ -19,7 +21,8 @@
 window.HeaderFit = (() => {
   const STEPS = ["tools", "brand", "title", "resign", "wx", "date", "zulu", "tabs", "chips", "dots", "links", "tight", "squeeze"];
   const HYST = 16;                         // px of room beyond its own that a folded item needs to come back
-  const TICKS = "#clock, #prealert";       // text that changes every second: watched by its size, not its mutations
+  const TICKS = "#clock, .pa-age";         // text that changes every second: watched by its size, not its mutations
+  const TICKING = "#clock, #prealert";     // (what holds it: the ResizeObserver's)
 
   // The fewest steps that fit, from `level`: fold while there is no room; unfold one step at a time while the step below
   // leaves HYST px spare. room(n) applies n steps and measures; the result is the last one applied.
@@ -89,12 +92,18 @@ window.HeaderFit = (() => {
   function fit() {
     if (st.frame) cancelAnimationFrame(st.frame);
     st.frame = 0;
-    if (hdr.clientWidth) {                 // (0: not laid out, nothing to measure)
+    if (!hdr.clientWidth) st.w = -1;       // (not laid out: nothing to measure; measured again once it is)
+    else {
       st.runs++;
       st.rows = Number(getComputedStyle(hdr).getPropertyValue("--hdr-rows")) || 0;   // 0: one row, no wrapping
-      // (from the steps as they were, the ones back folded again: the search counts in whole steps)
-      st.level = search(st.level, (n) => room(n));
-      st.back = backfill(st.level, room, st.back);
+      // as it is fits, and nothing folded or with less than HYST to spare and nothing out of order: nothing can change
+      // (one layout, not ~10)
+      const now = room(st.level, st.back);
+      if (!(now >= 0 && (st.level === 0 || (now < HYST && !st.back.size)))) {
+        // (from the steps as they were, the ones back folded again: the search counts in whole steps)
+        st.level = search(st.level, (n) => room(n));
+        st.back = backfill(st.level, room, st.back);
+      }
       st.w = hdr.clientWidth;
     }
     mo.takeRecords();                      // its own changes are not content
@@ -113,8 +122,9 @@ window.HeaderFit = (() => {
   // never a fold in the observer's own callback (it would resize what it watches): the next frame
   const ro = new ResizeObserver((es) => { if (es.some((e) => e.target !== hdr || hdr.clientWidth !== st.w)) later(); });
   ro.observe(hdr);
-  for (const n of hdr.querySelectorAll(TICKS)) ro.observe(n);
-  window.addEventListener("resize", fit);  // runs before the frame's paint; a zoom is a resize too
+  for (const n of hdr.querySelectorAll(TICKING)) ro.observe(n);
+  // runs before the frame's paint; a zoom is a resize too; only the height: nothing to do
+  window.addEventListener("resize", () => { if (hdr.clientWidth !== st.w) fit(); });
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
   window.addEventListener("load", fit);
 

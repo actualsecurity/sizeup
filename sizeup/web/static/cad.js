@@ -444,8 +444,8 @@ window.playBtn = playBtn;
 function renderConn() {
   const pill = $("#conn");
   const age = Date.now() - cad.lastMsgAt;
-  if (!cad.lastMsgAt) { pill.className = "pill warn"; setText(pill, "Connecting"); }
-  else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "No updates"); }
+  if (!cad.lastMsgAt) { pill.className = "pill warn"; setText(pill, "Connecting"); pill.title = "Connecting"; }
+  else if (age > LOST_AFTER_MS) { pill.className = "pill err"; setText(pill, "No updates"); pill.title = "No updates"; }
   else if (cad.live && cad.live.mode() === "polling") {
     pill.className = "pill ok"; setText(pill, "Polling");
     pill.title = "Stream blocked on this network: polling every 2 s";

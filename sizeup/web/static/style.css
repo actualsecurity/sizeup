@@ -753,8 +753,9 @@
 
   /* ---- the header: one bar for every view and the board ---------------------------------------------
      brand · page · station · tabs (console) · state pills · who is talking · ... · alerts · page tools · links ·
-     clock. One height everywhere (--hdr-h); it never wraps on a desk: labels fold to icons as it narrows
-     (its own container queries). A phone gets two rows, the same on every view. */
+     clock. One height everywhere (--hdr-h); it never wraps on a desk: items fold as it fills (measured, hdrfit.js:
+     below). A phone gets two rows, the same on every view. Who is talking takes only the room left (it never
+     reshuffles the header on every key-up). */
   :where(body > header) {
     container: hdr / inline-size;
     position: relative; z-index: var(--z-header);
@@ -795,35 +796,39 @@
   :where(a.me-chip) { text-decoration: none; }
   :where(a.me-chip):where(:hover, :focus-visible) { text-decoration: underline; }
   /* the fold (hdrfit.js): measured, as many of these steps as it takes to fit, in this order; each one comes back when
-     there is room again. The profile button, the local time and the sign-in chip ("9 min") never go. */
-  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], #fullscreen, #hub-cad) .lbl { display: none; }
-  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], #fullscreen, #hub-cad) { inline-size: var(--ctl); padding-inline: 0; }
+     there is room again. The profile button, the local time and the sign-in chip ("9 min") never go. A folded label
+     stays the control's name (visually hidden, not gone). */
+  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], a.nav[href="/cad"], #fullscreen, #hub-cad) .lbl,
+  :where(body > header.fold-tabs) .tabs .tab .lbl {
+    position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  :where(body > header.fold-tools) :where(#runcards-open, #alerts .nav, a[href="/monitor"], a.nav[href="/cad"], #fullscreen, #hub-cad) { inline-size: var(--ctl); padding-inline: 0; }
   :where(body > header.fold-brand) :where(.brand-name, .station) { display: none; }
   :where(body > header.fold-title) .cad-title { display: none; }
   :where(body > header.fold-resign) .me-more { display: none; }   /* "9 min": Re-sign in is the chip itself, its hover, the menu */
   /* (the weather: cad.css, beside its own rule) */
   :where(body > header.fold-date) :where(#clock-date, .operator > .dim) { display: none; }
   :where(body > header.fold-zulu) #clock-z { display: none; }
-  :where(body > header.fold-tabs) .tabs .tab .lbl { display: none; }
   :where(body > header.fold-tabs) .tabs .tab { padding-inline: var(--s-2); }
-  /* a long state cut short (its whole text on hover); then a good state as a dot in its color: trouble keeps its words */
-  :where(body > header.fold-chips) > :where(.pill:not(.pa-badge), .station) {
+  /* a long state cut short (its whole text on hover, and to a screen reader); then a good state as a dot in its color:
+     trouble and "off" keep their words. Never a button (the alarm's "Tap for alarm sound"), never the ringing phone. */
+  :where(body > header.fold-chips) > :where(.pill:not(button, .pa-badge)) {
     display: inline-block; max-inline-size: 9rem; overflow: hidden; text-overflow: ellipsis;
     line-height: calc(var(--tag-h) - 2 * var(--bw));
   }
   :where(body > header.fold-chips) .operator :is(input, select) { inline-size: 7rem; }
-  :where(body > header.fold-dots) > :where(.pill:is(.ok, .off, .tx-off)) {
-    inline-size: var(--s-3); block-size: var(--s-3); padding: 0; border-radius: 50%; color: transparent;
-    background: var(--c-dot, currentColor);
+  @media (forced-colors: none) {           /* (forced colors: no dots, the words stay) */
+    :where(body > header.fold-dots) > :where(.pill.ok:not(button, .pa-badge)) {
+      inline-size: var(--s-3); block-size: var(--s-3); padding: 0; border-radius: 50%; color: transparent;
+      background: var(--ok); border-color: var(--ok);
+    }
   }
-  :where(body > header.fold-dots) > :where(.pill.ok) { --c-dot: var(--ok); border-color: var(--ok); }
-  :where(body > header.fold-dots) > :where(.pill:is(.off, .tx-off)) { --c-dot: transparent; }
   :where(body > header.fold-links) > :where(#runcards-open, a[href="/monitor"]) { display: none; }   /* as on a phone */
   :where(body > header.fold-tight) { column-gap: var(--s-1); }
   :where(body > header.fold-tight) .tabs .tab { padding-inline: var(--s-1); }
-  /* last: the texts (the state chips, the weather, the operator) may shrink, cut, rather than push the clock and the
-     profile off; never a control */
-  :where(body > header.fold-squeeze) > :where(.pill, .station, .wx-now, .operator) { flex-shrink: 1; min-inline-size: var(--s-3); overflow: hidden; }
+  /* last: the state texts may shrink, cut, rather than push the clock and the profile off; never a control */
+  :where(body > header.fold-squeeze) > :where(.pill:not(button, .pa-badge)) { flex-shrink: 1; min-inline-size: var(--s-3); }
+  :where(body > header.fold-squeeze) .operator :is(input, select) { inline-size: 5rem; }
 
   /* ---- the cloud banner, the read-only banner ------------------------------------------------------ */
   :where(.cloud-banner, .role-banner) { margin: var(--s-2) var(--gutter) 0; }

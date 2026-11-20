@@ -66,7 +66,16 @@ function fill() {
     const back = H.backfill(n, room, new Set((was || []).map((x) => H.STEPS.indexOf(x))), 16);
     return { back: [...back].map((i) => H.STEPS[i]).sort(), last: seen[seen.length - 1].map((i) => H.STEPS[i]).sort() };
   };
-  return { s62: run(62), s140: run(140), s45: run(45), s45was: run(45, ["zulu"]), s0: run(0) };
+  // 300 px: everything that hides fits back but the tools' labels (80 left after the rest... 300-45-75-120-40 = 20:
+  // no room for resign 70, brand 110, tools 80); the earliest one (tools) is the last tried
+  const squeezed = (() => {
+    const calls = [];
+    const back = H.backfill(H.STEPS.length, (k, b) => { calls.push(k); return 999; }, new Set(), 16);
+    return { back: back.size, calls: calls.length };
+  })();
+  const tiny = [0, 1].map((k) => H.backfill(k, () => { throw new Error("measured"); }, new Set(), 16).size);
+  return { s62: run(62), s140: run(140), s45: run(45), s45was: run(45, ["zulu"]), s0: run(0), s300: run(300),
+           s999: run(999), squeezed, tiny };
 }
 """
 
@@ -114,16 +123,23 @@ def test_the_room_left_brings_back_the_most_important_items_that_fit(search):
     assert b["s45"]["back"] == [] and b["s45"]["last"] == []
     assert b["s45was"]["back"] == ["zulu"] and b["s45was"]["last"] == ["zulu"]
     assert b["s0"] == {"back": [], "last": []}
+    assert b["s300"]["back"] == ["date", "title", "wx", "zulu"] and b["s300"]["last"] == b["s300"]["back"]
+    # all of it fits: all back, and the last tried (the tools' labels) was kept: no measuring again
+    assert b["s999"]["back"] == ["brand", "date", "resign", "title", "tools", "wx", "zulu"]
+    assert b["s999"]["last"] == b["s999"]["back"]
+    assert b["squeezed"] == {"back": 0, "calls": 0}           # squeezed: the room is the texts', none given back
+    assert b["tiny"] == [0, 0]                                 # nothing before the last step: nothing measured
 
 
 def test_the_pages_load_it_with_the_header_and_the_old_breakpoints_are_gone():
-    for page in ("cad.html", "station.html"):
+    # before anything draws in the header (in /cad's bundle, after session.js: no round trip of its own)
+    for page, first in (("cad.html", ["session.js", "hdrfit.js"]), ("station.html", ["hdrfit.js"])):
         html = (STATIC / page).read_text()
-        assert html.index('<script src="/static/hdrfit.js"></script>') == html.index("</header>") + len("</header>\n") + \
-            len("<!-- the header folds to fit, measured (hdrfit.js): first, so it fits from the first paint -->\n")
+        scripts = [x.split('"')[0] for x in html.split('<script src="/static/')[1:] if not x.startswith("vendor/")]
+        assert scripts[:len(first)] == first, page
     css = "".join((STATIC / f).read_text() for f in ("style.css", "cad.css", "station.css"))
     assert "@container hdr" not in css                              # no width breakpoints left for the header
-    for step in ("tools", "brand", "title", "resign", "wx", "date", "zulu", "tabs", "chips", "dots", "tight", "squeeze"):
+    for step in ("tools", "brand", "title", "resign", "wx", "date", "zulu", "tabs", "chips", "dots", "links", "tight", "squeeze"):
         assert f"header.fold-{step})" in css or f"header.fold-{step} >" in css, step
 
 
@@ -225,7 +241,10 @@ FITS = """() => {
           me: box('#me .me-btn'), chip: box('#me .me-chip'), clock: box('#clock-local'),
           clockText: clock.textContent, clockCut: clock.scrollWidth > clock.clientWidth + 1,
           chipText: (document.querySelector('#me .me-chip:not([hidden])') || {}).innerText || '',
-          steps: HeaderFit.state().steps, runs: HeaderFit.state().runs};
+          steps: HeaderFit.state().steps, runs: HeaderFit.state().runs,
+          // an item whose content spills out of it (over its neighbour): never; a state chip is cut on purpose
+          spill: [...h.children].filter((c) => c.offsetWidth && !c.matches('.pill, .talking-strip, .spacer'))
+            .filter((c) => c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className)};
 }"""
 
 
@@ -234,7 +253,8 @@ def check(m, what):
     assert m["page"] <= m["vw"], what
     assert m["me"] and m["me"]["l"] >= 0 and m["me"]["r"] <= m["vw"], f"{what}: the profile button {m['me']}"
     assert m["clock"] and m["clock"]["r"] <= m["vw"] and m["clock"]["w"] > 20 and not m["clockCut"], f"{what}: the clock"
-    assert len(m["clockText"]) == 8, what                           # hh:mm:ss, whole
+    assert len(m["clockText"]) == 8, what
+    assert m["spill"] == [], f"{what}: spills over its neighbour: {m['spill']} ({m['steps']})"                           # hh:mm:ss, whole
 
 
 def shot(pg, name, width):
@@ -307,6 +327,7 @@ def test_in_a_browser_it_folds_when_the_content_grows_and_comes_back_after(heade
     }""", sources(*BUSY["src"]))
     m1 = pg.evaluate(FITS)                                  # (after the observer's microtask: no frame in between)
     check(m1, "busy, same width")
+    assert m1["runs"] - m0["runs"] <= 2, (m0["runs"], m1["runs"])                 # one change, one fit (two calls)
     assert len(m1["steps"]) > len(m0["steps"]), (m0["steps"], m1["steps"])
     # the source back to ok: what folded for it comes back
     header.set(QUIET)
@@ -348,6 +369,13 @@ def test_in_a_browser_a_cut_chip_keeps_its_whole_text_on_hover(header):
     assert pg.evaluate("(n) => n.scrollWidth > n.clientWidth", src.element_handle())        # cut short
     assert src.text_content().startswith("Sample County dispatch feed · backing off")  # all there (screen readers)
     cloud = pg.locator("#cloud-pill")
-    cloud.hover()
-    assert cloud.get_attribute("title") == "Station unreachable"
+    assert cloud.get_attribute("title") == "Station unreachable"      # its own script's (cad.js renderCloud)
+    # a chip whose script gave it no title: the header's hover gives it its whole text
+    pg.evaluate("document.getElementById('src-pill').removeAttribute('title')")
+    src.hover()
+    assert src.get_attribute("title") == "Sample County dispatch feed · backing off · Paging backup primary"
+    # trouble and "off" keep their words (a dot is for a good state only); the ringing phone is never cut
+    tx = pg.locator("#tx-pill")
+    assert tx.bounding_box()["width"] > 40 and tx.text_content() == "Transmit off"
+    assert "dots" in steps and pg.locator("#conn").bounding_box()["width"] < 16      # Live: a dot
     pg.context.close()
