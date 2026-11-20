@@ -695,3 +695,138 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
         browser.close()
         pw.stop()
         ws.shutdown()
+
+
+# -- #831 in production: every hydrant gone from the maps ------------------------------------------------------------------
+# The county's f=geojson gives a feature no "id" unless the object id field is among the outFields (checked against the
+# live service, 2026-11-20); the hub asked for the shown fields only, so its copy had no ids, and the merge dropped every
+# feature without one: an empty layer. These run the layer as the county really answers, with an empty overlay (the
+# default in production).
+
+def arcgis_like(features):
+    """A fetch answering as the county's MapServer does: the description (objectIdField OBJECTID), and each query page with
+    only the outFields asked for, and the feature "id" only when OBJECTID is one of them."""
+    from tests.test_gis import arcgis_answer
+    info = {"name": "Fire Hydrants", "geometryType": "esriGeometryPoint", "maxRecordCount": 1000, "capabilities": "Map,Query,Data",
+            "objectIdField": "OBJECTID", "fields": [{"name": n, "type": t} for n, t in (
+                ("OBJECTID", "esriFieldTypeOID"), ("DISTRICT", "esriFieldTypeString"), ("MUNCIPALIT", "esriFieldTypeString"),
+                ("HYD_NUMBER", "esriFieldTypeString"), ("FIRENAME", "esriFieldTypeString"))]}
+    full = [{"type": "Feature", "id": f["id"], "geometry": f["geometry"], "properties": {"OBJECTID": f["id"], **f["properties"]}}
+            for f in features]
+    url = next(l.url for l in DEFAULT_LAYERS if l.key == "hydrants")
+    asked = []
+
+    def fetch(u, timeout, limit):
+        asked.append(u)
+        code, h, body = arcgis_answer(u, {"hydrants": {"url": url, "info": info, "features": full}})
+        if "/query" in u and code == 200:
+            from urllib.parse import parse_qs, urlsplit
+            out = (parse_qs(urlsplit(u).query).get("outFields") or ["*"])[0]
+            if out != "*" and "OBJECTID" not in out.split(","):
+                doc = json.loads(body)
+                for f in doc["features"]:
+                    f.pop("id", None)
+                body = json.dumps(doc).encode()
+        return code, h, body
+    fetch.asked = asked
+    return fetch
+
+
+def test_the_layer_as_the_county_serves_it_keeps_ids_and_draws_every_hydrant(tmp_path):
+    fetch = arcgis_like(COUNTY)
+    g = Gis(layers=tuple(l for l in DEFAULT_LAYERS if l.key == "hydrants"), cache_dir=tmp_path / "gis", fetch=fetch,
+            log=lambda m: None)
+    assert g.refresh("hydrants")
+    q = next(u for u in fetch.asked if "/query" in u)
+    assert "OBJECTID" in q                                                   # asked for: the county gives ids only then
+    assert sorted(f["id"] for f in g.data["hydrants"]) == [f["id"] for f in COUNTY]
+    assert all("OBJECTID" not in f["properties"] for f in g.data["hydrants"])   # (only the shown fields kept)
+    c = make_cad(tmp_path)
+    wire(c, g)
+    assert c.store.q("SELECT * FROM hydrants") == []                         # the overlay empty: production's default
+    feats = served(g)[0]["features"]
+    assert len(feats) == len(COUNTY) and all(f["properties"]["_k"] == f"c{f['id']}" for f in feats)
+
+
+def test_a_copy_without_ids_still_draws_every_hydrant_and_is_fetched_again(tmp_path):
+    """The hub's cached copy from before (no ids): every hydrant still served (not editable) until it is fetched again,
+    which the cache's signature makes happen at once."""
+    import hashlib
+    noid = [{k: v for k, v in json.loads(json.dumps(f)).items() if k != "id"} for f in COUNTY]
+    c = make_cad(tmp_path)
+    g = fake_gis(noid)
+    wire(c, g)
+    feats = served(g)[0]["features"]
+    assert len(feats) == len(COUNTY) and all("_k" not in f["properties"] for f in feats)
+    assert c.hydrants.listing({})["counts"]["unkeyed"] == len(COUNTY)
+    # the recorded fixture (the county's real shape: no ids) through an empty overlay: every feature
+    real = json.loads((Path(__file__).parent / "fixtures" / "wcgis" / "hydrants.geojson").read_text())["features"]
+    set_layer(g, "hydrants", real)
+    assert len(served(g)[0]["features"]) == len(real) > 0
+    # a cache written with the old signature (no ids asked for) is not read: the layer is fetched again
+    layer = next(l for l in DEFAULT_LAYERS if l.key == "hydrants")
+    g2 = Gis(layers=(layer,), cache_dir=tmp_path / "gis2", fetch=arcgis_like(COUNTY), log=lambda m: None, load=False)
+    old = {"url": layer.url, "bbox": [round(x, 4) for x in g2.layer_bbox(layer)], "where": layer.where,
+           "fields": [f for f, _ in layer.fields], "simplify_m": layer.simplify_m}
+    sig = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()[:16]
+    assert sig != g2._signature(layer)
+    (tmp_path / "gis2").mkdir()
+    (tmp_path / "gis2" / "hydrants.geojson").write_text(json.dumps(
+        {"type": "FeatureCollection", "features": noid, "sizeup": {"at": 1.0, "signature": sig}}))
+    g2.load_cache()
+    assert g2.status["hydrants"]["at"] is None and g2.due() == ["hydrants"]
+
+
+def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
+    """#831's regression in the browser: the county's layer as fetched (ids and, from an old copy, none), nothing in the
+    overlay: every hydrant rendered on the map, grey (no flow data)."""
+    import threading
+    sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
+    from sizeup.web.server import WebServer
+    c = make_cad(tmp_path)
+    g = Gis(layers=tuple(l for l in DEFAULT_LAYERS if l.key in ("hydrants", "municipalities")), cache_dir=tmp_path / "gis",
+            fetch=arcgis_like(COUNTY[:3]), log=lambda m: None, load=False)
+    g.cache_loaded = True
+    assert g.refresh("hydrants")
+    set_layer(g, "municipalities", TOWNS)
+    g.data["hydrants"] += [{k: v for k, v in hyd(990006 + i, f"90{i}", 0.3 + i * 0.3, dlon=0.0006).items() if k != "id"}
+                           for i in range(2)]                                # two from an old copy, with no id
+    g._boxes["hydrants"] = [geometry_bbox(f["geometry"]) for f in g.data["hydrants"]]
+    with g._lock:
+        g._changed("hydrants")
+    wire(c, g)
+    scene = {"timezone": "America/New_York", "home": {"center": [LON0 + 0.0003, LAT0 + 0.0009], "zoom": 17.0},
+             "glyphs": "https://tiles.invalid/fonts/{fontstack}/{range}.pbf"}
+    ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False, cad=CadApi(c), gis=g)
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001
+        pw.stop()
+        ws.shutdown()
+        pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+    try:
+        pg = browser.new_page(viewport={"width": 1400, "height": 900})
+        pg.set_default_timeout(15000)
+        pg.route(lambda url: not url.startswith(base), lambda route: route.abort())
+        errors, console = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.on("console", lambda m: console.append(m.text) if m.type == "error" and "Failed to load" not in m.text else None)
+        pg.goto(base + "/cad")
+        pg.wait_for_function("() => window.GisLayers && GisLayers.catalog() && [...GisLayers.maps].length > 0")
+        pg.evaluate("""() => { MapLayers.setLayer('gis:hydrants', true);
+            const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            gm.map.jumpTo({ center: cad.scene.home.center, zoom: cad.scene.home.zoom }); }""")
+        pg.wait_for_function("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            return gm && gm.map.getLayer('gis-hydrants-pt')
+              && gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).length >= 5; }""")
+        drawn = pg.evaluate("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
+            return gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).map((f) => Hydrants.imageFor(f.properties)); }""")
+        assert len(drawn) == 5 and set(drawn) == {"hy-unk"}, drawn
+        assert errors == [] and not [m for m in console if "Expected" in m or "expression" in m.lower()], (errors, console)
+    finally:
+        browser.close()
+        pw.stop()
+        ws.shutdown()

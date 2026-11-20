@@ -288,10 +288,14 @@ class Hydrants:
 
     def _build(self, feats: list[dict], rows: list[dict]) -> dict:
         pts: dict = {}
+        plain = []                                   # a county feature with no id: served as it is (drawn, not editable)
         for f in feats:
             fid = f.get("id")
             c = (f.get("geometry") or {}).get("coordinates")
-            if fid is None or not isinstance(c, list) or len(c) < 2:
+            if not isinstance(c, list) or len(c) < 2:
+                continue
+            if fid is None:
+                plain.append(f)
                 continue
             pts[fid] = (f, float(c[1]), float(c[0]))
         county_rows = [r for r in rows if r["county_id"] is not None]
@@ -357,7 +361,8 @@ class Hydrants:
         for it in items:
             if not it["removed"]:
                 grid.setdefault(_cell(it["lat"], it["lon"]), []).append(it)
-        return {"items": items, "by_key": by_key, "grid": grid, "missing": sum(1 for it in items if it["missing"])}
+        return {"items": items, "by_key": by_key, "grid": grid, "missing": sum(1 for it in items if it["missing"]),
+                "plain": plain}
 
     @staticmethod
     def _item(key, fid, clat, clon, props, r, missing, rebound) -> dict:
@@ -377,7 +382,8 @@ class Hydrants:
         if key != LAYER:
             return feats
         out = []
-        for it in self.index()["items"]:
+        idx = self.index()
+        for it in idx["items"]:
             if it["removed"]:
                 continue
             p = dict(it["props"])
@@ -399,6 +405,8 @@ class Hydrants:
             if it["fid"] is not None and not it["missing"]:   # (a missing one's id may be another's now)
                 f["id"] = it["fid"]
             out.append(f)
+        # (a copy of the layer without ids, until it is fetched again: never a layer with nothing on it, #831)
+        out.extend(idx["plain"])
         return out
 
     # -- the town (the layer's MUNCIPALIT is the fire district's name: Rye Brook's say PORT_CHESTER) --------------------
@@ -566,7 +574,7 @@ class Hydrants:
         every = idx["items"]
         counts = {"all": sum(1 for it in every if not it["removed"]),
                   "oos": sum(1 for it in every if it["status"] in DOWN and not it["removed"]),
-                  "missing": idx["missing"], "removed": sum(1 for it in every if it["removed"]),
+                  "missing": idx["missing"], "removed": sum(1 for it in every if it["removed"]), "unkeyed": len(idx["plain"]),
                   "hub": sum(1 for it in every if it["hub"] and not it["removed"]),
                   "edited": sum(1 for it in every if it["row"])}
         towns = sorted({self.town(it) for it in every} - {""})
