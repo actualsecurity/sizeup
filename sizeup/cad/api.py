@@ -68,6 +68,15 @@ POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?
 POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
                                           action?: delete | restore (admins)}. Both: dispatchers and admins, in the
                                           Settings audit log (section "preplan")
+GET  /api/cad/hydrants/<key>             a hydrant's card (#799, sizeup/cad/hydrants.py): {hydrant, gen}; an admin's has
+                                          its history (the Settings audit log, section "hydrants"). Anyone signed in
+GET  /api/cad/hydrants?q=&status=&flag=&town=&offset=&limit=
+                                          the Settings > Hydrants list: {rows, total, counts, towns}; admins (ADMIN_READS)
+GET  /api/cad/hydrants.csv?...            the same as a spreadsheet, every overlay column: admins (ADMIN_READS)
+POST /api/cad/hydrants                    {lat, lon, number?, fields...}: a hydrant the county lacks
+POST /api/cad/hydrants/<key>              {fields..., lat?, lon? (a move), action?: remove | restore | reset_position}
+POST /api/cad/hydrants/import             {action: preview | apply, csv}: by key; nothing applied with a row in error.
+                                          All three: admins (WRITES), in the Settings audit log (section "hydrants")
 GET  /api/cad/streetview                  {provider: "google", key} with a key set ([streetview] google_key: a browser
                                           key restricted by referrer), else {provider: ""}; no-store, never logged
 POST /api/cad/streetview/open             the page asks before it makes a panorama: {ok, used, limit, why?}. Counts one
@@ -405,6 +414,7 @@ PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")             
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
 DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
 DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
+HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}|import))?")         # hydrants (#799)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -439,6 +449,8 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Station > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/hydrants": "the hydrant list is for admins (Settings > Hydrants)",          # #799 (a card: anyone)
+    "/api/cad/hydrants.csv": "the hydrant export is for admins",
     "/api/cad/stt/corrections": "transcript corrections are for admins",      # the STT reference set (sttfix.py)
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
@@ -469,6 +481,7 @@ WRITES = (
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
     (DOCS, "dispatch"),                                                     # site documents: upload, edit, align, delete (#459)
+    (HYDRANT, "admin"),                                                     # hydrants: add, edit, move, remove, import (#799)
     (re.compile(r"/api/cad/streetview/open"), "read"),                      # a panorama opened: counted against the month's limit
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
@@ -696,6 +709,26 @@ def _docs(m, b, o, c):
     return f"Edited site doc {did}: {', '.join(changed) or 'nothing'}", ""
 
 
+def _hydrant(m, b, o, c):
+    """A hydrant (#799): its key and the names of what changed (the values are in the Settings audit log)."""
+    if m.group(1) == "import":
+        if b.get("action") != "apply":
+            return None
+        return f"Imported hydrants: {o.get('changed', 0)} changed, {o.get('new', 0)} new", ""
+    key = m.group(1) or o.get("key") or ""
+    if m.group(1) is None:
+        return f"Added hydrant {key}", ""
+    act = str(b.get("action") or "")
+    if act in ("remove", "restore"):
+        return f"{'Removed' if act == 'remove' else 'Restored'} hydrant {key}", ""
+    changed = o.get("changed") or []
+    moved = "lat" in changed or "lon" in changed
+    rest = [k for k in changed if k not in ("lat", "lon")]
+    if moved and not rest:
+        return f"{'Moved' if act != 'reset_position' else 'Reset the position of'} hydrant {key}", ""
+    return f"{'Moved and edited' if moved else 'Edited'} hydrant {key}: {', '.join(rest) or 'nothing'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -737,6 +770,7 @@ DOES = (
     (PREMISE, _premise),
     (PREPLAN, _preplan),
     (DOCS, _docs),
+    (HYDRANT, _hydrant),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -951,6 +985,29 @@ class CadApi:
             return _json(403, {"error": f"Admins only: {e}"})
         h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
         return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
+
+    def _hydrants_get(self, path: str, query: str, who) -> tuple:
+        """GET /api/cad/hydrants/<key> (anyone signed in; an admin's with the history), the list and the CSV (admins:
+        ADMIN_READS has checked them; the CSV in the person's activity, kind "search"). Never cached: the overlay moves."""
+        may, q = self._may(who), parse_qs(query)
+        hy = self.cad.hydrants
+        nostore = {"Cache-Control": "no-store"}
+        if path == "/api/cad/hydrants.csv":
+            data, n = hy.csv(q)
+            if who is not None and who.email:
+                self.cad.activity.record(who.email, "search", "GET /api/cad/hydrants.csv", f"CSV: hydrants: {n}")
+            name = f"hydrants-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.csv"
+            return 200, data, "text/csv; charset=utf-8", {"Content-Disposition": f'attachment; filename="{name}"', **nostore}
+        if path == "/api/cad/hydrants":
+            return 200, json.dumps(hy.listing(q), separators=(",", ":")).encode(), JSON, nostore
+        m = HYDRANT.fullmatch(path)
+        if m.group(1) == "import":
+            return 405, b'{"error":"POST"}', JSON
+        try:
+            out = hy.one(m.group(1), may)
+        except CadError as e:
+            return _json(404, {"error": str(e)})
+        return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, nostore
 
     def _stt_fix(self, path: str, query: str, who) -> tuple:
         """The hand-corrected transcripts (sizeup/cad/sttfix.py): admins only. The counts and the JSONL are in ADMIN_READS
@@ -1289,6 +1346,8 @@ class CadApi:
                 return self._stt_fix(path, query, who)
             if path.startswith("/api/cad/preplan/docs"):
                 return self._docs_get(path, query, who)
+            if path in ("/api/cad/hydrants", "/api/cad/hydrants.csv") or HYDRANT.fullmatch(path):
+                return self._hydrants_get(path, query, who)
             if m := HERE.fullmatch(path):
                 return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
@@ -1458,6 +1517,12 @@ class CadApi:
             return c.preplan.create(body) if m.group(1) is None else c.preplan.edit(int(m.group(1)), body)
         if m := STT_CORRECTION.fullmatch(path):
             return c.stt_fix.save(m.group(1), body)
+        if m := HYDRANT.fullmatch(path):
+            if m.group(1) is None:
+                return c.hydrants.create(body)
+            if m.group(1) == "import":
+                return c.hydrants.import_csv(body)
+            return c.hydrants.edit(m.group(1), body)
         if m := DOCS.fullmatch(path):
             if m.group(1) is None:
                 raise CadError("upload: the file as the body, its details in X-Sizeup-Doc")

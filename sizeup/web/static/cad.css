@@ -1160,4 +1160,22 @@
   .ppd-h.mid { inline-size: var(--s-6); block-size: var(--s-6); border-radius: 50%; background: var(--accent); cursor: grab; }
   .ppd-h.rot { border-radius: 50%; cursor: grab; }
   .ppd-h.scl { cursor: nwse-resize; background: #15181B; border-color: #F2F3F5; }
+
+  /* ---- hydrants (#799, hydrants.js): a call's nearest, the editor, Settings > Hydrants ---- */
+  .pp-row.hy-down .pp-go { color: var(--err); }
+  .hy-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: var(--s-2) var(--s-3); }
+  .hy-form .span2 { grid-column: span 2; }
+  .hy-form .dialog-foot, .hy-form .hy-cls { grid-column: 1 / -1; }
+  .hy-form textarea { resize: vertical; }
+  .hy-filters { gap: var(--s-2); flex-wrap: wrap; margin-block: var(--s-2); }
+  .hy-filters input[type=search] { flex: 1 1 14rem; }
+  .hy-flags { flex-wrap: wrap; margin-block-end: var(--s-2); }
+  .hy-body { display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; overflow-x: auto; }
+  .hy-table td { vertical-align: middle; }
+  .hy-tr { cursor: pointer; }
+  .hy-tr:hover { background: var(--hover); }
+  .hy-tr td:first-child { white-space: nowrap; }
+  .hy-tr .chip { margin-inline-start: var(--s-1); }
+  .hy-import { padding: var(--s-2) var(--s-3); }
+  .hy-errs, .hy-diff { margin: 0; padding-inline-start: var(--s-5); max-block-size: calc(var(--s-8) * 8); overflow-y: auto; }
 }
