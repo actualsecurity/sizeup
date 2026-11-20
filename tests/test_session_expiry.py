@@ -116,6 +116,16 @@ def test_reauth_start_drops_the_cookie_and_goes_to_reauth_only(keys, hub):
     assert req(hub.url + "/reauth/start")[0] == 401                             # behind Access like the rest
 
 
+def test_the_hub_sends_no_opener_policy_that_would_cut_the_popup_off(keys, hub):
+    """#826: the console page and /reauth* come with no Cross-Origin-Opener-Policy (the pop-up's way back doesn't need
+    the opener anyway: BroadcastChannel, storage)."""
+    import urllib.request
+    h = {"Cf-Access-Jwt-Assertion": jwt(keys[0])}
+    for path in ("/cad", "/reauth"):
+        with urllib.request.urlopen(urllib.request.Request(hub.url + path, headers=h)) as r:
+            assert r.headers.get("Cross-Origin-Opener-Policy") is None, path
+
+
 def test_without_access_there_is_no_end(tmp_path):
     h = HubRun(hub_cfg(tmp_path))                                           # a hub not set up with Access (local dev)
     try:
@@ -403,6 +413,67 @@ const edge = () => (url, init) => init.redirect === "manual" ? res(0, null, "opa
     out.stale = { out: env.ctx.SessionWatch.out, label: env.ctx.SessionWatch.label() };
   }
 
+  // 4c. the pop-up: closed by this page on the signal (its own close() may be refused); the storage event signals too;
+  //     a pop-up stuck on its blank first page: sent its address once more, then closed, and the next one is a tab
+  {
+    const env = makeEnv();
+    env.respond = signedIn(env, env.clock / 1000 + 300);
+    env.run(SESSION);
+    await flush();
+    const o = out.popup = {};
+    const pop = (href) => ({ closed: false, closes: 0, replaced: [], close() { this.closed = true; this.closes++; },
+                             location: { href, replace(u) { pop.last.replaced.push(u); } } });
+    // a pop-up that went on to the Access login (cross-origin: its location can't be read)
+    const away = { closed: false, closes: 0, close() { this.closed = true; this.closes++; },
+                   get location() { throw new Error("SecurityError"); } };
+    env.openReturns = away;
+    o.opened = env.click().opened;
+    await env.advance(15000);                       // the watch: it moved on, so it is left alone
+    o.awayLeft = { closed: away.closed };
+    env.respond = signedIn(env, env.clock / 1000 + 24 * 3600);
+    // another page's localStorage write (reauth.js): the storage event
+    const se = new Event("storage"); se.key = "sizeup:signed-in"; se.newValue = "1";
+    env.ctx.dispatchEvent(se);
+    await flush();
+    o.afterStorage = { closed: away.closed, closes: away.closes, level: env.ctx.SessionWatch.state().level };
+    // its own pop-up back on /reauth (readable, this origin): closed from here on the signal
+    const home = { closed: false, closes: 0, close() { this.closed = true; this.closes++; },
+                   location: { href: "https://hub.example.test/reauth", pathname: "/reauth" } };
+    env.respond = signedIn(env, env.clock / 1000 + 300);
+    await env.ctx.SessionWatch.check();
+    env.openReturns = home;
+    env.click();
+    env.respond = signedIn(env, env.clock / 1000 + 24 * 3600);
+    env.ctx.dispatchEvent(se);
+    await flush();
+    o.home = { closed: home.closed, closes: home.closes };
+    // a handle that comes back already closed (a blocker): not opened, the link's tab instead
+    env.respond = signedIn(env, env.clock / 1000 + 300);
+    await env.ctx.SessionWatch.check();
+    env.openReturns = { closed: true };
+    o.closedHandle = env.click();
+    const other = new Event("storage"); other.key = "something"; other.newValue = "1";
+    const n0 = env.sessionCalls().length;
+    env.ctx.dispatchEvent(other);
+    await flush();
+    o.otherKey = env.sessionCalls().length - n0;
+    // a pop-up that never leaves about:blank
+    env.respond = signedIn(env, env.clock / 1000 + 300);
+    await env.ctx.SessionWatch.check();
+    const stuck = pop("about:blank");
+    pop.last = stuck;
+    env.openReturns = stuck;
+    env.opened.length = 0;
+    o.stuckOpened = env.click().opened;
+    await env.advance(8000);
+    o.replaced = stuck.replaced.slice();
+    await env.advance(22000);
+    o.stuckClosed = stuck.closed;
+    env.opened.length = 0;
+    o.next = env.click();
+    o.nextOpened = env.opened.length;
+  }
+
   // 5. a clip that is just missing (signed in): one check, nothing else
   {
     const env = makeEnv();
@@ -513,7 +584,8 @@ def test_the_warning_shows_ten_minutes_before_and_counts_down(page, skew):
     assert o["tip16"].startswith("Cloudflare Access sign-in ends at ")
     assert o["href16"] == "/reauth/start"                          # still signed in: renew
     assert o["renew"] == {"opened": True, "prevented": True}
-    assert o["renewOpened"] == [["/reauth/start", "sizeup-reauth", "popup,width=520,height=640"]]
+    # opened in the click, straight at its address, a new window each time (#826: never a blank one navigated later)
+    assert o["renewOpened"] == [["https://hub.example.test/reauth/start", "_blank", "width=520,height=640"]]
     # the header is told on a change (the minutes), not on every tick
     assert o["state17"]["left"] == 8 and o["changes17"] == o["changes16"] + 1
     assert o["at24_5"] == "Sign-in ends in 1 min"
@@ -544,7 +616,7 @@ def test_an_audio_error_signs_out_and_re_sign_in_plays_it_again(page):
     o = page["audio"]
     assert o["label"] == "Signed out" and o["checks"] == 2
     assert o["click"] == {"opened": True, "prevented": True}       # the pop-up opened: the link not followed
-    assert o["opened"] == [["/reauth", "sizeup-reauth", "popup,width=520,height=640"]]
+    assert o["opened"] == [["https://hub.example.test/reauth", "_blank", "width=520,height=640"]]
     assert o["blocked"] == {"opened": False, "prevented": False}   # blocked: the link opens /reauth in a new tab
     assert o["ignored"] == 0 and o["stillOut"] is True              # another origin, another shape: nothing
     assert o["checked"] == 1 and o["out"] is False and o["after"] == "" and o["level"] == ""
@@ -556,6 +628,20 @@ def test_an_audio_error_signs_out_and_re_sign_in_plays_it_again(page):
 
 def test_a_message_during_an_older_check_checks_again(page):
     assert page["stale"] == {"out": False, "label": ""}
+
+
+def test_the_popup_is_closed_from_here_and_a_stuck_one_gives_way_to_a_tab(page):
+    o = page["popup"]
+    assert o["opened"] is True and o["awayLeft"] == {"closed": False}       # on the Access login: left alone
+    # signed in elsewhere (another /reauth's localStorage write): checked; the pop-up on the Access login is left open
+    assert o["afterStorage"] == {"closed": False, "closes": 0, "level": ""}
+    assert o["home"] == {"closed": True, "closes": 1}                      # back on /reauth: closed from here
+    assert o["closedHandle"] == {"opened": False, "prevented": False}       # handed back closed: the link's tab
+    assert o["otherKey"] == 0                                               # another key: nothing
+    # stuck on its blank page: sent to /reauth at 8 s (never /reauth/start twice), closed at 30 s while still signed in
+    # (nothing in progress there), and the next Re-sign in is the link's tab
+    assert o["stuckOpened"] is True and o["replaced"] == ["https://hub.example.test/reauth"]
+    assert o["stuckClosed"] is True and o["next"] == {"opened": False, "prevented": False} and o["nextOpened"] == 0
 
 
 def test_a_missing_clip_is_not_a_sign_in_matter(page):
@@ -748,3 +834,221 @@ def test_in_a_browser_the_profile_fits_a_phone_and_the_wall_board(console):
         tab.value.close()
         pg.locator("#ui-menu").wait_for(state="detached")
     assert pg.errors == []
+
+
+# -- the pop-up's round trip through a stand-in for Cloudflare's edge and the Access team domain (#826) ----------------
+
+class FakeEdge:
+    """Cloudflare's edge and the Access team domain, on this machine. The edge (127.0.0.1) passes a request with the
+    CF_Authorization cookie on to the hub, sends one without it to the team's login (another origin: localhost),
+    and at /cdn-cgi/access/authorized sets a fresh cookie and goes back. The team's login, its session still good,
+    answers a page that goes on by script (optionally with Cross-Origin-Opener-Policy), as Access's does. The edge
+    takes off the hub's cookie attributes a browser refuses over plain http (Secure, SameSite=None): it stands where
+    Cloudflare ends TLS."""
+
+    def __init__(self, hub_port, token, coop="", slow=0.0):
+        import http.client
+        import threading
+        from http.cookies import SimpleCookie
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs, quote, urlsplit
+        me = self
+        self.log = []
+
+        class Edge(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _redir(self, where, extra=None):
+                self.send_response(302)
+                self.send_header("Location", where)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+            def do_GET(self):
+                u = urlsplit(self.path)
+                jar = SimpleCookie(self.headers.get("Cookie") or "")
+                if u.path == "/cdn-cgi/access/authorized":
+                    me.log.append("authorized")
+                    back = parse_qs(u.query).get("redirect_url", ["/"])[0]
+                    return self._redir(back, {"Set-Cookie": f"CF_Authorization={token()}; Path=/; HttpOnly"})
+                if "CF_Authorization" not in jar:
+                    me.log.append(f"login {u.path}")
+                    return self._redir(f"http://localhost:{me.team_port}/cdn-cgi/access/login/hub?redirect_url={quote(self.path)}")
+                if u.path.startswith("/reauth"):
+                    me.log.append(u.path)
+                c = http.client.HTTPConnection("127.0.0.1", hub_port, timeout=60)
+                c.request("GET", self.path, headers={k: v for k, v in self.headers.items() if k.lower() not in ("connection",)})
+                r = c.getresponse()
+                self.send_response(r.status)
+                for k, v in r.getheaders():
+                    if k.lower() in ("connection", "transfer-encoding", "keep-alive"):
+                        continue
+                    if k.lower() == "set-cookie":
+                        v = v.replace("; Secure", "").replace("; SameSite=None", "; SameSite=Lax")
+                    self.send_header(k, v)
+                if r.getheader("Content-Length") is None:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                self.end_headers()
+                try:
+                    while b := r.read1(65536):
+                        self.wfile.write(b)
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                c.close()
+
+        class Team(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                back = parse_qs(urlsplit(self.path).query).get("redirect_url", ["/"])[0]
+                to = f"http://127.0.0.1:{me.edge_port}/cdn-cgi/access/authorized?redirect_url={quote(back)}"
+                if slow:          # a slow login that is only redirects: the pop-up stays on its blank page meanwhile
+                    time.sleep(slow)
+                    self.send_response(302)
+                    self.send_header("Location", to)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = (f"<!doctype html><title>Sign in</title><p>Signing in"
+                        f"<script>setTimeout(() => location.replace({json.dumps(to)}), 200)</script>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                if coop:
+                    self.send_header("Cross-Origin-Opener-Policy", coop)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.servers = [ThreadingHTTPServer(("127.0.0.1", 0), Edge), ThreadingHTTPServer(("127.0.0.1", 0), Team)]
+        for srv in self.servers:
+            srv.daemon_threads = True
+        self.edge_port, self.team_port = (s.server_address[1] for s in self.servers)
+        for s in self.servers:
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.edge_port}"
+
+    def close(self):
+        for s in self.servers:
+            s.shutdown()
+
+
+@pytest.fixture(params=["chromium", "chromium+coop", "webkit"])
+def edged(request, tmp_path, keys, jwks):
+    yield from _edged(request.param, tmp_path, keys, jwks)
+
+
+@pytest.fixture
+def slow_edged(tmp_path, keys, jwks):
+    yield from _edged("chromium", tmp_path, keys, jwks, slow=10.0)
+
+
+def _edged(param, tmp_path, keys, jwks, slow=0.0):
+    """(context, console page, edge): the console 5 min before its sign-in ends, behind the stand-in edge."""
+    pw = pytest.importorskip("playwright.sync_api")
+    import threading
+    from sizeup.cad.api import CadApi
+    from sizeup.web.server import WebServer
+    from tests.test_cad import make_cad
+    engine, _, coop = param.partition("+")
+    ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, lambda: {"time": 0}, lambda cid: None,
+                   lambda iid: False, cad=CadApi(make_cad(tmp_path)), access=verifier(jwks))
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    edge = FakeEdge(ws.httpd.server_address[1], lambda: jwt(keys[0], exp=int(time.time()) + 24 * 3600),
+                    "same-origin" if coop else "", slow)
+    with pw.sync_playwright() as p:
+        try:
+            browser = getattr(p, engine).launch()
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(f"no {engine}: {e}")
+        ctx = browser.new_context(viewport={"width": 1920, "height": 900})
+        ctx.add_cookies([{"name": "CF_Authorization", "value": jwt(keys[0], exp=int(time.time()) + 300), "url": edge.url}])
+        pg = ctx.new_page()
+        pg.set_default_timeout(20000)
+        pg.errors = []
+        pg.on("pageerror", lambda e: pg.errors.append(str(e)))
+        pg.goto(edge.url + "/cad")
+        pg.locator("#me .me-chip").wait_for()
+        yield ctx, pg, edge
+        browser.close()
+    edge.close()
+    ws.shutdown()
+
+
+def _navigations(ctx):
+    """[(page | "new", url)] of every navigation request from now on, in order ("new": a window's very first, made
+    before its page exists)."""
+    out = []
+
+    def seen(r):
+        if not r.is_navigation_request():
+            return
+        try:
+            out.append((r.frame.page, r.url))
+        except Exception:  # noqa: BLE001 - Playwright: no frame yet, the request opened the window
+            out.append(("new", r.url))
+    ctx.on("request", seen)
+    return out
+
+
+def _renewed(pg):
+    pg.wait_for_function("SessionWatch.state().level === '' && SessionWatch.state().until > Date.now() + 23 * 3600e3")
+
+
+def test_in_a_browser_re_sign_in_goes_straight_to_reauth_start_and_closes(edged):
+    """#826: the pop-up's first request is /reauth/start (that it is opened at its address, not a blank window
+    navigated later, is the window.open arguments' test above); through the edge's round trip it renews the sign-in,
+    tells the console and is closed; nothing is left open."""
+    ctx, pg, edge = edged
+    navs = _navigations(ctx)
+    with ctx.expect_page() as info:
+        pg.locator("#me .me-chip").click()
+    popup = info.value
+    popup.wait_for_event("close", timeout=15000)
+    first = [u for p, u in navs if p in (popup, "new")]
+    assert first and first[0].endswith("/reauth/start"), first          # the window's very first request
+    assert edge.log[:4] == ["/reauth/start", "login /reauth", "authorized", "/reauth"]
+    _renewed(pg)
+    assert ctx.pages == [pg] and pg.errors == []                          # no window left behind
+
+
+def test_in_a_browser_a_blocked_popup_opens_a_tab_that_still_renews(edged):
+    """window.open refused (a blocker, or a browser that opens it noopener): the link's own new tab (rel=noopener, no
+    opener at all) goes the same way, and the console hears it without the opener (BroadcastChannel / storage)."""
+    ctx, pg, edge = edged
+    pg.evaluate("window.open = () => null")
+    navs = _navigations(ctx)
+    with ctx.expect_page() as info:
+        pg.locator("#me .me-chip").click()
+    tab = info.value
+    _renewed(pg)
+    first = [u for p, u in navs if p in (tab, "new")]
+    assert first and first[0].endswith("/reauth/start"), first          # the window's very first request
+    if not tab.is_closed():                                               # a tab script may not close: it says so
+        assert "Signed in" in tab.locator("main").inner_text()
+    assert pg.errors == []
+
+
+def test_in_a_browser_a_slow_login_is_never_cut_short(slow_edged):
+    """A login that is only redirects and takes 10 s keeps the pop-up on its blank page that long: at 8 s it is sent to
+    /reauth (never /reauth/start a second time: the cookie it dropped stays dropped, the login carries on), and it is
+    not closed as stuck; it renews and closes."""
+    ctx, pg, edge = slow_edged
+    with ctx.expect_page() as info:
+        pg.locator("#me .me-chip").click()
+    popup = info.value
+    popup.wait_for_event("close", timeout=40000)
+    _renewed(pg)
+    assert edge.log.count("/reauth/start") == 1 and edge.log[-1] == "/reauth", edge.log
+    assert ctx.pages == [pg] and pg.errors == []
+    assert pg.evaluate("SessionWatch._st.stuckUntil || 0") == 0                    # not taken for a stuck pop-up
