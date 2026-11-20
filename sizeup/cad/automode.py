@@ -24,7 +24,9 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                Drill there, unless Settings > Lists says otherwise) is accepted like any other, but no unit is ever
                dispatched to it by automation (feed, page or radio): the units of ours listed or named are one line on
                the timeline, "Not dispatched (non-emergency event): E1, L2", for a person to attach if needed (as by
-               hand: "Non-emergency: attach units, no dispatch"); the feed's in service still closes it. A feed that
+               hand: "Non-emergency: attach units, no dispatch"; each unit named once, never one already on it); the
+               feed's in service still closes it. Made an emergency later (the feed's type or a person's), at the
+               feed's next report the units it lists then are taken as new, once ("Now an emergency event ..."). A feed that
                sends a type moved under another as a subtype (Drill retired, a Drill subtype of Notification) gets
                that subtype (Cad.moved_type)
       depts    a feed's department entry (Sources.department_units: a code that means a whole department, #370) is never
@@ -100,6 +102,8 @@ SOURCES = ("county", "radio")
 RANK = {"dispatched": 1, "enroute": 2, "onscene": 3}
 HINT_INTENTS = ("enroute", "onscene", "staging", "free", "quarters")
 FEED_STATUS = {"responding": "enroute", "on_location": "onscene", "in_service": "free"}
+QUIET = "Not dispatched (non-emergency event): "          # automode's line for units left off a non-emergency event
+UPGRADED = "Now an emergency event: the listed units go on"
 COLS = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at", "free": "cleared_at"}
 
 SCHEMA = """
@@ -505,7 +509,7 @@ class AutoDispatch:
         self._paged(iid)
         times, otimes = new.get("times") or {}, old.get("times") or {}
         uts, outs = new.get("unit_times") or {}, old.get("unit_times") or {}
-        had = set(old.get("units") or [])
+        had = set() if self._upgraded(iid, op) else set(old.get("units") or [])   # left off as a notification: new now
         fresh = [n for n in units if n not in had]
         unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts and not is_placeholder(n)]
         for name in fresh:                               # a department entry: that department paged, never a unit
@@ -666,14 +670,27 @@ class AutoDispatch:
         if self.store.incident(iid)["emergency"]:
             return
         ours = self._ours()
-        names = list(dict.fromkeys(ours[_key(n)]["name"] for n in names or () if _key(n) in ours))
-        if not names:
-            return
-        text = f"Not dispatched (non-emergency event): {', '.join(names)}"
-        if self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'auto' AND text = ?", (iid, text)):
-            return
+        said = {n for r in self._quiet_lines(iid) for n in r["text"][len(QUIET):].split(", ")}
+        names = [n for n in dict.fromkeys(ours[_key(x)]["name"] for x in names or () if _key(x) in ours)
+                 if n not in said and self._on_here(iid, ours[_key(n)]["id"]) is None]   # each unit once; one on it: not
+        if names:
+            with self.store.tx() as db:
+                self.store._event(db, iid, "auto", QUIET + ", ".join(names), op)
+
+    def _quiet_lines(self, iid: int) -> list[dict]:
+        return self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'auto' AND substr(text, 1, ?) = ?",
+                            (iid, len(QUIET), QUIET))
+
+    def _upgraded(self, iid: int, op: str) -> bool:
+        """A non-emergency event whose units were left off (_quiet) is an emergency now (the feed's type, or a
+        person's): once, True, so the units listed now are taken as new (dispatched, by the usual rules)."""
+        if not self.store.incident(iid)["emergency"] or not self._quiet_lines(iid):
+            return False
+        if self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'auto' AND text = ?", (iid, UPGRADED)):
+            return False
         with self.store.tx() as db:
-            self.store._event(db, iid, "auto", text, op)
+            self.store._event(db, iid, "auto", UPGRADED, op)
+        return True
 
     def _assign(self, iid: int, u: dict, t: float | None, op: str, verb: str, again: bool = False) -> bool:
         """again: the feed newly lists it now (not a repeat): a department's placeholder released here before comes
