@@ -73,6 +73,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 - [Who is signed in (the operator from Cloudflare Access)](#who-is-signed-in-the-operator-from-cloudflare-access)
   - [Roles: who may change what](#roles-who-may-change-what)
   - [Activity log](#activity-log)
+  - [Your own choices: map layers (#823)](#your-own-choices-map-layers-823)
 - [Config](#config)
 - [Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub](#speech-to-text-per-channel-whisper-on-the-station-amazon-transcribe-on-the-hub)
 - [Phone pre-alert (Tapout)](#phone-pre-alert-tapout)
@@ -1224,6 +1225,30 @@ without Access record nothing here: the chronology and the settings audit are un
 it; anyone else reads only their own (`403` for someone else's, and for the CSV). **Settings → Users**
 shows "last seen 3 min ago · 203.0.113.9" on each row and an **Activity** list (a kind filter, *All
 users* and CSV for admins; *My activity* for everyone else).
+
+### Your own choices: map layers (#823)
+
+The map layers a person turns on and off (the Overview / large map / wall board set, the event-map set, the Layers
+box's folded groups, *hide down cameras*) and the Pre-plan layer follow the signed-in person to any browser or device.
+They are kept on the hub (`sizeup/cad/prefs.py`, the `person_prefs` table in `state/cad.sqlite`, replicated with
+everything else), under the person's **Settings → Users** row (its id: a renamed person or a changed sign-in email keeps
+them).
+
+- `GET /api/me/prefs`: the caller's own, all namespaces (`{signed_in, id, prefs}`). `PUT /api/me/prefs/<ns>`
+  (`map_layers`, `preplan`): one namespace replaced. Only ever the caller's own (nothing in the request can name
+  someone else), viewers too; never in `/api/v1`. Only booleans in the known shapes; 16 KB per namespace, 32 KB per
+  person. Written without a CAD rev (no console state is rebuilt for it); a hub task that isn't the leader answers
+  503 and the page sends it again.
+- The page (`static/me-prefs.js`): this browser's copy (localStorage) first, so the map never flashes the defaults;
+  the hub's copy then wins. A change goes to the hub a second later, as one write for a burst of clicks. A browser's
+  choices from before this are sent once, the first time its person has none on the hub. Signed out, offline or a
+  handover: kept here and sent again; nothing waits on it. Another open console takes a change on its next load.
+- **Shared screens.** Each browser remembers whose its copy is: a different person signing in on it gets their own
+  choices (or the defaults), never the last person's. **/monitor** (the wall board) uses the *overview* set of
+  whoever is signed in on that screen: sign it in with the account whose layers the board should show (a change made
+  on the board is that account's everywhere).
+- An event's own layer set (a dispatcher's change on its map) stays the event's, for everyone who opens it.
+- All-in-one, or a hub without Access: nobody to keep them for; the browser keeps them, as before.
 
 ## Config
 

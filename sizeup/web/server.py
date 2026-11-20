@@ -47,6 +47,9 @@ GET  /cad                      the PCFD dispatch console (static/cad.html); its 
                                Its scripts and stylesheets as one file each when the image built them
                                (static/bundle/, sizeup/web/bundle.py); /cad?bundle=0: the separate files
 GET  /comms                    -> /cad#radio?<the same query> (the old communications page)
+GET  /api/me/prefs             the signed-in person's own console choices (sizeup/cad/prefs.py, #823): the map layers'
+                               sets, the Pre-plan layer; the hub only (404 on the station), never cached
+PUT  /api/me/prefs/<ns>        one namespace of them replaced (JSON, at most 16 KB): their own only, viewers too
 Caching (#137): /static/... named by version from the pages (?v=, kept a year), else revalidated (ETag, 304);
 the layers' data (airport, GIS catalog and layers, roads) ETag + max-age, must-revalidate; text gzipped.
 Timing (#284): every answer says how long it took (Server-Timing: app;dur=<ms>, gzip included); the access log too.
@@ -141,6 +144,7 @@ from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 from sizeup.api.v1 import errors as v1_errors
 from sizeup.api.v1.handler import V1
+from sizeup.cad import prefs as prefs_mod
 from sizeup.web import bundle as bundle_mod
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -602,7 +606,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.who = None
             if v1.handles(path):             # the app's API: a device's own token is its only door (#619), never Access
                 return True
-            if path.startswith("/api/cad/") and (self.headers.get("Authorization") or "")[:7].lower() == "bearer ":
+            if (path.startswith(("/api/cad/", prefs_mod.PATH))
+                    and (self.headers.get("Authorization") or "")[:7].lower() == "bearer "):
                 # a device's token is not for the console: refused, whoever is signed in, and in the console's own
                 # {"error": ...} shape, not v1's envelope
                 self.close_connection = True
@@ -912,6 +917,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                   "application/json", {"Cache-Control": "no-store"})
             if path.startswith("/api/cad/preplan/docs/") and path.endswith(("/file", "/plan")) and cad is not None:
                 return self._doc_file(path, url.query)
+            if path == prefs_mod.PATH and cad is not None and not station_ui:    # the caller's own choices (#823)
+                return self._send(*prefs_mod.http_get(cad.cad.prefs, self.who))
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):
@@ -993,8 +1000,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def _other_method(self) -> None:
             """PUT, PATCH, DELETE, OPTIONS: nothing serves them but /api/v1, which answers in its own error shape (a
-            405 or 404 today). Every other path gets the same 501 as before (http.server's own answer)."""
+            405 or 404 today), and PUT /api/me/prefs/<ns> (#823). Every other path gets the same 501 as before
+            (http.server's own answer)."""
             url = urlsplit(self.path)
+            if (self.command == "PUT" and url.path.startswith(prefs_mod.PATH + "/") and cad is not None
+                    and not station_ui):
+                return self._put_prefs(url.path)
             if not v1.handles(url.path):
                 return self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
             self.close_connection = True     # the body is left unread
@@ -1004,6 +1015,37 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 self._v1(url.path, url.query)
 
         do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _other_method
+
+        def _put_prefs(self, path: str) -> None:
+            """PUT /api/me/prefs/<ns> (#823): the signed-in person's own; refused from another site (#307) and, as a
+            POST is, while the hub hands over (503: the page sends it again)."""
+            if gate.refuse(write=True):
+                return self._updating()
+            gate.enter()
+            try:
+                self._fenced(lambda: self._put_prefs_now(path))
+            finally:
+                gate.leave()
+                if perf is not None:
+                    self._account()
+
+        def _put_prefs_now(self, path: str) -> None:
+            if not self._admit(path):
+                return
+            if why := cross_site(self.headers):
+                self.close_connection = True     # the body is left unread
+                return self._send(403, json.dumps({"error": why}).encode(), "application/json")
+            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+                self.close_connection = True
+                return self._send(415, b'{"error":"a JSON body (application/json)"}', "application/json")
+            length = self.headers.get("Content-Length")
+            if self.headers.get("Transfer-Encoding") or length is None or not length.strip().isdigit():
+                self.close_connection = True     # a body this server can't measure: never read
+                return self._send(411 if length is None else 400, b'{"error":"Content-Length"}', "application/json")
+            raw = self._body(prefs_mod.MAX_BODY)
+            if raw is None:
+                self.close_connection = True     # too big: left unread
+            self._send(*prefs_mod.http_put(cad.cad.prefs, self.who, path, raw, self.headers.get("X-Sizeup-Person")))
 
         def _post(self) -> None:
             path = urlsplit(self.path).path

@@ -7,7 +7,8 @@
 //                 source; their roadwork is in the "Road projects & closures" group, roadprojects.js, #185),
 //                 Mileposts, Exits (the gazetteer's, #67), Airport with its Approaches sub-toggle (airport.js,
 //                 #87: drawn by that module, listed and switched here; on by itself for an event at the airport,
-//                 focus(inc)). Each one on / off per viewer (localStorage "sizeup.mapLayers"), as two remembered
+//                 focus(inc)). Each one on / off per person (on the hub, me-prefs.js, #823; localStorage "sizeup.mapLayers"
+//                 this browser's copy), as two remembered
 //                 sets (#111): "overview" (the Overview map, the large map, the wall board) and "incident" (an
 //                 event's map); cameras and incidents on in both at first. An event can have its own set: a
 //                 dispatcher's change on its map is kept on the event (POST /api/cad/incident/<id> map_layers,
@@ -72,31 +73,44 @@ window.MapLayers = (() => {
   }
   const esc = (s) => String(s == null ? "" : s);
 
-  // ---- per-viewer choices (localStorage may be missing or refuse: then just this page view) --------------
+  // ---- per-person choices -----------------------------------------------------------------------------------
   // {overview: {key: on}, incident: {key: on}, folds: {group: open}, hideDown}; only what the viewer chose is
-  // in a set (the rest: the profile's default). Before #111 one flat set was kept (and gislayers.js its own,
-  // "sizeup.gisLayers"): read once as both sets.
+  // in a set (the rest: the profile's default). Kept on the hub for the person signed in (me-prefs.js, #823:
+  // namespace "map_layers", the same shape), so they follow them to any browser; localStorage is this browser's
+  // copy (read first: no flash of the defaults; may be missing or refuse: then the hub's, or this page view's).
+  // Before #111 one flat set was kept (and gislayers.js its own, "sizeup.gisLayers"): read once as both sets.
   const KEY_RE = /^[a-z][a-z0-9_:-]{0,47}$/;
+  // a group's heading as the hub keeps it (sizeup/cad/prefs.py _fold_key): one bad one would refuse the whole set
+  const FOLD_OK = (k) => k.length > 0 && k.length <= 80 && k === k.trim() && !/[\p{C}\p{Z}]/u.test(k.replace(/ /g, ""));
   // a stored value (drop: then forget it), or null when storage is missing or refuses
   function stored(key, drop = false) { try { const v = localStorage.getItem(key); if (drop) localStorage.removeItem(key); return v; } catch (_) { return null; } }
-  const prefs = (() => {
+  // a saved value (this browser's, the hub's; null: none) as the choices
+  function parsePrefs(saved) {
     const p = { overview: {}, incident: {}, folds: {}, hideDown: false };
-    try {
-      const saved = JSON.parse(stored(PREF_KEY) || "null");
-      if (saved && typeof saved === "object") {
-        const flat = Object.fromEntries(Object.entries(saved).filter(([k, v]) => typeof v === "boolean" && k !== "hideDown"));
-        for (const name of Object.keys(PROFILES)) {
-          const set = saved[name] && typeof saved[name] === "object" ? saved[name] : flat;
-          for (const [k, v] of Object.entries(set)) if (typeof v === "boolean" && KEY_RE.test(k)) p[name][k] = v;
-        }
-        if (saved.folds && typeof saved.folds === "object") for (const [k, v] of Object.entries(saved.folds)) if (typeof v === "boolean") p.folds[k] = v;
-        if (typeof saved.hideDown === "boolean") p.hideDown = saved.hideDown;
+    if (saved && typeof saved === "object") {
+      const flat = Object.fromEntries(Object.entries(saved).filter(([k, v]) => typeof v === "boolean" && k !== "hideDown"));
+      for (const name of Object.keys(PROFILES)) {
+        const set = saved[name] && typeof saved[name] === "object" ? saved[name] : flat;
+        for (const [k, v] of Object.entries(set)) if (typeof v === "boolean" && KEY_RE.test(k)) p[name][k] = v;
       }
+      if (saved.folds && typeof saved.folds === "object") for (const [k, v] of Object.entries(saved.folds)) if (typeof v === "boolean" && FOLD_OK(k)) p.folds[k] = v;
+      if (typeof saved.hideDown === "boolean") p.hideDown = saved.hideDown;
+    }
+    return p;
+  }
+  let hadLocal = false;               // this browser had choices of its own (sent to the hub once when it has none)
+  const prefs = (() => {
+    let p = parsePrefs(null);
+    try {
+      const raw = stored(PREF_KEY);
+      hadLocal = raw !== null;
+      p = parsePrefs(JSON.parse(raw || "null"));
       const gis = JSON.parse(stored("sizeup.gisLayers", true) || "null");          // read once, then gone
       if (gis && typeof gis === "object") {
+        hadLocal = true;
         for (const [k, v] of Object.entries(gis)) {
           if (typeof v !== "boolean") continue;
-          if (k.startsWith("_open:")) p.folds[k.slice(6)] = v;
+          if (k.startsWith("_open:")) { if (FOLD_OK(k.slice(6))) p.folds[k.slice(6)] = v; }
           else for (const name of Object.keys(PROFILES)) if (typeof p[name][`gis:${k}`] !== "boolean") p[name][`gis:${k}`] = v;
         }
       }
@@ -105,7 +119,23 @@ window.MapLayers = (() => {
   })();
   // keep a value for this viewer (or not, when storage is missing or refuses)
   function remember(key, v) { try { localStorage.setItem(key, v); } catch (_) { /* not remembered */ } }
-  function savePrefs() { remember(PREF_KEY, JSON.stringify(prefs)); }
+  function savePrefs() {
+    remember(PREF_KEY, JSON.stringify(prefs));
+    if (window.MePrefs) MePrefs.changed("map_layers");          // to the hub, a second later
+  }
+  // the hub's choices for the person signed in (null: the defaults, this browser's copy being someone else's):
+  // taken in place (MapLayers.prefs stays the same object) and every map redrawn
+  function adoptPrefs(v) {
+    const p = parsePrefs(v);
+    for (const k of Object.keys(p)) prefs[k] = p[k];
+    remember(PREF_KEY, JSON.stringify(prefs));
+    for (const m of maps) {
+      m.sigs.cameras = "";
+      if (store.data) m.update(store.data);
+      m.refresh();
+    }
+  }
+  if (window.MePrefs) MePrefs.register("map_layers", { get: () => prefs, apply: adoptPrefs, hadLocal });
 
   // ---- the data: one poll for every map on the page ------------------------------------------------------
   const store = { data: null, rev: "", timer: null, subs: new Set(), loading: null };

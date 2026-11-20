@@ -56,6 +56,7 @@ from pathlib import Path
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad import oos as oos_mod
+from sizeup.cad import prefs as prefs_mod
 from sizeup.cad.lists import Lists
 from sizeup.fence import FencedWrite, GuardedConnection, refuse
 
@@ -537,6 +538,7 @@ class Store:
         for stmt in oos_mod.SCHEMA.split(";"):            # automation refused on an out-of-service unit (oos.py)
             if stmt.strip():
                 self.db.execute(stmt)
+        self.db.execute(prefs_mod.SCHEMA)                 # each person's own console choices (prefs.py, #823)
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
