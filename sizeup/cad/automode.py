@@ -20,6 +20,13 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
                one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
                statuses come with the feed's next changes and the radio, never replayed)
+      non-emergency  an incident whose type is non-emergency (Lists.is_emergency: Notification and its subtypes, a
+               Drill there, unless Settings > Lists says otherwise) is accepted like any other, but no unit is ever
+               dispatched to it by automation (feed, page or radio): the units of ours listed or named are one line on
+               the timeline, "Not dispatched (non-emergency event): E1, L2", for a person to attach if needed (as by
+               hand: "Non-emergency: attach units, no dispatch"); the feed's in service still closes it. A feed that
+               sends a type moved under another as a subtype (Drill retired, a Drill subtype of Notification) gets
+               that subtype (Cad.moved_type)
       depts    a feed's department entry (Sources.department_units: a code that means a whole department, #370) is never
                dispatched as a unit, nor counted as one (the one-unit rule below counts apparatus only): "<department>
                paged" on the timeline when first listed. Alone it never accepts a call (a page attached does), unless
@@ -401,6 +408,7 @@ class AutoDispatch:
                         inc = self.store.incident(iid)
                     if inc["status"] in ("pending", "active"):
                         self._paged(iid)
+                        self._quiet(iid, units or (), "Paging · auto")
                         ours = self._ours()
                         for name in units or ():
                             u = ours.get(_key(name))
@@ -517,6 +525,7 @@ class AutoDispatch:
             if u is not None and L.placeholder(u["name"]) and not self._manual(iid, f"unit:{u['name']}"):
                 self.store.placeholder_off_call(iid, u["id"], op, f"{label} no longer lists it")
         first = sorted(fresh, key=lambda n: not (_key(n) in ours and L.placeholder(ours[_key(n)]["name"])))
+        self._quiet(iid, first, op)                      # a non-emergency event: listed, never dispatched
         for name in first:                               # newly listed: dispatched at the feed's time, placeholders first
             u = ours.get(_key(name))
             if u is not None:
@@ -608,6 +617,7 @@ class AutoDispatch:
         ours, op = self._ours(), f"{label} · auto"
         times, uts = data.get("times") or {}, data.get("unit_times") or {}
         L = self.store.lists
+        self._quiet(iid, data.get("units") or [], op)    # a non-emergency event: listed, never dispatched
         for name in sorted(data.get("units") or [], key=lambda n: not (_key(n) in ours and L.placeholder(ours[_key(n)]["name"]))):
             u = ours.get(_key(name))
             if u is not None:                            # placeholders first
@@ -649,11 +659,29 @@ class AutoDispatch:
     def _on_here(self, iid: int, uid: int) -> dict | None:
         return self.store.one("SELECT * FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL", (iid, uid))
 
+    def _quiet(self, iid: int, names, op: str) -> None:
+        """Units of ours a feed lists (or a page names) on a non-emergency event (a notification and its subtypes, a
+        drill there: Lists.is_emergency): never dispatched by automation, said once on the timeline; a person attaches
+        them if they are needed (as by hand: "Non-emergency: attach units, no dispatch")."""
+        if self.store.incident(iid)["emergency"]:
+            return
+        ours = self._ours()
+        names = list(dict.fromkeys(ours[_key(n)]["name"] for n in names or () if _key(n) in ours))
+        if not names:
+            return
+        text = f"Not dispatched (non-emergency event): {', '.join(names)}"
+        if self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'auto' AND text = ?", (iid, text)):
+            return
+        with self.store.tx() as db:
+            self.store._event(db, iid, "auto", text, op)
+
     def _assign(self, iid: int, u: dict, t: float | None, op: str, verb: str, again: bool = False) -> bool:
         """again: the feed newly lists it now (not a repeat): a department's placeholder released here before comes
         back only then, and only while none of its department's units has signed on there (an en route or on location
         time, ever): units merely dispatched don't keep it off. Never after a person freed it (manual_edits)."""
         L = self.store.lists
+        if not self.store.incident(iid)["emergency"]:
+            return False                                 # a non-emergency event (a notification): never dispatched (_quiet)
         u = self.store.unit(u["id"])
         ph = L.placeholder(u["name"])
         if ph:                                           # not a rig: may be on several calls at once (only this one counts)
@@ -858,6 +886,8 @@ class AutoDispatch:
             if len(cands) != 1 or not self.tracked(cands[0]):
                 return                                   # none, or which? (any open call counts, tracked or not)
             iid = cands[0]
+            if not self.store.incident(iid)["emergency"]:
+                return                                   # a non-emergency event (a notification): never put on by itself
         if self.store.incident(iid)["status"] not in ("pending", "active"):
             return
         if on is None and self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
