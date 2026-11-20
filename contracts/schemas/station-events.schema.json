@@ -474,6 +474,7 @@
           "description": "Other numbers read in the words."
         },
         "location": {"type": "string", "description": "The address, lower case as parsed; \"\" when none."},
+        "qualifier": {"type": "string", "description": "From #PRNUM on: where at the location, as said in front of it (\"across from\"): its location_qualifiers code (\"ACROSS\"); \"\" when none. Never part of location."},
         "cross_street": {"type": "string", "description": "The cross street, lower case; \"\" when none."},
         "time_out": {"type": "string", "description": "The time spoken at the end, HH:MM; \"\" when none."}
       }

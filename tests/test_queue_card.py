@@ -78,7 +78,7 @@ global.unconfirmed = () => false;
 global.txNow = () => false;
 global.canDo = () => true;
 global.statusChip = (code, text) => { const n = new Node("span"); n.className = "chip st"; n.textContent = text; return n; };
-eval(["el", "L", "nameOf", "typeLabel", "typeColor", "isOpen", "incTitle", "openAssignments", "callSummary", "callLive",
+eval(["el", "L", "qualOf", "qualText", "qualTitle", "locText", "nameOf", "typeLabel", "typeColor", "isOpen", "incTitle", "openAssignments", "callSummary", "callLive",
       "fillQueueItem"].map(grab).join("\n") + "\nglobal.fillQueueItem = fillQueueItem;");
 const shape = (n) => ({ cls: n.className, text: n.children.length ? undefined : n._text, c: n.children.map(shape),
                         color: n.style.props["--c"] });
