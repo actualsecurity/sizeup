@@ -68,8 +68,8 @@ POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?
 POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
                                           action?: delete | restore (admins)}. Both: dispatchers and admins, in the
                                           Settings audit log (section "preplan")
-GET  /api/cad/hydrants/<key>             a hydrant's card (#799, sizeup/cad/hydrants.py): {hydrant, gen}; an admin's has
-                                          its history (the Settings audit log, section "hydrants"). Anyone signed in
+GET  /api/cad/hydrants/<key>             a hydrant's card (#799, sizeup/cad/hydrants.py): {hydrant, history, gen}; the
+                                          history: the Settings audit log, section "hydrants". Anyone signed in
 GET  /api/cad/hydrants?q=&status=&flag=&town=&offset=&limit=
                                           the Settings > Hydrants list: {rows, total, counts, towns}; admins (ADMIN_READS)
 GET  /api/cad/hydrants.csv?...            the same as a spreadsheet, every overlay column: admins (ADMIN_READS)
@@ -414,7 +414,7 @@ PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")             
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
 DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
 DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
-HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}|import))?")         # hydrants (#799)
+HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?|import))?")   # hydrants (#799)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -987,7 +987,7 @@ class CadApi:
         return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
 
     def _hydrants_get(self, path: str, query: str, who) -> tuple:
-        """GET /api/cad/hydrants/<key> (anyone signed in; an admin's with the history), the list and the CSV (admins:
+        """GET /api/cad/hydrants/<key> (anyone signed in: the card and its history), the list and the CSV (admins:
         ADMIN_READS has checked them; the CSV in the person's activity, kind "search"). Never cached: the overlay moves."""
         may, q = self._may(who), parse_qs(query)
         hy = self.cad.hydrants

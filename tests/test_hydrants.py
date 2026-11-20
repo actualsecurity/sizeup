@@ -228,6 +228,73 @@ def test_an_id_that_disappears_is_kept_and_flagged(cad):
     assert h.index()["by_key"]["c990003"]["missing"]
 
 
+def test_swapped_ids_follow_their_hydrants(cad):
+    """Review of #799: the county swaps two edited hydrants' ids: each overlay stays on its own hydrant, no key twice."""
+    h, g = cad.hydrants, cad.gis
+    h.edit("c990001", {"status": "oos"})
+    h.edit("c990002", {"status": "dry"})
+    sw = [json.loads(json.dumps(f)) for f in COUNTY]
+    sw[0]["id"], sw[1]["id"] = 990002, 990001
+    set_layer(g, "hydrants", sw)
+    items = h.index()["by_key"]
+    assert items["c990001"]["fid"] == 990002 and items["c990001"]["status"] == "oos" and not items["c990001"]["missing"]
+    assert items["c990002"]["fid"] == 990001 and items["c990002"]["status"] == "dry"
+    feats = served(g)[0]["features"]
+    keys = [f["properties"]["_k"] for f in feats]
+    assert len(keys) == len(set(keys)) == 5
+    ids = [f["id"] for f in feats if "id" in f]
+    assert len(ids) == len(set(ids))
+    # the hydrant now at 9001's point (id 990002) opens and edits 9001's row
+    h.edit("c990001", {"notes": "Checked"})
+    assert h.store.one("SELECT county_id, notes FROM hydrants WHERE key = 'c990001'")["notes"] == "Checked"
+
+
+def test_a_reused_id_gets_a_key_of_its_own(cad):
+    """A row rebound elsewhere keeps its key; a new hydrant given the old id gets another key, and is editable."""
+    h, g = cad.hydrants, cad.gis
+    h.edit("c990001", {"flow_gpm": 1200})
+    re_ = [json.loads(json.dumps(f)) for f in COUNTY]
+    re_[0]["id"] = 990009                                                # 9001 under a new id ...
+    re_.append(hyd(990001, "9100", 10))                                  # ... and its old id on a new hydrant 900 m off
+    set_layer(g, "hydrants", re_)
+    items = h.index()["by_key"]
+    assert items["c990001"]["fid"] == 990009 and items["c990001"]["cls"] == "A"
+    assert items["c990001-2"]["fid"] == 990001 and items["c990001-2"]["row"] is None
+    keys = [f["properties"]["_k"] for f in served(g)[0]["features"]]
+    assert len(keys) == len(set(keys))
+    out = h.edit("c990001-2", {"status": "oos"})
+    assert out["changed"] == ["status"] and h.index()["by_key"]["c990001-2"]["status"] == "oos"
+    assert h.index()["by_key"]["c990001"]["cls"] == "A"                    # both bound to their own after the write
+
+
+def test_an_edit_that_changes_nothing_writes_nothing(cad):
+    h = cad.hydrants
+    for body in ({}, {"status": "unknown"}, {"notes": ""}, {"status": "Unknown", "flow_gpm": ""}):
+        assert h.edit("c990001", body)["changed"] == []
+    assert h.store.q("SELECT * FROM hydrants") == []
+    assert h.edit("c990001", {"status": "oos"})["changed"] == ["status"]
+
+
+def test_a_failed_merge_is_never_kept(cad):
+    g = cad.gis
+    real = g.overlays["hydrants"]
+
+    class Flaky:
+        gen, calls = real.gen, 0
+
+        def apply(self, key, feats):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("database is locked")
+            return real.apply(key, feats)
+    cad.hydrants.edit("c990002", {"status": "oos"})
+    Flaky.gen = real.gen
+    g.overlays["hydrants"] = Flaky()
+    g._bytes.clear()
+    assert "_st" not in json.dumps(served(g)[0])                             # the county's, this once
+    assert by_key(served(g)[0])["c990002"]["properties"]["_st"] == "oos"     # and the overlay's on the next request
+
+
 def test_forged_and_unknown_keys(cad):
     for k in ("c1", "c990099", "h1", "x990001", "c0", "../c990001", "c990001; DROP"):
         with pytest.raises(hy.CadError):
@@ -244,11 +311,19 @@ def test_forged_and_unknown_keys(cad):
     ({"thread": "garden"}, "thread"), ({"flow_date": "31/12/2026"}, "flow_date"), ({"notes": "x" * 501}, "notes"),
     ({"lat": "abc", "lon": 1}, "lat"), ({"lat": float("nan"), "lon": LON0}, "lat"), ({"owner": "me"}, "owner"),
     ({"action": "explode"}, "action"), ({"flow_gpm": True}, "flow_gpm"),
+    ({"lat": 10 ** 400, "lon": LON0}, "lat"), ({"flow_gpm": 10 ** 400}, "flow_gpm"), ({"notes": ["a", "b"]}, "notes"),
+    ({"flow_date": "2026-05-01junk"}, "flow_date"), ({"flow_date": "13/45/2026"}, "flow_date"),
 ])
 def test_bad_values_are_refused(cad, body, err):
     with pytest.raises(hy.CadError, match=err):
         cad.hydrants.edit("c990001", body)
     assert cad.store.q("SELECT * FROM hydrants") == []
+
+
+def test_dates_as_a_spreadsheet_saves_them(cad):
+    out = cad.hydrants.edit("c990001", {"flow_date": "6/30/2027", "inspected": "2026-11-01T00:00", "status_since": "11/2/2026 0:00"})
+    hh = out["hydrant"]
+    assert (hh["flow_date"], hh["inspected"], hh["status_since"]) == ("2027-06-30", "2026-11-01", "2026-11-02")
 
 
 def test_the_labels_and_formula_guard_are_read(cad):
@@ -272,7 +347,7 @@ def test_only_admins_write(api):
         assert get(api, "/api/cad/hydrants", email)[0] == 403                   # the list and the CSV: admins
         assert get(api, "/api/cad/hydrants.csv", email)[0] == 403
         code, card = get(api, "/api/cad/hydrants/c990001", email)                # the card: anyone signed in
-        assert code == 200 and "history" not in card
+        assert code == 200 and card["history"] == []
     assert api.cad.store.q("SELECT * FROM hydrants") == []
     code, out = call(api, "/api/cad/hydrants/c990001", {"status": "oos", "operator": "Someone Else"}, CASEY)
     assert code == 200 and out["changed"] == ["status"]
@@ -367,6 +442,15 @@ def test_csv_round_trip_preview_and_apply(cad):
     assert h.import_csv({"action": "preview", "csv": h.csv({})[0].decode("utf-8-sig")})["changed"] == 0
 
 
+def test_csv_import_of_every_point_moves_nothing(cad):
+    """A file with each hydrant's own point (another export of the same points): no nudges; a real move: one."""
+    text = "key,lat,lon\n" + "".join(f"c{f['id']},{f['geometry']['coordinates'][1] + 0.000001},{f['geometry']['coordinates'][0]}\n"
+                                      for f in COUNTY[:4])
+    text += f"c990005,{LAT0 + 3 * DLAT + 0.00009},{LON0 + 0.002}\n"
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": text})
+    assert pv["changed"] == 1 and pv["unchanged"] == 4 and pv["preview"][0]["key"] == "c990005"
+
+
 def test_csv_import_validation_refuses_the_whole_file(cad):
     h = cad.hydrants
     text = ("key,status,flow_gpm,lat,lon\n"
@@ -383,9 +467,20 @@ def test_csv_import_validation_refuses_the_whole_file(cad):
     with pytest.raises(hy.CadError, match="nothing applied"):
         h.import_csv({"action": "apply", "csv": text})
     assert h.store.q("SELECT * FROM hydrants") == []
-    for bad in ("", "status\noos\n", "key,key\nc990001,c990001\n"):
+    for bad in ("", "status\noos\n", "key,key\nc990001,c990001\n", "key,notes\nc990001,\"" + "x" * 200000 + "\"\n"):
         with pytest.raises(hy.CadError):
             h.import_csv({"action": "preview", "csv": bad})
+
+
+def test_csv_import_never_adds_a_hydrant_twice(cad):
+    text = "key,lat,lon,number\n,41.0002,-73.66,P-9\n"
+    assert cad.hydrants.import_csv({"action": "apply", "csv": text})["new"] == 1
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": text})          # the same file again
+    assert pv["error_count"] == 1 and "within 3 m" in pv["errors"][0]["error"]
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": "key,lat,lon\n,41.01,-73.66\n,41.01001,-73.66\n"})
+    assert pv["error_count"] == 1 and "this file" in pv["errors"][0]["error"]
+    pv = cad.hydrants.import_csv({"action": "preview", "csv": "key,class,town,notes\nc990001,AA,X,hi\n"})
+    assert pv["read_only"] == ["class", "town"] and pv["changed"] == 1
 
 
 def test_csv_import_through_the_api(api):
@@ -500,7 +595,8 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
     h = c.hydrants
     h.edit("c990001", {"flow_gpm": 1650, "flow_date": "2026-05-01", "thread": "nst", "outlets": "2x2.5, 1x4.5",
                        "owner": "water_company", "asset_id": "99-0001", "location": "Sample St at Example Ave", "main_in": 8})
-    h.edit("c990002", {"status": "oos", "status_reason": "Broken stem", "status_since": "2026-11-12", "flow_gpm": 1100})
+    h.edit("c990002", {"status": "oos", "status_reason": "Broken stem", "status_since": "2026-11-12", "flow_gpm": 1100,
+                       "operator": "Casey <casey@example.org>"})
     h.edit("c990003", {"flow_gpm": 750, "status": "restricted", "status_reason": "One outlet seized"})
     h.edit("c990005", {"flow_gpm": 420})
     h.create({"lat": LAT0 + 1.5 * DLAT, "lon": LON0 + 0.0008, "number": "P-1", "owner": "private"})

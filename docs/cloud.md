@@ -2626,7 +2626,8 @@ lacks, and county hydrants removed from the maps.
   `hydrants.gen`).
 - **Who.** Admins edit (WRITES). Everyone signed in sees the marks, the card and a call's nearest hydrants. The
   list and the CSV are for admins (ADMIN_READS). Every change is in the Settings audit log (section `hydrants`,
-  key: the hydrant's key). That log is also the hydrant's history in its card.
+  key: the hydrant's key). That log is also the hydrant's history in its card. Hydrant data is no secret:
+  anyone signed in can read the cards and that log.
 - **CSV.** The export has every overlay column, keyed by `key`. An import changes only the columns the file has
   (an empty cell clears that field) and shows a preview first. If any row is in error, nothing is applied.
 

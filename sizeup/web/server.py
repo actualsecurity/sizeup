@@ -163,7 +163,7 @@ MAX_COMMON_PLACES_BODY = 4608 * 1024
 MAX_DOC_BODY = 25 * 1024 * 1024      # a site document upload (#459, sizeup/cad/preplan_docs.py MAX_BYTES)
 # Settings > Hydrants > Import (#799, sizeup/cad/hydrants.py): the CSV's text in the JSON body (every hydrant: ~2 MB)
 HYDRANT_IMPORT_PATH = "/api/cad/hydrants/import"
-MAX_HYDRANT_IMPORT_BODY = 6 * 1024 * 1024
+MAX_HYDRANT_IMPORT_BODY = 10 * 1024 * 1024     # (a 4 MB file, JSON-escaped)
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
 # (not the squelch: set on the CAD of record only, Settings > Radios > Squelch; the station applies what the hub sends)
 STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}

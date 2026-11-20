@@ -6,7 +6,7 @@ an incident (the nearest hydrants, the out-of-service ones called out).
 
 Department data: it lives only in the hub's CAD database (the `hydrants` table, replicated by Litestream like the rest
 of the CAD), never in the repo. Every change is in the Settings audit log (section "hydrants", key: the hydrant's key),
-which is the hydrant's history (GET /api/cad/hydrants/<key>, admins).
+which is the hydrant's history on its card.
 
 The key. The county layer has no hydrant id of its own: its fields are OBJECTID, DISTRICT, MUNCIPALIT, HYD_NUMBER and
 FIRENAME (surveyed 2026-11-20), and a hydrant number repeats within a district (351 of 3,874 district + number pairs in
@@ -34,7 +34,7 @@ kept as information (body_color), never what the map draws. With a static and a 
 from the flow at 20 psi residual (NFPA 291's Q_R = Q_F x ((S - 20) / (S - R)) ^ 0.54), else from the flow as entered
 (a water company's rated capacity). No flow: no class (never red: red means under 500 GPM). An admin may set the class.
 
-HTTP (sizeup/cad/api.py): GET /api/cad/hydrants/<key> (anyone signed in: the card; admins: its history too),
+HTTP (sizeup/cad/api.py): GET /api/cad/hydrants/<key> (anyone signed in: the card and its history),
 GET /api/cad/hydrants (?q, status, flag, town: admins: the Settings list), GET /api/cad/hydrants.csv (admins),
 POST /api/cad/hydrants (admins: a new one), POST /api/cad/hydrants/<key> (admins: edit, move, remove, restore),
 POST /api/cad/hydrants/import {action: preview | apply, csv} (admins).
@@ -58,7 +58,7 @@ LAYER = "hydrants"                    # the county layer (sizeup/gis.py DEFAULT_
 TOWNS = "municipalities"              # the town a hydrant is in (the layer's MUNCIPALIT is the fire district's name)
 SECTION = "hydrants"                  # the Settings audit log's section
 NUMBER, DISTRICT = "HYD_NUMBER", "FIRENAME"
-KEY_RE = re.compile(r"[ch][1-9]\d{0,9}")
+KEY_RE = re.compile(r"[ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?")    # c<id>-2: a county id whose own key a rebound row has
 STATUSES = {"in_service": "In service", "oos": "Out of service", "restricted": "Restricted", "dry": "Dry", "unknown": "Unknown"}
 DOWN = ("oos", "dry")                 # drawn with the out-of-service mark, called out near a call
 # NFPA 291 Table 5.1 (the module doc): (class, the least rated GPM, the cap colour)
@@ -67,6 +67,7 @@ THREADS = {"nst": "NST (NH)", "nyc": "NYC / NYFD pipe", "storz4": "Storz 4\"", "
 OWNERS = {"water_company": "Water company", "municipal": "Municipal", "private": "Private"}
 REBIND_M = 150.0                      # the same district and number this close to the anchor: the same hydrant
 SAME_M = 3.0                          # this close to the anchor: the same hydrant whatever its number says
+SAME_POINT_M = 0.5                    # an imported point this close to where it is: no move
 MAX_NUDGE_M = 300.0                   # a county hydrant moved further than this: a mistake (Remove it and Add one)
 NEAR_N, NEAR_M = 5, 300.0             # an incident's nearest hydrants: at most this many, this close
 CELL_DEG = 0.002                      # the grid the nearest search reads (about 220 m x 170 m)
@@ -121,6 +122,9 @@ CREATE TABLE IF NOT EXISTS hydrants (
 CREATE INDEX IF NOT EXISTS hydrants_county ON hydrants(county_id);
 """
 TEXT_COLS = {"number", "status_reason", "outlets", "body_color", "asset_id", "location", "notes"}   # NOT NULL '' columns
+# a hydrant with no overlay row: what each column would be
+DEFAULTS = {k: ("unknown" if k == "status" else "" if k in TEXT_COLS else None) for k in FIELDS} | {
+    "lat": None, "lon": None, "removed": 0}
 
 
 # ---- pure helpers ---------------------------------------------------------------------------------------------------
@@ -159,10 +163,15 @@ def _day(v, name: str) -> str | None:
     s = str(v or "").strip()
     if not s:
         return None
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})(?: 0?0:00(?::00)?)?", s)        # as a spreadsheet saves it again
     try:
-        return date.fromisoformat(s[:10]).isoformat()
+        if m:
+            return date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?", s):
+            return date.fromisoformat(s[:10]).isoformat()
     except ValueError:
-        raise CadError(f"{name}: a date (2027-06-30)") from None
+        pass
+    raise CadError(f"{name}: a date (2027-06-30)")
 
 
 def clean(name: str, v):
@@ -172,6 +181,8 @@ def clean(name: str, v):
         v = v.strip()
         if len(v) >= 2 and v[0] == "'" and v[1] in "=+-@":        # the export's guard against a formula (export._cell)
             v = v[1:]
+    if v is not None and not isinstance(v, (str, int, float)):
+        raise CadError(f"{name}: a value")
     if kind == "text":
         t = " ".join(str(v or "").split()).replace("×", "x")
         if len(t) > arg:
@@ -197,7 +208,7 @@ def clean(name: str, v):
     lo, hi = arg
     try:
         x = float(str(v).replace(",", "")) if not isinstance(v, (int, float)) or isinstance(v, bool) else float(v)
-    except ValueError:
+    except (ValueError, OverflowError):
         raise CadError(f"{name}: a number") from None
     if isinstance(v, bool) or not math.isfinite(x) or not lo <= x <= hi:
         raise CadError(f"{name}: a number from {lo:g} to {hi:g}")
@@ -211,7 +222,7 @@ def clean(name: str, v):
 def point(lat, lon) -> tuple[float, float]:
     try:
         la, lo = float(lat), float(lon)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise CadError("lat, lon: the point on the map") from None
     if not (math.isfinite(la) and math.isfinite(lo) and -90 <= la <= 90 and -180 <= lo <= 180):
         raise CadError("lat, lon: the point on the map")
@@ -284,7 +295,6 @@ class Hydrants:
                 continue
             pts[fid] = (f, float(c[1]), float(c[0]))
         county_rows = [r for r in rows if r["county_id"] is not None]
-        own = {r["county_id"] for r in county_rows}
         bound: dict = {}                             # county feature id -> (row, rebound)
         loose = []
         for r in county_rows:
@@ -295,28 +305,42 @@ class Hydrants:
                 loose.append(r)
         missing = []
         if loose:
+            # the candidates: every feature no row is bound to directly (an id another row once had included: swapped
+            # or reused ids follow their hydrants); by district and number, and by point (the grid: never a full scan)
             by_fp: dict = {}
+            near: dict = {}
             for fid, (f, la, lo) in pts.items():
-                if fid in bound or fid in own:
-                    continue                          # bound already, or the feature has an overlay of its own
+                if fid in bound:
+                    continue
                 p = f.get("properties") or {}
                 by_fp.setdefault((_norm(p.get(DISTRICT)), _norm(p.get(NUMBER))), []).append((fid, la, lo))
-            free = [(fid, la, lo) for fid, (f, la, lo) in pts.items() if fid not in bound and fid not in own]
+                near.setdefault(_cell(la, lo), []).append((fid, la, lo))
             for r in loose:
                 cands = []
                 if r["anchor_lat"] is not None:
+                    alat, alon = r["anchor_lat"], r["anchor_lon"]
                     cands = [x for x in by_fp.get((r["anchor_dist"], r["anchor_no"]), [])
-                             if metres(x[1], x[2], r["anchor_lat"], r["anchor_lon"]) <= REBIND_M]
+                             if x[0] not in bound and metres(x[1], x[2], alat, alon) <= REBIND_M]
                     if len(cands) != 1:
-                        cands = [x for x in free if metres(x[1], x[2], r["anchor_lat"], r["anchor_lon"]) <= SAME_M]
-                if len(cands) == 1 and cands[0][0] not in bound:
+                        cy, cx = _cell(alat, alon)
+                        cands = [x for y in (cy - 1, cy, cy + 1) for xx in (cx - 1, cx, cx + 1) for x in near.get((y, xx), ())
+                                 if x[0] not in bound and metres(x[1], x[2], alat, alon) <= SAME_M]
+                if len(cands) == 1:
                     bound[cands[0][0]] = (r, True)
                 else:
                     missing.append(r)
+        taken = {r["key"] for r in rows}
         items = []
         for fid, (f, la, lo) in pts.items():
             r, rebound = bound.get(fid, (None, False))
-            items.append(self._item(r["key"] if r else f"c{fid}", fid, la, lo, f.get("properties") or {}, r, False, rebound))
+            if r is not None:
+                key = r["key"]
+            else:                                    # its own key, unless a row bound elsewhere (or missing) has it
+                key, n = f"c{fid}", 1
+                while key in taken:
+                    n += 1
+                    key = f"c{fid}-{n}"
+            items.append(self._item(key, fid, la, lo, f.get("properties") or {}, r, False, rebound))
         for r in missing:                            # kept, where it was: flagged for the admins
             la = r["lat"] if r["lat"] is not None else r["anchor_lat"]
             lo = r["lon"] if r["lon"] is not None else r["anchor_lon"]
@@ -372,7 +396,7 @@ class Hydrants:
                 p["_hub"] = True
             f = {"type": "Feature", "properties": p,
                  "geometry": {"type": "Point", "coordinates": [round(it["lon"], 7), round(it["lat"], 7)]}}
-            if it["fid"] is not None:
+            if it["fid"] is not None and not it["missing"]:   # (a missing one's id may be another's now)
                 f["id"] = it["fid"]
             out.append(f)
         return out
@@ -429,14 +453,14 @@ class Hydrants:
             raise CadError(f"no hydrant {key}")
         return it
 
-    def one(self, key: str, may: str) -> dict:
-        """GET /api/cad/hydrants/<key>: the card; an admin's has the history (the Settings audit log's rows)."""
+    def one(self, key: str, may: str = "viewer") -> dict:
+        """GET /api/cad/hydrants/<key>: the card and its history (the Settings audit log's rows: anyone signed in reads
+        that log in Settings too; hydrant data is no secret, the list and the CSV are admins' as the editors' tools)."""
         out = {"hydrant": self.shown(self._item_or_404(key)), "gen": self.gen}
-        if may == "admin":
-            out["history"] = self.store.q("SELECT at, operator, old, new FROM settings_audit WHERE section = ? AND key = ? "
-                                          "ORDER BY at DESC, id DESC LIMIT 100", (SECTION, key))
-            for h in out["history"]:
-                h["by"] = who(h.pop("operator") or "")
+        out["history"] = self.store.q("SELECT at, operator, old, new FROM settings_audit WHERE section = ? AND key = ? "
+                                      "ORDER BY at DESC, id DESC LIMIT 100", (SECTION, key))
+        for h in out["history"]:
+            h["by"] = who(h.pop("operator") or "")
         return out
 
     def near(self, lat: float, lon: float, n: int = NEAR_N, within: float = NEAR_M) -> list[dict]:
@@ -587,13 +611,15 @@ class Hydrants:
         return dict(db.execute("SELECT * FROM hydrants WHERE key = ?", (it["key"],)).fetchone())
 
     def _write(self, db, it: dict, changes: dict, op: str, now: float) -> list[str]:
-        """One hydrant's changes in the transaction (its row made first when it has none), audited. The fields changed."""
-        r = it["row"]
-        if r is None:
-            r = self._new_row(db, it, op, now)
+        """One hydrant's changes in the transaction, audited (the row as it is now, read in the transaction: never the
+        index's copy; made first only when something changes). The fields changed."""
+        cur = db.execute("SELECT * FROM hydrants WHERE key = ?", (it["key"],)).fetchone()
+        r = dict(cur) if cur is not None else dict(DEFAULTS)
         diff = {k: v for k, v in changes.items() if r.get(k) != v}
         if not diff:
             return []
+        if cur is None:
+            r = self._new_row(db, it, op, now)
         db.execute(f"UPDATE hydrants SET {', '.join(f'{k} = ?' for k in diff)}, updated_by = ?, updated_at = ? WHERE key = ?",
                    (*diff.values(), op, now, it["key"]))
         Editor._audit(db, now, op, SECTION, it["key"], {k: r.get(k) for k in diff}, diff)
@@ -695,7 +721,13 @@ class Hydrants:
         text = body.get("csv")
         if not isinstance(text, str) or not text.strip():
             raise CadError("csv: the file's text")
-        rd = csv.reader(io.StringIO(text.lstrip("﻿")))
+        try:
+            return self._import(act, text, body)
+        except csv.Error as e:
+            raise CadError(f"csv: {e}") from None
+
+    def _import(self, act: str, text: str, body: dict) -> dict:
+        rd = csv.reader(io.StringIO(text.lstrip("\ufeff")))
         try:
             head = next(rd)
         except StopIteration:
@@ -709,6 +741,7 @@ class Hydrants:
         ignored = [h for h, c in zip(head, cols) if c and c not in writable and c != "key" and c not in self.READ_ONLY]
         idx = self.index()
         changes, errors, seen, new = [], [], set(), []
+        new_at: list = []
         unchanged = rows = 0
         for line, row in enumerate(rd, start=2):
             if line - 1 > MAX_IMPORT_ROWS:
@@ -733,6 +766,10 @@ class Hydrants:
                     if f.get("lat") is None:
                         raise CadError("a new hydrant (no key) needs lat and lon")
                     self._check_point(None, f["lat"], f["lon"])
+                    there = self.near(f["lat"], f["lon"], n=1, within=SAME_M)
+                    if there or any(metres(a, b, f["lat"], f["lon"]) <= SAME_M for a, b in new_at):
+                        raise CadError(f"a hydrant within {SAME_M:g} m already ({there[0]['key'] if there else 'this file'})")
+                    new_at.append((f["lat"], f["lon"]))
                     new.append((line, f))
                     continue
                 if key in seen:
@@ -743,12 +780,17 @@ class Hydrants:
                     raise CadError(f"no hydrant {key}")
                 if f.get("lat") is not None:
                     self._check_point(it, f["lat"], f["lon"])
+                    if metres(it["lat"], it["lon"], f["lat"], f["lon"]) < SAME_POINT_M:
+                        f.pop("lat")                   # where it is already (a file with every point): no move
+                        f.pop("lon")
+                    elif (not it["hub"] and it["county_lat"] is not None
+                          and metres(it["county_lat"], it["county_lon"], f["lat"], f["lon"]) < SAME_POINT_M):
+                        f["lat"] = f["lon"] = None     # the county's point: no nudge
                 elif "lat" in f and (it["hub"] or it["missing"]):
                     f.pop("lat")
                     f.pop("lon", None)                 # a hub hydrant's (or a missing one's) point stays: never cleared
-                r = it["row"] or {}
-                base = {k: r.get(k, 0 if k == "removed" else ("unknown" if k == "status" else ("" if k in TEXT_COLS else None)))
-                        for k in f}
+                r = it["row"] or DEFAULTS
+                base = {k: r.get(k, DEFAULTS[k]) for k in f}
                 diff = {k: (base[k], v) for k, v in f.items() if base[k] != v}
                 if diff:
                     changes.append({"key": key, "number": it["number"], "line": line, "changes": diff, "_it": it,
@@ -759,7 +801,8 @@ class Hydrants:
                 errors.append({"line": line, "key": key, "error": str(e)})
         out = {"rows": rows,
                "changed": len(changes), "unchanged": unchanged, "new": len(new), "errors": errors[:200],
-               "error_count": len(errors), "ignored": ignored, "columns": sorted(writable)}
+               "error_count": len(errors), "ignored": ignored, "columns": sorted(writable),
+               "read_only": [h for h, c in zip(head, cols) if c in self.READ_ONLY]}
         out["preview"] = [{"key": c["key"], "number": c["number"], "line": c["line"],
                            "changes": {k: list(v) for k, v in c["changes"].items()}} for c in changes[:500]]
         out["preview"] += [{"key": "(new)", "number": f.get("number") or "", "line": ln,
@@ -771,7 +814,7 @@ class Hydrants:
         op = str(body.get("operator") or "")[:320]
         now = self.cad.clock()
         if self.index() is not idx:
-            raise CadError("the hydrants changed meanwhile: preview again")
+            raise CadError("the hydrants changed while importing: try again")
         with self.store.tx() as db:
             for c in changes:
                 self._write(db, c["_it"], c["_f"], op, now)

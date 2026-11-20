@@ -1110,16 +1110,16 @@ class Gis:
             return {"configured": self.configured, "source": SOURCE, "attribution": ATTRIBUTION, "link": LINK_URL,
                     "terms": TERMS_URL, "rev": self.rev, "bbox": list(self.bbox), "layers": layers}
 
-    def _served(self, key: str, feats: list[dict]) -> list[dict]:
-        """The features with the layer's overlay applied (#799); the county's as they are if it fails."""
+    def _served(self, key: str, feats: list[dict]) -> tuple[list[dict], bool]:
+        """(the features with the layer's overlay applied (#799), True); the county's as they are and False if it fails."""
         ov = self._over(key)
         if ov is None:
-            return feats
+            return feats, True
         try:
-            return ov.apply(key, feats)
+            return ov.apply(key, feats), True
         except Exception as e:  # noqa: BLE001 - the county's layer still shows
             self.log(f"gis: {key}: overlay not applied ({type(e).__name__}: {e})")
-            return feats
+            return feats, False
 
     def _layer_bytes(self, key: str) -> tuple[int | str, bytes, bytes]:
         stations = self._trains_for(key)
@@ -1129,11 +1129,12 @@ class Gis:
             if cur is not None and cur[0] == rev:
                 return cur
             feats = list(self.data[key])
-        feats = self._served(key, self._marked(key, feats, stations))
+        feats, whole = self._served(key, self._marked(key, feats, stations))
         body = json.dumps({"type": "FeatureCollection", "key": key, "rev": rev, "features": feats}, separators=(",", ":")).encode()
         cur = (rev, body, gzip.compress(body, 6))
-        with self._lock:
-            self._bytes[key] = cur
+        if whole:                                  # (a failed overlay's: never kept, the next request tries again)
+            with self._lock:
+                self._bytes[key] = cur
         return cur
 
     def features(self, key: str) -> list[dict]:
@@ -1180,7 +1181,7 @@ class Gis:
             feats = self.features_in(key, bbox)                   # (a new rev first when the Trains layer's stations changed)
             if self._over(key) is not None:                       # (the overlay's points may be anywhere: all, then the box)
                 w, s, e, n = bbox
-                feats = [f for f in self._served(key, self.features(key)) if (b := geometry_bbox(f.get("geometry") or {}))
+                feats = [f for f in self._served(key, self.features(key))[0] if (b := geometry_bbox(f.get("geometry") or {}))
                          and _touches(b, (w, s, e, n))]
             rev = self._rev(key)
             body = json.dumps({"type": "FeatureCollection", "key": key, "rev": rev, "bbox": list(bbox), "features": feats},

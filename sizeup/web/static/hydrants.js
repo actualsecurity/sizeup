@@ -203,10 +203,10 @@ window.Hydrants = (() => {
     const seq = ++st.seq;
     api("GET", `/api/cad/hydrants/${encodeURIComponent(key)}`).then((d) => {
       if (seq !== st.seq) return;
-      draw(d.hydrant, adminRow(gm, d.hydrant, d.history));
+      draw(d.hydrant, [...adminRow(gm, d.hydrant), ...(d.history && d.history.length ? [historyEl(d.history)] : [])]);
     }).catch((e) => { if (seq === st.seq) draw(quick, [el("div", "error", e.message)]); });
   }
-  function adminRow(gm, h, history) {
+  function adminRow(gm, h) {
     if (!canDo("admin") || BOARD_()) return [];
     const row = el("div", "row hy-acts");
     const btn = (t, tip, fn, cls = "sm") => { const b = el("button", cls, t); b.type = "button"; b.title = tip; b.addEventListener("click", fn); row.append(b); return b; };
@@ -215,9 +215,7 @@ window.Hydrants = (() => {
     if (h.removed) btn("Restore", "Show it on the maps again", () => act(h, "restore"));
     else btn("Remove", h.hub ? "Delete this added hydrant (reversible)" : "Hide a county hydrant that isn't there (reversible)",
              () => remove(h), "sm danger-quiet");
-    const out = [row];
-    if (history && history.length) out.push(historyEl(history));
-    return out;
+    return [row];
   }
   function historyEl(history) {
     const d = el("details", "hy-hist small");
@@ -246,8 +244,9 @@ window.Hydrants = (() => {
     act(h, "remove");
   }
   function changed() {
+    st.changedAt = Date.now();
     if (window.GisLayers) GisLayers.load(true);     // the catalog's rev moved (past the browser's copy): the layer again
-    if (S.list) loadList();
+    if (S.list && canDo("admin")) loadList();
   }
 
   // ---- the editor (a dialog: any map, Settings) ---------------------------------------------------------------------------
@@ -588,7 +587,7 @@ window.Hydrants = (() => {
   }
   async function importFile(f) {
     const s = S.list;
-    if (f.size > 5 * 1024 * 1024) { UI.toast("CSV over 5 MB", "err"); return; }
+    if (f.size > 4 * 1024 * 1024) { UI.toast("CSV over 4 MB", "err"); return; }
     const text = await f.text();
     try {
       const pv = await api("POST", "/api/cad/hydrants/import", { action: "preview", csv: text, operator: operator() });
@@ -608,7 +607,8 @@ window.Hydrants = (() => {
     if (im.err) { card.append(el("p", "error", im.err)); head.append(close); return card; }
     const pv = im.pv;
     card.append(el("p", "small", `${pv.rows} rows · ${pv.changed} changed · ${pv.new} new · ${pv.unchanged} unchanged`
-      + (pv.error_count ? ` · ${pv.error_count} in error` : "") + (pv.ignored.length ? ` · ignored: ${pv.ignored.join(", ")}` : "")));
+      + (pv.error_count ? ` · ${pv.error_count} in error` : "") + (pv.ignored.length ? ` · ignored: ${pv.ignored.join(", ")}` : "")
+      + ((pv.read_only || []).length ? ` · not imported (read-only): ${pv.read_only.join(", ")}` : "")));
     if (pv.errors.length) {
       const ol = el("ol", "hy-errs small");
       for (const e of pv.errors) ol.append(el("li", "error", `Line ${e.line}${e.key ? ` (${e.key})` : ""}: ${e.error}`));
@@ -643,7 +643,7 @@ window.Hydrants = (() => {
     if (g == null || g === st.gen) return;
     const first = st.gen === null;
     st.gen = g;
-    if (!first) changed();
+    if (!first && Date.now() - (st.changedAt || 0) > 5000) changed();    // (not again for this page's own write)
   });
 
   return { ...api_, addImages, legend, show: showCard, card, mount, editor };
