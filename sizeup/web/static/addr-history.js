@@ -17,7 +17,9 @@ window.AddrHistory = (() => {
   const OPEN_KEY = "sizeup.cad.hereOpen";
   const CATS = { hazard: "Hazard", access: "Access/Knox", medical: "Medical/O2", animals: "Animals", hoarding: "Hoarding", other: "Other" };
   const PRIO = { 1: "High", 2: "Normal", 3: "Low" };
-  const st = { iid: null, sig: "", here: null, seq: 0, open: remembered(), notesSig: "", hereSig: "", readonly: true, inc: null };
+  const st = { iid: null, sig: "", here: null, seq: 0, open: remembered(), notesSig: "", hereSig: "", readonly: true, inc: null, sizeOpen: false };
+  // In Size-Up, History starts folded each time and is not saved; Details keeps the saved state (OPEN_KEY).
+  const isOpen = () => (window.SizeUp && SizeUp.on() ? st.sizeOpen : st.open);
 
   function remembered() {
     try { return localStorage.getItem(OPEN_KEY) === "1"; } catch (_) { return false; }
@@ -151,10 +153,10 @@ window.AddrHistory = (() => {
     if (!located(inc)) return;
     const h = st.here;
     const tog = $("#d-here-toggle");
-    tog.setAttribute("aria-expanded", String(st.open));
-    show($("#d-here-body"), st.open);
+    tog.setAttribute("aria-expanded", String(isOpen()));
+    show($("#d-here-body"), isOpen());
     show($("#d-here-note"), !st.readonly);
-    const sig = JSON.stringify([inc.id, h, st.open]);
+    const sig = JSON.stringify([inc.id, h, isOpen()]);
     if (sig === st.hereSig) return;
     st.hereSig = sig;
     let sum = "…";
@@ -272,12 +274,20 @@ window.AddrHistory = (() => {
   }
 
   $("#d-here-toggle").addEventListener("click", () => {
-    st.open = !st.open;
-    remember(st.open);
+    if (window.SizeUp && SizeUp.on()) st.sizeOpen = !st.sizeOpen;
+    else {
+      st.open = !st.open;
+      remember(st.open);
+    }
     if (st.inc) renderHere(st.inc);
   });
   $("#d-here-note").addEventListener("click", () => forIncident(""));
   $("#note-premise").addEventListener("click", () => forIncident($("#note-text").value.trim()));
 
-  return { card, noteForm, expire, CATS, PRIO, day, isoDay };
+  function refold() {               // Size-Up opened or left (sizeup-view.js): folded there, as remembered in Details
+    st.sizeOpen = false;
+    if (st.inc) renderHere(st.inc);
+  }
+
+  return { card, noteForm, expire, CATS, PRIO, day, isoDay, refold };
 })();
