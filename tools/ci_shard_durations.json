@@ -83,6 +83,7 @@
  "tests/test_police_stt.py": 7.0,
  "tests/test_polly.py": 4.6,
  "tests/test_prealert.py": 35.8,
+ "tests/test_prealert_action_row.py": 6.0,
  "tests/test_preplan_docs.py": 9.9,
  "tests/test_profiler.py": 30.0,
  "tests/test_proximity.py": 5.0,
