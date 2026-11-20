@@ -1764,9 +1764,9 @@ window.CadMap = (() => {
     const pbox = $("#ov-pages");
     show(pbox, !!pages.length);
     syncList(pbox, pages, {
-      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.type, o.subtype, o.address]),
+      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.type, o.subtype, o.address, o.location_qualifier]),
       make: () => { const b = el("button", "ov-page"); b.type = "button"; b.addEventListener("click", () => selectIncident(Number(b.dataset.key))); return b; },
-      fill: (b, o) => b.replaceChildren(el("b", "", "60 Control "), el("span", "", `${typeLabel(o.type, o.subtype) || "No type"}, ${o.address || "No location"}`),
+      fill: (b, o) => b.replaceChildren(el("b", "", "60 Control "), el("span", "", `${typeLabel(o.type, o.subtype) || "No type"}, ${locText(o) || "No location"}`),
                                         el("span", "dim", " Accept / Dismiss")),
       empty: "",
     });

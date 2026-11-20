@@ -1493,6 +1493,8 @@ class Store:
         changes = {k: v for k, v in fields.items() if k in self.EDITABLE and inc[k] != v}
         if ("type" in changes or "subtype" in changes) and changes.get("type", inc["type"]) and "type_note" not in fields:
             changes["type_note"] = ""                 # a person picked the type: the page's doubt is settled
+        if "address" in changes and "location_qualifier" not in fields and inc["location_qualifier"]:
+            changes["location_qualifier"] = ""        # another address (a feed's, a page's): where at the old one goes
         if "address" in changes and "address_raw" not in fields and inc["address_raw"]:
             changes["address_raw"] = ""               # the address is no longer the one that text made (a person's): theirs
         if inc.get("geo_alts") and ("lat" in changes or "address" in changes) and "geo_alts" not in fields:

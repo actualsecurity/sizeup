@@ -326,7 +326,10 @@ def overlay(d: dict, ov: dict) -> dict:
         o = ov.get(sec) or {}
         if not o:
             continue
-        items = [x if isinstance(x, dict) else {"code": x} for x in d.get(sec) or []]
+        have = d.get(sec)
+        if have is None and sec == "location_qualifiers":   # a data file without its own: the defaults are its items
+            have = [dict(q) for q in lists_mod.DEFAULT_QUALIFIERS]
+        items = [x if isinstance(x, dict) else {"code": x} for x in have or []]
         by = {str(x.get("code")): x for x in items}
         order = list(by)
         for code, v in o.items():

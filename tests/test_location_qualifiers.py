@@ -303,3 +303,66 @@ def test_the_console_has_the_picker_in_both_location_boxes():
     assert "location_qualifier: $(\"#f-qual\").value" in js and "body.location_qualifier = $(\"#e-qual\").value" in js
     assert "qualSelect(el(\"select\", \"loc-qual\")" in (static / "hydrants.js").read_text()
     assert '["location_qualifiers", "Location qualifiers"]' in (static / "settings.js").read_text()
+
+
+# -- the review's cases -----------------------------------------------------------------------------------------------
+
+def test_a_qualifier_typed_in_front_of_the_same_address_keeps_the_pin():
+    geo, calls = counting_geocoder()
+    cad = make_cad(geocoder=geo)
+    iid = cad.create({"type": "STRU", "address": "12 Sample St", "location_qualifier": "REAR", "lat": 41.02, "lon": -73.67})["id"]
+    n = len(calls)
+    cad.update(iid, {"address": "IFO 12 Sample St", "operator": "JD"})
+    inc = cad.store.incident(iid)
+    assert (inc["location_qualifier"], inc["address"], inc["lat"], inc["lon"]) == ("IFO", "12 Sample St", 41.02, -73.67)
+    assert len(calls) == n
+
+
+def test_another_address_without_a_qualifier_drops_the_old_one():
+    cad = make_cad()
+    iid = cad.create({"type": "STRU", "address": "40 Example Ave", "location_qualifier": "ACROSS", **PT})["id"]
+    cad.store.update_incident(iid, {"address": "12 Sample St"}, operator="CAD feed")      # a feed's address
+    assert cad.store.incident(iid)["location_qualifier"] == ""
+    cad.update(iid, {"address": "14 Sample St", "location_qualifier": "OPP", **PT, "operator": "JD"})
+    assert cad.store.incident(iid)["location_qualifier"] == "OPP"
+    cad.update(iid, {"address": "", "location_qualifier": "OPP", "operator": "JD"})      # no location: none
+    assert cad.store.incident(iid)["location_qualifier"] == ""
+
+
+def test_a_data_file_without_the_list_keeps_the_defaults_through_an_edit(tmp_path):
+    from tests.test_cad import DATA
+    d = json.loads(DATA.read_text())
+    d.pop("location_qualifiers")
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cad = make_cad(tmp_path, lists=str(p))
+    post(cad, "location_qualifiers", action="retire", code="SIDE")
+    assert len(cad.lists.location_qualifiers) == 8 and cad.lists.qualifier("SIDE")["retired"]
+    assert cad.lists.qualified("IFO", "12 Sample St") == "IFO 12 Sample St"
+
+
+def test_a_street_named_like_a_qualifier_is_left_whole():
+    L = lists.load()
+    for street in ("Side Hill Rd", "Near Rd", "Opp Ln", "Rear Admiral Way", "Cor Sample Dr", "Between Example Ave"):
+        assert L.split_qualifier(street) == ("", street)
+    assert L.split_qualifier("Opposite 12 Sample St") == ("OPP", "12 Sample St")     # a house number after it
+    assert L.split_qualifier("IFO @Sample Market") == ("IFO", "@Sample Market")       # a place after it
+    assert L.split_qualifier("Rear of Sample Market") == ("REAR", "Sample Market")    # two words: always one
+    d = parse("Engine 61 respond to 5 Near Street for a fire alarm")
+    assert (d.location, d.qualifier) == ("5 near street", "")
+    d = parse("Port Chester Fire, car fire between Model Street and Specimen Road. Time out 1432.")
+    assert (d.location, d.qualifier, d.cross_street) == ("model street", "", "specimen road")   # the cross streets
+
+
+def test_one_form_one_meaning():
+    d = lists.read()
+    bad = {"code": "CLOSE", "name": "Close", "short": "NEAR", "spoken": "close to"}       # NEAR is another's code
+    with pytest.raises(lists.ListsError, match="is NEAR's already"):
+        lists.build(dict(d, location_qualifiers=[*d["location_qualifiers"], bad]), "t")
+
+
+def test_a_hydrants_location_cleared_takes_its_qualifier(hcad):
+    h = hcad.hydrants
+    h.edit("c990001", {"location_qualifier": "IFO", "location": "Sample St"})
+    out = h.edit("c990001", {"location": "", "location_qualifier": "IFO"})
+    assert (out["hydrant"]["location_qualifier"], out["hydrant"]["location"]) == ("", "")

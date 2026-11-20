@@ -137,7 +137,7 @@
         node.className = c.className + " b-unit" + (Radio.talkingFor(u.name) ? " talking" : "");
         node.style.cssText = c.style.cssText;
         node.textContent = u.name;
-        node.title = `${u.name}: ${unitStatus(u.status).name}` + (inc ? `, ${incTitle(inc)} ${inc.address || ""}` : "");
+        node.title = `${u.name}: ${unitStatus(u.status).name}` + (inc ? `, ${incTitle(inc)} ${(typeof locText === "function" ? locText(inc) : inc.address) || ""}` : "");
       },
       empty: "None",
     });

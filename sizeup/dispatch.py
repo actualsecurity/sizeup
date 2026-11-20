@@ -506,8 +506,13 @@ def _qualifiers(qualifiers) -> list[tuple[str, str]]:
     if qualifiers is None:
         from sizeup.cad.lists import DEFAULT_QUALIFIERS          # (lazily: sizeup.cad imports this module)
         qualifiers = {q["spoken"]: q["code"] for q in DEFAULT_QUALIFIERS}
-    out = {_norm(p): c for p, c in (qualifiers or {}).items() if isinstance(p, str) and _norm(p) and c}
+    out = {_norm(p): c for p, c in (qualifiers or {}).items()
+           if isinstance(p, str) and _norm(p) and c and _norm(p) not in NOT_QUALIFIERS}
     return sorted(out.items(), key=lambda x: -len(x[0]))
+
+
+# "between" on a page names the two streets either side (the cross streets: parse reads it so), never where at one
+NOT_QUALIFIERS = {"between"}
 
 
 def _said_before(text: str, at: int, quals: list[tuple[str, str]]) -> str:
@@ -577,7 +582,8 @@ def parse(text: str, known=None, qualifiers=None) -> Dispatch:
     quals = _qualifiers(qualifiers)
     said = masked
     if quals:
-        qpat = re.compile(r"\b(?:" + "|".join(re.escape(p) for p, _ in quals) + r")\b")
+        # (never a word of a street's own name: "5 near street" is a street)
+        qpat = re.compile(r"\b(?:" + "|".join(re.escape(p) for p, _ in quals) + rf")\b(?!\s+{SUFFIX}\b)")
         masked = qpat.sub(lambda m: (" ," + " " * (len(m.group(0)) - 2))[:len(m.group(0))], masked)
     a = ADDRESS.search(masked)                            # address came first ("12 Example Ave, near I-999 MM 4")
     if hw is not None and a is not None and a.start() <= hw.start:   # ("120 North Ridge St": an address)

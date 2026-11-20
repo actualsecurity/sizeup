@@ -401,9 +401,9 @@ window.Hydrants = (() => {
         inp.placeholder = `near ${p.label}`;
         const use = el("button", "sm quiet", "Use");
         use.type = "button";
-        const near = qs && [...qs.options].some((o) => o.value === "NEAR") && !qs.value;   // the list's Near, else the words
         use.title = `Fill in "near @${p.label}"`;
         use.addEventListener("click", () => {
+          const near = qs && [...qs.options].some((o) => o.value === "NEAR") && !qs.value;   // the list's Near, else the words
           if (near) qs.value = "NEAR";
           inp.value = near ? "" : "near ";
           L.tok = { text: "", start: inp.value.length, end: inp.value.length };

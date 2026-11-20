@@ -323,7 +323,9 @@ function qualSplit(text) {
   for (const [f, code] of forms) {
     const head = text.slice(0, f.length + 1);
     if (head.length === f.length + 1 && head.slice(0, -1).toLowerCase() === f.toLowerCase() && /[\s,:]/.test(head.slice(-1))) {
-      return { code, rest: text.slice(f.length).replace(/^[\s,:]+/, "") };
+      const rest = text.slice(f.length).replace(/^[\s,:]+/, "");
+      // a one-word form only before a house number or an "@" place ("Side Hill Rd", "Near Rd" are streets): as the hub
+      if (f.trim().includes(" ") || /^[\d@]/.test(rest)) return { code, rest };
     }
   }
   return null;
@@ -3586,6 +3588,7 @@ async function saveEdit(e) {
   const addr = $("#e-address").value.trim();
   if (addr !== (inc.address || "") || (editAddr.picked && editAddr.picked.kind !== "current")) {
     body.address = addr;
+    body.location_qualifier = $("#e-qual").value;      // with the address (another address without one: it goes)
     Object.assign(body, editAddr.geo());
   }
   try {

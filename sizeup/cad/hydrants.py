@@ -678,6 +678,8 @@ class Hydrants:
         f = {k: clean(k, body.get(k)) for k in FIELDS if k in body}
         if "location_qualifier" in f:
             f["location_qualifier"] = self._qualifier(f["location_qualifier"], (row or {}).get("location_qualifier") or "")
+        if "location" in f and not f["location"]:
+            f["location_qualifier"] = ""               # no location: nothing to be in front of
         if "location_places" in body or "location" in f:
             text = f["location"] if "location" in f else (row or {}).get("location") or ""
             raw = body["location_places"] if "location_places" in body else _places((row or {}).get("location_places"))
@@ -872,6 +874,8 @@ class Hydrants:
                 f = {k: (saved[k] if same_cell(k, cells[k], saved.get(k)) else clean(k, cells[k])) for k in writable if k in FIELDS}
                 if "location_qualifier" in f and f["location_qualifier"] != saved.get("location_qualifier"):
                     f["location_qualifier"] = self._qualifier(f["location_qualifier"], saved.get("location_qualifier") or "")
+                if "location" in f and not f["location"]:
+                    f["location_qualifier"] = ""           # no location: nothing to be in front of
                 if "location" in f and key:                # plain text in the file: the "@" places still named in it kept
                     old = _places((it0["row"] or {}).get("location_places")) if it0 else []
                     f["location_places"] = json.dumps(type(self.cad)._note_places(old, f["location"] or ""), separators=(",", ":"))

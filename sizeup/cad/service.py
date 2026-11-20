@@ -998,6 +998,8 @@ class Cad:
             code, rest = self.lists.split_qualifier(f["address"])
             if code:
                 f["location_qualifier"], f["address"] = code, rest
+        if "address" in f and not f["address"]:
+            f["location_qualifier"] = ""               # no location: nothing to be in front of
 
     @staticmethod
     def _place(f: dict, old: dict | None = None) -> None:
@@ -1044,7 +1046,10 @@ class Cad:
             elif f["until_at"] < self.clock() - UNTIL_GRACE_S:
                 raise CadError("Until is in the past: check the day (or Close it)")
         if "location_qualifier" in body or f.get("address"):
-            self._qualifier(body, f, self.store.incident(iid))
+            old = self.store.incident(iid)
+            self._qualifier(body, f, old)
+            if "address" in f and "lat" not in f and f["address"] == old["address"] and "place" not in f:
+                del f["address"]                       # "IFO" typed in front of the same address: the point stays
         if "place" in f or "address" in f:
             self._place(f, self.store.incident(iid))
         if "address" in f and "lat" not in f:      # moved without a picked point: re-place or unpin
@@ -2732,6 +2737,7 @@ class Cad:
             fill.pop("location_qualifier", None)       # ... and where at it (as heard with it)
         if old["geo_alts"] and sure:                   # the repeat confirmed what the first reading couldn't (#176)
             fill.update(address=f["address"], address_raw=f["address_raw"], cross_street=f["cross_street"], lat=f["lat"], lon=f["lon"],
+                        location_qualifier=f.get("location_qualifier", ""),
                         geo_label=f["geo_label"], geo_alts="")
         elif old["geo_alts"] and alts:                 # still unconfirmed: the readings as they stand now
             fill["geo_alts"] = f["geo_alts"]

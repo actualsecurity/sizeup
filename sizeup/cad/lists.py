@@ -240,14 +240,16 @@ class Lists:
     def split_qualifier(self, text: str) -> tuple[str, str]:
         """An address typed with a qualifier in front ("IFO 12 Sample St", "across from 40 Example Ave") -> (its code, the
         address); ('', text) without one (an active one only, by its name, spoken form, short form or code; never the
-        whole text)."""
+        whole text). A one-word form only before a house number or an "@" place: "Side Hill Rd", "Near Rd" and "Cor
+        Jesu Dr" are streets."""
         t = (text or "").strip()
         forms = sorted({(f, q["code"]) for q in self.location_qualifiers if not q.get("retired")
                         for f in (q["name"], q["spoken"], q["short"], q["code"])}, key=lambda x: -len(x[0]))
         for f, code in forms:
             m = re.match(rf"{re.escape(f)}(?=[\s,:]|$)[\s,:]*", t, re.I)
-            if m and t[m.end():].strip():
-                return code, t[m.end():].strip()
+            rest = t[m.end():].strip() if m else ""
+            if rest and (" " in f.strip() or re.match(r"[\d@]", rest)):
+                return code, rest
         return "", t
 
     def qualifier_phrases(self) -> dict[str, str]:
@@ -931,6 +933,7 @@ def _qualifiers(d: dict, where: str) -> tuple[dict, ...]:
         d = {"location_qualifiers": [dict(q) for q in DEFAULT_QUALIFIERS]}
     out = _items(d, "location_qualifiers", where, CODE, ("short", "spoken"))
     seen: dict[str, set] = {"short": set(), "spoken": set()}
+    forms: dict[str, str] = {}                     # every form, any case -> its item: one meaning each
     for i, q in enumerate(out):
         w = f"{where}: location_qualifiers[{i}]"
         short, spoken = q.get("short"), q.get("spoken")
@@ -943,6 +946,10 @@ def _qualifiers(d: dict, where: str) -> tuple[dict, ...]:
             if q[k].lower() in seen[k]:
                 raise ListsError(f"{w}.{k}: {q[k]!r} twice")
             seen[k].add(q[k].lower())
+        for k in ("code", "name", "short", "spoken"):
+            other = forms.setdefault(q[k].lower(), q["code"])
+            if other != q["code"]:
+                raise ListsError(f"{w}.{k}: {q[k]!r} is {other}'s already")
     return out
 
 
