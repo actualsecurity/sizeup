@@ -11,10 +11,6 @@
   .station-page body > header > .cad-title,
   .station-page body > header > .station:not(:empty) { display: inline-block; }
   .station-page body > header > .station { color: var(--text-2); font-family: var(--mono); }
-  @container hdr (width < 1240px) {
-    #hub-cad .lbl { display: none; }
-    #hub-cad { inline-size: var(--ctl); padding-inline: 0; }
-  }
 
   /* Monitor */
   .m-filters { flex: 1 1 22rem; justify-content: flex-end; }
