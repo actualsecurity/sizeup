@@ -114,11 +114,11 @@ window.IntelCard = (() => {
     // icon buttons (a narrow column never cuts their names short): the name is the aria-label, the hover says it all
     const b = (icon, name, title, fn, cls = "") => iconBtn(icon, name, title, busy, fn, cls);
     const acts = el("span", "aa-acts");             // (they wrap together, under More info, in a narrow column)
-    acts.append(b("thumbs-up", "Useful", "It was real", act("feedback", { verdict: "useful" }, "Noted: useful")),
-      b("volume-x", "Noise", "Nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise")),
-      b("map-pin-off", "Wrong place", "The place is wrong", act("feedback", { verdict: "wrong_place" }, "Noted: wrong place")));
+    acts.append(b("thumbs-up", "Useful", "it was real", act("feedback", { verdict: "useful" }, "Noted: useful")),
+      b("thumbs-down", "Noise", "nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise")),
+      b("map-pin-off", "Wrong place", "the place is wrong", act("feedback", { verdict: "wrong_place" }, "Noted: wrong place")));
     if (typeof canDo !== "function" || canDo("dispatch")) {
-      acts.append(b("x", "Dismiss", "Off the list (logged as noise)", act("dismiss", {}, ""), "pa-dismiss"));
+      acts.append(b("x", "Dismiss", "off the list (logged as noise)", act("dismiss", {}, ""), "pa-dismiss"));
     }
     row.append(acts);
     li.append(row);

@@ -181,7 +181,7 @@ window.AirportAlerts = (() => {
       acc.hidden = true;
     }
     // Dismiss: the × as on the radio pre-alert cards (icons.js Icon.button: named, its hover says what it does)
-    const DIS = "Nothing to it: take it off the list (logged)";
+    const DIS = "nothing to it, off the list (logged)";
     const dis = window.Icon ? Icon.button("x", "Dismiss", DIS, "pa-dismiss") : el("button", "mini pa-dismiss", "Dismiss");
     dis.type = "button";
     if (!window.Icon) dis.title = DIS;

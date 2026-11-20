@@ -121,7 +121,8 @@ def test_no_action_is_cut_short_or_runs_over_another(site, browser, column, touc
         assert n in names, n
     for b in boxes:
         assert b[8] <= b[9], b                                                   # all of it shows
-        assert b[6] - b[4] >= 20 and b[7] - b[5] >= 20, b                        # and is there to be pressed
+        least = 44 if touch else 20                                              # (touch: 44 px targets)
+        assert b[6] - b[4] >= least - 0.5 and b[7] - b[5] >= least - 0.5, b      # and is there to be pressed
         _, left, _top, right, _bottom, sw, cw = cards[b[0]]
         assert left - 0.5 <= b[4] and b[6] <= right + 0.5, b                     # inside its card
     for i, a in enumerate(boxes):
@@ -141,13 +142,15 @@ def test_no_action_is_cut_short_or_runs_over_another(site, browser, column, touc
 
 def test_each_action_is_named_hovered_focused_in_order_and_posts_as_before(site, browser):
     """The icon buttons: a name (aria-label) and a hover that starts with it; Tab goes More info, Useful, Noise,
-    Wrong place, Dismiss, each with a visible focus ring; and each posts what its text button did, with its toast."""
+    Wrong place, Dismiss, each with a visible focus ring; and each posts what its text button did, with its toast.
+    Every Dismiss keeps .pa-dismiss (cad.js RO_DISPATCH locks it for a viewer)."""
     pg = open_column(browser, site, 220)
     acts = pg.evaluate("""() => [...document.querySelectorAll('#t-intel > li:first-child .aa-btns :is(a, button)')].map((n) =>
       [n.tagName, n.getAttribute('aria-label') || n.textContent.trim(), n.title, !!n.querySelector('svg.ico use')])""")
     assert [a[1] for a in acts] == ["More info", "Useful", "Noise", "Wrong place", "Dismiss"]
     for tag, name, title, icon in acts[1:]:
         assert tag == "BUTTON" and icon and title.startswith(f"{name}: ") and len(title) > len(name) + 4, (name, title)
+        assert title[len(name) + 2].islower() and title.count(":") == 1, title          # "Noise: nothing to it ..."
     assert pg.get_attribute("#t-intel > li:first-child .aa-more", "href") == "#prealert/intel/101"
     # keyboard: from the play button, Tab walks the row in order with a visible ring on each
     pg.focus("#t-intel > li:first-child .aa-src button")
@@ -164,6 +167,8 @@ def test_each_action_is_named_hovered_focused_in_order_and_posts_as_before(site,
         pg.click(f"#t-intel > li:first-child .aa-btns button[aria-label='{name}']")
     pg.click("#t-airport > li:nth-child(2) button[aria-label='Dismiss']")
     pg.click("#t-phone > li button[aria-label='Dismiss']")
+    assert pg.evaluate("[...document.querySelectorAll('#t-intel, #t-airport, #t-phone')].flatMap((l) => [...l.querySelectorAll("
+                       "'button[aria-label=Dismiss]')]).every((b) => b.classList.contains('pa-dismiss'))")
     pg.wait_for_function("window.__posts.length === 6")
     posts = pg.evaluate("window.__posts")
     assert posts == [
@@ -174,10 +179,13 @@ def test_each_action_is_named_hovered_focused_in_order_and_posts_as_before(site,
         ["POST", "/api/cad/airport-alert/8/dismiss", {"operator": "JD"}],
         ["POST", "/api/cad/prealert/5/dismiss", {"operator": "JD"}],
     ], posts
+    toasts = pg.locator(".toasts").inner_text()
+    for said in ("Noted: useful", "Noted: noise", "Noted: wrong place"):
+        assert said in toasts, toasts
     assert pg.errors == []
 
 
 def test_the_icons_are_in_the_sprite():
     svg = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "icons.svg").read_text()
-    for name in ("thumbs-up", "volume-x", "map-pin-off", "x"):
+    for name in ("thumbs-up", "thumbs-down", "map-pin-off", "x"):
         assert f'id="i-{name}"' in svg, name

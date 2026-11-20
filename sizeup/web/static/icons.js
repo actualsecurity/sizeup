@@ -2,7 +2,8 @@
 //
 //   Icon("bell")               <svg class="ico"><use href="/static/icons.svg#i-bell"></svg>, aria-hidden
 //   Icon.play(button, state)   a play button's face: "play", "stop" or "none" (no recording: a dash)
-//   Icon.button("x", "Dismiss", "Off the list")   a small square icon button, named (aria-label) and with a hover
+//   Icon.button("x", "Dismiss", "off the list")   a small square icon button, named (aria-label), hovered
+//                                                  "Dismiss: off the list"
 "use strict";
 
 // The sprite's address as the page names it: /static/icons.svg?v=<its version> (the hub versions what a page

@@ -69,7 +69,7 @@ window.PreAlert = (() => {
     li.append(what, ticking(el("span", "pa-age"), p.at));
     if (deps.readonly) return li;
     // the × as on the other pre-alert cards (icons.js Icon.button: named, its hover says what it does)
-    const DIS = "Not a call: take it off the list (logged)";
+    const DIS = "not a call, off the list (logged)";
     const b = window.Icon ? Icon.button("x", "Dismiss", DIS, "pa-dismiss") : el("button", "mini pa-dismiss", "Dismiss");
     b.type = "button";
     if (!window.Icon) b.title = DIS;
