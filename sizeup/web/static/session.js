@@ -17,8 +17,9 @@
 //            and holds the stream, the "Reconnecting…" pill stays away, and the live player holds its queue.
 //   again    "Re-sign in" opens a pop-up (blocked: the link opens it in a new tab): before the end /reauth/start
 //            (the hub drops the still-good Access cookie, so the edge really signs in again: the token's exp is fixed,
-//            nothing renews it), after it /reauth. After Access signs in there, /reauth says so (postMessage to this
-//            origin, BroadcastChannel) and closes. A message only makes this page check /api/session again: nothing
+//            nothing renews it), after it /reauth: opened in the click, straight at that address. After Access signs in
+//            there, /reauth says so (BroadcastChannel, localStorage, postMessage: this origin only; none needs the
+//            opener) and closes, and this page closes it too. A message only makes this page check /api/session again: nothing
 //            in it is trusted. Signed in again: the stream resumes (window event sizeup:signed-in, whenIn()), and a
 //            player that asks for it (element.sessionRetry, cad.js's) plays its failed clip again.
 //
@@ -31,7 +32,10 @@ const SessionWatch = (() => {
   const NOT_OURS = /^\/api\/(v1|station)\//;  // the app's API (device tokens) and the station's: not this sign-in
   const RENEW_URL = "/reauth/start";        // still signed in: the hub drops the cookie first (server.py)
   const MSG = "sizeup:signed-in";
-  const CHANNEL = "sizeup-session";
+  const CHANNEL = "sizeup-session";       // BroadcastChannel: this origin's tabs only (reauth.js says so on it)
+  const STORE_KEY = "sizeup:signed-in";   // the same through localStorage's storage event (no BroadcastChannel)
+  const POPUP = "width=520,height=640";   // a small window (sized: a pop-up in every browser)
+  const BLANK_MS = [5000, 12000];          // the pop-up still on its first, blank page then: sent again, then given up
   const WARN_S = 600;                    // the warning shows this long before the sign-in ends
   const POLL_MS = 5 * 60 * 1000;         // asked again this often (a re-sign-in elsewhere moves exp)
   const OUT_POLL_MS = 60 * 1000;         // signed out: asked this often (signed in again in another tab)
@@ -168,18 +172,57 @@ const SessionWatch = (() => {
     st.shown = key;
     window.dispatchEvent(new CustomEvent("sizeup:session"));
   }
-  // Re-sign in (a click on a link to href()): in a pop-up; blocked (null), the link's own default opens it in a new
-  // tab. The pop-up keeps its opener (to post back): it goes only to this hub and the Access login. true: opened.
+  // Re-sign in (a click on a link to href()): a pop-up opened right here, in the click, straight at its address (no
+  // blank window navigated later), each time a new one (_blank: never an earlier pop-up that got stuck, #826).
+  // Blocked (null), or one already given up on (stuck): the link's own default opens it in a new tab. The pop-up
+  // keeps its opener only so this page can close it; the way back never needs it (BroadcastChannel, storage).
+  // true: opened.
   function reauth(ev) {
-    const w = window.open(href(), "sizeup-reauth", "popup,width=520,height=640");
+    if (st.stuck) return false;                       // a pop-up stuck on its blank page last time: a tab this time
+    closePopup();
+    const w = window.open(new URL(href(), location.href).href, "_blank", POPUP);
     if (!w) return false;
     if (ev && ev.preventDefault) ev.preventDefault();
     st.popup = w;
+    watchPopup(w);
     return true;
+  }
+  // A pop-up that never leaves its blank first page (#826: a browser left it "Untitled", about:blank): asked to load
+  // its address once more, then closed, and the next Re-sign in opens a tab instead. While it is on the blank page
+  // (or back on this hub) it is this origin and can be read; on the Access login it can't (it has moved on).
+  function blank(w) {
+    try { return !w.closed && w.location.href === "about:blank"; } catch (_) { return false; }
+  }
+  function watchPopup(w) {
+    const url = new URL(href(), location.href).href;
+    setTimeout(() => {
+      if (st.popup !== w || !blank(w)) return;
+      try { w.location.replace(url); } catch (_) { /* moved on meanwhile */ }
+      setTimeout(() => {
+        if (st.popup !== w || !blank(w)) return;
+        st.stuck = true;
+        closePopup();
+      }, BLANK_MS[1] - BLANK_MS[0]);
+    }, BLANK_MS[0]);
+  }
+  // signed in again: the pop-up this page opened is closed from here too (the pop-up's own close() can be refused)
+  function closePopup() {
+    const w = st.popup;
+    st.popup = null;
+    try { if (w && !w.closed) w.close(); } catch (_) { /* gone */ }
+  }
+  function signal() {
+    closePopup();
+    check(true);
   }
   function message(ev) {
     if (ev.origin !== location.origin || !ev.data || ev.data.type !== MSG) return;
-    check(true);
+    signal();
+  }
+  // localStorage's storage event: fired only in this origin's other pages, with the key reauth.js set
+  function stored(ev) {
+    if (ev.key !== STORE_KEY || !ev.newValue) return;
+    signal();
   }
 
   // -- watching what fails --------------------------------------------------------------------------------------
@@ -249,9 +292,10 @@ const SessionWatch = (() => {
     document.addEventListener("error", (ev) => { if (ev.target instanceof HTMLMediaElement) mediaFailed(ev); }, true);
     document.addEventListener("stalled", (ev) => { if (ev.target instanceof HTMLMediaElement) mediaFailed(ev); }, true);
     window.addEventListener("message", message);
+    window.addEventListener("storage", stored);
     try {
       const ch = new BroadcastChannel(CHANNEL);
-      ch.onmessage = (ev) => { if (ev.data && ev.data.type === MSG) check(true); };
+      ch.onmessage = (ev) => { if (ev.data && ev.data.type === MSG) signal(); };
     } catch (_) { /* no BroadcastChannel: focus checks */ }
     window.addEventListener("focus", look);
     document.addEventListener("visibilitychange", look);
@@ -260,7 +304,7 @@ const SessionWatch = (() => {
   }
 
   return {
-    start, check, suspect, whenIn, label, state, tip, href, reauth,
+    start, check, suspect, whenIn, label, state, tip, href, reauth, closePopup,
     get out() { return st.out; },
     // tests: the state, as-is
     _st: st,
