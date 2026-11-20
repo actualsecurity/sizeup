@@ -957,3 +957,42 @@ def test_a_table_from_831_gets_the_new_column(tmp_path):
     c2 = make_cad(tmp_path)
     wire(c2, fake_gis())
     assert c2.hydrants.edit("c990001", {"location": "IFO @A", "location_places": [{"label": "A", "lat": 41.0, "lon": -73.66}]})["changed"]
+
+
+def saved_raw(c, key, **cols):
+    """Data saved before today's rules (the previous release allowed it): written straight into the table."""
+    c.hydrants.edit(key, {"notes": "x"})
+    c.store.db.execute(f"UPDATE hydrants SET {', '.join(f'{k} = ?' for k in cols)} WHERE key = ?", (*cols.values(), key))
+    c.store.db.commit()
+    c.hydrants._bump()
+
+
+def test_data_saved_before_the_rules_never_blocks_another_edit(cad):
+    h = cad.hydrants
+    saved_raw(cad, "c990001", flow_gpm=1000, static_psi=60, residual_psi=60, flow_date="2099-06-30", main_in=30.0)
+    out = h.edit("c990001", {"status": "oos", "status_reason": "Broken stem"})           # marking it OOS always works
+    assert out["changed"] == ["status", "status_reason"] and any(w.startswith("Saved data: residual") for w in out["warnings"])
+    with pytest.raises(hy.CadError, match="under the static"):                             # touching the pressures: checked
+        h.edit("c990001", {"residual_psi": 61})
+    assert h.edit("c990001", {"residual_psi": 40})["changed"] == ["residual_psi"]
+    # the CSV: a row with an unrelated column, and the whole export read back (main 30 in, from before the 2-24 rule)
+    pv = h.import_csv({"action": "preview", "csv": "key,notes\nc990001,Checked\n"})
+    assert pv["error_count"] == 0 and pv["changed"] == 1
+    pv = h.import_csv({"action": "preview", "csv": h.csv({})[0].decode("utf-8-sig")})
+    assert pv["error_count"] == 0 and pv["changed"] == 0
+    pv = h.import_csv({"action": "preview", "csv": "key,main_in\nc990001,31\n"})            # a new out-of-range value: refused
+    assert pv["error_count"] == 1
+
+
+@pytest.mark.parametrize("text", ["2X2.5", "2x2 1/2, 1x4 1/2", "2-2.5", "2×2½, 1x4.5 steamer", "1x5\" Storz", "4.5"])
+def test_outlets_as_people_write_them(cad, text):
+    assert cad.hydrants.edit("c990001", {"outlets": text})["hydrant"]["outlets"]
+
+
+def test_clearing_one_pressure_classes_from_the_observed_flow(cad):
+    h = cad.hydrants
+    h.edit("c990001", {"flow_gpm": 1000, "static_psi": 80, "residual_psi": 60})
+    assert h.one("c990001")["hydrant"]["cls"] == "AA"                                     # rated at 20 psi
+    out = h.edit("c990001", {"residual_psi": ""})
+    assert out["hydrant"]["gpm"] == 1000 and out["hydrant"]["cls"] == "A" and any("One pressure" in w for w in out["warnings"])
+    assert not any("under 20" in w for w in h.edit("c990002", {"flow_gpm": 500, "static_psi": 18, "residual_psi": 10})["warnings"])

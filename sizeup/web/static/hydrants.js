@@ -68,7 +68,7 @@ window.Hydrants = (() => {
     const notes = [];
     if (s != null && r != null) {
       if (r >= s) return { error: "Residual must be under the static pressure", notes };
-      if (r < 20) notes.push("Residual under 20 psi: rated flow extrapolated");
+      if (r < 20 && s > 20 && flow != null) notes.push("Residual under 20 psi: rated flow extrapolated");
     } else if (flow != null && (s != null || r != null)) notes.push("One pressure only: class from the observed flow");
     if (flow != null) {
       if (flow > FLOW_HIGH) notes.push(`${flow} gpm is unusually high: check`);
@@ -316,7 +316,7 @@ window.Hydrants = (() => {
     ["static_psi", "Static psi", "number", [1, 300, 0.1]], ["residual_psi", "Residual psi", "number", [0, 300, 0.1]],
     ["nfpa_class", "Class", "select", null], ["thread", "Thread", "select", THREADS], ["outlets", "Outlets", "text", 60],
     ["main_in", "Main (in)", "number", [2, 24, 0.5]], ["owner", "Owner", "select", OWNERS], ["body_color", "Body colour", "text", 30],
-    ["asset_id", "Asset id", "text", 40], ["location", "Location", "text", 120], ["inspected", "Inspected", "date"],
+    ["asset_id", "Asset id", "text", 40], ["location", "Location", "text", 160], ["inspected", "Inspected", "date"],
     ["notes", "Notes", "textarea", 500],
   ];
   const TIPS = { flow_gpm: "Flow as tested (with both pressures: the class uses the flow at 20 psi residual), or the rated capacity",
@@ -435,6 +435,9 @@ window.Hydrants = (() => {
       }
       const v = h[k];
       inp.value = v === null || v === undefined ? (k === "status" ? "unknown" : "") : String(v);
+      if (kind === "number" && inp.value !== "" && (Number(inp.value) < Number(inp.min) || Number(inp.value) > Number(inp.max))) {
+        inp.removeAttribute("min"); inp.removeAttribute("max");      // saved before today's limits: the hub allows it untouched
+      }
       if (k === "number" && !isNew && !h.hub && !(h.number && h.number !== h.county_number)) inp.value = "";
       if (k === "number" && !h.hub) inp.placeholder = h.county_number || "";
       if (TIPS[k]) lab.title = TIPS[k];
@@ -487,11 +490,13 @@ window.Hydrants = (() => {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       showCls();
-      if (fc.error) { setText(err, fc.error); return; }
+      const flowEdited = ["flow_gpm", "static_psi", "residual_psi"].some((k) => inputs[k].value.trim() !== String(h[k] ?? ""));
+      if (fc.error && flowEdited) { setText(err, fc.error); return; }     // (saved before the rule, untouched: the hub allows it)
       const fl = Number(inputs.flow_gpm.value);
       if (inputs.flow_gpm.value !== "" && fl > FLOW_HIGH && String(fl) !== String(h.flow_gpm ?? "")
           && !(await UI.confirm(`${fl} gpm is unusually high for one hydrant. Save it anyway?`, { ok: "Save", danger: false }))) return;
-      if (inputs.status_since.value && inputs.status_until.value && inputs.status_until.value < inputs.status_since.value) {
+      if (inputs.status_since.value && inputs.status_until.value && inputs.status_until.value < inputs.status_since.value
+          && (inputs.status_since.value !== (h.status_since || "") || inputs.status_until.value !== (h.status_until || ""))) {
         setText(err, "Expected back is before Since"); return;
       }
       const body = { operator: operator() };

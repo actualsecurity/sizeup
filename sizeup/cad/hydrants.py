@@ -101,12 +101,14 @@ FIELDS: dict[str, tuple[str, object]] = {
 AUDITED = (*FIELDS, "location_places", "lat", "lon", "removed")
 FLOW_HIGH = 2500                      # an observed flow over this: "unusually high: check" (allowed)
 RATED_MAX = 10000                     # a rated flow (at 20 psi) over this: refused (a typo in the flow or the pressures)
-OUTLET = re.compile(r"(?:(\d{1,2})\s*[x×*]\s*)?(\d(?:\.\d{1,3})?|\d?½)\s*(?:\"|in\b|inch(?:es)?\b)?\s*([A-Za-z][A-Za-z ]{0,19})?")
+OUTLET = re.compile(r"(?:(\d{1,2})\s*[xX×*-]\s*)?(\d(?:\.\d{1,3})?(?:\s+1/2|½)?|½)\s*(?:\"|in\b|inch(?:es)?\b)?\s*"
+                    r"([A-Za-z][A-Za-z ]{0,19})?")
 
 
 def outlets_ok(text: str) -> None:
-    """"2x2.5, 1x4.5 steamer": each a count (1-6) and a size in inches (1-6), a word after it; CadError otherwise."""
-    for part in re.split(r"[,;/+]", text or ""):
+    """"2x2.5, 1x4.5 steamer", "2X2 1/2", "2-2½": each a count (1-6) and a size in inches (1-6), a word after it;
+    CadError otherwise."""
+    for part in re.split(r"[,;+]", text or ""):
         part = part.strip()
         if not part:
             continue
@@ -114,20 +116,28 @@ def outlets_ok(text: str) -> None:
         if not m:
             raise CadError(f"outlets: count x size in inches, e.g. 2x2.5, 1x4.5 (not \"{part[:20]}\")")
         n = int(m.group(1) or 1)
-        size = m.group(2)
-        size = float(size.replace("½", "") or 0) + (0.5 if "½" in size else 0)
+        sz = m.group(2)
+        half = "½" in sz or "1/2" in sz
+        size = float(sz.replace("½", "").replace("1/2", "").strip() or 0) + (0.5 if half else 0)
         if not (1 <= n <= 6 and 1 <= size <= 6):
             raise CadError(f"outlets: {part[:20]}: 1-6 outlets of 1-6 inches")
 
 
-def check(rec: dict, today: str) -> list[str]:
-    """The rules across fields, on a hydrant as it would be saved (CadError: refused); the warnings (allowed)."""
-    warn = []
+def check(rec: dict, today: str, changed=None) -> list[str]:
+    """The rules across fields, on a hydrant as it would be saved: the warnings (allowed). A rule broken is refused
+    (CadError) when one of its fields is being changed (changed: their names; None: all); one broken by data saved
+    before, and not touched now, is a warning (never in the way of marking that hydrant out of service)."""
+    warn: list[str] = []
+
+    def bad(fields: tuple, msg: str) -> None:
+        if changed is None or any(k in changed for k in fields):
+            raise CadError(msg)
+        warn.append(f"Saved data: {msg}")
     flow, s, r = rec.get("flow_gpm"), rec.get("static_psi"), rec.get("residual_psi")
     if s is not None and r is not None:
         if r >= s:
-            raise CadError("residual_psi: under the static pressure")
-        if r < 20:
+            bad(("static_psi", "residual_psi"), "residual_psi: under the static pressure")
+        elif r < 20 < s and flow is not None:
             warn.append("Residual under 20 psi: the rated flow is extrapolated")
     elif flow is not None and (s is not None or r is not None):
         warn.append("One pressure only: the class is from the observed flow")
@@ -136,15 +146,20 @@ def check(rec: dict, today: str) -> list[str]:
             warn.append(f"Flow {flow} gpm is unusually high: check")
         rated = rated_gpm(flow, s, r)
         if rated is not None and rated > RATED_MAX:
-            raise CadError(f"flow_gpm: {flow} gpm at {s:g}/{r:g} psi rates {rated} gpm at 20 psi, over {RATED_MAX}: check the flow "
-                           "and the pressures")
+            bad(("flow_gpm", "static_psi", "residual_psi"),
+                f"flow_gpm: {flow} gpm at {s:g}/{r:g} psi rates {rated} gpm at 20 psi, over {RATED_MAX}: check the flow and the "
+                "pressures")
     for k in ("flow_date", "inspected"):
         if rec.get(k) and rec[k] > today:
-            raise CadError(f"{k}: not in the future")
+            bad((k,), f"{k}: not in the future")
     if rec.get("status_since") and rec.get("status_until") and rec["status_until"] < rec["status_since"]:
-        raise CadError("status_until: on or after status_since")
-    outlets_ok(rec.get("outlets") or "")
+        bad(("status_since", "status_until"), "status_until: on or after status_since")
+    try:
+        outlets_ok(rec.get("outlets") or "")
+    except CadError as e:
+        bad(("outlets",), str(e))
     return warn
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hydrants (
@@ -724,7 +739,9 @@ class Hydrants:
             f.update(lat=lat, lon=lon)
         if it["missing"] and "lat" in f and f["lat"] is None:
             raise CadError("reset_position: the county no longer has this hydrant")
-        warn = check({**DEFAULTS, **(it["row"] or {}), **f}, self._today()) if any(k in FIELDS for k in f) else []
+        row = it["row"] or {}
+        touched = {k for k in f if k in FIELDS and row.get(k, DEFAULTS[k]) != f[k]}
+        warn = check({**DEFAULTS, **row, **f}, self._today(), touched) if touched else []
         now = self.cad.clock()
         with self.store.tx() as db:
             changed = self._write(db, it, f, op, now)
@@ -830,9 +847,10 @@ class Hydrants:
             cells = {c: (row[i] if i < len(row) else "") for i, c in enumerate(cols) if c}
             key = cells.get("key", "").strip()
             try:
-                f = {k: clean(k, cells[k]) for k in writable if k in FIELDS}
+                it0 = idx["by_key"].get(key) if key and KEY_RE.fullmatch(key) else None
+                saved = (it0 or {}).get("row") or {}
+                f = {k: (saved[k] if same_cell(k, cells[k], saved.get(k)) else clean(k, cells[k])) for k in writable if k in FIELDS}
                 if "location" in f and key:                # plain text in the file: the "@" places still named in it kept
-                    it0 = idx["by_key"].get(key) if KEY_RE.fullmatch(key) else None
                     old = _places((it0["row"] or {}).get("location_places")) if it0 else []
                     f["location_places"] = json.dumps(type(self.cad)._note_places(old, f["location"] or ""), separators=(",", ":"))
                 f = self._stored(f)
@@ -877,7 +895,7 @@ class Hydrants:
                 base = {k: r.get(k, DEFAULTS[k]) for k in f}
                 diff = {k: (base[k], v) for k, v in f.items() if base[k] != v}
                 if any(k in FIELDS for k in diff):
-                    for w in check({**DEFAULTS, **(it["row"] or {}), **f}, today):
+                    for w in check({**DEFAULTS, **(it["row"] or {}), **f}, today, {k for k in diff if k in FIELDS}):
                         warnings.append({"line": line, "key": key, "warning": w})
                 if diff:
                     changes.append({"key": key, "number": it["number"], "line": line, "changes": diff, "_it": it,
@@ -918,6 +936,20 @@ class Hydrants:
             self._bump()
         out["applied"] = True
         return out
+
+
+def same_cell(k: str, cell: str, saved) -> bool:
+    """A CSV cell that says what is saved (an export read back): kept as it is, whatever the rules say now (a value
+    from before a rule never makes a whole file fail)."""
+    if saved is None or saved == "":
+        return False
+    t = (cell or "").strip()
+    if FIELDS[k][0] in ("int", "float"):
+        try:
+            return float(t.replace(",", "")) == float(saved)
+        except ValueError:
+            return False
+    return t == str(saved)
 
 
 def _places(v) -> list[dict]:
