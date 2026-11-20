@@ -1152,6 +1152,12 @@ Access sends every request it lets through to the origin with a signed JWT
 * **shows it**: `GET /api/cad/whoami` → `{email, name, callsign, source: "access" | "none", role,
   enforced}` (with Access also `active`, `may`, `bootstrap`, `admins`); the CAD's Operator field then
   shows the name, read-only ("Signed in with Cloudflare Access as ...").
+* **warns before it ends** (#818): how long a sign-in lasts is the Access application's *Session Duration*
+  (Zero Trust → Access → Applications → sizeup), not a sizeup setting; the console reads the token's `exp`
+  (`GET /api/session`); the header's profile button (top right: initials, its menu: who, "Sign-in until 14:32",
+  Re-sign in) gets an amber ring and "9 min · Re-sign in" from 10 min before, a red ring and "Signed out · Re-sign in"
+  after (the read-only Operator field is folded into it), and *Re-sign in* signs in again in a pop-up (`/reauth`; before the end `/reauth/start` first drops the
+  still-good `CF_Authorization` cookie, as nothing renews a token early) without reloading the page or its audio.
 
 Without both keys (all-in-one, the station, local dev, a hub not set up yet) nothing changes: the
 Operator field is typed or picked, as before. The hub logs which it is at startup.

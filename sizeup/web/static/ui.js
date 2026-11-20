@@ -7,9 +7,12 @@
 //   UI.dialog.open(overlay, opts)   an .overlay's dialog: focus moves in, Tab stays inside, Esc and a click on
 //   UI.dialog.close(overlay)        the scrim close it, the focus goes back where it was (opts: onClose, opener)
 //   UI.keys(handlers)               the dispatcher's shortcuts (cad.js gives the handlers); "?" shows them
-//   UI.menu.button(label, items, {key})   a "⋯" button (aria-haspopup=menu) whose menu lists items() (asked each
-//                                   time it opens): [{label, run, disabled, checked, hint, danger, sub: () => items}, "-"]
-//                                   ("-": a line; sub: "▸", a second page in the same popover, with Back)
+//   UI.menu.button(label, items, {key, cls, face})   a "⋯" button (aria-haspopup=menu; face: its content instead
+//                                   of "⋯") whose menu lists items() (asked each time it opens):
+//                                   [{label, run, disabled, checked, hint, danger, sub: () => items, info, href}, "-"]
+//                                   ("-": a line; sub: "▸", a second page in the same popover, with Back; info: a
+//                                   line of text, not a choice; href: a link, run(event) first: it may
+//                                   preventDefault, else the link opens)
 //   UI.menu.close()                 closes the open one
 //
 // Shortcuts never fire while typing in a field (Esc there leaves the field first), with a modifier held,
@@ -155,7 +158,7 @@ window.UI = (() => {
   // is given), one tab stop: the menu holds the focus while open. key: the button's identity across redraws
   // (a row redrawn while its menu is open: the focus goes back to the new button).
   const M = { el: null, btn: null, key: "", pages: [], items: [] };
-  function menuButton(label, items, { key = "", cls = "" } = {}) {
+  function menuButton(label, items, { key = "", cls = "", face = null } = {}) {
     const b = make("button", `menu-btn sm icon quiet${cls ? ` ${cls}` : ""}`);
     b.type = "button";
     b.setAttribute("aria-haspopup", "menu");
@@ -163,7 +166,7 @@ window.UI = (() => {
     b.setAttribute("aria-label", label);
     b.title = label;
     if (key) b.dataset.menuKey = key;
-    b.append(window.Icon ? Icon("more") : "⋯");
+    b.append(face || (window.Icon ? Icon("more") : "⋯"));
     b._menu = items;
     b.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -183,7 +186,18 @@ window.UI = (() => {
     el.setAttribute("aria-label", b.getAttribute("aria-label") || "Actions");
     el.addEventListener("click", (e) => {
       const n = e.target.closest(".menu-item");
-      if (n) { e.stopPropagation(); choose(M.items[Number(n.dataset.i)]); }
+      if (!n) return;
+      e.stopPropagation();
+      const it = M.items[Number(n.dataset.i)];
+      if (it && it.href) {                 // a link: its run first (it may take it over), else the link itself
+        if (it.disabled) { e.preventDefault(); return; }
+        if (it.run) it.run(e);
+        if (e.defaultPrevented) menuClose(true);
+        else setTimeout(() => menuClose(true));   // the link opens first (from the menu still in the page)
+        return;
+      }
+      e.preventDefault();
+      choose(it);
     });
     (b.closest(".overlay") || document.body).append(el);
     Object.assign(M, { el, btn: b, key: b.dataset.menuKey || "", pages: [] });
@@ -201,8 +215,21 @@ window.UI = (() => {
         sep.setAttribute("role", "separator");
         return sep;
       }
-      const n = make("button", "menu-item" + (it.danger ? " danger-quiet" : "") + (it.back ? " menu-back" : ""));
-      n.type = "button";
+      if (it.info) {                       // a line of text: not a choice, not a stop for the keys; the menu's
+        const t = make("div", "menu-info");  // description (aria-describedby: read with the first choice)
+        t.id = `ui-menu-info-${i}`;
+        t.setAttribute("role", "none");
+        t.append(make("span", "menu-text", it.label));
+        if (it.hint) t.append(make("span", "menu-hint", it.hint));
+        if (it.title) t.title = it.title;
+        return t;
+      }
+      const n = make(it.href ? "a" : "button", "menu-item" + (it.danger ? " danger-quiet" : "") + (it.back ? " menu-back" : ""));
+      if (it.href) {
+        n.href = it.href;
+        n.target = "_blank";
+        n.rel = "noopener";
+      } else n.type = "button";
       n.tabIndex = -1;
       n.dataset.i = String(i);
       n.setAttribute("role", it.checked === undefined ? "menuitem" : "menuitemcheckbox");
@@ -219,6 +246,9 @@ window.UI = (() => {
       if (it.sub) n.append(window.Icon ? Icon("chevron", "sm menu-hint") : make("span", "menu-hint", "▸"));
       return n;
     }));
+    const info = [...el.querySelectorAll(".menu-info")].map((t) => t.id).join(" ");
+    if (info) el.setAttribute("aria-describedby", info);
+    else el.removeAttribute("aria-describedby");
     place();
     const f = focusItems();
     if (f.length) f[at < 0 ? f.length - 1 : Math.min(at || 0, f.length - 1)].focus({ preventScroll: true });
@@ -270,6 +300,8 @@ window.UI = (() => {
     else if (e.key === "ArrowUp") move(i < 0 ? -1 : i - 1);
     else if (e.key === "Home") move(0);
     else if (e.key === "End") move(-1);
+    else if (e.key === "Enter" && cur && cur.href && !cur.disabled) done = false;   // a link: its own Enter (a click)
+    else if (e.key === " " && cur && cur.href) f[i].click();          // Space on a link: the same click
     else if (e.key === "Enter" || e.key === " ") choose(cur);
     else if (e.key === "ArrowRight") { if (cur && cur.sub) choose(cur); }
     else if (e.key === "ArrowLeft" || e.key === "Backspace") { if (M.pages.length) choose({ back: true }); }

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Signed in</title>
+<link rel="icon" type="image/svg+xml" href="/static/brand/pcfd-mark.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<!-- /reauth (#818): the console's "Re-sign in" opens this behind Cloudflare Access; reached means signed in again.
+     It tells the console (reauth.js) and closes. No parameters, no redirect. -->
+<main class="reauth">
+  <p class="notice ok" role="status">Signed in</p>
+  <p class="dim small"><a href="/cad">Open sizeup</a></p>
+</main>
+<script src="/static/reauth.js"></script>
+</body>
+</html>

@@ -24,7 +24,8 @@
 window.RadioLive = (() => {
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   const MAX_QUEUE = 15;
-  const st = { on: false, audio: new Audio(), seen: null, queue: [], dropped: 0, blocked: false, playing: null, buttons: [], label: "Live" };
+  const st = { on: false, audio: new Audio(), seen: null, queue: [], dropped: 0, blocked: false, playing: null, buttons: [], label: "Live",
+               held: false, gen: 0 };          // held: signed out, the queue waits (#818); gen: each time it is turned on
 
   function paint() {
     for (const b of st.buttons) {
@@ -41,11 +42,14 @@ window.RadioLive = (() => {
     }
   }
   function pump() {
-    if (!st.on || st.playing || !st.queue.length) return paint();
+    if (!st.on || st.playing || st.held || !st.queue.length) return paint();
     st.playing = st.queue.shift();
     st.audio.src = `/api/audio/${encodeURIComponent(st.playing)}.wav`;
     st.audio.play().then(() => { st.blocked = false; paint(); })
-      .catch(() => { st.blocked = true; st.playing = null; paint(); });
+      .catch((e) => {
+        if (e && e.name === "NotSupportedError") return;   // it didn't load: its error event (failed) goes on
+        st.blocked = true; st.playing = null; paint();
+      });
     paint();
   }
   function done() {
@@ -54,7 +58,23 @@ window.RadioLive = (() => {
     pump();
   }
   st.audio.addEventListener("ended", done);
-  st.audio.addEventListener("error", done);
+  // A clip that won't load: the next one, unless the sign-in ended (session.js, #818): then the queue waits, this
+  // one first, until signed in again (it went through the whole queue failing each one).
+  function failed() {
+    if (st.audio.src.startsWith("data:")) return;
+    const id = st.playing, gen = st.gen;
+    if (!window.SessionWatch || !id) return done();
+    st.playing = null;
+    st.held = true;
+    SessionWatch.check()
+      .then((s) => {
+        if (s !== "out") return;
+        if (st.gen === gen && st.on) st.queue.unshift(id);   // turned off and on meanwhile: not the old backlog
+        return SessionWatch.whenIn();
+      })
+      .then(() => { st.held = false; pump(); });
+  }
+  st.audio.addEventListener("error", failed);
 
   function toggle() {
     if (st.on && !st.blocked) {                    // off
@@ -64,7 +84,7 @@ window.RadioLive = (() => {
       st.playing = null;
       return paint();
     }
-    if (!st.on) { st.on = true; st.dropped = 0; st.seen = null; }   // from now on, not the backlog
+    if (!st.on) { st.on = true; st.dropped = 0; st.seen = null; st.gen++; }   // from now on, not the backlog
     st.audio.src = SILENT_WAV;                     // unlock sound with this click (Safari)
     st.audio.play().then(() => { st.blocked = false; pump(); }).catch(() => { st.blocked = true; paint(); });
     paint();
