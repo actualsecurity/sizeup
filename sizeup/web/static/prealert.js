@@ -68,10 +68,13 @@ window.PreAlert = (() => {
                 el("span", "pa-src", `${p.source} · ${deps.time(p.at)}`));
     li.append(what, ticking(el("span", "pa-age"), p.at));
     if (deps.readonly) return li;
-    const b = el("button", "mini pa-dismiss", st.busy.has(p.id) ? "…" : "Dismiss");
+    // the × as on the other pre-alert cards (icons.js Icon.button: named, its hover says what it does)
+    const DIS = "not a call, off the list (logged)";
+    const b = window.Icon ? Icon.button("x", "Dismiss", DIS, "pa-dismiss") : el("button", "mini pa-dismiss", "Dismiss");
     b.type = "button";
+    if (!window.Icon) b.title = DIS;
+    if (st.busy.has(p.id)) b.replaceChildren("…");
     b.disabled = st.busy.has(p.id);
-    b.title = "Not a call: take it off the list (logged)";
     b.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       st.busy.add(p.id);
