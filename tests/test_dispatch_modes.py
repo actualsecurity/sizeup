@@ -506,7 +506,7 @@ def test_a_county_drill_is_accepted_as_a_notification_and_nothing_is_dispatched(
     assert inc["status"] == "pending" and inc["number"]                          # accepted: Non-emergency events
     assert inc["assignments"] == [] and {n: rig.status(n) for n in before} == before
     lines = [e["text"] for e in inc["events"] if e["kind"] == "auto"]
-    assert lines.count("Not dispatched (non-emergency event): E60, L31") == 1
+    assert lines.count("Not dispatched (notification): E60, L31") == 1
     assert [s[0] for s in rig.steps()] == ["accept"]
 
     rig.at(30)
@@ -514,7 +514,7 @@ def test_a_county_drill_is_accepted_as_a_notification_and_nothing_is_dispatched(
     inc = rig.inc()
     assert inc["assignments"] == [] and rig.status("E60") == before["E60"]
     assert [e["text"] for e in inc["events"] if e["kind"] == "auto"].count(
-        "Not dispatched (non-emergency event): E62") == 1
+        "Not dispatched (notification): E62") == 1
 
     rig.at(600)
     rig.change(times={"dispatched": T0, "in_service": T0 + 590})                 # the feed's in service still closes it
@@ -530,7 +530,7 @@ def test_a_page_naming_units_on_a_notification_dispatches_none(rig):
     assert len(rig.incidents()) == 1 and inc["auto"]["paged_at"] == T0 + 20      # the page joined the feed's event
     assert inc["assignments"] == []
     assert [e["text"] for e in inc["events"] if e["text"].startswith("Not dispatched")] == [
-        "Not dispatched (non-emergency event): E60", "Not dispatched (non-emergency event): L31"]   # each unit once
+        "Not dispatched (notification): E60", "Not dispatched (notification): L31"]   # each unit once
     assert (inc["type"], inc["subtype"]) == ("NOTIF", "DRILL")
 
 
@@ -550,6 +550,25 @@ def test_an_admin_rule_making_drills_emergency_brings_dispatch_back(rig):
     assert {a["name"] for a in inc["assignments"]} == {"E60", "L31"}
 
 
+def test_another_non_emergency_event_still_gets_the_units_the_feed_lists(rig):
+    """Only a notification is held (the admin, 2026-11-21): a non-emergency event of another type that the feed sends
+    our units to keeps today's rule, the listed units go on (and show dispatched)."""
+    _post(rig.cad, "event_class", action="set", key="SERVICE", value="non-emergency")
+    rig.created(type="SERVICE")
+    inc = rig.inc()
+    assert (inc["type"], inc["emergency"]) == ("SERVICE", False)
+    assert {a["name"] for a in inc["assignments"]} == {"E60", "L31"}
+    assert not [e for e in inc["events"] if e["text"].startswith("Not dispatched")]
+
+
+def test_the_notification_type_itself_is_held_too(rig):
+    rig.created(type="NOTIF")
+    inc = rig.inc()
+    assert (inc["type"], inc["emergency"]) == ("NOTIF", False)
+    assert inc["assignments"] == []
+    assert [e["text"] for e in inc["events"] if e["kind"] == "auto"].count("Not dispatched (notification): E60, L31") == 1
+
+
 def test_a_notification_made_an_emergency_dispatches_the_units_it_left_off(rig):
     move_drill(rig.cad)
     rig.created(type="DRILL")
@@ -558,7 +577,7 @@ def test_a_notification_made_an_emergency_dispatches_the_units_it_left_off(rig):
     rig.change(type="STRU/COMM")                                                 # the county upgrades it
     inc = rig.inc()
     assert inc["emergency"] is True and {a["name"] for a in inc["assignments"]} == {"E60", "L31"}
-    assert sum(e["text"].startswith("Now an emergency event") for e in inc["events"]) == 1
+    assert sum(e["text"].startswith("No longer a notification") for e in inc["events"]) == 1
     rig.at(40)
     rig.change(units=("E60", "L31", "E62"))                                      # then as usual: only the new one
     assert {a["name"] for a in rig.inc()["assignments"]} == {"E60", "L31", "E62"}
@@ -573,7 +592,7 @@ def test_an_emergency_made_a_notification_keeps_its_units_and_dispatches_no_more
     inc = rig.inc()
     assert inc["emergency"] is False and {a["name"] for a in inc["assignments"]} == {"E60", "L31"}
     assert [e["text"] for e in inc["events"] if e["text"].startswith("Not dispatched")] == [
-        "Not dispatched (non-emergency event): E62"]                             # never a unit already on it
+        "Not dispatched (notification): E62"]                             # never a unit already on it
 
 
 def test_each_unit_left_off_a_notification_is_named_once(rig):
@@ -584,5 +603,5 @@ def test_each_unit_left_off_a_notification_is_named_once(rig):
     rig.change(units=("E60", "L31", "E62"))
     rig.cad.auto.accepted(rig.iid())                                             # the whole list again
     lines = [e["text"] for e in rig.inc()["events"] if e["text"].startswith("Not dispatched")]
-    assert lines == ["Not dispatched (non-emergency event): E60", "Not dispatched (non-emergency event): E62"]
+    assert lines == ["Not dispatched (notification): E60", "Not dispatched (notification): E62"]
     assert rig.here("L31") is not None and rig.here("E62") is None

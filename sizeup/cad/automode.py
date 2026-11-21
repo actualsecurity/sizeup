@@ -20,13 +20,14 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
                one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
                statuses come with the feed's next changes and the radio, never replayed)
-      non-emergency  an incident whose type is non-emergency (Lists.is_emergency: Notification and its subtypes, a
-               Drill there, unless Settings > Lists says otherwise) is accepted like any other, but no unit is ever
+      notification   a non-emergency Notification (NOTIF, any subtype: a Drill moved under it; Lists.is_notification,
+               unless Settings > Lists makes it an emergency) is accepted like any other, but no unit is ever
                dispatched to it by automation (feed, page or radio): the units of ours listed or named are one line on
-               the timeline, "Not dispatched (non-emergency event): E1, L2", for a person to attach if needed (as by
+               the timeline, "Not dispatched (notification): E1, L2", for a person to attach if needed (as by
                hand: "Non-emergency: attach units, no dispatch"; each unit named once, never one already on it); the
                feed's in service still closes it. Made an emergency later (the feed's type or a person's), at the
-               feed's next report the units it lists then are taken as new, once ("Now an emergency event ..."). A feed that
+               feed's next report the units it lists then are taken as new, once ("No longer a notification ..."). Any other
+               non-emergency event keeps the feed's units (the admin, 2026-11-21). A feed that
                sends a type moved under another as a subtype (Drill retired, a Drill subtype of Notification) gets
                that subtype (Cad.moved_type)
       depts    a feed's department entry (Sources.department_units: a code that means a whole department, #370) is never
@@ -102,8 +103,8 @@ SOURCES = ("county", "radio")
 RANK = {"dispatched": 1, "enroute": 2, "onscene": 3}
 HINT_INTENTS = ("enroute", "onscene", "staging", "free", "quarters")
 FEED_STATUS = {"responding": "enroute", "on_location": "onscene", "in_service": "free"}
-QUIET = "Not dispatched (non-emergency event): "          # automode's line for units left off a non-emergency event
-UPGRADED = "Now an emergency event: the listed units go on"
+QUIET = "Not dispatched (notification): "          # automode's line for units left off a non-emergency event
+UPGRADED = "No longer a notification: the listed units go on"
 COLS = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at", "free": "cleared_at"}
 
 SCHEMA = """
@@ -667,7 +668,7 @@ class AutoDispatch:
         """Units of ours a feed lists (or a page names) on a non-emergency event (a notification and its subtypes, a
         drill there: Lists.is_emergency): never dispatched by automation, said once on the timeline; a person attaches
         them if they are needed (as by hand: "Non-emergency: attach units, no dispatch")."""
-        if self.store.incident(iid)["emergency"]:
+        if not self._notif_held(iid):
             return
         ours = self._ours()
         said = {n for r in self._quiet_lines(iid) for n in r["text"][len(QUIET):].split(", ")}
@@ -677,6 +678,13 @@ class AutoDispatch:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", QUIET + ", ".join(names), op)
 
+    def _notif_held(self, iid: int) -> bool:
+        """A notification (the Notification type, any subtype: a drill moved under it) that is non-emergency: automation
+        never dispatches to it (_quiet, _assign, a radio's responding). Other non-emergency events keep today's rule:
+        the units the feed lists go on (the admin, 2026-11-21). A rule making it an emergency (*/DRILL) brings it back."""
+        inc = self.store.incident(iid)
+        return not inc["emergency"] and self.store.lists.is_notification(inc["type"])
+
     def _quiet_lines(self, iid: int) -> list[dict]:
         return self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'auto' AND substr(text, 1, ?) = ?",
                             (iid, len(QUIET), QUIET))
@@ -684,7 +692,7 @@ class AutoDispatch:
     def _upgraded(self, iid: int, op: str) -> bool:
         """A non-emergency event whose units were left off (_quiet) is an emergency now (the feed's type, or a
         person's): once, True, so the units listed now are taken as new (dispatched, by the usual rules)."""
-        if not self.store.incident(iid)["emergency"] or not self._quiet_lines(iid):
+        if self._notif_held(iid) or not self._quiet_lines(iid):
             return False
         if self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'auto' AND text = ?", (iid, UPGRADED)):
             return False
@@ -697,8 +705,8 @@ class AutoDispatch:
         back only then, and only while none of its department's units has signed on there (an en route or on location
         time, ever): units merely dispatched don't keep it off. Never after a person freed it (manual_edits)."""
         L = self.store.lists
-        if not self.store.incident(iid)["emergency"]:
-            return False                                 # a non-emergency event (a notification): never dispatched (_quiet)
+        if self._notif_held(iid):
+            return False                                 # a notification (non-emergency): never dispatched (_quiet)
         u = self.store.unit(u["id"])
         ph = L.placeholder(u["name"])
         if ph:                                           # not a rig: may be on several calls at once (only this one counts)
@@ -903,8 +911,8 @@ class AutoDispatch:
             if len(cands) != 1 or not self.tracked(cands[0]):
                 return                                   # none, or which? (any open call counts, tracked or not)
             iid = cands[0]
-            if not self.store.incident(iid)["emergency"]:
-                return                                   # a non-emergency event (a notification): never put on by itself
+            if self._notif_held(iid):
+                return                                   # a notification (non-emergency): never put on by itself
         if self.store.incident(iid)["status"] not in ("pending", "active"):
             return
         if on is None and self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
