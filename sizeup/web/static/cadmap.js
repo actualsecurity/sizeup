@@ -1693,7 +1693,8 @@ window.CadMap = (() => {
     if (o.joint_call) head.append(el("span", "chip joint", o.joint_call));
     head.append(el("span", "spacer"), since(el("span", "ov-el", ""), o.created_at));
     const type = el("div", "ov-type", typeLabel(o.type, o.subtype) || "No type");
-    const addr = el("div", "ov-addr" + (o.address ? "" : " dim"), o.address || "No location");
+    const addr = el("div", "ov-addr" + (o.address ? "" : " dim"), locText(o) || "No location");
+    if (o.location_qualifier) addr.title = qualTitle(o.location_qualifier, o.address);
     li.replaceChildren(head, type, addr);
     const ap = o.type === "AIRPORT" ? AirportLayer.summary(o, o.subtype ? nameOf("event_subtypes", o.subtype) : "") : "";
     if (ap) li.append(el("div", "ov-airport", ap));       // "Alert 2 · B737 · unsafe gear · 12 min · RWY 16 · 140 souls (Level 5)" (#105)
@@ -1763,9 +1764,9 @@ window.CadMap = (() => {
     const pbox = $("#ov-pages");
     show(pbox, !!pages.length);
     syncList(pbox, pages, {
-      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.type, o.subtype, o.address]),
+      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.type, o.subtype, o.address, o.location_qualifier]),
       make: () => { const b = el("button", "ov-page"); b.type = "button"; b.addEventListener("click", () => selectIncident(Number(b.dataset.key))); return b; },
-      fill: (b, o) => b.replaceChildren(el("b", "", "60 Control "), el("span", "", `${typeLabel(o.type, o.subtype) || "No type"}, ${o.address || "No location"}`),
+      fill: (b, o) => b.replaceChildren(el("b", "", "60 Control "), el("span", "", `${typeLabel(o.type, o.subtype) || "No type"}, ${locText(o) || "No location"}`),
                                         el("span", "dim", " Accept / Dismiss")),
       empty: "",
     });
@@ -1784,7 +1785,7 @@ window.CadMap = (() => {
       empty: "None",
     });
     if (BOARD) syncList($("#ov-nonemerg"), ne, {
-      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.units.map((u) => u.name)]),
+      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.location_qualifier, o.units.map((u) => u.name)]),
       make: () => {
         const li = el("li", "ov-ne item");
         li.tabIndex = 0;
@@ -1795,7 +1796,7 @@ window.CadMap = (() => {
       fill: (li, o) => {
         const t = el("span", "qt", typeLabel(o.type, o.subtype));
         t.style.setProperty("--c", typeColor(o.type) || "#8fb8d8");
-        li.replaceChildren(el("b", "", incTitle(o)), t, el("span", "ov-addr-s", o.address || "No location"),
+        li.replaceChildren(el("b", "", incTitle(o)), t, el("span", "ov-addr-s", locText(o) || "No location"),
                            el("span", "spacer"), since(el("span", "dim small"), o.created_at));
         if (o.units.length) li.append(el("span", "dim small", o.units.map((u) => u.name).join(", ")));
       },

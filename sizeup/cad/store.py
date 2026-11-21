@@ -118,6 +118,8 @@ CREATE TABLE incidents (
   place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Sample Market"), '' for a plain address
   place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("40 Example Rd"), '' when the data has none
   cross_street TEXT NOT NULL DEFAULT '',
+  location_qualifier TEXT NOT NULL DEFAULT '',  -- where at the location: a location_qualifiers code ("IFO"), shown before
+                                        -- the address ("IFO 12 Sample St"); never the point (that is the address's)
   lat REAL, lon REAL, geo_label TEXT NOT NULL DEFAULT '',
   geo_alts TEXT NOT NULL DEFAULT '',    -- a page's location not confirmed (#176): JSON [{label, lat, lon, town, confidence, why}] to pick from
   address_raw TEXT NOT NULL DEFAULT '', -- the text a feed or page gave that address was made from (sources.normal_location):
@@ -567,6 +569,8 @@ class Store:
                 self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if icols and "address_raw" not in icols:         # the text a normalised address came from, 2026-11-12: old rows ''
             self.db.execute("ALTER TABLE incidents ADD COLUMN address_raw TEXT NOT NULL DEFAULT ''")
+        if icols and "location_qualifier" not in icols:  # where at the location ("IFO"), 2026-11-20: old rows ''
+            self.db.execute("ALTER TABLE incidents ADD COLUMN location_qualifier TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -1411,7 +1415,8 @@ class Store:
                         status: str = "pending", operator: str = "", acft_type: str = "", acft_nature: str = "",
                         acft_eta: int | None = None, acft_runway: str = "", acft_souls: int | None = None,
                         acft_level: int | None = None, acft_fuel: str = "", acft_cargo: str = "", geo_alts: str = "",
-                        place: str = "", place_address: str = "", address_raw: str = "") -> int:
+                        place: str = "", place_address: str = "", address_raw: str = "",
+                        location_qualifier: str = "") -> int:
         """ACCEPT EVENT: entered by a person, numbered at once, PENDING until units go (or, a
         non-emergency one, listed under NON-EMERGENCY EVENTS until closed). One from a 60 Control
         page waits as queued, with no number, until someone accepts it. emergency None = from the
@@ -1435,15 +1440,17 @@ class Store:
                 "INSERT INTO incidents (number, type, subtype, type_note, emergency, received_via, until_at, priority, "
                 "address, cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, "
                 "source_ref, status, created_at, accepted_at, acft_type, acft_nature, acft_eta, acft_runway, acft_souls, "
-                "acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw, location_qualifier) VALUES (?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (number, type, subtype, type_note, int(bool(emergency)), received_via, until_at, priority, address,
                  cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, source_ref,
                  status, now, now if number else None, acft_type, acft_nature, acft_eta, acft_runway, acft_souls,
-                 acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw if address else ""))
+                 acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw if address else "",
+                 location_qualifier))
             iid = cur.lastrowid
             L = self.lists
-            what = (L.type_label(type, subtype) or "type not set") + (f" at {address}" if address else "")
+            what = (L.type_label(type, subtype) or "type not set") + (
+                f" at {L.qualified(location_qualifier, address)}" if address else "")
             if type_note:
                 what += f" ({type_note})"
             if received_via:
@@ -1467,10 +1474,12 @@ class Store:
 
     EDITABLE = ("type", "subtype", "type_note", "emergency", "received_via", "until_at", "priority", "address",
                 "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks",
-                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts", "place", "place_address", "address_raw")
-    # changed, not spelled out in the log (place / place_address: the location's own line says them, #204)
+                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts", "place", "place_address", "address_raw",
+                "location_qualifier")
+    # changed, not spelled out in the log (place / place_address: the location's own line says them, #204; the
+    # qualifier: said with the location, "location: IFO 12 Sample St")
     QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts", "place", "place_address",
-             "address_raw")
+             "address_raw", "location_qualifier")
 
     def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
         """Edit an open event. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the
@@ -1484,6 +1493,8 @@ class Store:
         changes = {k: v for k, v in fields.items() if k in self.EDITABLE and inc[k] != v}
         if ("type" in changes or "subtype" in changes) and changes.get("type", inc["type"]) and "type_note" not in fields:
             changes["type_note"] = ""                 # a person picked the type: the page's doubt is settled
+        if "address" in changes and "location_qualifier" not in fields and inc["location_qualifier"]:
+            changes["location_qualifier"] = ""        # another address (a feed's, a page's): where at the old one goes
         if "address" in changes and "address_raw" not in fields and inc["address_raw"]:
             changes["address_raw"] = ""               # the address is no longer the one that text made (a person's): theirs
         if inc.get("geo_alts") and ("lat" in changes or "address" in changes) and "geo_alts" not in fields:
@@ -1524,6 +1535,13 @@ class Store:
                 changes_shown = dict(changes, received_via=self.lists.name("received_via", changes["received_via"]))
             else:
                 changes_shown = changes
+            if "location_qualifier" in changes:          # the location as shown: "IFO 12 Sample St"
+                where = self.lists.qualified(changes["location_qualifier"], changes.get("address", inc["address"]))
+                changes_shown = dict(changes_shown, address=where)
+                if "address" not in changes:
+                    parts.append(f"location: {where or '(none)'}")
+            elif "address" in changes and changes["address"] and inc["location_qualifier"]:
+                changes_shown = dict(changes_shown, address=self.lists.qualified(inc["location_qualifier"], changes["address"]))
             parts += [f"{labels.get(k, k.replace('_', ' '))}: {changes_shown[k] if changes[k] not in (None, '') else '(none)'}"
                       for k in changes if k not in self.QUIET and k not in ("type", "subtype", "emergency")]
             if "remarks" in changes:

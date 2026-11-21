@@ -81,6 +81,7 @@ class Incident:
     page_starts: list[float] = field(default_factory=list)   # aligned with pages / page_text
     traffic: list[Traffic] = field(default_factory=list)
     tone_departments: list[str] = field(default_factory=list)   # whose tones opened it (what makes it ours)
+    qualifier: str = ""                 # where at the location, as heard ("across from": its code, Dispatch.qualifier)
 
     def as_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k not in ("traffic", "page_starts")}
@@ -193,6 +194,8 @@ class IncidentStore:
                     inc.page_text.append(d.text)
                     inc.page_starts.append(at)
                     inc.updated = at
+                    if not inc.location and d.location:              # the place heard now: where at it too
+                        inc.qualifier = getattr(d, "qualifier", "")
                     for k in ("location", "cross_street", "time_out"):
                         if not getattr(inc, k) and getattr(d, k):
                             setattr(inc, k, getattr(d, k))
@@ -225,7 +228,7 @@ class IncidentStore:
                        d.cross_street, d.time_out, self._geocode(d, tone_departments) if d.location else None,
                        pages=[page_id], page_text=[d.text], page_starts=[at],
                        units=list(getattr(d, "units", [])), code=getattr(d, "code", ""),
-                       tone_departments=list(tone_departments))
+                       tone_departments=list(tone_departments), qualifier=getattr(d, "qualifier", ""))
         with self._lock:
             self.incidents.append(inc)
         self.save()

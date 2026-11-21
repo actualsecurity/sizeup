@@ -5,6 +5,10 @@
   -> departments ["Port Chester FD"], type "Fire alarm" (category fire), location text
      "209 West Chester Avenue", cross street "Pearl Street", time out "14:32"
 
+A location qualifier said in front of the place ("across from 40 Example Avenue", "in front of the Sample Market": the CAD's
+Settings > Lists > Location qualifiers, as said) is its own field (qualifier: the list's code), never part of the street
+or the place.
+
 The cross streets are the next two streets after the address; a street said with the address's own house number in
 front ("47 Sample Avenue ... 47 Model Avenue": the page read again, misheard) is never one.
 
@@ -106,6 +110,7 @@ class Dispatch:
     units: list[str] = field(default_factory=list)   # "Engine 25"
     numbers: list[int] = field(default_factory=list)  # bare numbers in the unit list ("174, 175, Ladder 1")
     location: str = ""             # the address / place part, for the geocoder
+    qualifier: str = ""            # where at it, as said in front of it ("across from"): its code ("ACROSS"), '' for none
     cross_street: str = ""
     time_out: str = ""             # "14:32"
 
@@ -495,8 +500,34 @@ def split_joined(units, known) -> list[str]:
     return out
 
 
-def parse(text: str, known=None) -> Dispatch:
-    """known: the configured apparatus (the station's roster), for "Engine 59/63" (_unit_slash)."""
+def _qualifiers(qualifiers) -> list[tuple[str, str]]:
+    """{spoken form: code} (the CAD's list: Lists.qualifier_phrases; None: its defaults) -> [(phrase as _norm writes it,
+    code)], longest first."""
+    if qualifiers is None:
+        from sizeup.cad.lists import DEFAULT_QUALIFIERS          # (lazily: sizeup.cad imports this module)
+        qualifiers = {q["spoken"]: q["code"] for q in DEFAULT_QUALIFIERS}
+    out = {_norm(p): c for p, c in (qualifiers or {}).items()
+           if isinstance(p, str) and _norm(p) and c and _norm(p) not in NOT_QUALIFIERS}
+    return sorted(out.items(), key=lambda x: -len(x[0]))
+
+
+# "between" on a page names the two streets either side (the cross streets: parse reads it so), never where at one
+NOT_QUALIFIERS = {"between"}
+
+
+def _said_before(text: str, at: int, quals: list[tuple[str, str]]) -> str:
+    """The qualifier said just before text[at:] ("across from | 40 example ave", "in front of the | sample market"):
+    its code, else ''."""
+    if not quals or at <= 0:
+        return ""
+    alts = "|".join(re.escape(p) for p, _ in quals)
+    m = re.search(rf"\b({alts})\s*[,:]?\s*(?:the\s+)?$", text[:at])
+    return dict(quals).get(m.group(1), "") if m else ""
+
+
+def parse(text: str, known=None, qualifiers=None) -> Dispatch:
+    """known: the configured apparatus (the station's roster), for "Engine 59/63" (_unit_slash). qualifiers: the
+    location qualifiers as said -> their codes ({"across from": "ACROSS"}; None: the CAD's defaults)."""
     d = Dispatch(text)
     # "16-10-191-22": 60 Control's run number, not engines (the normalising below turns "-" into spaces).
     t = _spoken_digits(_norm(_unit_slash(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text), known)))
@@ -546,6 +577,14 @@ def parse(text: str, known=None) -> Dispatch:
     hw = highway(masked)                                  # a highway's mile marker or exit: the place, unless an
     # "exit 4 to Sample Avenue": never 4 Sample Avenue (blanked to the same length: hw.start still indexes it)
     masked = EXIT_NUMBER.sub(lambda m: " ," + " " * (len(m.group(0)) - 2), masked)
+    # "across from 40 sample avenue", "rear of sample avenue": the qualifier is never a word of the street (blanked to
+    # the same length, as above); which one was said just before the place is read from what it was (said)
+    quals = _qualifiers(qualifiers)
+    said = masked
+    if quals:
+        # (never a word of a street's own name: "5 near street" is a street)
+        qpat = re.compile(r"\b(?:" + "|".join(re.escape(p) for p, _ in quals) + rf")\b(?!\s+{SUFFIX}\b)")
+        masked = qpat.sub(lambda m: (" ," + " " * (len(m.group(0)) - 2))[:len(m.group(0))], masked)
     a = ADDRESS.search(masked)                            # address came first ("12 Example Ave, near I-999 MM 4")
     if hw is not None and a is not None and a.start() <= hw.start:   # ("120 North Ridge St": an address)
         hw = None
@@ -559,8 +598,10 @@ def parse(text: str, known=None) -> Dispatch:
             d.numbers.append(int(n))
     if hw is not None:                                    # a highway's marker or exit: the place
         d.location = hw.shown()
+        d.qualifier = _said_before(said, hw.start, quals)
     elif a:
         d.location = f"{a.group(1)} {_clean_street(a.group(2))}".strip()
+        d.qualifier = _said_before(said, a.start(), quals)
         after = masked[a.end():]
         crosses = []
         again = re.compile(rf"\b{re.escape(a.group(1))}\s+$")
@@ -577,6 +618,9 @@ def parse(text: str, known=None) -> Dispatch:
         # No house number (highways, intersections): the first named road, the next one as the cross.
         # "Sprain Brook Parkway southbound at the Bronx River Parkway interchange"
         d.location = roads[0]
+        first = next((m for m in STREET.finditer(masked) if _road(m.group(1), tw) == roads[0]), None)
+        if first is not None:
+            d.qualifier = _said_before(said, first.end(1) - len(roads[0]), quals)
         d.cross_street = " and ".join(roads[1:3])          # "between Sample Avenue and Specimen Street": both
     else:
         # No street address heard: the clause after the type / "respond to" (place names, intersections).
@@ -588,7 +632,15 @@ def parse(text: str, known=None) -> Dispatch:
             if r:
                 start, located = r.end(), r.group(1).startswith("respond")
         named = {w.lower() for w in re.findall(r"\b[A-Z][a-z]+", text)}   # written with a capital: a name
-        d.location = place_clause(t[start:], located, named)
+        rest = t[start:]
+        if quals:                                          # "... in front of the sample market": a place, and where at it
+            q = re.match(r"\s*[,.:;]?\s*(?:(?:at|on|to)\s+)?(" + "|".join(re.escape(p) for p, _ in quals) + r")\s+", rest)
+            if q:
+                rest, located = rest[q.end():], True
+                d.qualifier = dict(quals)[q.group(1)]
+        d.location = place_clause(rest, located, named)
+        if not d.location:
+            d.qualifier = ""
         c = re.search(r"\b(?:cross(?:\s+street)?s?(?:\s+of|\s+is)?|between)\s+(.+?)(?:[.,;]|\s+(?:time|port chester|rye brook)\b|$)", t)
         if c:
             d.cross_street = c.group(1).strip(" .,")

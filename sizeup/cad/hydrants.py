@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import re
 import threading
@@ -93,11 +94,12 @@ FIELDS: dict[str, tuple[str, object]] = {
     "owner": ("enum", tuple(OWNERS)),
     "body_color": ("text", 30),
     "asset_id": ("text", 40),
-    "location": ("text", 160),        # where it stands
+    "location_qualifier": ("qualifier", 40),   # where at the location: a location_qualifiers code ("IFO"; Settings > Lists)
+    "location": ("text", 160),        # where it stands: "@Sample Market", "@12 Sample St" (location_places)
     "inspected": ("date", None),
     "notes": ("text", 500),
 }
-AUDITED = (*FIELDS, "lat", "lon", "removed")
+AUDITED = (*FIELDS, "location_places", "lat", "lon", "removed")
 FLOW_HIGH = 2500                      # an observed flow over this: "unusually high: check" (allowed)
 RATED_MAX = 10000                     # a rated flow (at 20 psi) over this: refused (a typo in the flow or the pressures)
 OUTLET = re.compile(r"(?:(\d{1,2})\s*[xX×*-]\s*)?(\d(?:\.\d{1,3})?(?:\s+1/2|½)?|½)\s*(?:\"|in\b|inch(?:es)?\b)?\s*"
@@ -177,15 +179,19 @@ CREATE TABLE IF NOT EXISTS hydrants (
   nfpa_class TEXT,                      -- set by an admin; NULL: from the flow
   thread TEXT, outlets TEXT NOT NULL DEFAULT '', main_in REAL, owner TEXT, body_color TEXT NOT NULL DEFAULT '',
   asset_id TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', inspected TEXT, notes TEXT NOT NULL DEFAULT '',
+  location_qualifier TEXT NOT NULL DEFAULT '',  -- "IFO": shown before the location ("IFO @Sample Market"); never the point
+  location_places TEXT NOT NULL DEFAULT '[]', -- the "@" places in location (the comment box's: label, lat, lon ...); never
+                                        -- the hydrant's point
   created_by TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
   updated_by TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS hydrants_county ON hydrants(county_id);
 """
-TEXT_COLS = {"number", "status_reason", "outlets", "body_color", "asset_id", "location", "notes"}   # NOT NULL '' columns
+TEXT_COLS = {"number", "status_reason", "outlets", "body_color", "asset_id", "location", "notes",   # NOT NULL '' columns
+             "location_qualifier"}
 # a hydrant with no overlay row: what each column would be
 DEFAULTS = {k: ("unknown" if k == "status" else "" if k in TEXT_COLS else None) for k in FIELDS} | {
-    "lat": None, "lon": None, "removed": 0}
+    "lat": None, "lon": None, "removed": 0, "location_places": "[]"}
 
 
 # ---- pure helpers ---------------------------------------------------------------------------------------------------
@@ -244,6 +250,11 @@ def clean(name: str, v):
             v = v[1:]
     if v is not None and not isinstance(v, (str, int, float)):
         raise CadError(f"{name}: a value")
+    if kind == "qualifier":                                     # as written: Hydrants._qualifier reads it with the list
+        t = " ".join(str(v or "").split())
+        if len(t) > arg:
+            raise CadError(f"{name}: at most {arg} characters")
+        return t
     if kind == "text":
         t = " ".join(str(v or "").split()).replace("×", "x")
         if len(t) > arg:
@@ -310,6 +321,11 @@ class Hydrants:
         with self.store.lock:
             if self.store.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'incidents'").fetchone():
                 self.store.db.executescript(SCHEMA)
+                have = {r[1] for r in self.store.db.execute("PRAGMA table_info(hydrants)")}
+                if "location_places" not in have:      # a table from #831
+                    self.store.db.execute("ALTER TABLE hydrants ADD COLUMN location_places TEXT NOT NULL DEFAULT '[]'")
+                if "location_qualifier" not in have:   # a table from before the location qualifiers
+                    self.store.db.execute("ALTER TABLE hydrants ADD COLUMN location_qualifier TEXT NOT NULL DEFAULT ''")
 
     # -- the county layer and the merge -------------------------------------------------------------------------------
 
@@ -511,6 +527,7 @@ class Hydrants:
             if k not in out or k == "number":
                 out[k] = r.get(k, "" if k in TEXT_COLS else None)
         out["number"] = it["number"]
+        out["location_places"] = _places(r.get("location_places"))
         out["status"] = it["status"]
         return out
 
@@ -656,7 +673,26 @@ class Hydrants:
             g.overlay_changed(LAYER)
 
     def _fields(self, body: dict, row: dict | None = None) -> dict:
-        return {k: clean(k, body.get(k)) for k in FIELDS if k in body}
+        """The fields the body sets, cleaned; location_places (the "@" places the comment box's picker took) kept only
+        when its "@label" is in the location text (the comment box's rule: Cad._note_places), as JSON."""
+        f = {k: clean(k, body.get(k)) for k in FIELDS if k in body}
+        if "location_qualifier" in f:
+            f["location_qualifier"] = self._qualifier(f["location_qualifier"], (row or {}).get("location_qualifier") or "")
+        if "location" in f and not f["location"]:
+            f["location_qualifier"] = ""               # no location: nothing to be in front of
+        if "location_places" in body or "location" in f:
+            text = f["location"] if "location" in f else (row or {}).get("location") or ""
+            raw = body["location_places"] if "location_places" in body else _places((row or {}).get("location_places"))
+            f["location_places"] = json.dumps(type(self.cad)._note_places(raw, text or ""), separators=(",", ":"))
+        return f
+
+    def _qualifier(self, v: str, keep: str = "") -> str:
+        """A location qualifier as picked, typed or in a CSV cell (its code, short form, name or spoken form) -> its code
+        (Settings > Lists > Location qualifiers); the one the hydrant has stays even retired. Never the hydrant's point."""
+        try:
+            return self.cad.lists.qualifier_code(v, keep)
+        except ValueError as e:
+            raise CadError(str(e)) from None
 
     def _bounds(self) -> tuple | None:
         g = getattr(self.cad, "gis", None)
@@ -836,6 +872,13 @@ class Hydrants:
                 it0 = idx["by_key"].get(key) if key and KEY_RE.fullmatch(key) else None
                 saved = (it0 or {}).get("row") or {}
                 f = {k: (saved[k] if same_cell(k, cells[k], saved.get(k)) else clean(k, cells[k])) for k in writable if k in FIELDS}
+                if "location_qualifier" in f and f["location_qualifier"] != saved.get("location_qualifier"):
+                    f["location_qualifier"] = self._qualifier(f["location_qualifier"], saved.get("location_qualifier") or "")
+                if "location" in f and not f["location"]:
+                    f["location_qualifier"] = ""           # no location: nothing to be in front of
+                if "location" in f and key:                # plain text in the file: the "@" places still named in it kept
+                    old = _places((it0["row"] or {}).get("location_places")) if it0 else []
+                    f["location_places"] = json.dumps(type(self.cad)._note_places(old, f["location"] or ""), separators=(",", ":"))
                 f = self._stored(f)
                 if "removed" in writable:
                     f["removed"] = 1 if cells["removed"].strip().lower() in ("yes", "y", "1", "true", "removed") else 0
@@ -933,6 +976,14 @@ def same_cell(k: str, cell: str, saved) -> bool:
         except ValueError:
             return False
     return t == str(saved)
+
+
+def _places(v) -> list[dict]:
+    try:
+        out = json.loads(v) if isinstance(v, str) and v else (v or [])
+    except ValueError:
+        return []
+    return out if isinstance(out, list) else []
 
 
 def _num_key(n: str) -> tuple:

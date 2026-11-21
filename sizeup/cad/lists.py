@@ -46,6 +46,11 @@ shows). A new export can replace the file without a code change:
                                      apparatus, ANY_KIND), {"unit": "2398"} or {"all": "Port Chester FD"}
                                      (the full department: sizeup/cad/runcards.py)
     geo_town_order, geo_town_aliases Location suggestions: which towns come first
+    location_qualifiers              {code, name, short, spoken}: where at a location ("In front of": the console's pick
+                                     list, "IFO": the text, "in front of": the dispatch voice and a page as heard).
+                                     Stored by code on an event (incidents.location_qualifier) and a hydrant: shown in
+                                     front of the address ("IFO 12 Sample St"), never a point moved. Not in the file:
+                                     DEFAULT_QUALIFIERS
 
 Any item may carry "confirm": why its meaning or role is a guess. Settings shows it as "meaning to
 confirm" until someone edits or confirms the item there (the override drops the note), as it does for a
@@ -90,7 +95,21 @@ HOME_DEPARTMENT = "Port Chester FD"     # whose apparatus a run card's full-depa
 ANY_KIND = "any"                        # a run-card kind slot that takes any apparatus ("1 × any")
 ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
 COMMAND = "IC"                          # Incident command: one unit per event
-LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses")
+LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses", "location_qualifiers")
+# Where at a location (Settings > Lists > Location qualifiers): a data file without its own list gets these.
+DEFAULT_QUALIFIERS = (
+    {"code": "IFO", "name": "In front of", "short": "IFO", "spoken": "in front of"},
+    {"code": "ACROSS", "name": "Across from", "short": "ACROSS", "spoken": "across from"},
+    {"code": "REAR", "name": "Rear of", "short": "REAR", "spoken": "rear of"},
+    {"code": "CORNER", "name": "Corner of", "short": "COR", "spoken": "corner of"},
+    {"code": "OPP", "name": "Opposite", "short": "OPP", "spoken": "opposite"},
+    {"code": "NEAR", "name": "Near", "short": "NR", "spoken": "near"},
+    {"code": "SIDE", "name": "Side of", "short": "SIDE", "spoken": "side of"},
+    {"code": "BETWEEN", "name": "Between", "short": "BTWN", "spoken": "between"},
+)
+QUAL_SHORT_MAX, QUAL_SPOKEN_MAX = 12, 40
+QUAL_SHORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9/&.\- ]{0,11}")      # "IFO", "R/O", "BTWN"
+QUAL_SPOKEN = re.compile(r"[a-z][a-z' ]{0,39}")                      # "in front of": words only (said and heard)
 # Dispositions only the hub sets (a passed Until: store.expire_until): named on events, never on a pick list, refused
 # from a person's Close. Set here, so an edit in Settings can't make one pickable.
 SYSTEM_DISPOSITIONS = ("EXPIRED",)
@@ -135,6 +154,7 @@ class Lists:
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     agency_status_sets: dict = field(default_factory=dict) # {"default", "sets": {id: {statuses, labels}}, "boards"}
     unit_placeholders: str = ""                            # regex: a department's placeholder code ('' = none)
+    location_qualifiers: tuple[dict, ...] = ()             # {"code", "name", "short", "spoken"}: where at a location
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     _board_of: dict[str, str] = field(default_factory=dict, repr=False)
@@ -188,6 +208,54 @@ class Lists:
             return f"? / {self.name('event_subtypes', subtype)}" if subtype else ""
         t = self.name("event_types", typ)
         return f"{t} / {self.name('event_subtypes', subtype)}" if subtype else t
+
+    # -- location qualifiers ------------------------------------------------------------------------
+
+    def qualifier(self, code: str) -> dict | None:
+        """The item ({code, name, short, spoken}), a retired one too; None for none or a code not on the list."""
+        return next((q for q in self.location_qualifiers if q["code"] == code), None) if code else None
+
+    def qualifier_code(self, text: str, keep: str = "") -> str:
+        """What was picked or typed -> its code: the code, the short form, the name or the spoken form, any case ('' for
+        none). An active one, or keep (what the record has now: a retired one stays). ValueError otherwise."""
+        t = " ".join(str(text or "").split()).lower()
+        if not t:
+            return ""
+        for q in self.location_qualifiers:
+            if t in (q["code"].lower(), q["short"].lower(), q["name"].lower(), q["spoken"]):
+                if not q.get("retired") or q["code"] == keep:
+                    return q["code"]
+        if keep and t == keep.lower():
+            return keep                                  # (a code the list no longer has: as the record says it)
+        live = ", ".join(q["short"] for q in self.location_qualifiers if not q.get("retired"))
+        raise ValueError(f"location qualifier: one of {live} (not {str(text)[:20]!r})")
+
+    def qualified(self, code: str, text: str, form: str = "short") -> str:
+        """'IFO', '12 Sample St' -> 'IFO 12 Sample St' (form: short | name | spoken); the text alone without one. A code
+        the list no longer has is shown as it is."""
+        q = self.qualifier(code)
+        word = (q[form] if q else code) if code else ""
+        return " ".join(x for x in (word, (text or "").strip()) if x)
+
+    def split_qualifier(self, text: str) -> tuple[str, str]:
+        """An address typed with a qualifier in front ("IFO 12 Sample St", "across from 40 Example Ave") -> (its code, the
+        address); ('', text) without one (an active one only, by its name, spoken form, short form or code; never the
+        whole text). A one-word form only before a house number or an "@" place: "Side Hill Rd", "Near Rd" and "Cor
+        Jesu Dr" are streets."""
+        t = (text or "").strip()
+        forms = sorted({(f, q["code"]) for q in self.location_qualifiers if not q.get("retired")
+                        for f in (q["name"], q["spoken"], q["short"], q["code"])}, key=lambda x: -len(x[0]))
+        for f, code in forms:
+            m = re.match(rf"{re.escape(f)}(?=[\s,:]|$)[\s,:]*", t, re.I)
+            rest = t[m.end():].strip() if m else ""
+            if rest and (" " in f.strip() or re.match(r"[\d@]", rest)):
+                return code, rest
+        return "", t
+
+    def qualifier_phrases(self) -> dict[str, str]:
+        """The active ones as said -> code ("across from" -> "ACROSS"): what a page's transcript is read for
+        (sizeup/dispatch.py parse)."""
+        return {q["spoken"]: q["code"] for q in self.location_qualifiers if not q.get("retired")}
 
     # -- types ------------------------------------------------------------------------------------
 
@@ -535,6 +603,7 @@ class Lists:
                 "status_flow": {k: list(v) for k, v in self.status_flow.items()},
                 "free_status": self.status_for("free"),
                 "type_subtypes_partial": self.type_subtypes_partial,
+                "location_qualifiers": [dict(q) for q in self.location_qualifiers],
                 "source": _shown_path(self.path)}
 
 
@@ -627,6 +696,7 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                          for x in _items(d, "dispositions", where, LONG_CODE))
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
+    quals = _qualifiers(d, where)
     type_codes, sub_codes = {t["code"] for t in types}, {s["code"] for s in subtypes}
     for x in types + subtypes + dispositions + received + statuses:
         if "confirm" in x and not isinstance(x["confirm"], str):
@@ -853,7 +923,34 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
                  free_status=free_status, release_on_close=release, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
-                 unit_placeholders=ph, path=str(path))
+                 unit_placeholders=ph, location_qualifiers=quals, path=str(path))
+
+
+def _qualifiers(d: dict, where: str) -> tuple[dict, ...]:
+    """location_qualifiers checked: a code, a name, a short form (the text) and a spoken form (words, lower case), each
+    short form and spoken form once. Not in the file: DEFAULT_QUALIFIERS."""
+    if d.get("location_qualifiers") is None:
+        d = {"location_qualifiers": [dict(q) for q in DEFAULT_QUALIFIERS]}
+    out = _items(d, "location_qualifiers", where, CODE, ("short", "spoken"))
+    seen: dict[str, set] = {"short": set(), "spoken": set()}
+    forms: dict[str, str] = {}                     # every form, any case -> its item: one meaning each
+    for i, q in enumerate(out):
+        w = f"{where}: location_qualifiers[{i}]"
+        short, spoken = q.get("short"), q.get("spoken")
+        if not isinstance(short, str) or not QUAL_SHORT.fullmatch(short.strip()):
+            raise ListsError(f"{w}.short: up to {QUAL_SHORT_MAX} letters, digits, / & . - (\"IFO\")")
+        if not isinstance(spoken, str) or not QUAL_SPOKEN.fullmatch(" ".join(spoken.split()).lower()):
+            raise ListsError(f"{w}.spoken: up to {QUAL_SPOKEN_MAX} letters, as said (\"in front of\")")
+        q["short"], q["spoken"] = short.strip(), " ".join(spoken.split()).lower()
+        for k in ("short", "spoken"):
+            if q[k].lower() in seen[k]:
+                raise ListsError(f"{w}.{k}: {q[k]!r} twice")
+            seen[k].add(q[k].lower())
+        for k in ("code", "name", "short", "spoken"):
+            other = forms.setdefault(q[k].lower(), q["code"])
+            if other != q["code"]:
+                raise ListsError(f"{w}.{k}: {q[k]!r} is {other}'s already")
+    return out
 
 
 def _agency_sets(v, statuses: tuple[dict, ...], board_ids: set[str], where: str) -> dict:

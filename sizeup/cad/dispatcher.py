@@ -149,7 +149,9 @@ def join_and(names: list[str]) -> str:
     return names[0] if len(names) == 1 else (", ".join(names[:-1]) + " and " + names[-1] if names else "")
 
 
-def where(incident: dict) -> str:
+def where(incident: dict, qualifier: str = "") -> str:
+    """The location as said. qualifier: where at it, as said ("in front of": the location_qualifiers list's spoken form),
+    in front of the address."""
     # a named place (#204): "40 Example Rd @ Sample Market" is said "40 Example Road, Sample Market"
     address = incident.get("address") or ""
     w = spoken_street(re.sub(r"\s*@\s*", ", ", address).strip(" ,"))
@@ -158,7 +160,7 @@ def where(incident: dict) -> str:
     named = [c.strip().lower() for c in re.split(r"\s+and\s+|\s*[/&]\s*", cross) if c.strip()]
     if w and cross and not (len(named) >= 2 and all(c in address.lower() for c in named)):
         w += f", cross of {spoken_street(cross)}"
-    return w
+    return f"{qualifier.strip()} {w}" if w and qualifier and qualifier.strip() else w
 
 
 def bare(phrase: str) -> str:
@@ -207,7 +209,8 @@ def tone_plan(departments: list[tuple[str, list | None]], home: str, home_tones)
 
 def compose(kind: str, *, department: str, incident: dict, units: list[str], phrase: str = "",
             at: float | None = None, full: bool = False, already: list[tuple[str, list[str]]] = (),
-            info: str = "", new_phrase: str = "", wording: dict | None = None, remarks: str = "") -> str:
+            info: str = "", new_phrase: str = "", wording: dict | None = None, remarks: str = "",
+            qualifier: str = "") -> str:
     """The written dispatch (what the chronology shows and, through speech(), what is said).
 
     kind      new | add_on (units added to an event that already had a dispatch) | upgrade
@@ -218,14 +221,18 @@ def compose(kind: str, *, department: str, incident: dict, units: list[str], phr
     new_phrase upgrade: the new type as spoken, when the type changed ("a structure fire")
     remarks   the dispatcher's remarks ("two vehicles, one on its side"): "Reported: ...", before the time out
     department the lead-in (lead_in(): "Port Chester and Rye Brook Fire" when theirs go too)
+    qualifier where at the location, as said ("in front of"): "respond, in front of 12 Sample Street" (never "respond
+              to in front of ...")
     """
     w = dict(WORDING, **(wording or {}))
     at = at if at is not None else datetime.now(TZ).timestamp()
     phrase = phrase or "a call for service"
-    loc = where(incident)
+    loc = where(incident, qualifier)
     fr = w["full_response"]
     if kind == "new":
         tpl = w["new"] if loc else w["new_no_location"]
+        if loc and qualifier and qualifier.strip():
+            tpl = re.sub(r"\bto(\s+\{location\})", r",\1", tpl, count=1)     # "respond, in front of ..."
         units_text = fr if full else ", ".join(u for u in units if u)
     elif kind == "add_on":
         tpl, units_text = w["add_on"], fr if full else join_and(units)

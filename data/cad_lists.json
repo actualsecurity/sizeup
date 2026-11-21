@@ -201,6 +201,17 @@
     {"code": "PD", "name": "PD"},
     {"code": "OTHER", "name": "Other"}
   ],
+  "_location_qualifiers": "Where at the location (Location: [qualifier] [address]): name as the console offers it, short as the text shows it (IFO 12 Sample St), spoken as the dispatch voice says it and as pages are heard. Never moves a point.",
+  "location_qualifiers": [
+    {"code": "IFO", "name": "In front of", "short": "IFO", "spoken": "in front of"},
+    {"code": "ACROSS", "name": "Across from", "short": "ACROSS", "spoken": "across from"},
+    {"code": "REAR", "name": "Rear of", "short": "REAR", "spoken": "rear of"},
+    {"code": "CORNER", "name": "Corner of", "short": "COR", "spoken": "corner of"},
+    {"code": "OPP", "name": "Opposite", "short": "OPP", "spoken": "opposite"},
+    {"code": "NEAR", "name": "Near", "short": "NR", "spoken": "near"},
+    {"code": "SIDE", "name": "Side of", "short": "SIDE", "spoken": "side of"},
+    {"code": "BETWEEN", "name": "Between", "short": "BTWN", "spoken": "between"}
+  ],
   "_event_class": [
     "Emergency (Pending events, then Active events once units go: run card, dispatch) or non-emergency",
     "(Non-emergency events: notifications, road closures, hydrants; logged and tracked, no dispatch).",

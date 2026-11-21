@@ -68,6 +68,7 @@
  "tests/test_intel_listen.py": 0.6,
  "tests/test_intel_replay.py": 1.7,
  "tests/test_livetap.py": 1.0,
+ "tests/test_location_qualifiers.py": 3.0,
  "tests/test_map_layers.py": 2.3,
  "tests/test_me_prefs.py": 4.8,
  "tests/test_notify.py": 4.0,

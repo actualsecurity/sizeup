@@ -82,7 +82,25 @@ window.Hydrants = (() => {
     const cls = h.cls ? `${h.cls}${h.gpm != null ? ` ${h.gpm} gpm` : ""}` : "";
     return [h.number || "?", cls, SHORT[h.status] || "", h.dist_m != null ? fmtDist(h.dist_m) : ""].filter(Boolean).join(" · ");
   }
-  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, flowCheck, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
+  // the "@words" being typed at the caret of the Location box (the comment box's rule, cad.js placeTokenAt): {text, start, end}
+  function atToken(value, pos, taken = []) {
+    const before = value.slice(0, pos), at = before.lastIndexOf("@");
+    if (at < 0 || (at > 0 && !/\s/.test(before[at - 1]))) return null;
+    const text = before.slice(at + 1);
+    if (!text.trim() || /^\s/.test(text) || text.length > 60 || /[@\n]/.test(text)) return null;
+    if (taken.some((p) => text.toLowerCase().startsWith(p.label.toLowerCase()))) return null;
+    return { text, start: at, end: pos };
+  }
+  // a picked place into the text: "IFO @sam" -> "IFO @Sample Market ", and the refs still named in it
+  function takeAt(value, tok, p, places) {
+    const after = value.slice(tok.end).replace(/^[A-Za-z0-9.-]*/, "");
+    const lead = value.slice(0, tok.start) + "@" + p.label + (after.startsWith(" ") ? "" : " ");
+    const ref = { label: p.label, lat: p.lat, lon: p.lon, kind: p.kind || "place", sub: p.sub || "", source: p.source || "" };
+    const next = [...places.filter((x) => x.label !== p.label), ref];
+    return { value: lead + after, caret: lead.length, places: next };
+  }
+  const named = (text, places) => places.filter((p) => text.toLowerCase().includes(`@${p.label.toLowerCase()}`));
+  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, flowCheck, atToken, takeAt, named, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
   if (typeof document === "undefined") return api_;
 
   // ---- the marks: the county sprite's hydrant in each class's colour --------------------------------------------------
@@ -159,7 +177,38 @@ window.Hydrants = (() => {
   const when = (t) => (t ? new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "");
   const st = { seq: 0, move: null, gen: null };
 
-  function lines(h) {
+  // the Location text with each picked "@place" a chip: a click shows that place on this map (never the hydrant moved)
+  function locationEl(h, gm) {
+    const box = el("div", "hy-loc");
+    if (h.location_qualifier && typeof qualText === "function") {   // "IFO": where at it (its name on hover)
+      const q = el("span", "hy-qual", qualText(h.location_qualifier, ""));
+      q.title = qualTitle(h.location_qualifier, "");
+      box.append(q, " ");
+    }
+    const ps = named(h.location, h.location_places || []).sort((a, b) => b.label.length - a.label.length);
+    let rest = h.location;
+    while (rest) {
+      let best = null;
+      for (const p of ps) {
+        const i = rest.toLowerCase().indexOf(`@${p.label.toLowerCase()}`);
+        if (i >= 0 && (!best || i < best.i)) best = { i, p };
+      }
+      if (!best) { box.append(rest); break; }
+      if (best.i) box.append(rest.slice(0, best.i));
+      const b = el("button", "chip place-tag");
+      b.type = "button";
+      if (window.Icon) b.append(Icon("locate"));
+      b.append(best.p.label);
+      b.title = `${best.p.label}${best.p.sub ? `, ${best.p.sub}` : ""}: show it on the map`;
+      const p = best.p;
+      b.addEventListener("click", (e) => { e.stopPropagation(); if (gm) gm.map.easeTo({ center: [p.lon, p.lat], zoom: Math.max(gm.map.getZoom(), 18), duration: 400 }); });
+      box.append(b);
+      rest = rest.slice(best.i + best.p.label.length + 1);
+    }
+    return box;
+  }
+
+  function lines(h, gm) {
     const out = [];
     const cl = el("div", "hy-line");
     cl.append(mark(h.cls, h.status));
@@ -178,8 +227,8 @@ window.Hydrants = (() => {
       if (dates.length) s.append(el("span", "dim", ` · ${dates.join(" · ")}`));
       out.push(s);
     }
-    const where = [h.location, h.district].filter(Boolean);           // (the town is the card's subtitle)
-    if (where.length) out.push(where.join(" · "));
+    if (h.location) out.push(locationEl(h, gm));                       // "IFO @Sample Market": a chip per place
+    if (h.district) out.push(h.district);                              // (the town is the card's subtitle)
     const kit = [h.thread ? THREADS[h.thread] || h.thread : "", h.outlets, h.main_in ? `${h.main_in}" main` : ""].filter(Boolean);
     if (kit.length) out.push(kit.join(" · "));
     const own = [h.owner ? OWNERS[h.owner] || h.owner : "", h.asset_id ? `Asset ${h.asset_id}` : "", h.body_color ? `${h.body_color} body` : ""].filter(Boolean);
@@ -206,7 +255,7 @@ window.Hydrants = (() => {
     const quick = { key, number: props._no || props.HYD_NUMBER || "", cls: props._cls || null, gpm: props._gpm ?? null,
                     status: props._st || "unknown", missing: !!props._miss, hub: !!props._hub, district: props.FIRENAME || "" };
     const draw = (h, more) => {
-      const ls = lines(h);
+      const ls = lines(h, gm);
       if (more) ls.push(...more);
       gm.control.close();
       gm.control.showInfo(`Hydrant ${h.number || "?"}`, h.town || (h.hub ? "Added here" : ""), ls,
@@ -279,6 +328,95 @@ window.Hydrants = (() => {
                  outlets: "e.g. 2x2.5, 1x4.5", number: "Empty: the county's", nfpa_class: "Empty: from the flow (NFPA 291)",
                  location: "Street, side, landmark", status_until: "Expected back in service" };
 
+  // The Location box: "@" finds a common place, a business or an address (GET /api/cad/places, nearest the hydrant first:
+  // the comment box's search); a picked one is written "@<label>" and kept with the text as a reference. Never the
+  // hydrant's point. Empty: the nearest address or place as the placeholder, "Use" fills it in.
+  function locationBox(lab, inp, h, at) {
+    const wrap = el("div", "hy-locbox");
+    // [qualifier ▾] in front (Settings > Lists > Location qualifiers): "IFO" + "@Sample Market"; typed "IFO " goes in it
+    const qs = typeof qualSelect === "function" ? qualSelect(el("select", "loc-qual"), h.location_qualifier || "") : null;
+    if (qs) {
+      qs.setAttribute("aria-label", "Where at the location");
+      qs.title = "Where at the location";
+      inp.hyQual = qs;
+      qualTyped(inp, qs);
+      wrap.append(qs);
+    }
+    const list = el("ol", "sugg note-sugg");
+    list.hidden = true;
+    list.setAttribute("role", "listbox");
+    inp.setAttribute("role", "combobox");
+    inp.setAttribute("aria-autocomplete", "list");
+    const pt = at ? [at[1], at[0]] : h.lat != null ? [h.lat, h.lon] : null;
+    const L = { places: [...(h.location_places || [])], items: [], idx: 0, tok: null, seq: 0, timer: null };
+    inp.hyPlaces = () => named(inp.value, L.places);
+    const close = () => { L.items = []; list.hidden = true; inp.setAttribute("aria-expanded", "false"); };
+    const take = (p) => {
+      const t = takeAt(inp.value, L.tok, p, L.places);
+      inp.value = t.value;
+      L.places = t.places;
+      inp.setSelectionRange(t.caret, t.caret);
+      close();
+    };
+    const draw = () => {
+      if (!L.items.length) return close();
+      list.replaceChildren(...L.items.map((p, i) => {
+        const li = el("li", i === L.idx ? "on" : "");
+        li.setAttribute("role", "option");
+        li.append(...(typeof suggestionHead === "function" ? suggestionHead(p) : [el("b", "", p.label)]));
+        if (p.sub) li.append(el("span", "town", p.sub));
+        li.addEventListener("mousedown", (e) => { e.preventDefault(); take(p); });
+        return li;
+      }), el("li", "hint dim small", "Tab take · Esc close"));
+      list.hidden = false;
+      inp.setAttribute("aria-expanded", "true");
+    };
+    inp.addEventListener("input", () => {
+      L.tok = atToken(inp.value, inp.selectionStart ?? inp.value.length, named(inp.value, L.places));
+      clearTimeout(L.timer);
+      if (!L.tok || L.tok.text.trim().length < 2) return close();
+      const q = L.tok.text.trim(), my = ++L.seq;
+      L.timer = setTimeout(async () => {
+        try {
+          const r = await api("GET", `/api/cad/places?q=${encodeURIComponent(q)}&limit=6${pt ? `&near=${pt[0]},${pt[1]}` : ""}`);
+          if (my !== L.seq) return;
+          L.items = (r.places || []).filter((p) => p.lat != null && p.lon != null);
+          L.idx = 0;
+          draw();
+        } catch (_) { close(); }
+      }, 180);
+    });
+    inp.addEventListener("keydown", (e) => {
+      if (!L.items.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); L.idx = (L.idx + (e.key === "ArrowDown" ? 1 : -1) + L.items.length) % L.items.length; draw(); }
+      else if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); take(L.items[L.idx]); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    inp.addEventListener("blur", () => setTimeout(close, 150));
+    wrap.append(inp, list);
+    if (!inp.value && pt) {                    // the nearest address or place: a suggestion only
+      api("GET", `/api/cad/geocode/here?lat=${pt[0]}&lon=${pt[1]}`).then((d) => {
+        const p = (d && (d.address || d.place)) || null;
+        if (!p || !p.label || inp.value) return;
+        inp.placeholder = `near ${p.label}`;
+        const use = el("button", "sm quiet", "Use");
+        use.type = "button";
+        use.title = `Fill in "near @${p.label}"`;
+        use.addEventListener("click", () => {
+          const near = qs && [...qs.options].some((o) => o.value === "NEAR") && !qs.value;   // the list's Near, else the words
+          if (near) qs.value = "NEAR";
+          inp.value = near ? "" : "near ";
+          L.tok = { text: "", start: inp.value.length, end: inp.value.length };
+          take({ ...p, lat: p.lat, lon: p.lon });
+          use.remove();
+        });
+        wrap.append(use);
+      }).catch(() => { /* no geocoder here: no suggestion */ });
+    }
+    lab.append(wrap);
+    return inp;
+  }
+
   // h: a hydrant ({key, ...}); at: [lon, lat] for a new one (no key)
   function editor(h, at) {
     const isNew = !h || !h.key;
@@ -319,7 +457,8 @@ window.Hydrants = (() => {
       if (k === "number" && !isNew && !h.hub && !(h.number && h.number !== h.county_number)) inp.value = "";
       if (k === "number" && !h.hub) inp.placeholder = h.county_number || "";
       if (TIPS[k]) lab.title = TIPS[k];
-      lab.append(inp);
+      if (k === "location") locationBox(lab, inp, h, at);
+      else lab.append(inp);
       inputs[k] = inp;
       form.append(lab);
     }
@@ -377,6 +516,11 @@ window.Hydrants = (() => {
         setText(err, "Expected back is before Since"); return;
       }
       const body = { operator: operator() };
+      const q = inputs.location.hyQual ? inputs.location.hyQual.value : (h.location_qualifier || "");
+      if (q !== (h.location_qualifier || "")) body.location_qualifier = q;           // never the hydrant's point
+      const lp = inputs.location.hyPlaces ? inputs.location.hyPlaces() : [];
+      if (JSON.stringify(lp) !== JSON.stringify(named(inputs.location.value, h.location_places || []))
+          || inputs.location.value.trim() !== (h.location || "")) body.location_places = lp;
       for (const [k, , kind] of FORM) {
         const v = inputs[k].value.trim();
         const was = h[k] === null || h[k] === undefined ? (k === "status" ? "unknown" : "") : String(h[k]);
@@ -602,7 +746,7 @@ window.Hydrants = (() => {
         if (h.removed) no.append(el("span", "chip", "removed"));
         tr.append(no, el("td", "", h.town || ""), el("td", DOWN.includes(h.status) ? "err" : h.status === "restricted" ? "warn" : "",
           h.status === "unknown" ? "" : STATUS[h.status] + (h.status_reason ? `: ${h.status_reason}` : "")),
-          el("td", "", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : ""), el("td", "", h.location || ""),
+          el("td", "", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : ""), el("td", "", typeof qualText === "function" ? qualText(h.location_qualifier, h.location) : h.location || ""),
           el("td", "mono", h.asset_id || ""), el("td", "dim small", h.by ? `${h.by} ${when(h.updated_at)}` : ""));
         tr.title = `${h.key}${h.district ? ` · ${h.district}` : ""}`;
         const open = () => editor(h);

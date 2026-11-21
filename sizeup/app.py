@@ -2347,7 +2347,9 @@ class App:
                 self.live.fm_open(label, since)
 
     def _dispatch(self, raw: str):
-        d = parse(raw, self.cfg.unit_departments) if raw else None
+        cad = getattr(self, "cad", None)              # the location qualifiers as said (Settings > Lists): the CAD's
+        quals = cad.lists.qualifier_phrases() if cad is not None and getattr(cad, "lists", None) is not None else None
+        d = parse(raw, self.cfg.unit_departments, quals) if raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
             # "Engine 6158": Engine 61 and Engine 58 run together, split when the roster has both
             d.units = split_joined(d.units, self.cfg.unit_departments)

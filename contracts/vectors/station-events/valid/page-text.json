@@ -40,6 +40,7 @@
           "units": ["Engine 5"],
           "numbers": [],
           "location": "12 example avenue",
+          "qualifier": "",
           "cross_street": "sample road",
           "time_out": ""
         },
