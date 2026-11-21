@@ -111,8 +111,18 @@
   .aa-snip.ctx { color: var(--text-2); }
   .aa-t { flex: none; color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .aa-q { min-inline-size: 0; overflow-wrap: anywhere; }
-  .aa-btns { display: flex; gap: var(--s-1); justify-content: flex-end; align-items: center; }
+  /* a pre-alert card's actions: More info (a quiet link) at the start, the actions (icon buttons, Accept) at the end;
+     nothing shrinks under its content, so a narrow column (220 px) wraps the row rather than cutting a button short */
+  .aa-btns { display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: flex-end; align-items: center; }
+  .aa-btns > * { flex: none; }
+  .aa-btns > .aa-ack { flex: 0 1 auto; min-inline-size: 0; overflow-wrap: anywhere; }
+  .aa-acts { display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: flex-end; margin-inline-start: auto; }
+  .aa-btns > .aa-acts { flex: 0 1 auto; min-inline-size: 0; }
+  .aa-acts > * { flex: none; }
   .aa-ack { color: var(--text-2); font-size: var(--fs-xs); margin-right: auto; }
+  /* the phone pre-alert's ×: its whole size (the words before it give way), in the button's colour, not the bell's */
+  .pa > .pa-dismiss { flex: none; }
+  .pa > .pa-dismiss .ico { color: inherit; }
   /* an aircraft emergency's pre-alert (#235, ADS-B): its details and its alarm's state */
   .aa.aa-drill { border-color: var(--info); background: color-mix(in srgb, var(--info) 10%, var(--raised)); animation: none; }
   .aa-alarm { color: var(--warn); font-size: var(--fs-xs); line-height: var(--lh-xs); }
@@ -885,7 +895,7 @@
   .pi-inc { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; }
   .pi-level.high { color: var(--accent-text); }
   .pi-level.medium { color: var(--warn); }
-  .aa-more { margin-right: auto; }
+  .aa-more { margin-right: auto; padding-inline: var(--s-0); }      /* a quiet link: its words, little padding */
   @media (max-width: 1100px) { .pi-grid { grid-template-columns: minmax(0, 1fr); } }
 
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */

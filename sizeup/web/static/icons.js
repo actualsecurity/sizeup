@@ -2,6 +2,8 @@
 //
 //   Icon("bell")               <svg class="ico"><use href="/static/icons.svg#i-bell"></svg>, aria-hidden
 //   Icon.play(button, state)   a play button's face: "play", "stop" or "none" (no recording: a dash)
+//   Icon.button("x", "Dismiss", "off the list")   a small square icon button, named (aria-label), hovered
+//                                                  "Dismiss: off the list"
 "use strict";
 
 // The sprite's address as the page names it: /static/icons.svg?v=<its version> (the hub versions what a page
@@ -28,6 +30,17 @@ window.Icon = (() => {
     b.setAttribute("aria-label", LABEL[state] || state);
     if (state === "none") b.replaceChildren("–");
     else b.replaceChildren(Icon(state));
+    return b;
+  };
+  // a card's small square action (the 60 Control column's pre-alert cards): its icon, its name for a screen
+  // reader (aria-label), "Name: what it does" on hover; a narrow column never cuts it short as it would a word
+  Icon.button = (icon, name, title, cls = "") => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `mini icon${cls ? ` ${cls}` : ""}`;
+    b.setAttribute("aria-label", name);
+    b.title = `${name}: ${title}`;
+    b.append(Icon(icon));
     return b;
   };
   return Icon;
