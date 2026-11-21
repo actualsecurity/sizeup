@@ -115,6 +115,9 @@ QUAL_SPOKEN = re.compile(r"[a-z][a-z' ]{0,39}")                      # "in front
 SYSTEM_DISPOSITIONS = ("EXPIRED",)
 
 
+NOTIFICATION = "NOTIF"                    # the Notification type's code (Settings > Lists)
+
+
 class ListsError(ValueError):
     """The data file is missing, not JSON, or inconsistent."""
 
@@ -313,6 +316,11 @@ class Lists:
         if not typ:
             return "a call for service"
         return generic(self.type_label(typ, subtype).replace(" / ", ", ").lower())
+
+    def is_notification(self, typ: str) -> bool:
+        """The Notification type (NOTIF) and so its every subtype (a drill moved under it): 60 Control automation never
+        dispatches to one that is non-emergency (automode._notif_held); other non-emergency events keep the feed's units."""
+        return typ == NOTIFICATION
 
     def is_emergency(self, typ: str, subtype: str = "") -> bool:
         """TYPE/SUBTYPE, then */SUBTYPE, then TYPE; not listed = emergency."""
