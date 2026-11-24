@@ -111,7 +111,7 @@ from sizeup import fence as fence_mod
 from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.radios import OTHER_P25, SYSTEMS as RADIO_SYSTEMS, fm_system
+from sizeup.cad.radios import OTHER_P25, fm_system
 from sizeup.audiostore import STT_SRC
 from sizeup.cloud import client as wire, statusshape, sttinput
 from sizeup.cloud.autoupdate import describe
@@ -1298,7 +1298,7 @@ class HubApp(App):
         elif kind in SOURCE_KINDS:                     # an external incident source on the station (#297)
             self.apply_source(kind, d)
         elif kind == "heard":
-            if d.get("system") in RADIO_SYSTEMS:      # (another P25 system's too: "mrrs", heard rows only)
+            if d.get("system") in ("mdc", "p25", "fleetsync", "mrrs"):     # (MRRS: heard rows, never a rig)
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
                                   str(d.get("channel") or ""))
         elif kind == "activity":                      # key-ups on an encrypted talkgroup (#409): counted, never rows

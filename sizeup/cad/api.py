@@ -493,7 +493,8 @@ WRITES = (
                                                                             # engine per channel, the AWS vocabulary + limit
     (SETTINGS, "admin"),                                                    # lists, units, dispatch, users, import ...
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
-    (re.compile(r"/api/cad/radios(?:/range)?(?:/delete)?"), "admin"),      # the radio-ID registry (and its ranges)
+    (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
+    (re.compile(r"/api/cad/radios/range(?:/delete)?"), "admin"),           # ... another system's ID ranges (MRRS)
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
