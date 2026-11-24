@@ -328,6 +328,8 @@ POST /api/cad/settings/datasources        {action: set, key, value: off | hourly
                                           reset, key?}: how often a data source is refreshed; admins
 POST /api/cad/settings/atc                {action: set {key: identify | map | vocab, value: true | false} | reset {key}}: who is
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
+POST /api/cad/settings/hydrant_display    {action: set {key: assume_c, value: true | false} | reset {key}}: untested hydrants
+                                          drawn as an assumed Class C, marked "C*" (#840, sizeup/cad/hydrants.py); admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,

@@ -227,7 +227,8 @@ def rated_gpm(flow, static, residual) -> int | None:
 
 
 def class_of(gpm) -> str | None:
-    """NFPA 291's class for a rated capacity (GPM); None without one (never C: red means under 500 GPM)."""
+    """NFPA 291's class for a rated capacity (GPM); None without one (untested: drawn as an assumed C*, marked so, while
+    Settings > Hydrants says so; never a tested C)."""
     if gpm is None:
         return None
     return next(c for c, lo, _ in CLASSES if gpm >= lo)
@@ -324,11 +325,14 @@ def _phrase(text: str, p: str) -> tuple[bool, str]:
     return (True, (text[:m.start()] + " " + text[m.end():]).strip()) if m else (False, text)
 
 
-def search_query(q: str, towns=()) -> dict:
+def search_query(q: str, towns=(), plain: bool = False) -> dict:
     """A search's text -> {status: (statuses) | None, cls, assumed (True: "C*" only), untested, town, words, filters (as
     understood, for the page)}. "oos sampletown", "class c", "AA", "c*", "untested", "9001", "sample st"."""
     text = " ".join(str(q or "").lower().replace(",", " ").split())[:120]
     f = {"status": None, "cls": None, "assumed": False, "untested": False, "town": "", "words": [], "filters": []}
+    if plain:                                            # every word a word (the filters found nothing)
+        f["words"] = [w for w in (w.lstrip("#") for w in text.split() if w not in NOISE) if w]
+        return f
     for p, st in STATUS_WORDS:
         hit, text = _phrase(text, p)
         if hit and f["status"] is None:
@@ -345,7 +349,7 @@ def search_query(q: str, towns=()) -> dict:
     m = CLASS_RE.search(text)
     if m:
         c = (m.group(1) or m.group(3) or m.group(4)).upper()
-        f["cls"], f["assumed"] = c, f["assumed"] or bool(m.group(2) or m.group(3))
+        f["cls"], f["assumed"] = c, (f["assumed"] or bool(m.group(2) or m.group(3))) and c == ASSUMED   # ("b*": class B)
         text = (text[:m.start()] + " " + text[m.end():]).strip()
     for t in towns:                                      # the longest name first ("north sampletown" first)
         hit, text = _phrase(text, t.lower())
@@ -827,7 +831,15 @@ class Hydrants:
         """The hydrants a search names (search_query): {rows, total, filters}. exact: only a number or an asset id typed
         whole (the "@" search's fallback after the places). near (lat, lon): the nearer first among equals."""
         table = self._table()
-        f = search_query(q, sorted({t["town"] for t in table} - {""}, key=len, reverse=True))
+        towns = sorted({t["town"] for t in table} - {""}, key=len, reverse=True)
+        out = self._search(table, search_query(q, towns), limit, near, exact)
+        if not out["total"] and out["filters"] and not exact:       # "dry brook rd", "aa st": the words as written
+            plain = self._search(table, search_query(q, towns, plain=True), limit, near, exact)
+            if plain["total"]:
+                return plain
+        return out
+
+    def _search(self, table: list[dict], f: dict, limit: int, near, exact: bool) -> dict:
         if exact and (len(f["words"]) != 1 or f["filters"]):
             return {"rows": [], "total": 0, "filters": f["filters"]}
         if not f["words"] and not f["filters"]:
@@ -846,8 +858,9 @@ class Hydrants:
             else:
                 it = t["it"]
                 d = metres(near[0], near[1], it["lat"], it["lon"]) if near else 0.0
-                hits.append((-score, not t["tested"], d, order.get(t["town_l"], len(order)), t["town"],
-                             _num_key(it["number"]), it["key"], t))
+                # near a call (the "@" search): the nearer first; else (Search) the tested first
+                first = (d, not t["tested"]) if near else (not t["tested"], d)
+                hits.append((-score, *first, order.get(t["town_l"], len(order)), t["town"], _num_key(it["number"]), it["key"], t))
         hits.sort(key=lambda h: h[:7])
         limit = max(1, min(int(limit), SEARCH_MAX))
         return {"rows": [self._found(h[-1]) for h in hits[:limit]], "total": len(hits), "filters": f["filters"]}

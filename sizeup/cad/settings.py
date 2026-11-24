@@ -1274,6 +1274,8 @@ class Editor:
                 raise CadError(f"{key}: true or false")
         else:
             raise CadError("action: set or reset")
+        if v == cur:                                     # as it is: nothing written, nothing audited
+            return {"ok": True, HYD_SECTION: {key: v}}
         out = self._commit([(HYD_SECTION, key, REMOVE if v is True else v)], op,
                            [("system", f"{HYD_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, HYD_SECTION: {key: v}}

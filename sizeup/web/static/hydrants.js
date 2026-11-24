@@ -682,23 +682,37 @@ window.Hydrants = (() => {
 
   // ---- Show on map (#840): the large map on one hydrant, its card open, the layer on for that view ------------------------
   // a hydrant on a map already on screen (the call's): centred, its card (h: a row, a place: key, number, cls ...)
-  function focusOn(gm, h) {
-    gm.map.easeTo({ center: [h.lon, h.lat], zoom: Math.max(gm.map.getZoom(), 17.5), duration: 400 });
-    const x = h.hydrant || h;                                           // an "@" place: its hydrant's facts
+  async function focusOn(gm, h) {
+    let got = null, x = h.hydrant || h;                                // an "@" suggestion: its hydrant's facts
+    if (x.number === undefined) {                                       // a note's saved place: the key only; where it is now
+      try { got = await api("GET", `/api/cad/hydrants/${encodeURIComponent(h.key)}`); x = got.hydrant; }
+      catch (e) { UI.toast(`Hydrant: ${e.message}`, "err"); return; }
+    }
+    const at = got ? [x.lon, x.lat] : [h.lon, h.lat];
+    gm.map.easeTo({ center: at, zoom: Math.max(gm.map.getZoom(), 17.5), duration: 400 });
     showCard(gm, { _k: h.key, _no: x.number, _cls: x.cls || undefined, _asm: x.cls ? undefined : x.cls_assumed || undefined,
-                   _gpm: x.gpm, _st: x.status && x.status !== "unknown" ? x.status : undefined });
+                   _gpm: x.gpm, _st: x.status && x.status !== "unknown" ? x.status : undefined }, got);
   }
-  const R = { key: null, pushed: false, closing: false, seq: 0, ring: null, gm: null };
+  // refocus: the key whose button is focused again once its list is drawn again after the map closes (keyboard users)
+  const R = { key: null, closing: false, seq: 0, ring: null, gm: null, booted: false, refocus: null };
   function showOnMap(key) {
     if (!key) return;
     if (location.hash === routeOf(key)) { route(); return; }
-    R.pushed = true;                                                    // closing it: Back to where this was
+    R.refocus = null;
     location.hash = routeOf(key);
+    history.replaceState({ hyMap: key }, "", location.href);           // ours: closing it is Back (kept on Back / Forward)
+  }
+  function refocus(root) {
+    const k = R.refocus;
+    if (!k || !root) return;
+    const b = [...root.querySelectorAll("button.hy-map")].find((x) => x.dataset.key === k);
+    if (b) { R.refocus = null; b.focus({ preventScroll: false }); }
   }
   // the button: "Show on map" (Settings, search); compact: an icon (a call's list)
   function mapBtn(h, compact) {
     const b = el("button", compact ? "icon quiet sm hy-map" : "sm hy-map ro-ok");
     b.type = "button";
+    b.dataset.key = h.key;
     if (window.Icon) b.append(Icon("expand"));
     if (!compact) b.append("Show on map");
     const what = `hydrant ${h.number || h.key}`;
@@ -713,11 +727,15 @@ window.Hydrants = (() => {
     if (R.gm) { R.gm.control.force[LAYER_KEY] = false; try { R.gm.control.refresh(); } catch (_) { /* gone */ } R.gm = null; }
   }
   // the large map closed (Esc, Close, the scrim): out of #map/... back where it came from
-  function bigClosed() {
+  // how: {picked: true} a call picked on it (cadmap.js): that call's view next, never Back to a list over it
+  function bigClosed(how) {
     unfocus();
     if (R.closing || !routeKey(location.hash)) return;
+    const key = R.key;
     R.key = null;
-    if (R.pushed) { R.pushed = false; history.back(); return; }
+    R.seq++;                                                           // (a card still loading: dropped)
+    if (how && how.picked) { history.replaceState(null, "", location.pathname + location.search); return; }
+    if (history.state && history.state.hyMap) { R.refocus = key; history.back(); return; }
     history.replaceState(null, "", location.pathname + location.search);
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   }
@@ -725,7 +743,6 @@ window.Hydrants = (() => {
     if (BOARD_()) return;
     const key = routeKey(location.hash);
     if (!key) {
-      R.pushed = false;
       if (R.key) { R.key = null; R.closing = true; try { if (window.CadMap) CadMap.closeBig(); } finally { R.closing = false; } }
       return;
     }
@@ -756,13 +773,16 @@ window.Hydrants = (() => {
   }
   if (!BOARD_()) {
     window.addEventListener("hashchange", route);
-    if (CAD() && cad.hooks) cad.hooks.push(() => { if (!R.key && routeKey(location.hash) && cad.scene) route(); });   // a reload
+    if (CAD() && cad.hooks) cad.hooks.push(() => {                    // a reload on the address: once, with the scene
+      if (R.booted || !cad.scene) return;
+      R.booted = true;
+      if (!R.key && routeKey(location.hash)) route();
+    });
   }
 
   // ---- search (#840): a result's row in the Search view's Hydrants tab (search-view.js) ------------------------------------
   function resultRow(h) {
-    const tr = el("tr", "ev hy-tr");
-    tr.tabIndex = 0;
+    const tr = el("tr", "ev hy-tr");                                   // (the button is its one tab stop)
     const no = el("td", "num");
     no.append(mark(h.cls, h.status, h.cls_assumed), ` ${h.number || "?"}`);
     if (h.hub) no.append(el("span", "chip", "added"));
@@ -783,7 +803,6 @@ window.Hydrants = (() => {
     tr.append(no, el("td", "", h.town || ""), cls, stt, loc, act);
     tr.title = [h.district, h.key].filter(Boolean).join(" · ");
     tr.addEventListener("click", () => showOnMap(h.key));
-    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) showOnMap(h.key); });
     return tr;
   }
 
@@ -820,6 +839,7 @@ window.Hydrants = (() => {
       list.append(li);
     }
     box.replaceChildren(head, list);
+    refocus(box);
   }
 
   // ---- Settings > Hydrants (admins) ---------------------------------------------------------------------------------------
@@ -952,6 +972,7 @@ window.Hydrants = (() => {
     const had = s.host.contains(document.activeElement) && document.activeElement.type === "search";
     s.host.replaceChildren(head, bar, chips, body);
     if (had) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+    else if (d) refocus(s.host);                                       // back from Show on map (#840)
   }
   async function importFile(f) {
     const s = S.list;
@@ -1019,5 +1040,5 @@ window.Hydrants = (() => {
     if (!first && Date.now() - (st.changedAt || 0) > 5000) changed();    // (not again for this page's own write)
   });
 
-  return { ...api_, addImages, legend, show: showCard, card, mount, editor, showOnMap, mapBtn, resultRow, mark, focusOn };
+  return { ...api_, addImages, legend, show: showCard, card, mount, editor, showOnMap, mapBtn, resultRow, mark, focusOn, refocus };
 })();

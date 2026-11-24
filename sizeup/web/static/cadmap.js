@@ -1662,7 +1662,13 @@ window.CadMap = (() => {
       document.body.append(ov);
       ov.hidden = false;
       views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
-                                      onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig, layers: "overview" });
+                                      onPick: (id) => {        // (a Show on map's close told it was a pick, #840)
+                                        const f = views.bigOnClose;
+                                        views.bigOnClose = null;
+                                        closeBig();
+                                        if (f) f({ picked: true });
+                                        selectIncident(id);
+                                      }, onClose: closeBig, layers: "overview" });
     }
     UI.dialog.open(ov, { onClose: () => {                // focus in, Esc / the scrim close (ui.js)
       views.bigOpen = false;

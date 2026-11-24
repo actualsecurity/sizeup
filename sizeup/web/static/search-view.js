@@ -162,7 +162,9 @@ window.SearchView = (() => {
   async function runHydrants() {
     const seq = ++st.seq;
     const q = (st.q.where || "").trim();
-    const h = `#search?${new URLSearchParams({ ...(q ? { where: q } : {}), tab: "hydrants" })}`;
+    const p = params({ ...st.q, where: q }, 0);                       // (the calls' filters kept in the address)
+    p.set("tab", "hydrants");
+    const h = `#search?${p}`;
     if (location.hash !== h) history.replaceState(null, "", h);         // reload, Back from the map: here again
     const body = $("#sv-hy-rows");
     if (!q) { setText($("#sv-count"), ""); body.replaceChildren(row0(WHERE_PH.hydrants, 6)); return; }
@@ -173,6 +175,7 @@ window.SearchView = (() => {
       setText($("#sv-count"), [n ? `${n} hydrant${n === 1 ? "" : "s"}` + (n > d.rows.length ? ` · first ${d.rows.length}` : "") : "None",
                                ...(d.filters || [])].join(" · "));
       body.replaceChildren(...(d.rows.length && window.Hydrants ? d.rows.map((r) => Hydrants.resultRow(r)) : [row0("No hydrants", 6)]));
+      if (window.Hydrants) Hydrants.refocus(body);                    // back from Show on map: its button again
     } catch (e) {
       if (seq !== st.seq) return;
       setText($("#sv-count"), "");
@@ -309,7 +312,7 @@ window.SearchView = (() => {
   $("#sv-where").addEventListener("input", () => {           // hydrants: as typed (one table on the hub, never the layer)
     if (st.tab !== "hydrants") return;
     clearTimeout(st.hyTimer);
-    st.hyTimer = setTimeout(() => { st.q.where = $("#sv-where").value.trim(); runHydrants(); }, 200);
+    st.hyTimer = setTimeout(() => { if (st.tab !== "hydrants") return; st.q.where = $("#sv-where").value.trim(); runHydrants(); }, 200);
   });
   $("#sv-clear").addEventListener("click", () => { for (const k of KEYS) $(INPUT[k]).value = ""; submit(0); });
   $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
