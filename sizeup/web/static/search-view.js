@@ -2,7 +2,9 @@
 // street or place, words in the remarks, comments and transcripts, type, unit, disposition and dates. Newest first, 50
 // at a time (GET /api/cad/search: the first page of each search is in the person's activity), each row opens the call;
 // the page's calls on a map (a pin each, a click opens it); CSV for admins (GET /api/cad/search.csv). Address notes:
-// the premise notes (GET /api/cad/premise), to add, edit, expire and restore (dispatchers and admins).
+// the premise notes (GET /api/cad/premise), to add, edit, expire and restore (dispatchers and admins). Hydrants (#840):
+// the box's words (number, street, asset id, OOS, class C, untested, town) as typed (GET /api/cad/hydrants/search, the
+// first HY_LIMIT), each row's Show on map (hydrants.js); #search?where=...&tab=hydrants.
 //
 // Filters live in the URL hash, like the Radio view's, so Back goes to the last search. Uses cad.js's helpers (el,
 // setText, show, api, operator, L, typeLabel, typeColor, nameOf, canDo, openFromRecords) and addr-history.js's
@@ -13,7 +15,10 @@ window.SearchView = (() => {
   const KEYS = ["where", "text", "type", "unit", "disposition", "from", "to"];
   const INPUT = { where: "#sv-where", text: "#sv-text", type: "#sv-type", unit: "#sv-unit", disposition: "#sv-disp",
                   from: "#sv-from", to: "#sv-to" };
-  const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null };
+  const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null, hyTimer: null };
+  const TABS = ["notes", "preplan", "hydrants"];
+  const HY_LIMIT = 50;
+  const WHERE_PH = { hydrants: "Number, street, asset id, OOS, class C, untested, town" };
   const tz = () => (cad.scene && cad.scene.timezone) || "America/New_York";
   const when = (unix) => (unix ? new Intl.DateTimeFormat("en-US", { timeZone: tz(), year: "2-digit", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(unix * 1000)).replace(",", "") : "");
@@ -47,7 +52,7 @@ window.SearchView = (() => {
     const p = new URLSearchParams(qs || "");
     st.q = Object.fromEntries(KEYS.map((k) => [k, p.get(k) || ""]));
     st.page = Math.max(0, Number(p.get("page")) || 0);
-    st.tab = ["notes", "preplan"].includes(p.get("tab")) ? p.get("tab") : st.tab;
+    st.tab = TABS.includes(p.get("tab")) ? p.get("tab") : st.tab;
     fillLists();
     sizer();
     for (const k of KEYS) {
@@ -72,12 +77,22 @@ window.SearchView = (() => {
     show($("#sv-calls"), name === "calls");
     show($("#sv-notes"), name === "notes");
     show($("#sv-preplan"), name === "preplan");
+    show($("#sv-hydrants"), name === "hydrants");
+    if (name !== "hydrants" && /[?&]tab=hydrants/.test(location.hash)) {       // (the hydrants' own address, #840: left)
+      const p = new URLSearchParams(location.hash.slice("#search".length).replace(/^\?/, ""));
+      p.delete("tab");
+      history.replaceState(null, "", "#search" + (p.toString() ? `?${p}` : ""));
+    }
+    const where = $("#sv-where"), ph = WHERE_PH[name] || "Address, street or place";
+    where.placeholder = ph;
+    where.setAttribute("aria-label", ph);
     for (const id of ["#sv-text", "#sv-type", "#sv-unit", "#sv-disp", "#sv-from-l", "#sv-to-l", "#sv-csv"]) {
       if (name !== "calls") show($(id), false);         // the notes, the pre-plan points: by address only
       else if (id !== "#sv-csv") show($(id), true);
     }
     if (name !== "preplan" && window.Preplan) Preplan.closeSearch();
-    if (name === "calls") run(); else if (name === "notes") runNotes(); else if (window.Preplan) Preplan.search(st.q.where);   // #456
+    if (name === "calls") run(); else if (name === "notes") runNotes(); else if (name === "hydrants") runHydrants();
+    else if (window.Preplan) Preplan.search(st.q.where);   // #456
   }
 
   // ---- calls ----------------------------------------------------------------------------------------------------
@@ -141,6 +156,31 @@ window.SearchView = (() => {
     $("#sv-next").disabled = d.page + 1 >= pages;
     show($("#sv-prev").parentElement, d.total > d.size);
     pins(d.rows);
+  }
+
+  // ---- hydrants (#840): by number, street, asset id, status, class, untested, town -----------------------------------
+  async function runHydrants() {
+    const seq = ++st.seq;
+    const q = (st.q.where || "").trim();
+    const p = params({ ...st.q, where: q }, 0);                       // (the calls' filters kept in the address)
+    p.set("tab", "hydrants");
+    const h = `#search?${p}`;
+    if (location.hash !== h) history.replaceState(null, "", h);         // reload, Back from the map: here again
+    const body = $("#sv-hy-rows");
+    if (!q) { setText($("#sv-count"), ""); body.replaceChildren(row0(WHERE_PH.hydrants, 6)); return; }
+    try {
+      const d = await api("GET", `/api/cad/hydrants/search?q=${encodeURIComponent(q)}&limit=${HY_LIMIT}`);
+      if (seq !== st.seq) return;
+      const n = d.total;
+      setText($("#sv-count"), [n ? `${n} hydrant${n === 1 ? "" : "s"}` + (n > d.rows.length ? ` · first ${d.rows.length}` : "") : "None",
+                               ...(d.filters || [])].join(" · "));
+      body.replaceChildren(...(d.rows.length && window.Hydrants ? d.rows.map((r) => Hydrants.resultRow(r)) : [row0("No hydrants", 6)]));
+      if (window.Hydrants) Hydrants.refocus(body);                    // back from Show on map: its button again
+    } catch (e) {
+      if (seq !== st.seq) return;
+      setText($("#sv-count"), "");
+      body.replaceChildren(row0(`Search failed: ${e.message}`, 6));
+    }
   }
 
   // ---- the map: the page's calls, a pin each -------------------------------------------------------------------
@@ -269,6 +309,11 @@ window.SearchView = (() => {
 
   // ---- wiring ------------------------------------------------------------------------------------------------------
   $("#sv-filters").addEventListener("submit", (e) => { e.preventDefault(); if (st.tab !== "calls") { st.q.where = $("#sv-where").value.trim(); tab(st.tab); } else submit(0); });
+  $("#sv-where").addEventListener("input", () => {           // hydrants: as typed (one table on the hub, never the layer)
+    if (st.tab !== "hydrants") return;
+    clearTimeout(st.hyTimer);
+    st.hyTimer = setTimeout(() => { if (st.tab !== "hydrants") return; st.q.where = $("#sv-where").value.trim(); runHydrants(); }, 200);
+  });
   $("#sv-clear").addEventListener("click", () => { for (const k of KEYS) $(INPUT[k]).value = ""; submit(0); });
   $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
   $("#sv-next").addEventListener("click", () => submit(st.page + 1));

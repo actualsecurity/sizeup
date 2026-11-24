@@ -81,6 +81,8 @@ Reset to default = drop the override (one item, or a whole section).
                                    sizeup/datasources.py); not set: the source's default
     station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
                                    CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
+    hydrant_display                key "assume_c" -> true | false (default true): an untested hydrant drawn as Class C,
+                                   always marked assumed ("C*"; #840, sizeup/cad/hydrants.py; Settings > Hydrants, admins)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -144,6 +146,9 @@ ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show
                                  # #257 (sizeup/atc_vocab.py): the sizeup-atc vocabulary refreshed from the operators seen
                                  "vocab": "Refresh the ATC vocabulary from the traffic"}
 PAGE_SECTION[ATC_SECTION] = "system"
+# How the hydrants are drawn (#840, sizeup/cad/hydrants.py): Settings > Hydrants, audited as System.
+HYD_SECTION, HYD_KEYS = "hydrant_display", {"assume_c": "Untested hydrants: assume Class C"}
+PAGE_SECTION[HYD_SECTION] = "system"
 # A feed's department entries (#370, sizeup/cad/sources.py department_units): key the code as the feed writes it ->
 # the department ("Port Chester FD"), or {"name", "accepts": true} (it accepts a call alone in 60 Control mode). The
 # hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch. Never a board unit's code.
@@ -589,6 +594,10 @@ class Editor:
         self.cad.atc_identify = bool(a.get("identify", True))           # sizeup/atc_talkers.py (#252): on by default
         self.cad.atc_map = bool(a.get("map", True))
         self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
+        was = getattr(self.cad, "hydrants_assume_c", True)        # (not set yet: the default, sizeup/cad/hydrants.py)
+        self.cad.hydrants_assume_c = bool((ov.get(HYD_SECTION) or {}).get("assume_c", True))   # #840: on by default
+        if was != self.cad.hydrants_assume_c and getattr(self.cad, "hydrants", None) is not None:
+            self.cad.hydrants.display_changed()          # the layer drawn again, every page
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
@@ -1251,6 +1260,26 @@ class Editor:
                            [("system", f"{ATC_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, "atc": self.atc_page()}
 
+    def _hyd_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: assume_c, value: true | false} | reset {key}: admins (Settings > Hydrants, #840)."""
+        key = body.get("key")
+        if key not in HYD_KEYS:
+            raise CadError("key: assume_c")
+        cur = (self.overrides().get(HYD_SECTION) or {}).get(key, True)
+        if action == "reset":
+            v = True
+        elif action == "set":
+            v = body.get("value")
+            if not isinstance(v, bool):
+                raise CadError(f"{key}: true or false")
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                     # as it is: nothing written, nothing audited
+            return {"ok": True, HYD_SECTION: {key: v}}
+        out = self._commit([(HYD_SECTION, key, REMOVE if v is True else v)], op,
+                           [("system", f"{HYD_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
+        return {**out, HYD_SECTION: {key: v}}
+
     def _dept_value(self, key, value, accepts=None) -> tuple[str, object]:
         """(code, the stored value: the name, or {"name", "accepts": true}). A board unit's code is refused."""
         if isinstance(value, dict):
@@ -1392,7 +1421,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -3441,6 +3470,9 @@ class Editor:
         a = ov.get(ATC_SECTION) or {}
         if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError("overrides.atc: identify and map, true or false")
+        a = ov.get(HYD_SECTION) or {}
+        if set(a) - set(HYD_KEYS) or any(not isinstance(v, bool) for v in a.values()):
+            raise CadError(f"overrides.{HYD_SECTION}: assume_c, true or false")
         fx = ov.get(FIX_SECTION) or {}
         if set(fx) - {"keep"} or any(not isinstance(v, bool) for v in fx.values()):
             raise CadError(f"overrides.{FIX_SECTION}: keep, true or false")

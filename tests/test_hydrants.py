@@ -554,6 +554,16 @@ out.take = H.takeAt("IFO @sam", tok, { label: "Sample Market", lat: 41, lon: -73
 out.noTok = [H.atToken("a@b", 3), H.atToken("@ x", 3), H.atToken("@Sample Market x", 16, [{ label: "Sample Market" }])];
 out.named = H.named("rear of @Sample Market", [{ label: "Sample Market" }, { label: "Gone" }]).map((p) => p.label);
 out.down = H.DOWN;
+// #840: the assumed class, the route
+out.asmImg = [{ _asm: "C" }, { _asm: "C", _st: "restricted" }, { _asm: "C", _st: "oos" }, { _cls: "C" }].map(H.imageFor);
+out.legendOn = H.legendRows(true).map((l) => l[0]);
+out.legendOff = H.legendRows(false).map((l) => l[0]);
+out.clsText = [H.clsText({ cls: "B" }), H.clsText({ cls: null, cls_assumed: "C" }), H.clsText({ cls_assumed: "C" }, true),
+               H.clsText({ cls: "C", cls_assumed: null }, true), H.clsText({})];
+out.lineAsm = H.line({ number: "9004", cls: null, cls_assumed: "C", status: "unknown", dist_m: 60 });
+out.routes = ["#map/hydrant/c990001", "#map/hydrant/h3", "#map/hydrant/c990001-2", "#map/hydrant/x1", "#map/hydrant/c0",
+              "#map/hydrant/c1/x", "#settings/hydrants", ""].map(H.routeKey);
+out.routeOf = H.routeOf("c990002");
 console.log(JSON.stringify(out));
 """
 
@@ -581,6 +591,14 @@ def test_the_map_helpers_in_node(tmp_path):
     assert out["tok"] == {"text": "sam", "start": 4, "end": 8}
     assert out["take"]["value"] == "IFO @Sample Market " and out["take"]["places"][0]["label"] == "Sample Market"
     assert out["noTok"] == [None, None, None] and out["named"] == ["Sample Market"]
+    # #840: assumed C has its own mark (restricted too), out of service wins, a tested C is never the assumed one
+    assert out["asmImg"] == ["hy-Cx", "hy-Cx-r", "hy-down", "hy-C"]
+    assert "_asm" in json.dumps(out["icon"]) and "hy-Cx" in json.dumps(out["icon"])
+    assert "_asm" in json.dumps(out["label"]) and '"*"' in json.dumps(out["label"])          # "9004 · C*" by the mark
+    assert out["legendOn"] == ["AA", "A", "B", "C", "Cx", "down"] and out["legendOff"] == out["keys"]
+    assert out["clsText"] == ["B", "C*", "C (assumed)", "C", ""] and out["lineAsm"] == "9004 · C* · 60 m"
+    assert out["routes"] == ["c990001", "h3", "c990001-2", None, None, None, None, None]
+    assert out["routeOf"] == "#map/hydrant/c990002"
 
 
 def test_the_script_wires_the_layer_card_editor_and_settings():
@@ -654,7 +672,8 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
             const out = {}; for (const f of gm.map.querySourceFeatures('gis-hydrants')) out[f.properties._k] = Hydrants.imageFor(f.properties);
             return out; }""")
         assert got["c990001"] == "hy-AA" and got["c990002"] == "hy-down" and got["c990003"] == "hy-B-r"
-        assert got.get("c990004", "hy-unk") == "hy-unk" and got["c990005"] == "hy-C" and any(k.startswith("h") for k in got)
+        # untested: assumed Class C by default (#840), its own mark; a tested C (420 gpm) is never the assumed one
+        assert got.get("c990004", "hy-Cx") == "hy-Cx" and got["c990005"] == "hy-C" and any(k.startswith("h") for k in got)
         pg.wait_for_timeout(600)
         shot(pg.locator("#ov-map"), "hydrants-map.png")
         # the card: a click on the out-of-service one
@@ -674,7 +693,7 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
         pg.evaluate("""() => { const d = document.querySelector('#ov-map .hy-legend').closest('details'); if (d) d.open = true;
             document.querySelector('#ov-map .hy-legend').scrollIntoView(); }""")
         shot(pg.locator("#ov-map .ml-panel"), "hydrants-legend.png")
-        assert "no flow" in pg.inner_text("#ov-map .hy-legend")
+        assert "assumed (untested)" in pg.inner_text("#ov-map .hy-legend")         # #840: on by default
         pg.evaluate("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map')); gm.control.close(); }""")
         # Edit: the dialog, a save
         pg.evaluate("""async () => { const d = await api('GET', '/api/cad/hydrants/c990005'); Hydrants.editor(d.hydrant); }""")
@@ -820,9 +839,11 @@ def test_no_cache_at_all_is_fetched_at_once(tmp_path):
     assert g.refresh("hydrants") and c.hydrants.listing({})["counts"]["all"] == len(COUNTY)
 
 
-def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
+@pytest.mark.parametrize("assume", [True, False])
+def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path, assume):
     """#831's regression in the browser: the county's layer as fetched (ids and, from an old copy, none), nothing in the
-    overlay: every hydrant rendered on the map, grey (no flow data)."""
+    overlay: every hydrant rendered on the map, as an assumed Class C (#840's default: none has a flow test); with the
+    setting off, grey (no flow data)."""
     import threading
     sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
     from sizeup.web.server import WebServer
@@ -838,6 +859,8 @@ def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
     with g._lock:
         g._changed("hydrants")
     wire(c, g)
+    if not assume:
+        c.settings.post("hydrant_display", {"action": "set", "key": "assume_c", "value": False})
     scene = {"timezone": "America/New_York", "home": {"center": [LON0 + 0.0003, LAT0 + 0.0009], "zoom": 17.0},
              "glyphs": "https://tiles.invalid/fonts/{fontstack}/{range}.pbf"}
     ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False, cad=CadApi(c), gis=g)
@@ -867,7 +890,7 @@ def test_every_hydrant_is_drawn_with_an_empty_overlay_in_a_browser(tmp_path):
               && gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).length >= 5; }""")
         drawn = pg.evaluate("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
             return gm.map.queryRenderedFeatures({ layers: ['gis-hydrants-pt'] }).map((f) => Hydrants.imageFor(f.properties)); }""")
-        assert len(drawn) == 5 and set(drawn) == {"hy-unk"}, drawn
+        assert len(drawn) == 5 and set(drawn) == ({"hy-Cx"} if assume else {"hy-unk"}), drawn
         assert errors == [] and not [m for m in console if "Expected" in m or "expression" in m.lower()], (errors, console)
     finally:
         browser.close()
@@ -996,3 +1019,371 @@ def test_clearing_one_pressure_classes_from_the_observed_flow(cad):
     out = h.edit("c990001", {"residual_psi": ""})
     assert out["hydrant"]["gpm"] == 1000 and out["hydrant"]["cls"] == "A" and any("One pressure" in w for w in out["warnings"])
     assert not any("under 20" in w for w in h.edit("c990002", {"flow_gpm": 500, "static_psi": 18, "residual_psi": 10})["warnings"])
+
+
+# -- #840: assume Class C when untested, search, Show on map ---------------------------------------------------------------
+
+def test_untested_hydrants_are_assumed_class_c_and_marked(cad):
+    h = cad.hydrants
+    h.edit("c990001", {"flow_gpm": 1650})                                     # tested: AA
+    h.edit("c990002", {"flow_gpm": 420})                                      # tested: a real C
+    h.edit("c990003", {"nfpa_class": "B"})                                    # an admin's class, no flow: never assumed
+    doc, _ = served(cad.gis)
+    p = {k: f["properties"] for k, f in by_key(doc).items()}
+    assert p["c990004"]["_asm"] == "C" and "_cls" not in p["c990004"]         # assumed: never written as the class
+    assert p["c990002"]["_cls"] == "C" and "_asm" not in p["c990002"]         # a tested C is never C*
+    assert "_asm" not in p["c990001"] and "_asm" not in p["c990003"]
+    one = h.one("c990004")["hydrant"]
+    assert one["cls"] is None and one["cls_assumed"] == "C" and one["class_color"] == ""
+    assert h.one("c990002")["hydrant"]["cls_assumed"] is None
+    near = {x["key"]: x for x in h.near(LAT0, LON0, n=10, within=5000)}
+    assert near["c990004"]["cls_assumed"] == "C" and near["c990001"]["cls_assumed"] is None
+    rows = {r["key"]: r for r in rows_of(h.csv({})[0])}
+    assert rows["c990004"]["class"] == "" and rows["c990004"]["class_assumed"] == "C"     # never mixed in the CSV
+    assert rows["c990002"]["class"] == "C" and rows["c990002"]["class_assumed"] == ""
+    assert h.state()["assume_c"] is True
+    # a flow test replaces it at once
+    gen = h.gen
+    h.edit("c990004", {"flow_gpm": 1100})
+    assert h.gen > gen and by_key(served(cad.gis)[0])["c990004"]["properties"]["_cls"] == "A"
+    assert "_asm" not in by_key(served(cad.gis)[0])["c990004"]["properties"]
+
+
+def test_the_assume_setting_off_is_grey_again_and_redraws(cad):
+    h, g = cad.hydrants, cad.gis
+    def rev_of():
+        return {lay["key"]: lay["rev"] for lay in g.public()["layers"]}["hydrants"]
+    rev = rev_of()
+    out = cad.settings.post("hydrant_display", {"action": "set", "key": "assume_c", "value": False, "operator": "Casey"})
+    assert out["hydrant_display"] == {"assume_c": False}
+    assert rev_of() != rev                              # every page fetches the layer again
+    doc, _ = served(g)
+    assert all("_asm" not in f["properties"] for f in doc["features"])
+    assert h.one("c990004")["hydrant"]["cls_assumed"] is None and h.state()["assume_c"] is False
+    assert h.listing({})["assume_c"] is False
+    assert all(r["class_assumed"] == "" for r in rows_of(h.csv({})[0]))
+    audit = cad.store.q("SELECT * FROM settings_audit WHERE key = 'hydrant_display/assume_c'")
+    assert len(audit) == 1 and audit[0]["section"] == "system"
+    cad.settings.post("hydrant_display", {"action": "reset", "key": "assume_c"})
+    cad.settings.post("hydrant_display", {"action": "reset", "key": "assume_c"})      # as it is: nothing written
+    assert len(cad.store.q("SELECT * FROM settings_audit WHERE key = 'hydrant_display/assume_c'")) == 2
+    assert h.assume() and by_key(served(g)[0])["c990004"]["properties"]["_asm"] == "C"
+    for body, err in (({"action": "set", "key": "assume_c", "value": "yes"}, "true or false"),
+                      ({"action": "set", "key": "other", "value": True}, "assume_c"), ({"action": "flip", "key": "assume_c"}, "action")):
+        with pytest.raises(hy.CadError, match=err):
+            cad.settings.post("hydrant_display", body)
+
+
+def test_a_restart_keeps_the_assume_setting(tmp_path):
+    c = make_cad(tmp_path)
+    c.settings.post("hydrant_display", {"action": "set", "key": "assume_c", "value": False})
+    c2 = make_cad(tmp_path)
+    wire(c2, fake_gis())
+    assert c2.hydrants.assume() is False and "_asm" not in json.dumps(served(c2.gis)[0])
+
+
+def test_the_csv_import_reads_the_assumed_marker_as_no_data(cad):
+    h = cad.hydrants
+    h.edit("c990001", {"nfpa_class": "B"})
+    text = h.csv({})[0].decode("utf-8-sig")
+    out = h.import_csv({"action": "preview", "csv": text})                  # read back: nothing changes
+    assert out["changed"] == 0 and out["error_count"] == 0 and "class_assumed" in out["read_only"]
+    out = h.import_csv({"action": "apply", "csv": "key,nfpa_class\nc990001,C*\nc990002,C (assumed)\n"})
+    assert out["error_count"] == 0
+    assert h.one("c990001")["hydrant"]["cls"] is None and h.one("c990001")["hydrant"]["cls_assumed"] == "C"
+    assert h.one("c990002")["hydrant"]["nfpa_class"] is None                  # never a tested C
+
+
+def test_search_finds_each_kind_of_query(cad):
+    h = cad.hydrants
+    h.edit("c990001", {"flow_gpm": 1650, "asset_id": "99-0001", "location": "Sample St at Example Ave"})
+    h.edit("c990002", {"status": "oos", "status_reason": "Broken stem", "flow_gpm": 1100})
+    h.edit("c990003", {"flow_gpm": 420, "status": "restricted"})
+    h.edit("c990005", {"status": "dry"})
+
+    def keys(q, **kw):
+        return [r["key"] for r in h.search(q, **kw)["rows"]]
+    assert keys("9001") == ["c990001", "c990004"]                            # a number (twice in the district)
+    assert keys("#9002") == ["c990002"] and keys("hydrant 9002") == ["c990002"]
+    assert keys("99-0001") == ["c990001"] and keys("990001") == ["c990001"]   # an asset id, with or without the dash
+    assert keys("c990003") == ["c990003"]                                     # the key
+    assert keys("sample st") == ["c990001"] and keys("example ave") == ["c990001"]   # the location's words
+    assert set(keys("oos")) == {"c990002", "c990005"} == set(keys("out of service"))   # OOS: out of service and dry
+    assert keys("dry") == ["c990005"] and keys("restricted") == ["c990003"]
+    assert keys("class c")[0] == "c990003" and set(keys("class c")) == {"c990003", "c990004", "c990005"}   # tested first
+    assert set(keys("c*")) == {"c990004", "c990005"} and "c990003" not in keys("C*")   # assumed only
+    assert keys("AA") == ["c990001"] and keys("class a") == ["c990002"] and keys("b") == []
+    assert set(keys("untested")) == {"c990004", "c990005"} == set(keys("no flow"))
+    assert set(keys("exampleville")) == {"c990005"} and len(keys("Sampletown")) == 4
+    assert keys("oos exampleville") == ["c990005"] and keys("9001 sampletown") == ["c990001", "c990004"]
+    assert keys("nothing here") == [] and keys("") == [] and keys("hydrant") == []
+    r = h.search("oos sampletown")
+    assert r["filters"] == ["OOS", "Sampletown"] and r["total"] == 1
+    row = r["rows"][0]
+    assert row["status_label"] == "Out of service" and row["status_reason"] == "Broken stem" and row["town"] == "Sampletown"
+    h.edit("c990004", {"removed": None, "action": "remove"})
+    assert keys("9001") == ["c990001"]                                        # a removed one: never found
+
+
+def test_search_ranking_and_limit(cad):
+    h = cad.hydrants
+    h.create({"lat": LAT0 + 5 * DLAT, "lon": LON0, "number": "90012"})
+    h.edit("c990002", {"asset_id": "9001"})
+    keys = [r["key"] for r in h.search("9001")["rows"]]
+    assert keys[:2] == ["c990001", "c990004"] and keys[2] == "c990002" and keys[3].startswith("h")   # whole number, asset, start
+    out = h.search("sampletown", limit=2)
+    assert len(out["rows"]) == 2 and out["total"] == 5
+    assert len(h.search("sampletown", limit=10_000)["rows"]) == 5          # (at most SEARCH_MAX)
+    assert hy.search_query("class c oos", ["Sampletown"])["filters"] == ["OOS", "Class C"]
+    assert hy.search_query("a st", [])["words"] == ["a", "st"]                # a letter with a street: words, not a class
+    assert hy.search_query("b*", [])["filters"] == ["Class B"]                # only C is ever assumed
+    # a street named like a filter: the words as written when the filter finds nothing
+    h.edit("c990005", {"location": "Dry Brook Rd"})
+    assert [r["key"] for r in h.search("dry brook")["rows"]] == ["c990005"]
+    h.edit("c990003", {"status": "dry"})
+    assert [r["key"] for r in h.search("dry")["rows"]] == ["c990003"]        # the filter first when it finds some
+    # near a call (the "@" search): the nearer first, tested or not
+    far = h.search("9001", near=(LAT0 + 30 * DLAT, LON0))["rows"]
+    assert [r["key"] for r in far][:2] == ["c990004", "c990001"]
+
+
+def test_search_over_7000_hydrants_reads_one_table(tmp_path):
+    import time
+    county = [hyd(900000 + i, str(i % 900), 0) for i in range(7000)]
+    for i, f in enumerate(county):
+        f["geometry"]["coordinates"] = [round(LON0 + (i % 100) * 0.0005, 6), round(LAT0 + (i // 100) * 0.0005, 6)]
+    c = make_cad(tmp_path)
+    wire(c, fake_gis(county))
+    h = c.hydrants
+    h.search("1")
+    table = h._table()
+    t = time.perf_counter()
+    for q in ("12", "123", "oos", "class c", "sample", "99-00", "untested sampletown", "9"):
+        h.search(q)
+    took = time.perf_counter() - t
+    assert h._table() is table and took < 0.5, took                          # built once, every keystroke reads it
+    h.edit("c900001", {"status": "oos"})
+    assert h._table() is not table and [r["key"] for r in h.search("oos")["rows"]] == ["c900001"]
+
+
+def test_search_through_the_api_for_anyone_signed_in(api):
+    call(api, "/api/cad/hydrants/c990002", {"status": "oos"}, CASEY)
+    for email in (CASEY, JORDAN, VAL):
+        code, out = get(api, "/api/cad/hydrants/search?q=oos", email)
+        assert code == 200 and [r["key"] for r in out["rows"]] == ["c990002"] and out["filters"] == ["OOS"], email
+    assert get(api, "/api/cad/hydrants/search?q=9001&limit=1")[1]["total"] == 2
+    assert get(api, "/api/cad/hydrants/search?q=9001&limit=x")[0] == 400
+    assert needs("/api/cad/hydrants/search") == "admin"                      # (a POST there: refused)
+    assert call(api, "/api/cad/hydrants/search", {}, CASEY)[0] == 400
+    assert HYDRANT.fullmatch("/api/cad/hydrants/search")
+
+
+def test_the_at_place_search_offers_hydrants_and_a_note_keeps_the_key(cad):
+    cad.hydrants.edit("c990002", {"asset_id": "99-0002", "status": "oos"})
+    got = cad.search_places({"q": ["hydrant 9002"]})["places"]
+    assert [p["key"] for p in got] == ["c990002"]
+    p = got[0]
+    assert p["kind"] == "hydrant" and p["label"] == "Hydrant 9002" and p["sub"] == "Sampletown"
+    assert p["hydrant"]["status"] == "oos" and p["hydrant"]["cls_assumed"] == "C"
+    assert [x["key"] for x in cad.search_places({"q": ["99-0002"]})["places"]] == ["c990002"]   # typed whole: after the places
+    cad.hydrants.edit("c990001", {"location": "Sample St at Example Ave"})
+    two = cad.search_places({"q": ["hyd 9001"]})["places"]                    # the same number twice: told apart
+    assert sorted(x["label"] for x in two) == ["Hydrant 9001, Sample St at Example Ave", "Hydrant 9001, c990004"]
+    assert cad.search_places({"q": ["90"]})["places"] == []                   # a start only: never in the places' way
+    ref = {"label": p["label"], "lat": p["lat"], "lon": p["lon"], "kind": "hydrant", "sub": p["sub"], "source": "hydrant", "key": "c990002"}
+    kept = type(cad)._note_places([ref], "Supply from @Hydrant 9002")
+    assert kept[0]["key"] == "c990002" and kept[0]["kind"] == "hydrant"
+    with pytest.raises(hy.CadError, match="key"):
+        type(cad)._note_places([{**ref, "key": "../x"}], "Supply from @Hydrant 9002")
+    assert "key" not in type(cad)._note_places([{**ref, "kind": "place"}], "at @Hydrant 9002")[0]
+
+
+def test_the_settings_import_checks_the_hydrant_display(cad):
+    from sizeup.cad import settings as sm
+    assert sm.HYD_SECTION in sm.PAGE_SECTION and "hydrant_display" in sm.__doc__
+    doc = json.loads(json.dumps(cad.settings.export()))
+    doc["overrides"]["hydrant_display"] = {"assume_c": "no"}
+    with pytest.raises(hy.CadError, match="hydrant_display"):
+        cad.settings.post("import", {"action": "dry_run", "settings": doc})
+    doc["overrides"]["hydrant_display"] = {"assume_c": False}
+    cad.settings.post("import", {"action": "apply", "settings": doc})
+    assert cad.hydrants.assume() is False
+
+
+def test_show_on_map_search_and_the_at_chip_in_a_browser(tmp_path):
+    """#840 in the browser: Settings > Hydrants' Show on map opens the large map on the hydrant (its card, the layer on for
+    that view, #map/hydrant/<key>), Esc goes back; a reload of the address does it again; the Search view's Hydrants tab
+    as typed; a note's "@Hydrant" chip opens the card on the call's map; assumed C on the card and in the lists."""
+    import os
+    import threading
+    sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
+    from sizeup.web.server import WebServer
+    c = make_cad(tmp_path)
+    g = fake_gis()
+    wire(c, g)
+    h = c.hydrants
+    h.edit("c990001", {"flow_gpm": 1650, "asset_id": "99-0001", "location": "Sample St at Example Ave"})
+    h.edit("c990002", {"status": "oos", "status_reason": "Broken stem", "flow_gpm": 1100})
+    h.edit("c990003", {"flow_gpm": 420})
+    iid = c.store.create_incident(type="STRU", address="10 Sample St", lat=LAT0 + 0.6 * DLAT, lon=LON0 + 0.0003)
+    iid = iid["id"] if isinstance(iid, dict) else iid
+    p = c.hydrants.places("9002")[0]
+    c.note(iid, {"text": "Supply from @Hydrant 9002", "places": [p], "operator": "JD"})
+    shots = os.environ.get("SIZEUP_SHOTS", "")
+    fonts = "https://tiles.openfreemap.org/fonts/"
+    scene = {"timezone": "America/New_York", "home": {"center": [LON0 + 0.0008, LAT0 + 0.00135], "zoom": 16.0},
+             "glyphs": fonts + "{fontstack}/{range}.pbf"}
+    ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False, cad=CadApi(c), gis=g)
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    shot = (lambda loc, name: loc.screenshot(path=os.path.join(shots, name))) if shots else (lambda loc, name: None)
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001
+        pw.stop()
+        ws.shutdown()
+        pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+    big = "[...GisLayers.maps].find((x) => x.map.getContainer().closest('.cm-big'))"
+    try:
+        pg = browser.new_page(viewport={"width": 1500, "height": 950})
+        pg.set_default_timeout(15000)
+        pg.route(lambda url: not url.startswith(base) and not (shots and url.startswith(fonts)), lambda route: route.abort())
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(base + "/cad#settings/hydrants")
+        pg.fill("#operator", "JD")
+        pg.evaluate("() => MapLayers.setLayer('gis:hydrants', false)")       # off for this viewer: the view turns it on
+        pg.wait_for_selector("#s-hydrants .hy-table tbody tr")
+        assert pg.is_checked("#s-hydrants .hy-assume input")                  # on by default
+        row4 = pg.locator("#s-hydrants .hy-table tbody tr", has_text="Sampletown").filter(has_text="C*").first
+        assert row4.count() == 1
+        shot(pg.locator("#s-hydrants"), "hydrant-settings-list.png")
+        # Show on map from the list: the large map on 9002, its card, the layer on for that view
+        pg.locator("#s-hydrants .hy-table tbody tr", has_text="Broken stem").locator("button.hy-map").click()
+        pg.wait_for_function("() => location.hash === '#map/hydrant/c990002'")
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        pg.wait_for_function("() => /Hydrant 9002/.test(document.querySelector('.cm-big .ml-info').innerText)")
+        info = pg.inner_text(".cm-big .ml-info")
+        assert "Out of service: Broken stem" in info and "Class A · 1100 gpm" in info
+        assert pg.evaluate(f"() => {big}.control.on('gis:hydrants')") is True
+        assert pg.is_hidden("#settings")
+        centre = pg.evaluate(f"() => {{ const c = {big}.map.getCenter(); return [c.lng, c.lat, {big}.map.getZoom()]; }}")
+        assert abs(centre[0] - LON0) < 1e-5 and abs(centre[1] - (LAT0 + DLAT)) < 1e-5 and centre[2] >= 17.9
+        pg.wait_for_function(f"() => {big}.map.getLayer('gis-hydrants-pt') && {big}.map.querySourceFeatures('gis-hydrants').length >= 5")
+        pg.wait_for_timeout(500)
+        shot(pg.locator(".cm-big"), "hydrant-show-on-map.png")
+        pg.keyboard.press("Escape")                                         # the card first
+        pg.keyboard.press("Escape")                                         # then the map: back to Settings
+        pg.wait_for_function("() => location.hash === '#settings/hydrants'")
+        pg.wait_for_selector("#s-hydrants .hy-table tbody tr")
+        assert pg.evaluate(f"() => {big}.control.on('gis:hydrants')") is False   # only for that view
+        pg.wait_for_function("() => document.activeElement && document.activeElement.dataset.key === 'c990002'")   # its button
+        # the browser's Back while it is open: closed, Settings again
+        pg.locator("#s-hydrants .hy-table tbody tr", has_text="Broken stem").locator("button.hy-map").click()
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        pg.go_back()
+        pg.wait_for_function("() => location.hash === '#settings/hydrants' && document.querySelector('#cm-overlay').hidden")
+        # a call picked on it: that call, never Settings over it
+        pg.locator("#s-hydrants .hy-table tbody tr", has_text="Broken stem").locator("button.hy-map").click()
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        pg.click(".cm-big .cm-pin")
+        pg.wait_for_function("() => document.querySelector('#cm-overlay').hidden && location.hash === ''")
+        pg.wait_for_timeout(300)
+        assert pg.evaluate("() => location.hash") == "" and pg.is_hidden("#settings") and pg.evaluate("() => cad.sel") == iid
+        # a reload of the address: the same view; closing it leaves the console (never the page)
+        pg.goto(base + "/cad#map/hydrant/c990004")
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        pg.wait_for_function("() => /C \\(assumed\\)/.test(document.querySelector('.cm-big .ml-info').innerText)")
+        assert "untested" in pg.inner_text(".cm-big .ml-info")
+        shot(pg.locator(".cm-big"), "hydrant-assumed-card.png")
+        pg.click(".cm-big .cm-btn:has-text('Close')")
+        pg.wait_for_function("() => location.hash === '' && location.pathname === '/cad'")
+        # Search: the Hydrants tab, as typed
+        pg.goto(base + "/cad#search")
+        pg.click("#sv-tabs button[data-tab=hydrants]")
+        pg.fill("#sv-where", "oos")
+        pg.wait_for_selector("#sv-hy-rows tr.hy-tr")
+        assert pg.locator("#sv-hy-rows tr.hy-tr").count() == 1 and "9002" in pg.inner_text("#sv-hy-rows")
+        assert "1 hydrant · OOS" in pg.inner_text("#sv-count")
+        pg.fill("#sv-where", "class c")
+        pg.wait_for_function("() => document.querySelectorAll('#sv-hy-rows tr.hy-tr').length === 3")
+        rows = pg.inner_text("#sv-hy-rows")
+        assert rows.index("9003") < rows.index("C*") and "Exampleville" in rows
+        assert "tab=hydrants" in pg.evaluate("() => location.hash")
+        shot(pg.locator("#search-view"), "hydrant-search.png")
+        pg.locator("#sv-hy-rows tr.hy-tr", has_text="9005").locator("button.hy-map").click()
+        pg.wait_for_function("() => location.hash === '#map/hydrant/c990005'")
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        pg.keyboard.press("Escape")
+        pg.keyboard.press("Escape")
+        pg.wait_for_function("() => location.hash.startsWith('#search') && location.hash.includes('tab=hydrants')")
+        pg.wait_for_selector("#sv-hydrants:not([hidden]) #sv-hy-rows tr.hy-tr")
+        # the call: a note's "@Hydrant 9002" chip opens its card on the call's map; the nearest list: C* and Show on map
+        pg.goto(base + "/cad")
+        pg.wait_for_function(f"() => cad.state && (cad.state.incidents || []).some((i) => i.id === {iid} && i.hydrants)")
+        pg.evaluate(f"() => selectIncident({iid})")
+        pg.wait_for_selector("#d-hydrants:not([hidden]) .pp-row")
+        assert "C*" in pg.inner_text("#d-hydrants") and pg.locator("#d-hydrants button.hy-map").count() >= 3
+        shot(pg.locator("#d-hydrants"), "hydrant-call-list.png")
+        pg.click("button.place-tag:has-text('Hydrant 9002')")
+        pg.wait_for_selector("#d-map .ml-info:not([hidden])")
+        pg.wait_for_function("() => /Out of service/.test(document.querySelector('#d-map .ml-info').innerText)")
+        pg.locator("#d-hydrants button.hy-map").first.click()
+        pg.wait_for_function("() => location.hash.startsWith('#map/hydrant/')")
+        pg.wait_for_selector(".cm-big .ml-info:not([hidden])")
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        ws.shutdown()
+
+
+def test_the_at_search_offers_hydrants_in_a_browser(tmp_path):
+    """#840: "@hyd 9002" in the comment box lists the hydrant (its mark, its town); taken, the note keeps its key."""
+    import threading
+    sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
+    from sizeup.web.server import WebServer
+    c = make_cad(tmp_path)
+    g = fake_gis()
+    wire(c, g)
+    c.hydrants.edit("c990002", {"status": "oos", "flow_gpm": 1100})
+    iid = c.store.create_incident(type="STRU", address="10 Sample St", lat=LAT0, lon=LON0)
+    iid = iid["id"] if isinstance(iid, dict) else iid
+    scene = {"timezone": "America/New_York", "home": {"center": [LON0, LAT0], "zoom": 16.0},
+             "glyphs": "https://tiles.invalid/fonts/{fontstack}/{range}.pbf"}
+    ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False, cad=CadApi(c), gis=g)
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001
+        pw.stop()
+        ws.shutdown()
+        pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+    try:
+        pg = browser.new_page(viewport={"width": 1400, "height": 900})
+        pg.set_default_timeout(15000)
+        pg.route(lambda url: not url.startswith(base), lambda route: route.abort())
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(base + "/cad")
+        pg.fill("#operator", "JD")
+        pg.wait_for_function(f"() => cad.state && (cad.state.incidents || []).some((i) => i.id === {iid})")
+        pg.evaluate(f"() => selectIncident({iid})")
+        pg.click("#note-text")
+        pg.keyboard.type("Supply from @hyd 9002")
+        pg.wait_for_selector("#note-sugg li:has-text('Hydrant 9002')")
+        assert "hydrant" in pg.inner_text("#note-sugg") and pg.locator("#note-sugg .hy-mark").count() == 1
+        pg.keyboard.press("Tab")
+        assert pg.input_value("#note-text").startswith("Supply from @Hydrant 9002")
+        pg.keyboard.press("Enter")
+        pg.wait_for_selector("#d-cmts-list button.place-tag:has-text('Hydrant 9002')")
+        got = c.store.q("SELECT places FROM events WHERE incident_id = ? AND kind = 'note'", (iid,))
+        assert [pl["key"] for pl in json.loads(got[0]["places"])] == ["c990002"]
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
+        ws.shutdown()

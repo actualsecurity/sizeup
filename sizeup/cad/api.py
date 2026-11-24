@@ -70,6 +70,8 @@ POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priorit
                                           Settings audit log (section "preplan")
 GET  /api/cad/hydrants/<key>             a hydrant's card (#799, sizeup/cad/hydrants.py): {hydrant, history, gen}; the
                                           history: the Settings audit log, section "hydrants". Anyone signed in
+GET  /api/cad/hydrants/search?q=&limit=   hydrants by number, street, asset id, status, class, "untested", town (#840):
+                                          {rows, total, filters}; anyone signed in (the Search view's Hydrants tab)
 GET  /api/cad/hydrants?q=&status=&flag=&town=&offset=&limit=
                                           the Settings > Hydrants list: {rows, total, counts, towns}; admins (ADMIN_READS)
 GET  /api/cad/hydrants.csv?...            the same as a spreadsheet, every overlay column: admins (ADMIN_READS)
@@ -330,6 +332,8 @@ POST /api/cad/settings/datasources        {action: set, key, value: off | hourly
                                           reset, key?}: how often a data source is refreshed; admins
 POST /api/cad/settings/atc                {action: set {key: identify | map | vocab, value: true | false} | reset {key}}: who is
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
+POST /api/cad/settings/hydrant_display    {action: set {key: assume_c, value: true | false} | reset {key}}: untested hydrants
+                                          drawn as an assumed Class C, marked "C*" (#840, sizeup/cad/hydrants.py); admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
@@ -396,6 +400,7 @@ from urllib.parse import parse_qs, unquote
 
 from sizeup import sourcekeys
 from sizeup.cad import airport
+from sizeup.cad import hydrants as hydrants_mod
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
@@ -418,7 +423,7 @@ PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")             
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
 DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
 DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
-HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?|import))?")   # hydrants (#799)
+HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?|import|search))?")   # hydrants (#799, #840)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -1012,6 +1017,13 @@ class CadApi:
         m = HYDRANT.fullmatch(path)
         if m.group(1) == "import":
             return 405, b'{"error":"POST"}', JSON
+        if m.group(1) == "search":                     # #840: the Search view's Hydrants tab (anyone signed in)
+            one = lambda k: ((q.get(k) or [""])[0] or "").strip()          # noqa: E731
+            try:
+                limit = int(one("limit") or hydrants_mod.SEARCH_LIMIT)
+            except ValueError:
+                return _json(400, {"error": "limit: a number"})
+            return 200, json.dumps(hy.search(one("q")[:120], limit), separators=(",", ":")).encode(), JSON, nostore
         try:
             out = hy.one(m.group(1), may)
         except CadError as e:
@@ -1535,6 +1547,8 @@ class CadApi:
                 return c.hydrants.create(body)
             if m.group(1) == "import":
                 return c.hydrants.import_csv(body)
+            if m.group(1) == "search":
+                raise CadError("search: GET")
             return c.hydrants.edit(m.group(1), body)
         if m := DOCS.fullmatch(path):
             if m.group(1) is None:

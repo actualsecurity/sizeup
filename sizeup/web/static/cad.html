@@ -218,6 +218,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <button type="button" data-tab="calls" aria-pressed="true" title="Past calls">Calls</button>
           <button type="button" data-tab="notes" aria-pressed="false" title="Premise notes: shown on every call at the building">Address notes</button>
           <button type="button" data-tab="preplan" aria-pressed="false" title="Pre-plan points: a building's Knox box, FDC, shutoffs on the map">Pre-plan</button>
+          <button type="button" data-tab="hydrants" aria-pressed="false" title="Hydrants: number, street, asset id, status, class, town">Hydrants</button>
         </span>
         <a id="sv-csv" class="nav sm" href="#" download hidden title="These results as a spreadsheet (admins; in your activity)">CSV</a>
       </div>
@@ -248,6 +249,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="sv-note-form" hidden></div>
         <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Address</th><th>Note</th><th>Priority</th><th>Review by</th><th>By</th><th><span class="sr-only">Actions</span></th></tr></thead>
           <tbody id="sv-note-rows"></tbody></table></div>
+      </div>
+      <!-- hydrants (#840, search-view.js / hydrants.js): by number, street, asset id, status, class, town; Show on map -->
+      <div id="sv-hydrants" class="sv-notes" hidden>
+        <div class="tscroll"><table class="evtable db sv-table hy-results"><thead><tr><th>No.</th><th>Town</th><th>Class</th><th>Status</th><th>Location</th><th><span class="sr-only">Map</span></th></tr></thead>
+          <tbody id="sv-hy-rows"></tbody></table></div>
       </div>
       <!-- pre-plan points (#456, preplan.js): one building's (the address box), on its own map, to add, edit, move and
            delete; every point and the CSV: admins -->

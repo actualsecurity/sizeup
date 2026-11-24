@@ -2693,7 +2693,8 @@ async function upgrade(e, previewOnly) {
 
 const noteTag = { tags: new Set(), places: [], items: [], idx: 0, tok: null, ptok: null, pq: "", hits: [], seq: 0, timer: null };
 const UNITISH = /^[A-Za-z]{0,3}\d{1,4}[A-Za-z]?$/;       // E63, L31, 2398: a unit code, not a place
-const PLACE_KIND = { milemarker: "mile marker", exit: "exit", address: "address", intersection: "intersection", street: "street" };
+const PLACE_KIND = { milemarker: "mile marker", exit: "exit", address: "address", intersection: "intersection", street: "street",
+                     hydrant: "hydrant" };      // #840: "@hydrant 9001", or a number or asset id typed whole
 function tagOrder(inc) {
   if (inc && Array.isArray(inc.tag_units)) return inc.tag_units;
   const on = ((inc && inc.assignments) || []).map((a) => a.name);
@@ -2776,6 +2777,7 @@ function suggestNote() {
       else if (u && (u.title || u.department)) li.append(el("span", "dim small", u.title || u.department));
     } else {
       const p = x.place;
+      if (p.kind === "hydrant" && p.hydrant && window.Hydrants) li.append(Hydrants.mark(p.hydrant.cls, p.hydrant.status, p.hydrant.cls_assumed));
       li.append(...suggestionHead(p));
       if (p.sub) li.append(el("span", "town" + (ours.includes(p.sub) ? " ours" : ""), p.sub));
       li.append(el("span", "dim small", PLACE_KIND[p.kind] || p.category || "place"));
@@ -2812,7 +2814,8 @@ function takePlace(p) {                 // "@lyon pa" -> "@Lyon Park ", the plac
   input.value = lead + after;
   input.setSelectionRange(lead.length, lead.length);
   if (!noteTag.places.some((x) => x.label === p.label)) {
-    noteTag.places.push({ label: p.label, lat: p.lat, lon: p.lon, kind: p.kind, sub: p.sub || "", source: p.source || "" });
+    noteTag.places.push({ label: p.label, lat: p.lat, lon: p.lon, kind: p.kind, sub: p.sub || "", source: p.source || "",
+                          ...(p.key ? { key: p.key } : {}) });     // a hydrant's key (#840): its chip opens its card
   }
   noteTag.pq = "";
   noteTag.hits = [];
@@ -2909,6 +2912,12 @@ function noteNodes(e, text) {
   return out;
 }
 function showPlace(p) {
+  if (p.kind === "hydrant" && p.key && window.Hydrants) {      // #840: the hydrant's card, on the call's map if shown
+    const gm = window.GisLayers && !$("#d-map").hidden && [...GisLayers.maps].find((x) => x.map.getContainer().closest("#d-map"));
+    if (gm && $("#d-map").getClientRects().length) { Hydrants.focusOn(gm, p); $("#d-map").scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+    else Hydrants.showOnMap(p.key);
+    return;
+  }
   const inc = selected();
   const may = !!inc && isOpen(inc) && !BOARD && canDo("dispatch");
   const shown = window.CadMap && CadMap.place && CadMap.place(p, may ? () => placeAsLocation(inc, p) : null);

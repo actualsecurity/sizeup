@@ -643,6 +643,13 @@
     box-shadow: 0 0 0 var(--bw) var(--line-strong);
   }
   .hy-mark.down { background: var(--bg); color: var(--err); box-shadow: 0 0 0 var(--bw) var(--err); }
+  /* assumed Class C (#840): the class's colour, a dashed edge: never read as a tested C */
+  .hy-mark.asm { outline: var(--bw) dashed var(--text); outline-offset: var(--bw); margin-inline: var(--s-0); }
+  /* Show on map (#840): a ring round the hydrant on the large map */
+  .hy-focus {
+    inline-size: var(--s-7); block-size: var(--s-7); border-radius: 50%; pointer-events: none;
+    border: calc(var(--bw) * 2) solid var(--accent); box-shadow: 0 0 0 var(--bw) var(--bg), inset 0 0 0 var(--bw) var(--bg);
+  }
   .hy-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding-inline-start: var(--s-6); }
   .hy-key { display: inline-flex; align-items: center; gap: var(--s-0); color: var(--text-2); }
   .hy-line { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }

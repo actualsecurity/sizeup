@@ -1191,6 +1191,11 @@
   .hy-tr td:first-child { white-space: nowrap; }
   .hy-tr .chip { margin-inline-start: var(--s-1); }
   .hy-import { padding: var(--s-2) var(--s-3); }
+  .hy-assume { flex: 0 1 auto; min-inline-size: 0; }
+  .hy-map { white-space: nowrap; }
+  .hy-tr td.act { text-align: end; }
+  .hy-results td.num { white-space: nowrap; }
+  .hy-cls.asm { border-style: dashed; }
   .hy-locbox { position: relative; display: flex; align-items: center; gap: var(--s-1); }
   .hy-locbox input { flex: 1; min-inline-size: 0; }
   /* a location: [qualifier ▾] [address] (Settings > Lists > Location qualifiers) */
