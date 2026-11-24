@@ -3,22 +3,26 @@
 
     python tools/ci_shard.py INDEX TOTAL        the test files of shard INDEX (1..TOTAL), one per line
     python tools/ci_shard.py --files            every test file pytest collects here, one per line
-    python tools/ci_shard.py --refresh OUT      rewrite tools/ci_shard_durations.json from pytest's own report
+    python tools/ci_shard.py --refresh REPORT   rewrite tools/ci_shard_durations.json from pytest's own report
 
 The split is by whole file, so everything the suite relies on stays as it is under `--dist loadfile` (a file's module
 fixtures and its tests run on one worker). Files are dealt out longest first, each to the shard with the least work so
 far (longest-processing-time-first, which is within 4/3 of the best possible split). Durations come from
 tools/ci_shard_durations.json; a file not listed there (a new test file) gets DEFAULT_S, so it is always assigned
-to some shard and can never be skipped.
+to some shard and can never be skipped, and a few such files never matter (see stale(): only data that is mostly
+missing does).
 
 The test files are the ones pytest itself would collect (#751): the tool runs pytest's own collection with the repo's
 config (testpaths, python_files, norecursedirs, conftest ignores, subdirectories, *_test.py), stopping at each file's
 collector so no test module is imported (about a second). No test is ever left out: tests/test_ci_shard.py checks
 that the shards together hold every file a real `pytest --collect-only` collects, each exactly once.
 
-To refresh the durations after the suite has changed a lot:
-    python -m pytest -q -n auto --durations=0 > /tmp/durations.txt
+To refresh the durations after the suite has changed a lot (the whole suite, as CI runs it):
+    python -m pytest -q -p no:cacheprovider -n auto --dist loadfile --durations=0 --durations-min=0 > /tmp/durations.txt
     python tools/ci_shard.py --refresh /tmp/durations.txt
+`--durations-min=0` (or -vv) matters: by default pytest hides every phase under 0.005 s, so a file of fast tests
+never appears in the report. The refresh records EVERY file pytest collects anyway: one with no reported time gets
+FLOOR_S, and a reported file pytest no longer collects is dropped.
 """
 from __future__ import annotations
 
@@ -33,7 +37,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DURATIONS = Path(__file__).resolve().parent / "ci_shard_durations.json"
-DEFAULT_S = 2.0          # a file with no recorded duration (a new one): about the median of the recorded ones
+DEFAULT_S = 2.0          # a file with no recorded duration (a new one): a little under the median recorded (3.5 s)
+FLOOR_S = 0.01           # a collected file the refresh's report gave no time (all of its phases too fast to show)
+STALE_SHARE = 0.5        # stale(): the most of the files, or of the estimated time, that may be unrecorded guesses
 
 
 class _FileRecorder:
@@ -107,15 +113,46 @@ def shards(files: list[str], durations: dict[str, float], total: int) -> list[li
     return [sorted(b) for b in bins]
 
 
-def refresh(report: Path, out: Path = DURATIONS) -> dict[str, float]:
-    """Sum pytest's `--durations` lines (setup, call and teardown) per test file."""
+def stale(files: list[str], durations: dict[str, float]) -> str | None:
+    """Why the recorded durations are too stale to balance `files` by, or None when they are fine.
+
+    Only the collected files count (an entry for a deleted file is ignored). The data is stale when more than
+    STALE_SHARE of the collected files have no recorded time, or when the DEFAULT_S guesses for those files make up
+    more than STALE_SHARE of the estimated total time. A refresh records every file, so an ordinary new test file
+    (or dozens of them) never gets near either limit; only data that is mostly missing does."""
+    if not files:
+        return None
+    missing = [f for f in files if f not in durations]
+    if len(missing) > STALE_SHARE * len(files):
+        return f"{len(missing)} of {len(files)} collected test files have no recorded duration"
+    guessed = DEFAULT_S * len(missing)
+    total = guessed + sum(durations[f] for f in files if f in durations)
+    if total and guessed > STALE_SHARE * total:
+        return f"guesses for unrecorded files are {guessed / total:.0%} of the estimated {total:.0f} s"
+    return None
+
+
+def refresh(report: Path, out: Path = DURATIONS, files: list[str] | None = None) -> dict[str, float]:
+    """Sum pytest's `--durations` lines (setup, call and teardown) per test file, for every collected file.
+
+    `files` are the collected test files (collect_files() when None). Each one is written: a file the report gives
+    no time (its phases all hidden as too fast, or no test ran) gets FLOOR_S, so the next new file is the only one
+    missing. A reported file that is not collected any more is dropped. A report that covers too few of the files
+    (a partial run, or the hidden fast phases of a run without --durations-min=0) is refused."""
     per: dict[str, float] = {}
     for m in re.finditer(r"^\s*([0-9.]+)s (?:setup|call|teardown)\s+([^:\s]+\.py)::", report.read_text(), re.M):
         per[m.group(2)] = per.get(m.group(2), 0.0) + float(m.group(1))
     if not per:
         raise SystemExit("no pytest --durations lines found in " + str(report))
-    out.write_text(json.dumps({k: round(v, 1) for k, v in sorted(per.items())}, indent=1) + "\n")
-    return per
+    if files is None:
+        files = collect_files()
+    reported = sum(1 for f in files if f in per)
+    if reported <= STALE_SHARE * len(files):
+        raise SystemExit(f"{report} has durations for only {reported} of the {len(files)} collected test files: run "
+                         "the whole suite with --durations=0 --durations-min=0 (tools/ci_shard.py's docstring)")
+    data = {f: max(round(per.get(f, 0.0), 2), FLOOR_S) for f in sorted(files)}
+    out.write_text(json.dumps(data, indent=1) + "\n")
+    return data
 
 
 def main(argv: list[str]) -> int:
