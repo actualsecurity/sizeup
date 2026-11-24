@@ -110,6 +110,8 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
             number: str = "", fd_at=None) -> dict:
     """{title, body, tags, priority, click} for the event (never the transcript). number: the incident it is linked
     to (an FYI's "FD on scene · #<number>"); fd_at: when the FD cleared it ("FD here HH:MM")."""
+    if cat.get("highway"):
+        return _highway(ev, pack_label, cat, public_url, tz)
     town = ev.town or ""
     fd = fd_text(getattr(ev, "fd", ""), number, fd_at, tz)
     title = " · ".join(x for x in ("FYI" if getattr(ev, "fd", "") in FYI else "", pack_label, category_label(cat, pack_label, ev.category), town) if x)
@@ -125,6 +127,30 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
         view = "police" if ev.domain == "police" else "all"
         click = f"{public_url.rstrip('/')}/radio?view={view}&intel={quote(str(ev.id))}"
     return {"title": title, "body": body, "tags": tags, "priority": int(ev.priority), "click": click}
+
+
+SERVICE_LABEL = {"police": "PD", "ems": "EMS", "fire": "FD", "transit": "Transit"}
+
+
+def _highway(ev, pack_label: str, cat: dict, public_url: str = "", tz=None) -> dict:
+    """A "highway": true category's push (sizeup/intel/highway.py): "PD · Crash · I-287 WB near exit 10 (Sample PD)";
+    body "I-287 WB exit 10 · Sampletown" (the route alone: "· exit not heard"), then the time and the level (the rules'
+    confidence: low / medium / high). Never transcript words."""
+    from sizeup.intel.highway import title_where
+    label = ev.label_full if ev.precision != "none" else ""
+    where = title_where(label)
+    head = SERVICE_LABEL.get(str(getattr(ev, "service", "") or ""), pack_label)
+    title = " · ".join(x for x in (head, category_label(cat, pack_label, ev.category), where) if x)
+    if getattr(ev, "dept", ""):
+        title += f" ({ev.dept})"
+    if any(str(r[0]).startswith("model.") for r in ev.rules or [] if r):
+        title += " ·m"
+    line = " · ".join(x for x in (label, ev.town or "", "" if ev.lat is not None or not label else "exit not heard") if x)
+    when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
+    body = "\n".join((line or "location not heard", " · ".join(x for x in (when, ev.level) if x)))
+    click = f"{public_url.rstrip('/')}/radio?view=all&intel={quote(str(ev.id))}" if public_url and ev.id is not None else ""
+    return {"title": title, "body": body, "tags": [t for t in (cat.get("tag") or "",) if t], "priority": int(ev.priority),
+            "click": click}
 
 
 def scrub_label(label: str, forbidden=()) -> str:

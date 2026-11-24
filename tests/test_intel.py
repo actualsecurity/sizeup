@@ -98,7 +98,8 @@ def test_a_bad_phrase_says_why(bad):
 
 def test_packs_load_pure_with_overrides_and_the_hash_follows_them():
     base = rules_mod.load_packs()
-    assert [p.name for p in base] == ["police", "county_police", "ems", "fire", "neighbor_police"]   # by "order"
+    assert [p.name for p in base] == ["police", "county_police", "ems", "fire", "neighbor_police",
+                                       "highway"]   # by "order"
     pol = base[0]
     assert pol.accept is False and all(c["mode"] == "push" for c in pol.categories.values())    # user: push from day one
     h0 = rules_mod.ruleset_hash(base)

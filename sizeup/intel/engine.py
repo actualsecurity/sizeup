@@ -119,6 +119,15 @@ How a row becomes an event, per pack whose scope it is in:
      stays at log ("placed_late"). A category with "defer_to" is never raised beside that category (_deferred), and an
      event of that category takes its open event over: one pre-alert per call. The tick never lets a held call go: an
      unplaced one stays at log until it expires (#640: a burning smell with no address is no pre-alert).
+     A category with "highway": true (data/intel/highway.json: a crash heard first on another agency's channel) is held
+     by its own gate instead (_hw_hold, sizeup/intel/highway.py): its place is the highway's (an exit, a mile marker,
+     an interchange, the route alone: engine.highway, the place search's markers and our district's shapes), held at
+     log while it isn't within the pack's highway.buffer_m of our district ("out_of_area") or isn't known
+     ("unplaced"), or while our own call is already at it ("near_incident"). Another source's report of the same crash
+     (the same route, within merge_m and merge_min) joins its event (_hw_same: one push). Our call made after the push
+     (within link_min, link_m) links it on the tick: kept at map, never pushed again (_hw_dispatched). While such an
+     event is live (pushed; never one held) its sources are promoted for promote_min (promoted_since():
+     speech-to-text's operating-channel promotion, App.promoted_keys, so the follow-ups aren't shed as context).
      A push can only be as early as the transcript: a row is read when its text lands (consider), so speech-to-text's
      queue (sizeup/stt.py: another system's "text" talkgroups wait in the LOW class) is the delay before a push, never
      the engine. A row transcribed after newer rows of its source is still read (Window.prune keeps it).
@@ -296,6 +305,15 @@ class IntelEngine:
         # made since opened_since and open, or closed since closed_since; fd "on_scene" | "dispatched" | "cleared" | ""
         # (no unit known yet), fd_at when it cleared. For a fire-related event (_fire). None: never checked.
         self.fire_incidents = None
+        # highway: a highway.Corridor, or a function returning one (the app's: the place search's markers and our
+        # district's shapes), for a "highway": true category (_hw_*). None: such an event is never placed (held at log)
+        self.highway = None
+        # on_promote(): a source was promoted (a crash pre-alert live on it, promoted_since()): the app tells
+        # speech-to-text at once (App.promoted_changed); called on a thread of its own, never under the engine's lock
+        self.on_promote = None
+        self._promo: dict[str, tuple[float, float]] = {}      # source key -> (since, until): promoted_since()
+        self._promo_first: dict = {}                           # event id -> its first promotion (promote_max_min)
+        self._promo_lock = threading.Lock()
         self._numbers: dict = {}              # incident id -> (its number, when the FD cleared), as fire_incidents
                                               # last gave them (the push, the console: fd_shown)
         self.windows: dict[tuple[str, str], Window] = {}
@@ -418,7 +436,7 @@ class IntelEngine:
         except Exception as e:  # noqa: BLE001 - the topic unknown: none (the push would fail closed too)
             self.log(f"intel: push sources: the topic: {type(e).__name__}")
             return frozenset()
-        packs = [p for p in self.packs if can_push(p)]
+        packs = [p for p in self.packs if can_push(p) and p.stt_high]     # ("stt_high": false: pushes, never raises STT)
         if not packs or self.sources is None:
             return frozenset()
         try:
@@ -691,7 +709,7 @@ class IntelEngine:
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp)
-        if self.locate is not None and not suppressed and (
+        if (self.locate is not None or (pack.hw and self.highway is not None)) and not suppressed and (
                 self._could_reach(pack, win, tid, hits)
                 or any(not e.confirmed or pack.category(e.category).get("moves")
                        or (e.category in PEOPLE and MOVE_WORDS.search(text))
@@ -1070,6 +1088,9 @@ class IntelEngine:
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
         cat = pack.category(ev.category)
+        if cat.get("highway"):
+            self._hw_hold(pack, ev, mode)
+            return
         if not pack.area and not cat.get("place") and not cat.get("fire_related"):
             return
         if ev.suppressed in ("placed_late", "fd_late") and ev.pushed_at is None:
@@ -1204,6 +1225,8 @@ class IntelEngine:
     def _where(self, pack, row: dict, key: str, texts: list[str], who=()):
         """The place in these transmissions' words (only the event's own: never another job's in the same window);
         a label the scrub refuses (a plate or an ID read as an address) is no place at all (fail closed)."""
+        if pack.hw and texts:
+            return self._hw_where(texts)      # a highway pack: its own places only (highway.py), never a street's
         if self.locate is None or not texts:
             return None
         try:
@@ -1268,6 +1291,8 @@ class IntelEngine:
                 pack, row, key, self._texts(pack, key, tids), [w for t in tids if t in win.entries for w in win.entries[t].who])
         elif (not ev.confirmed or moved) and tid in tids:
             place = rp if rp is not None else entry.place
+        if ev is None and not fresh and place is not None and cd.get("highway"):
+            ev = self._hw_same(pack, cat, place, at)   # another source's report of this crash: one event, one push
         subject = f"{pack.name}:{cat}:{place.key}" if place is not None and place.key else ""
         if ev is None and subject and not fresh:
             ev = next((e for e in self.events.open_events() if e.subject == subject), None)
@@ -1316,6 +1341,8 @@ class IntelEngine:
         self._note_who(pack, ev)
         self._after(pack, ev, change, now, before, moved=moved and before is not None and before.precision != "none"
                     and not same_place(before.place(), ev.place()))
+        if cd.get("highway"):
+            self._hw_promote(pack, ev, key, now)
         return ev
 
     def _relocate(self, pack, ev: Event, row, key, win, tid, at) -> Event | None:
@@ -1342,6 +1369,8 @@ class IntelEngine:
         self.events.save(ev)
         self._note_who(pack, ev)
         self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
+        if pack.category(ev.category).get("highway"):
+            self._hw_promote(pack, ev, key, ev.updated_at)
         return ev
 
     def _inference(self, pack, row, key, tid, win, at, cats, mine, event_of, hits) -> list[Event]:
@@ -1612,6 +1641,177 @@ class IntelEngine:
                     out += list(e.who)
         return out
 
+    # -- a "highway": true category (sizeup/intel/highway.py) ----------------------------------------------------
+
+    def _corridor(self):
+        h = self.highway
+        try:
+            return h() if callable(h) else h
+        except Exception as e:  # noqa: BLE001 - no corridor now: such events stay unplaced (held)
+            self.log(f"intel: highway: {type(e).__name__}")
+            return None
+
+    def _hw_where(self, texts: list[str]):
+        """The highway place the words say (an exit, a marker, an interchange, the route alone), else None."""
+        cor = self._corridor()
+        if cor is None:
+            return None
+        try:
+            return cor.place(cor.parse(" . ".join(texts)))
+        except Exception as e:  # noqa: BLE001 - no place is still an event (held)
+            self.log(f"intel: highway place: {type(e).__name__}")
+            return None
+
+    def _hw_towns(self, pack, ev: Event) -> list[str]:
+        from sizeup.intel.highway import towns_of
+        return towns_of(ev.dept, pack.towns_for(ev.source_key))
+
+    def _hw_hold(self, pack, ev: Event, mode: str | None = None) -> None:
+        """Held at log until the crash is on a highway segment by our district (highway.Corridor.gate: "out_of_area",
+        "unplaced"), or our own call is already at it ("near_incident": no pre-alert for the call we have). Pushed and
+        our call there since: linked and kept at map (no more pushes, still on the map and the console)."""
+        cor = self._corridor()
+        hw = pack.hw
+        why = cor.gate(ev.place(), self._hw_towns(pack, ev), hw["buffer_m"]) if cor is not None else "unplaced"
+        inc = self._hw_incident(pack, ev, cor) if not why else None
+        if inc is not None:
+            ev.near_incident = inc
+        if ev.pushed_at is not None:
+            if ev.near_incident is not None:
+                ev.mode, ev.note = lowest(ev.mode, "map"), "dispatched"
+            return
+        if why or ev.near_incident is not None:
+            ev.mode = lowest(ev.mode, "log")
+            ev.suppressed = why or "near_incident"
+        elif ev.suppressed in ("out_of_area", "unplaced", "near_incident"):
+            ev.suppressed = ""                # placed by our district now: the mode its rules raised it at
+            ev.mode = max(ev.mode, mode if mode is not None else self._event_mode(pack, ev), key=mode_rank)
+
+    def _hw_incs(self) -> list | None:
+        if self.incidents is None:
+            return None
+        try:
+            return list(self.incidents(self.clock()) or [])
+        except Exception as e:  # noqa: BLE001 - no incidents is still a pre-alert
+            self.log(f"intel: incidents: {type(e).__name__}")
+            return None
+
+    def _hw_incident(self, pack, ev: Event, cor=None, incs=None) -> int | None:
+        """Our own incident at the crash (highway.Corridor.at_incident), made from an hour before its first report to
+        link_min after its last; the latest. None: none (or no incidents known here). incs: as _hw_incs() read them."""
+        cor = cor if cor is not None else self._corridor()
+        if cor is None or ev.precision == "none":
+            return None
+        incs = incs if incs is not None else self._hw_incs()
+        if incs is None:
+            return None
+        hw, place, best = pack.hw, ev.place(), None
+        for inc in incs:
+            at = float(inc.get("created_at") or 0.0)
+            closed = inc.get("closed_at")
+            if not at or at < ev.first_at - 3600.0 or at > ev.last_at + hw["link_min"] * 60:
+                continue
+            if closed is not None and float(closed) < ev.first_at:
+                continue
+            try:
+                hit = cor.at_incident(place, inc, hw["link_m"], hw["buffer_m"])
+            except Exception:  # noqa: BLE001
+                hit = False
+            if hit and (best is None or at > best[0]):
+                best = (at, int(inc["id"]))
+        return best[1] if best else None
+
+    def _hw_same(self, pack, cat: str, place, at: float) -> Event | None:
+        """The open crash event of this pack another source reported at the same place (highway.Corridor.same), within
+        merge_min: the most recent."""
+        cor = self._corridor()
+        if cor is None:
+            return None
+        hw, best = pack.hw, None
+        for e in self.events.open_events():
+            if (e.pack != pack.name or e.category != cat or e.precision == "none" or e.last_at < at - hw["merge_min"] * 60
+                    or e.suppressed in ("out_of_area", "unplaced")):
+                continue                      # (another place's crash, or one not known to be ours: never this one)
+            if cor.same(place, e.place(), hw["merge_m"]) and (best is None or e.last_at > best.last_at):
+                best = e
+        return best
+
+    def _hw_promote(self, pack, ev: Event, key: str, now: float) -> None:
+        """A crash pre-alert that went out (pushed: on a highway by our district): its source (and the reporting row's)
+        transcribed like ours for promote_min (promoted_since(); the operating-channel promotion, sizeup/cad/opchannel.py),
+        renewed by each later report but never past promote_max_min after the event's first promotion (it must not
+        feed itself). An event's first promotion is raised from its first report (a new crash on a channel promoted
+        before for another one too: its own backlog); a renewal of the same event after a lapse from LEAD_S before now
+        only (#801's rule: promote_since covers the current promotion, never the backlog again). Never one held
+        (out of area, unplaced), nor once our call is at it."""
+        from sizeup.cad.opchannel import LEAD_S
+        minutes = float(pack.hw.get("promote_min") or 0)
+        if minutes <= 0 or ev.pushed_at is None or ev.near_incident is not None or ev.status != "open":
+            return
+        renewal = ev.id in self._promo_first          # this crash promoted before: from LEAD_S before now only
+        first = self._promo_first.setdefault(ev.id, now)
+        while len(self._promo_first) > 500:
+            self._promo_first.pop(next(iter(self._promo_first)))
+        until = min(now + minutes * 60, first + float(pack.hw.get("promote_max_min") or minutes) * 60)
+        if until <= now:
+            return
+        added = False
+        with self._promo_lock:
+            for k in dict.fromkeys((ev.source_key, key)):
+                if not k:
+                    continue
+                cur = self._promo.get(k)
+                if cur is not None and cur[1] > now:
+                    self._promo[k] = (cur[0], max(cur[1], until))      # live: extended, its since as it was
+                    continue
+                added = True                  # (a new crash on a channel promoted before: its own backlog)
+                self._promo[k] = (now - LEAD_S if renewal else ev.first_at, until)
+        if added and self.on_promote is not None:
+            threading.Thread(target=self._promoted_cb, name="intel-promote", daemon=True).start()
+
+    def _promoted_cb(self) -> None:
+        try:
+            self.on_promote()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"intel: promote: {type(e).__name__}")
+
+    def promoted_since(self, now: float | None = None) -> dict[str, float]:
+        """{speech-to-text channel key ("tg:N", "p25:<system>:N"): since}: the sources a live crash pre-alert promotes
+        now (_hw_promote), keyed as the station's queue keys them (sourcekeys.channel_key). Never under the engine's
+        lock; {} on a station (its engine is idle)."""
+        from sizeup import sourcekeys
+        now = self.clock() if now is None else now
+        out: dict[str, float] = {}
+        with self._promo_lock:
+            for k in [k for k, (_s, u) in self._promo.items() if u <= now]:
+                del self._promo[k]
+            items = list(self._promo.items())
+        for k, (since, _u) in items:
+            got = sourcekeys.parse(k)
+            if got is not None:
+                ck = sourcekeys.channel_key(*got)
+                out[ck] = min(since, out.get(ck, since))
+        return out
+
+    def _hw_dispatched(self, now: float) -> list[Event]:
+        """Pushed crash events our own call has come in for since (the county's dispatch, link_min): linked, kept at
+        map, no more pushes (the tick: our call usually comes after the last report)."""
+        out, incs = [], None
+        for ev in self.events.open_events():
+            pack = self.pack(ev.pack)
+            if (pack is None or not pack.category(ev.category).get("highway") or ev.pushed_at is None
+                    or ev.near_incident is not None):
+                continue
+            incs = self._hw_incs() if incs is None else incs        # one read a tick, only when there is such an event
+            inc = self._hw_incident(pack, ev, incs=incs or [])
+            if inc is None:
+                continue
+            ev.near_incident, ev.note, ev.mode, ev.updated_at = inc, "dispatched", lowest(ev.mode, "map"), now
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
+        return out
+
     def tick(self, now: float | None = None) -> list[Event]:
         """Events past their until: expired. A digest when due. Windows that have gone quiet: forgotten."""
         now = self.clock() if now is None else now
@@ -1631,6 +1831,8 @@ class IntelEngine:
                     out += self.backing.tick(self, now)       # held questions due, deadlines passed (backing.py)
                 except Exception as e:  # noqa: BLE001 - the model never stops the tick
                     self.log(f"intel: model: {type(e).__name__}")
+            if self.enabled:
+                out += self._hw_dispatched(now)   # our own call at a pushed crash: linked, no more pushes
             held = self.policy.digest_due(now) if self.enabled else []     # obeys enabled, push, quiet (M3)
             if held and hasattr(self.sink, "digest"):
                 evs = [e for e in (self.events.get(i) for i in held) if e is not None]

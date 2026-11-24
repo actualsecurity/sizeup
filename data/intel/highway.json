@@ -1,0 +1,205 @@
+{
+  "_about": "A crash on a highway in or next to our district, heard first on another agency's channel (sizeup/intel/highway.py, engine.py step 6 for a \"highway\": true category). Scope: every captured channel with words (police, EMS, fire, DOT, interop, transit; the context talkgroups included) except the police pack's own (they push their own crashes) and our own dispatch channel. One category, crash: held at log until the words put it on a highway segment within highway.buffer_m of our district (an exit, a mile marker, or two routes and a ramp word: the gazetteer's markers), or name the route alone on a source whose own town has that route by our district. One event per crash across sources (same route, within highway.merge_m), later transmissions attach; our own call at it (the county's dispatch, within highway.link_min after) links it and stops its pushes. While a pushed crash event is live, its source is transcribed at HIGH (above every live and context class, never beside our fire traffic) for highway.promote_min, at most highway.promote_max_min after its first promotion (the operating-channel promotion, sizeup/cad/opchannel.py). Its sources are not made push sources for speech-to-text (\"stt_high\": false): Settings can turn that on. An injury, EMS or an agency word is a cue only (beside a crash word), never a crash alone; cleared, reopened, gone on arrival or no injuries is none (or damps it). The local model (sizeup/intel/backing.py) is asked only about rows with a highway word (\"model_needs\"), at most model_hour_cap an hour of its own, and what it raises alone stays on the map (\"model_mode\": \"map\"): never a push without a rule. Generic phrases only, in data/intel/tables/stt.json's spelling (\"rollover\", \"guardrail\", number words as digits). A count of cars alone is weak: police say \"two cars\" for patrol cars; \"N car\" said with a crash word, a highway word or a route is a crash.",
+  "name": "highway",
+  "version": 1,
+  "order": 5,
+  "domain": "highway",
+  "label": "Radio",
+  "scope": {
+    "services": [],
+    "sources": [
+      "p25:mrrs:*",
+      "p25:westchester:*"
+    ],
+    "exclude": [
+      "p25:mrrs:9211",
+      "p25:mrrs:9212",
+      "p25:mrrs:9213",
+      "p25:westchester:307"
+    ],
+    "tiers": [],
+    "systems": []
+  },
+  "accept": false,
+  "window_s": 180,
+  "threshold": 0.6,
+  "context_factor": 0.5,
+  "mode": "push",
+  "normalize": "stt",
+  "infer": false,
+  "model": true,
+  "model_needs": [
+    "re:\\b(?:i[- ]?\\d{2,3}|interstate|route \\d{2,3}|\\d{2,3}\\s+(?:north|south|east|west)|(?:north|south|east|west)bound|exit \\d|mile marker|hutch|hutchinson|thruway|cross county|merritt|parkway|expressway|highway)\\b"
+  ],
+  "stt_high": false,
+  "towns": {},
+  "highway": {
+    "buffer_m": 2000,
+    "merge_m": 3000,
+    "merge_min": 30,
+    "link_m": 3000,
+    "link_min": 30,
+    "promote_min": 10,
+    "promote_max_min": 30
+  },
+  "categories": {
+    "crash": {
+      "label": "Crash",
+      "highway": true,
+      "ttl_min": 60,
+      "priority": 4,
+      "mode": "push",
+      "tag": "car",
+      "describe": "A vehicle crash on a highway (interstate, parkway, expressway), its ramps or an interchange: cars into each other or the guardrail, a rollover, injuries, entrapment, a multi-car crash.",
+      "words": [
+        "crash",
+        "accident",
+        "collision",
+        "rollover",
+        "overturned",
+        "guardrail",
+        "entrapment",
+        "injuries",
+        "vehicles",
+        "exit",
+        "mile marker",
+        "ramp"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "id": "hwy.crash",
+      "v": 1,
+      "category": "crash",
+      "w": 0.5,
+      "any": [
+        "(mva|accident|crash|collision|wreck|crashed|pileup|pile up|motor vehicle accident|car accident|vehicle accident)"
+      ],
+      "not": [
+        "no accident",
+        "(not|no longer) (a|an) (accident|crash)",
+        "(accident|crash) (report|reports) only",
+        "(cleared|reopened|clear of the|lanes are open|all lanes open|lanes open)",
+        "(goa|gone on arrival|unfounded|nothing found|unable to locate)"
+      ]
+    },
+    {
+      "id": "hwy.crash_serious",
+      "v": 1,
+      "category": "crash",
+      "w": 0.65,
+      "any": [
+        "(rollover|overturned|rolled over|on its side|on its roof|head on|flipped)",
+        "(entrapment|extrication|ejected|ejection)",
+        "(pin|pinned|trapped) ... (vehicle|car|truck|driver|passenger)",
+        "(car|cars|vehicle|vehicles|truck|tractor trailer|suv|van) (into|hit|struck) (the|a) (guardrail|barrier|median|divider)",
+        "(car|cars|vehicle|vehicles|truck|suv|van) (into|hit|struck) (the|a) (wall|jersey barrier|pole|sign)",
+        "(2|3|4|5|6|multi|multiple) (car|vehicle) (mva|accident|crash|collision|pileup)"
+      ],
+      "not": [
+        "no entrapment",
+        "no injuries",
+        "(deer|animal) ... (struck|hit)",
+        "(cleared|reopened|clear of the|lanes are open|all lanes open|lanes open)",
+        "(goa|gone on arrival|unfounded|nothing found|unable to locate)"
+      ]
+    },
+    {
+      "id": "hwy.cars",
+      "v": 1,
+      "category": "crash",
+      "w": 0.45,
+      "any": [
+        "(2|3|4|5|6|multi|multiple) (car|vehicle)",
+        "(2|3|4|5|6) vehicles (involved|into)",
+        "(cars|vehicles) involved",
+        "(guardrail|barrier|median) (damage|hit|struck)",
+        "(car|vehicle) (fire|on fire) ... (exit|ramp|lane|shoulder)"
+      ],
+      "not": [
+        "(2|3|4|5|6) (car|vehicle) (response|respond|responding|detail|escort|patrol)",
+        "parking lot",
+        "(cleared|reopened|clear of the|lanes are open|all lanes open|lanes open)",
+        "(goa|gone on arrival|unfounded|nothing found|unable to locate)"
+      ]
+    },
+    {
+      "id": "hwy.cars_road",
+      "v": 1,
+      "category": "crash",
+      "w": 0.55,
+      "any": [
+        "re:\\b(?:[2-6]|multi|multiple)[- ]car\\b[^.?!]{0,40}?\\b(?:\\d{2,3}|westbound|eastbound|northbound|southbound|exit|ramp|hutch|hutchinson|thruway|parkway)\\b"
+      ],
+      "not": [
+        "(2|3|4|5|6) (car|vehicle) (response|respond|responding|detail|escort|patrol)",
+        "(cleared|reopened|clear of the|lanes are open|all lanes open|lanes open)",
+        "(goa|gone on arrival|unfounded|nothing found|unable to locate)"
+      ]
+    },
+    {
+      "id": "hwy.injury",
+      "v": 1,
+      "category": "*",
+      "w": 0.25,
+      "any": [
+        "(injury|injuries|injured|ems|ambulance|medics|aided)"
+      ],
+      "not": [
+        "(no|zero|negative|without|any) (injury|injuries|injured)",
+        "(refused|refusing|refusal|rma)",
+        "(cancel|canceling|cancelling) (ems|the ambulance|medics)"
+      ]
+    },
+    {
+      "id": "hwy.road_cue",
+      "v": 1,
+      "category": "*",
+      "w": 0.2,
+      "any": [
+        "(northbound|southbound|eastbound|westbound|north bound|south bound|east bound|west bound)",
+        "(exit|mile marker|milepost|ramp|on ramp|off ramp|interchange)",
+        "(shoulder|left lane|right lane|center lane|travel lane|median|guardrail)",
+        "re:\\b\\d{2,3} (?:north|south|east|west)\\b"
+      ]
+    },
+    {
+      "id": "hwy.route_cue",
+      "v": 1,
+      "category": "*",
+      "w": 0.2,
+      "any": [
+        "re:\\b(?:i[- ]?\\d{2,3}|interstate \\d{2,3}|(?:the|route) \\d{2,3}|hutch|hutchinson|thruway|cross county|merritt|parkway|expressway)\\b"
+      ]
+    },
+    {
+      "id": "hwy.agency_cue",
+      "v": 1,
+      "category": "*",
+      "w": 0.15,
+      "any": [
+        "(state police|trooper|troopers|troop|nysp|thruway authority|dot|tow truck|wrecker|flatbed)"
+      ]
+    },
+    {
+      "id": "hwy.minor",
+      "v": 1,
+      "category": "crash",
+      "w": -0.5,
+      "any": [
+        "(property damage only|pdo|fender bender|minor accident|minor mva)",
+        "(disabled vehicle|disabled car|broken down|out of gas|flat tire)",
+        "(no injuries|no injury|non injury|nobody hurt|no one hurt|no one injured)"
+      ]
+    }
+  ],
+  "suppress": [
+    "(disregard|disregarding)",
+    "cancel (that|the call|the response)",
+    "(training|this is a test|for training)",
+    "(drill only|it's a drill|just a drill)"
+  ],
+  "model_mode": "map",
+  "model_hour_cap": 20
+}

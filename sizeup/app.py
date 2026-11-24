@@ -907,6 +907,12 @@ class App:
         if self.gaz is not None:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
+            # a highway crash's place (sizeup/intel/highway.py): the same markers, our district's shapes (roads.py)
+            from sizeup.intel.highway import LiveCorridor
+            intel.highway = LiveCorridor(self.cad.place_index, lambda: self.roads.area_shapes()
+                                         if getattr(self, "roads", None) is not None else None)
+        # a crash pre-alert promoted its channel (engine.promoted_since): speech-to-text hears it now (the station too)
+        intel.on_promote = self.promoted_changed
         intel.listen = self._intel_listen(intel)
         # speech-to-text's priority hook (sizeup.intel.push_sources()): the sources intel could push from, over every
         # source known here: the talkgroups as the CAD lists them (the hub: its station's), then this process's own
@@ -2893,8 +2899,9 @@ class App:
 
     def promoted_keys(self) -> frozenset:
         """The county talkgroups transcribed like ours now ("tg:N"): an incident of ours is worked on them
-        (sizeup/cad/opchannel.py). A station: the hub's word (set_channel_prefs' aws.promote); the CAD of record: its
-        own, read at most every PROMOTE_CACHE_S."""
+        (sizeup/cad/opchannel.py); and the channels a live highway-crash pre-alert promotes for a few minutes
+        (sizeup/intel/engine.py promoted_since: "tg:N" or "p25:<system>:N"). A station: the hub's word
+        (set_channel_prefs' aws.promote); the CAD of record: its own, read at most every PROMOTE_CACHE_S."""
         if self.forwarding():
             return frozenset((getattr(self, "_hub_aws", None) or {}).get("promote") or ())
         at, keys = self._promo_cache
@@ -2906,8 +2913,19 @@ class App:
         except Exception as e:  # noqa: BLE001 - none promoted then: the class it had
             log(f"speech-to-text: operating channels: {type(e).__name__}: {e}")
             keys = frozenset()
+        keys = keys | frozenset(self.intel_promoted())
         self._promo_cache = (time.monotonic(), keys)
         return keys
+
+    def intel_promoted(self) -> dict:
+        """{channel key: since} a live highway-crash pre-alert promotes now (sizeup/intel/engine.py promoted_since);
+        {} without an engine (a station: its engine is idle)."""
+        eng = getattr(getattr(self, "cad", None), "intel", None)
+        try:
+            return dict(eng.promoted_since()) if eng is not None and hasattr(eng, "promoted_since") else {}
+        except Exception as e:  # noqa: BLE001 - none then
+            log(f"speech-to-text: intel promotion: {type(e).__name__}")
+            return {}
 
     def promoted_changed(self) -> None:
         """An incident's operating channel came or went: read again at once (the hub pushes its station: HubApp)."""
@@ -3080,6 +3098,8 @@ class App:
         p = self._stt_priority(item, key)
         if p in (CONTEXT, CONTEXT_FALLBACK) or App._stt_class(self, item, key) in (CONTEXT, CONTEXT_FALLBACK):
             return sttinput.PRE                                 # an alert-tier talkgroup
+        if key.startswith("p25:") and key in _promoted(self):
+            return sttinput.PRE                                 # a crash pre-alert's channel (sizeup/intel/engine.py)
         if p == URGENT:
             return sttinput.FIRE
         return sttinput.LOW if p == LOW else sttinput.NORMAL
@@ -3154,7 +3174,7 @@ class App:
         if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page" or key in STT_FIRST:
             return URGENT
         if key in _promoted(self):             # a county talkgroup an incident of ours is worked on now (opchannel.py)
-            return URGENT
+            return promoted_class(key)         # (another system's: a crash pre-alert's, HIGH: never beside Fire/EMS 15)
         if key in AIRBAND_FIRST:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
@@ -3677,11 +3697,14 @@ class App:
         return float(self.cfg.stt_aws_context_limit_usd)
 
     def context_aws_keys(self) -> list[str]:
-        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT): the ones the
-        station must hear about separately when only one of the two budgets is used up."""
+        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT), and those a crash
+        pre-alert promotes now (forced to AWS: stt_engine): the ones the station must hear about separately when only
+        one of the two budgets is used up (deny: whisper at once, never a round trip to the hub's refusal per clip)."""
         from sizeup.transcribe import is_context
         keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
-        return sorted(k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both"))
+        promoted = {k for k in _promoted(self) if is_context(k)}     # a crash pre-alert's: forced to AWS (stt_engine)
+        return sorted({k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both")}
+                      | promoted)
 
     def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
         """(context keys that keep AWS while ours can't, context keys that can't while ours can, why): the police
@@ -3807,7 +3830,7 @@ class App:
                 up = set(new.get("promote") or ()) - set(self._hub_aws.get("promote") or ())
                 self._hub_aws = new
                 for k in sorted(up):                   # promoted: what waits as context since the move goes with it
-                    n = self.stt.raise_channel(k, URGENT, (new.get("promote_since") or {}).get(k)) \
+                    n = self.stt.raise_channel(k, promoted_class(k), (new.get("promote_since") or {}).get(k)) \
                         if hasattr(self.stt, "raise_channel") else 0
                     log(f"speech-to-text: {k} transcribed like ours (an incident is worked on it)"
                         + (f"; {n} waiting clip(s) raised" if n else ""))
@@ -3824,6 +3847,7 @@ class App:
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
+                "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 
@@ -5948,6 +5972,13 @@ class App:
         audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
         path, note = self.cad._render(text, tones=[])
         return (self.cad._audio_url(path), note) if path else (None, note)
+
+
+def promoted_class(key: str) -> int:
+    """The whisper class of a promoted channel: URGENT for a county talkgroup an incident of ours is worked on (#801:
+    like Fire/EMS 15); HIGH for another system's a crash pre-alert promotes (sizeup/intel/engine.py promoted_since: not
+    our incident, so never beside our fire traffic; above every live and context class, never shed as context)."""
+    return HIGH if str(key).startswith("p25:") else URGENT
 
 
 def _promoted(app) -> frozenset:

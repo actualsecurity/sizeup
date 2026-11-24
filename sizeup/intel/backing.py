@@ -18,9 +18,12 @@ meta)); the stage builds the prompt, a backend only carries it:
     FakeBackend       tests and tools/intel_replay.py --model fake: no model at all
 
 Which rows (the gate, consider()): the pack named infer_pd_pack ("police": its scope, read from the pack, never a
-talkgroup here); a row the rules raised, changed and scored over no threshold with (the engine says so: ruled), that
-is in no open event of its source yet, not suppressed ("disregard", "training"), no routine words, at least
-infer_pd_min_words words, asked once per transmission, within infer_pd_hour_cap / infer_pd_day_cap. While infer_pd is
+talkgroup here), and a pack whose file says "model": true (data/intel/highway.json: only its rows that say one of its
+"model_needs" phrases, a highway's name or a direction, within its own "model_hour_cap" too; what the model raises
+alone for it is capped at its "model_mode", map); a row the rules raised, changed and scored over no threshold with
+(the engine says so: ruled), that is in no open event of its source yet, not suppressed ("disregard", "training"), no
+routine words, at least infer_pd_min_words words, asked once per transmission, within infer_pd_hour_cap /
+infer_pd_day_cap. While infer_pd is
 on, infer.py's own stage is never asked about that pack's rows (one model per row).
 
 What is sent (messages(), never logged): the categories (the pack's own: a category the pack gains is offered with no
@@ -393,6 +396,8 @@ class ModelBacking:
         self.today = {"day": "", **{k: 0 for k in COUNTS}}
         self.total = {k: 0 for k in COUNTS}    # since start (replay's report: its clock crosses days)
         self.records: list[dict] = []          # without a store (replay, tests)
+        self._needs: dict = {}                 # (pack, its "model_needs") -> the phrases, compiled
+        self._pack_hour: dict = {}             # pack -> when each of its questions went ("model_hour_cap")
         self.last_model = {"model": "", "model_version": "", "backend": ""}
         self.seen = {"backend": "none", "pc": "not checked yet", "at": 0.0}   # what the model thread last saw
         self._lock = threading.Lock()
@@ -432,7 +437,25 @@ class ModelBacking:
     def owns(self, pack) -> bool:
         """This stage asks about the pack's rows (infer.py's own stage then never does: one model per row)."""
         c = self.cfg()
-        return bool(c["infer_pd"]) and pack.name == str(c["infer_pd_pack"])
+        return bool(c["infer_pd"]) and self._mine(pack, c)
+
+    @staticmethod
+    def _mine(pack, c: dict) -> bool:
+        """The pack named infer_pd_pack, or one whose file says "model": true (the highway pack: only its rows with
+        one of its "model_needs" phrases, needs())."""
+        return pack.name == str(c["infer_pd_pack"]) or bool((pack.src or {}).get("model"))
+
+    def needs(self, pack, text: str) -> bool:
+        """A pack's "model_needs" (phrases, rules.py's grammar): the row must say one to be asked; none: any row."""
+        src = (pack.src or {}).get("model_needs") or []
+        if not src:
+            return True
+        from sizeup.intel import rules as rules_mod
+        k = (pack.name, tuple(src))
+        if k not in self._needs:
+            self._needs[k] = rules_mod._phrases(list(src), f"{pack.name}.model_needs")
+        ws = rules_mod.words(text)
+        return any(p.found(text, ws) for p in self._needs[k])
 
     def _roll(self, now: float) -> None:
         day = datetime.fromtimestamp(now, self.tz).strftime("%Y-%m-%d")
@@ -477,7 +500,7 @@ class ModelBacking:
         text = f"{head} · today {t['asked']} asked · {t['ok']} answered · {t['events']} events · {t['deadline']} timeouts"
         if t["invalid"]:
             text += f" · {t['invalid']} invalid"          # answers the schema refused (a confidence outside 0-1 ...)
-        title = ("The local model behind the police rules (sizeup/intel/backing.py): only rows the rules left alone. "
+        title = ("The local model behind the police and highway rules (sizeup/intel/backing.py): only rows the rules left alone. "
                  "Today: " + " · ".join(f"{t[k]} {k}" for k in COUNTS)
                  + (f"\nModel {s['model']} {s['model_version']}".rstrip() if s["model"] else "")
                  + f"\nBedrock: {'on' if s['bedrock']['on'] else 'off'} ({s['bedrock']['state']})")
@@ -492,7 +515,7 @@ class ModelBacking:
         gate, snapshotted and queued. ruled: a category this row speaks of reached its threshold (raised, deferred, or
         its mode off: the rules' call either way). The events this made (inline only: tests, replay)."""
         c = self.cfg()
-        if pack.name != str(c["infer_pd_pack"]) or not (c["infer_pd"] or c["infer_pd_bedrock"]) or pack.mode == "off":
+        if not self._mine(pack, c) or not (c["infer_pd"] or c["infer_pd_bedrock"]) or pack.mode == "off":
             return []
         from sizeup.intel import rules as rules_mod
         text = str(row.get("text") or "")
@@ -502,14 +525,22 @@ class ModelBacking:
                 src.append({"tid": tid, "at": at, "text": text})
         out = self._due(engine, at)
         if (suppressed or changed or ruled or tid in self.asked or any(r.category == "routine" for r, _w in hits)
-                or len(rules_mod.words(text)) < int(c["infer_pd_min_words"])
+                or len(rules_mod.words(text)) < int(c["infer_pd_min_words"]) or not self.needs(pack, text)
                 or any(tid in e.traffic_ids for e in engine.events.open_events()
                        if e.pack == pack.name and e.source_key == key)):      # a re-feed of a row already in an event
             return out
         now = self.clock()
+        own = int((pack.src or {}).get("model_hour_cap") or 0)     # a pack of its own budget (highway.json): apart
         with self._lock:
             self._roll(now)
             capped = len(self.hour) >= int(c["infer_pd_hour_cap"]) or self.today["asked"] >= int(c["infer_pd_day_cap"])
+            if own:
+                mine = self._pack_hour.setdefault(pack.name, deque())
+                while mine and mine[0] <= now - 3600:
+                    mine.popleft()
+                capped = capped or len(mine) >= own
+                if not capped:
+                    mine.append(now)
         if capped:
             self.count("capped", now)
             return out
@@ -703,7 +734,8 @@ class ModelBacking:
                 return []
             key, tid, at, row = job["key"], job["tid"], job["at"], job["row"]
             cd = pack.category(cat)
-            mode = lowest(pack.mode, cd.get("mode", "push"), str(c["infer_pd_mode"]))
+            mode = lowest(pack.mode, cd.get("mode", "push"), str(c["infer_pd_mode"]),
+                          str((pack.src or {}).get("model_mode") or "push"))     # (highway.json: map, never a push)
             if mode == "off":
                 return []
             win = engine.windows.get((pack.name, key))
