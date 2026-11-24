@@ -76,6 +76,7 @@ LIVE_CLASSES = (URGENT, HIGH, LIVE)
 SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, CONTEXT: CONTEXT_MAX_WAIT_S, CONTEXT_FALLBACK: CONTEXT_FALLBACK_MAX_WAIT_S,
               LOW: LOW_MAX_WAIT_S}
 CONTEXT_CLASSES = (CONTEXT_FALLBACK, CONTEXT)
+RAISABLE = (HIGH, LIVE, *CONTEXT_CLASSES, LOW)   # what raise_channel moves up: never a re-run, a catch-up (or a late clip)
 SHED = "skipped: busy"      # what a shed clip's reason starts with: its status is "skipped", not "error" (re-runnable)
 # A shed clip caught up later (sizeup/sttcatchup.py): under every other class, and started only once no clip of ours
 # (URGENT, HIGH, LIVE; one that went to AWS counts too) has come in for CATCHUP_QUIET_S, nor since the start, so fire
@@ -373,9 +374,12 @@ class SttQueue:
 
     def raise_channel(self, channel: str, priority: int = URGENT, since: float | None = None) -> int:
         """A channel's waiting live and context clips heard since `since` (the move to it) raised to `priority` (a county
-        talkgroup an incident of ours is now worked on, sizeup/cad/opchannel.py: no longer shed as context), each behind
-        what already waits in that class (a fresh seq: never ahead of Fire/EMS 15's). Never a late clip (#747/#753: after
-        every live one), a re-run, a catch-up, or anything when `since` isn't known. How many."""
+        talkgroup an incident of ours is now worked on, sizeup/cad/opchannel.py: no longer shed as context; another
+        system's talkgroup a crash pre-alert promotes, sizeup/intel/engine.py: HIGH), each behind what already waits in
+        that class (a fresh seq: never ahead of Fire/EMS 15's). Live, HIGH, LOW and the context classes (an alert-tier
+        talkgroup's, CONTEXT / CONTEXT_FALLBACK); never a late clip (#747/#753: after every live one), a re-run, a
+        catch-up, or anything when `since` isn't known. Raised into a class that sheds (HIGH), a clip's wait starts
+        again then (it is never shed for the minutes it waited as context). How many."""
         if since is None:
             return 0
         n = 0
@@ -383,10 +387,12 @@ class SttQueue:
             for e in sorted(self._items, key=lambda x: x[1]):
                 item = e[2]
                 start = getattr(item, "start", None)
-                if e[4] != channel or e[0] not in (LIVE, LOW) or e[0] <= priority or getattr(item, "late", False) \
+                if e[4] != channel or e[0] not in RAISABLE or e[0] <= priority or getattr(item, "late", False) \
                         or not isinstance(start, (int, float)) or start < since:
                     continue
                 e[0], e[1] = priority, next(self._seq)
+                if priority in SHED_AFTER:
+                    e[5] = self.clock()               # (its wait in the new class: never shed for the context's)
                 n += 1
             if n:
                 self._cv.notify()

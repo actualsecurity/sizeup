@@ -312,6 +312,8 @@ class IntelEngine:
         # speech-to-text at once (App.promoted_changed); called on a thread of its own, never under the engine's lock
         self.on_promote = None
         self._promo: dict[str, tuple[float, float]] = {}      # source key -> (since, until): promoted_since()
+        self._promo_had: dict[str, float] = {}                 # source key -> when its last promotion lapsed (F4)
+        self._promo_first: dict = {}                           # event id -> its first promotion (promote_max_min)
         self._promo_lock = threading.Lock()
         self._numbers: dict = {}              # incident id -> (its number, when the FD cleared), as fire_incidents
                                               # last gave them (the push, the console: fd_shown)
@@ -1737,21 +1739,34 @@ class IntelEngine:
 
     def _hw_promote(self, pack, ev: Event, key: str, now: float) -> None:
         """A crash pre-alert that went out (pushed: on a highway by our district): its source (and the reporting row's)
-        transcribed like ours for promote_min from the crash's first report (promoted_since(); the operating-channel
-        promotion, sizeup/cad/opchannel.py). Never one held (out of area, unplaced), nor once our call is at it."""
+        transcribed like ours for promote_min (promoted_since(); the operating-channel promotion, sizeup/cad/opchannel.py),
+        renewed by each later report but never past promote_max_min after the event's first promotion (it must not
+        feed itself). Raised from the crash's first report the first time; a renewal after a lapse from LEAD_S before
+        now only (#801's rule: promote_since covers the current promotion, never the backlog again). Never one held
+        (out of area, unplaced), nor once our call is at it."""
+        from sizeup.cad.opchannel import LEAD_S
         minutes = float(pack.hw.get("promote_min") or 0)
         if minutes <= 0 or ev.pushed_at is None or ev.near_incident is not None or ev.status != "open":
             return
-        until = now + minutes * 60
+        first = self._promo_first.setdefault(ev.id, now)
+        while len(self._promo_first) > 500:
+            self._promo_first.pop(next(iter(self._promo_first)))
+        until = min(now + minutes * 60, first + float(pack.hw.get("promote_max_min") or minutes) * 60)
+        if until <= now:
+            return
         added = False
         with self._promo_lock:
             for k in dict.fromkeys((ev.source_key, key)):
                 if not k:
                     continue
-                since, was = self._promo.get(k, (ev.first_at, 0.0))
-                if was <= now:
-                    added = True
-                self._promo[k] = (min(since, ev.first_at) if was > now else ev.first_at, max(was, until))
+                cur = self._promo.get(k)
+                if cur is not None and cur[1] > now:
+                    self._promo[k] = (cur[0], max(cur[1], until))      # live: extended, its since as it was
+                    continue
+                added = True
+                lapsed = cur is not None or k in self._promo_had
+                self._promo[k] = (now - LEAD_S if lapsed else ev.first_at, until)
+                self._promo_had.pop(k, None)
         if added and self.on_promote is not None:
             threading.Thread(target=self._promoted_cb, name="intel-promote", daemon=True).start()
 
@@ -1770,7 +1785,9 @@ class IntelEngine:
         out: dict[str, float] = {}
         with self._promo_lock:
             for k in [k for k, (_s, u) in self._promo.items() if u <= now]:
-                del self._promo[k]
+                self._promo_had[k] = self._promo.pop(k)[1]
+            while len(self._promo_had) > 200:
+                self._promo_had.pop(next(iter(self._promo_had)))
             items = list(self._promo.items())
         for k, (since, _u) in items:
             got = sourcekeys.parse(k)

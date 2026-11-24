@@ -448,3 +448,117 @@ def test_the_hub_sends_another_systems_key_only_to_a_station_that_takes_it(tmp_p
                                            want["squelch"], None, got["promote"])
     finally:
         hub.stop()
+
+
+# -- speech-to-text's side of a crash promotion (the radio session's review) ------------------------------------------
+
+def _clip(name, start, late=False):
+    from sizeup.incidents import Traffic
+    t = Traffic(name, "x", start, start + 1.0, "")
+    if late:
+        t.late = True
+    return t
+
+
+def test_raise_channel_takes_the_context_and_high_classes_too_never_a_rerun_catchup_or_late_clip():
+    from sizeup.stt import CATCHUP, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, URGENT, SttQueue
+    clock = Clock(2_000.0)
+    q = SttQueue(clock=clock)
+    ch = NEXT_DOOR
+    for prio, item in ((CONTEXT, _clip("ctx", 1100.0)), (CONTEXT_FALLBACK, _clip("fb", 1110.0)), (LOW, _clip("low", 1120.0)),
+                       (LIVE, _clip("live", 1130.0)), (HIGH, _clip("high", 1140.0)), (RERUN, _clip("rerun", 1150.0)),
+                       (CATCHUP, _clip("catch", 1160.0)), (CONTEXT, _clip("late", 1170.0, late=True)),
+                       (CONTEXT, _clip("before", 900.0))):
+        q.put((prio, None, item, None, ch))
+    assert q.raise_channel(ch, HIGH, 1000.0) == 4               # (HIGH already: as it was)
+    got = {e[2].id: e[0] for e in q._items}
+    assert got == {"ctx": HIGH, "fb": HIGH, "low": HIGH, "live": HIGH, "high": HIGH, "rerun": RERUN, "catch": CATCHUP,
+                   "late": CONTEXT, "before": CONTEXT}
+    assert q.raise_channel(ch, URGENT, 1000.0) == 5             # #801's raise to URGENT takes HIGH too
+    clock.t += 299                                              # raised into HIGH: its wait starts again (never shed for
+    q2 = SttQueue(clock=clock)                                  # the minutes it waited as context)
+    q2.put((CONTEXT, None, _clip("waited", 2_000.0), None, ch))
+    clock.t += 400
+    assert q2.raise_channel(ch, HIGH, 1000.0) == 1
+    item = q2.get_nowait()
+    assert item is not None and item[2].id == "waited"
+
+
+def test_a_station_hears_a_crash_channel_at_high_through_set_channel_prefs(tmp_path):
+    from sizeup.app import HIGH as A_HIGH, URGENT as A_URGENT
+    from sizeup.cloud import sttinput
+    from sizeup.incidents import Traffic
+    from sizeup.stt import CONTEXT, LOW, SttQueue
+    from tests.test_stt_input import offline_station
+    st = offline_station(tmp_path)
+    try:
+        q = SttQueue(clock=Clock(2_000.0))
+        st.stt.raise_channel = q.raise_channel                  # the real queue's raise (not started: nothing is taken)
+        q.put((CONTEXT, None, _clip("ctx", 1_500.0), None, NEXT_DOOR))
+        q.put((LOW, None, _clip("low", 1_600.0), None, NEXT_DOOR))
+        q.put((LOW, None, _clip("old", 900.0), None, NEXT_DOOR))
+        t = Traffic("9901-1-call_1-t0", "Sample PD", 0.0, 1.0, "", talkgroup=9901)
+        word = {"ok": True, "why": "", "reserve": [], "promote": ["tg:4031", NEXT_DOOR],
+                "promote_since": {NEXT_DOOR: 1_000.0, "tg:4031": 1_000.0}}
+        st.set_channel_prefs({}, word)
+        assert {e[2].id: e[0] for e in q._items} == {"ctx": A_HIGH, "low": A_HIGH, "old": LOW}
+        assert st._stt_class(t, NEXT_DOOR) == A_HIGH and st._stt_class(t, "tg:4031") == A_URGENT
+        assert st._stt_lane(t, NEXT_DOOR) == sttinput.PRE
+        assert st.stt_engine(NEXT_DOOR) == "aws"
+        assert st.channels_applied()["promote_p25_ok"] is True
+        st.set_channel_prefs({}, {"ok": True, "why": "", "reserve": []})         # the window over: as before
+        assert st._stt_class(t, NEXT_DOOR) not in (A_HIGH, A_URGENT) and st.stt_engine(NEXT_DOOR) != "aws"
+    finally:
+        st.link.stop()
+
+
+def test_a_promotion_never_outlives_promote_max_min_however_often_it_is_renewed():
+    clock = Clock(10_000.0)
+    e, _sink = engine(clock)
+    e.feed(row("a", "two cars into the guardrail on I-998 eastbound by exit 40", clock.t))
+    for i in range(8):                                          # a report every 5 min renews it
+        clock.t += 300
+        e.feed(row(f"r{i}", f"update {i}, the crash is still blocking two lanes, 998 eastbound exit 40", clock.t))
+    assert e.promoted_since(10_000.0 + 29 * 60) and e.promoted_since(10_000.0 + 31 * 60) == {}
+
+
+def test_a_renewal_after_a_lapse_raises_only_from_lead_s_before_it():
+    from sizeup.cad.opchannel import LEAD_S
+    clock = Clock(10_000.0)
+    e, _sink = engine(clock)
+    e.feed(row("a", "two cars into the guardrail on I-998 eastbound by exit 40", clock.t))
+    assert e.promoted_since(clock.t) == {NEXT_DOOR: 10_000.0}
+    clock.t += 12 * 60
+    assert e.promoted_since(clock.t) == {}                      # lapsed
+    e.feed(row("b", "two cars, one overturned now, 998 eastbound exit 40", clock.t))
+    assert e.promoted_since(clock.t) == {NEXT_DOOR: clock.t - LEAD_S}     # never the whole backlog again
+
+
+def test_the_hub_keeps_our_incidents_keys_first_past_the_cap(tmp_path):
+    from sizeup import channels
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    hub = HubApp(hub_cfg(tmp_path))
+    try:
+        many = {f"p25:mrrs:{9800 + i}": 10_000.0 for i in range(channels.AWS_KEYS_MAX + 4)}
+        hub.intel_promoted = lambda: many
+        hub.cad.opchan.promoted = lambda now=None: {4031}
+        hub.cad.opchan.promoted_since = lambda now=None: {"tg:4031": 9_000.0}
+        hub.promoted_changed()
+        hub.hub.status = {"channels": {"promote_ok": True, "promote_p25_ok": True}}
+        sent = hub.channel_desired()["aws"]["promote"]
+        assert sent[0] == "tg:4031" and len(sent) == channels.AWS_KEYS_MAX
+    finally:
+        hub.stop()
+
+
+def test_a_promoted_crash_channel_is_denied_aws_with_the_context_budget():
+    from sizeup.app import App
+
+    class Stub:
+        _chan_ov: dict = {}
+        cfg = type("C", (), {"stt_aws_channels": ()})()
+        channel_pref = lambda self, k: {"engine": "local"}       # noqa: E731
+        promoted_keys = lambda self: frozenset({NEXT_DOOR, "tg:4031"})   # noqa: E731
+        context_aws_keys = App.context_aws_keys
+    assert Stub().context_aws_keys() == [NEXT_DOOR]             # (ours never: their own budget, as before)

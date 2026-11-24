@@ -3084,6 +3084,8 @@ class App:
         p = self._stt_priority(item, key)
         if p in (CONTEXT, CONTEXT_FALLBACK) or App._stt_class(self, item, key) in (CONTEXT, CONTEXT_FALLBACK):
             return sttinput.PRE                                 # an alert-tier talkgroup
+        if key.startswith("p25:") and key in _promoted(self):
+            return sttinput.PRE                                 # a crash pre-alert's channel (sizeup/intel/engine.py)
         if p == URGENT:
             return sttinput.FIRE
         return sttinput.LOW if p == LOW else sttinput.NORMAL
@@ -3158,7 +3160,7 @@ class App:
         if not isinstance(item, (Traffic, Rerun)) or getattr(item, "kind", "") == "page" or key in STT_FIRST:
             return URGENT
         if key in _promoted(self):             # a county talkgroup an incident of ours is worked on now (opchannel.py)
-            return URGENT
+            return promoted_class(key)         # (another system's: a crash pre-alert's, HIGH: never beside Fire/EMS 15)
         if key in AIRBAND_FIRST:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
@@ -3681,11 +3683,14 @@ class App:
         return float(self.cfg.stt_aws_context_limit_usd)
 
     def context_aws_keys(self) -> list[str]:
-        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT): the ones the
-        station must hear about separately when only one of the two budgets is used up."""
+        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT), and those a crash
+        pre-alert promotes now (forced to AWS: stt_engine): the ones the station must hear about separately when only
+        one of the two budgets is used up (deny: whisper at once, never a round trip to the hub's refusal per clip)."""
         from sizeup.transcribe import is_context
         keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
-        return sorted(k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both"))
+        promoted = {k for k in _promoted(self) if is_context(k)}     # a crash pre-alert's: forced to AWS (stt_engine)
+        return sorted({k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both")}
+                      | promoted)
 
     def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
         """(context keys that keep AWS while ours can't, context keys that can't while ours can, why): the police
@@ -3811,7 +3816,7 @@ class App:
                 up = set(new.get("promote") or ()) - set(self._hub_aws.get("promote") or ())
                 self._hub_aws = new
                 for k in sorted(up):                   # promoted: what waits as context since the move goes with it
-                    n = self.stt.raise_channel(k, URGENT, (new.get("promote_since") or {}).get(k)) \
+                    n = self.stt.raise_channel(k, promoted_class(k), (new.get("promote_since") or {}).get(k)) \
                         if hasattr(self.stt, "raise_channel") else 0
                     log(f"speech-to-text: {k} transcribed like ours (an incident is worked on it)"
                         + (f"; {n} waiting clip(s) raised" if n else ""))
@@ -5953,6 +5958,13 @@ class App:
         audio URL, which voice) or (None, why not). Played in the browser; never keyed."""
         path, note = self.cad._render(text, tones=[])
         return (self.cad._audio_url(path), note) if path else (None, note)
+
+
+def promoted_class(key: str) -> int:
+    """The whisper class of a promoted channel: URGENT for a county talkgroup an incident of ours is worked on (#801:
+    like Fire/EMS 15); HIGH for another system's a crash pre-alert promotes (sizeup/intel/engine.py promoted_since: not
+    our incident, so never beside our fire traffic; above every live and context class, never shed as context)."""
+    return HIGH if str(key).startswith("p25:") else URGENT
 
 
 def _promoted(app) -> frozenset:

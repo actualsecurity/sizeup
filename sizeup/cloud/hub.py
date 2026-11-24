@@ -2100,9 +2100,10 @@ class HubApp(App):
         # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
         # takes them (one from before would never echo them in its signature: a push every 10 s)
         st_ch = _part(self.hub.status, "channels") or {}
-        promote = sorted(k for k in self.promoted_keys()
-                         if k.startswith("tg:") or (k.startswith("p25:") and st_ch.get("promote_p25_ok"))
-                         )[:channels.AWS_KEYS_MAX] if st_ch.get("promote_ok") else []
+        promote = sorted((k for k in self.promoted_keys()
+                          if k.startswith("tg:") or (k.startswith("p25:") and st_ch.get("promote_p25_ok"))),
+                         key=lambda k: (not k.startswith("tg:"), k))[:channels.AWS_KEYS_MAX] if st_ch.get("promote_ok") else []
+        # (our incidents' talkgroups first: past AWS_KEYS_MAX a crash pre-alert's channel goes, never one of ours)
         # (another system's talkgroup, a crash pre-alert's: only to a station that takes "p25:" keys in promote)
         since = {**self.intel_promoted(), **self.cad.opchan.promoted_since()} if promote else {}
         aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {}),

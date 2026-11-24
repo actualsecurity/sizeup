@@ -585,7 +585,8 @@ def read_files(paths=None) -> list[dict]:
 
 
 HIGHWAY = {"buffer_m": (2000.0, 0, 20000), "merge_m": (3000.0, 100, 20000), "merge_min": (30.0, 1, 240),
-           "link_m": (3000.0, 100, 20000), "link_min": (30.0, 1, 240), "promote_min": (10.0, 0, 60)}
+           "link_m": (3000.0, 100, 20000), "link_min": (30.0, 1, 240), "promote_min": (10.0, 0, 60),
+           "promote_max_min": (30.0, 0, 240)}
 
 
 def _bool(v, what: str) -> bool:
@@ -598,7 +599,8 @@ def highway_cfg(v, name: str) -> dict:
     """A pack's "highway" numbers (a "highway": true category: engine.py, sizeup/intel/highway.py), Settings' over the
     file's (intel_packs.<pack>.highway): buffer_m (a crash this close to our district is ours), merge_m / merge_min
     (two reports this close, this soon: one crash), link_m / link_min (our own call this close, this soon after: the
-    pre-alert's, linked), promote_min (its source transcribed like ours this long). ValueError with the reason."""
+    pre-alert's, linked), promote_min (its source transcribed like ours this long), promote_max_min (... never past
+    this long after the event's first promotion, however many reports renew it). ValueError with the reason."""
     if not isinstance(v, dict):
         raise ValueError(f"{name}.highway: an object")
     return {k: _num(v.get(k, dv), lo, hi, f"{name}.highway.{k}") for k, (dv, lo, hi) in HIGHWAY.items()}
