@@ -15,7 +15,15 @@ window.RadiosPanel = (() => {
   const FM = new Set(["mdc", "fleetsync"]);         // the fireground's (FG1, FG2): every one listed by default, named or not
   const SYS_TEXT = { mdc: "MDC (fireground)", fleetsync: "FleetSync (fireground, Kenwood)", p25: "P25 (county)" };
   const p = { box: null, opts: {}, data: null, filter: "", show: "mapped", sys: "", sort: "last", editing: null,
-              rangeEdit: null, error: "" };
+              rangeEdit: null, error: "", drafts: {} };
+  // a form's typed values kept across a redraw (an error redraws the panel): key -> {field: value}; gone once saved
+  function keep(key, fields) {
+    const d = p.drafts[key] || {};
+    for (const [k, n] of Object.entries(fields)) {
+      if (d[k] !== undefined) n.value = d[k];
+      n.addEventListener(n.tagName === "SELECT" ? "change" : "input", () => { (p.drafts[key] ||= {})[k] = n.value; });
+    }
+  }
   const other = (sys) => !!(p.data && p.data.other_systems && p.data.other_systems[sys]);   // MRRS: names, no rigs
   const sysText = (sys) => SYS_TEXT[sys] || (other(sys) ? `${p.data.other_systems[sys]} (P25, names only)` : sys);
   const inRange = (r) => ((p.data && p.data.ranges) || []).find((g) => g.system === r.system && /^\d+$/.test(r.radio_id)
@@ -181,7 +189,10 @@ window.RadiosPanel = (() => {
     use.type = "button";
     use.title = `Label it ${h.agency}`;
     use.addEventListener("click", async () => {
-      try { await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id, label: h.agency }); await load(); }
+      try {
+        await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id, label: h.agency, source: "confirmed" });
+        await load();
+      }
       catch (e) { p.error = e.message; render(); }
     });
     return [s, " ", use];
@@ -218,29 +229,34 @@ window.RadiosPanel = (() => {
 
   function rangeForm(sys, g) {
     const f = el("form", "rp-add row");
-    const lo = el("input"), hi = el("input"), label = el("input");
+    const lo = el("input"), hi = el("input"), label = el("input"), notes = el("input");
     lo.placeholder = "From ID";
     hi.placeholder = "To ID";
     label.placeholder = "Agency / role";
-    [lo, hi].forEach((x) => { x.inputMode = "numeric"; x.maxLength = 9; x.required = true; });
+    notes.placeholder = "Notes";
+    [lo, hi].forEach((x) => { x.inputMode = "numeric"; x.maxLength = 8; x.required = true; });
     label.maxLength = 60;
     label.required = true;
-    if (g) { lo.value = g.lo; hi.value = g.hi; label.value = g.label; }
+    notes.maxLength = 300;
+    if (g) { lo.value = g.lo; hi.value = g.hi; label.value = g.label; notes.value = g.notes || ""; }
+    const key = `range:${sys}:${g ? g.id : "new"}`;
+    keep(key, { lo, hi, label, notes });
     const b = el("button", "primary mini", g ? "Save" : "Add range");
     b.type = "submit";
-    f.append(lo, hi, label, b);
+    f.append(lo, hi, label, notes, b);
     if (g) {
       const c = el("button", "mini", "Cancel");
       c.type = "button";
-      c.addEventListener("click", () => { p.rangeEdit = null; render(); });
+      c.addEventListener("click", () => { p.rangeEdit = null; delete p.drafts[key]; render(); });
       f.append(c);
     }
     f.addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
         await post("/api/cad/radios/range", Object.assign({ system: sys, lo: lo.value.trim(), hi: hi.value.trim(),
-                                                            label: label.value }, g ? { id: g.id, notes: g.notes } : {}));
+                                                            label: label.value, notes: notes.value }, g ? { id: g.id } : {}));
         p.rangeEdit = null;
+        delete p.drafts[key];
         await load();
       } catch (err) { p.error = err.message; render(); }
     });
@@ -263,6 +279,7 @@ window.RadiosPanel = (() => {
     b.type = "submit";
     const named = () => other(sys.value);
     const fit = () => { unit.hidden = named(); label.placeholder = named() ? "Agency / role" : "Label"; };
+    keep("add", { sys, id, unit, label, src });
     sys.addEventListener("change", fit);
     fit();
     f.append(el("b", "", "Add"), sys, id, unit, label, src, b);
@@ -272,6 +289,7 @@ window.RadiosPanel = (() => {
         await post("/api/cad/radios", Object.assign({ system: sys.value, radio_id: id.value.trim(), label: label.value,
                                                       source: src.value }, named() ? {} : { unit: unit.value }));
         p.filter = id.value.trim();
+        delete p.drafts.add;
         await load();
       } catch (err) { p.error = err.message; render(); }
     });

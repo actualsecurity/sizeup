@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 
 from sizeup.cad import radios as radios_mod
 from sizeup.cloud.access import Identity
 from sizeup.cad.api import CadApi
 from sizeup.radio.p25 import Call, Turn
+from sizeup.incidents import Traffic
 from tests.test_app import voice, wait
 from tests.test_p25_systems import EMS, PD, PD_SECURE, rows, two  # noqa: F401 (fixture)
 from tests.test_radios import Clock, cad
@@ -158,7 +160,14 @@ def test_settings_adds_edits_and_removes_mrrs_names_and_ranges_audited(tmp_path)
     assert post(api, "/api/cad/radios/range/delete", {"id": g["id"], "operator": "Lt. Example"})[0] == 200
     assert c.radios.get("mrrs", A) is None and c.radios.ranges() == []
     # every change in the settings log, kept across a restart
-    audit = json.loads(CadApi(cad(tmp_path)).get("/api/cad/settings/audit", "section=radios")[1])["audit"]
+    c2 = cad(tmp_path)
+    # with no sign-in (the station's LAN, an all-in-one box without Access) none of it is in the settings log at all
+    c2.radios.save({"system": "p25", "radio_id": B, "unit": "E61"}, "Lt. Example")
+    for q in ("section=radios", ""):
+        code, raw, _ = CadApi(c2).get("/api/cad/settings/audit", q)
+        assert code == 200 and "mrrs" not in raw.decode() and "officer" not in raw.decode() and "9900200" not in raw.decode()
+        assert f"p25:{B}" in raw.decode()                         # the county's rows stay
+    audit = json.loads(CadApi(c2).get("/api/cad/settings/audit", "section=radios", WHO)[1])["audit"]
     keys = [(a["operator"], a["key"], a["old"], a["new"]) for a in audit]
     assert ("Lt. Example", f"mrrs:{A}", "", "no unit · PCPD officer · confirmed") in keys
     assert ("Lt. Example", f"mrrs:{A}/label", "PCPD officer", "Rye PD officer") in keys
@@ -263,3 +272,93 @@ def test_the_hub_names_its_stations_mrrs_rows_from_its_own_registry(tmp_path):
                           "attach": True}, None)
     assert hub.cad.store.one(f"SELECT talker, rig FROM radio_traffic WHERE id = '{PD}-h6'") == {
         "talker": "PCPD officer", "rig": ""}
+
+
+# -- review follow-ups: bounds, the backfill, the hint cache, overlap under concurrency, the gate, the heard event ----
+
+def test_a_range_end_is_ascii_digits_within_a_p25_id_else_400(tmp_path):
+    api = CadApi(cad(tmp_path))
+    for lo, hi in (("9" * 40, "9" * 41), ("1", "16777216"), ("\u0661\u0662", "\u0661\u0663"), ("+5", "9"), (" 12 ", "20"),
+                   ("1e3", "2000"), (True, 5), ("", "5"), (None, "5"), ([1], "5")):
+        code, err = post(api, "/api/cad/radios/range", {"system": "mrrs", "lo": lo, "hi": hi, "label": "x"})
+        assert code == 400 and "lo, hi" in err["error"], (lo, hi, code, err)
+    code, g = post(api, "/api/cad/radios/range", {"system": "mrrs", "lo": 16777200, "hi": "16777215", "label": "Top"})
+    assert code == 200 and (g["lo"], g["hi"]) == (16777200, 16777215)
+
+
+def test_the_startup_backfill_never_gives_another_systems_row_one_of_our_rigs(two):
+    app, _said, _logs = two
+    now = time.time()
+    mine = Traffic("307-b1", "Fire/EMS 15", now, now + 1, "", status="done", unit="E61", talkgroup=307)
+    theirs = Traffic(f"{PD}-b2", "PD Dispatch", now, now + 1, "", status="done", unit="E61", talkgroup=PD)
+    theirs.system = "mrrs"
+    old = Traffic(f"{PD}-b3", "PD Dispatch", now, now + 1, "", status="done", unit="E61", talkgroup=PD)   # from before
+    app.store.loose.extend([mine, theirs, old])                                                           # rows said so
+    app._backfill()
+    assert mine.rig == "E61" and theirs.rig == "" and old.rig == ""
+
+
+def test_the_hints_are_cached_and_read_off_the_stores_lock(tmp_path, monkeypatch):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    calls = []
+    real = c.comms.radio_tg_counts
+    monkeypatch.setattr(c.comms, "radio_tg_counts", lambda *a: calls.append(a) or real(*a))
+    api = CadApi(c)
+    api.get("/api/cad/radios", "", WHO)
+    api.get("/api/cad/radios", "", WHO)
+    assert len(calls) == 1                                       # one scan per HINT_CACHE_S, not one per look
+    clock.t += radios_mod.HINT_CACHE_S + 1
+    api.get("/api/cad/radios", "", WHO)
+    assert len(calls) == 2
+    # the scan runs on its own read connection: it finishes while another thread holds the store's lock
+    got = []
+    with c.store.lock:
+        t = threading.Thread(target=lambda: got.append(real("mrrs", 0.0)))
+        t.start()
+        t.join(5)
+    assert got == [[]]
+
+
+def test_two_admins_saving_overlapping_ranges_at_once_store_one(tmp_path):
+    c = cad(tmp_path)
+    go = threading.Barrier(8)
+    out = []
+
+    def save(k):
+        go.wait()
+        try:
+            c.radios.save_range({"system": "mrrs", "lo": str(9900100 + k), "hi": str(9900200 + k), "label": f"x{k}"})
+            out.append("ok")
+        except radios_mod.RadioError:
+            out.append("refused")
+    ts = [threading.Thread(target=save, args=(k,)) for k in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert out.count("ok") == 1 and out.count("refused") == 7
+    assert len(c.store.q("SELECT * FROM radio_ranges")) == 1
+
+
+def test_a_cad_that_broadcasts_context_shows_the_mrrs_radios_like_its_traffic(tmp_path):
+    c = cad(tmp_path)
+    c.radios.save({"system": "mrrs", "radio_id": A, "label": "PCPD officer"})
+    # outside a request (a state built for every listener), the same gate as that system's rows (Comms._sees_context)
+    assert c.radio_registry()["context"] is False
+    c.comms.context_broadcast = True            # (Access enforced: every listener verified)
+    got = c.radio_registry()
+    assert got["context"] is True and [r["label"] for r in got["radios"] if r["system"] == "mrrs"] == ["PCPD officer"]
+    # a request from nobody verified never sees them, broadcast or not (as with the rows)
+    assert json.loads(CadApi(c).get("/api/cad/radios", "")[1])["context"] is False
+
+
+def test_the_station_sends_the_hub_each_mrrs_radio_heard(two):
+    app, _said, _logs = two
+    rt = app.systems["mrrs"]
+    sent = []
+    app.events = lambda kind, data, clip: sent.append((kind, data))
+    app._call_system(rt, call(app, "5-call_5", PD, [(0.0, A, ""), (1.0, B, "SYS ALIAS 2")]))
+    heard = [d for k, d in sent if k == "heard"]
+    assert [(d["system"], d["radio_id"], d["alias"], d["channel"]) for d in heard] == [
+        ("mrrs", A, "", "PD Dispatch"), ("mrrs", B, "SYS ALIAS 2", "PD Dispatch")]

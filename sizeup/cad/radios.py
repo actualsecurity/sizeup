@@ -55,6 +55,9 @@ ID_OF = {"mdc": MDC_ID, "p25": P25_ID, "fleetsync": FS_ID, **{k: P25_ID for k in
 RANGE_SPAN_MAX = 10_000_000  # a range wider than this is a typo, not an agency's block
 HINT_DAYS = 14               # the "likely agency" hint: the radio log's rows of this many days
 HINT_MIN = 3                 # ... and only for a radio heard on at least this many of them
+HINT_CACHE_S = 300.0         # ... worked out again at most this often (Cad.radio_hints)
+P25_ID_MAX = 16_777_215      # a P25 radio ID is 24 bits
+RANGE_ID = re.compile(r"[0-9]{1,9}")   # a range's ends as typed: ASCII digits only (never "+5", " 12 ", other scripts)
 RANGES_SCHEMA = """CREATE TABLE IF NOT EXISTS radio_ranges (
   id INTEGER PRIMARY KEY,
   system TEXT NOT NULL,                 -- another P25 system's key (OTHER_P25: mrrs)
@@ -101,6 +104,16 @@ def audit(db, at: float, operator: str, section: str, key: str, old: str, new: s
     """One row of settings_audit (shared by every Settings section): who changed what, old -> new."""
     db.execute("INSERT INTO settings_audit (at, operator, section, key, old, new) VALUES (?, ?, ?, ?, ?, ?)",
                (at, operator, section, key, old, new))
+
+
+def redact_audit(rows: list[dict], sees_context: bool) -> list[dict]:
+    """The Settings audit log as this reader may see it: another P25 system's radio rows (section "radios", key
+    "mrrs:..."; its IDs, labels and ranges) only for a reader who may see that system's traffic (a verified sign-in,
+    sourcekeys.may_see_context), else they are not there at all."""
+    if sees_context:
+        return rows
+    return [r for r in rows if not (r.get("section") == "radios"
+                                    and str(r.get("key") or "").split(":", 1)[0] in OTHER_P25)]
 
 
 def audit_log(store, section: str = "", limit: int = 100) -> list[dict]:
@@ -539,10 +552,13 @@ class Registry:
         system = str(body.get("system") or "")
         if system not in OTHER_P25:
             raise RadioError(f"system: ranges are for {', '.join(OTHER_P25)} only")
-        try:
-            lo, hi = (int(str(body.get(k) if body.get(k) is not None else "").strip()) for k in ("lo", "hi"))
-        except ValueError:
-            raise RadioError("lo, hi: radio IDs (digits)") from None
+        ends = [body.get(k) for k in ("lo", "hi")]
+        ends = [str(v) if isinstance(v, (str, int)) and not isinstance(v, bool) else "" for v in ends]
+        if not all(RANGE_ID.fullmatch(v) for v in ends):
+            raise RadioError("lo, hi: radio IDs (digits)")
+        lo, hi = (int(v) for v in ends)
+        if lo > P25_ID_MAX or hi > P25_ID_MAX:
+            raise RadioError(f"lo, hi: a P25 radio ID is at most {P25_ID_MAX}")
         if lo < 1 or hi < lo:
             raise RadioError("lo, hi: lo at least 1, hi at least lo")
         if hi - lo >= RANGE_SPAN_MAX:
@@ -564,13 +580,14 @@ class Registry:
             old = next((r for r in self.ranges() if str(r["id"]) == str(rid)), None)
             if old is None or old["system"] != system:
                 raise RadioError(f"no {system} range {rid}")
-        clash = next((r for r in self.ranges() if r["system"] == system and (old is None or r["id"] != old["id"])
-                      and r["lo"] <= hi and lo <= r["hi"]), None)
-        if clash:
-            raise RadioError(f"lo, hi: overlaps {clash['lo']}–{clash['hi']} ({clash['label']}): ranges never overlap")
         now = self.clock()
         new = {"lo": lo, "hi": hi, **out}
         with self.store.tx() as db:
+            # the overlap looked for in the same transaction as the write: two admins saving at once never both pass
+            clash = db.execute("SELECT lo, hi, label FROM radio_ranges WHERE system = ? AND id != ? AND lo <= ? AND ? <= hi "
+                               "ORDER BY lo LIMIT 1", (system, old["id"] if old else -1, hi, lo)).fetchone()
+            if clash:
+                raise RadioError(f"lo, hi: overlaps {clash['lo']}–{clash['hi']} ({clash['label']}): ranges never overlap")
             if old is None:
                 cur = db.execute("INSERT INTO radio_ranges (system, lo, hi, label, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                                  (system, lo, hi, out["label"], out["notes"], now))

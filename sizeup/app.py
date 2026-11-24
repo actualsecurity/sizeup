@@ -2313,7 +2313,12 @@ class App:
         rows = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         n = 0
         for t in rows:
-            if not t.rig and t.unit:
+            # (never another P25 system's row: its talkers are another agency's, never one of our rigs, whatever
+            # its alias says; told by its system, or by its talkgroup for a row from before rows said so)
+            other = t.talkgroup is not None and (
+                sources.other_p25({"talkgroup": t.talkgroup, "system": str(getattr(t, "system", "") or "")})
+                or t.talkgroup in sources.context_talkgroups())
+            if not t.rig and t.unit and not other:
                 rig, ids = self.radios.rig_for_names(t.unit, t.talkgroup is None, self.cfg.mdc_aliases)
                 t.rig = rig
                 t.radio_id = t.radio_id or ids

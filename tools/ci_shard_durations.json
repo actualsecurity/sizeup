@@ -91,7 +91,7 @@
  "tests/test_push_settings.py": 6.0,
  "tests/test_radio_emergency.py": 15.7,
  "tests/test_radio_main_window.py": 18.4,
- "tests/test_radio_names_mrrs.py": 1.4,
+ "tests/test_radio_names_mrrs.py": 2.2,
  "tests/test_radio_nav.py": 0.7,
  "tests/test_radiolog_units.py": 2.4,
  "tests/test_radios.py": 18.8,

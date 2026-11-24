@@ -3114,7 +3114,8 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
   (lo-hi, never overlapping another; an ID's own label wins). A row's talker is that label, else the alias the system
   sent, else "unknown MRRS radio" (the raw ID stays in `radio_id`); the hub names its station's rows from its own
   registry (the row's `pairs`). The list's "likely agency" hint (the talkgroup's department, heard most) is never
-  applied. Another system's radios in the registry are served only to a signed-in person, like its traffic. Its units
+  applied. Another system's radios in the registry, and their rows in the Settings audit log, are served only to a
+  signed-in person, like its traffic. Its units
   never link a transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
 
 ### Settings > Radios > Channels by system
