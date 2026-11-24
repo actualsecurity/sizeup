@@ -101,7 +101,7 @@ def test_three_talkers_cut_on_mrrs_are_three_rows_each_with_its_own_stt_lane_log
     r = rows(app)
     assert [(r[i]["call_id"], r[i]["turn"], r[i]["radio_id"], r[i]["talker"], r[i]["rig"], r[i]["system"],
              r[i]["talkgroup"], r[i]["ours"]) for i in ids] == [
-        (name, k, str(x), str(x), "", "mrrs", PD, 0) for k, x in enumerate((A, B, C))]
+        (name, k, str(x), "unknown MRRS radio", "", "mrrs", PD, 0) for k, x in enumerate((A, B, C))]   # nobody named them
     # each its own time: back to back, A's end is B's start
     assert [round(r[i]["end"] - r[i]["start"], 2) for i in ids] == [2.0, 1.4, 1.8]
     assert all(abs(r[i]["start"] - s) < 0.05 for i, s in zip(ids, starts))

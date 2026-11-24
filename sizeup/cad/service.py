@@ -46,6 +46,7 @@ from sizeup.cad.radiolog import RadioLog
 from sizeup.cad.opchannel import OpChannels
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
+from sizeup.cad import radios as radios_mod
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -1853,8 +1854,25 @@ class Cad:
     # -- radios and communications ---------------------------------------------------------------
 
     def radio_registry(self) -> dict:
-        """GET /api/cad/radios: the registry, and how many FG1 transmissions had an ID in the last 24 h (#163)."""
-        return dict(self.radios.public(), id_stats=self.comms.id_stats(self.clock() - 24 * 3600))
+        """GET /api/cad/radios: the registry, and how many FG1 transmissions had an ID in the last 24 h (#163).
+        Another system's radios (MRRS: its IDs, names, ranges and the "likely agency" hints) only for a signed-in
+        person (sourcekeys.may_see_context), like that system's traffic; "context": False says they were left out."""
+        out = self.radios.public()
+        if not sourcekeys.may_see_context():
+            other = set(radios_mod.OTHER_P25)
+            out["radios"] = [r for r in out["radios"] if r["system"] not in other]
+            out["ranges"] = []
+            out["log"] = [a for a in out["log"] if str(a.get("key") or "").split(":", 1)[0] not in other]
+            return dict(out, id_stats=self.comms.id_stats(self.clock() - 24 * 3600), hints={}, context=False)
+        hints = {}
+        for system in radios_mod.OTHER_P25:      # another system's radios: the agency each is heard with most (a hint)
+            try:
+                got = radios_mod.agency_hints(self.comms.radio_tg_counts(system, self.clock() - radios_mod.HINT_DAYS * 86400))
+            except Exception as e:  # noqa: BLE001 - a hint, never in the way of the list
+                self.log(f"CAD: radio hints for {system}: {type(e).__name__}: {e}")
+                got = {}
+            hints[system] = got
+        return dict(out, id_stats=self.comms.id_stats(self.clock() - 24 * 3600), hints=hints, context=True)
 
     def save_radio(self, body: dict) -> dict:
         """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163)."""
@@ -1870,6 +1888,20 @@ class Cad:
         try:
             self.radios.delete(_text(body, "system", 8, required=True), _text(body, "radio_id", 12, required=True),
                                _text(body, "operator", OPERATOR_MAX))
+        except RadioError as e:
+            raise CadError(str(e)) from None
+        return {"ok": True}
+
+    def save_radio_range(self, body: dict) -> dict:
+        """Settings > Radios > Radio IDs: add / edit one of another system's ID ranges (MRRS: an agency's block)."""
+        try:
+            return self.radios.save_range(body, _text(body, "operator", OPERATOR_MAX))
+        except RadioError as e:
+            raise CadError(str(e)) from None
+
+    def delete_radio_range(self, body: dict) -> dict:
+        try:
+            self.radios.delete_range(body.get("id"), _text(body, "operator", OPERATOR_MAX))
         except RadioError as e:
             raise CadError(str(e)) from None
         return {"ok": True}

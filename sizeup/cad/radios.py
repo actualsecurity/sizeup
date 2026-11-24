@@ -12,6 +12,14 @@ from the user's numbering pattern (new APX radios <unit number>01-10, old ones 0
 An ID two units would both get by the pattern (M40 / R40 -> 4001) is left unmapped and listed
 as a conflict; a unit the pattern doesn't fit (TL2, U239, the chiefs) is listed too.
 
+Other P25 systems (OTHER_P25: MTA MRRS, "mrrs", #409) are keyed under their own system: MRRS radio 1234 is not county
+radio 1234. Their radios are another agency's, so never on a rig (resolve() never names a unit for them); an entry
+names the talker instead (`label`, an agency or role: officers swap radios). An admin can also name a whole block of
+IDs at once (radio_ranges: lo-hi inclusive -> label; ranges of one system never overlap, refused when saved). An exact
+ID's label always beats a range. name() / talker() give the talker label rows carry: the label, else the system's
+talker alias, else "unknown MRRS radio" (the raw ID stays in the row's radio_id). The keys from before stay as they
+were: "p25" is the county's system ("westchester"), "mdc" / "fleetsync" are the fireground's (FG1, FG2).
+
 P25 needs no table to work: a talker alias that is a board code ("E60", "2398", "77A4") or starts
 with one ("E60 P2") names that unit. Every (radio ID, alias) pair heard is kept, so a radio heard
 once with its alias is known later without it.
@@ -35,20 +43,58 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SEED = ROOT / "data" / "radio_ids.json"
-SYSTEMS = ("mdc", "p25", "fleetsync")
+OTHER_P25 = {"mrrs": "MRRS"}      # another P25 system's key (its trunk-recorder shortName) -> as shown: names only
+SYSTEMS = ("mdc", "p25", "fleetsync", *OTHER_P25)
 SOURCES = ("confirmed", "guessed", "heard")
 PCFD_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 DISPATCHER = re.compile(r"\bCtrl\b|\bControl\b|\bDispatch", re.I)
 MDC_ID = re.compile(r"[0-9A-F]{4}")
 P25_ID = re.compile(r"\d{1,9}")
 FS_ID = re.compile(r"\d{3}-\d{4}")
-ID_OF = {"mdc": MDC_ID, "p25": P25_ID, "fleetsync": FS_ID}
+ID_OF = {"mdc": MDC_ID, "p25": P25_ID, "fleetsync": FS_ID, **{k: P25_ID for k in OTHER_P25}}
+RANGE_SPAN_MAX = 10_000_000  # a range wider than this is a typo, not an agency's block
+HINT_DAYS = 14               # the "likely agency" hint: the radio log's rows of this many days
+HINT_MIN = 3                 # ... and only for a radio heard on at least this many of them
+RANGES_SCHEMA = """CREATE TABLE IF NOT EXISTS radio_ranges (
+  id INTEGER PRIMARY KEY,
+  system TEXT NOT NULL,                 -- another P25 system's key (OTHER_P25: mrrs)
+  lo INTEGER NOT NULL, hi INTEGER NOT NULL,   -- radio IDs lo..hi, inclusive
+  label TEXT NOT NULL,                  -- the talker label of every ID in it without an entry of its own
+  notes TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL
+)"""
 
 
 def fm_system(radio_id: str) -> str:
     """The registry system of an ID decoded on an analog channel: FleetSync "167-1002", else MDC "0611"."""
     return "fleetsync" if FS_ID.fullmatch(str(radio_id or "").strip()) else "mdc"
 HEARD_WRITE_S = 60.0        # last-heard times are written at most this often per radio
+
+
+def unknown_talker(system: str) -> str:
+    """The talker label of another system's radio nothing names: "unknown MRRS radio"."""
+    return f"unknown {OTHER_P25.get(system, system.upper())} radio"
+
+
+def agency_hints(counts: list[dict], min_n: int = HINT_MIN) -> dict[str, dict]:
+    """The Radio IDs list's "likely agency" hint for another system's radios, from the radio log's rows
+    ({radio_id, talkgroup, channel, dept, n}: rows per radio and talkgroup): radio ID -> {agency, channel, share, n,
+    shared}. The talkgroup it is heard on most is the one hinted; its agency is the talkgroup's department
+    (talkgroups.csv "Department"), and a talkgroup with none (one several agencies share, the PD dispatch) is
+    `shared`: no agency, said as such. A hint only: never applied, an admin accepts it into a label or not."""
+    per: dict[str, dict[tuple, list]] = {}
+    for c in counts:
+        for rid in [x.strip() for x in str(c.get("radio_id") or "").split(",") if x.strip()]:
+            k = (c.get("talkgroup"), str(c.get("channel") or ""), str(c.get("dept") or ""))
+            per.setdefault(rid, {}).setdefault(k, [0])[0] += int(c.get("n") or 0)
+    out: dict[str, dict] = {}
+    for rid, tgs in per.items():
+        total = sum(v[0] for v in tgs.values())
+        if total < min_n:
+            continue
+        (_tg, channel, dept), (n,) = max(tgs.items(), key=lambda kv: (kv[1][0], kv[0][1]))
+        out[rid] = {"agency": dept, "channel": channel, "share": round(n / total, 2), "n": total, "shared": not dept}
+    return out
 
 
 def audit(db, at: float, operator: str, section: str, key: str, old: str, new: str) -> None:
@@ -152,6 +198,7 @@ class Registry:
         self.seed_path = Path(seed_path) if seed_path else SEED
         self._lock = threading.RLock()
         self._rows: dict[tuple[str, str], dict] = {}
+        self._ranges: dict[str, list[dict]] = {}      # system -> its ID ranges (radio_ranges), lo first
         self._written: dict[tuple[str, str], float] = {}
         self.rev = 0            # bumped when a row is added, named, edited or removed (not on a last-heard time)
         self.refresh_units()
@@ -194,6 +241,10 @@ class Registry:
     def _reload(self) -> None:
         with self._lock:
             self._rows = {(r["system"], r["radio_id"]): r for r in self.store.q("SELECT * FROM radios")}
+            ranges: dict[str, list[dict]] = {}
+            for r in self.store.q("SELECT * FROM radio_ranges ORDER BY system, lo"):
+                ranges.setdefault(r["system"], []).append(r)
+            self._ranges = ranges
         self.rev += 1
 
     def rows(self) -> list[dict]:
@@ -245,6 +296,8 @@ class Registry:
         """{unit, label, source, radio_id} for one radio, or None when nothing names a unit.
         A row with a unit wins (a person's edit, a confirmed or guessed ID); then the alias."""
         rid = str(radio_id or "").strip()
+        if system in OTHER_P25:        # another agency's radio: never on one of our rigs (name() names it)
+            return None
         if system == "mdc":
             rid = rid.upper()
         row = self.get(system, rid) if rid else None
@@ -256,6 +309,46 @@ class Registry:
         if hit:
             return {"unit": hit[0], "label": hit[1] or alias, "source": "heard", "radio_id": rid}
         return None
+
+    def range_of(self, system: str, radio_id: str) -> dict | None:
+        """The admin's range an ID is in (ranges never overlap), or None."""
+        rid = str(radio_id or "").strip()
+        if not rid.isdigit():
+            return None
+        n = int(rid)
+        with self._lock:
+            hit = next((r for r in self._ranges.get(system, ()) if r["lo"] <= n <= r["hi"]), None)
+            return dict(hit) if hit else None
+
+    def name(self, system: str, radio_id: str) -> str:
+        """Another system's radio as the department named it: its own entry's label, else its range's, else ""."""
+        rid = str(radio_id or "").strip()
+        if not rid:
+            return ""
+        row = self.get(system, rid)
+        if row and row["label"]:
+            return row["label"]
+        r = self.range_of(system, rid)
+        return r["label"] if r else ""
+
+    def talker(self, system: str, radio_id: str, alias: str = "") -> str:
+        """The talker label of another system's radio (rows, the radio log, intel): the department's name for it,
+        else the alias the system sent, else "unknown MRRS radio". "" for a key-up with no radio ID."""
+        rid = str(radio_id or "").strip()
+        alias = " ".join(str(alias or "").split())
+        if not rid:
+            return alias
+        return self.name(system, rid) or (alias if alias != rid else "") or unknown_talker(system)
+
+    def talkers(self, system: str, pairs, fallback: str = "") -> str:
+        """talker() of each (radio ID, alias) of a row (one per key-up: a split part has its own), joined; fallback
+        when none of them says anything."""
+        out: list[str] = []
+        for rid, alias in pairs or ():
+            n = self.talker(system, str(rid or ""), str(alias or ""))
+            if n and n not in out:
+                out.append(n)
+        return ", ".join(out) or fallback
 
     def rig_mdc(self, ids: list[str]) -> str:
         out: list[str] = []
@@ -315,9 +408,11 @@ class Registry:
         at = self.clock() if at is None else at
         key = (system, rid)
         row = self.get(system, rid)
-        hit = self.unit_for_alias(alias) if alias else None
+        # another system's alias never names one of our rigs ("E60" there is not our E60)
+        hit = self.unit_for_alias(alias) if alias and system not in OTHER_P25 else None
         if row is None:
-            unit, label = (hit[0], alias) if hit else ("", alias)
+            # (another system's: no label from what is heard; its alias is kept as the alias, its name is a person's)
+            unit, label = (hit[0], alias) if hit else ("", "" if system in OTHER_P25 else alias)
             with self.store.lock:
                 self.store.db.execute(
                     "INSERT OR IGNORE INTO radios (system, radio_id, unit, label, source, alias, first_heard, last_heard, "
@@ -377,6 +472,8 @@ class Registry:
         f: dict = {}
         if "unit" in body:
             unit = str(body.get("unit") or "").strip()
+            if unit and system in OTHER_P25:
+                raise RadioError(f"unit: {OTHER_P25[system]} radios are never on a rig: give it a label")
             if unit and unit.upper() not in self._by_code:
                 raise RadioError(f"unit: {unit!r} is not on the boards")
             f["unit"] = self._by_code.get(unit.upper(), "")
@@ -397,7 +494,8 @@ class Registry:
         old = self.get(system, rid)
         with self.store.tx() as db:
             if old is None:
-                f.setdefault("source", "confirmed" if f.get("unit") else "heard")
+                f.setdefault("source", "confirmed" if f.get("unit") or (system in OTHER_P25 and f.get("label"))
+                             else "heard")
                 db.execute("INSERT INTO radios (system, radio_id, unit, label, source, notes, edited, updated_at) "
                            "VALUES (?, ?, ?, ?, ?, ?, 1, ?)", (system, rid, f.get("unit", ""), f.get("label", ""),
                                                              f["source"], f.get("notes", ""), now))
@@ -415,6 +513,8 @@ class Registry:
         return self.get(system, rid)
 
     def delete(self, system: str, radio_id: str, operator: str = "") -> None:
+        if system not in SYSTEMS:
+            raise RadioError(f"system: one of {', '.join(SYSTEMS)}")
         rid = str(radio_id or "").strip()
         rid = rid.upper() if system == "mdc" else rid
         old = self.get(system, rid)
@@ -426,6 +526,76 @@ class Registry:
             audit(db, now, operator, "radios", f"{system}:{rid}", self._describe(old), "")
         self._reload_one((system, rid))
         self.rev += 1
+
+    # -- another system's ID ranges (an admin's, Settings > Radios > Radio IDs) ------------------------
+
+    def ranges(self) -> list[dict]:
+        with self._lock:
+            return [dict(r) for rs in self._ranges.values() for r in rs]
+
+    def save_range(self, body: dict, operator: str = "") -> dict:
+        """Add or edit one range: {system, lo, hi, label, notes?, id? (edit)}. Never overlapping another of the same
+        system (refused: which one wins would be a guess). Logged like every edit here."""
+        system = str(body.get("system") or "")
+        if system not in OTHER_P25:
+            raise RadioError(f"system: ranges are for {', '.join(OTHER_P25)} only")
+        try:
+            lo, hi = (int(str(body.get(k) if body.get(k) is not None else "").strip()) for k in ("lo", "hi"))
+        except ValueError:
+            raise RadioError("lo, hi: radio IDs (digits)") from None
+        if lo < 1 or hi < lo:
+            raise RadioError("lo, hi: lo at least 1, hi at least lo")
+        if hi - lo >= RANGE_SPAN_MAX:
+            raise RadioError(f"lo, hi: at most {RANGE_SPAN_MAX:,} IDs in one range")
+        out = {}
+        for k, n in (("label", 60), ("notes", 300)):
+            v = body.get(k)
+            if v is not None and not isinstance(v, str):
+                raise RadioError(f"{k}: text")
+            v = " ".join((v or "").split())
+            if len(v) > n:
+                raise RadioError(f"{k}: at most {n} characters")
+            out[k] = v
+        if not out["label"]:
+            raise RadioError("label: what to call the radios in it")
+        rid = body.get("id")
+        old = None
+        if rid not in (None, ""):
+            old = next((r for r in self.ranges() if str(r["id"]) == str(rid)), None)
+            if old is None or old["system"] != system:
+                raise RadioError(f"no {system} range {rid}")
+        clash = next((r for r in self.ranges() if r["system"] == system and (old is None or r["id"] != old["id"])
+                      and r["lo"] <= hi and lo <= r["hi"]), None)
+        if clash:
+            raise RadioError(f"lo, hi: overlaps {clash['lo']}–{clash['hi']} ({clash['label']}): ranges never overlap")
+        now = self.clock()
+        new = {"lo": lo, "hi": hi, **out}
+        with self.store.tx() as db:
+            if old is None:
+                cur = db.execute("INSERT INTO radio_ranges (system, lo, hi, label, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                 (system, lo, hi, out["label"], out["notes"], now))
+                rid = cur.lastrowid
+                audit(db, now, operator, "radios", f"{system}:{lo}-{hi}", "", f"range · {out['label']}")
+            else:
+                ch = {k: v for k, v in new.items() if old[k] != v}
+                if ch:
+                    db.execute(f"UPDATE radio_ranges SET {', '.join(f'{k} = ?' for k in ch)}, updated_at = ? WHERE id = ?",
+                               (*ch.values(), now, old["id"]))
+                    for k, v in ch.items():
+                        audit(db, now, operator, "radios", f"{system}:{old['lo']}-{old['hi']}/{k}", str(old[k]), str(v))
+                rid = old["id"]
+        self._reload()
+        return next(r for r in self.ranges() if r["id"] == rid)
+
+    def delete_range(self, range_id, operator: str = "") -> None:
+        old = next((r for r in self.ranges() if str(r["id"]) == str(range_id)), None)
+        if old is None:
+            raise RadioError(f"no range {range_id}")
+        now = self.clock()
+        with self.store.tx() as db:
+            db.execute("DELETE FROM radio_ranges WHERE id = ?", (old["id"],))
+            audit(db, now, operator, "radios", f"{old['system']}:{old['lo']}-{old['hi']}", f"range · {old['label']}", "")
+        self._reload()
 
     @staticmethod
     def _describe(f: dict) -> str:
@@ -439,4 +609,5 @@ class Registry:
                 "log": self.log(), "seed": {"file": self.seed_path.name, "version": self.plan["version"]},
                 "units": [{"name": u["name"], "kind": u["kind"], "pcfd": is_pcfd(u), "department": u["department"]}
                           for u in self.units if u["board"]],
-                "sources": list(SOURCES), "systems": list(SYSTEMS)}
+                "sources": list(SOURCES), "systems": list(SYSTEMS), "ranges": self.ranges(),
+                "other_systems": dict(OTHER_P25)}

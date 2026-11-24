@@ -681,6 +681,14 @@ class Comms:
                 self.rev += 1
         return sorted(got)
 
+    def radio_tg_counts(self, system: str, since: float) -> list[dict]:
+        """Another P25 system's rows since then, per radio ID and talkgroup: [{radio_id, talkgroup, channel, dept, n}]
+        (the Radio IDs list's "likely agency" hint, radios.agency_hints). On radio_traffic_system_start; recorded
+        talkgroups only (an encrypted one is never a row)."""
+        return self.store.q("SELECT radio_id, talkgroup, MAX(channel) AS channel, MAX(dept) AS dept, COUNT(*) AS n "
+                            "FROM radio_traffic WHERE system = ? AND start >= ? AND radio_id != '' "
+                            "GROUP BY radio_id, talkgroup", (str(system), float(since)))
+
     def id_stats(self, since: float, channels=None) -> list[dict]:
         """Per analog channel since then (Settings > Radios, #163): transmissions, how many had a radio ID, and of
         the rest how many sent none / had a burst that didn't decode / were too weak to tell / are from before."""

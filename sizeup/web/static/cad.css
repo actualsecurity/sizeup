@@ -977,6 +977,10 @@
   .rp-table .rp-edit :is(input, select) { inline-size: 100%; min-inline-size: 6rem; }
   .rp-sum > span + span { margin-inline-start: var(--s-4); }
   .rp-ids { overflow-wrap: anywhere; }      /* FG1's last 24 h: how many key-ups had an ID (#163) */
+  .rp-ranges { display: grid; gap: var(--s-1); }   /* another system's ID ranges -> a label (MRRS) */
+  .rp-range-list { margin: 0; padding: 0; list-style: none; }
+  .rp-range-list li { gap: var(--s-2); align-items: center; }
+  .rp-ranges .rp-add input { inline-size: 8rem; }
   .chip.src-confirmed { --c: var(--ok); }
   .chip.src-guessed { --c: var(--warn); }
   .chip.src-heard { --c: var(--info); }

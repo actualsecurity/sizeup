@@ -3108,8 +3108,14 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
 - Until every reader of a bare `talkgroup` number is qualified (the 60 Control feed, the alarm windows, the status
   hints, the health hints), a system that lists a talkgroup number already used here is left out when the config
   loads.
-- Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
-  transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
+- Another system's radio IDs are never one of our rigs. The registry keeps them under that system's own key
+  (`mrrs`: MRRS radio N is not county radio N), as heard rows (last heard, talkgroup, alias; never a unit). An admin
+  names them in Settings > Radios > Radio IDs (system MRRS): a label per ID (an agency or role) or a range of IDs
+  (lo-hi, never overlapping another; an ID's own label wins). A row's talker is that label, else the alias the system
+  sent, else "unknown MRRS radio" (the raw ID stays in `radio_id`); the hub names its station's rows from its own
+  registry (the row's `pairs`). The list's "likely agency" hint (the talkgroup's department, heard most) is never
+  applied. Another system's radios in the registry are served only to a signed-in person, like its traffic. Its units
+  never link a transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
 
 ### Settings > Radios > Channels by system
 
