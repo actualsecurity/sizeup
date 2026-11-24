@@ -46,6 +46,7 @@
  "tests/test_dispatch_rigs.py": 0.8,
  "tests/test_errwatch.py": 0.5,
  "tests/test_fast_dispatch.py": 12.7,
+ "tests/test_feed_highway_point.py": 6.0,
  "tests/test_fenced_reads.py": 20.7,
  "tests/test_fg2.py": 28.6,
  "tests/test_fg_emergency.py": 55.3,

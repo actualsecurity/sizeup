@@ -159,6 +159,12 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                again), going on where it was after a restart (backfill_run / backfill_addresses: never a person's,
                a failing row marked, counts logged). The addresses a feed put on an
                incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
+    point      a feed's location is placed as a typed one is (Cad._auto_geo): a highway's marker or exit first, from its
+               normalised form (Cad.highway_point: an "@" in front, a town after it, a marker and an exit both: the
+               point the location box shows), else the gazetteer. A later report at another place moves it; an open
+               incident at its ruling report's place with no point gets one on the next report, and once from the
+               start's backfill (backfill_points, after backfill_addresses); never over a person's location or pin. A
+               highway left with no point is logged once per incident, with why
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
                over the data file's; #370) are a whole department paged, never a unit: never a unit in common here,
@@ -1383,6 +1389,7 @@ class Sources:
         self.cad, self.store, self.clock, self.log = cad, cad.store, clock, log
         self._lock = threading.RLock()
         self._resent_said: set[tuple[str, str]] = set()     # (source, event id): a re-sent older report dropped, said
+        self._unplaced_said: set[tuple[int, str]] = set()   # (incident, location): a highway left with no point, said
         # Is the paging decoder up? The hub sets it (the station connected); alone, always.
         self.paging_ok: Callable[[], bool] = lambda: True
         # trigger(reason): tell the station's adapters "poll now" (the app sets it: the runner here, or a job to the
@@ -1950,7 +1957,7 @@ class Sources:
         return self.store.one("SELECT * FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                               "ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
 
-    def _location_fields(self, iid: int, loc: str, data: dict | None = None) -> dict:
+    def _location_fields(self, iid: int, loc: str, data: dict | None = None, label: str = "") -> dict:
         """The fields for a feed's location: the address (normalised, with the feed's text it came from), and a new pin
         only when no person set one. A place's name (common_place): its address, the name kept as the place."""
         named = self._common_fields(loc, data, "pin" not in self.manual(iid))
@@ -1959,12 +1966,47 @@ class Sources:
         f = {"address": "", "address_raw": loc, "place": "", "place_address": "", "geo_alts": ""}
         geo = self.store.incident(iid)["geo_label"]
         if "pin" not in self.manual(iid):
-            g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
-            self.cad._auto_geo(g)
+            g = self._point(iid, loc, data, label)
             f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
             geo = g["geo_label"]
         f["address"] = self.normal(loc, data, geo)
         return f
+
+    def _point(self, iid: int, loc: str, data: dict | None = None, label: str = "") -> dict:
+        """A feed's location's map point {lat, lon, geo_label} (None, None, '' when not found): a place's name
+        (common_place) its point, else as a typed location is placed (Cad._auto_geo: a highway's marker or exit from
+        its normalised form first, "@" and a town after it or not). A highway left with no point: said once (why)."""
+        cp = self._common_fields(loc, data, True)
+        if cp is not None and cp.get("lat") is not None:
+            return {"lat": cp["lat"], "lon": cp["lon"], "geo_label": cp["geo_label"]}
+        g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
+        self.cad._auto_geo(g)
+        if g["lat"] is None:
+            self._unplaced(iid, loc, label)
+        return {"lat": g["lat"], "lon": g["lon"], "geo_label": g["geo_label"]}
+
+    @staticmethod
+    def _here(loc: str, inc: dict) -> bool:
+        """A feed's location is the incident's own place: the text it was made from, or the same place (same_place)."""
+        at = match_address(inc).strip()
+        return bool(at) and (loc.strip().lower() == at.lower() or same_place(loc, at))
+
+    def _unplaced(self, iid: int, loc: str, label: str = "") -> None:
+        """A feed's highway location (a marker or an exit) that got no map point: said once per incident and location,
+        and why (the incident's id, never the location: "logs")."""
+        hw = highway(loc)
+        key = (iid, loc)
+        if hw is None or key in self._unplaced_said:
+            return
+        if len(self._unplaced_said) >= 500:
+            self._unplaced_said.clear()
+        self._unplaced_said.add(key)
+        cad = self.cad
+        why = ("no geocoder" if getattr(cad, "geocoder", None) is None
+               else "no place search" if getattr(cad, "place_index", lambda: None)() is None
+               else "no such marker or exit in the place search")
+        self.log(f"incident sources: {label or 'a feed'}: event {iid}: a highway location left with no map point "
+                 f"({why})")
 
     def normal(self, loc: str, data: dict | None = None, geo_label: str = "") -> str:
         """A feed's location as the incident stores it (normal_location): the town its text names, else the feed's town
@@ -1993,7 +2035,7 @@ class Sources:
             loc = (d.get("location") or "").strip()
             if not loc:
                 raise CadError(f"{r['label']} has no location")
-            f = self._location_fields(iid, loc, d)
+            f = self._location_fields(iid, loc, d, r["label"])
         inc = self.store.update_incident(iid, f, operator=operator)
         if field == "location":
             self._fed_address(iid)
@@ -2231,6 +2273,8 @@ class Sources:
             db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, source, ref))
         self._fed_address(iid)
         self.log(f"incident sources: {label}: new event {iid}")
+        if f.get("lat") is None:                             # (a highway: by its normalised marker or exit, _auto_geo)
+            self._unplaced(iid, loc, label)
         rep = self._report(source, ref)
         self._apply(iid, None, data, label, rep["rank"] if rep else 1, created=True)
         self.cad._prealert_match(self.store.incident(iid))      # the phone pre-alert and the notices it answers
@@ -2531,7 +2575,15 @@ class Sources:
             elif not created:
                 notes.append((now, f"{pre}: location {shown}"))
             if auth and differs and "location" not in hand:
-                fields.update(self._location_fields(iid, loc, new))
+                fields.update(self._location_fields(iid, loc, new, label))
+        if (loc and auth and "lat" not in fields and inc["lat"] is None and inc["status"] in OPEN
+                and not {"pin", "location"} & hand and self._here(loc, inc)):
+            # an open incident at this report's place with no map point (a page's location the gazetteer wasn't sure
+            # of, a highway's text the place search once read as nothing): its point now, the address as it is
+            g = self._point(iid, loc, new, label)
+            if g["lat"] is not None:
+                fields.update(g, geo_alts="")                # (a page's unsure readings: the feed's point is sure)
+                notes.append((now, f"{label}: map point {g['geo_label']}"))
         if new["units"] != list(old["units"]):
             added = [u for u in new["units"] if u not in old["units"]]
             gone = [u for u in old["units"] if u not in new["units"]]
@@ -3458,6 +3510,12 @@ class Sources:
             if self.store.may_write():
                 try:
                     self.backfill_addresses(pause=BACKFILL_PAUSE_S)
+                    try:
+                        self.backfill_points()
+                    except FencedWrite:
+                        raise
+                    except Exception as e:  # noqa: BLE001 - the points stay as they were; the feeds go on
+                        self.log(f"incident sources: map point backfill: {type(e).__name__}")
                     return
                 except FencedWrite:
                     pass                                     # the lease ran out in this pass: as below
@@ -3472,6 +3530,45 @@ class Sources:
             self.log("incident sources: address backfill: stopped until this is the leader again")
             if self._stop.wait(retry_s):
                 return
+
+    def backfill_points(self) -> int:
+        """Open incidents a feed reports on with no map point whose ruling report's location places now (_point: a
+        highway's "@" / town / marker-and-exit text the place search read as nothing before): each given that point,
+        the address as it is, a timeline line. Never one a person set the location or the pin of, nor one whose
+        report is another place than its location (_here). Only where the point is still empty, so a second pass
+        places nothing again (the rest still don't place). Only the leader writes (FencedWrite). How many placed."""
+        if not self.store.may_write():
+            raise FencedWrite("not the leader: map point backfill stopped (nothing written)")
+        self._towns()
+        rows = self.store.q(
+            f"SELECT i.id FROM incidents i WHERE i.lat IS NULL AND i.status IN ({','.join('?' * len(OPEN))}) "
+            "AND EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id AND r.source != ? AND r.merged_into = '') "
+            "AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND m.field IN ('pin', 'location')) "
+            "ORDER BY i.id", (*OPEN, PAGING))
+        n = 0
+        for row in rows:
+            if self._stop.is_set():
+                break
+            with self._lock:                                 # (a feed's event on it meanwhile: one at a time)
+                iid = row["id"]
+                inc, rep = self.store.incident(iid), self._best_feed(iid)
+                if (inc is None or rep is None or inc["lat"] is not None or inc["status"] not in OPEN
+                        or {"pin", "location"} & self.manual(iid)):
+                    continue
+                d = json.loads(rep["data"] or "{}")
+                loc = str(d.get("location") or "").strip()
+                if not loc or not self._here(loc, inc):
+                    continue
+                g = self._point(iid, loc, d, rep["label"])
+                if g["lat"] is None:
+                    continue
+                self.store.update_incident(iid, dict(g, geo_alts=""), operator=rep["label"], log=False)
+                with self.store.tx() as db:
+                    self.store._event(db, iid, "feed", f"{rep['label']}: map point {g['geo_label']}", at=self.clock())
+                n += 1
+        if n:
+            self.log(f"incident sources: map point backfill: {n} open incident(s) placed from their feed's location")
+        return n
 
     def backfill_addresses(self, pause: float = 0.0) -> int:
         """The addresses a feed or a page wrote before they were stored normalised (address_raw ''), open ones first,
