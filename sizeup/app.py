@@ -906,6 +906,12 @@ class App:
         if self.gaz is not None:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
+            # a highway crash's place (sizeup/intel/highway.py): the same markers, our district's shapes (roads.py)
+            from sizeup.intel.highway import LiveCorridor
+            intel.highway = LiveCorridor(self.cad.place_index, lambda: self.roads.area_shapes()
+                                         if getattr(self, "roads", None) is not None else None)
+        # a crash pre-alert promoted its channel (engine.promoted_since): speech-to-text hears it now (the station too)
+        intel.on_promote = self.promoted_changed
         intel.listen = self._intel_listen(intel)
         # speech-to-text's priority hook (sizeup.intel.push_sources()): the sources intel could push from, over every
         # source known here: the talkgroups as the CAD lists them (the hub: its station's), then this process's own
@@ -2879,8 +2885,9 @@ class App:
 
     def promoted_keys(self) -> frozenset:
         """The county talkgroups transcribed like ours now ("tg:N"): an incident of ours is worked on them
-        (sizeup/cad/opchannel.py). A station: the hub's word (set_channel_prefs' aws.promote); the CAD of record: its
-        own, read at most every PROMOTE_CACHE_S."""
+        (sizeup/cad/opchannel.py); and the channels a live highway-crash pre-alert promotes for a few minutes
+        (sizeup/intel/engine.py promoted_since: "tg:N" or "p25:<system>:N"). A station: the hub's word
+        (set_channel_prefs' aws.promote); the CAD of record: its own, read at most every PROMOTE_CACHE_S."""
         if self.forwarding():
             return frozenset((getattr(self, "_hub_aws", None) or {}).get("promote") or ())
         at, keys = self._promo_cache
@@ -2892,8 +2899,19 @@ class App:
         except Exception as e:  # noqa: BLE001 - none promoted then: the class it had
             log(f"speech-to-text: operating channels: {type(e).__name__}: {e}")
             keys = frozenset()
+        keys = keys | frozenset(self.intel_promoted())
         self._promo_cache = (time.monotonic(), keys)
         return keys
+
+    def intel_promoted(self) -> dict:
+        """{channel key: since} a live highway-crash pre-alert promotes now (sizeup/intel/engine.py promoted_since);
+        {} without an engine (a station: its engine is idle)."""
+        eng = getattr(getattr(self, "cad", None), "intel", None)
+        try:
+            return dict(eng.promoted_since()) if eng is not None and hasattr(eng, "promoted_since") else {}
+        except Exception as e:  # noqa: BLE001 - none then
+            log(f"speech-to-text: intel promotion: {type(e).__name__}")
+            return {}
 
     def promoted_changed(self) -> None:
         """An incident's operating channel came or went: read again at once (the hub pushes its station: HubApp)."""
@@ -3810,6 +3828,7 @@ class App:
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
+                "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 

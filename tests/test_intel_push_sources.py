@@ -172,12 +172,13 @@ def test_recomputed_at_most_push_refresh_s_after_the_last_without_a_change_told(
 
 
 def test_the_set_is_what_feed_reads_one_predicate():
-    """Every known source a pack that can push reads (Pack.in_scope, as feed() calls it), and no other."""
+    """Every known source a pack that can push reads (Pack.in_scope, as feed() calls it), and no other; a pack with
+    "stt_high": false (the highway pack: data/intel/highway.json) pushes without making its sources ones."""
     e, cfg = engine({"intel_packs": {"neighbor_police": {"mode": "push"}}})
     keys, _rev = e.push_sources()
     for r in e.sources():
         row = {**r, "id": "t1", "text": "x", "start": 1.0}
-        read = [p.name for p in e.packs if p.in_scope(row) and engine_mod.can_push(p)]
+        read = [p.name for p in e.packs if p.in_scope(row) and engine_mod.can_push(p) and p.stt_high]
         assert (r["source"] in keys) == bool(read), r["source"]
 
 

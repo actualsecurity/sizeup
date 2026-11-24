@@ -332,6 +332,9 @@ class Pack:
     rise: dict = field(default_factory=dict)    # category -> ("escalate", "escalate_not", "escalate_always"), compiled
     resolved: list = field(default_factory=list)   # phrases that end a "possibly cancelled" call with "cancel_ttl_min"
     fd: dict = field(default_factory=dict)    # "fd_present" compiled: {kind: [(any, nots)], priorities} (fd_said)
+    hw: dict = field(default_factory=dict)    # "highway" compiled (highway_cfg): a "highway": true category's numbers
+    stt_high: bool = True             # its sources are push sources for speech-to-text's priority ("stt_high": false:
+                                      # never, engine.push_sources; Settings intel_packs.<pack>.stt_high over the file's)
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -501,7 +504,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
                    "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
-                   "fire_related": bool(cd.get("fire_related")),
+                   "fire_related": bool(cd.get("fire_related")), "highway": bool(cd.get("highway")),
                    "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
                    "deescalate": [p.src for p in _phrases(cd.get("deescalate") or [], f"{name}.{c}.deescalate")],
                    "escalate": [p.src for p in _phrases(cd.get("escalate") or [], f"{name}.{c}.escalate")],
@@ -545,6 +548,9 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 check_spelling(p, norm, f"rule {r.id} not")
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
+    _phrases(d.get("model_needs") or [], f"{name}.model_needs")      # (backing.py reads them: a bad one fails here)
+    if d.get("model_mode") is not None:
+        _mode(d["model_mode"], f"{name}.model_mode")
     return Pack(name=name, version=int(d.get("version") or 1), domain=str(d.get("domain") or name),
                 label=str(d.get("label") or name.upper()), scope=dict(d.get("scope") or {}), accept=bool(d.get("accept")),
                 window_s=_num(po.get("window_s", d.get("window_s", 120)), 10, 1800, f"{name}.window_s"),
@@ -559,7 +565,10 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                           [Phrase(x) for x in cd["escalate_always"]])
                       for c, cd in cats.items() if cd["escalate"] or cd["escalate_always"]},
                 resolved=_phrases(d.get("resolved") or [], f"{name}.resolved"),
-                fd=fd_present(d.get("fd_present"), name))
+                fd=fd_present(d.get("fd_present"), name),
+                hw=(highway_cfg({**(d.get("highway") or {}), **(po.get("highway") or {})}, name)
+                    if any(cd["highway"] for cd in cats.values()) else {}),
+                stt_high=_bool(po.get("stt_high", d.get("stt_high", True)), f"{name}.stt_high"))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -573,6 +582,26 @@ def read_files(paths=None) -> list[dict]:
     if not given:
         out.sort(key=lambda d: d.get("order") or 0)      # stable: the file names' order within one "order"
     return out
+
+
+HIGHWAY = {"buffer_m": (2000.0, 0, 20000), "merge_m": (3000.0, 100, 20000), "merge_min": (30.0, 1, 240),
+           "link_m": (3000.0, 100, 20000), "link_min": (30.0, 1, 240), "promote_min": (10.0, 0, 60)}
+
+
+def _bool(v, what: str) -> bool:
+    if not isinstance(v, bool):
+        raise ValueError(f"{what}: true or false")
+    return v
+
+
+def highway_cfg(v, name: str) -> dict:
+    """A pack's "highway" numbers (a "highway": true category: engine.py, sizeup/intel/highway.py), Settings' over the
+    file's (intel_packs.<pack>.highway): buffer_m (a crash this close to our district is ours), merge_m / merge_min
+    (two reports this close, this soon: one crash), link_m / link_min (our own call this close, this soon after: the
+    pre-alert's, linked), promote_min (its source transcribed like ours this long). ValueError with the reason."""
+    if not isinstance(v, dict):
+        raise ValueError(f"{name}.highway: an object")
+    return {k: _num(v.get(k, dv), lo, hi, f"{name}.highway.{k}") for k, (dv, lo, hi) in HIGHWAY.items()}
 
 
 INHERITED = ("suppress", "normalize", "threshold", "window_s", "context_factor", "fd_present")
@@ -639,6 +668,7 @@ def ruleset_hash(packs: list[Pack]) -> str:
                         {k: [[[x.src for x in a], [x.src for x in n]] for a, n in v] if isinstance(v, list)
                          else {c: sorted(ts) for c, ts in v.items()} if isinstance(v, dict) else v
                          for k, v in p.fd.items()},
-                        *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],
+                        *([[p.norm.name, p.norm.digest]] if p.norm is not None else []),
+                        *([p.hw] if p.hw else [])] for p in packs],
                       sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]

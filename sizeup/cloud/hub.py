@@ -2099,9 +2099,12 @@ class HubApp(App):
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
         # takes them (one from before would never echo them in its signature: a push every 10 s)
-        promote = sorted(self.promoted_keys())[:channels.AWS_KEYS_MAX] \
-            if (_part(self.hub.status, "channels") or {}).get("promote_ok") else []
-        since = self.cad.opchan.promoted_since() if promote else {}
+        st_ch = _part(self.hub.status, "channels") or {}
+        promote = sorted(k for k in self.promoted_keys()
+                         if k.startswith("tg:") or (k.startswith("p25:") and st_ch.get("promote_p25_ok"))
+                         )[:channels.AWS_KEYS_MAX] if st_ch.get("promote_ok") else []
+        # (another system's talkgroup, a crash pre-alert's: only to a station that takes "p25:" keys in promote)
+        since = {**self.intel_promoted(), **self.cad.opchan.promoted_since()} if promote else {}
         aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {}),
                **({"promote": promote, "promote_since": {k: since[k] for k in promote if k in since}} if promote else {})}
         return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),

@@ -11,7 +11,9 @@ Settings sections (audited as "system", exported like any setting):
 
 POST /api/cad/settings/intel {action, ...}:
     set       {key: a policy key, value}                     the intel section
-    pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own)}
+    pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
+              merge_m?, merge_min?, link_m?, link_min?, promote_min?} (a pack with a "highway": true category;
+              rules.highway_cfg), stt_high?: true | false (its sources transcribed at HIGH: engine.py push sources)}
     category  {pack, category, mode?, priority?, ttl_min?}
     rule      {rule, mode?, w?, enabled?}
     local     {rule: "local.x", pack, category, any: [...], not?: [...], w?, mode?}   (new rules start in shadow)
@@ -294,6 +296,21 @@ class IntelAdmin:
                     if k in body:
                         cur[k] = (_mode(body[k], "mode") if k == "mode" else
                                   _f(body[k], 0, 1, "threshold") if k == "threshold" else _f(body[k], 10, 1800, "window_s"))
+                if "highway" in body:
+                    if not self.engine.pack(pname).hw:
+                        raise CadError(f"{pname} has no highway category")
+                    try:
+                        hw = {k: v for k, v in (body["highway"] or {}).items() if k in rules_mod.HIGHWAY}
+                        rules_mod.highway_cfg({**(cur.get("highway") or {}), **hw}, pname)
+                    except (ValueError, AttributeError) as e:
+                        raise CadError(str(e)) from None
+                    cur["highway"] = {**(cur.get("highway") or {}), **hw}
+                if "stt_high" in body:
+                    if not self.engine.pack(pname).hw:
+                        raise CadError(f"{pname} has no highway category")
+                    if not isinstance(body["stt_high"], bool):
+                        raise CadError("stt_high: true or false")
+                    cur["stt_high"] = body["stt_high"]
                 if "area" in body:
                     try:
                         towns = list(rules_mod.area(body["area"], "area"))

@@ -43,10 +43,16 @@ def crow(tid, text, at, source=CPD, service="police", **kw):
     return r
 
 
+def without_highway(settings=None):
+    """The shipped packs but the highway one (tests/test_intel_highway.py holds it): these tests count what the other
+    packs raise."""
+    return [p for p in rules_mod.load_packs(None, settings or {}) if p.name != "highway"]
+
+
 def engine(settings=None, clock=None, locate=None):
     sink = RecordingSink()
     return IntelEngine(settings=settings or {}, events=MemoryEvents(), sink=sink, locate=locate, thread=False,
-                       clock=clock or Clock()), sink
+                       clock=clock or Clock(), packs=without_highway(settings)), sink
 
 
 def raised(text, source, service, settings=None):
@@ -67,7 +73,7 @@ def everything_at(mode: str, names=NEW) -> dict:
 
 def test_the_new_packs_the_categories_and_the_rules_are_all_at_log():
     packs = {p.name: p for p in rules_mod.load_packs()}
-    assert list(packs) == ["police", *NEW, "neighbor_police"]
+    assert list(packs) == ["police", *NEW, "neighbor_police", "highway"]
     for name in NEW:
         p = packs[name]
         assert p.mode == "log" and p.accept is False and p.norm is not None, name
@@ -90,7 +96,7 @@ def test_the_new_packs_the_categories_and_the_rules_are_all_at_log():
 
 
 def test_the_new_packs_and_the_table_have_no_real_strings():
-    for f in [*(rules_mod.DATA / f"{n}.json" for n in NEW), rules_mod.TABLES / "stt.json"]:
+    for f in [*(rules_mod.DATA / f"{n}.json" for n in (*NEW, "highway")), rules_mod.TABLES / "stt.json"]:
         raw = f.read_text().lower()
         for s in ("ntfy", "pcfd-", "officer ", "@", "http", "tg:"):
             assert s not in raw, (f.name, s)
@@ -116,7 +122,10 @@ def test_the_new_packs_and_the_table_have_no_real_strings():
 ])
 def test_scope_is_by_service_and_system(source, service, want):
     row = crow("t1", "anything", 1000.0, source, service)
-    assert {p.name for p in rules_mod.load_packs() if p.in_scope(row)} == want
+    assert {p.name for p in without_highway() if p.in_scope(row)} == want
+    # the highway pack reads every talkgroup but the police pack's and our own dispatch's (data/intel/highway.json)
+    hwy = next(p for p in rules_mod.load_packs() if p.name == "highway")
+    assert hwy.in_scope(row) == (source.startswith("p25:") and source not in ("p25:mrrs:9211", FIRE_TG))
 
 
 def test_the_first_pack_is_untouched_by_the_table():
@@ -612,9 +621,9 @@ def test_a_place_that_reads_as_a_person_or_an_id_is_withheld(pack, source, servi
 def test_the_settings_page_lists_five_packs_and_who_may_change_them(live):
     cad, _n, api = live
     page = cad.intel_admin.page(gate=False)
-    assert [p["name"] for p in page["packs"]] == ["police", *NEW, "neighbor_police"]
-    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log", "log"]
-    area = page["packs"][-1]                              # the police pack's rules at push, the pack at log (one switch)
+    assert [p["name"] for p in page["packs"]] == ["police", *NEW, "neighbor_police", "highway"]
+    assert [p["mode"] for p in page["packs"]] == ["push", "log", "log", "log", "log", "push"]
+    area = page["packs"][-2]                              # the police pack's rules at push, the pack at log (one switch)
     assert area["label"] == "Area PD" and area["scope"]["exclude"] == page["packs"][0]["scope"]["sources"]
     assert all(r["id"].startswith("area.pd.") and r["mode"] == "push" for r in area["rules"])
     raise_area = {"action": "pack", "pack": "neighbor_police", "mode": "push"}
