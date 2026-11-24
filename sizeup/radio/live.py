@@ -37,6 +37,15 @@ the finished call's turns are checked against them (radio/p25.py apply_grants): 
 JSON has no radio ID for is named by the grant that opened it, and a transmission that ran into the
 next talker's (no terminator decoded) is cut where that talker was granted.
 
+The grant split (#819, radio/p25.py plan_grant_cuts) has its own record, cut_events(): per system and talkgroup, each
+grant to another radio while the call's transmission is being recorded ("Unit ID externally set from GRANT", at
+trunk-recorder's own time stamp; one that names the sink idle, or no samples written yet, is its stale talker and left
+out), each unit-script grant (when sizeup read it: the grant split takes those only for a radio coming back), plus the
+voice-channel ID changes ("Unit ID changed on Voice Channel" and #647's "would split", at their time stamps), which
+already cut there or would.
+LogEvents reads the same lines back from trunk-recorder.log for a call written while sizeup was down (#747): only
+time-stamped lines are of use then, so it has the log lines and never the unit script's.
+
 FG1 (analog): the app's watcher calls fm_open while the squelch is open, fm_ids when the MDC-1200
 ID decodes from the audio so far (APX radios send it 0.3-0.8 s in), and fm_segment with the IDs
 found in the whole transmission when it ends (a post-ID on release is only known then).
@@ -48,7 +57,8 @@ import re
 import threading
 import time
 from collections import deque
-from typing import Callable
+from pathlib import Path
+from typing import Callable, Iterable
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\[(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)\]")   # trunk-recorder's (local) time
@@ -60,6 +70,10 @@ VOICE_SET = re.compile(r"Unit ID changed on Voice Channel, ext: (?P<src>\d+)")
 # 5.2.0 (error level) / later (debug): a grant to another radio while the recorder holds this call's
 # transmission; trunk-recorder caches it for the next transmission. Kept as a grant (call turns only).
 GRANT_SET = re.compile(r"Unit ID externally set from GRANT: (?P<src>\d+)")
+# ... one the sink logs while idle, or before it wrote a sample: its "current" talker is a stale one (#819: not a cut)
+GRANT_STALE = re.compile(r"\bstate:\s*idle\b|\bsamples:\s*0\b", re.I)
+# #647's patch on "log": where it would have cut for a new radio ID on the voice channel (a voice-ID cut, #819)
+WOULD_SPLIT = re.compile(r"sizeup split \(log\): would split: prev -?\d+ -> new (?P<src>\d+)")
 ALIAS = re.compile(r"New \S+ alias: (?P<src>\d+) \((?P<alias>[^)]*)\)")
 SRC = re.compile(r"- Transmission src: (?P<src>-?\d+)(?: \((?P<alias>[^)]*)\))? pos:")
 UNIT_TAG = "SIZEUP-UNIT "
@@ -71,6 +85,7 @@ GRANT_IDLE_S = 5.0       # ... and is gone this long after its last grant when n
 CONCLUDED_KEEP_S = 5.0   # the "Transmission src" lines follow the conclusion
 GRANT_KEEP_S = 1800.0    # grants kept this long for the finished calls' turns (radio/p25.py apply_grants)
 GRANT_DUP_S = 2.0        # the unit script and the log line naming the same grant: kept once
+STAMP_SKEW_S = 120.0     # a log line's own time stamp this far from the clock: not trusted (read time used, #819)
 
 
 def _noop(*_a) -> None:
@@ -86,6 +101,74 @@ def _tr_time(line: str) -> float | None:
         return time.mktime(time.strptime(m["ts"][:19], "%Y-%m-%d %H:%M:%S")) + float("0" + m["ts"][19:])
     except (ValueError, OverflowError):
         return None
+
+
+LOG_EVENT_WORDS = ("externally set from GRANT", "Unit ID changed on Voice Channel", "would split")
+
+
+def log_cut_events(lines: Iterable[str], system: str = "") -> list[tuple[float, str, int, str, str]]:
+    """(time, system, talkgroup, radio ID, "grant" | "voice") of trunk-recorder's time-stamped lines the grant split
+    reads (#819: LiveTalk.cut_events), from its log as written; a line with no time stamp is of no use here, and a stale
+    GRANT line (GRANT_STALE) is left out."""
+    out = []
+    for line in lines:
+        if not any(w in line for w in LOG_EVENT_WORDS):
+            continue
+        line = ANSI.sub("", line).strip()
+        at, m = _tr_time(line), LINE.search(line)
+        if at is None or not m or (system and m["sys"] != system):
+            continue
+        msg = m["msg"]
+        g = GRANT_SET.search(msg)
+        if g and GRANT_STALE.search(msg):
+            continue
+        v = None if g else (VOICE_SET.search(msg) or WOULD_SPLIT.search(msg))
+        hit = g or v
+        if hit and hit["src"] not in ("-1", "0"):
+            out.append((at, m["sys"], int(m["tg"]), hit["src"], "grant" if g else "voice"))
+    return out
+
+
+class LogEvents:
+    """LiveTalk.cut_events() for a call written while sizeup was down (#747, #819): its lines read back from
+    trunk-recorder.log and the file before it (the service keeps one, trunkrecd.LOG_MAX_BYTES each). Each file is read
+    once and then only what was added to it (from the start again when it is another file or shorter)."""
+
+    def __init__(self, paths: Iterable[str | Path]):
+        self.paths = [Path(p) for p in paths]
+        self._read: dict[str, tuple[int, int, list]] = {}    # path -> (inode, bytes read, its events)
+        self._lock = threading.Lock()
+
+    def events(self, system: str, tg: int, t0: float, t1: float) -> list[tuple[float, str, str]]:
+        out = []
+        with self._lock:
+            for p in self.paths:
+                got = self._update(p)
+                out += [(at, src, kind) for at, s, g, src, kind in got
+                        if g == tg and (not system or s == system) and t0 <= at <= t1]
+        return sorted(out)
+
+    def _update(self, p: Path) -> list:
+        try:
+            st = p.stat()
+        except OSError:
+            self._read.pop(str(p), None)
+            return []
+        ino, done, got = self._read.get(str(p), (st.st_ino, 0, []))
+        if ino != st.st_ino or st.st_size < done:
+            ino, done, got = st.st_ino, 0, []
+        if st.st_size > done:
+            try:
+                with open(p, "rb") as f:
+                    f.seek(done)
+                    chunk = f.read(st.st_size - done)
+            except OSError:
+                return got
+            end = chunk.rfind(b"\n") + 1                    # (a line still being written: read with the next)
+            got = got + log_cut_events(chunk[:end].decode(errors="replace").splitlines())
+            done += end
+        self._read[str(p)] = (ino, done, got)
+        return got
 
 
 class LiveTalk:
@@ -109,6 +192,8 @@ class LiveTalk:
         self._recent: list[dict] = []
         self.aliases: dict[str, str] = {}                   # P25 radio ID -> alias, learned from the log
         self._grant_log: deque[tuple[float, str, int, str]] = deque(maxlen=20000)   # (time, system, tg, src)
+        # the grant split's (#819): (time, system, tg, src, "grant" | "voice"), see cut_events()
+        self._cut_log: deque[tuple[float, str, int, str, str]] = deque(maxlen=20000)
 
     # -- P25 -------------------------------------------------------------------------------------
 
@@ -123,21 +208,24 @@ class LiveTalk:
         parts = [line] if i <= 0 else [line[:i], line[i:]]
         self._named = []
         changed = False
+        stamp = _tr_time(line)
         for part in parts:
-            changed = self._feed(part, self.clock()) or changed
+            changed = self._feed(part, self.clock(), stamp) or changed
         if changed:
             self.on_change()
             if self.debug is not None:
                 self._report(got, _tr_time(line))
         return changed
 
-    def _feed(self, line: str, now: float) -> bool:
+    def _feed(self, line: str, now: float, stamp: float | None = None) -> bool:
         if m := UNIT_SCRIPT.match(line):
             if m["ev"] == "call" and m["tg"] and m["src"] not in ("-1", "0"):
                 return self._grant(m["sys"], m["src"], int(m["tg"]), now)
             return False
         if m := LINE.search(line):
-            return self._call_line(m["sys"], m["call"], int(m["tg"]), m["msg"], now)
+            # (#819) trunk-recorder's own time for the grant split, when it is about now (else when it was read)
+            at = stamp if stamp is not None and abs(stamp - now) <= STAMP_SKEW_S else now
+            return self._call_line(m["sys"], m["call"], int(m["tg"]), m["msg"], now, at)
         return False
 
     def _report(self, got: float, stamped: float | None) -> None:
@@ -162,6 +250,22 @@ class LiveTalk:
             return [(at, src) for at, s, g, src in self._grant_log
                     if g == tg and (not system or s == system) and t0 <= at <= t1]
 
+    def cut_events(self, system: str, tg: int, t0: float, t1: float) -> list[tuple[float, str, str]]:
+        """(time, radio ID, kind) on talkgroup tg between t0 and t1 for the grant split (#819, radio/p25.py
+        plan_grant_cuts), in time order: "grant", a grant to a radio while a call is up ("Unit ID externally set from
+        GRANT", at trunk-recorder's time stamp); "unit", a unit-script grant, when it was read; "voice", a radio ID
+        changed on the voice channel (the patch's cut, or #647's "would split"), at its time stamp."""
+        with self._lock:
+            return sorted((at, src, kind) for at, s, g, src, kind in self._cut_log
+                          if g == tg and (not system or s == system) and t0 <= at <= t1)
+
+    def _log_cut(self, system: str, tg: int, src: str, kind: str, at: float, now: float) -> None:
+        """Under the lock: one event for cut_events(), the old ones (GRANT_KEEP_S) let go."""
+        log = self._cut_log
+        while log and now - log[0][0] > GRANT_KEEP_S:
+            log.popleft()
+        log.append((at, system, tg, src, kind))
+
     def _log_grant(self, system: str, tg: int, src: str, now: float) -> None:
         """Under the lock: one grant for the call turns. The same radio granted on the same talkgroup
         again within GRANT_DUP_S (the unit script and trunk-recorder's own log line) is one grant."""
@@ -181,6 +285,7 @@ class LiveTalk:
         """A voice grant (or a grant with a new source on a call in progress): src is talking on tg now."""
         with self._lock:
             self._log_grant(system, tg, src, now)
+            self._log_cut(system, tg, src, "unit", now, now)
             live = [c for (s, _k), c in self._calls.items() if s == system and c["tg"] == tg]
             call = max((c for c in live if not c.get("grant")), key=lambda c: c["since"], default=None) \
                 or next((c for c in live if c.get("grant")), None)
@@ -211,7 +316,7 @@ class LiveTalk:
         self._calls[(system, key)] = call
         return call
 
-    def _call_line(self, system: str, key: str, tg: int, msg: str, now: float) -> bool:
+    def _call_line(self, system: str, key: str, tg: int, msg: str, now: float, at: float | None = None) -> bool:
         k = (system, key)
         with self._lock:
             if msg.startswith("Starting P25 Recorder"):
@@ -243,6 +348,11 @@ class LiveTalk:
             if m := GRANT_SET.search(msg):
                 if m["src"] not in ("-1", "0"):
                     self._log_grant(system, tg, m["src"], now)
+                    if not GRANT_STALE.search(msg):          # (#819) the sink idle: its "current" talker is stale
+                        self._log_cut(system, tg, m["src"], "grant", now if at is None else at, now)
+                return False
+            if m := WOULD_SPLIT.search(msg):
+                self._log_cut(system, tg, m["src"], "voice", now if at is None else at, now)
                 return False
             if m := UNIT_SET.search(msg):
                 if m["src"] not in ("-1", "0"):
@@ -250,7 +360,10 @@ class LiveTalk:
                 return self._talker(call, m["src"], now, "log")
             if m := VOICE_SET.search(msg):
                 # not a grant: the call JSON already has this key-up as its own srcList entry
-                return self._talker(call, m["src"], now, "voice") if m["src"] not in ("-1", "0") else False
+                if m["src"] in ("-1", "0"):
+                    return False
+                self._log_cut(system, tg, m["src"], "voice", now if at is None else at, now)
+                return self._talker(call, m["src"], now, "voice")
             if m := ALIAS.search(msg):
                 src, alias = m["src"], m["alias"].strip()
                 self.aliases[src] = alias

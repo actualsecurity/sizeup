@@ -147,6 +147,18 @@ def p25_call(st, name: str = "4101-1794990000_476075000.0-call_1", tg: int = 410
                 ids={alias or radio: (radio, alias)}, system=st.tg.county, emergency=emergency)
 
 
+def p25_grant_cut_call(st, name: str = "4101-1794990060_476075000.0-call_2", at: float | None = None):
+    """A county call of two talkers in one transmission, the second cut where the control channel granted it (#819:
+    the grant split "on", sizeup/radio/p25.py apply_grant_cuts)."""
+    from sizeup.radio.p25 import GRANT_CUT, Call, Turn
+    from tests.test_app import voice
+    at = time.time() if at is None else at
+    return Call(name, 4101, c.TALKGROUPS.get(4101, "East Dispatch"), at, at + 4.0, ["990001", "990004"], voice(4.0, 1), "",
+                [Turn(0.0, "990001", "990001", "", 2.0, at=at), Turn(2.0, "990004", "990004", "", 2.0, at=at + 2.0,
+                                                                      via=GRANT_CUT)],
+                ids={"990001": ("990001", "")}, system=st.tg.county)
+
+
 def context_call(st, name: str = "7001-1794990000_770181250.0-call_2", tg: int = 7001, radio: str = "880001",
                  seconds: float = 2.0, at: float | None = None, late: bool = False) -> None:
     """A finished call on a talkgroup of the other P25 system ("east"): context, by its talkgroup's tier. late: written
@@ -329,6 +341,8 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     page(st, at=t + 50)
     st._call(p25_call(st, at=t + 70))                                           # fm, call_id, turn, pairs, ours
     ids["p25"] = "4101-1794990000_476075000.0-call_1"
+    st._call(p25_grant_cut_call(st, at=t + 75))                                # cut (#819)
+    ids["p25_grant_cut"] = "4101-1794990060_476075000.0-call_2-t1"
     rec = lv.tmp / "tr" / "4101-1794990050_476075000.0-call_3.json"             # trunk-recorder's own record of the call
     rec.parent.mkdir(parents=True, exist_ok=True)
     rec.write_text(json.dumps({"talkgroup": 4101, "emergency": 1, "srcList": [{"src": 990002, "time": 1794990050,

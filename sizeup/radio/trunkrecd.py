@@ -182,6 +182,10 @@ SPLIT_KINDS = (
 )
 SPLIT_HEAD = re.compile(r"\[(?P<sys>[^\]\s]+)\]\s+(?P<call>\d+)C\b")    # log_header's "[<sys>]\t<n>C"
 SPLIT_EVERY_S = 3600.0            # the counts said once an hour per system (and when trunk-recorder is stopped)
+# The grant split's cuts (#819, sizeup/radio/p25.py GrantCount): sizeup-station counts them, cumulative, in a file beside
+# the state (grant_cuts_path); the hourly split line adds the window's ("N grant cuts (log)"). Its config.json keys are
+# sizeup's only: a change to them restarts no trunk-recorder (_file_sig).
+GRANT_SPLIT_KEYS = ("grant_split", "grant_split_tune")
 
 
 # -- what to run ----------------------------------------------------------------------------------------------------------
@@ -725,6 +729,8 @@ class Shipper:
         self.split_mode: str | None = None          # SIZEUP_TR_SPLIT of the trunk-recorder that runs (None: not known)
         self.splits: dict[str, SplitTally] = {}     # system (log_header's short name) -> its counts since split_win
         self.split_win: float | None = None
+        self.grant_path: str | None = None          # (#819) sizeup's grant split count (grant_cuts_path)
+        self.grant_from = 0                         # ... its cuts when split_win opened
         self._lock = threading.Lock()
 
     def watch(self, watched: dict[int, str]) -> None:
@@ -799,16 +805,27 @@ class Shipper:
         a new window."""
         if self.split_win is None:
             self.split_win = now
+            g = grant_cuts(self.grant_path)
+            self.grant_from = g[2] if g else 0
             return []
         span = now - self.split_win
         if span < SPLIT_EVERY_S and not force:
             return []
         when = "last hour" if SPLIT_EVERY_S <= span < SPLIT_EVERY_S + 300 else f"last {_dur(span)}"
+        # (#819) the grant split's cuts in the window: its cumulative count since the window opened (the file new or
+        # started again: all of it)
+        g = grant_cuts(self.grant_path)
+        grant = None
+        if g is not None:
+            n = g[2] - self.grant_from if g[2] >= self.grant_from else g[2]
+            grant = (g[0], f", {n} grant cuts ({g[1]})") if g[1] in ("log", "on") or n else None
+        self.grant_from = g[2] if g else 0
         said = []
         for name, t in sorted(self.splits.items()):
             if t.any():
                 label = self.tag if not name or self.tag.split()[-1] == name else f"{self.tag} {name}"
-                said.append(f"{label}: {t.text(self.split_mode, when)}")
+                extra = grant[1] if grant and (grant[0] == name or len(self.splits) == 1) else ""
+                said.append(f"{label}: {t.text(self.split_mode, when)}{extra}")
             t.n = dict.fromkeys(t.KEYS, 0)              # the call numbers stay: a call cut across the hour counts once
         self.split_win = now
         return said
@@ -1053,6 +1070,7 @@ class Supervisor:
         self.shipper = Shipper(self.log, self.tag)  # #547: its own lines worth seeing, into the journal
         self.calls_open = OpenCalls()               # the calls it records now (a config change waits for them, #647)
         self._wcfg: dict | None = None              # the watchdog's limits ([p25] watchdog_*), as last read
+        self.shipper.grant_path = grant_cuts_path("", state)    # (#819) the county's grant split count
 
     tag = "p25"                 # its lines in the journal
 
@@ -1333,6 +1351,29 @@ def system_dirs(workdir: str | Path) -> dict[str, Path]:
     return {n: base / n for n in names}
 
 
+def grant_cuts_path(name: str = "", state: str = STATE) -> str:
+    """The grant split's count (#819) beside the state: p25_grant_cuts.json (the county's), p25_grant_cuts.<name>.json;
+    "" with no state path."""
+    try:
+        return str(Path(state).with_name(f"p25_grant_cuts.{name}.json" if name else "p25_grant_cuts.json"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def grant_cuts(path: str | None) -> tuple[str, str, int] | None:
+    """(system, mode, cuts so far) of a grant-cuts file (sizeup/radio/p25.py GrantCount), None with none readable."""
+    if not path:
+        return None
+    try:
+        d = json.loads(Path(path).read_text())
+        cuts = d["cuts"]
+        if d.get("v") != 1 or isinstance(cuts, bool) or not isinstance(cuts, int) or cuts < 0:
+            return None
+        return str(d.get("system") or ""), str(d.get("mode") or ""), cuts
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def system_state_path(name: str, state: str = STATE) -> str:
     p = Path(state)
     return str(p.with_name(f"{p.stem}.{name}{p.suffix}"))
@@ -1464,11 +1505,28 @@ def _file_sig(*paths: Path) -> tuple:
             st = p.stat()
             seen = _SIGS.get(str(p))
             if seen is None or seen[0] != (st.st_mtime_ns, st.st_size):
-                seen = _SIGS[str(p)] = ((st.st_mtime_ns, st.st_size), hashlib.sha1(p.read_bytes()).hexdigest())
+                seen = _SIGS[str(p)] = ((st.st_mtime_ns, st.st_size), hashlib.sha1(_sig_bytes(p)).hexdigest())
             out.append((p.name, seen[1]))
         except OSError:
             out.append((p.name, ""))
     return tuple(out)
+
+
+def _sig_bytes(p: Path) -> bytes:
+    """What of a file counts for _file_sig: all of it, but a config.json's sizeup-only grant split keys (#819:
+    GRANT_SPLIT_KEYS, read by sizeup-station alone) are left out, so changing them restarts no trunk-recorder."""
+    raw = p.read_bytes()
+    if p.name != "config.json":
+        return raw
+    try:
+        d = json.loads(raw)
+        mine = d.get("sizeup") if isinstance(d, dict) else None
+        if not isinstance(mine, dict) or not any(k in mine for k in GRANT_SPLIT_KEYS):
+            return raw
+        d["sizeup"] = {k: v for k, v in mine.items() if k not in GRANT_SPLIT_KEYS}
+        return json.dumps(d, sort_keys=True).encode()
+    except ValueError:
+        return raw
 
 
 CONTEXT_NICE = 5       # a context system's trunk-recorder (#409): under the county's (the service is Nice=-5)
@@ -1499,6 +1557,7 @@ class SystemSupervisor(Supervisor):
         self.setpriority = None                      # os.setpriority (the tests': a recorder)
         self.name = name
         self.tag = self.shipper.tag = f"p25 {name}"
+        self.shipper.grant_path = grant_cuts_path(name, state)   # (#819) this system's grant split count
         self.claims_held: dict[str, str] = {}        # serial -> the mode it is claimed under
         # #592: its dongles unplugged under it, and back
         self.ran_key = None                          # what last ran (a dongle missing then is one that went)

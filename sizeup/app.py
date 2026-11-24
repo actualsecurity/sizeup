@@ -83,7 +83,7 @@ from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
 from sizeup.cad.radios import fm_system
-from sizeup.radio.p25 import Call, CallIngest, Piece, split_call
+from sizeup.radio.p25 import GRANT_CUT, Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
 from sizeup.radio.live import LiveTalk
 from sizeup.radio.livepage import HOLD_S, LivePaging
@@ -646,6 +646,11 @@ class App:
         if self.p25 is not None:        # a finished call's key-ups checked against the live grants (issue #62)
             self.p25.grants = self.live.grants
             self.p25.alias_of = lambda src: self.live.aliases.get(src, "")
+            # the grant split (#819): the county's config.json "sizeup" {"grant_split"} (off unless it says)
+            if self.recorder is not None:
+                p25_systems.wire_grant_split(self.p25, self.live, p25_systems.sizeup_block(cfg.p25_recorder_dir or "."),
+                                             cfg.p25_recorder_dir or ".", getattr(self.recorder, "state_path", None), "",
+                                             self.tg.county)
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
@@ -1734,6 +1739,8 @@ class App:
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
                 t.call_id, t.turn = call.id, k  # the whole call it is a key-up of (= cad/comms.py split_call)  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
+                if pc.via == GRANT_CUT:
+                    t.cut = "grant"  # cut at a mid-call grant (#819): its talker is the granted radio  # type: ignore[attr-defined]
                 if late:
                     t.late = True  # from while sizeup was down (#747): no pre-alert; an emergency alarms, labelled late  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
@@ -1789,6 +1796,8 @@ class App:
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
                 t.call_id, t.turn = call.id, k  # type: ignore[attr-defined]
+                if pc.via == GRANT_CUT:
+                    t.cut = "grant"  # cut at a mid-call grant (#819): its talker is the granted radio  # type: ignore[attr-defined]
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
@@ -2249,6 +2258,7 @@ class App:
                                      # (#747) from while sizeup was down: logged, never told to what alerts
                                      "late": bool(getattr(t, "late", False)),
                                      "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
+                                     "cut": getattr(t, "cut", "") or "",     # (#819) cut at a mid-call grant
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
                                     replace=replace)

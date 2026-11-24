@@ -49,6 +49,7 @@ RECORDED = {
     "traffic-fm-emergency.json": ("traffic", lambda d, ids: d["id"] == ids["fm_after_live_alarm"]),
     "traffic-fm-for-amazon-transcribe.json": ("traffic", lambda d, ids: d["id"] == ids["fm_aws"]),
     "traffic-p25.json": ("traffic", lambda d, ids: d["id"] == ids["p25"]),
+    "traffic-p25-grant-cut.json": ("traffic", lambda d, ids: d["id"] == ids["p25_grant_cut"]),
     "traffic-p25-emergency.json": ("traffic", lambda d, ids: d["id"] == ids["p25_emergency"]),
     "traffic-p25-stuck-flag.json": ("traffic", lambda d, ids: d["id"] == ids["p25_flag_2"]),
     "traffic-airband.json": ("traffic", lambda d, ids: d["id"] == ids["airband"]),
@@ -130,14 +131,15 @@ def test_every_post_of_a_station_with_everything_is_what_the_schema_says(ran):
 
 def test_every_event_type_was_sent_and_every_key_of_every_type(ran):
     """What makes the sub-schemas complete (`x-complete`): the run sends every event type the schema knows, and of
-    each type every key its sub-schema names. For a transmission that is all 50 attributes of the Traffic object, each
-    set by the path that sets it in the code (FM, a key-up cut, an emergency packet, P25, a P25 emergency with
-    trunk-recorder's record, a stuck flag, the airband, another P25 system, the hub's engines)."""
+    each type every key its sub-schema names. For a transmission that is all 51 attributes of the Traffic object, each
+    set by the path that sets it in the code (FM, a key-up cut, an emergency packet, P25, a P25 key-up cut at a mid-call
+    grant, a P25 emergency with trunk-recorder's record, a stuck flag, the airband, another P25 system, the hub's
+    engines)."""
     seen: dict[str, set] = {k: set() for k in KINDS}
     for ev in ran.events:
         seen[ev["type"]] |= set(ev["data"])
     assert all(seen[k] for k in KINDS), [k for k in KINDS if not seen[k]]
-    assert seen["traffic"] | seen["alarm"] == set(TX) and len(TX) == 50
+    assert seen["traffic"] | seen["alarm"] == set(TX) and len(TX) == 51
     assert seen["traffic"] == set(TX) and "attach" not in seen["alarm"]
     assert set(TX) - seen["alarm"] >= {"attach", "raw", "confidence", "model", "stt", "stt_class", "transcript_pending"}
     for kind in ("retext", "rerun", "alt_text", "heard", "activity", "source_event", "source_health", "source_seen"):
