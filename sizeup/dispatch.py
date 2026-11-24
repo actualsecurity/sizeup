@@ -311,12 +311,8 @@ def _known(t: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def highway(text: str) -> MilePlace | None:
-    """The first highway with a mile marker or an exit the text names ("I-999 SB MM 5.7", "i 999 southbound mile
-    marker 5.7", "I999 SB 5.7", "Sample Pkwy NB MM 3.1", "I-999 north at exit 4"); None without a route or a marker or
-    exit after it, and when another route is named between a route and the marker ("the Sample Parkway at the Model
-    Parkway interchange, mile marker 0": whose marker?). Its start is an index into text as given."""
-    t = (text or "").replace("_", " ").replace("@", " ")    # (the same length: indices hold)
+def _routes(t: str) -> list[tuple[int, int, str]]:
+    """The roads text names, in order: (start, end, route), one road per words (the longest reading first)."""
     found: list[tuple[int, int, str]] = []
     for m in NUMBERED.finditer(t):
         if m.group(1).lower() == "i" and m.group(2).strip(" -") == "" and " " in m.group(2) \
@@ -332,9 +328,38 @@ def highway(text: str) -> MilePlace | None:
     found += _known(t)
     found.sort(key=lambda f: (f[0], -f[1]))
     kept: list[tuple[int, int, str]] = []
-    for f in found:                                      # one road per words (the longest reading first)
+    for f in found:
         if not any(s <= f[0] < e for s, e, _ in kept):
             kept.append(f)
+    return kept
+
+
+def highway_exit(text: str, hw: MilePlace) -> str:
+    """The exit text also names for the highway hw read at its marker ("I-999 NB 21.3 exit 40": "40"), '' for none:
+    within MARKER_REACH of the route's name, before the next road named, and never an exit said to be another road's
+    ("exit 3 of the Sample Pkwy", "exit 3 to Route 9")."""
+    if hw.mile is None:
+        return ""
+    t = (text or "").replace("_", " ").replace("@", " ")
+    kept = _routes(t)
+    k = next((k for k, r in enumerate(kept) if r[0] == hw.start), None)
+    if k is None:
+        return ""
+    end = kept[k][1]
+    nxt = kept[k + 1][0] if k + 1 < len(kept) else len(t)
+    ex = EXIT.search(t, end, min(end + MARKER_REACH, nxt))
+    if ex is None or (nxt < len(t) and re.fullmatch(r"\W*(?:(?:of|to|onto|for|on|the)\W+)+", t[ex.end():nxt], re.I)):
+        return ""
+    return ex.group(1).upper()
+
+
+def highway(text: str) -> MilePlace | None:
+    """The first highway with a mile marker or an exit the text names ("I-999 SB MM 5.7", "i 999 southbound mile
+    marker 5.7", "I999 SB 5.7", "Sample Pkwy NB MM 3.1", "I-999 north at exit 4"); None without a route or a marker or
+    exit after it, and when another route is named between a route and the marker ("the Sample Parkway at the Model
+    Parkway interchange, mile marker 0": whose marker?). Its start is an index into text as given."""
+    t = (text or "").replace("_", " ").replace("@", " ")    # (the same length: indices hold)
+    kept = _routes(t)
     pending = False                  # a route named just before, with no marker of its own before this one
     for k, (start, end, route) in enumerate(kept):
         nxt = kept[k + 1][0] if k + 1 < len(kept) else len(t)

@@ -91,6 +91,7 @@
  "tests/test_errwatch.py": 1.6,
  "tests/test_fast_dispatch.py": 2.85,
  "tests/test_feed.py": 0.98,
+ "tests/test_feed_highway_point.py": 2.0,
  "tests/test_fenced_reads.py": 10.78,
  "tests/test_fetch_places.py": 0.05,
  "tests/test_fg2.py": 10.1,
