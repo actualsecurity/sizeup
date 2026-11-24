@@ -562,3 +562,42 @@ def test_a_promoted_crash_channel_is_denied_aws_with_the_context_budget():
         promoted_keys = lambda self: frozenset({NEXT_DOOR, "tg:4031"})   # noqa: E731
         context_aws_keys = App.context_aws_keys
     assert Stub().context_aws_keys() == [NEXT_DOOR]             # (ours never: their own budget, as before)
+
+
+def test_a_new_crash_on_a_channel_promoted_before_raises_its_own_backlog():
+    clock = Clock(10_000.0)
+    e, sink = engine(clock)
+    e.feed(row("a", "two cars into the guardrail on I-998 eastbound by exit 40", clock.t))
+    clock.t += 12 * 60
+    assert e.promoted_since(clock.t) == {}                      # crash A's promotion lapsed
+    first_b = clock.t - 300                                     # crash B, its row transcribed late
+    e.feed(row("b", "rollover with entrapment, 998 westbound at exit 41", first_b))
+    assert len(pushed(sink)) == 2
+    assert e.promoted_since(clock.t) == {NEXT_DOOR: first_b}    # B's own backlog, never only LEAD_S before now
+
+
+def _take(q, now):
+    sheds, skips = [], []
+    got = q._take(now, skips, sheds)
+    return (got[2].id if got else None), [i.id for i, _w in sheds]
+
+
+def test_a_clip_raised_into_high_is_never_shed_sooner_than_in_its_old_class():
+    from sizeup.stt import CONTEXT_FALLBACK, CONTEXT_FALLBACK_MAX_WAIT_S, HIGH, LIVE, SttQueue
+    clock = Clock(5_000.0)
+    q = SttQueue(clock=clock)
+    q.put((LIVE, None, _clip("live", 5_000.0), None, NEXT_DOOR))          # LIVE: never shed
+    clock.t += 100
+    assert q.raise_channel(NEXT_DOOR, HIGH, 1_000.0) == 1
+    assert _take(q, clock.t + 3_000) == ("live", [])                       # well past HIGH's 300 s: still taken
+    clock.t = 5_000.0
+    q2 = SttQueue(clock=clock)
+    q2.put((CONTEXT_FALLBACK, None, _clip("fb", 5_000.0), None, NEXT_DOOR))
+    clock.t += 100
+    assert q2.raise_channel(NEXT_DOOR, HIGH, 1_000.0) == 1
+    assert _take(q2, 5_000.0 + CONTEXT_FALLBACK_MAX_WAIT_S - 10) == ("fb", [])    # its 30 min kept, not HIGH's 5
+    q3 = SttQueue(clock=Clock(5_000.0))
+    q3.put((CONTEXT_FALLBACK, None, _clip("fb2", 5_000.0), None, NEXT_DOOR))
+    q3.clock.t += 100
+    q3.raise_channel(NEXT_DOOR, HIGH, 1_000.0)
+    assert _take(q3, 5_000.0 + CONTEXT_FALLBACK_MAX_WAIT_S + 1) == (None, ["fb2"])

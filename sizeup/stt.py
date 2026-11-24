@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import itertools
 import json
+import math
 import queue
 import re
 import threading
@@ -327,7 +328,7 @@ class SttQueue:
     def __init__(self, on_drop: Callable[[object, str], None] = lambda item, why: None,
                  clock: Callable[[], float] = time.time, maxsize: int = QUEUE_MAX, channel_cap: int = CHANNEL_CAP):
         self.on_drop, self.clock, self.maxsize, self.channel_cap = on_drop, clock, maxsize, channel_cap
-        self._items: list[list] = []              # [priority, seq, item, audio, channel, at, fallback]
+        self._items: list[list] = []              # [priority, seq, item, audio, channel, at, fallback(, shed at)]
         self._cv = threading.Condition()
         self._seq = itertools.count()
         self.dropped = self.skipped = self.shed = 0
@@ -378,8 +379,9 @@ class SttQueue:
         system's talkgroup a crash pre-alert promotes, sizeup/intel/engine.py: HIGH), each behind what already waits in
         that class (a fresh seq: never ahead of Fire/EMS 15's). Live, HIGH, LOW and the context classes (an alert-tier
         talkgroup's, CONTEXT / CONTEXT_FALLBACK); never a late clip (#747/#753: after every live one), a re-run, a
-        catch-up, or anything when `since` isn't known. Raised into a class that sheds (HIGH), a clip's wait starts
-        again then (it is never shed for the minutes it waited as context). How many."""
+        catch-up, or anything when `since` isn't known. Raised into a class that sheds (HIGH), a clip is shed at the
+        later of its old class's horizon and the new one's counted from now (_shed_at): never sooner than before (a
+        LIVE clip never), never for the minutes it waited as context. How many."""
         if since is None:
             return 0
         n = 0
@@ -390,9 +392,11 @@ class SttQueue:
                 if e[4] != channel or e[0] not in RAISABLE or e[0] <= priority or getattr(item, "late", False) \
                         or not isinstance(start, (int, float)) or start < since:
                     continue
+                was = self._shed_at(e)
                 e[0], e[1] = priority, next(self._seq)
-                if priority in SHED_AFTER:
-                    e[5] = self.clock()               # (its wait in the new class: never shed for the context's)
+                if priority in SHED_AFTER:            # the later horizon: never shed sooner than in its old class
+                    at = max(was, self.clock() + SHED_AFTER[priority])
+                    e[7:] = [at]
                 n += 1
             if n:
                 self._cv.notify()
@@ -459,8 +463,16 @@ class SttQueue:
             except Exception:  # the caller's trouble must not stop the queue
                 pass
 
+    @staticmethod
+    def _shed_at(e: list) -> float:
+        """When the item is shed: its class's horizon from when it was queued, or the one raise_channel set (e[7]);
+        inf for a class that never sheds."""
+        if len(e) > 7:
+            return e[7]
+        return e[5] + SHED_AFTER[e[0]] if e[0] in SHED_AFTER else math.inf
+
     def _take(self, now: float, skips: list, sheds: list) -> tuple | None:
-        shed = [e for e in self._items if e[0] in SHED_AFTER and now - e[5] >= SHED_AFTER[e[0]]]
+        shed = [e for e in self._items if e[0] in SHED_AFTER and now >= self._shed_at(e)]
         old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S and e not in shed]
         for e in old + shed:
             self._items.remove(e)
