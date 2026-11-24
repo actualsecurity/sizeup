@@ -342,9 +342,10 @@ def test_on_makes_each_part_a_row_with_its_radio_its_text_and_its_intel(two, tmp
     cid = p.stem
     assert wait(lambda: len(heard) == 3)
     r = rows(app)
+    U = "unknown MRRS radio"
     assert {k: (v["radio_id"], v["talker"], v["cut"], v["call_id"], v["turn"], v["status"]) for k, v in r.items()} == {
-        f"{cid}-t0": (A, A, "", cid, 0, "done"), f"{cid}-t1": (B, B, "grant", cid, 1, "done"),
-        f"{cid}-t2": (C, C, "grant", cid, 2, "done")}
+        f"{cid}-t0": (A, U, "", cid, 0, "done"), f"{cid}-t1": (B, U, "grant", cid, 1, "done"),
+        f"{cid}-t2": (C, U, "grant", cid, 2, "done")}      # (MRRS radios nobody named: the raw ID in radio_id)
     assert sorted(heard) == sorted(r) and len(said) == 3            # one speech-to-text job each
     assert r[f"{cid}-t0"]["end"] == pytest.approx(r[f"{cid}-t1"]["start"], abs=0.01)
     assert all(app.clip(k)[:4] == b"RIFF" for k in r)

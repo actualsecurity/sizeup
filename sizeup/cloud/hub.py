@@ -111,7 +111,7 @@ from sizeup import fence as fence_mod
 from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
-from sizeup.cad.radios import fm_system
+from sizeup.cad.radios import OTHER_P25, fm_system
 from sizeup.audiostore import STT_SRC
 from sizeup.cloud import client as wire, statusshape, sttinput
 from sizeup.cloud.autoupdate import describe
@@ -1298,7 +1298,7 @@ class HubApp(App):
         elif kind in SOURCE_KINDS:                     # an external incident source on the station (#297)
             self.apply_source(kind, d)
         elif kind == "heard":
-            if d.get("system") in ("mdc", "p25", "fleetsync"):
+            if d.get("system") in ("mdc", "p25", "fleetsync", "mrrs"):     # (MRRS: heard rows, never a rig)
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
                                   str(d.get("channel") or ""))
         elif kind == "activity":                      # key-ups on an encrypted talkgroup (#409): counted, never rows
@@ -1359,8 +1359,15 @@ class HubApp(App):
         t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
         ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
         pairs = d.get("pairs")
-        if getattr(t, "system", ""):                   # another P25 system's radio IDs (#409): never our registry's
-            t.rig = ""
+        system = str(getattr(t, "system", "") or "")
+        if system:                                     # another P25 system's radio IDs (#409): never one of our rigs,
+            t.rig = ""                                 # its talkers named from the registry here (an admin's MRRS names)
+            if system in OTHER_P25:
+                if isinstance(pairs, list):
+                    got = [(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2]
+                    t.unit = self.radios.talkers(system, got, t.unit)
+                elif len(ids) == 1 and self.radios.name(system, ids[0]):     # a station from before it sent pairs
+                    t.unit = self.radios.name(system, ids[0])
         elif t.talkgroup is None:
             t.rig = self.radios.rig_mdc(ids)
         elif isinstance(pairs, list):

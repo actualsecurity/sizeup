@@ -57,6 +57,7 @@ from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad import oos as oos_mod
 from sizeup.cad import prefs as prefs_mod
+from sizeup.cad import radios as radios_mod
 from sizeup.cad.lists import Lists
 from sizeup.fence import FencedWrite, GuardedConnection, refuse
 
@@ -209,7 +210,7 @@ CREATE TABLE dispatches (
 """ + """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS radios (
-  system TEXT NOT NULL,                 -- mdc (FG1 MDC-1200, 4 hex digits) | p25 (county radio number)
+  system TEXT NOT NULL,                 -- mdc (FG1 MDC-1200, 4 hex digits) | fleetsync | p25 (county radio number) | mrrs
   radio_id TEXT NOT NULL,
   unit TEXT NOT NULL DEFAULT '',        -- the board code it's on ('' = no rig / not known)
   label TEXT NOT NULL DEFAULT '',       -- "Portable 1", "Mobile", the P25 alias
@@ -643,6 +644,9 @@ class Store:
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")
+        # another P25 system's ID ranges, an admin's (MRRS naming): a new table; the radios rows keep their keys
+        # ("p25" the county's, "mdc" / "fleetsync" the fireground's), so nothing there moves
+        self.db.execute(radios_mod.RANGES_SCHEMA)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(operators)")}
         if not cols:
             return

@@ -82,6 +82,7 @@ from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
 from sizeup.radio.mdc1200 import decode as mdc_decode
 from sizeup.radio import fleetsync
+from sizeup.cad import radios as radios_mod
 from sizeup.cad.radios import fm_system
 from sizeup.radio.p25 import GRANT_CUT, Call, CallIngest, Piece, split_call
 from sizeup.radio import claims
@@ -1767,7 +1768,10 @@ class App:
     def _call_system(self, rt, call: Call) -> None:
         """A finished call on another P25 system (#409, sizeup/radio/systems.py), by its talkgroup's tier
         (sizeup/tiers.py). Context only: never Main, never on our incident; its radio IDs are another system's, so
-        never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
+        never on one of our rigs; its emergency flags raise none of our alarms. Its radios are learned into the
+        registry under their own system ("mrrs": heard rows, last heard, the talkgroup, the alias the system sent;
+        never a unit), and each row's talker is the department's name for its radio (sizeup/cad/radios.py talker:
+        an ID's label, its range's, the alias, else "unknown MRRS radio"), each split part by its own radio ID."""
         name, tg = rt.system.name, call.talkgroup
         if self._late_dup(call):                     # (#747)
             return
@@ -1783,6 +1787,9 @@ class App:
             self._drop_recorder_files(call, False)
             return
         self.tg.seen(tg, system=name)
+        if name in radios_mod.OTHER_P25:             # its radios, as heard (recorded talkgroups only: never encrypted)
+            for _talker, (src, tag) in call.ids.items():
+                self._heard(name, src, tag if tag != src else "", call.start, call.label)
         info = rt.system.talkgroups.get(tg, {})
         key = sources.channel_key(name, tg)
         eng = "off" if tier == tiers.RECORD else channels.effective(
@@ -1792,9 +1799,11 @@ class App:
             for k, pc in enumerate(split_turns(call)):
                 if pc.id in taken:
                     continue
-                t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
+                talker = (self.radios.talkers(name, pc.pairs, pc.talker) if name in radios_mod.OTHER_P25 else pc.talker)
+                t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=talker,
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
+                t.pairs = pc.pairs  # (radio ID, alias) per talker: the hub names them from its own registry  # type: ignore[attr-defined]
                 t.call_id, t.turn = call.id, k  # type: ignore[attr-defined]
                 if pc.via == GRANT_CUT:
                     t.cut = "grant"  # cut at a mid-call grant (#819): its talker is the granted radio  # type: ignore[attr-defined]
@@ -2304,7 +2313,12 @@ class App:
         rows = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         n = 0
         for t in rows:
-            if not t.rig and t.unit:
+            # (never another P25 system's row: its talkers are another agency's, never one of our rigs, whatever
+            # its alias says; told by its system, or by its talkgroup for a row from before rows said so)
+            other = t.talkgroup is not None and (
+                sources.other_p25({"talkgroup": t.talkgroup, "system": str(getattr(t, "system", "") or "")})
+                or t.talkgroup in sources.context_talkgroups())
+            if not t.rig and t.unit and not other:
                 rig, ids = self.radios.rig_for_names(t.unit, t.talkgroup is None, self.cfg.mdc_aliases)
                 t.rig = rig
                 t.radio_id = t.radio_id or ids

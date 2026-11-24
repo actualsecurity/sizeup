@@ -70,6 +70,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 from sizeup import sourcekeys as sources
 from sizeup.cad import airport
@@ -680,6 +681,23 @@ class Comms:
             if rows:
                 self.rev += 1
         return sorted(got)
+
+    def radio_tg_counts(self, system: str, since: float) -> list[dict]:
+        """Another P25 system's rows since then, per radio ID and talkgroup: [{radio_id, talkgroup, channel, dept, n}]
+        (the Radio IDs list's "likely agency" hint, radios.agency_hints). On radio_traffic_system_start; recorded
+        talkgroups only (an encrypted one is never a row). On its own read-only connection (WAL: it neither waits for
+        nor holds the store's lock: a busy system's weeks of rows take a while); an in-memory store has only its own."""
+        sql = ("SELECT radio_id, talkgroup, MAX(channel) AS channel, MAX(dept) AS dept, COUNT(*) AS n "
+               "FROM radio_traffic WHERE system = ? AND start >= ? AND radio_id != '' GROUP BY radio_id, talkgroup")
+        args = (str(system), float(since))
+        if self.store.path == ":memory:":
+            return self.store.q(sql, args)
+        db = sqlite3.connect(Path(self.store.path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+        try:
+            db.row_factory = sqlite3.Row
+            return [dict(r) for r in db.execute(sql, args)]
+        finally:
+            db.close()
 
     def id_stats(self, since: float, channels=None) -> list[dict]:
         """Per analog channel since then (Settings > Radios, #163): transmissions, how many had a radio ID, and of

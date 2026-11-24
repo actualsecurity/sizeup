@@ -21,7 +21,9 @@ in through their own CallIngest: only the talkgroups in its file, each by its ti
 
 Rules that hold for every such system:
     - its traffic is context: never Main, never on our incident, never an incident source;
-    - its radio IDs are never looked up in our radio registry (another system's numbers);
+    - its radio IDs are never one of our rigs (another system's numbers): the registry keeps them under the system's
+      own key ("mrrs", sizeup/cad/radios.py OTHER_P25), heard and named there (an admin's label or range), never mixed
+      with the county's;
     - a talkgroup ID is unique across the systems here (checked when the config loads), so rows, clips and the
       "tg:<id>" keys stay as they are; each row also carries its `system`;
     - an encrypted talkgroup is never recorded: its grants are counted and kept as activity (time, talkgroup, radio ID);

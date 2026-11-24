@@ -1,0 +1,20 @@
+{
+  "base": "station-events/valid/heard.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/events/0/data/system",
+      "value": "mrrs"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/radio_id",
+      "value": "9900101"
+    },
+    {
+      "op": "replace",
+      "path": "/events/0/data/channel",
+      "value": "PD Dispatch"
+    }
+  ]
+}

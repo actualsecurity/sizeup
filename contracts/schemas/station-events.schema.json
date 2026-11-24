@@ -272,7 +272,7 @@
       "required": ["system", "radio_id", "alias", "at", "channel"],
       "additionalProperties": true,
       "properties": {
-        "system": {"type": "string", "description": "The signalling the id came in. The hub ignores the event, without a word, for any other value.", "x-known": ["p25", "mdc", "fleetsync"]},
+        "system": {"type": "string", "description": "The signalling the id came in (`p25` the county's, `mrrs` the MTA MRRS P25 system's: a heard row there, never a rig). The hub ignores the event, without a word, for any other value.", "x-known": ["p25", "mdc", "fleetsync", "mrrs"]},
         "radio_id": {"type": "string", "description": "The radio id as decoded: P25 unit id (digits), MDC-1200 (4 hex), FleetSync (`<fleet>-<id>`). Never \"\"."},
         "alias": {"type": "string", "description": "The alias the P25 system sent for it; \"\" when none."},
         "at": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it was heard, Unix seconds; null when not known."},
@@ -546,7 +546,7 @@
             "maxItems": 2,
             "description": "One talker: [radio id, alias]. The hub drops a pair that is not a two-item list."
           },
-          "description": "The P25 talkers of this key-up, for the hub's own registry lookup. `traffic`: null on a channel that is not P25 (and on another P25 system's, whose radios are never looked up). `alarm`: always a list, [] when none.",
+          "description": "The P25 talkers of this key-up, for the hub's own registry lookup. `traffic`: null on a channel that is not P25. On another P25 system's (`system` set) the hub names the talker from its own registry (an admin's MRRS label or range; never a rig); a station from before this sends null there. `alarm`: always a list, [] when none.",
           "x-hub": "read"
         },
         "low_energy": {"type": "boolean", "description": "FM and airband: the clip has less than the least speech whisper needs. Whisper's judge reads it on the station.", "x-hub": "kept"},
