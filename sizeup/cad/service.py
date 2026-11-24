@@ -53,7 +53,7 @@ from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import CLOSED_HOURS, OPERATOR_MAX, PERSON, TZ, UNTIL_GRACE_S, CadError, Store
 from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
 from sizeup.cad.voicequeue import VoiceQueue
-from sizeup.dispatch import EXIT, MilePlace, highway
+from sizeup.dispatch import MilePlace, highway, highway_exit
 from sizeup.radio.tones import base_name
 from sizeup.tts import VoiceCfg
 from sizeup.tts import voices as tts_voices
@@ -970,12 +970,16 @@ class Cad:
             out["acft_level"] = airport.level(out["acft_souls"])      # the Level follows the souls unless said
 
     def _auto_geo(self, f: dict) -> None:
-        """Location typed but no suggestion picked: place it if the gazetteer is sure; else no pin. A highway's mile
-        marker or exit (dispatch.highway, whatever else the text says around it) is placed at the place search's
-        point for it first, as the location box offers it (highway_point): the gazetteer has no markers."""
+        """Location typed but no suggestion picked: place it if the gazetteer is sure; else no pin. A location that is
+        a highway's mile marker or exit (dispatch.highway; nothing but an "@" before its route, whatever follows it)
+        is placed at the place search's point for it first, as the location box offers it (highway_point): the
+        gazetteer has no markers. One that only names a highway after something else ("600 Sample Ave by I-999 exit
+        40"): the gazetteer first, the highway's point when it isn't sure."""
         if f.get("lat") is not None or not f.get("address") or self.geocoder is None:
             return
-        h = self.highway_point(f["address"])
+        hw = highway(f["address"])
+        lead = hw is not None and not f["address"][:hw.start].strip(" @")
+        h = self.highway_point(f["address"], hw) if lead else None
         if h:
             f["lat"], f["lon"], f["geo_label"] = h["lat"], h["lon"], h["label"]
             return
@@ -987,23 +991,25 @@ class Cad:
         # "I287 EB MM 10.0", "Hutch SB exit 30": a highway marker the place search knows exactly (#67)
         h = next((h for h in self._place_hits(f["address"][:120], limit=2)
                   if h["kind"] in ("milemarker", "exit") and h["quality"] >= 0.95), None)
+        if h is None and hw is not None and not lead:
+            h = self.highway_point(f["address"], hw)
         if h:
             f["lat"], f["lon"], f["geo_label"] = h["lat"], h["lon"], h["label"]
 
-    def highway_point(self, text: str) -> dict | None:
+    def highway_point(self, text: str, hw=None) -> dict | None:
         """The place search's mile marker or exit for a highway location (dispatch.highway), read from its normalised
         form ("I-999 NB MM 21.3"), as the location box offers it: the place search reads a highway only when nothing
         else is in the text, so a feed's "@" in front, a town after it, or a marker and an exit both found nothing as
         written. The marker first, then the exit the text also names, then the text itself; only a hit the place
         search is sure of (quality 0.95) on that route, whatever town it is in. None: not a highway, or no such marker
-        or exit known."""
-        hw = highway(text or "")
+        or exit known. hw: the text's dispatch.highway, when read already."""
+        hw = hw or highway(text or "")
         if hw is None:
             return None
         tries = [hw.shown()]
-        ex = EXIT.search((text or "").replace("_", " "), hw.start)
-        if hw.mile is not None and ex is not None:   # a marker and an exit both: the exit when the marker isn't known
-            tries.append(MilePlace(hw.route, hw.dir, None, ex.group(1).upper()).shown())
+        ex = highway_exit(text or "", hw)
+        if ex:                                       # a marker and an exit both: the exit when the marker isn't known
+            tries.append(MilePlace(hw.route, hw.dir, None, ex).shown())
         tries.append(text or "")
         for q in dict.fromkeys(t[:120] for t in tries if t):
             for h in self._place_hits(q, limit=2):

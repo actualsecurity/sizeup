@@ -202,3 +202,72 @@ def test_the_sweep_writes_nothing_when_not_the_leader(rig):
         rig.cad.sources.backfill_points()
     rig.cad.store.may_write = lambda: True
     assert point(rig, rig.incidents()[0]["id"]) is None
+
+
+SURE = {"label": "600 Sample Ave", "lat": 41.02, "lon": -73.66, "confidence": 0.95, "municipality": "Sampleville"}
+
+
+@pytest.mark.parametrize("text", ["600 Sample Ave by I-95 NB exit 21", "600 SAMPLE AVE I95 NB EXIT 21 RAMP"])
+def test_an_address_the_gazetteer_is_sure_of_beats_a_highway_only_named_after_it(rig, text):
+    rig.cad.geocoder = lambda q: [dict(SURE)]
+    inc = rig.cad.create({"type": "MVA", "address": text, "operator": "JD"})
+    assert (inc["lat"], inc["lon"]) == (SURE["lat"], SURE["lon"])
+
+
+def test_a_highway_location_is_its_marker_even_when_the_gazetteer_guesses(rig):
+    rig.cad.geocoder = lambda q: [dict(SURE)]
+    run(rig, "F0090001", "@I95 NB 14.0 Exit 21 OUR TOWN A")
+    assert point(rig, rig.incidents()[0]["id"]) == MM14
+
+
+def test_an_exit_said_to_be_another_road_s_is_never_this_highway_s():
+    from sizeup.dispatch import highway, highway_exit
+    for text, want in [("I95 NB 15.3 Exit 21 OUR TOWN A", "21"), ("I-95 NB MM 15.3", ""),
+                       ("I95 NB 15.3 by exit 3 of the Hutch", ""), ("I95 NB 15.3 near exit 3 to Hutch", ""),
+                       ("I95 NB 15.3, Hutch SB exit 19A", "")]:
+        assert highway_exit(text, highway(text)) == want, text
+
+
+def test_a_report_that_changes_nothing_of_the_place_never_looks_again(rig):
+    asked = []
+    rig.cad.geocoder = lambda q: asked.append(q) or []
+    run(rig, "F0090001", "12 NOWHERE LN OUR TOWN A")                    # not a highway: never looked for again
+    run(rig, "F0090002", "@I95 NB 31.7 OUR TOWN A", units=("E63",), dt=20)   # a marker nobody has: once
+    n = len(asked)
+    for k, dt in enumerate((60, 90, 120)):
+        rig.at(dt)
+        rig.feed.change("F0090001", units=("E61", f"E6{k + 2}"))
+        rig.feed.change("F0090002", units=("E63", f"E6{k + 4}"))
+        rig.poll()
+    assert len(asked) == n
+
+
+def test_the_ruling_run_unplaced_a_joining_run_at_a_known_marker_never_sets_the_point(auto):
+    auto.feed.put("F0090001", type="MVA/INJURIES", location="@I95 NB 14.3 OUR TOWN A", units=("E61",),
+                  times={"dispatched": T0}, extra=TOWN_A)
+    auto.poll()
+    iid = auto.iid("F0090001")
+    auto.at(90)
+    auto.feed.put("F0090907", type="MVA/INJURIES", location="I95 NB 14.0 OUR TOWN B", units=("E61", "E63"),
+                  times={"dispatched": T0 + 80}, extra=TOWN_B)
+    auto.poll()
+    assert auto.iid("F0090907") == iid and point(auto, iid) is None      # the first run rules the fields (#807)
+
+
+def test_the_backfill_thread_places_after_the_addresses(rig):
+    unplaced(rig)
+    run(rig, "F0090001", "@I95 NB 14.0 Exit 21 OUR TOWN A")
+    placed(rig)
+    calls = []
+    fenced = [True]
+    real = rig.cad.sources.backfill_points
+
+    def once_fenced():
+        from sizeup.fence import FencedWrite
+        calls.append(1)
+        if fenced and fenced.pop():
+            raise FencedWrite("lease ran out")
+        return real()
+    rig.cad.sources.backfill_points = once_fenced
+    rig.cad.sources.backfill_run(delay_s=0, retry_s=0)
+    assert len(calls) == 2 and point(rig, rig.incidents()[0]["id"]) == MM14

@@ -1390,6 +1390,7 @@ class Sources:
         self._lock = threading.RLock()
         self._resent_said: set[tuple[str, str]] = set()     # (source, event id): a re-sent older report dropped, said
         self._unplaced_said: set[tuple[int, str]] = set()   # (incident, location): a highway left with no point, said
+        self._unplaced_tried: dict[tuple[int, str], tuple] = {}   # ... and the searches it was tried with (_apply)
         # Is the paging decoder up? The hub sets it (the station connected); alone, always.
         self.paging_ok: Callable[[], bool] = lambda: True
         # trigger(reason): tell the station's adapters "poll now" (the app sets it: the runner here, or a job to the
@@ -1977,8 +1978,8 @@ class Sources:
         (common_place) its point, else as a typed location is placed (Cad._auto_geo: a highway's marker or exit from
         its normalised form first, "@" and a town after it or not). A highway left with no point: said once (why)."""
         cp = self._common_fields(loc, data, True)
-        if cp is not None and cp.get("lat") is not None:
-            return {"lat": cp["lat"], "lon": cp["lon"], "geo_label": cp["geo_label"]}
+        if cp is not None:                                   # a place's name: its point or none, never its name's guess
+            return {"lat": cp.get("lat"), "lon": cp.get("lon"), "geo_label": cp.get("geo_label") or ""}
         g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
         self.cad._auto_geo(g)
         if g["lat"] is None:
@@ -1991,12 +1992,29 @@ class Sources:
         at = match_address(inc).strip()
         return bool(at) and (loc.strip().lower() == at.lower() or same_place(loc, at))
 
+    def _geo_sources(self) -> tuple:
+        """Which gazetteer and place search a point was looked for with: tried again only when one changed."""
+        cad = self.cad                                       # (never building the place search to ask)
+        return tuple(id(getattr(cad, k, None)) for k in ("geocoder", "place_source", "_place_ix"))
+
+    def _retry_point(self, iid: int, loc: str) -> bool:
+        """Look again for the point of an incident left with none (_apply): only a highway's location (a marker or an
+        exit), and not with the same gazetteer and place search it was looked for with already (each report would)."""
+        if highway(loc) is None:
+            return False
+        return self._unplaced_tried.get((iid, loc)) != self._geo_sources()
+
     def _unplaced(self, iid: int, loc: str, label: str = "") -> None:
         """A feed's highway location (a marker or an exit) that got no map point: said once per incident and location,
         and why (the incident's id, never the location: "logs")."""
         hw = highway(loc)
         key = (iid, loc)
-        if hw is None or key in self._unplaced_said:
+        if hw is None:
+            return
+        if len(self._unplaced_tried) >= 500:
+            self._unplaced_tried.clear()
+        self._unplaced_tried[key] = self._geo_sources()     # (_retry_point: not again with the same ones)
+        if key in self._unplaced_said:
             return
         if len(self._unplaced_said) >= 500:
             self._unplaced_said.clear()
@@ -2576,10 +2594,11 @@ class Sources:
                 notes.append((now, f"{pre}: location {shown}"))
             if auth and differs and "location" not in hand:
                 fields.update(self._location_fields(iid, loc, new, label))
-        if (loc and auth and "lat" not in fields and inc["lat"] is None and inc["status"] in OPEN
-                and not {"pin", "location"} & hand and self._here(loc, inc)):
-            # an open incident at this report's place with no map point (a page's location the gazetteer wasn't sure
-            # of, a highway's text the place search once read as nothing): its point now, the address as it is
+        if (loc and auth and not created and "lat" not in fields and inc["lat"] is None and inc["status"] in OPEN
+                and not {"pin", "location"} & hand and self._retry_point(iid, loc) and self._here(loc, inc)):
+            # an open incident on a highway at this report's place with no map point (a page's location the gazetteer
+            # wasn't sure of, a highway's text the place search once read as nothing): its point now, the address as
+            # it is
             g = self._point(iid, loc, new, label)
             if g["lat"] is not None:
                 fields.update(g, geo_alts="")                # (a page's unsure readings: the feed's point is sure)
