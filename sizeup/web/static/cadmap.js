@@ -1420,6 +1420,7 @@ window.CadMap = (() => {
       };
       btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
         this.userMoved = false;
+        this.held = false;
         if (this.layer.setBand && this.layer.setBand()) this.layer.draw();  // #376: the automatic frame again: active rigs full
         this.map.fire("sizeup:recenter");             // an aircraft being followed (aircraft.js) is let go
         if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
@@ -1502,7 +1503,7 @@ window.CadMap = (() => {
       }
       const key = JSON.stringify(this.focus ? this.layer.focusKey() : this.framePoints());
       if (!this.focus) {                              // no call open: the calls changed, so all of them again, as
-        if (this.callsKey !== undefined && key !== this.callsKey) {
+        if (this.callsKey !== undefined && key !== this.callsKey && !this.held) {   // (held: a hydrant shown, #840)
           this.userMoved = false;                     // Recenter does (#218)
           if (this.layer.stationOpen) this.layer.closePicker();   // #384: a firehouse's list never left over the calls
         }
@@ -1615,7 +1616,7 @@ window.CadMap = (() => {
 
   // ---- the CAD console's maps (uses cad.js: cad, $, el, show, setText, selectIncident, ...) ----------
 
-  const views = { detail: null, big: null, overview: null, bigOpen: false };
+  const views = { detail: null, big: null, overview: null, bigOpen: false, bigOnClose: null };
   const mapData = () => ({ map: cad.state && cad.state.map, lists: cad.state && cad.state.lists });
   const mapsOk = () => !!(window.maplibregl && cad.scene && cad.scene.home);
   const noPoint = (inc) => (inc && (inc.lat == null || inc.lon == null) ? "No map point" : "");
@@ -1663,12 +1664,32 @@ window.CadMap = (() => {
       views.big = new RigMap(panel, { scene: cad.scene, pins: true, unset: true, editable: () => canDo("admin"), operator,
                                       onPick: (id) => { closeBig(); selectIncident(id); }, onClose: closeBig, layers: "overview" });
     }
-    UI.dialog.open(ov, { onClose: () => { views.bigOpen = false; } });   // focus in, Esc / the scrim close (ui.js)
+    UI.dialog.open(ov, { onClose: () => {                // focus in, Esc / the scrim close (ui.js)
+      views.bigOpen = false;
+      views.big.held = false;
+      const f = views.bigOnClose;
+      views.bigOnClose = null;
+      if (f) f();
+    } });
     views.bigOpen = true;
     const inc = cad.mode === "view" ? selected() : null;
     views.big.size = "";
     views.big.focusId = undefined;                     // look at the call again
     views.big.update(mapData(), inc, noPoint(inc));
+  }
+  // Show on map (#840, hydrants.js): the large map on a point, held there (the calls changing never move it; Recenter
+  // does); opts.onClose: called once when it closes. The map, or null with no map here.
+  function showAt(center, zoom, opts = {}) {
+    if (!mapsOk()) return null;
+    views.bigOnClose = null;                           // (a Show on map before this one, replaced: not a close)
+    if (!views.bigOpen) openBig();
+    views.bigOnClose = opts.onClose || null;
+    const rm = views.big;
+    rm.userMoved = true;
+    rm.held = true;
+    if (window.MapFollow) MapFollow.takeMap(rm.map);   // a follow lets go
+    rm.map.jumpTo({ center, zoom });
+    return rm;
   }
   function closeBig() {
     const ov = $("#cm-overlay");
@@ -1835,6 +1856,6 @@ window.CadMap = (() => {
   }
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
-  return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
+  return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, showAt, areaBounds, areaCalls, AREA_KM,
            followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass, iconOf, vehicles: V, vehSvg };
 })();

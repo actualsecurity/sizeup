@@ -13,7 +13,15 @@
 //   Add          admins: "+ Add" by the legend, tap the map, drag to adjust, then the form.
 //   A call       its nearest hydrants (the state push: inc.hydrants {near, down}) beside its map (#d-hydrants); the out of
 //                service ones within 300 m called out.
-//   Settings     Settings > Hydrants (admins): search and filters, the list, CSV export and import (preview, then apply).
+//   Settings     Settings > Hydrants (admins): search and filters, the list, CSV export and import (preview, then apply),
+//                "Untested hydrants: assume Class C" (#840).
+//   Assumed C    (#840, on by default) a hydrant with no class (no flow test, no admin's class) is drawn red like Class C,
+//                always marked: a star badge on its mark, "C*" by its number, "C (assumed)" on its card and in the legend,
+//                "C*" in a call's list and in search (the layer's _asm, the API's cls_assumed). Off: grey, "no flow".
+//   Show on map  (#840) a row of Settings > Hydrants, a search result, a call's nearest: the large map (cadmap.js's
+//                Expand overlay) on the hydrant, its card open, the Hydrants layer on for that view; #map/hydrant/<key>
+//                (reload, share in the console). Closing it goes back to where it came from.
+//   Search       (#840) the Search view's Hydrants tab (search-view.js; GET /api/cad/hydrants/search): resultRow here.
 // Uses cad.js's helpers (el, $, show, setText, api, operator, canDo, UI, cad): loaded after it, before gislayers.js.
 "use strict";
 
@@ -32,6 +40,14 @@ window.Hydrants = (() => {
   const LEGEND = [["AA", "≥ 1500 gpm"], ["A", "1000–1499 gpm"], ["B", "500–999 gpm"], ["C", "< 500 gpm"], ["unk", "No flow data"],
                   ["down", "Out of service / dry"]];
   const SRC_NOTE = "NFPA 291 cap colours, rated flow at 20 psi residual";
+  const ASSUMED = "C";                         // sizeup/cad/hydrants.py ASSUMED: an untested hydrant's class when assumed
+  const ASM_TIP = "No flow test: assumed Class C until tested (Settings > Hydrants)";
+  const LAYER_KEY = "gis:hydrants";
+  const FOCUS_ZOOM = 18;
+  // #map/hydrant/<key> (sizeup/cad/hydrants.py KEY_RE): the large map on one hydrant
+  const ROUTE = /^#map\/hydrant\/([ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?)$/;
+  const routeKey = (hash) => { const m = ROUTE.exec(hash || ""); return m ? m[1] : null; };
+  const routeOf = (key) => `#map/hydrant/${key}`;
 
   // ---- pure helpers (tests/test_hydrants.py runs these in node) ------------------------------------------------------
   const classOf = (gpm) => (gpm === null || gpm === undefined ? null : CLASSES.find((c) => gpm >= c[1])[0]);
@@ -42,25 +58,37 @@ window.Hydrants = (() => {
   }
   const hex = (cls) => (CLASSES.find((c) => c[0] === cls) || [0, 0, 0, UNK])[3];
   const colorName = (cls) => (CLASSES.find((c) => c[0] === cls) || [0, 0, ""])[2];
+  // a hydrant's class as shown (#840): tested (or an admin's) as it is, assumed with its mark; "" for none.
+  // long: the card's and the legend's "C (assumed)"; else "C*" (a call's list, search, the map's label)
+  function clsText(h, long) {
+    if (h.cls) return h.cls;
+    if (h.cls_assumed) return long ? `${h.cls_assumed} (assumed)` : `${h.cls_assumed}*`;
+    return "";
+  }
+  const clsTip = (h) => (h.cls ? `Class ${h.cls}: ${colorName(h.cls).toLowerCase()} cap` : h.cls_assumed ? `Class ${h.cls_assumed} (assumed): ${ASM_TIP}` : "No flow data");
   // the map's image for a hydrant's properties (the same rule as iconExpr)
   function imageFor(p) {
     if (DOWN.includes(p._st)) return "hy-down";
-    const base = CLASSES.some((c) => c[0] === p._cls) ? `hy-${p._cls}` : "hy-unk";
+    const base = CLASSES.some((c) => c[0] === p._cls) ? `hy-${p._cls}` : p._asm ? `hy-${ASSUMED}x` : "hy-unk";
     return p._st === "restricted" ? `${base}-r` : base;
   }
   function iconExpr() {
     const st = ["coalesce", ["get", "_st"], ""], cls = ["coalesce", ["get", "_cls"], ""];
-    const by = (sfx) => ["match", cls, ...CLASSES.flatMap((c) => [c[0], `hy-${c[0]}${sfx}`]), `hy-unk${sfx}`];
+    const by = (sfx) => ["match", cls, ...CLASSES.flatMap((c) => [c[0], `hy-${c[0]}${sfx}`]),
+                         ["case", ["has", "_asm"], `hy-${ASSUMED}x${sfx}`, `hy-unk${sfx}`]];
     return ["case", ["in", st, ["literal", DOWN]], "hy-down", ["==", st, "restricted"], by("-r"), by("")];
   }
   // out of service first, then restricted: placed before (never thinned out by) their neighbours
   const sortExpr = () => ["case", ["in", ["coalesce", ["get", "_st"], ""], ["literal", DOWN]], 0, ["==", ["get", "_st"], "restricted"], 1, 2];
-  // "9001 · A", "9002 · OOS" (beside the mark from the label zoom)
+  // "9001 · A", "9002 · OOS", "9004 · C*" (assumed, #840) beside the mark from the label zoom
   function labelExpr() {
     const no = ["to-string", ["coalesce", ["get", "_no"], ["get", "HYD_NUMBER"], ""]];
     return ["concat", no,
-      ["case", ["in", ["coalesce", ["get", "_st"], ""], ["literal", DOWN]], " · OOS", ["has", "_cls"], ["concat", " · ", ["get", "_cls"]], ""]];
+      ["case", ["in", ["coalesce", ["get", "_st"], ""], ["literal", DOWN]], " · OOS", ["has", "_cls"], ["concat", " · ", ["get", "_cls"]],
+       ["has", "_asm"], ["concat", " · ", ["get", "_asm"], "*"], ""]];
   }
+  // the legend's rows: with the setting on, every untested hydrant is an assumed C (no grey "no flow" left to show)
+  const legendRows = (assume) => LEGEND.map((r) => (r[0] === "unk" && assume ? ["Cx", "assumed (untested)"] : r));
   const fmtDist = (m) => `${Math.round(m)} m`;
   // the flow test's checks (sizeup/cad/hydrants.py check: the hub refuses the errors too): {error, notes}
   const FLOW_HIGH = 2500, RATED_MAX = 10000;
@@ -77,9 +105,9 @@ window.Hydrants = (() => {
     }
     return { error: "", notes };
   }
-  // a call's row: "9001 · A 1200 gpm · OOS · 40 m"
+  // a call's row: "9001 · A 1200 gpm · OOS · 40 m", "9004 · C* · 60 m" (assumed)
   function line(h) {
-    const cls = h.cls ? `${h.cls}${h.gpm != null ? ` ${h.gpm} gpm` : ""}` : "";
+    const cls = h.cls ? `${h.cls}${h.gpm != null ? ` ${h.gpm} gpm` : ""}` : clsText(h);
     return [h.number || "?", cls, SHORT[h.status] || "", h.dist_m != null ? fmtDist(h.dist_m) : ""].filter(Boolean).join(" · ");
   }
   // the "@words" being typed at the caret of the Location box (the comment box's rule, cad.js placeTokenAt): {text, start, end}
@@ -95,12 +123,14 @@ window.Hydrants = (() => {
   function takeAt(value, tok, p, places) {
     const after = value.slice(tok.end).replace(/^[A-Za-z0-9.-]*/, "");
     const lead = value.slice(0, tok.start) + "@" + p.label + (after.startsWith(" ") ? "" : " ");
-    const ref = { label: p.label, lat: p.lat, lon: p.lon, kind: p.kind || "place", sub: p.sub || "", source: p.source || "" };
+    const ref = { label: p.label, lat: p.lat, lon: p.lon, kind: p.kind || "place", sub: p.sub || "", source: p.source || "",
+                  ...(p.key ? { key: p.key } : {}) };                    // a hydrant's key (#840): its chip opens its card
     const next = [...places.filter((x) => x.label !== p.label), ref];
     return { value: lead + after, caret: lead.length, places: next };
   }
   const named = (text, places) => places.filter((p) => text.toLowerCase().includes(`@${p.label.toLowerCase()}`));
-  const api_ = { CLASSES, DOWN, LEGEND, classOf, ratedGpm, flowCheck, atToken, takeAt, named, imageFor, iconExpr, sortExpr, labelExpr, fmtDist, line };
+  const api_ = { CLASSES, DOWN, LEGEND, ASSUMED, classOf, ratedGpm, flowCheck, atToken, takeAt, named, imageFor, iconExpr, sortExpr,
+                 labelExpr, legendRows, clsText, clsTip, fmtDist, line, routeKey, routeOf };
   if (typeof document === "undefined") return api_;
 
   // ---- the marks: the county sprite's hydrant in each class's colour --------------------------------------------------
@@ -128,32 +158,50 @@ window.Hydrants = (() => {
   };
   const dot = (g) => { g.fillStyle = DARK; g.beginPath(); g.arc(19.5, 4.5, 4.4, 0, 2 * Math.PI); g.fill();
                        g.fillStyle = AMBER; g.beginPath(); g.arc(19.5, 4.5, 3.2, 0, 2 * Math.PI); g.fill(); };
-  // gislayers.js: the images on one map (once): hy-AA ... hy-C, hy-unk, each -r (restricted), hy-down
-  function addImages(map, shape) {
-    if (!shape || map.hasImage("hy-down")) return;
-    for (const [cls, col] of [...CLASSES.map((c) => [c[0], c[3]]), ["unk", UNK]]) {
-      map.addImage(`hy-${cls}`, paint(shape, col), { pixelRatio: 2 });
-      map.addImage(`hy-${cls}-r`, paint(shape, col, dot), { pixelRatio: 2 });
+  // assumed (#840): a light star on a dark badge at the top left (the restricted dot is top right)
+  const star = (g) => {
+    g.fillStyle = DARK; g.beginPath(); g.arc(4.5, 4.5, 4.4, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = LIGHT; g.lineWidth = 1.4; g.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = Math.PI / 2 + i * Math.PI / 3, dx = 2.9 * Math.cos(a), dy = 2.9 * Math.sin(a);
+      g.moveTo(4.5 - dx, 4.5 - dy); g.lineTo(4.5 + dx, 4.5 + dy);
     }
-    map.addImage("hy-down", paint(shape, null, cross), { pixelRatio: 2 });
+    g.stroke();
+  };
+  // gislayers.js: the images on one map (once): hy-AA ... hy-C, hy-unk, hy-Cx (assumed), each -r (restricted), hy-down
+  function addImages(map, shape) {
+    if (!shape || map.hasImage(`hy-${ASSUMED}x`)) return;
+    const add = (id, img) => { if (!map.hasImage(id)) map.addImage(id, img, { pixelRatio: 2 }); };
+    for (const [cls, col] of [...CLASSES.map((c) => [c[0], c[3]]), ["unk", UNK]]) {
+      add(`hy-${cls}`, paint(shape, col));
+      add(`hy-${cls}-r`, paint(shape, col, dot));
+    }
+    add(`hy-${ASSUMED}x`, paint(shape, hex(ASSUMED), star));
+    add(`hy-${ASSUMED}x-r`, paint(shape, hex(ASSUMED), (g) => { star(g); dot(g); }));
+    add("hy-down", paint(shape, null, cross));
   }
 
-  // a small mark in the page: the class's colour with its letter (the legend, the card, a call's list)
-  function mark(cls, st) {
-    const down = DOWN.includes(st);
-    const m = el("span", "hy-mark" + (down ? " down" : ""), down ? "✕" : cls || "?");
-    if (!down) m.style.setProperty("--hy", cls ? hex(cls) : UNK);
+  // a small mark in the page: the class's colour with its letter (the legend, the card, a call's list); asm: the assumed
+  // class (#840) when there is none, "C*" with a dashed edge
+  function mark(cls, st, asm) {
+    const down = DOWN.includes(st), a = !cls && !!asm;
+    const m = el("span", "hy-mark" + (down ? " down" : a ? " asm" : ""), down ? "✕" : cls || (a ? `${asm}*` : "?"));
+    if (!down) m.style.setProperty("--hy", cls || a ? hex(cls || asm) : UNK);
     m.setAttribute("aria-hidden", "true");
     return m;
   }
+  // (cad.js's cad is a top-level const, not a property of the window)
+  const CAD = () => (typeof cad !== "undefined" ? cad : null);
+  const assumeOn = () => !(CAD() && cad.state && cad.state.hydrants && cad.state.hydrants.assume_c === false);
 
   // ---- the legend under the layer's toggle (gislayers.js panel) -----------------------------------------------------------
   function legend(gm) {
     const box = el("div", "hy-legend small");
-    for (const [k, tip] of LEGEND) {
+    for (const [k, tip] of legendRows(assumeOn())) {
       const s = el("span", "hy-key");
-      s.append(k === "down" ? mark(null, "oos") : mark(k === "unk" ? null : k), el("span", "", k === "unk" ? "no flow" : k === "down" ? "OOS" : ""));
-      s.title = k === "unk" || k === "down" ? tip : `Class ${k}: ${tip}`;
+      s.append(k === "down" ? mark(null, "oos") : k === "Cx" ? mark(null, null, ASSUMED) : mark(k === "unk" ? null : k),
+               el("span", "", k === "unk" ? "no flow" : k === "down" ? "OOS" : k === "Cx" ? tip : ""));
+      s.title = k === "unk" || k === "down" ? tip : k === "Cx" ? `${ASSUMED} (assumed): ${ASM_TIP}` : `Class ${k}: ${tip}`;
       box.append(s);
     }
     box.title = SRC_NOTE;
@@ -201,7 +249,11 @@ window.Hydrants = (() => {
       b.append(best.p.label);
       b.title = `${best.p.label}${best.p.sub ? `, ${best.p.sub}` : ""}: show it on the map`;
       const p = best.p;
-      b.addEventListener("click", (e) => { e.stopPropagation(); if (gm) gm.map.easeTo({ center: [p.lon, p.lat], zoom: Math.max(gm.map.getZoom(), 18), duration: 400 }); });
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (p.kind === "hydrant" && p.key) { if (gm) focusOn(gm, p); else showOnMap(p.key); return; }   // #840
+        if (gm) gm.map.easeTo({ center: [p.lon, p.lat], zoom: Math.max(gm.map.getZoom(), 18), duration: 400 });
+      });
       box.append(b);
       rest = rest.slice(best.i + best.p.label.length + 1);
     }
@@ -211,11 +263,15 @@ window.Hydrants = (() => {
   function lines(h, gm) {
     const out = [];
     const cl = el("div", "hy-line");
-    cl.append(mark(h.cls, h.status));
+    cl.append(mark(h.cls, h.status, h.cls_assumed));
     if (h.cls) {
       const t = el("span", "", `Class ${h.cls}${h.gpm != null ? ` · ${h.gpm} gpm` : ""}`);
       t.title = `${colorName(h.cls)} cap (${SRC_NOTE})` + (h.class_set ? ` · set by hand (flow says ${h.class_flow || "none"})` : "")
         + (h.static_psi != null && h.residual_psi != null && h.flow_gpm != null ? ` · ${h.flow_gpm} gpm flowed at ${h.residual_psi} psi residual` : "");
+      cl.append(t);
+    } else if (h.cls_assumed) {                                          // #840: "C (assumed)", never a tested class
+      const t = el("span", "", `${clsText(h, true)} · untested`);
+      t.title = ASM_TIP;
       cl.append(t);
     } else cl.append(el("span", "dim", "No flow data"));
     out.push(cl);
@@ -250,9 +306,11 @@ window.Hydrants = (() => {
   }
 
   // a click on a hydrant (gislayers.js): what the layer had at once, then the hub's card
-  function showCard(gm, props) {
+  // got: the card's GET already made (Show on map)
+  function showCard(gm, props, got) {
     const key = props._k;
     const quick = { key, number: props._no || props.HYD_NUMBER || "", cls: props._cls || null, gpm: props._gpm ?? null,
+                    cls_assumed: props._cls ? null : props._asm || null,
                     status: props._st || "unknown", missing: !!props._miss, hub: !!props._hub, district: props.FIRENAME || "" };
     const draw = (h, more) => {
       const ls = lines(h, gm);
@@ -265,7 +323,7 @@ window.Hydrants = (() => {
     draw(quick);
     if (!key) return;
     const seq = ++st.seq;
-    api("GET", `/api/cad/hydrants/${encodeURIComponent(key)}`).then((d) => {
+    (got ? Promise.resolve(got) : api("GET", `/api/cad/hydrants/${encodeURIComponent(key)}`)).then((d) => {
       if (seq !== st.seq) return;
       draw(d.hydrant, [...adminRow(gm, d.hydrant), ...(d.history && d.history.length ? [historyEl(d.history)] : [])]);
     }).catch((e) => { if (seq === st.seq) draw(quick, [el("div", "error", e.message)]); });
@@ -471,8 +529,9 @@ window.Hydrants = (() => {
       const s = n("static_psi"), r = n("residual_psi"), flow = n("flow_gpm");
       fc = flowCheck(flow, s, r);
       const g = s != null && r != null ? ratedGpm(flow, s, r) : ratedGpm(flow, null, null);
-      const c = inputs.nfpa_class.value || classOf(g);
-      const parts = [mark(c, inputs.status.value), el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : "No class (no flow)")];
+      const c = inputs.nfpa_class.value || classOf(g), asm = !c && assumeOn() ? ASSUMED : null;
+      const parts = [mark(c, inputs.status.value, asm),
+                     el("span", "", c ? `Class ${c}${g != null ? ` · ${g} gpm rated` : ""}` : asm ? `${asm} (assumed) · no flow` : "No class (no flow)")];
       if (fc.error) parts.push(el("span", "error", fc.error));
       for (const t of fc.notes) parts.push(el("span", "warn", t));
       cls.replaceChildren(...parts);
@@ -621,6 +680,113 @@ window.Hydrants = (() => {
   }
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && st.move && !UI.dialog.isOpen()) endMove(); });
 
+  // ---- Show on map (#840): the large map on one hydrant, its card open, the layer on for that view ------------------------
+  // a hydrant on a map already on screen (the call's): centred, its card (h: a row, a place: key, number, cls ...)
+  function focusOn(gm, h) {
+    gm.map.easeTo({ center: [h.lon, h.lat], zoom: Math.max(gm.map.getZoom(), 17.5), duration: 400 });
+    const x = h.hydrant || h;                                           // an "@" place: its hydrant's facts
+    showCard(gm, { _k: h.key, _no: x.number, _cls: x.cls || undefined, _asm: x.cls ? undefined : x.cls_assumed || undefined,
+                   _gpm: x.gpm, _st: x.status && x.status !== "unknown" ? x.status : undefined });
+  }
+  const R = { key: null, pushed: false, closing: false, seq: 0, ring: null, gm: null };
+  function showOnMap(key) {
+    if (!key) return;
+    if (location.hash === routeOf(key)) { route(); return; }
+    R.pushed = true;                                                    // closing it: Back to where this was
+    location.hash = routeOf(key);
+  }
+  // the button: "Show on map" (Settings, search); compact: an icon (a call's list)
+  function mapBtn(h, compact) {
+    const b = el("button", compact ? "icon quiet sm hy-map" : "sm hy-map ro-ok");
+    b.type = "button";
+    if (window.Icon) b.append(Icon("expand"));
+    if (!compact) b.append("Show on map");
+    const what = `hydrant ${h.number || h.key}`;
+    b.title = "Show on the large map";
+    b.setAttribute("aria-label", `Show ${what} on the large map`);
+    b.addEventListener("click", (e) => { e.stopPropagation(); showOnMap(h.key); });
+    b.addEventListener("keydown", (e) => { if (e.key === "Enter") e.stopPropagation(); });
+    return b;
+  }
+  function unfocus() {
+    if (R.ring) { R.ring.remove(); R.ring = null; }
+    if (R.gm) { R.gm.control.force[LAYER_KEY] = false; try { R.gm.control.refresh(); } catch (_) { /* gone */ } R.gm = null; }
+  }
+  // the large map closed (Esc, Close, the scrim): out of #map/... back where it came from
+  function bigClosed() {
+    unfocus();
+    if (R.closing || !routeKey(location.hash)) return;
+    R.key = null;
+    if (R.pushed) { R.pushed = false; history.back(); return; }
+    history.replaceState(null, "", location.pathname + location.search);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  }
+  async function route() {
+    if (BOARD_()) return;
+    const key = routeKey(location.hash);
+    if (!key) {
+      R.pushed = false;
+      if (R.key) { R.key = null; R.closing = true; try { if (window.CadMap) CadMap.closeBig(); } finally { R.closing = false; } }
+      return;
+    }
+    if (!CAD() || !cad.scene || !window.CadMap) return;          // (the first state calls again: hooks below)
+    R.key = key;
+    const seq = ++R.seq;
+    let d;
+    try { d = await api("GET", `/api/cad/hydrants/${encodeURIComponent(key)}`); } catch (e) { d = { error: e.message }; }
+    if (seq !== R.seq || routeKey(location.hash) !== key) return;
+    const h = d && d.hydrant;
+    const rm = h && h.lat != null ? CadMap.showAt([h.lon, h.lat], FOCUS_ZOOM, { onClose: bigClosed }) : null;
+    if (!rm) {
+      UI.toast(h ? "No map here" : `Hydrant ${key}: ${(d && d.error) || "not found"}`, "err");
+      bigClosed();
+      return;
+    }
+    unfocus();
+    const ring = el("div", "hy-focus");
+    ring.setAttribute("aria-hidden", "true");
+    R.ring = new maplibregl.Marker({ element: ring, anchor: "center" }).setLngLat([h.lon, h.lat]).addTo(rm.map);
+    const gm = window.GisLayers && [...GisLayers.maps].find((x) => x.map === rm.map);
+    if (!gm) return;
+    R.gm = gm;
+    gm.control.force[LAYER_KEY] = true;                                // on for this view (unticking it lets go)
+    gm.control.refresh();
+    showCard(gm, { _k: h.key, _no: h.number, _cls: h.cls || undefined, _asm: h.cls_assumed || undefined, _gpm: h.gpm,
+                   _st: h.status !== "unknown" ? h.status : undefined, _miss: h.missing, _hub: h.hub, FIRENAME: h.district }, d);
+  }
+  if (!BOARD_()) {
+    window.addEventListener("hashchange", route);
+    if (CAD() && cad.hooks) cad.hooks.push(() => { if (!R.key && routeKey(location.hash) && cad.scene) route(); });   // a reload
+  }
+
+  // ---- search (#840): a result's row in the Search view's Hydrants tab (search-view.js) ------------------------------------
+  function resultRow(h) {
+    const tr = el("tr", "ev hy-tr");
+    tr.tabIndex = 0;
+    const no = el("td", "num");
+    no.append(mark(h.cls, h.status, h.cls_assumed), ` ${h.number || "?"}`);
+    if (h.hub) no.append(el("span", "chip", "added"));
+    if (h.missing) no.append(el("span", "chip warn", "missing"));
+    const cls = el("td", "");
+    const ct = clsText(h);
+    if (ct) { const c = el("span", "chip hy-cls" + (h.cls ? "" : " asm"), ct + (h.cls && h.gpm != null ? ` · ${h.gpm}` : "")); c.title = clsTip(h); cls.append(c); }
+    const stt = el("td", "");
+    if (h.status && h.status !== "unknown") {
+      const c = el("span", "chip" + (DOWN.includes(h.status) ? " err" : h.status === "restricted" ? " warn" : ""), SHORT[h.status] || STATUS[h.status]);
+      if (h.status_reason) c.title = h.status_reason;
+      stt.append(c);
+    }
+    const loc = el("td", "loc", typeof qualText === "function" ? qualText(h.location_qualifier, h.location) : h.location || "");
+    if (h.asset_id) loc.append(el("span", "dim small mono", ` ${h.asset_id}`));
+    const act = el("td", "act");
+    act.append(mapBtn(h));
+    tr.append(no, el("td", "", h.town || ""), cls, stt, loc, act);
+    tr.title = [h.district, h.key].filter(Boolean).join(" · ");
+    tr.addEventListener("click", () => showOnMap(h.key));
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) showOnMap(h.key); });
+    return tr;
+  }
+
   // ---- a call: its nearest hydrants beside its map --------------------------------------------------------------------------
   function card(inc) {
     const box = $("#d-hydrants");
@@ -644,15 +810,13 @@ window.Hydrants = (() => {
       const li = el("li", "pp-row" + (DOWN.includes(h.status) ? " hy-down" : ""));
       const go = el("button", "pp-go", line(h));
       go.type = "button";
-      go.prepend(mark(h.cls, h.status));
-      go.title = h.cls ? `Class ${h.cls}: ${colorName(h.cls).toLowerCase()} cap` : "No flow data";
+      go.prepend(mark(h.cls, h.status, h.cls_assumed));
+      go.title = clsTip(h);
       go.addEventListener("click", () => {
         const gm = window.GisLayers && [...GisLayers.maps].find((x) => x.map.getContainer().closest("#d-map"));
-        if (!gm) return;
-        gm.map.easeTo({ center: [h.lon, h.lat], zoom: Math.max(gm.map.getZoom(), 17.5), duration: 400 });
-        showCard(gm, { _k: h.key, _no: h.number, _cls: h.cls, _gpm: h.gpm, _st: h.status !== "unknown" ? h.status : undefined });
+        if (gm) focusOn(gm, h);
       });
-      li.append(go);
+      li.append(go, mapBtn(h, true));
       list.append(li);
     }
     box.replaceChildren(head, list);
@@ -712,6 +876,22 @@ window.Hydrants = (() => {
     town.value = s.town;
     town.addEventListener("change", () => { s.town = town.value; s.offset = 0; loadList(); });
     bar.append(search, town);
+    if (d) {                                       // #840: the admin's switch (Settings, audited as System)
+      const lab = el("label", "check hy-assume");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = d.assume_c !== false;
+      cb.addEventListener("change", async () => {
+        try {
+          await api("POST", "/api/cad/settings/hydrant_display", { action: "set", key: "assume_c", value: cb.checked, operator: operator() });
+          UI.toast(cb.checked ? "Untested hydrants: assumed Class C" : "Untested hydrants: no class");
+          changed();
+        } catch (e) { cb.checked = !cb.checked; UI.toast(e.message, "err"); }
+      });
+      lab.append(cb, el("span", "", "Untested hydrants: assume Class C"));
+      lab.title = `${ASSUMED} (assumed): drawn red, marked ${ASSUMED}*, until a flow test`;
+      bar.append(lab);
+    }
     const chips = el("div", "seg hy-flags");
     chips.setAttribute("role", "group");
     chips.setAttribute("aria-label", "Show");
@@ -733,6 +913,9 @@ window.Hydrants = (() => {
       const tbl = el("table", "evtable hy-table");
       const th = el("tr");
       for (const c of ["No.", "Town", "Status", "Class", "Location", "Asset", "Changed"]) th.append(el("th", "", c));
+      const mth = el("th");
+      mth.append(el("span", "sr-only", "Map"));
+      th.append(mth);
       const thead = el("thead");
       thead.append(th);
       const tb = el("tbody");
@@ -740,14 +923,18 @@ window.Hydrants = (() => {
         const tr = el("tr", "hy-tr" + (h.removed ? " dim" : ""));
         tr.tabIndex = 0;
         const no = el("td");
-        no.append(mark(h.cls, h.status), ` ${h.number || "?"}`);
+        no.append(mark(h.cls, h.status, h.cls_assumed), ` ${h.number || "?"}`);
         if (h.missing) no.append(el("span", "chip warn", "missing"));
         if (h.hub) no.append(el("span", "chip", "added"));
         if (h.removed) no.append(el("span", "chip", "removed"));
         tr.append(no, el("td", "", h.town || ""), el("td", DOWN.includes(h.status) ? "err" : h.status === "restricted" ? "warn" : "",
           h.status === "unknown" ? "" : STATUS[h.status] + (h.status_reason ? `: ${h.status_reason}` : "")),
-          el("td", "", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : ""), el("td", "", typeof qualText === "function" ? qualText(h.location_qualifier, h.location) : h.location || ""),
+          Object.assign(el("td", h.cls ? "" : "dim", h.cls ? `${h.cls}${h.gpm != null ? ` · ${h.gpm}` : ""}` : clsText(h)), { title: clsTip(h) }),
+          el("td", "", typeof qualText === "function" ? qualText(h.location_qualifier, h.location) : h.location || ""),
           el("td", "mono", h.asset_id || ""), el("td", "dim small", h.by ? `${h.by} ${when(h.updated_at)}` : ""));
+        const mt = el("td", "act");
+        if (!h.removed) mt.append(mapBtn(h));
+        tr.append(mt);
         tr.title = `${h.key}${h.district ? ` · ${h.district}` : ""}`;
         const open = () => editor(h);
         tr.addEventListener("click", open);
@@ -824,7 +1011,7 @@ window.Hydrants = (() => {
   }
 
   // a write anywhere (the state's generation): the maps' layer and the list again
-  if (window.cad && cad.hooks) cad.hooks.push(() => {
+  if (CAD() && cad.hooks) cad.hooks.push(() => {     // (#840: it looked on the window, so another page's write was missed)
     const g = cad.state && cad.state.hydrants && cad.state.hydrants.gen;
     if (g == null || g === st.gen) return;
     const first = st.gen === null;
@@ -832,5 +1019,5 @@ window.Hydrants = (() => {
     if (!first && Date.now() - (st.changedAt || 0) > 5000) changed();    // (not again for this page's own write)
   });
 
-  return { ...api_, addImages, legend, show: showCard, card, mount, editor };
+  return { ...api_, addImages, legend, show: showCard, card, mount, editor, showOnMap, mapBtn, resultRow, mark, focusOn };
 })();

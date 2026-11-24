@@ -32,9 +32,22 @@ orange, C < 500 red. Checked against the University of Tennessee MTAS's summary 
 practice recommends a chrome yellow barrel for public hydrants and another colour (most often red) for private ones:
 kept as information (body_color), never what the map draws. With a static and a residual pressure the class is taken
 from the flow at 20 psi residual (NFPA 291's Q_R = Q_F x ((S - 20) / (S - R)) ^ 0.54), else from the flow as entered
-(a water company's rated capacity). No flow: no class (never red: red means under 500 GPM). An admin may set the class.
+(a water company's rated capacity). No flow: no class. An admin may set the class.
+
+Assumed Class C (#840, admin request): Settings > Hydrants "Untested hydrants: assume Class C" (on by default; the
+setting hydrant_display/assume_c, sizeup/cad/settings.py). On: a hydrant with no class (no flow test, no admin's class)
+is drawn red like Class C but always marked as assumed: "_asm" on the layer (the label "C*"), cls_assumed on the card,
+the call's list and search ("C (assumed)", "C*"), class_assumed in the CSV (class stays blank: an import reads "C*" as
+no data). Never stored: a flow test or an admin's class replaces it at once. Off: no class, drawn grey.
+
+Search (#840): GET /api/cad/hydrants/search?q= (anyone signed in: the Search view's Hydrants tab) and the "@" place
+search (sizeup/cad/service.py search_places): number, street or location words, asset id, status ("OOS", "out of
+service", "dry", "restricted"), class ("class C", "AA", "C*"), "untested" / "no flow" and town; ranked by how well the
+number or asset id matches, then the town and the number. Read from a table built once per merge (and towns layer, and
+the setting), never a scan of the layer's GeoJSON.
 
 HTTP (sizeup/cad/api.py): GET /api/cad/hydrants/<key> (anyone signed in: the card and its history),
+GET /api/cad/hydrants/search?q=&limit= (anyone signed in),
 GET /api/cad/hydrants (?q, status, flag, town: admins: the Settings list), GET /api/cad/hydrants.csv (admins),
 POST /api/cad/hydrants (admins: a new one), POST /api/cad/hydrants/<key> (admins: edit, move, remove, restore),
 POST /api/cad/hydrants/import {action: preview | apply, csv} (admins).
@@ -74,6 +87,8 @@ NEAR_N, NEAR_M = 5, 300.0             # an incident's nearest hydrants: at most 
 CELL_DEG = 0.002                      # the grid the nearest search reads (about 220 m x 170 m)
 MAX_IMPORT_ROWS = 20000
 LIST_MAX = 500                        # rows a list page at most
+ASSUMED = "C"                         # an untested hydrant's class when assumed (#840): never stored, always marked
+SEARCH_LIMIT, SEARCH_MAX = 50, 200    # search results: by default, at most (the Search view's page)
 
 # The overlay's fields: name -> (kind, arg). enum: the allowed values ("" clears); text: the most characters; int / float:
 # (lo, hi); date: YYYY-MM-DD. Their order is the CSV's.
@@ -260,6 +275,8 @@ def clean(name: str, v):
         if len(t) > arg:
             raise CadError(f"{name}: at most {arg} characters")
         return t
+    if name == "nfpa_class" and isinstance(v, str) and ASSUMED_CELL.fullmatch(v):
+        v = None                                                # "C*", "C (assumed)": assumed, never a tested class (#840)
     if v in (None, ""):
         return "unknown" if name == "status" else None
     if kind == "enum":
@@ -291,6 +308,101 @@ def clean(name: str, v):
     return round(x, 1)
 
 
+ASSUMED_CELL = re.compile(r"[A-Za-z]{1,2}\s*(?:\*|\(\s*assumed\s*\))", re.I)
+
+# -- search (#840) -------------------------------------------------------------------------------------------------------
+# A query's filters, longest phrase first; what is left are words (number, asset id, location, district, key).
+STATUS_WORDS = (("out of service", DOWN), ("not in service", DOWN), ("in service", ("in_service",)), ("oos", DOWN),
+                ("o/s", DOWN), ("dry", ("dry",)), ("restricted", ("restricted",)))
+UNTESTED_WORDS = ("untested", "not tested", "no flow test", "no flow", "no-flow", "no test", "no data")
+NOISE = {"hydrant", "hydrants", "hyd", "fh", "#"}
+CLASS_RE = re.compile(r"(?:^| )(?:class|cls)[ :]*(aa|a|b|c)(\*)?(?= |$)|(?:^| )(aa|a|b|c)\*(?= |$)|(?:^| )(aa)(?= |$)")
+
+
+def _phrase(text: str, p: str) -> tuple[bool, str]:
+    m = re.search(rf"(?:^| ){re.escape(p)}(?= |$)", text)
+    return (True, (text[:m.start()] + " " + text[m.end():]).strip()) if m else (False, text)
+
+
+def search_query(q: str, towns=()) -> dict:
+    """A search's text -> {status: (statuses) | None, cls, assumed (True: "C*" only), untested, town, words, filters (as
+    understood, for the page)}. "oos sampletown", "class c", "AA", "c*", "untested", "9001", "sample st"."""
+    text = " ".join(str(q or "").lower().replace(",", " ").split())[:120]
+    f = {"status": None, "cls": None, "assumed": False, "untested": False, "town": "", "words": [], "filters": []}
+    for p, st in STATUS_WORDS:
+        hit, text = _phrase(text, p)
+        if hit and f["status"] is None:
+            f["status"] = st
+            f["filters"].append("OOS" if st == DOWN else STATUSES[st[0]])
+    for p in UNTESTED_WORDS:
+        hit, text = _phrase(text, p)
+        if hit and not f["untested"]:
+            f["untested"] = True
+            f["filters"].append("Untested")
+    hit, text = _phrase(text, "assumed")
+    if hit:
+        f["assumed"] = True
+    m = CLASS_RE.search(text)
+    if m:
+        c = (m.group(1) or m.group(3) or m.group(4)).upper()
+        f["cls"], f["assumed"] = c, f["assumed"] or bool(m.group(2) or m.group(3))
+        text = (text[:m.start()] + " " + text[m.end():]).strip()
+    for t in towns:                                      # the longest name first ("north sampletown" first)
+        hit, text = _phrase(text, t.lower())
+        if hit:
+            f["town"] = t
+            f["filters"].append(t)
+            break
+    words = [w.lstrip("#") for w in text.split() if w not in NOISE]
+    words = [w for w in words if w]
+    if f["cls"] is None and len(words) == 1 and words[0] in ("a", "b", "c") and (f["filters"] or len(text.split()) == 1):
+        f["cls"] = words.pop().upper()                   # "c" alone, "oos b": a class; "a st": words
+    if f["assumed"] and f["cls"] is None:
+        f["cls"] = ASSUMED
+    if f["cls"]:
+        f["filters"].append(f"{f['cls']}*" if f["assumed"] else f"Class {f['cls']}")
+    f["words"] = words
+    return f
+
+
+def _passes(t: dict, f: dict) -> bool:
+    it = t["it"]
+    if f["status"] is not None and it["status"] not in f["status"]:
+        return False
+    if f["untested"] and t["tested"]:
+        return False
+    if f["town"] and t["town_l"] != f["town"].lower():
+        return False
+    if f["cls"]:
+        if f["assumed"]:
+            return t["asm"] == f["cls"]
+        return it["cls"] == f["cls"] or t["asm"] == f["cls"]       # "class c": the tested ones and the assumed ones
+    return True
+
+
+def _word_score(t: dict, w: str, exact: bool = False) -> int:
+    """How well one word names this hydrant (0: not at all): the number or the asset id whole, then their start, the key,
+    then a word of its location or district, then anywhere in them."""
+    flat = w.replace("-", "")
+    if w == t["no"] or (w == t["cno"] and t["cno"]):
+        return 100
+    if t["asset"] and (w == t["asset"] or flat == t["asset"].replace("-", "")):
+        return 90
+    if w == t["key"]:
+        return 80
+    if exact:
+        return 0
+    if t["no"].startswith(w) or (t["cno"] and t["cno"].startswith(w)):
+        return 60
+    if t["asset"] and t["asset"].replace("-", "").startswith(flat):
+        return 50
+    if any(x.startswith(w) for x in t["wl"]):
+        return 30
+    if len(w) >= 3 and w in t["words"]:
+        return 10
+    return 0
+
+
 def point(lat, lon) -> tuple[float, float]:
     try:
         la, lo = float(lat), float(lon)
@@ -317,6 +429,7 @@ class Hydrants:
         self.gen = int(time.time() * 1000)
         self._lock = threading.Lock()
         self._idx: tuple | None = None          # (signature, index)
+        self._sidx: tuple | None = None         # (index, towns rev, assume, the search table) (#840)
         self._towns: dict = {"rev": None, "at": {}}
         with self.store.lock:
             if self.store.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'incidents'").fetchone():
@@ -477,14 +590,34 @@ class Hydrants:
                 p["_miss"] = True
             if it["hub"]:
                 p["_hub"] = True
+            if asm := self.assumed(it):
+                p["_asm"] = asm                      # #840: drawn as Class C, marked assumed ("C*")
             f = {"type": "Feature", "properties": p,
                  "geometry": {"type": "Point", "coordinates": [round(it["lon"], 7), round(it["lat"], 7)]}}
             if it["fid"] is not None and not it["missing"]:   # (a missing one's id may be another's now)
                 f["id"] = it["fid"]
             out.append(f)
         # (a copy of the layer without ids, until it is fetched again: never a layer with nothing on it, #831)
-        out.extend(idx["plain"])
+        if self.assume():                            # untested too (#840): copies, the county's never touched
+            out.extend({**f, "properties": {**(f.get("properties") or {}), "_asm": ASSUMED}} for f in idx["plain"])
+        else:
+            out.extend(idx["plain"])
         return out
+
+    # -- the assumed class (#840) ---------------------------------------------------------------------------------------
+
+    def assume(self) -> bool:
+        """Settings > Hydrants "Untested hydrants: assume Class C" (sizeup/cad/settings.py: on unless set off)."""
+        return bool(getattr(self.cad, "hydrants_assume_c", True))
+
+    def assumed(self, it: dict) -> str | None:
+        """ASSUMED for a hydrant with no class (no flow test, no admin's class) while the setting is on, else None: a
+        flow test or an admin's class always replaces it."""
+        return ASSUMED if it["cls"] is None and self.assume() else None
+
+    def display_changed(self) -> None:
+        """The setting changed (sizeup/cad/settings.py _use): the layer's rev moves, the pages draw it again."""
+        self._bump()
 
     # -- the town (the layer's MUNCIPALIT is the fire district's name: Rye Brook's say PORT_CHESTER) --------------------
 
@@ -508,7 +641,8 @@ class Hydrants:
     def shown(self, it: dict, full: bool = True) -> dict:
         r = it["row"] or {}
         out = {"key": it["key"], "number": it["number"], "lat": it["lat"], "lon": it["lon"], "status": it["status"],
-               "cls": it["cls"], "gpm": it["gpm"], "removed": it["removed"], "missing": it["missing"], "hub": it["hub"]}
+               "cls": it["cls"], "cls_assumed": self.assumed(it), "gpm": it["gpm"], "removed": it["removed"],
+               "missing": it["missing"], "hub": it["hub"]}
         if not full:
             return out
         p = it["props"]
@@ -586,7 +720,7 @@ class Hydrants:
                     self.cad.log(f"CAD hydrants: {type(e).__name__}: {e}")
 
     def state(self) -> dict:
-        return {"gen": self.gen}
+        return {"gen": self.gen, "assume_c": self.assume()}
 
     FLAGS = {"oos": "Out of service, dry", "restricted": "Restricted", "no_flow": "No flow", "moved": "Moved",
              "removed": "Removed", "missing": "Missing from county", "hub": "Added here", "edited": "Edited"}
@@ -658,7 +792,87 @@ class Hydrants:
         towns = sorted({self.town(it) for it in every} - {""})
         page = items[f["offset"]:f["offset"] + f["limit"]]
         return {"rows": [self.shown(it) for it in page], "total": len(items), "counts": counts, "towns": towns,
-                "gen": self.gen, "county": self._gis() is not None}
+                "gen": self.gen, "county": self._gis() is not None, "assume_c": self.assume()}
+
+    # -- search (#840): the Search view's Hydrants tab, the "@" place search ----------------------------------------------
+
+    def _table(self) -> list[dict]:
+        """The search table: one row per hydrant on the maps, its words lower-cased; built once per merge, towns layer and
+        setting (never per query, never from the layer's GeoJSON)."""
+        idx = self.index()
+        g = getattr(self.cad, "gis", None)
+        trev = g.status[TOWNS]["rev"] if g is not None and TOWNS in getattr(g, "layers", {}) else None
+        assume = self.assume()
+        got = self._sidx
+        if got is not None and got[0] is idx and got[1] == trev and got[2] == assume:
+            return got[3]
+        rows = []
+        for it in idx["items"]:
+            if it["removed"]:
+                continue
+            r = it["row"] or {}
+            loc = " ".join(str(x or "") for x in (r.get("location_qualifier"), r.get("location"))).replace("@", " ")
+            town = self.town(it)
+            words = " ".join(f"{loc} {it['props'].get(DISTRICT) or ''} {town}".lower().split())
+            rows.append({"it": it, "no": it["number"].lower(), "cno": str(it["props"].get(NUMBER) or "").strip().lower(),
+                         "asset": str(r.get("asset_id") or "").lower(), "key": it["key"], "words": words,
+                         "wl": tuple(set(words.split())),
+                         "town": town, "town_l": town.lower(), "tested": r.get("flow_gpm") is not None,
+                         "asm": self.assumed(it)})
+        with self._lock:
+            self._sidx = (idx, trev, assume, rows)
+        return rows
+
+    def search(self, q: str, limit: int = SEARCH_LIMIT, near: tuple | None = None, exact: bool = False) -> dict:
+        """The hydrants a search names (search_query): {rows, total, filters}. exact: only a number or an asset id typed
+        whole (the "@" search's fallback after the places). near (lat, lon): the nearer first among equals."""
+        table = self._table()
+        f = search_query(q, sorted({t["town"] for t in table} - {""}, key=len, reverse=True))
+        if exact and (len(f["words"]) != 1 or f["filters"]):
+            return {"rows": [], "total": 0, "filters": f["filters"]}
+        if not f["words"] and not f["filters"]:
+            return {"rows": [], "total": 0, "filters": []}
+        order = {t.lower(): i for i, t in enumerate(getattr(getattr(self.cad, "lists", None), "geo_town_order", ()) or ())}
+        hits = []
+        for t in table:
+            if not _passes(t, f):
+                continue
+            score = 0
+            for w in f["words"]:
+                s = _word_score(t, w, exact)
+                if not s:
+                    break
+                score += s
+            else:
+                it = t["it"]
+                d = metres(near[0], near[1], it["lat"], it["lon"]) if near else 0.0
+                hits.append((-score, not t["tested"], d, order.get(t["town_l"], len(order)), t["town"],
+                             _num_key(it["number"]), it["key"], t))
+        hits.sort(key=lambda h: h[:7])
+        limit = max(1, min(int(limit), SEARCH_MAX))
+        return {"rows": [self._found(h[-1]) for h in hits[:limit]], "total": len(hits), "filters": f["filters"]}
+
+    def _found(self, t: dict) -> dict:
+        it = t["it"]
+        r = it["row"] or {}
+        return self.shown(it, full=False) | {"town": t["town"], "district": str(it["props"].get(DISTRICT) or "").strip(),
+                                             "status_label": STATUSES.get(it["status"], it["status"]),
+                                             "status_reason": r.get("status_reason") or "",
+                                             "location": r.get("location") or "", "location_qualifier": r.get("location_qualifier") or "",
+                                             "asset_id": r.get("asset_id") or "", "tested": t["tested"]}
+
+    def places(self, q: str, near=None, limit: int = 6, exact: bool = False) -> list[dict]:
+        """The "@" place search's hydrants (sizeup/cad/service.py search_places): each a place {kind: hydrant, label
+        "Hydrant 9001", sub (the town), lat, lon, source, key, hydrant: {cls, cls_assumed, status}}."""
+        rows = self.search(q, limit, near, exact)["rows"]
+        twice = {n for n in (h["number"] for h in rows) if sum(1 for x in rows if x["number"] == n) > 1}
+        out = []
+        for h in rows:                               # a number twice: told apart by where it stands, else its key
+            label = f"Hydrant {h['number'] or h['key']}" + (f", {h['location'][:40] or h['key']}" if h["number"] in twice else "")
+            out.append({"kind": "hydrant", "label": label, "sub": h["town"], "lat": round(h["lat"], 6), "lon": round(h["lon"], 6),
+                        "source": "hydrant", "key": h["key"],
+                        "hydrant": {"cls": h["cls"], "cls_assumed": h["cls_assumed"], "status": h["status"], "number": h["number"]}})
+        return out
 
     # -- writing ------------------------------------------------------------------------------------------------------
 
@@ -797,10 +1011,11 @@ class Hydrants:
 
     # -- CSV ------------------------------------------------------------------------------------------------------------
 
+    # class: the tested (or admin's) class only; class_assumed: "C" when assumed (#840), so the two never mix
     COLUMNS = ("key", "county_id", "county_number", "district", "town", "county_lat", "county_lon", "lat", "lon",
-               "removed", *FIELDS, "class", "rated_gpm", "missing", "updated_by", "updated_at")
-    READ_ONLY = ("county_id", "county_number", "district", "town", "county_lat", "county_lon", "class", "rated_gpm",
-                 "missing", "updated_by", "updated_at")
+               "removed", *FIELDS, "class", "class_assumed", "rated_gpm", "missing", "updated_by", "updated_at")
+    READ_ONLY = ("county_id", "county_number", "district", "town", "county_lat", "county_lon", "class", "class_assumed",
+                 "rated_gpm", "missing", "updated_by", "updated_at")
 
     def csv(self, q: dict) -> tuple[bytes, int]:
         """GET /api/cad/hydrants.csv (admins): the list's rows (its filter), every overlay column, keyed by the key."""
@@ -816,7 +1031,8 @@ class Hydrants:
                     "county_number": str(p.get(NUMBER) or "").strip(), "district": str(p.get(DISTRICT) or "").strip(),
                     "town": self.town(it), "county_lat": _f6(it["county_lat"]), "county_lon": _f6(it["county_lon"]),
                     "lat": _f6(r.get("lat")), "lon": _f6(r.get("lon")), "removed": "yes" if it["removed"] else "",
-                    "class": it["cls"] or "", "rated_gpm": it["gpm"] if it["gpm"] is not None else "",
+                    "class": it["cls"] or "", "class_assumed": self.assumed(it) or "",
+                    "rated_gpm": it["gpm"] if it["gpm"] is not None else "",
                     "missing": "yes" if it["missing"] else "", "updated_by": who(r.get("updated_by") or ""),
                     "updated_at": _iso(r.get("updated_at"))}
             for k in FIELDS:

@@ -34,6 +34,7 @@ from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTH
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
+from sizeup.cad.hydrants import KEY_RE as HYDRANT_KEY
 from sizeup.cad.hydrants import Hydrants
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
@@ -77,9 +78,10 @@ VOICE_BUDGET_S = 25.0    # one render, at most: Polly's retries plus the station
 MAX_UNITS = 30
 VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14:32."   # Settings > Voice > Preview
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
-PLACE_KINDS = ("address", "intersection", "street", "place", "milemarker", "exit")     # a note's "@" places
+PLACE_KINDS = ("address", "intersection", "street", "place", "milemarker", "exit", "hydrant")   # a note's "@" places
 PLACE_FIELDS = ("kind", "label", "sub", "lat", "lon", "source", "category", "detail", "route", "dir", "value",
-                "precision", "score", "at")
+                "precision", "score", "at", "key", "hydrant")
+HYDRANT_Q = re.compile(r"(?:hydrants?|hyd|fh)\b[\s#:.-]*", re.I)    # "@hydrant 9001", "@hyd oos": hydrants first (#840)
 
 
 @dataclass
@@ -1169,6 +1171,11 @@ class Cad:
             seen.add(label.lower())
             out.append({"label": label, "lat": round(lat, 6), "lon": round(lon, 6), "kind": kind or "place",
                         "sub": _text(p, "sub", 80), "source": _text(p, "source", 40)})
+            if kind == "hydrant":                        # #840: its key, so its chip opens its card (never its point)
+                key = _text(p, "key", 20)
+                if not HYDRANT_KEY.fullmatch(key):
+                    raise CadError(f"places: {label!r}: a hydrant's key")
+                out[-1]["key"] = key
         return out
 
     def tag_order(self, iid: int | None, units: list[dict] | None = None) -> list[str]:
@@ -2599,9 +2606,24 @@ class Cad:
             limit = max(1, min(int(one("limit") or 8), 20))
         except ValueError:
             raise CadError("limit: a number") from None
-        if self.place_index() is None:
-            return {"places": [], "error": "place search unavailable"}
-        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit, at_address=True)]}
+        # hydrants (#840): "@hydrant 9001" / "@hyd oos" asks for them first; else a number or an asset id typed whole
+        # fills what the places leave of the limit (the places' ranking and limit as they were)
+        m = HYDRANT_Q.match(q)
+        hyd = []
+        try:
+            if m:
+                hyd = self.hydrants.places(q[m.end():] or "hydrant", near, limit)
+        except Exception as e:  # noqa: BLE001 - the places still answer
+            self.log(f"CAD place search: hydrants: {type(e).__name__}: {e}")
+        ix = self.place_index() is not None
+        hits = hyd + (self._place_hits(q, near, limit, at_address=True) if ix else [])
+        if not m and len(hits) < limit:
+            try:
+                hits += self.hydrants.places(q, near, limit - len(hits), exact=True)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"CAD place search: hydrants: {type(e).__name__}: {e}")
+        out = {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in hits[:limit]]}
+        return out if ix or out["places"] else out | {"error": "place search unavailable"}
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 
