@@ -133,15 +133,45 @@ def test_no_data_at_all_is_still_a_valid_split(tmp_path):
 
 
 def test_the_shards_are_balanced():
+    """The recorded durations must still describe the suite, by ci.stale()'s rule: no more than half of the collected
+    files unrecorded, and the DEFAULT_S guesses for the unrecorded ones no more than half of the estimated time. A
+    refresh records every collected file, so a new test file with no entry yet never fails this (the sharder gives it
+    DEFAULT_S); only durations that are mostly missing do, and then the fix is a refresh (tools/ci_shard.py)."""
     d = ci.load_durations()
     files = real_files()
-    assert sum(1 for f in files if f in d) > len(files) // 2                  # the recorded durations are in use
+    assert ci.stale(files, d) is None, "refresh tools/ci_shard_durations.json (tools/ci_shard.py's docstring)"
     for total in (2, 3, 4):
         bins = ci.shards(files, d, total)
         loads = [sum(d.get(f, ci.DEFAULT_S) for f in b) for b in bins]
         biggest_file = max(d.get(f, ci.DEFAULT_S) for f in files)
         # longest-first greedy: the heaviest shard is at most the even share plus the largest single file
         assert max(loads) <= sum(loads) / total + biggest_file
+
+
+def test_new_test_files_with_no_recorded_duration_do_not_make_the_data_stale():
+    d = ci.load_durations()
+    new = [f"tests/test_brand_new_{i}.py" for i in range(20)]
+    assert not set(new) & set(d)
+    assert ci.stale(real_files() + new[:1], d) is None
+    assert ci.stale(real_files() + new, d) is None
+    flat = [f for b in ci.shards(real_files() + new, d, 3) for f in b]
+    assert all(flat.count(f) == 1 for f in new)
+
+
+def test_durations_with_most_files_missing_are_stale():
+    files = [f"tests/test_{i:03}.py" for i in range(100)]
+    assert ci.stale(files, {f: 2.0 for f in files}) is None
+    assert ci.stale(files, {f: 2.0 for f in files[:60]}) is None              # 40 missing: fine
+    assert "61 of 100" in ci.stale(files, {f: 2.0 for f in files[:39]})      # most missing: stale
+    # entries for files that are not collected any more do not count as recorded
+    gone = {f"tests/test_deleted_{i}.py": 2.0 for i in range(100)}
+    assert ci.stale(files, {**gone, **{f: 2.0 for f in files[:10]}})
+    # few files missing, but their guesses outweigh what is recorded (the recorded files are all near zero): stale
+    assert "estimated" in ci.stale(files, {f: 0.01 for f in files[:70]})
+    # the real data with most of its files dropped is stale too
+    real = real_files()
+    d = ci.load_durations()
+    assert ci.stale(real, {f: d[f] for f in real[: len(real) // 4] if f in d})
 
 
 def test_a_shard_number_out_of_range_is_refused():
@@ -167,15 +197,67 @@ def test_refresh_sums_pytests_duration_lines_per_file(tmp_path):
         "12.00s call     tests/test_cad.py::test_b[47-0.75]\n"
         "noise that is not a duration line\n")
     out = tmp_path / "out.json"
+    ci.refresh(report, out, files=["tests/test_cad.py", "tests/test_perf.py"])
+    assert json.loads(out.read_text()) == {"tests/test_cad.py": 12.0, "tests/test_perf.py": 59.35}
+
+
+def test_refresh_reads_the_verbose_report_and_its_sub_5ms_lines(tmp_path):
+    """-vv (or --durations-min=0) shows the phases under 0.005 s that -q hides; -vv also adds progress lines."""
+    report = tmp_path / "durations.txt"
+    report.write_text(
+        "[gw0] [ 50%] PASSED tests/test_fast.py::test_a\n"
+        "tests/test_slow.py::test_b PASSED                    [100%]\n"
+        "============================= slowest durations =============================\n"
+        "3.21s call     tests/test_slow.py::test_b\n"
+        "0.00s setup    tests/test_fast.py::test_a\n"
+        "0.00s call     tests/test_fast.py::test_a\n"
+        "0.03s call     tests/test_fast.py::test_c[x-1]\n"
+        "0.00s teardown tests/test_fast.py::test_a\n"
+        "============================== 2 passed in 3.40s ==============================\n")
+    out = tmp_path / "out.json"
+    got = ci.refresh(report, out, files=["tests/test_fast.py", "tests/test_slow.py"])
+    assert got == json.loads(out.read_text()) == {"tests/test_fast.py": 0.03, "tests/test_slow.py": 3.21}
+
+
+def test_refresh_records_every_collected_file_with_a_floor(tmp_path):
+    """A collected file the report has no time for (every phase hidden as too fast) still gets an entry, FLOOR_S, so
+    it is never counted as missing; a reported file that is not collected any more is dropped."""
+    report = tmp_path / "durations.txt"
+    report.write_text(
+        "1.00s call     tests/test_a.py::test_x\n"
+        "0.00s call     tests/test_b.py::test_y\n"
+        "2.00s call     tests/test_deleted.py::test_z\n"
+        "(3 durations < 0.005s hidden.  Use -vv to show these durations.)\n")
+    out = tmp_path / "out.json"
+    files = ["tests/test_a.py", "tests/test_b.py", "tests/sub/test_c.py"]
+    ci.refresh(report, out, files=files)
+    assert json.loads(out.read_text()) == {
+        "tests/sub/test_c.py": ci.FLOOR_S, "tests/test_a.py": 1.0, "tests/test_b.py": ci.FLOOR_S}
+    assert ci.stale(files, ci.load_durations(out)) is None
+
+
+def test_refresh_lists_the_files_pytest_collects_when_not_given(tmp_path, monkeypatch):
+    report = tmp_path / "durations.txt"
+    report.write_text("0.50s call     tests/test_a.py::test_x\n0.20s call     tests/test_b.py::test_y\n")
+    monkeypatch.setattr(ci, "collect_files", lambda: ["tests/test_a.py", "tests/test_b.py", "tests/test_c.py"])
+    out = tmp_path / "out.json"
     ci.refresh(report, out)
-    assert json.loads(out.read_text()) == {"tests/test_cad.py": 12.0, "tests/test_perf.py": 59.4}
+    assert json.loads(out.read_text()) == {"tests/test_a.py": 0.5, "tests/test_b.py": 0.2, "tests/test_c.py": 0.01}
+
+
+def test_refresh_refuses_a_report_of_a_partial_run(tmp_path):
+    report = tmp_path / "durations.txt"
+    report.write_text("1.00s call     tests/test_a.py::test_x\n")
+    with pytest.raises(SystemExit, match="1 of the 3"):
+        ci.refresh(report, tmp_path / "out.json", files=["tests/test_a.py", "tests/test_b.py", "tests/test_c.py"])
+    assert not (tmp_path / "out.json").exists()
 
 
 def test_refresh_refuses_a_report_with_no_durations(tmp_path):
     report = tmp_path / "empty.txt"
     report.write_text("nothing here\n")
     with pytest.raises(SystemExit):
-        ci.refresh(report, tmp_path / "out.json")
+        ci.refresh(report, tmp_path / "out.json", files=["tests/test_a.py"])
     assert not (tmp_path / "out.json").exists()
 
 
