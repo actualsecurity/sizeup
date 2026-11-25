@@ -77,7 +77,8 @@ def test_undoing_a_close_puts_back_the_units_it_released(rig):
     rig.change(unit_times={"E60": {"in_service": T0 + 880}}, times={"in_service": T0 + 890})
     assert rig.inc()["status"] == "closed" and rig.status("E62") == "AV"
     rig.cad.auto_undo(rig.iid(), {"step": rig.step("close")["id"], "operator": "Lt. Test"})
-    assert rig.inc()["status"] == "active" and rig.status("E62") == "CN"
+    # E62 back as it was (Cancelled, off the call); no unit on it (E60's own in service stands): pending, as reopened
+    assert rig.inc()["status"] == "pending" and rig.status("E62") == "CN" and rig.here("E60") is None
 
 
 # -- H3: auto-accept only our call, never a likely duplicate -----------------------------------------------------------

@@ -339,7 +339,7 @@ window.AddrHistory = (() => {
       fact("Duration", fmtDur(inc.closed_at - inc.created_at));
     }
     fact("Disposition", inc.disposition ? nameOf("dispositions", inc.disposition) : "");
-    const where = el("div", "pk-where");
+    const where = el("div", "pk-facts");
     where.append(el("b", "", locText(inc) || "No location"));
     if (inc.cross_street) where.append(el("span", "dim", ` · ${inc.cross_street}`));
     const parts = [where, facts];
