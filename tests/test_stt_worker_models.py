@@ -323,21 +323,25 @@ def ready_models(tmp_path, monkeypatch, cat=None):
 def test_servers_start_one_at_a_time_and_only_while_idle(tmp_path, monkeypatch):
     m, procs, clock = ready_models(tmp_path, monkeypatch)
     m.want = ["asr-test", "atc-test"]
-    m.step(idle=False, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: False, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert procs == []                                       # a clip in hand: nothing starts
-    m.step(idle=True, held=True, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=True, gpu=None, llm_running=False, stop=lambda: False)
     assert procs == []                                       # gaming: nothing starts
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert len(procs) == 1
     argv, kw = procs[0]
     assert argv[:2] == ["llama-server", "-m"] and "--mmproj" in argv and argv[argv.index("--host") + 1] == "127.0.0.1"
     assert "--no-slots" in argv and "--no-webui" in argv
     assert kw["env"]["LLAMA_API_KEY"] == m.servers["asr-test"].key and m.servers["asr-test"].key
     assert TOKEN not in json.dumps(kw["env"])
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert len(procs) == 1                                   # the first one still loading: nothing else meanwhile
+    m.servers["asr-test"].ok = True
+    m.servers["asr-test"].alive = lambda: True               # (a fake answering on its port)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert len(procs) == 2 and procs[1][0][0] == "whisper-server"
     assert procs[1][0][procs[1][0].index("--port") + 1] == "18182"
-    assert m.ready() == []                                   # neither answered a test decode yet
+    assert m.ready() == ["asr-test"]                         # the second hasn't answered a test decode yet
 
 
 def test_an_asr_model_needs_a_new_enough_llama_server(tmp_path, monkeypatch):
@@ -346,40 +350,99 @@ def test_an_asr_model_needs_a_new_enough_llama_server(tmp_path, monkeypatch):
     m, procs, clock = ready_models(tmp_path, monkeypatch, cat)
     m.run = lambda argv: "version: 12359 (b1b770d9)\n"
     m.want = ["asr-test"]
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert procs == [] and "needs llama-server b12643+" in m.status["asr-test"]
 
 
 def test_a_server_that_never_answers_is_dropped_and_its_hash_marked_bad(tmp_path, monkeypatch):
     m, procs, clock = ready_models(tmp_path, monkeypatch)
     m.want = ["atc-test"]
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert "atc-test" in m.servers
     clock[0] += W.MODEL_CHECK_S + 1
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert "atc-test" not in m.servers and m.bad(m.catalog["atc-test"]["sha256"])
     n = len(procs)
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert len(procs) == n and "marked bad" in m.status["atc-test"]     # not started again while marked
 
 
 def test_a_new_version_waits_for_its_files_and_the_old_one_keeps_running(tmp_path, monkeypatch):
     m, procs, clock = ready_models(tmp_path, monkeypatch)
     m.want = ["atc-test"]
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     old = m.servers["atc-test"]
     old.ok = True
+    old.alive = lambda: True
     new = json.loads((tmp_path / "pins.json").read_text())
     new["stt_models"]["atc-test"]["files"]["model"].update(bytes=4, sha256=sha(b"atc2"))
     m.catalog = W.check_catalog(new)
     gate = threading.Event()
     m.download = lambda url, dest, size, sha_, stop: gate.wait(0) or (_ for _ in ()).throw(W.DownloadError("net"))
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
     assert m.servers["atc-test"] is old and m.ready() == ["atc-test"]   # still the old one
     f = m.catalog["atc-test"]["files"]["model"]
     m.path_of(f).write_bytes(b"atc2")
-    m.step(idle=True, held=False, gpu=None, llm_running=False, stop=lambda: False)
-    assert "atc-test" not in m.servers or m.servers["atc-test"] is not old       # swapped while idle
+    m.step(idle=lambda: False, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert m.servers["atc-test"] is old                                      # a clip in hand: not swapped
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    fresh = m.servers["atc-test"]                                             # swapped while idle, the old one kept
+    assert fresh is not old and m.prev["atc-test"]["sha256"] == old.sha
+    assert fresh.sha == m.catalog["atc-test"]["sha256"]
+    clock[0] += W.MODEL_CHECK_S + 1                                          # the new version never answers ...
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert m.bad(m.catalog["atc-test"]["sha256"])                            # ... marked bad, so the old version
+    assert m.servers["atc-test"].sha == old.sha                              # runs again
+    assert all(m.path_of(f).exists() for f in m.prev["atc-test"]["files"].values())   # (its files never pruned)
+
+
+def test_a_stopped_download_keeps_its_part_through_a_step(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    f = m.catalog["atc-test"]["files"]["model"]
+    m.path_of(f).unlink()
+    part = m.path_of(f).with_name(m.path_of(f).name + ".part")
+
+    def download(url, dest, size, sha_, stop):
+        part.write_bytes(b"at")
+        raise W.DownloadError("stopped: resumed later")
+    m.download = download
+    m.want = ["atc-test"]
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert part.exists() and m.status["atc-test"] == "waiting (gaming)"
+
+
+def test_a_ready_server_that_exits_is_dropped_not_marked_bad(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.want = ["atc-test"]
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    s = m.servers["atc-test"]
+    s.ok = True
+    s.proc.proc.returncode = 1                                               # it crashed
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert "atc-test" not in m.servers and not m.bad(s.sha) and m.ready() == []
+
+
+def test_a_server_in_use_is_never_stopped_by_the_models_thread(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.want = ["atc-test"]
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    s = m.servers["atc-test"]
+    s.ok, s.alive = True, lambda: True
+    assert m.acquire("atc-test") is s
+    m.want = []                                                               # no longer wanted ...
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert m.servers["atc-test"] is s                                         # ... but a clip is on it
+    m.release(s)
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert "atc-test" not in m.servers
+
+
+def test_llama_servers_build_is_read_from_either_version_line(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    for out, want in (("version: 12728 (ea722948)\nbuilt with cc", 12728),
+                      ("version: 0.5.0 (build 11146, commit 0123abcd)", 11146), ("", 0)):
+        m._llama_build, m.run = None, (lambda o: lambda argv: o)(out)
+        assert m.llama_build() == want
 
 
 def test_only_the_workers_own_files_are_pruned(tmp_path, monkeypatch):
