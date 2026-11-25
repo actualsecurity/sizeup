@@ -1,7 +1,7 @@
 """Per-channel speech-to-text models on the GPU workers (#639): the catalog, each channel's model and context, the models
 the workers are asked to run, and the context each clip carries.
 
-    catalog     tools/stt_worker/models.json "stt_models" (the worker checks it whole: worker.py check_catalog): each model's
+    catalog     deploy/stt-worker/models.json "stt_models" (the worker checks it whole: worker.py check_catalog): each model's
                 kind (whisper-ggml: whisper-server, its context a prompt; llama-asr: llama-server with an audio model,
                 its context a short list), VRAM, services and context_default. The hub tells the workers which catalog
                 (word(): the commit it was built from and models.json's SHA-256) and which models it wants (want()).
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
-PINS = ROOT / "tools" / "stt_worker" / "models.json"
+PINS = ROOT / "deploy" / "stt-worker" / "models.json"
 META = "stt_models"
 KINDS = ("whisper-ggml", "llama-asr")
 ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -327,6 +327,8 @@ class Choices:
 WORD = re.compile(r"[a-z0-9']+")
 
 
+# TODO: use the shared repetition-loop check (sizeup/stt_quality.py, another pull request) once it is on main, and drop
+# this one
 def is_loop(text: str) -> bool:
     """A repetition loop (a model stuck on a phrase: every one here does it on silence or noise): a run of one to eight
     words said again and again in a row (a word 6 times, a short phrase 4, a longer one 3) that is 40% or more of a

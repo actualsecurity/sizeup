@@ -927,8 +927,11 @@ window.CadMap = (() => {
           e.addEventListener("click", (ev) => { ev.stopPropagation(); this.chipClick(this.chips.get(m.unit).m); });
           const marker = new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat(this.where(m)).addTo(this.map);
           // #427: its label made once and kept (its words updated in place); its vehicle made again only for a new icon
-          const lbl = h("span", "lbl"), parts = { n: h("span", "n"), st: h("span", "st") };   // a tag, an age: when it has one
+          const lbl = h("span", "lbl rem-slot"), parts = { n: h("span", "n"), st: h("span", "st") };   // a tag, an age: when it has one
           lbl.append(parts.n, parts.st);
+          e.dataset.remUnit = m.unit;                     // a reminder: the label flashes, "6 min" after its status (reminders.js)
+          e.dataset.remChip = "age";
+          if (window.Reminders) Reminders.dirty();
           rec = { marker, el: e, sig: "", lbl, parts, lblAt: "" };
           this.chips.set(m.unit, rec);
         }
@@ -1716,7 +1719,9 @@ window.CadMap = (() => {
     li.style.setProperty("--c", color);
     const head = el("div", "ov-h");
     const es = eventStatus(o);
-    head.append(el("b", "ov-n", incTitle(o)), stBadge(el("span"), es.name, es.bg));
+    head.append(el("b", "ov-n", incTitle(o)), stBadge(el("span"), es.name, es.bg), el("span", "rem-slot"));
+    li.dataset.remInc = String(o.id);                   // the wall board's card: a reminder's flash and chip (reminders.js)
+    li.dataset.remChip = "";
     if (o.joint_call) head.append(el("span", "chip joint", o.joint_call));
     head.append(el("span", "spacer"), since(el("span", "ov-el", ""), o.created_at));
     const type = el("div", "ov-type", typeLabel(o.type, o.subtype) || "No type");
@@ -1729,6 +1734,7 @@ window.CadMap = (() => {
     if (o.units.length) {
       for (const u of o.units) {
         const c = statusChip(u.status, `${u.name} ${u.status}`);
+        c.dataset.remUnit = u.name;                       // flashes with its reminder (reminders.js)
         const t = Radio.talkingFor(u.name);
         if (t && !t.ended) c.classList.add("talking");
         chips.append(c);

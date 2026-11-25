@@ -1,5 +1,5 @@
 """contracts/ (ADR 0004): a pool worker's hello and state (POST /api/station/stt/hello, /state), as built. The real GPU
-worker client (tools/stt_worker/worker.py, its nvidia-smi a fake as in tests/test_stt_worker.py) and a real station's
+worker client (deploy/stt-worker/worker.py, its nvidia-smi a fake as in tests/test_stt_worker.py) and a real station's
 whisper (sizeup/cloud/stationworker.py) post to a real hub over HTTP; what went over the wire is checked against
 contracts/schemas/, and each reader is sent keys it does not know. The other routes of the workers' API (claim, the
 job's audio, extend, complete, release, the LLM lane) have no schema yet. Every id and name here is made up."""
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 from sizeup import sttpool
 from sizeup.cloud import stationworker
 from tests import contracts as c

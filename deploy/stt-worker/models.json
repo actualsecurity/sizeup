@@ -110,7 +110,7 @@
       "license": "MIT",
       "notes": "no initial prompt by default: a prompt cost WER and raised repetition loops on ATC (a research note, 2026-11-25)",
       "recipe": {
-        "how": "built once by this recipe and kept as a release asset of this repo (merging a LoRA needs torch and peft, too much for the worker): python -I tools/stt_worker/recipes/merge_lora.py base lora merged, then python -I convert-h5-to-ggml.py merged whisper out (f16). Two runs from scratch gave the same file.",
+        "how": "built once by this recipe and kept as a release asset of this repo (merging a LoRA needs torch and peft, too much for the worker): python -I deploy/stt-worker/recipes/merge_lora.py base lora merged, then python -I convert-h5-to-ggml.py merged whisper out (f16). Two runs from scratch gave the same file.",
         "base": {
           "repo": "openai/whisper-large-v3-turbo",
           "revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
@@ -146,7 +146,7 @@
           }
         },
         "merge": {
-          "script": "tools/stt_worker/recipes/merge_lora.py",
+          "script": "deploy/stt-worker/recipes/merge_lora.py",
           "dtype": "float32",
           "python": "3.12.16",
           "torch": "2.15.0 (CPU)",
