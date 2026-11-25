@@ -10,7 +10,7 @@
 //            board's cards) or data-rem-unit="<code>" (the unit board's rows, a call's unit rows, the cards' unit chips,
 //            the maps' rigs, the wall board's strip). A due one gets data-rem="<kind>" (the flash: cad.css, ≤ 1 Hz,
 //            steady with reduced motion); one with data-rem-chip also its chip ("Pending 6 min", "DP 6 min"; "age":
-//            "6 min" only, beside a code that says it already) in its .rem-slot.
+//            "6 min" only, beside a code that says it already) in its data-rem-slot (a selector), else its .rem-slot.
 //   OK       a click on the flashing item (not on another of its buttons) or on its chip: POST /api/cad/reminders/ack,
 //            quiet for everyone for the set minutes (the hub's snooze, in the event's timeline). Dispatchers and admins;
 //            on /monitor only someone signed in as one. Quiet here at once; the next push confirms.
@@ -72,7 +72,7 @@ window.Reminders = (() => {
       if (kind) host.dataset.rem = kind; else delete host.dataset.rem;
     }
     if (!("remChip" in host.dataset)) return;
-    const slot = host.querySelector(".rem-slot") || host;
+    const slot = (host.dataset.remSlot && host.querySelector(host.dataset.remSlot)) || host.querySelector(".rem-slot") || host;
     let chip = slot.querySelector(":scope > .rem-chip");
     if (!it) { if (chip) chip.remove(); return; }
     // a button where it can be one (never inside another button: a map's rig); a plain chip without the right to OK

@@ -634,7 +634,7 @@ function queueItem() {
 function fillQueueItem(li, inc) {
   const o = isOpen(inc) ? callSummary(inc.id) : null, live = callLive(o);
   li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "") + (live.length ? " live" : "");
-  if (isOpen(inc)) { li.dataset.remInc = String(inc.id); li.dataset.remChip = ""; }      // a reminder (reminders.js)
+  if (isOpen(inc)) { li.dataset.remInc = String(inc.id); li.dataset.remChip = ""; li.dataset.remSlot = ".qtl"; }   // reminders.js
   else { delete li.dataset.remInc; delete li.dataset.remChip; delete li.dataset.rem; }
   if (inc.id === cad.sel) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
   // The top row: the number and the time, the time at the end. The type on its own line under them, the card's
@@ -650,7 +650,6 @@ function fillQueueItem(li, inc) {
   if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
   else t.classList.add("warn");
   type.append(t);
-  if (isOpen(inc)) type.append(el("span", "rem-slot"));       // "Pending 6 min" (reminders.js)
   if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
   if (inc.scope) {                    // full department or specific units (#370)
     const sc = el("span", "chip scope", inc.scope.short);
@@ -3761,6 +3760,7 @@ function renderUnits() {
         li._rig = u.name;
         li.dataset.remUnit = u.name;                                          // "DP 6 min" (reminders.js)
         li.dataset.remChip = "";
+        li.dataset.remSlot = ".ust";                                          // the chip after its status and time
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
@@ -3783,7 +3783,7 @@ function renderUnits() {
         if (!BOARD && onMap(u.name)) head.append(followBtn(u.name));
         const ust = el("span", "ust");                                        // the status and its time: one piece (#205)
         ust.append(statusChip(u.status, agencySet(u) ? statusLabel(u, u.status) : undefined), since(el("span", "ut"), u.status_at, true));   // compact, exact on hover (#209)
-        head.append(el("span", "spacer"), el("span", "rem-slot"), ust);
+        head.append(el("span", "spacer"), ust);
         li.replaceChildren(head);
         const sub = [];
         if (u.incident_number) {
