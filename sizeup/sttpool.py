@@ -39,6 +39,12 @@ BUDGETS: dict[float, tuple[float, float, float]] = {
     URGENT: (2.5, 4.0, 8.0), HIGH: (2.5, 4.0, 8.0), CONTEXT_FALLBACK: (2.5, 4.0, 8.0), CONTEXT: (2.5, 4.0, 8.0),
     LIVE: (5.0, 10.0, 20.0), RERUN: (10.0, 15.0, 45.0), LOW: (30.0, 20.0, 60.0), CATCHUP: (120.0, 20.0, 20.0)}
 # (a catch-up clip keeps the catch-up's own bounds on any worker: one greedy pass, 20 s at most, sttcatchup's clip cap)
+# A challenger's run (sizeup/sttscore.py): under every class, the GPU idle, its model loaded, never a live clip of ours
+# lately (CHALLENGE_QUIET_S): it waits up to 10 min for that, else it is skipped (a sample less, nothing lost)
+CHALLENGE = 4
+BUDGETS[CHALLENGE] = (600.0, 60.0, 120.0)
+CHALLENGE_QUIET_S = 30.0
+CHALLENGE_MAX_S = 30.0         # a clip longer than this isn't sampled (it would hold the GPU too long)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
                           # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
@@ -86,7 +92,7 @@ def model_label(model: str, worker: str = "", kind: str = "gpu") -> str:
 
 
 def class_key(cls: float) -> str:
-    return CLASS_NAMES.get(cls, str(cls))
+    return "challenger" if cls == CHALLENGE else CLASS_NAMES.get(cls, str(cls))
 
 
 @dataclass(eq=False)
@@ -184,6 +190,7 @@ class Pool:
         self.fallbacks = {r: 0 for r in REASONS}
         self.refused_late = 0
         self.submitted = 0
+        self.last_ours = 0.0                      # a clip of ours (urgent, high, live) last submitted: challengers wait
         self._fb_q: deque = deque()
         self._fb_cv = threading.Condition()
         self._stop = threading.Event()
@@ -379,6 +386,8 @@ class Pool:
         """May this worker take this job now. A station's whisper: never a pre-alert clip nor an AWS channel's (slower
         than AWS), and only once a GPU worker that could take it now has had STATION_DEFER_S to. A GPU worker: a
         pre-alert clip only when _fast_ok."""
+        if j.cls == CHALLENGE:
+            return self._challenge_ok(w, j, now)
         if w.kind == "station":
             if j.cls in FAST_CLASSES or j.gpu_only or j.extra.get("origin") == w.id.removeprefix("station:"):
                 return False                       # (never a station's own clip back to it: no round trip)
@@ -389,6 +398,13 @@ class Pool:
             return False                           # (a worker with its model takes it in a moment)
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
 
+    def _challenge_ok(self, w: Worker, j: Job | None, now: float, model: str = "") -> bool:
+        """A challenger's run on this worker now: a GPU worker with that model loaded, idle (in a claim, holding
+        nothing), no other clip waiting, and no clip of ours for CHALLENGE_QUIET_S."""
+        model = j.model if j is not None else model
+        return (w.kind == "gpu" and model in w.models and w.polling > 0 and not w.leases and self._ready(w, now)
+                and now - self.last_ours >= CHALLENGE_QUIET_S and not any(o.cls != CHALLENGE for o in self._queue))
+
     def _model_idle(self, j: Job, w: Worker, now: float) -> bool:
         """Another GPU worker has this job's model loaded and could take the job now (in a claim, room for a lease;
         for a pre-alert clip: quick and holding nothing)."""
@@ -397,7 +413,7 @@ class Pool:
                    for o in self.workers.values())
 
     def ready(self, cls: float, now: float | None = None, gpu_only: bool = False, origin: str = "",
-              seconds: float | None = None) -> tuple[bool, str]:
+              seconds: float | None = None, model: str = "") -> tuple[bool, str]:
         """Can the pool take a clip of this class now: (yes, why not). gpu_only: on a GPU worker (an AWS channel's clip:
         a station's whisper is slower than AWS); a pre-alert class always is."""
         now = self.clock() if now is None else now
@@ -410,6 +426,13 @@ class Pool:
             return False, "off"
         if self._stop.is_set():
             return False, "stopped"
+        if cls == CHALLENGE:                       # (a model loaded somewhere; it waits for the GPU to be idle)
+            with self._cv:
+                if not any(w.kind == "gpu" and model in w.models and self._ready(w, now) for w in self.workers.values()):
+                    return False, "no worker has the model loaded"
+                if sum(1 for j in self._queue if j.cls == CHALLENGE) >= 20:
+                    return False, "challengers wait already"
+            return True, ""
         with self._cv:
             ready = [w for w in self.workers.values() if self._ready(w, now)
                      and (w.kind == "gpu" or not (gpu_only or cls in FAST_CLASSES
@@ -448,13 +471,15 @@ class Pool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
         ok, _why = self.ready(job.cls, gpu_only=job.gpu_only, origin=str(job.extra.get("origin") or ""),
-                              seconds=job.seconds)
+                              seconds=job.seconds, model=job.model)
         if not ok or self._stop.is_set():
             return False
         with self._cv:
             if job.id in self._open:
                 return False
             job.queued_at = self.clock()
+            if job.cls in (URGENT, HIGH, LIVE):
+                self.last_ours = job.queued_at
             self._queue.append(job)
             self._open.add(job.id)
             self.submitted += 1
@@ -629,7 +654,7 @@ class Pool:
                     n += 1
             anyone = any(self._ready(w, now) for w in self.workers.values())
             for job in list(self._queue):
-                if not anyone:
+                if not anyone and job.cls != CHALLENGE:      # (a challenger waits its own budget for the GPU)
                     self._queue.remove(job)
                     self._fall(job, "no_worker", "no pool worker ready")
                     n += 1

@@ -41,6 +41,8 @@ CONTEXT_MAX = 12
 CALLSIGNS_MAX = 8
 CALLSIGN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'/-]{0,39}")
 WANT_MAX = 8
+FIELDS = ("model", "context", "callsigns", "challenger", "pct", "promoted", "rolled_back")
+PCT_DEFAULT = 10.0           # a challenger's share of its channel's clips
 
 
 def load(path: Path | str = PINS) -> tuple[dict, str]:
@@ -117,6 +119,7 @@ class Choices:
         self.catalog, self.digest = catalog, digest
         self._lock = threading.Lock()
         self._cache: tuple[float, dict] = (0.0, {})
+        self.service_of: Callable[[str], str] = lambda key: ""    # a channel key's service (the hub's: _key_service)
 
     def settings(self) -> dict:
         """{channel key: {model?, context?, callsigns?}} as stored (read at most once a second: asked per clip)."""
@@ -131,7 +134,7 @@ class Choices:
         s = {}
         for k, v in (raw.items() if isinstance(raw, dict) else ()):
             if isinstance(k, str) and isinstance(v, dict):
-                s[k] = {f: v[f] for f in ("model", "context", "callsigns") if f in v}
+                s[k] = {f: v[f] for f in FIELDS if f in v}
         self._cache = (now, s)
         return s
 
@@ -155,6 +158,56 @@ class Choices:
         """The catalog's models this channel's context is off for (the job's `plain`: whichever model decodes it)."""
         return [m for m in self.catalog if not self.context_on(key, m)]
 
+    def challenger_for(self, key: str) -> tuple[str, float] | None:
+        """(the challenger model, its share in %) a channel's clips are sampled for, None for none."""
+        v = self.settings().get(key) or {}
+        m = v.get("challenger")
+        if not isinstance(m, str) or m not in self.catalog:
+            return None
+        pct = v.get("pct")
+        return m, float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else PCT_DEFAULT
+
+    def promoted(self, key: str) -> dict:
+        v = (self.settings().get(key) or {}).get("promoted")
+        return dict(v) if isinstance(v, dict) else {}
+
+    def _write(self, cur: dict) -> None:
+        self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
+        self._cache = (0.0, {})
+
+    def promote(self, key: str, service: str | None = None, why: str = "") -> tuple[dict, dict]:
+        """The channel's challenger becomes its model; the model it replaces becomes the challenger (at the same share),
+        so the two go on being compared: if the new one scores worse over the samples since (sttscore.should_roll_back),
+        roll_back() puts the old one back. (old, new). ValueError with no challenger."""
+        with self._lock:
+            cur = dict(self.settings())
+            old = dict(cur.get(key) or {})
+            ch = self.challenger_for(key)
+            if ch is None:
+                raise ValueError("no challenger on this channel")
+            was = self.model_for(key, self.service_of(key) if service is None else service)
+            new = dict(old, model=ch[0], challenger=was, promoted={"from": was, "to": ch[0], "at": self.clock(),
+                                                                   **({"why": why[:80]} if why else {})})
+            cur[key] = new
+            self._write(cur)
+        return old, new
+
+    def roll_back(self, key: str, why: str) -> tuple[dict, dict] | None:
+        """A promotion undone: the model it replaced is the channel's again, the challenger cleared (the rolled-back
+        model isn't sampled again until an admin says so). None when nothing was promoted."""
+        with self._lock:
+            cur = dict(self.settings())
+            old = dict(cur.get(key) or {})
+            p = old.get("promoted") if isinstance(old.get("promoted"), dict) else None
+            if not p or p.get("from") not in self.catalog:
+                return None
+            new = {k: v for k, v in old.items() if k not in ("promoted", "challenger", "pct")}
+            new["model"] = p["from"]
+            new["rolled_back"] = {"from": p.get("to"), "at": self.clock(), "why": why[:120]}
+            cur[key] = new
+            self._write(cur)
+        return old, new
+
     def callsigns(self, key: str) -> list[str]:
         v = (self.settings().get(key) or {}).get("callsigns")
         return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
@@ -172,6 +225,13 @@ class Choices:
             for m in mids:
                 if isinstance(m, str) and m in self.catalog and m not in out:
                     out.append(m)
+        # then the challengers (after every champion: one that doesn't fit the VRAM is the one left out), fire's first
+        order = {s: i for i, s in enumerate(SERVICE_ORDER)}
+        chall = sorted(((order.get(services.get(k, ""), len(order)), k, v.get("challenger"))
+                        for k, v in self.settings().items() if v.get("challenger")), key=lambda x: (x[0], x[1]))
+        for _o, _k, m in chall:
+            if isinstance(m, str) and m in self.catalog and m not in out:
+                out.append(m)
         return out[:WANT_MAX]
 
     def set(self, key: str, body: dict) -> tuple[dict, dict]:
@@ -205,12 +265,30 @@ class Choices:
                     new["callsigns"] = cs
                 else:
                     new.pop("callsigns", None)
+            if "challenger" in body:
+                c = body.get("challenger")
+                if c in (None, ""):
+                    for f in ("challenger", "pct"):
+                        new.pop(f, None)
+                elif not isinstance(c, str) or c not in self.catalog:
+                    raise ValueError(f"challenger: one of {', '.join(self.catalog)}")
+                else:
+                    new["challenger"] = c
+            if "pct" in body:
+                v = body.get("pct")
+                if v in (None, ""):
+                    new.pop("pct", None)
+                elif isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
+                    raise ValueError("pct: a share of the channel's clips, above 0 and at most 100")
+                else:
+                    new["pct"] = float(v)
+            if new.get("challenger") and new.get("challenger") == (new.get("model") or old.get("model")):
+                raise ValueError("challenger: not the channel's own model")
             if new:
                 cur[key] = new
             else:
                 cur.pop(key, None)
-            self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
-            self._cache = (0.0, {})
+            self._write(cur)
         return old, new
 
     def panel(self) -> dict:

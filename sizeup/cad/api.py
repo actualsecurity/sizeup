@@ -308,8 +308,10 @@ GET  /api/cad/stt-workers                 Settings > Station > STT workers (size
 POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
                                           llm {id, on} | update {id, mode: auto|hold|pin, commit?, sha256?} (its
                                           self-update) | pool {on?, classes?} | channel_model {key, model?, context?
-                                          (on|off|default), callsigns?} (a channel's speech model, sizeup/sttmodels.py;
-                                          audited as Radios)}: a signed-in admin only. add / rotate answer {token}
+                                          (on|off|default), callsigns?, challenger?, pct?} (a channel's speech model and
+                                          its challenger, sizeup/sttmodels.py) | promote {key} (its challenger becomes
+                                          its model; sizeup/sttscore.py; both audited as Radios)}: a signed-in admin
+                                          only. add / rotate answer {token}
                                           (no-store), the one time it is shown. In the Settings audit (System) and the
                                           person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
@@ -1260,6 +1262,9 @@ class CadApi:
         sm = getattr(self.cad, "stt_models", None)
         if sm is not None:                                   # each channel's speech model (sizeup/sttmodels.py)
             out["models"] = sm.panel()
+            board = getattr(self.cad, "stt_challenges", None)     # champion and challenger, per channel (scores only)
+            if board is not None:
+                out["models"]["challenges"] = board()
         return _json(200, out)
 
     def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
@@ -1482,17 +1487,22 @@ class CadApi:
                 raise NeedsConfirm(str(e)) from None
             except StationError as e:
                 raise CadError(str(e)) from None
-        if path == "/api/cad/stt-workers" and body.get("action") == "channel_model" \
+        if path == "/api/cad/stt-workers" and body.get("action") in ("channel_model", "promote") \
                 and getattr(c, "stt_models", None) is not None:
             op = str(body.get("operator") or "")
             key = str(body.get("key") or "")
-            try:     # a channel's speech model, context and call signs, in the Settings audit (Radios)
-                old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns") if k in body})
+            try:     # a channel's speech model, context, call signs and challenger, in the Settings audit (Radios)
+                if body.get("action") == "promote":
+                    old, new = c.stt_models.promote(key, why=f"by {op}" if op else "")
+                else:
+                    old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns", "challenger",
+                                                                           "pct") if k in body})
             except ValueError as e:
                 raise CadError(str(e)) from None
-            for f in ("model", "context", "callsigns"):
+            for f in ("model", "context", "callsigns", "challenger", "pct"):
                 if old.get(f) != new.get(f):
-                    said = lambda v: ", ".join(v) if isinstance(v, list) else (v or "default")   # noqa: E731
+                    said = lambda v: (", ".join(v) if isinstance(v, list)                      # noqa: E731
+                                      else "default" if v in (None, "") else f"{v:g}" if isinstance(v, float) else str(v))
                     c.settings.note(op, "radios", f"stt_models/{key}/{f}", said(old.get(f)), said(new.get(f)))
             return {"ok": True, "key": key, "channel": new, "models": c.stt_models.panel()}
         if path == "/api/cad/stt-workers" and getattr(c, "stt_workers", None) is not None:

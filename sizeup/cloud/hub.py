@@ -122,7 +122,7 @@ from sizeup.cloud.sttworkers import API as STT_API, STATION_PREFIX, WorkerApi, W
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
-from sizeup import stt_time, sttmodels, sttpool, sttruns
+from sizeup import stt_time, sttmodels, sttpool, sttruns, sttscore
 from sizeup.cloud import infer as infer_mod
 from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
@@ -1104,8 +1104,10 @@ class HubApp(App):
         # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's pins.json,
         # the choices in Settings > Radios; the workers hear which models to run in their hello and state answers
         self.stt_choices = sttmodels.Choices(self.mdb)
+        self.stt_choices.service_of = lambda key: self._key_service(key)[1]
         self.stt_api.stt_models = self._stt_models_word
         self.cad.stt_models = self.stt_choices
+        self.cad.stt_challenges = self._challenge_boards
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
@@ -2073,8 +2075,190 @@ class HubApp(App):
                               check=check, prompt_n=prompt_n, ctx=ctx, gate=gate, want=want)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
+            if role == "text" and status == "done" and text:
+                self._maybe_challenge(cid, key, item, engine, model, text, clip_end, check)
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
+
+    # -- champion and challenger (sizeup/sttscore.py) ----------------------------------------------------------------
+
+    def _maybe_challenge(self, cid: str, key: str, item, engine: str, model: str, text: str, clip_end, check) -> bool:
+        """A channel's text of record just came: when the channel has a challenger and this clip is one of its share
+        (sttscore.sampled), the challenger decodes the same audio with the same context, last of all, on an idle GPU
+        that has it loaded (sttpool CHALLENGE). What is known about the clip now (the CAD's units and address, the
+        aircraft near the field, the channel's terms) goes with it for the scores. True when one was queued."""
+        ch = getattr(self, "stt_choices", None)
+        c = ch.challenger_for(key) if ch is not None else None
+        if c is None or item is None or getattr(self, "sttpool", None) is None:
+            return False
+        chall, pct = c
+        if chall == model or not sttscore.sampled(cid, chall, pct):
+            return False
+        page = None if isinstance(item, Traffic) else item
+        service = "fire" if page is not None else str(self._row_source(item).get("service") or "") \
+            if isinstance(item, Traffic) else ""
+        if model != ch.model_for(key, service):
+            return False                            # (only the champion's own text: an AWS fallback compares nothing)
+        seconds = max(0.0, float(getattr(item, "end", 0.0) or 0.0) - float(getattr(item, "start", 0.0) or 0.0))
+        if not 0 < seconds <= sttpool.CHALLENGE_MAX_S or not self.sttpool.ready(sttpool.CHALLENGE, model=chall)[0]:
+            return False
+        try:
+            prompt, vocab_v = self._prompt_v(item)
+        except Exception:  # noqa: BLE001 - no prompt is still a run
+            prompt, vocab_v = "", ""
+        job = sttpool.Job(f"{cid}~ch", sttpool.CHALLENGE, key, "page" if page is not None else "traffic", seconds,
+                          audio_wait=True, audio=self._pool_audio_of(cid, page, None), on_done=self._challenge_done,
+                          on_fallback=self._challenge_fell, prompt=prompt, clip_end=clip_end,
+                          extra={"clip": cid, "page": page, "vocab_v": vocab_v, "champ_text": text,
+                                 "champ_model": model, "champ_engine": engine, "service": service,
+                                 "champ_check": check, "refs": self._challenge_refs(item, key, service, clip_end)})
+        self._pool_models(job, item, key)
+        job.model = chall                                   # (the same context; the challenger's model)
+        return self.sttpool.submit(job)
+
+    def _challenge_refs(self, item, key: str, service: str, clip_end) -> dict:
+        """What is known about a clip when it is sampled, for its scores (never kept: only the scores are): the CAD's
+        incidents around its time (their units as said and their address), the aircraft near the field (airband), the
+        channel's terms (police)."""
+        refs: dict = {}
+        try:
+            if service in ("fire", "ems", "police") and isinstance(clip_end, (int, float)):
+                refs["cad"] = self._cad_refs(float(clip_end))
+            if service == "air" or self._kind.get(getattr(item, "source", "")) == "airband":
+                from sizeup import atc
+                refs["aircraft"] = atc.spoken_callsigns(self._atc_planes(getattr(item, "source", ""), clip_end),
+                                                        atc.telephony_words(), cap=30)
+            if service == "police":
+                ts = self._terms_for_item(item)
+                refs["terms"] = list(ts.terms[:300]) if ts is not None else []
+        except Exception as e:  # noqa: BLE001 - fewer refs is still a sample
+            self.hub.log(f"stt challenger: refs: {type(e).__name__}: {e}")
+        return refs
+
+    def _cad_refs(self, at: float, window_s: float = 900.0) -> list[str]:
+        """The CAD's incidents open around a time: their units as said ("Engine 60") and their address's number and
+        street words."""
+        rows = self.cad.store.q(
+            "SELECT i.id, i.address, u.name, u.spoken FROM incidents i LEFT JOIN assignments a ON a.incident_id = i.id "
+            "LEFT JOIN units u ON u.id = a.unit_id WHERE i.created_at <= ? AND i.created_at >= ? AND "
+            "(i.closed_at IS NULL OR i.closed_at >= ?) AND i.status IN ('pending', 'active', 'closed') LIMIT 400",
+            (at + window_s, at - 6 * 3600.0, at - window_s))
+        out: list[str] = []
+        for r in rows:
+            for v in (r.get("spoken") or r.get("name"), " ".join(str(r.get("address") or "").split("@")[0].split()[:3])):
+                if v and v not in out:
+                    out.append(v)
+        return out[:200]
+
+    def _challenge_done(self, job: sttpool.Job, res: dict) -> None:
+        """A challenger's words: kept as a run (role challenger, private, pruned with its transcript) with its sample's
+        scores against the text of record. A text from another model (the worker had lost the challenger) or a loop
+        is kept unscored. Then the channel's promotion is watched (_challenge_watch)."""
+        cid, raw = str(job.extra.get("clip") or ""), str(res.get("text") or "")
+        used = str(res.get("model") or "")
+        ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
+        prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
+        loop = bool(raw) and sttmodels.is_loop(raw)
+        text, status = ("", "loop") if loop else judge(raw, job.seconds, prompt=job.prompt if ctx == "prompt" else "",
+                                                      vocab_v=str(job.extra.get("vocab_v") or "") if ctx == "prompt"
+                                                      else "")
+        score = None
+        if used == job.model:
+            item = job.extra.get("page") or self._find(cid)[0]
+            champ = str(job.extra.get("champ_text") or "")
+            checks = (job.extra.get("champ_check"),
+                      self._time_check(job.channel, item, text, job.clip_end, "gpu-worker", False) if text else None)
+            score = sttscore.sample(str(job.extra.get("service") or ""), champ, text, job.extra.get("refs") or {},
+                                    checks)
+            score.update(champion=str(job.extra.get("champ_model") or ""), challenger=job.model)
+        done_at = time.time()
+        try:
+            self.stt_runs.add(cid, "gpu-worker", text=raw, status=status, model=used, worker=job.worker,
+                              prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, want=job.model, role="challenger",
+                              channel=job.channel, cls="challenger", clip_end=job.clip_end, queued_at=job.queued_at,
+                              engine_start=job.claimed_at, done_at=done_at, score=score,
+                              run_s=done_at - job.claimed_at if job.claimed_at else None)
+        except Exception as e:  # noqa: BLE001 - bookkeeping
+            self.hub.log(f"stt challenger: {cid}: {type(e).__name__}: {e}")
+        if score is not None:
+            self._challenge_watch(job.channel)
+
+    def _challenge_fell(self, job: sttpool.Job, why: str) -> None:
+        """A challenger's run that didn't happen (the GPU never idle in time, the worker gone): a sample less."""
+        self._challenges_skipped = getattr(self, "_challenges_skipped", 0) + 1
+
+    def challenge_board(self, key: str) -> dict:
+        """A channel's champion and challenger: the current pair's samples compared (sttscore.compare), people's edits
+        scored in where a clip was corrected since, and the promotion being watched."""
+        ch = self.stt_choices
+        c = ch.challenger_for(key)
+        champ = ch.model_for(key, self._key_service(key)[1])
+        promoted = ch.promoted(key)
+        since = float(promoted.get("at") or 0.0)
+        rows = [r for r in self.stt_runs.challenges(key, since)        # (the current pair's samples only)
+                if c is not None and r["want"] == c[0] and r["score"].get("champion") == champ]
+        edits = self._corrections([r["clip_id"] for r in rows])
+        samples = []
+        for r in rows:
+            s = r["score"]
+            if r["clip_id"] in edits:
+                s = sttscore.with_edit(s, self.stt_runs.text_of(r["clip_id"]), r["text"], edits[r["clip_id"]])
+            samples.append(s)
+        out = sttscore.compare(samples)
+        out.update(key=key, champion=champ, challenger=c[0] if c else "", pct=c[1] if c else 0.0,
+                   promoted=promoted, rolled_back=(ch.settings().get(key) or {}).get("rolled_back") or {},
+                   edits=sum(1 for r in rows if r["clip_id"] in edits), norm=sttscore.NORM)
+        return out
+
+    def _challenge_boards(self) -> list[dict]:
+        """Every channel with a challenger, or a promotion being watched: its board (challenge_board)."""
+        out = []
+        for key, v in sorted(self.stt_choices.settings().items()):
+            if v.get("challenger") or v.get("promoted") or v.get("rolled_back"):
+                try:
+                    out.append(self.challenge_board(key))
+                except Exception as e:  # noqa: BLE001 - one channel's board never hides the others
+                    self.hub.log(f"stt challenger: {key}: board: {type(e).__name__}: {e}")
+        return out
+
+    def _corrections(self, ids: list[str]) -> dict[str, str]:
+        """People's corrections (sizeup/cad/sttfix.py) of these clips: {clip id: the words as said}."""
+        out: dict[str, str] = {}
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            try:
+                rows = self.cad.store.q(f"SELECT traffic_id, corrected FROM stt_corrections WHERE traffic_id IN "
+                                        f"({', '.join('?' * len(part))})", tuple(part))
+            except Exception:  # noqa: BLE001 - no corrections table yet: none
+                return out
+            out.update({r["traffic_id"]: r["corrected"] for r in rows if r.get("corrected")})
+        return out
+
+    def _challenge_watch(self, key: str) -> None:
+        """After a promotion the model it replaced runs as the challenger: when it scores better (sttscore.
+        should_roll_back) the promotion is undone, audited and said in the log. At most once a minute per channel."""
+        ch = self.stt_choices
+        if not ch.promoted(key):
+            return
+        seen = self.__dict__.setdefault("_watch_at", {})
+        if time.time() - seen.get(key, 0.0) < 60.0:
+            return
+        seen[key] = time.time()
+        b = self.challenge_board(key)
+        if not sttscore.should_roll_back(b):
+            return
+        why = (f"{b['challenger']} scored {b['chall']:.3f} against {b['champion']}'s {b['champ']:.3f} over {b['n']} "
+               f"clips since the promotion")
+        got = ch.roll_back(key, why)
+        if got is None:
+            return
+        old, new = got
+        self.hub.log(f"stt challenger: {key}: promotion rolled back: {why}")
+        try:
+            self.cad.settings.note("automatic rollback", "radios", f"stt_models/{key}/model", old.get("model") or "",
+                                   new.get("model") or "")
+        except Exception as e:  # noqa: BLE001 - the rollback stands; the audit is said in the log
+            self.hub.log(f"stt challenger: {key}: audit: {type(e).__name__}: {e}")
 
     def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
                     prompted: bool | None = None) -> stt_time.Check | None:
