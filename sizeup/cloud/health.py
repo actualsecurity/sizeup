@@ -31,6 +31,12 @@ notice when it clears:
     group         the station's antenna groups file unreadable: dropped, every dongle unlocked     warning
     whisper       speech-to-text (whisper-server) down for down_min (2)                    warning
     recorder      trunk-recorder down for down_min while its dongle job is on              critical
+    cover:<job>   "Fire/EMS 15 down: SDR V4 gone": our dispatch coverage lost (2026-11-24: the county   critical,
+                  P25 job and South 2 lost ~6 h, only "Still:" pushes noticed): a dispatch job (P25_JOB,  urgent
+                  trunk-recorder's; and each paging channel, kind "paging") this station runs and
+                  nothing runs, for COVER_DOWN_S (5 min), whatever the cause (a dongle gone, trunk-recorder
+                  down, an antenna group short, no audio #703, held by another app, its job down). See
+                  "Dispatch coverage" below
     stuck:<chan>  a channel's squelch open without a break (#116's flag)                   warning
     trunk         "P25 trunk silent" (#258): trunk-recorder running but no call on ANY       critical
                   talkgroup for the trunk window, or the control channel lost (its decode
@@ -103,6 +109,20 @@ Each alert is logged once when it starts and once when it clears, shown to admin
 status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed). A critical
 one still on is pushed again ("Still: ...") every remind_min (180; 0: never), muted or panel-only ones not (#547).
 
+Dispatch coverage (2026-11-24): the county P25 job or the paging channel not running is the one outage that matters
+most, so it is its own alert, "cover:<job>", pushed at URGENT_PRIORITY (ntfy 5, "urgent": the only level a phone may
+let through Do Not Disturb), never at once: only once it has lasted COVER_DOWN_S (5 min: a dongle swap or a restart
+is shorter), then again ("Still: ...") every COVER_REMIND_S (30 min, whatever remind_min), and "All clear: <job> back"
+once it has stayed back COVER_SETTLE_S (2 min; the usual flapping hold once it flaps). While a job's coverage is lost,
+the alerts that are its causes (its dongle's sdr / noaudio / dup, job:<job>, recorder, an antenna group short only of
+lost dispatch jobs) stay on the panel and are not pushed themselves ("covered_by"): one stream of pushes per outage; a
+cause still on once the job runs again (a stand-in took it) is pushed as usual. Not counted, its 5 min starting again
+after: the station's planned update window (the updater "updating" for at most UPDATE_SWITCH_MAX_S, and
+UPDATE_GRACE_S after its last switch ended). Its own mute kind ("cover"), for a time only.
+
+A push that ntfy didn't take (the Notifier gave up after its retries) is tried again after PUSH_RETRY_S, up to
+PUSH_RETRIES times: before, a lost first push was marked sent, so the next word was the "Still:" 3 h later.
+
 Flapping (#340), for every alert: one that clears is "settling" for SETTLE_S (15 min; SETTLE_FLAPPING_S, 30 min, once it
 has come back FLAP_N (3) times within FLAP_WINDOW_S (1 h)). Back before it settles, it is the same episode: no second
 push and no "Recovered"; "Recovered" is pushed only once it has settled (with how often it flapped). A flapping
@@ -129,6 +149,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import os
@@ -167,6 +188,14 @@ CC_WARN = 10.0              # trunk-recorder's default controlWarnRate: a rate a
 CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it began: the station's watchdog restarts a hung
                             # decoder at 2 min (sizeup/radio/trunkrecd.py), and one it healed is never a page (#547)
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
+COVER_DOWN_S = 300.0        # a dispatch job (the county P25 job, a paging channel) not running this long: the urgent push
+COVER_REMIND_S = 1800.0     # ... pushed again this often while it lasts (not remind_min)
+COVER_SETTLE_S = 120.0      # ... "All clear" once back this long (flapping: SETTLE_FLAPPING_S, as every alert)
+UPDATE_SWITCH_MAX_S = 20 * 60.0   # the updater's "updating" is a planned window for at most this long ...
+UPDATE_GRACE_S = 300.0      # ... and this long after its last switch ended: no dispatch coverage alert starts in it
+URGENT_PRIORITY = 5         # ntfy "urgent" (max): the level a phone may let through Do Not Disturb
+PUSH_RETRY_S = 60.0         # a push ntfy didn't take: tried again this long after ...
+PUSH_RETRIES = 3            # ... at most this many times per alert
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 REFUSED_HINT_S = 600.0           # a part of the station's post left out for its shape (Hub._refused): a hint this long
@@ -198,6 +227,7 @@ MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
               "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
+              "cover": "Dispatch coverage lost (urgent)",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "rejected": "Station event rejected (critical)",
               "rejected_minor": "Station event rejected (other)",
@@ -206,9 +236,18 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped",
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
-MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected")   # critical ones: muted for a time only, never
-                                                                          # until unmuted
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected", "cover")   # critical ones: muted for a time
+                                                                                   # only, never until unmuted
 REJECTED_RECENT_S = 24 * 3600.0     # a non-critical event the hub refused: a warning this long after its last refusal
+
+
+def _takes_done(send) -> bool:
+    """A notifier's send() that takes done= (sizeup/notify.py Notifier, KindNotifier: the push's outcome)."""
+    try:
+        ps = inspect.signature(send).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "done" or p.kind is p.VAR_KEYWORD for p in ps)
 
 
 def alert_kind(key: str) -> str:
@@ -595,6 +634,10 @@ class StationHealth:
         self.disk_pct = cfg.alerts_disk_pct
         self.repeat_s = cfg.alerts_repeat_min * 60
         self.remind_s = float(getattr(cfg, "alerts_remind_min", REMIND_S / 60)) * 60   # 0: no reminders
+        # the paging channels by the config's kind (the hub lists the station's channels for their kinds): with P25_JOB,
+        # our dispatch coverage (cover:<job>); the station's rows say a channel's kind too
+        self.paging = tuple(str(c.label) for c in getattr(cfg, "channels", None) or ()
+                            if getattr(c, "kind", "") == "paging")
         self.public_url = (cfg.cloud_public_url or "").rstrip("/")
         self.errors = None          # the hub's own error lines (sizeup/errwatch.py ErrorWatch, #285): HubApp sets it
         self._lock = threading.RLock()
@@ -852,6 +895,7 @@ class StationHealth:
                        else "noise on the channel: check antenna and dongle")
                 hint = (hint + " · " if hint else "") + f"squelch chattering: {short:g} short opens/min · {fix}"
             chans.append({"label": label, "name": r.get("name") or label, "usual_now_s": usual,
+                          "kind": str(r.get("channel_kind") or "")[:20],
                           "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
                           "detail": str(r.get("detail") or "")[:200], "open": bool(r.get("open")),
                           "open_s": r.get("open_s"), "stuck": bool(r.get("stuck")), "quieting_db": r.get("quieting_db"),
@@ -1227,12 +1271,94 @@ class StationHealth:
                            "text": f"disk {disk:.0f}% full" + (
                                f" ({m['system']['disk_free'] / 1e9:.1f} GB free)" if m["system"].get("disk_free") else ""),
                            "since": now}
+        lost = self._coverage(m, rec)
+        planned = self._planned(m, now)
+        for job, (cause, causes) in lost.items():
+            key = f"cover:{job}"
+            if planned and key not in self.active:
+                continue                                 # the update's switch: not counted (its 5 min start after it)
+            held(key, COVER_DOWN_S, {"severity": "critical", "urgent": True, "title": f"{job} down: {cause}",
+                                     "job": job, "cause": cause,
+                                     "text": f"{job} not running: {cause} · our dispatch not heard"})
+        for job, (_cause, causes) in lost.items():
+            for k in causes:                             # pushed as the job's coverage, not each by itself
+                if out.get(k) is not None:
+                    out[k]["covered_by"] = f"cover:{job}"
         for k in [k for k in self._first if k not in seen]:
             del self._first[k]                          # not holding any more: its clock starts again
         for k, a in out.items():
             if a is not None:
                 a["who"] = self._who(k, m)
         return out, True
+
+    def dispatch_jobs(self, m: dict) -> list[str]:
+        """Our dispatch coverage: the county P25 job (P25_JOB, trunk-recorder) and each paging channel (kind "paging" in
+        the config's [radio.channels] or the station's rows), the ones this station runs: a dongle's job or its own
+        job, a job of an antenna group (not parked), trunk-recorder expected, or (one dongle per channel) a channel."""
+        paging = set(self.paging) | {c["label"] for c in m["channels"] if c.get("kind") == "paging"}
+        jobs = {d["job"] for d in m["dongles"]} | {d["own"] for d in m["dongles"] if d.get("own")}
+        jobs |= {j for g in m.get("groups") or [] for j in g["jobs"] if j not in g["parked"]}
+        if not m["shared"]:
+            jobs |= {c["label"] for c in m["channels"] if c["mhz"]}
+        rec = m["processes"]["recorder"]
+        out = [P25_JOB] if P25_JOB in jobs or (rec and rec.get("expected")) else []
+        return out + sorted(j for j in paging & jobs if j != P25_JOB)
+
+    def _coverage(self, m: dict, rec: dict | None) -> dict[str, tuple[str, list[str]]]:
+        """The dispatch jobs nothing runs now: {job: (the cause, as short as a push title wants it; the keys of the
+        alerts that are its causes)}. A job runs when a dongle that is there runs it with audio (a stand-in counts;
+        the P25 job only while trunk-recorder is ok), or, one dongle per channel, when its channel is ok."""
+        out: dict[str, tuple[str, list[str]]] = {}
+        hl = self.hub.status.get("health") if isinstance(self.hub.status, dict) else None
+        hl_jobs = hl.get("jobs") if isinstance(hl, dict) and isinstance(hl.get("jobs"), dict) else {}
+        rec_bad = bool(rec and rec.get("expected") and rec.get("state") != "ok")
+        jobs = self.dispatch_jobs(m)
+        for job in jobs:
+            mine = [d for d in m["dongles"] if job in (d["job"], d.get("own"))
+                    or (d.get("noaudio") or {}).get("job") == job]
+            if m["shared"] or m["dongles"]:
+                ok = any(d["job"] == job and d["present"] and d["running"] and not d.get("noaudio") for d in m["dongles"])
+            else:                                        # one dongle per channel: its channel's state
+                c = next((c for c in m["channels"] if c["label"] == job), None)
+                j = hl_jobs.get(job) if isinstance(hl_jobs.get(job), dict) else {}
+                ok = (j.get("state", c["state"]) == "ok" if c is not None
+                      else job == P25_JOB and bool(rec) and rec.get("state") == "ok")
+            if job == P25_JOB and rec_bad:
+                ok = False
+            if ok:
+                continue
+            short = [g for g in m.get("groups") or [] if job in g["short"]]
+            gone = next((d for d in mine if not d["present"]), None)
+            deaf = next((d for d in mine if d.get("noaudio") and d["present"]), None)
+            held_by = next((d for d in mine if d.get("held_by") and d["job"] == job), None)
+            down = next((d for d in mine if d["job"] == job and d["present"]), None)
+            cause = (f"SDR {gone['name']} gone" if gone else f"SDR {deaf['name']} no audio" if deaf
+                     else f"SDR {held_by['name']} held by {held_by['held_by']}" if held_by
+                     else f"trunk-recorder {rec.get('state') or 'down'}" if job == P25_JOB and rec_bad
+                     else f"antenna group {short[0]['name']} short" if short
+                     else f"SDR {down['name']}: {down['state'] or 'not running'}" if down else "not running")
+            causes = [f"job:{job}"] + [f"{k}:{d['serial']}" for d in mine for k in ("sdr", "noaudio")]
+            causes += [f"dup:{x['serial']}" for x in m.get("duplicates") or [] if x["job"] == job]
+            causes += ["recorder"] if job == P25_JOB else []
+            out[job] = (cause, causes)
+        for g in m.get("groups") or []:                  # a group short only of lost dispatch jobs: theirs
+            if g["short"] and all(j in out for j in g["short"]):
+                out[g["short"][0]][1].append(f"group:{g['name']}")
+        return out
+
+    def _planned(self, m: dict, now: float) -> bool:
+        """The station's planned update window: the updater switching ("updating", for at most UPDATE_SWITCH_MAX_S), or
+        within UPDATE_GRACE_S of the end of its last switch (the radios come back after it)."""
+        snow = self._station_now(now)
+        u = m["build"]["update"] if isinstance(m["build"].get("update"), dict) else {}
+        since = u.get("since")
+        if u.get("state") == "updating" and isinstance(since, (int, float)) and 0 <= snow - since < UPDATE_SWITCH_MAX_S:
+            return True
+        last = m["build"]["last"]
+        if isinstance(last, dict) and isinstance(last.get("at"), (int, float)) and not isinstance(last.get("at"), bool):
+            secs = last.get("seconds") if isinstance(last.get("seconds"), (int, float)) else 0
+            return 0 <= snow - (last["at"] + secs) < UPDATE_GRACE_S
+        return False
 
     def _replica_state(self) -> dict | None:
         if self.replicas is None:
@@ -1521,6 +1647,11 @@ class StationHealth:
                     a["quiet"] = True                    # the panel only (#410: nothing of ours is affected)
                 else:
                     a.pop("quiet", None)
+                for f in ("urgent", "job", "cause", "covered_by"):   # dispatch coverage: its push; a cause of one
+                    if c.get(f):
+                        a[f] = c[f]
+                    elif f != "cause" and f != "job":
+                        a.pop(f, None)
                 if c.get("notify_after"):
                     a["notify_after"] = float(c["notify_after"])   # pushed only once this old (#547)
                 else:
@@ -1548,8 +1679,11 @@ class StationHealth:
                     continue                             # not settled yet (or can't tell: the station is silent)
                 self._settle(key, now, mutes)
                 settled = True
-            for a in self.active.values():
-                if (not a.get("pushed") and (a.get("escalated") or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
+            for a in list(self.active.values()):
+                if a.get("covered_by") or now < float(a.get("retry_at") or 0):
+                    continue                             # a cause of lost dispatch coverage: pushed as that (cover:<job>)
+                if (not a.get("pushed") and (a.get("escalated") or a.get("urgent")
+                                             or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
                         and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
                     self._push(a, now)
                 elif self._remind_due(a, now, mutes):
@@ -1574,9 +1708,11 @@ class StationHealth:
 
     def _remind_due(self, a: dict, now: float, mutes: dict) -> bool:
         """#547: a critical alert pushed and still on (the P25 trunk silent for 22 h was pushed once): pushed again
-        every remind_min (never sooner than repeat_min), unless muted or panel-only."""
-        return (self.remind_s > 0 and bool(a.get("pushed")) and a.get("severity") == "critical" and not a.get("quiet")
-                and now - self.last_push.get(a["key"], 0.0) >= max(self.remind_s, self.repeat_s)
+        every remind_min (never sooner than repeat_min), unless muted or panel-only. Dispatch coverage lost: every
+        COVER_REMIND_S, whatever remind_min."""
+        every = COVER_REMIND_S if a.get("urgent") else max(self.remind_s, self.repeat_s) if self.remind_s > 0 else 0
+        return (every > 0 and bool(a.get("pushed")) and a.get("severity") == "critical" and not a.get("quiet")
+                and now - self.last_push.get(a["key"], 0.0) >= every
                 and alert_kind(a["key"]) not in mutes)
 
     @staticmethod
@@ -1598,7 +1734,9 @@ class StationHealth:
         return sum(1 for t in a.get("flaps") or [] if 0 <= at - t < FLAP_WINDOW_S)
 
     def _settle_s(self, a: dict) -> float:
-        return SETTLE_FLAPPING_S if self._flaps(a, float(a["cleared"])) >= FLAP_N else SETTLE_S
+        if self._flaps(a, float(a["cleared"])) >= FLAP_N:
+            return SETTLE_FLAPPING_S
+        return COVER_SETTLE_S if alert_kind(a["key"]) == "cover" else SETTLE_S
 
     def _mutes(self, now: float) -> dict[str, float | None]:
         """The alert kinds muted now (#340): {kind: until | None}; none when the settings can't be read."""
@@ -1643,12 +1781,20 @@ class StationHealth:
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""
             told = f", {a['reminders']} reminder(s) sent" if a.get("reminders") else ""
+            took = _dur((a.get("cleared") or now) - a["since"])
+            if a.get("urgent"):                          # dispatch coverage back: "All clear", high (not urgent)
+                n.send(f"All clear: {a.get('job') or a['title']} back",
+                       f"{a.get('job') or a['title']} back at {_hhmm(a.get('cleared'))} after {took}"
+                       + (f" ({a['cause']})" if a.get("cause") else "") + f"{flap}{told}.",
+                       priority=4, tags=("white_check_mark", "sizeup"), click=click, who=who)
+                return
             n.send(f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
-                                               f"{_dur((a.get('cleared') or now) - a['since'])}{flap}{told}.",
+                                               f"{took}{flap}{told}.",
                    priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
             return
         if alert_kind(a["key"]) in self._mutes(now):     # muted since the tick began: not now
             return
+        prev = self.last_push.get(a["key"])
         a["pushed"] = True
         a.pop("escalated", None)
         self.last_push[a["key"]] = now
@@ -1658,11 +1804,42 @@ class StationHealth:
         long = now - a["since"]
         flaps = self._flaps(a, now)
         flap = f"; flapping, back {flaps}× in 1 h" if flaps >= FLAP_N else ""
-        n.send(("Still: " if reminder else "") + a["title"] + (f" {_dur(long)}" if long >= 60 else ""),
-               f"{a['text']} (since {_hhmm(a['since'])}{flap}).",
-               priority=4 if a["severity"] == "critical" else 3,
-               tags=("rotating_light" if a["severity"] == "critical" else "warning", "sizeup"), click=click, who=who)
+        if a.get("urgent"):                              # "Fire/EMS 15 down 5 min: SDR V4 gone"
+            title = f"{a.get('job')} down {_dur(long)}: {a.get('cause')}"
+            prio, tags = URGENT_PRIORITY, ("rotating_light", "sizeup")
+        else:
+            title = a["title"] + (f" {_dur(long)}" if long >= 60 else "")
+            prio = 4 if a["severity"] == "critical" else 3
+            tags = ("rotating_light" if a["severity"] == "critical" else "warning", "sizeup")
+        args = (("Still: " if reminder else "") + title, f"{a['text']} (since {_hhmm(a['since'])}{flap}).")
+        kw = dict(priority=prio, tags=tags, click=click, who=who)
+        if _takes_done(n.send):                          # (a notifier that tells how the push went)
+            kw["done"] = lambda out: self._delivered(a, out, prev, reminder)
+        if n.send(*args, **kw) is False:                 # not even queued (its queue full, no topic in effect now)
+            self._delivered(a, {"ok": False, "error": "not queued"}, prev, reminder)
         self._save()
+
+    def _delivered(self, a: dict, out: dict, prev: float | None, reminder: bool) -> None:
+        """A push's outcome (the Notifier's thread): one ntfy didn't take is tried again after PUSH_RETRY_S, at most
+        PUSH_RETRIES times an alert (before, a lost first push counted as sent: the next was "Still:" 3 h later)."""
+        if not isinstance(out, dict) or out.get("ok"):
+            return
+        with self._lock:
+            if self.active.get(a["key"]) is not a or int(a.get("push_failed") or 0) >= PUSH_RETRIES:
+                return
+            a["push_failed"] = int(a.get("push_failed") or 0) + 1
+            a["retry_at"] = self.clock() + PUSH_RETRY_S
+            if reminder:
+                a["reminders"] = max(0, int(a.get("reminders") or 0) - 1)
+            else:
+                a["pushed"] = False
+            if self.last_push.get(a["key"]) is not None:
+                if prev is None:
+                    self.last_push.pop(a["key"], None)
+                else:
+                    self.last_push[a["key"]] = prev
+            self.log(f"health: {a['title']} not delivered ({str(out.get('error') or '?')[:80]}): trying again in "
+                     f"{_dur(PUSH_RETRY_S)}")
 
     def run(self, stop: threading.Event) -> None:
         while not stop.wait(TICK_S):

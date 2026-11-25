@@ -165,7 +165,8 @@ def test_only_while_trunk_recorder_runs_and_a_recorder_back_up_gets_the_window()
     r = Rig()
     r.at(0, p25(0, rec="down"))
     r.at(3 * 3600, p25(0, rec="down"))
-    assert r.keys() == ["recorder"]                                     # down: the recorder alert, not the trunk's
+    # down: the recorder alert (and the dispatch coverage it costs), not the trunk's
+    assert r.keys() == ["cover:Fire/EMS 15", "recorder"]
     r.at(3 * 3600 + 5, p25(0))                                           # back up, no call yet
     assert r.keys() == []
     r.at(3 * 3600 + 19 * 60, p25(0))
