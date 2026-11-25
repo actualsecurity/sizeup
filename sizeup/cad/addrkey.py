@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from sizeup.cad.sources import proper_case
+from sizeup.geo import houserange
 from sizeup.geo.normalize import STREET_TYPES, TYPE_ABBRS, street_key
 
 SNAP_CONFIDENCE = 0.7      # the gazetteer's reading of an address is trusted from here (a misspelt street at ~0.74)
@@ -93,6 +94,11 @@ class Parsed:
         m = re.fullmatch(r"(\d+)-(\d+)", self.lot)
         return (m.group(1), m.group(2)) if m else ()
 
+    def numbers(self) -> tuple[str, ...]:
+        """The house numbers the gazetteer is asked for, in turn: the first ("12"); a range's first, then its last
+        ("10-12" -> "10", "12": either end's address point places it)."""
+        return (self.first, *self.ends()[1:])
+
 
 def _towns(aliases: dict[str, str]) -> list[tuple[str, str]]:
     return sorted(aliases.items(), key=lambda kv: -len(kv[0]))
@@ -136,8 +142,9 @@ def parse(text: str, aliases: dict[str, str]) -> Parsed | None:
         number = num.group(1) + num.group(2).upper()
     elif num.group(3):
         number = f"{num.group(1)} 1/2"
-    elif num.group(4):
-        number = f"{num.group(1)}-{num.group(4)}" if num.group(4) != num.group(1) else num.group(1)
+    elif num.group(4):                            # a building's range, in full ("149-51" -> "149-151"); any other
+        rng = houserange.make(num.group(1), num.group(4))       # two numbers ("10-200", "16-14"): the first
+        number = rng.text if rng is not None else num.group(1)
     else:
         number = num.group(1)
     low = [re.sub(r"[^a-z0-9#-]", "", w.lower()) for w in words]
@@ -214,6 +221,38 @@ def bldg_parts(bldg_key: str) -> tuple[str, str, str, str]:
     return p[0], p[1], p[2], p[3]
 
 
+def same_building(a: str, b: str) -> bool:
+    """Two building keys are one building: the same key, or the same street, town and complex building with house numbers
+    one building's (houserange.same_number: a range "10-12" and each of its numbers, 10, 12; "10-14" and 12)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    na, *ra = bldg_parts(a)
+    nb, *rb = bldg_parts(b)
+    return ra == rb and ("-" in na or "-" in nb) and houserange.same_number(na, nb)
+
+
+def building_rows(q: Callable, table: str, bldg_key: str) -> list[dict]:
+    """The active rows of a table keyed by building (premise notes, pre-plan points and documents) at this building:
+    its own key's, and the keys that are the same building (same_building): a range's numbers, the ranges holding this
+    number (on the building-key index, then a scan of that street's ranges). q: the store's query(sql, args)."""
+    if not bldg_key:
+        return []
+    num, street, town, b = bldg_parts(bldg_key)
+    rest = f"|{street}|{town}" + (f"|{b}" if b else "")
+    rng = houserange.parse_number(num)
+    keys = [bldg_key] + ([f"{n}{rest}" for n in sorted(rng.labels())] if rng else [])
+    rows = q(f"SELECT * FROM {table} WHERE active = 1 AND (bldg_key IN ({','.join('?' * len(keys))}) OR "
+             f"(bldg_key GLOB ? AND bldg_key GLOB ?))", (*keys, "[0-9]*-[0-9]*|*", "*" + _glob(rest)))
+    return [r for r in rows if r["bldg_key"] in keys or same_building(bldg_key, r["bldg_key"])]
+
+
+def _glob(s: str) -> str:
+    """s as a literal in a GLOB pattern."""
+    return re.sub(r"([*?\[])", r"[\1]", s)
+
+
 def meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dy = (lat2 - lat1) * 110_574.0
     dx = (lon2 - lon1) * 111_320.0 * math.cos(math.radians((lat1 + lat2) / 2))
@@ -234,8 +273,8 @@ def snap(p: Parsed, geocode: Callable[[str], list[dict] | None], town_of: Callab
     Rd" may be the street's own name)."""
     want = p.town or town_hint
     tries = [p] + ([Parsed(p.number, p.raw_street, "", p.town, "", p.raw_street)] if p.raw_street and p.raw_street != p.street else [])
-    for t in tries:
-        q = f"{t.first} {t.street}" + (f", {want}" if want else "")
+    for t, first in ((t, n) for t in tries for n in t.numbers()):
+        q = f"{first} {t.street}" + (f", {want}" if want else "")      # a range: its first number, then its last
         try:
             ms = geocode(q) or []
         except Exception:  # noqa: BLE001 - a key is never worth an error
@@ -244,7 +283,7 @@ def snap(p: Parsed, geocode: Callable[[str], list[dict] | None], town_of: Callab
             if m.get("kind") != "address" or float(m.get("confidence") or 0) < SNAP_CONFIDENCE or not m.get("street"):
                 continue
             hn = re.match(r"\d+", str(m.get("house_number") or ""))
-            if not hn or hn.group(0) != t.first:
+            if not hn or hn.group(0) != first:
                 continue
             if point is not None and m.get("lat") is not None and meters(point[0], point[1], m["lat"], m["lon"]) > SNAP_M:
                 continue

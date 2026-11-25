@@ -43,6 +43,7 @@ from pathlib import Path
 from sizeup import sourcekeys
 from sizeup.cad import addrkey
 from sizeup.cad.store import TZ, CadError
+from sizeup.geo import houserange
 
 ADDR_COLUMNS = ("addr_key", "bldg_key", "addr_street", "addr_how", "addr_label")
 COMMENT_KINDS = ("note", "remarks", "upgrade")      # the chronology's entries that are comments (fts_events)
@@ -436,32 +437,31 @@ class AddressHistory:
                 and addrkey.meters(lat, lon, r["lat"], r["lon"]) <= addrkey.GROUP_M]
 
     def _same_building(self, bldg_key: str, addr_street: str, point) -> list[int]:
-        """The other keys that are this building: a range and each of its numbers ("10-12" and 10, 12), and 12A and 12
-        when their pins are within SAME_LOT_M of this one's. Only the keys with this house number, by prefix on the
-        building index (a range ending with it: on the street index), never the whole street."""
+        """The other keys that are this building: a range and each of its numbers ("10-12" and 10, 12; "10-14" and 12:
+        houserange.same_number), and 12A and 12 when their pins are within SAME_LOT_M of this one's. Only the keys with
+        this house number, by prefix on the building index (the ranges on the street: on the street index), never the
+        whole street."""
         if not addr_street:
             return []
         num, street, town, b = addrkey.bldg_parts(bldg_key)
-        mine = re.fullmatch(r"(\d+)-(\d+)", num)
+        mine = houserange.parse_number(num)
         lot = re.fullmatch(r"(\d+)([a-z]?)", num)
         if not (mine or lot):
             return []
         rest = _glob(f"|{street}|{town}") + "*"
-        ors, args = [], []
-        for d in (mine.groups() if mine else (lot.group(1),)):
-            ors += ["bldg_key GLOB ?", "bldg_key GLOB ?", "bldg_key GLOB ?",
-                    "(addr_street = ? AND bldg_key GLOB ?)"]
-            args += [d + rest, d + "[a-z]" + rest, d + "-[0-9]*" + rest, addr_street, "[0-9]*-" + d + rest]
+        ors, args = ["(addr_street = ? AND bldg_key GLOB ?)"], [addr_street, "[0-9]*-[0-9]*" + rest]   # the street's ranges
+        for d in (sorted(mine.labels()) if mine else (lot.group(1),)):                # a range's numbers (houserange)
+            ors += ["bldg_key GLOB ?", "bldg_key GLOB ?"]
+            args += [d + rest, d + "[a-z]" + rest]
         out = []
         for r in self.store.q(f"SELECT id, bldg_key, lat, lon FROM incidents WHERE ({' OR '.join(ors)}) AND bldg_key != ? "
                               f"AND number IS NOT NULL", (*args, bldg_key)):
             n2, s2, t2, b2 = addrkey.bldg_parts(r["bldg_key"])
             if (s2, t2, b2) != (street, town, b):
                 continue
-            theirs = re.fullmatch(r"(\d+)-(\d+)", n2)
             lot2 = re.fullmatch(r"(\d+)([a-z]?)", n2)
-            if (mine and n2 in mine.groups()) or (theirs and num in theirs.groups()):
-                out.append(r["id"])
+            if ("-" in num or "-" in n2) and houserange.same_number(num, n2):     # a range and its numbers, or two
+                out.append(r["id"])                                                 # ranges, one holding the other
             elif (lot and lot2 and lot.group(1) == lot2.group(1) and point is not None and r["lat"] is not None
                   and addrkey.meters(point[0], point[1], r["lat"], r["lon"]) <= addrkey.SAME_LOT_M):
                 out.append(r["id"])                # 12A and 12 on one pin: one building
@@ -595,8 +595,8 @@ class AddressHistory:
         k = addrkey.key_text(where, L.geo_town_aliases, L.town_of, self.cad.geocoder)
         if k.bldg_key:
             num, street, town, b = addrkey.bldg_parts(k.bldg_key)
-            m = re.fullmatch(r"(\d+)-(\d+)", num)
-            nums = [num] + (list(m.groups()) if m else [])
+            m = houserange.parse_number(num)
+            nums = [num] + (sorted(m.labels()) if m else [])          # a range: each of its numbers too
             ors, args = [], []
             for n in nums:
                 base = f"{n}|{street}|{town}" + (f"|{b}" if b else "")
@@ -609,12 +609,11 @@ class AddressHistory:
                 else:
                     ors.append("bldg_key GLOB ?")
                     args.append(_glob(f"{n}|{street}|") + "*")
-            ranges = []                               # a range on the street with this number at one end ("10-12" for 10)
+            ranges = []                               # a range on the street holding this number ("10-12" for 10)
             for r in self._rq("SELECT id, bldg_key FROM incidents WHERE addr_street GLOB ? AND bldg_key GLOB ?",
                               (_glob(f"{street}|") + "*", "[0-9]*-[0-9]*|*")):
-                mr = re.match(r"(\d+)-(\d+)\|", r["bldg_key"])
-                _, s2, t2, b2 = addrkey.bldg_parts(r["bldg_key"])
-                if mr and num in mr.groups() and s2 == street and (not town or t2 == town) and b2 == b:
+                n2, s2, t2, b2 = addrkey.bldg_parts(r["bldg_key"])
+                if houserange.same_number(num, n2) and n2 != num and s2 == street and (not town or t2 == town) and b2 == b:
                     ranges.append(r["id"])
             if ranges:
                 ors.append(f"id IN ({','.join('?' * len(ranges))})")

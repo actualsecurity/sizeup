@@ -200,6 +200,7 @@ from sizeup.cad.fuzzy import SNAP_MARGIN, STREET_SIM, fold, misread, name_sim, s
 from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.dispatch import highway, near_marker, same_marker, split_joined
 from sizeup.fence import FencedWrite
+from sizeup.geo import houserange
 from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
 
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
@@ -329,6 +330,12 @@ NOISE = {"the", "of"}
 INTERSECTION = re.compile(r"\s(?:&|and|/|at)\s|&|/", re.I)
 UNIT_TAIL = re.compile(r"(?:\b(?:apt|apartment|unit|ste|suite|fl|flr|floor|rm|room|bldg|building)\b|#).*$", re.I)
 FLOOR = re.compile(r"\b\d+(?:st|nd|rd|th)\s+(?:fl|flr|floor)\b.*$", re.I)
+HOUSE_NO = re.compile(r"\d+[a-z]?|\d+-\d+[a-z]?", re.I)   # a house number as a word: 12, 12A, a range 14-16 (16A)
+
+
+def _house_no(w: str) -> bool:
+    """A word that is a house number: '12', '12A', or a building's range ('14-16': sizeup/geo/houserange.py)."""
+    return bool(HOUSE_NO.fullmatch(w)) and ("-" not in w or houserange.parse_number(w) is not None)
 # A transmission announcing a page or an alarm to come (a pre-alert: never an incident)
 INCOMING = re.compile(r"\b(?:incoming|stand\s*-?\s*by\s+for|standby\s+for)\b[^.?!]{0,40}?\b(?:alarm|page|tones?|call|"
                       r"assignment|box)\b|\b(?:additional|second|2nd|third|3rd|fourth|4th)\s+alarm\b|"
@@ -469,8 +476,12 @@ def _street(s: str) -> tuple[str, frozenset, str, frozenset, frozenset]:
     name words, directions after the suffix ("12 Main St W"). After the suffix only a direction and EXT ("12 Park Ave
     Ext") are kept; a known town at the end is dropped. A name made only of suffix or direction words is the name
     ("12 Court St", "12 North St")."""
-    raw = re.findall(r"[a-z0-9]+", s.lower())
-    num = raw.pop(0) if raw and re.fullmatch(r"\d+[a-z]?", raw[0]) else ""
+    lead = houserange.at_start(s)
+    if lead is not None:                                   # "14-16 SAMPLE AVE": the range is the number
+        num, raw = lead[0].written.lower(), re.findall(r"[a-z0-9]+", s[lead[1]:].lower())
+    else:
+        raw = re.findall(r"[a-z0-9]+", s.lower())
+        num = raw.pop(0) if raw and re.fullmatch(r"\d+[a-z]?", raw[0]) else ""
     raw = _strip_town(raw)[0]
     words = [ABBR.get(w, w) for w in raw]
     if len(raw) >= 2 and raw[0] in ("st", "saint") and words[1] not in SUFFIXES:
@@ -495,15 +506,26 @@ def _snake_town(m) -> str:
     return " " + " ".join(words) + " " if words in TOWN_OF else " "
 
 
+def _joined_range(s: str) -> tuple[str, tuple | None]:
+    """A location starting with a building's range written with spaces ("12 - 14 EXAMPLE AVE") as "12-14 EXAMPLE AVE":
+    never the " - " that ends a location. (the text, houserange.at_start's (range, end) or None)"""
+    lead = houserange.at_start(s)
+    if lead is None:
+        return s, None
+    return f"{lead[0].written} {s[lead[1]:].lstrip()}", lead
+
+
 def street_part(s: str) -> str:
     """The street part of a location: '12 EXAMPLE AVE : @SAMPLE PLACE' -> '12 EXAMPLE AVE'; '@SAMPLE PLACE (12 EXAMPLE
-    AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' -> '12 EXAMPLE AVE'. A named place, ' - ...', ';...', '(...)',
-    '[...]', the town after a comma, UPPER_SNAKE town tokens, floors, units and apartments are left out; a range is its
-    first number. '' for a place only."""
+    AVE)' -> '12 EXAMPLE AVE'; '12-14 EXAMPLE AVE 3RD FL' -> '12-14 EXAMPLE AVE'. A named place, ' - ...', ';...', '(...)',
+    '[...]', the town after a comma, UPPER_SNAKE town tokens, floors, units and apartments are left out. A building's
+    range (sizeup/geo/houserange.py: "12-14", "12 - 14", "149-51") is kept as written, spaces dropped; any other two
+    numbers ("10-200", "16-14") are the first number. '' for a place only."""
     s = (s or "").strip()
     m = re.match(r"^\s*@[^(]*\(([^)]*)\)", s)
     if m:                                                   # @PLACE (ADDRESS)
         s = m.group(1)
+    s, lead = _joined_range(s)
     s = re.split(r"\s:\s|\s*:\s*@", s)[0]
     s = s.split("@")[0].split(";")[0]
     s = re.split(r"\s+-\s+", s)[0]
@@ -511,7 +533,8 @@ def street_part(s: str) -> str:
     s = re.sub(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\b", _snake_town, s)     # EXAMPLE_TOWN: a known town kept, else dropped
     s = FLOOR.sub("", s)
     s = UNIT_TAIL.sub("", s)
-    s = re.sub(r"^\s*(\d+)[a-z]?\s*-\s*\d+[a-z]?\b", r"\1", s, flags=re.I)
+    if lead is None:
+        s = re.sub(r"^\s*(\d+)[a-z]?\s*-\s*\d+[a-z]?\b", r"\1", s, flags=re.I)
     return " ".join(s.split())
 
 
@@ -553,7 +576,7 @@ def _split_town(part: str) -> tuple[str, str]:
     for t in TOWNS:
         n = len(t)
         if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
-                and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
+                and any(not _house_no(w) for w in toks[:-n]):
             return " ".join(toks[:-n]), _title_town(toks[-n:])
     return part, ""
 
@@ -694,7 +717,7 @@ def _street_words(piece: str, spell: bool = False) -> tuple[str, list[str], list
     typed location's town). A suffix word is abbreviated only after a name ("THE CIRCLE" stays: it is the name).
     spell: a direction before the name stays a word ("EAST END AVE", a known street written so: _spelled)."""
     toks = re.findall(r"[A-Za-z0-9]+(?:['\u2019.-][A-Za-z0-9]+)*", piece)
-    num = toks.pop(0) if toks and re.fullmatch(r"\d+[a-z]?", toks[0], re.I) else ""
+    num = toks.pop(0) if toks and _house_no(toks[0]) else ""
     mapped = [ABBR.get(w.lower(), w.lower()) for w in toks]
     cut = _cut(mapped)
     end = cut if cut is not None else len(toks)
@@ -777,6 +800,7 @@ def location_extras(s: str, typed: bool = True) -> tuple[str, str]:
     s = " ".join(str(s or "").split())
     if not s or s.startswith("@") or not street_part(s):
         return "", ""
+    s = _joined_range(s)[0]
     snake = r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b"
     m = re.search(r"@\s*([^():;\[\],@]+)", s)
     place = re.sub(snake, " ", re.split(r"\s+-\s+", m.group(1))[0]) if m else ""
@@ -853,7 +877,7 @@ def normal_location(s: str, *, town: str = "", geo_label: str = "", within=(), f
     for t in TOWNS:                                        # a known town at its end
         n = len(t)
         if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
-                and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
+                and any(not _house_no(w) for w in toks[:-n]):
             part, found = " ".join(toks[:-n]), town_label(" ".join(toks[-n:]))
             if not typed:                                  # heard "... Example Avenue in Rye Brook": no stray "In"
                 part = re.sub(r"[\s,]+in(?:\s+the\s+(?:village|town|city)\s+of)?$", "", part, flags=re.I)
@@ -949,8 +973,8 @@ def _numbers(s: str) -> list[str]:
         return [f"{f.group(1)} 1/2"]
     out = []
     for piece in INTERSECTION.split(part):
-        m = re.match(r"\s*(\d+[a-z]?)\s+\S", piece, re.I)
-        out.append(m.group(1).lower() if m else "")
+        m = re.match(r"\s*(\d+[a-z]?(?:-\d+[a-z]?)?)\s+\S", piece, re.I)
+        out.append(m.group(1).lower() if m and _house_no(m.group(1)) else "")
     return out
 
 
@@ -1093,8 +1117,8 @@ def same_place(a: str, b: str) -> bool:
         return ka[1] == kb[1]
     if ka[0] == "x":
         return len(ka[1]) == len(kb[1]) and all(any(_same_street(x, y) for y in kb[1]) for x in ka[1])
-    if ka[1] != kb[1]:
-        return False
+    if not houserange.same_number(ka[1], kb[1]):
+        return False                                       # (a range holds each of its numbers: "14-16" is 16's)
     return _same_street(ka[2:], kb[2:])
 
 
@@ -1226,10 +1250,20 @@ def heard_place(heard: str, typed: str, towns=()) -> str:
     nh, nt = kh[1], kt[1]
     half = halved(heard)
     nh2 = place_key(half)[1] if half else ""
-    if not (nh == nt or not nh or not nt or misread(nh, nt) or (nh2 and nh2 == nt)):
+    if not (houserange.same_number(nh, nt) or not nh or not nt or any(misread(a, b) for a, b in _number_pairs(nh, nt))
+            or (nh2 and houserange.same_number(nh2, nt))):
         return "other"
     sure = how == "snap" and kh[2] == kt[2] and kh[5] == kt[5]
     return "num" if sure else "weak"
+
+
+def _number_pairs(heard: str, typed: str) -> list[tuple[str, str]]:
+    """A heard and a typed house number as pairs of single numbers: a range (sizeup/geo/houserange.py) as each of its
+    numbers ("16", "14-16" -> ("16", "14"), ("16", "16"))."""
+    rh, rt = houserange.parse_number(heard), houserange.parse_number(typed)
+    hs = sorted(rh.labels()) if rh else [heard]
+    ts = sorted(rt.labels()) if rt else [typed]
+    return [(a, b) for a in hs for b in ts]
 
 
 def one_letter_street(heard: tuple, typed: tuple, towns) -> bool:
@@ -1370,7 +1404,7 @@ def cross_town_place(a: str, b: str, town_a: str = "", town_b: str = "") -> str:
             return "same" if d <= CROSS_TOWN_SAME_MILES + 1e-9 else "near" if d <= CROSS_TOWN_MILES else ""
         return "same" if ha.mile is None and hb.mile is None and ha.exit == hb.exit else ""
     ka, kb = place_key(a), place_key(b)
-    if not (ka is not None and kb is not None and ka[0] == kb[0] == "addr" and ka[1] == kb[1]
+    if not (ka is not None and kb is not None and ka[0] == kb[0] == "addr" and houserange.same_number(ka[1], kb[1])
             and _same_street(ka[2:], kb[2:])):
         return ""
     has = set(_street_towns(a)) | set(_street_towns(b))

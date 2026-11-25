@@ -236,7 +236,7 @@ class Preplan:
             if hit is not None and hit[0] == self.gen:
                 return hit[1]
             gen = self.gen
-        rows = self.store.q("SELECT * FROM preplan_points WHERE bldg_key = ? AND active = 1", (bldg_key,)) if bldg_key else []
+        rows = addrkey.building_rows(self.store.q, "preplan_points", bldg_key)     # (a range and each of its numbers)
         if lat is not None and lon is not None:
             a, b, c, d = addrkey.bbox(lat, lon)
             cs = cells(c, a, d, b)

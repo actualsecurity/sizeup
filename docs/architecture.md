@@ -403,6 +403,15 @@ number, shown `189 1/2`; `189A` is a letter suffix, as in the address points. In
 counts only when a street the gazetteer knows follows it, and only for that street: "3 1/2 story", "10.5 min ago",
 "rt 9.5", "Box 12.25" are left alone.
 
+A building's house-number range (`sizeup/geo/houserange.py`) is read the same way everywhere: "14-16 Sample Ave",
+"14 - 16", "149-51" (149 to 151), and on a page "14 to 16", "fourteen through sixteen", "fourteen dash sixteen". Its
+ends are at most 50 apart and on one side of the street; "10-200", "16-14", "15-16", a phone number, a fraction, a
+highway's exit or a unit's number are never one. The address keeps it as given ("14-16 Sample Ave"); a page or feed
+saying either end, or a number on that side between them, is the same place (`same_place`, the page join's exact
+number, two towns' runs); the gazetteer places it between its ends' own points, else at the end that has one
+(`Gazetteer.locate_range`); its address key is its own ("14-16|...") and the same building as each of its numbers
+(History here, premise notes, pre-plans: `addrkey.same_building`); the voice says "fourteen to sixteen".
+
 They are kept in `cad.sqlite` (`settings_overrides`, section `local_addresses`, key `<number> <street>, <town>` in
 lower case: `{number, street, muni, lat, lon, note}`), audited as Lists, and exported and imported with the other
 settings. An imported point is checked as the form checks it (its street, its town, the pin on that town's stretch,

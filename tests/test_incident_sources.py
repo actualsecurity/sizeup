@@ -1339,7 +1339,9 @@ FORMATS_3 = [
     ("12 W Main St", "12 E Main St", DIFFERENT),
     ("12 W Main St", "12 Main St", SAME),
     ("1-3 Elm St", "1 Elm St", SAME),
-    ("1-3 Elm St", "3 Elm St", DIFFERENT),                 # a range is its first number
+    ("1-3 Elm St", "3 Elm St", SAME),                      # a building's range holds both its numbers
+    ("1-3 Elm St", "5 Elm St", DIFFERENT),                 # ... never the house past it
+    ("1-3 Elm St", "2 Elm St", DIFFERENT),                 # ... nor one across the street
     ("@SAMPLE SCHOOL", "12 Example Ave", DIFFERENT),
     ("@SAMPLE SCHOOL", "@OTHER SCHOOL", DIFFERENT),
     ("@SAMPLE SCHOOL", "@Sample School", SAME),
@@ -1488,7 +1490,7 @@ def test_a_feed_location_is_shown_and_said_as_its_street_part(tmp_path):
     rig.poll()
     a, b = rig.incidents()
     assert (a["address"], b["address"]) == ("12 Example Ave (Sample School)", "@ Sample Park")   # its place kept
-    assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 Example Ave"
+    assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12-14 Example Ave"
 
 
 def test_triggers_are_gentle_floor_cap_and_never_soon_after_a_poll(tmp_path):

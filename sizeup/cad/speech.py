@@ -2,6 +2,8 @@
 
     house numbers      5 "five", 15 "fifteen", 100 "one hundred", 209 "two oh nine",
                        169 "one sixty-nine", 1200 "twelve hundred", 4040 "forty forty"
+    a building's range "14-16 Sample Ave" -> "fourteen to sixteen Sample Ave", "149-51" -> "one forty-nine to one
+                       fifty-one" (sizeup/geo/houserange.py: never "fourteen minus sixteen"; "10-200" is no range)
     times              "Time out 15:13" -> "Time out fifteen thirteen" (15:00 "fifteen hundred",
                        07:30 "oh seven thirty")
     callsigns          "2398" / "23 98" -> "twenty-three ninety-eight"
@@ -25,6 +27,8 @@ forms (the timeline, the log); only the voice gets these words.
 from __future__ import annotations
 
 import re
+
+from sizeup.geo.houserange import find as find_ranges
 
 ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
         "sixteen seventeen eighteen nineteen").split()
@@ -130,9 +134,21 @@ def highways(text: str) -> str:
     return DIRECTION.sub(lambda m: BOUND[(m.group(1) or m.group(2)).upper()], t)
 
 
+def ranges(text: str) -> str:
+    """A building's range said as one: "14-16 Sample Ave" -> "fourteen to sixteen Sample Ave"."""
+    out, at = [], 0
+    for f in find_ranges(text):
+        if f.spoken:                                       # "14 to 16" already: the numbers are said as they come
+            continue
+        r = f.range
+        out += [text[at:f.start], f"{house(str(r.lo))} to {house(str(r.hi))}" + (f" {r.letter}" if r.letter else "")]
+        at = f.end
+    return "".join(out) + text[at:]
+
+
 def words(text: str, spoken: dict[str, str] | None = None) -> str:
     """The written dispatch as the voice should say it (see the module doc)."""
-    t = unit_codes(highways(text), spoken)
+    t = unit_codes(ranges(highways(text)), spoken)
     t = re.sub(r"(?<![\d:])\b([01]?\d|2[0-3]):([0-5]\d)\b(?!:\d)", lambda m: clock(m.group(1), m.group(2)), t)
     # A callsign written in pairs ("23 98", "77 05"): one number, said in pairs.
     t = re.sub(r"(?<![\d.])\b(\d{2}) (\d{2})\b(?![.:]\d| \d)", lambda m: house(m.group(1) + m.group(2)), t)
