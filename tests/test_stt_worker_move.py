@@ -210,12 +210,14 @@ def _load(path: Path, name: str):
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib (the installer writes worker.toml)")
 def test_the_installed_worker_takes_this_version(tmp_path, monkeypatch):
-    """The worker.py the PC runs (as f13acff2's installer pinned it; skipped where git hasn't that commit, as in CI's
-    shallow checkout), its own Updater with GitHub's fake serving this tree at the move's commit: it downloads the
+    """The worker.py the PC runs (as f13acff2's installer pinned it; skipped where git hasn't those commits, a shallow
+    checkout: CI fetches them), its own Updater with GitHub's fake serving this tree at the move's commit: it downloads the
     compatibility copy, the REAL self-check of this worker.py passes with the worker.toml that installer wrote, it
     swaps; then this version starts on it (boot), reaches the hub (confirm) and its next update uses the new path."""
     old = _installed_worker_py()
     if old is None:
+        # CI fetches both commits (.github/workflows/test.yml): there it must run
+        assert not os.environ.get("GITHUB_ACTIONS"), "CI must fetch f13acff2 and 39c4de4b for this test"
         pytest.skip("git has no f13acff2 here (a shallow checkout)")
     ps1 = _git_show(f"{PINNED_INSTALLER}:tools/stt_worker/install.ps1").decode()
     toml = re.search(r"^\$TomlStt = @'\n(.*?)\n'@$", ps1, re.S | re.M).group(1).replace("{{HUB_URL}}",

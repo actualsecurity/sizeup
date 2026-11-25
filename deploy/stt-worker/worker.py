@@ -1899,7 +1899,10 @@ LOG_SPOOL_MAX_FILES = 500                  # ... and this many batches: the olde
 LOG_SEND_A_TURN = 20                       # batches sent in one go, at most
 LOG_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)   # the hub unreachable / 5xx: waits in a row, then the last one
 LOG_NOT_THERE_S = 3600.0                   # a hub without the route (404, one from before it): asked again this often
-LOG_REJECT = (400, 413, 415, 422)          # the hub will never take this batch: deleted (counted), never sent again
+LOG_REJECT = (400, 413, 415, 422)          # with reason LOG_REJECTED (the hub's logs sink itself said so): the hub will
+LOG_REJECTED = "logs_rejected"             # never take this batch: deleted (counted), never sent again. Any other 4xx
+                                           # (a hub from before the route parses the gzip as JSON: 400): kept, later
+LOG_UNREADABLE_MAX = 5                     # a spool file that can't be read this many times in a row: deleted
 LOG_LEVELS = {"DEBUG": "debug", "INFO": "info", "WARNING": "warning", "ERROR": "error", "CRITICAL": "error"}
 
 # defence in depth: worker.log never holds a credential (Redact replaces the known values; nothing logs a header), and
@@ -1960,6 +1963,8 @@ class LogShip(logging.Handler):
                                                    timeout=20.0)
         self.dir = Path(cfg.state_dir) / "logspool"
         self._mu = threading.Lock()
+        self._spool_mu = threading.Lock()           # one spool at a time (the log thread's and the stop's)
+        self._unreadable = 0
         self._buf: list[list] = []                  # [ms, level, msg]
         self._buf_bytes = 0
         self._spooled_at = clock()
@@ -2005,6 +2010,10 @@ class LogShip(logging.Handler):
 
     def spool(self) -> bool:
         """What waits in memory to one batch file per LOG_BATCH_LINES. False (kept in memory) when it can't be written."""
+        with self._spool_mu:
+            return self._spool()
+
+    def _spool(self) -> bool:
         self._spooled_at = self.clock()
         while True:
             with self._mu:
@@ -2065,18 +2074,27 @@ class LogShip(logging.Handler):
             p = files[0]
             try:
                 data = p.read_bytes()
-            except OSError:
-                return "unreadable"
+                self._unreadable = 0
+            except OSError as e:
+                self._unreadable += 1
+                if self._unreadable >= LOG_UNREADABLE_MAX:          # (never one file in the way of all the others)
+                    self._unlink(p)
+                    self._unreadable = 0
+                    self.dropped += 1
+                    self._say(f"dropped {p.name}: can't read it ({e.strerror or e})", logging.WARNING)
+                    continue
+                return self._wait(LOG_RETRY_S[0], f"can't read {p.name}")
             try:
                 ans = self.hub.request("POST", LOGS_PATH, data=data, extra={"Content-Encoding": "gzip"})
             except HubError as e:
                 self.hub.close()
-                if e.status in LOG_REJECT:
+                if e.status in LOG_REJECT and e.reason == LOG_REJECTED:
                     self._unlink(p)
                     self.rejected += 1
                     self._say(f"rejected: hub said {e.status}", logging.WARNING)
                     continue
-                if e.status == 404:
+                if e.status == 404 or 400 <= e.status < 500 and e.status not in (401, 403, 429):
+                    # a hub without the route: 404, or 400 from one from before it (it reads the gzip as JSON)
                     return self._wait(LOG_NOT_THERE_S, "the hub doesn't take logs yet")
                 if e.refused:
                     return self._wait(self.cfg.unauthorized_retry_s, f"refused ({e.reason or e.status})")

@@ -261,7 +261,8 @@ def test_failures_back_off(tmp_path, shipped):
 
 
 def test_a_batch_the_hub_will_never_take_is_deleted_and_counted(tmp_path, shipped):
-    hub = FakeHub(W.HubError("hub said 400", 400), {"ok": True, "accepted": True})
+    """Only when the hub's logs sink itself refused it (reason logs_rejected, as WorkerLogs answers)."""
+    hub = FakeHub(W.HubError("hub said 400: bad gzip", 400, reason="logs_rejected"), {"ok": True, "accepted": True})
     ship = shipped(hub=hub)
     W.log.info("a")
     ship.spool()
@@ -270,6 +271,72 @@ def test_a_batch_the_hub_will_never_take_is_deleted_and_counted(tmp_path, shippe
     ship.send()
     assert ship.rejected == 1 and [b["lines"][0][2] for b in hub.batches] == ["a", "b"]
     assert not list(ship.dir.glob("*.json.gz"))
+
+
+def test_a_hub_from_before_the_route_never_costs_a_batch(tmp_path, shipped):
+    """A hub without the route reads the gzip body as JSON and answers 400 {"error": "bad request: UnicodeDecodeError"}
+    (no reason): the batches are kept and asked about again in an hour, not deleted."""
+    clock = Clock()
+    hub = FakeHub(W.HubError("hub said 400: bad request: UnicodeDecodeError", 400), {"ok": True, "accepted": True})
+    ship = shipped(hub=hub, clock=clock)
+    for x in ("a", "b"):
+        W.log.info(x)
+        ship.spool()
+    ship.send()
+    assert ship.rejected == 0 and len(hub.batches) == 1 and len(list(ship.dir.glob("*.json.gz"))) == 2
+    assert ship.state == "not shipped: the hub doesn't take logs yet" and ship.next_send == clock.t + W.LOG_NOT_THERE_S
+    clock.t += W.LOG_NOT_THERE_S
+    ship.send()
+    assert [b["lines"][0][2] for b in hub.batches] == ["a", "a", "b"] and not list(ship.dir.glob("*.json.gz"))
+
+
+def test_the_hubs_refusals_name_themselves():
+    wl = cwlogs.WorkerLogs(call=FakeCloudWatch(), log=lambda m: None)
+    for raw in (None, b"not gzip", gzip.compress(b"[]"), gzip.compress(b"{")):
+        code, ans = wl.ingest("gpu-1", raw, GZ)
+        assert code in W.LOG_REJECT and ans["reason"] == W.LOG_REJECTED == cwlogs.REJECTED
+
+
+def test_an_unreadable_batch_backs_off_then_goes(tmp_path, shipped, monkeypatch):
+    hub = FakeHub()
+    clock = Clock()
+    ship = shipped(hub=hub, clock=clock)
+    for x in ("stuck", "next"):
+        W.log.info(x)
+        ship.spool()
+    stuck = sorted(ship.dir.glob("*.json.gz"))[0]
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda p: (_ for _ in ()).throw(PermissionError(13, "in use"))
+                        if p == stuck else real(p))
+    for i in range(W.LOG_UNREADABLE_MAX - 1):
+        ship.send()
+        assert not hub.batches and ship.next_send == clock.t + W.LOG_RETRY_S[0]
+        clock.t = ship.next_send
+    ship.send()
+    assert [b["lines"][0][2] for b in hub.batches] == ["next"] and ship.dropped == 1 and not stuck.exists()
+
+
+def test_two_spools_at_once_neither_duplicate_nor_lose_a_line(tmp_path, shipped):
+    ship = shipped()
+    for i in range(3000):
+        W.log.info("line %d", i)
+    ts = [threading.Thread(target=ship.spool) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    got = [r[2] for p in sorted(ship.dir.glob("*.json.gz")) for r in json.loads(gzip.decompress(p.read_bytes()))["lines"]]
+    assert got == [f"line {i}" for i in range(3000)]
+
+
+def test_a_resent_batch_is_written_once():
+    cw = FakeCloudWatch({"/sizeup/stt-worker": 30})
+    wl = cwlogs.WorkerLogs(call=cw, log=lambda m: None)
+    raw = batch([[time.time() * 1000, "info", "once"]])
+    assert wl.ingest("gpu-1", raw, GZ)[1]["accepted"] and wl.ingest("gpu-1", raw, GZ)[1]["accepted"]
+    assert len(cw.streams[("/sizeup/stt-worker", "gpu-1")]) == 1
+    wl.ingest("gpu-2", raw, GZ)                                     # (another worker's batch of that name: its own)
+    assert len(cw.streams[("/sizeup/stt-worker", "gpu-2")]) == 1
 
 
 def test_the_spool_is_bounded_oldest_first(tmp_path, shipped, monkeypatch):

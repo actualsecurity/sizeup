@@ -511,6 +511,7 @@ WORKER_MAX_INFLATED = 4 * 1024 * 1024
 WORKER_MAX_LINES = 5000
 WORKER_SETUP = "the hub's task role needs the stt-worker-logs policy (deploy/stt-worker/README.md, Logs)"
 PERMISSION = ("AccessDeniedException", "NoCredentials", "UnrecognizedClientException")
+REJECTED = "logs_rejected"                    # a batch this hub will never take (worker.py LOG_REJECTED): deleted there
 
 
 class WorkerLogs:
@@ -543,6 +544,7 @@ class WorkerLogs:
         self.last_error = ""
         self._lock = threading.Lock()
         self._said = ""
+        self._done: dict[tuple[str, str], None] = {}   # (worker, batch) written lately: a resend isn't written twice
 
     def _retention_wanted(self) -> int:
         try:
@@ -593,22 +595,26 @@ class WorkerLogs:
     def ingest(self, wid: str, raw: bytes | None, headers) -> tuple[int, dict]:
         """A worker's batch: (HTTP status, answer). accepted: the worker may delete it."""
         if raw is None:
-            return 413, {"error": "too large"}
+            return 413, {"error": "too large", "reason": REJECTED}
         if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
             z = zlib.decompressobj(wbits=31)
             try:
                 raw = z.decompress(raw, WORKER_MAX_INFLATED)
             except zlib.error as e:
-                return 400, {"error": f"bad gzip: {e}"}
+                return 400, {"error": f"bad gzip: {e}", "reason": REJECTED}
             if z.unconsumed_tail:
-                return 413, {"error": "too large"}
+                return 413, {"error": "too large", "reason": REJECTED}
         try:
             d = json.loads(raw or b"{}")
         except ValueError:
-            return 400, {"error": "not JSON"}
+            return 400, {"error": "not JSON", "reason": REJECTED}
         if not isinstance(d, dict) or not isinstance(d.get("lines"), list) or len(d["lines"]) > WORKER_MAX_LINES:
-            return 400, {"error": f"{{v, worker, batch, lines: [[ms, level, msg]]}}, {WORKER_MAX_LINES} lines at most"}
+            return 400, {"error": f"{{v, worker, batch, lines: [[ms, level, msg]]}}, {WORKER_MAX_LINES} lines at most",
+                         "reason": REJECTED}
         answer = {"ok": True, "accepted": False}
+        key = (wid, str(d.get("batch") or "")[:80])
+        if key[1] and key in self._done:            # sent again after its answer was lost: written once
+            return 200, dict(answer, accepted=True, n=0, again=True)
         if self.configured is not True:
             self.check()
         if self.configured is not True:
@@ -625,6 +631,10 @@ class WorkerLogs:
                 return 200, dict(answer, retry_s=RETRY_S, reason=f"hub: not configured ({self.reason})")
             return 503, {"error": f"CloudWatch: {e.code}"}
         with self._lock:
+            if key[1]:
+                self._done[key] = None
+                while len(self._done) > 500:
+                    self._done.pop(next(iter(self._done)))
             day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             last = self.last.get(wid) or {}
             same = last.get("day") == day

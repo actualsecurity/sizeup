@@ -509,7 +509,8 @@ the worker token and its Cloudflare service token, the same Access application (
 - **How:** a gzipped batch every minute, through its own thread and connection, so a clip never waits for it. A batch
   is deleted on the PC only once the hub has taken it; until then it waits in `state\logspool` (5 MB at most) and is
   sent again, after a restart too. `worker.py status` shows the last shipment; so does Health (the Logs column).
-- **Off:** `log_ship = false` in `worker.toml`.
+- **Off:** `log_ship = false` in `worker.toml`. A `worker.py` from before this key refuses a `worker.toml` that has
+  it: take the line out before an `update rollback` to such a version or a **Pin** to one.
 
 **Admin, once (AWS):** the hub's task role needs to write the group. Until it may, Health shows
 `not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as always), and nothing else is
@@ -531,8 +532,10 @@ aws iam put-role-policy --role-name "$NAME-task" --policy-name stt-worker-logs \
 rm -rf "$work"
 ```
 
-`logs:DescribeLogGroups` comes from step 25's `station-logs` policy. The hub notices within 10 minutes; the workers
-send what they kept.
+`logs:DescribeLogGroups` comes from step 25's `station-logs` policy. All four actions are needed: without any one
+of them (the retention too) nothing is written and Health says `not shipped: permission`. The hub notices within 10
+minutes; the workers send what they kept. (`SIZEUP_STT_WORKER_LOG_GROUP` names another group: the policy must name
+that one.)
 
 ## Config
 
