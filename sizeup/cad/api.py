@@ -1510,7 +1510,11 @@ class CadApi:
                     said = lambda v: (", ".join(v) if isinstance(v, list)                      # noqa: E731
                                       else "default" if v in (None, "") else f"{v:g}" if isinstance(v, float) else str(v))
                     c.settings.note(op, "radios", f"stt_models/{key}/{f}", said(old.get(f)), said(new.get(f)))
-            return {"ok": True, "key": key, "channel": new, "models": c.stt_models.panel()}
+            models = c.stt_models.panel()
+            board = getattr(c, "stt_challenges", None)
+            if board is not None:
+                models["challenges"] = board()
+            return {"ok": True, "key": key, "channel": new, "models": models}
         if path == "/api/cad/stt-workers" and getattr(c, "stt_workers", None) is not None:
             from sizeup.cloud.sttworkers import WorkerError
             op = str(body.get("operator") or "")

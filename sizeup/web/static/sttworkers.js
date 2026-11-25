@@ -304,7 +304,7 @@ const SttWorkersCard = (() => {
   function channelsTable(m) {
     const t = el("table", "evtable");
     const hr = el("tr");
-    for (const h of ["Channel", "Model", "Context", "Call signs", ""]) hr.append(el("th", "", h));
+    for (const h of ["Channel", "Model", "Context", "Call signs", "Challenger", ""]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
     const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it";
@@ -319,7 +319,7 @@ const SttWorkersCard = (() => {
       const tdc = el("td", ""), tds = el("td", "");
       tdc.append(cs);
       tds.append(ci);
-      tr.append(el("td", "mono", key), mod, tdc, tds, el("td", ""));
+      tr.append(el("td", "mono", key), mod, tdc, tds, challengerCell(m, key, v), el("td", ""));
       t.tBodies[0].append(tr);
     }
     // a channel not listed yet: its key, then its context and call signs
@@ -344,9 +344,82 @@ const SttWorkersCard = (() => {
     tdc.append(cs);
     tds.append(ci);
     tda.append(add);
-    tr.append(tdk, el("td", "dim", "default"), tdc, tds, tda);
+    tr.append(tdk, el("td", "dim", "default"), tdc, tds, el("td", ""), tda);
     t.tBodies[0].append(tr);
     return t;
+  }
+
+  // a channel's challenger (sizeup/sttscore.py): a catalog model and its share of the channel's clips
+  function challengerCell(m, key, v) {
+    const td = el("td", "");
+    const s = el("select", "sm");
+    s.append(new Option("—", ""));
+    for (const c of m.catalog || []) if (c.id !== v.model) s.append(new Option(c.id, c.id));
+    s.value = v.challenger || "";
+    s.title = "Decodes a share of this channel's clips after its model, same context, only on an idle GPU; scored, "
+      + "never shown as the transcript";
+    s.setAttribute("aria-label", "Challenger");
+    const pct = el("input", "mono t");
+    pct.type = "number";
+    pct.min = "1";
+    pct.max = "100";
+    pct.step = "1";
+    pct.value = v.challenger ? String(v.pct || 10) : "";
+    pct.placeholder = "10";
+    pct.style.width = "4.5em";
+    pct.title = "% of the channel's clips";
+    pct.setAttribute("aria-label", "Challenger share, %");
+    pct.hidden = !v.challenger;
+    s.addEventListener("change", () => setChannel(key, { challenger: s.value || null },
+      s.value ? `${key}: challenger ${s.value}` : `${key}: no challenger`));
+    pct.addEventListener("change", () => setChannel(key, { pct: pct.value ? Number(pct.value) : null }, `${key}: ${pct.value || 10}%`));
+    td.append(s, pct);
+    return td;
+  }
+
+  // champion and challenger per channel (m.challenges: scores only, never a transcript); Promote (admin, audited)
+  function boardTable(m) {
+    const t = el("table", "evtable");
+    const hr = el("tr");
+    for (const h of ["Channel", "Champion", "Challenger", "n", "Champion", "Challenger", "Δ", "", ""]) hr.append(el("th", "", h));
+    t.append(el("thead"), el("tbody"));
+    t.tHead.append(hr);
+    const f = (x) => (x == null ? "—" : x.toFixed(3));
+    for (const b of m.challenges || []) {
+      const tr = el("tr");
+      const diff = el("td", "t", b.diff == null ? "—" : `${b.diff > 0 ? "+" : ""}${b.diff.toFixed(3)} ± ${(b.ci || 0).toFixed(3)}`);
+      diff.title = "Challenger - champion, 95% interval";
+      const v = el("td", b.verdict === "challenger better" ? "ok" : b.verdict === "champion better" ? "warn" : "dim",
+                   b.paused ? "paused" : b.verdict || "");
+      v.title = (b.promoted && b.promoted.at ? `Promoted ${when(b.promoted.at)}: watched (rolled back if it does worse)\n` : "")
+        + (b.rolled_back && b.rolled_back.at ? `Rolled back ${when(b.rolled_back.at)}: ${b.rolled_back.why || ""}\n` : "")
+        + `${b.samples} sampled, ${b.edits} corrected · ${b.norm}`;
+      const n = el("td", "t", String(b.n));
+      n.title = "Clips both sides were scored on";
+      const tda = el("td", "");
+      if (b.challenger) {
+        tda.append(btn("Promote", "sm", async () => {
+          if (!await UI.confirm(`${b.key}: make ${b.challenger} the model (${b.champion} goes on as the challenger)?`,
+                         { ok: "Promote", danger: false })) return;
+          promote(b.key);
+        }));
+      }
+      tr.append(el("td", "mono", b.key), el("td", "mono", b.champion || "—"),
+        el("td", "mono", b.challenger ? `${b.challenger} · ${b.pct}%` : "—"), n, el("td", "t", f(b.champ)),
+        el("td", "t", f(b.chall)), diff, v, tda);
+      t.tBodies[0].append(tr);
+    }
+    return t;
+  }
+
+  async function promote(key) {
+    msaid = "";
+    try {
+      const d = await post({ action: "promote", key });
+      if (last && d.models) last.models = d.models;
+      msaid = `${key}: promoted`;
+    } catch (e) { msaid = `${key}: ${e.message}`; }
+    renderModels(true);
   }
 
   // drawn again only when the panel changed (or after a save), never under a field being typed in
@@ -362,7 +435,7 @@ const SttWorkersCard = (() => {
     if (mcard.contains(document.activeElement) && /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) { mlater = true; return; }
     msig = sig;
     mlater = false;
-    mbody.replaceChildren(catalogTable(m), channelsTable(m));
+    mbody.replaceChildren(catalogTable(m), channelsTable(m), ...((m.challenges || []).length ? [boardTable(m)] : []));
   }
 
   function buildModels() {

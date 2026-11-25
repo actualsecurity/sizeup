@@ -127,12 +127,12 @@ def test_the_workers_models_and_each_channels_context_and_call_signs(site):
         assert cat.locator("tr", has_text=Q5).first.locator("td").nth(3).inner_text() == "rest"
         chans = m.locator("table").nth(1)
         fg1 = chans.locator("tr", has_text="FG1")
-        assert fg1.locator("input").input_value() == "Command" and fg1.locator("select").input_value() == "default"
-        fg1.locator("select").select_option("off")
+        assert fg1.locator("input").first.input_value() == "Command" and fg1.locator("select").first.input_value() == "default"
+        fg1.locator("select").first.select_option("off")
         until(pg, lambda: site.cad.stt_models.settings()["FG1"].get("context") == "off", "FG1 context off")
         fg1 = chans.locator("tr", has_text="FG1")
-        fg1.locator("input").fill("Command, Made-up Base")
-        fg1.locator("input").press("Tab")
+        fg1.locator("input").first.fill("Command, Made-up Base")
+        fg1.locator("input").first.press("Tab")
         until(pg, lambda: site.cad.stt_models.callsigns("FG1") == ["Command", "Made-up Base"], "FG1 call signs")
         # a channel not listed yet
         add = chans.locator("tr").last
@@ -143,8 +143,8 @@ def test_the_workers_models_and_each_channels_context_and_call_signs(site):
         chans.locator("td", has_text="South 2").wait_for()
         # a call sign that isn't one: said, nothing saved
         fg1 = chans.locator("tr", has_text="FG1")
-        fg1.locator("input").fill("Command, <b>")
-        fg1.locator("input").press("Tab")
+        fg1.locator("input").first.fill("Command, <b>")
+        fg1.locator("input").first.press("Tab")
         m.get_by_text("isn't a call sign").wait_for()
         assert site.cad.stt_models.callsigns("FG1") == ["Command", "Made-up Base"]
         if SHOTS:
@@ -186,6 +186,45 @@ def test_a_radios_hint_switch_shows_the_effective_state_and_sets_it(site):
         hq.click()                                                                  # on again: the default
         until(pg, lambda: r.get("mrrs", "9900501")["hint"] is None, "back to the default")
         assert r.hint_on(r.get("mrrs", "9900501"))
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_a_channels_challenger_its_board_and_promote(site):
+    from sizeup import sttscore
+    boards = []
+    site.cad.stt_challenges = lambda: boards
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/station/workers")
+        chans = pg.locator("#s-station-workers .stt-models table").nth(1)
+        tg = chans.locator("tr", has_text="tg:307")
+        tg.wait_for()
+        tg.locator("select").nth(1).select_option(QWEN)
+        until(pg, lambda: (site.cad.stt_models.challenger_for("tg:307") or ("",))[0] == QWEN, "a challenger set")
+        tg = chans.locator("tr", has_text="tg:307")
+        tg.locator("input[type=number]").fill("5")
+        tg.locator("input[type=number]").press("Tab")
+        until(pg, lambda: site.cad.stt_models.challenger_for("tg:307") == (QWEN, 5.0), "its share")
+        boards.append({"key": "tg:307", "champion": Q8, "challenger": QWEN, "pct": 5.0, "n": 42, "samples": 44,
+                       "champ": 0.612, "chall": 0.705, "diff": 0.093, "ci": 0.031, "verdict": "challenger better",
+                       "promoted": {}, "rolled_back": {}, "edits": 3, "norm": sttscore.NORM, "paused": False})
+        pg.reload()
+        board = pg.locator("#s-station-workers .stt-models table").nth(2)
+        row = board.locator("tr", has_text="tg:307")
+        row.wait_for()
+        assert row.locator("td").all_inner_texts()[:8] == ["tg:307", Q8, f"{QWEN} · 5%", "42", "0.612", "0.705",
+                                                           "+0.093 ± 0.031", "challenger better"]
+        pg.evaluate("document.activeElement && document.activeElement.blur()")
+        shot(pg, "#s-station-workers .stt-models", "sttworkers-challenger-board")
+        row.get_by_role("button", name="Promote").click()
+        pg.get_by_role("button", name="Promote").last.click()          # (the confirm dialog's)
+        until(pg, lambda: site.cad.stt_models.settings()["tg:307"].get("model") == QWEN, "promoted")
+        assert site.cad.stt_models.challenger_for("tg:307")[0] == Q8
+        audit = json.dumps(site.cad.settings.audit_log("radios"))
+        assert "stt_models/tg:307/challenger" in audit and "stt_models/tg:307/model" in audit
         assert pg.errors == []
     finally:
         browser.close()
