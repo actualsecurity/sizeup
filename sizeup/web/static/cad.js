@@ -589,6 +589,7 @@ function tick() {
   renderConn();
   const now = serverNow();
   for (const n of document.querySelectorAll("[data-since]")) sinceText(n, now);
+  if (window.Reminders) Reminders.tick();          // what has been left too long (reminders.js): touched only on a change
 }
 
 // ---- incidents: queue --------------------------------------------------------------------
@@ -639,6 +640,8 @@ function queueItem() {
 function fillQueueItem(li, inc) {
   const o = isOpen(inc) ? callSummary(inc.id) : null, live = callLive(o);
   li.className = `qi item ${inc.status}` + (inc.emergency ? "" : " nonemerg") + (inc.id === cad.sel ? " sel" : "") + (live.length ? " live" : "");
+  if (isOpen(inc)) { li.dataset.remInc = String(inc.id); li.dataset.remChip = ""; li.dataset.remSlot = ".qtl"; }   // reminders.js
+  else { delete li.dataset.remInc; delete li.dataset.remChip; delete li.dataset.rem; }
   if (inc.id === cad.sel) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
   // The top row: the number and the time, the time at the end. The type on its own line under them, the card's
   // width, wrapping as text does, the town's chip after it on that line (#231: all four on one row squeezed the type
@@ -689,6 +692,7 @@ function fillQueueItem(li, inc) {
     for (const a of on) {
       const c = statusChip(a.status, `${a.name} ${a.status}`);
       if (txNow(a.name)) c.classList.add("talking");
+      c.dataset.remUnit = a.name;                    // flashes with its reminder (reminders.js)
       chips.append(c);
     }
     li.append(chips);
@@ -850,6 +854,8 @@ function renderDetail() {
   setText($("#d-empty .big"), "No incident");
   if (!inc) return;
   const open = isOpen(inc);
+  const dh = $("#d-card > .card-head");                // the event's reminder flashes its head, "Pending 6 min" (reminders.js)
+  if (open) { if (dh.dataset.remInc !== String(inc.id)) dh.dataset.remInc = String(inc.id); } else { delete dh.dataset.remInc; delete dh.dataset.rem; $("#d-rem").replaceChildren(); }
   setText($("#d-number"), incTitle(inc));
   const es = eventStatus(inc);
   stBadge($("#d-status"), es.name, es.bg);
@@ -2105,9 +2111,11 @@ function renderOnUnits(inc) {
     fill: (li, a) => {
       li.className = "ou" + (a.cleared_at ? " cleared" : "");
       li._rig = a.cleared_at ? "" : a.name;
+      if (a.cleared_at) { delete li.dataset.remUnit; delete li.dataset.remChip; delete li.dataset.rem; }
+      else { li.dataset.remUnit = a.name; li.dataset.remChip = ""; }     // "DP 6 min" (reminders.js)
       const head = el("div", "ouh");
       head.append(el("b", "", a.name));
-      if (!a.cleared_at) head.append(statusChip(a.status, agencySet(a) ? statusLabel(a, a.status) : undefined));
+      if (!a.cleared_at) head.append(statusChip(a.status, agencySet(a) ? statusLabel(a, a.status) : undefined), el("span", "rem-slot"));
       const ac = window.DispatchMode && DispatchMode.unitChip(inc, a, autoDeps());      // set automatically (#311)
       if (ac) head.append(ac);
       const times = el("span", "dim small times");
@@ -3783,6 +3791,9 @@ function renderUnits() {
           + (talk ? (talk.ended ? " talked" : " talking") : "");
         li.style.setProperty("--st", unitStatus(u.status).bg || "#9AA3AD");     // Dispatch's rig tile: its status edge (#205)
         li._rig = u.name;
+        li.dataset.remUnit = u.name;                                          // "DP 6 min" (reminders.js)
+        li.dataset.remChip = "";
+        li.dataset.remSlot = ".ust";                                          // the chip after its status and time
         const head = el("div", "uh");
         const name = el("b", "un", u.name);
         name.title = [u.title, u.spoken && u.spoken !== u.name ? `said "${u.spoken}"` : "", u.department, u.spare ? "spare" : ""]
@@ -3822,6 +3833,7 @@ function renderUnits() {
     });
   });
   dropGoneHover();
+  if (window.Reminders) Reminders.dirty();        // (drawn outside render() too: a row opened, a board folded)
 }
 
 function renderUnitLog() {
@@ -4048,6 +4060,7 @@ function render() {
   renderOperators();
   syncVoice();
   for (const fn of cad.hooks) fn();
+  if (window.Reminders) Reminders.apply(true);     // (after the hooks: a row they drew again gets its flash back at once)
   roLockAll();
 }
 

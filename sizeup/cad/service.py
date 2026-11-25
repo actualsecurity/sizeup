@@ -39,6 +39,7 @@ from sizeup.cad.hydrants import Hydrants
 from sizeup.cad.footprints import Footprints
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
+from sizeup.cad.reminders import Reminders
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.oos import OosNotices
@@ -451,6 +452,8 @@ class Cad:
         # A call's building (sizeup/cad/footprints.py): the county footprint(s) its address, range or place name is, lit
         # whole on its maps; .gaz the gazetteer's address points (the app sets it)
         self.footprints = Footprints(self)
+        # Reminders (sizeup/cad/reminders.py): a call or unit left too long in one state flashes; an OK is shared
+        self.reminders = Reminders(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -490,12 +493,15 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
+            units = self.store.units()
             self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
-                "units": self.store.units(),
+                "units": units,
                 "incidents": incs,
+                # what has been left too long (Settings > Dispatch > Reminders): since / due by the hub's clock
+                "reminders": self.reminders.state(incs, units),
                 "closed_hours": CLOSED_HOURS,             # the queue's "Closed 24h" header
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,

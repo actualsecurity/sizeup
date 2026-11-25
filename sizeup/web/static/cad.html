@@ -364,13 +364,14 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
 
     <div id="d-body" hidden>
       <div id="d-card" class="card inc">
-        <div class="card-head">
+        <div class="card-head" data-rem-chip>
           <button id="d-back" type="button" class="sm" title="Overview (G O)"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-back"/></svg>Overview</button>
           <span id="d-number" class="number"></span>
           <span id="d-status" class="st-badge"></span>
           <span id="d-class" class="st-badge"></span>
           <span id="d-joint" class="st-badge" hidden title="Joint response: their units first"></span>
           <span id="d-scope" class="st-badge" hidden></span>
+          <span id="d-rem" class="rem-slot"></span>
           <span id="d-source" class="dim"></span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
@@ -865,6 +866,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/styleguide.js"></script>
 <script src="/static/logs.js"></script>
 <script src="/static/profile.js"></script>
+<script src="/static/reminders.js"></script>
 <!-- /bundle -->
 </body>
 </html>
