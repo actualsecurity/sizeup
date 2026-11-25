@@ -309,3 +309,11 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
         w.close()
         hub.close()
         fake.close()
+
+
+def test_a_context_list_read_back_is_caught():
+    ctx = ["Engine 60", "Ladder 31", "60 Control", "Main Street"]
+    assert sttmodels.context_echo("Engine 60, Ladder 31, 60 Control, Main Street.", ctx)
+    assert not sttmodels.context_echo("Engine 60 responding to Main Street.", ctx)
+    assert not sttmodels.context_echo("60 Control, Ladder 31 on scene, nothing showing, investigating.", ctx)
+    assert not sttmodels.context_echo("Engine 60, Ladder 31.", [])
