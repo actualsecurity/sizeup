@@ -127,7 +127,7 @@ def test_the_catalog_comes_only_from_main_with_the_hubs_hash():
         return 200, {}, body
 
     assert W.download_catalog(commit, sha(body), fetch, now=0) == body
-    assert calls[-1] == (W.GITHUB_RAW, f"/actualsecurity/sizeup/{commit}/tools/stt_worker/pins.json")
+    assert calls[-1] == (W.GITHUB_RAW, f"/actualsecurity/sizeup/{commit}/tools/stt_worker/models.json")
     with pytest.raises(W.UpdateError, match="hash"):
         W.download_catalog(commit, "0" * 64, fetch, now=0)
 
