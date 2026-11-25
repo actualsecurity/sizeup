@@ -361,10 +361,12 @@ def test_labels_in_the_activity_log_and_the_event_log(cad_clock):
 def test_a_late_edit_dispatches_nothing_and_puts_no_unit_back(cad_clock):
     cad, clock = cad_clock
     iid = dispatched(cad, clock, "E60")
-    n_disp, voices = len(cad.store.full(iid)["dispatches"]), len(cad.store.pending_voices())
+    assert cad.voice.wait(60) and cad.store.pending_voices() == []    # its voice done first, not mid-count (#426, #870)
+    n_disp, put, queued = len(cad.store.full(iid)["dispatches"]), cad.voice.put, []
+    cad.voice.put = lambda job: queued.append(job) or put(job)
     cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
     cad.update(iid, {"type": "STRU", "subtype": "", "quiet": True, "operator": "JD"})
-    assert len(cad.store.full(iid)["dispatches"]) == n_disp and len(cad.store.pending_voices()) == voices
+    assert len(cad.store.full(iid)["dispatches"]) == n_disp and queued == [] and cad.store.pending_voices() == []
     assert by_name(cad, "E60")["incident_id"] is None and status(cad, iid) == "closed"
 
 
