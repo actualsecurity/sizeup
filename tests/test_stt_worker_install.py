@@ -99,6 +99,13 @@ def test_install_ps1_is_ascii_and_kept_byte_for_byte():
     assert re.search(r"^tools/stt_worker/install\.ps1 -text$", attrs, re.M)
 
 
+def test_no_drive_qualified_variable_in_a_string():
+    """"$name: x" is a parse error in PowerShell (a drive-qualified variable): it must be "${name}: x"."""
+    bad = [(i, line) for i, line in enumerate(_ps1().splitlines(), 1)
+           if re.search(r"\$(?!(env|script|global|using):)[A-Za-z_]\w*:", line)]
+    assert not bad, bad
+
+
 def test_the_token_shape_is_the_workers():
     shape = _ps_string("TokenShape")
     assert shape == "^" + W.TOKEN.pattern.replace("(", "").replace(")", "") + "$"   # the worker's, without its groups

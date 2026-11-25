@@ -11,7 +11,8 @@
   - The secrets are read hidden (Read-Host -AsSecureString) and stored only as user environment variables, as in the
     README. They are never printed, logged or written anywhere else.
   - whisper-server and llama-server listen on 127.0.0.1 only.
-  - Safe to run again: what is already there with the pinned hash is kept, and nothing is replaced without asking.
+  - Safe to run again: what is already there with the pinned hash is kept. It asks before it replaces worker.toml, a
+    secret, the task, a self-updated worker.py or a whisper/llama folder it didn't install.
 
   Windows PowerShell 5.1 or PowerShell 7. Run it in an ordinary (not elevated) window as the user who games on the PC.
 
@@ -123,6 +124,9 @@ if ($PSVersionTable.PSEdition -eq 'Core') { $OnWindows = [bool](Get-Variable -Na
 if ($env:LOCALAPPDATA) { $D = Join-Path $env:LOCALAPPDATA 'sizeup-stt' }
 elseif ($DryRun) { $D = Join-Path $HOME 'AppData/Local/sizeup-stt' }
 else { Write-Host 'STOPPED: %LOCALAPPDATA% is not set (this installer is for Windows).' -ForegroundColor Red; exit 1 }
+# the secrets stay out of this process's environment (and so out of every program it starts) until the check
+foreach ($n in $SecretNames) { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
+$script:TaskDisabled = $false
 $Toml = Join-Path $D 'worker.toml'
 $WorkerPy = Join-Path $D 'worker.py'
 $StateDir = Join-Path $D 'state'
@@ -187,6 +191,9 @@ function Receive-File([string]$url, [string]$out, [long]$max) {
     $client = New-Object System.Net.Http.HttpClient
     $client.Timeout = [TimeSpan]::FromHours(12)
     $client.DefaultRequestHeaders.UserAgent.ParseAdd('sizeup-stt-install/1')
+    $r = $null
+    $inStream = $null
+    $fs = $null
     try {
         $r = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
         if (-not $r.IsSuccessStatusCode) { throw "HTTP $([int]$r.StatusCode) from $(([Uri]$url).Host)" }
@@ -197,7 +204,11 @@ function Receive-File([string]$url, [string]$out, [long]$max) {
             $total = [long]0
             $stepBytes = [long][Math]::Max($max / 10, 1)
             $next = $stepBytes
-            while (($n = $inStream.Read($buf, 0, $buf.Length)) -gt 0) {
+            while ($true) {
+                $read = $inStream.ReadAsync($buf, 0, $buf.Length)
+                if (-not $read.Wait([TimeSpan]::FromMinutes(2))) { throw 'the download stalled (nothing for 2 minutes)' }
+                $n = $read.Result
+                if ($n -le 0) { break }
                 $total += $n
                 if ($total -gt $max) { throw "the server sent more than the pinned $max bytes" }
                 $fs.Write($buf, 0, $n)
@@ -206,8 +217,13 @@ function Receive-File([string]$url, [string]$out, [long]$max) {
                     $next += $stepBytes
                 }
             }
-        } finally { $fs.Dispose(); $inStream.Dispose() }
-    } finally { $client.Dispose() }
+        } finally { }
+    } finally {
+        if ($fs) { $fs.Dispose() }
+        if ($inStream) { $inStream.Dispose() }
+        if ($r) { $r.Dispose() }
+        $client.Dispose()
+    }
 }
 
 # $dest stays when it already is the pinned file; else a download to $dest.partial, checked, then moved into place
@@ -224,6 +240,11 @@ function Save-Pinned($pin, [string]$dest) {
     }
     if ($DryRun) { Would "download $($pin.url) ($(Format-Size $size)) -> $dest, SHA-256 must be $want"; return }
     $tmp = "$dest.partial"
+    if ((Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -eq $size -and (Get-Sha256 $tmp) -eq $want) {
+        Move-Item -LiteralPath $tmp -Destination $dest -Force
+        Ok "$name (an earlier run's download, SHA-256 $want)"
+        return
+    }
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     Say "  downloading $name ($(Format-Size $size)) from $(([Uri]$pin.url).Host) ..."
     try {
@@ -242,7 +263,8 @@ function Save-Pinned($pin, [string]$dest) {
         Remove-Item -LiteralPath $tmp -Force
         Fail "${name}: SHA-256 $got is not the pinned $want. The download was deleted and nothing was installed from it. Don't use a copy from elsewhere; tell the admin if it happens again."
     }
-    Move-Item -LiteralPath $tmp -Destination $dest -Force
+    try { Move-Item -LiteralPath $tmp -Destination $dest -Force }
+    catch { Fail "${name}: checked, but it couldn't replace $dest ($($_.Exception.Message)). Close what uses it and run this again (the checked download is kept)." }
     Ok "$name (SHA-256 $want)"
 }
 
@@ -265,15 +287,27 @@ function Expand-Checked([string]$zip, [string]$dir) {
 
 # pinned zips unpacked into $dir; $dir\.sizeup-pins names the zips' hashes and the program's own, so a second run
 # keeps a folder that is still what the pins made
-function Install-Zips([string]$label, [object[]]$zipPins, [string]$dir, [string]$exe) {
+function Test-ZipsInstalled([object[]]$zipPins, [string]$dir, [string]$exe) {
+    $marker = Join-Path $dir '.sizeup-pins'
+    $exePath = Join-Path $dir $exe
+    if (-not ((Test-Path -LiteralPath $exePath) -and (Test-Path -LiteralPath $marker))) { return $false }
+    $zipHashes = ($zipPins | ForEach-Object { ([string]$_.sha256).ToUpperInvariant() }) -join ','
+    return (([IO.File]::ReadAllText($marker)).Trim() -eq "$zipHashes|$(Get-Sha256 $exePath)")
+}
+
+# a folder there that this script didn't make (a README install by hand, an own build): replace it only if the admin says so
+function Ask-KeepFolder([object[]]$zipPins, [string]$dir, [string]$exe) {
+    if (-not (Test-Path -LiteralPath (Join-Path $dir $exe))) { return $false }
+    if (Test-Path -LiteralPath (Join-Path $dir '.sizeup-pins')) { return $false }    # ours: updated to the pins if they changed
+    return (Ask-YesNo "$dir\$exe is there but this script didn't install it. Keep it as it is?" $true)
+}
+
+function Install-Zips([string]$label, [object[]]$zipPins, [string]$dir, [string]$exe, [bool]$keep) {
+    if ($keep) { Ok "keeping $dir as it is"; return }
     $marker = Join-Path $dir '.sizeup-pins'
     $exePath = Join-Path $dir $exe
     $zipHashes = ($zipPins | ForEach-Object { ([string]$_.sha256).ToUpperInvariant() }) -join ','
-    if ((Test-Path -LiteralPath $exePath) -and (Test-Path -LiteralPath $marker)) {
-        $was = ([IO.File]::ReadAllText($marker)).Trim()
-        if ($was -eq "$zipHashes|$(Get-Sha256 $exePath)") { Ok "$label already installed ($exe)"; return }
-        Warn "$label is there but isn't what the pins make: installing it again"
-    }
+    if (Test-ZipsInstalled $zipPins $dir $exe) { Ok "$label already installed ($exe)"; return }
     $zips = @()
     $i = 0
     foreach ($p in $zipPins) {
@@ -328,7 +362,7 @@ function Read-Secret([string]$name, [string]$shape, [string]$hint) {
                 return
             }
         } else {
-            Warn "$name is set but doesn't look like $hint: enter it again"
+            Warn "$name is set but doesn't look like ${hint}: enter it again"
         }
     }
     $have = $null
@@ -360,12 +394,23 @@ function Test-Port([int]$port) {
 }
 
 # a server for the check, on 127.0.0.1, started without the secrets in its environment (README step 6)
-function Start-Loopback([string]$exe, [string]$argLine, [string]$logName) {
-    foreach ($n in $SecretNames) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue }
+function Start-Loopback([string]$exe, [string]$argLine, [string]$logName, [string]$apiKey) {
+    foreach ($n in $SecretNames) { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
     New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     $out = Join-Path $StateDir "install-check-$logName.log"
-    return Start-Process -FilePath $exe -ArgumentList $argLine -WorkingDirectory $D -NoNewWindow -PassThru `
-        -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+    # llama-server's key goes in its environment (as the worker does), never on its command line
+    if ($apiKey) { [Environment]::SetEnvironmentVariable('LLAMA_API_KEY', $apiKey, 'Process') }
+    try {
+        return Start-Process -FilePath $exe -ArgumentList $argLine -WorkingDirectory $D -NoNewWindow -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+    } finally { [Environment]::SetEnvironmentVariable('LLAMA_API_KEY', $null, 'Process') }
+}
+
+function New-Key {
+    $b = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+    return (($b | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
 function Wait-Ready($proc, [scriptblock]$ready, [int]$seconds, [string]$label) {
@@ -395,28 +440,32 @@ function Invoke-Check([string]$python, [bool]$withLlm) {
         }
         if (-not (Test-Port 8179)) {
             Say '  starting whisper-server on 127.0.0.1:8179 ...'
-            $w = Start-Loopback (Join-Path $D 'whisper\Release\whisper-server.exe') $WhisperArgs 'whisper-server'
+            $w = Start-Loopback (Join-Path $D 'whisper\Release\whisper-server.exe') $WhisperArgs 'whisper-server' ''
             $procs += $w
             [void](Wait-Ready $w { Test-Port 8179 } 120 'whisper-server')
         }
-        if ($withLlm -and -not (Test-Port 8180)) {
+        if ($withLlm -and -not (Test-Port 8180) -and (Test-Path -LiteralPath (Join-Path $D 'llama\llama-server.exe'))) {
             Say '  starting llama-server on 127.0.0.1:8180 (loading the model takes a while) ...'
-            $l = Start-Loopback (Join-Path $D 'llama\llama-server.exe') $LlamaArgs 'llama-server'
+            # `check` sends the key in state\llm-key (the running worker's; the worker writes its own when it starts)
+            $key = New-Key
+            [IO.File]::WriteAllText((Join-Path $StateDir 'llm-key'), $key)
+            $l = Start-Loopback (Join-Path $D 'llama\llama-server.exe') $LlamaArgs 'llama-server' $key
+            $key = $null
             $procs += $l
             [void](Wait-Ready $l {
                     try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri 'http://127.0.0.1:8180/health').StatusCode -eq 200 } catch { $false }
                 } 300 'llama-server')
         }
         # the worker reads the secrets from its environment: this process's, from the user variables just stored
+        # (.NET, not Set-Item: PowerShell module logging records cmdlet parameters)
         foreach ($n in $SecretNames) {
-            $val = [Environment]::GetEnvironmentVariable($n, 'User')
-            if ($val) { Set-Item -LiteralPath "Env:$n" -Value $val }
-            $val = $null
+            [Environment]::SetEnvironmentVariable($n, [Environment]::GetEnvironmentVariable($n, 'User'), 'Process')
         }
         Say "  py worker.py check:"
         Invoke-Quiet { & $python $WorkerPy check -c $Toml 2>&1 } | ForEach-Object { Say "    $_" }
         return ($LASTEXITCODE -eq 0)
     } finally {
+        foreach ($n in $SecretNames) { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
         foreach ($p in $procs) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     }
 }
@@ -424,10 +473,14 @@ function Invoke-Check([string]$python, [bool]$withLlm) {
 # the worker task and the servers it started from this folder: stopped before files change or the check runs
 function Stop-Ours {
     $t = Get-Task
-    if ($t -and $t.State -eq 'Running') {
-        if ($DryRun) { Would "stop the running task $TaskName (started again at the end)"; return }
-        Stop-ScheduledTask -TaskName $TaskName
-        Say "  stopped the running task $TaskName (it is started again at the end)"
+    if ($t) {
+        if ($DryRun) { Would "disable and stop the task $TaskName while files change (enabled and started again at the end)"; return }
+        try {
+            Disable-ScheduledTask -TaskName $TaskName | Out-Null
+            $script:TaskDisabled = $true
+        } catch { Warn "couldn't disable the task $TaskName ($($_.Exception.Message)): its 5-minute trigger may start the worker during the install" }
+        if ($t.State -eq 'Running') { Stop-ScheduledTask -TaskName $TaskName }
+        Say "  the task $TaskName is off while files change (on again at the end)"
         Start-Sleep -Seconds 2
     }
     if ($DryRun -or -not $OnWindows) { return }
@@ -455,10 +508,10 @@ function Invoke-Uninstall {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Ok "task $TaskName removed"
     }
-    Stop-Ours
     Get-CimInstance Win32_Process -Filter "Name like 'python%'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -and $_.CommandLine.Contains($WorkerPy) } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Stop-Ours
     if (Test-Path -LiteralPath $D) {
         Start-Sleep -Seconds 1
         Remove-Item -LiteralPath $D -Recurse -Force
@@ -592,6 +645,10 @@ function Invoke-Install {
         }
     }
 
+    $keepWhisper = Ask-KeepFolder @($Art.whisper_zip) (Join-Path $D 'whisper') 'Release\whisper-server.exe'
+    $keepLlama = $false
+    if ($withLlm) { $keepLlama = Ask-KeepFolder @($Art.llama_zip, $Art.llama_cudart_zip) (Join-Path $D 'llama') 'llama-server.exe' }
+
     $task = Get-Task
     $writeTask = $true
     if ($task) { $writeTask = Ask-YesNo "The task $TaskName exists. Replace it with the README's?" $true }
@@ -602,11 +659,11 @@ function Invoke-Install {
     else { New-Item -ItemType Directory -Path (Join-Path $D 'models') -Force | Out-Null; Ok $D }
 
     Step '5/9 whisper.cpp b5454 (CUDA) and the model'
-    Install-Zips 'whisper' @($Art.whisper_zip) (Join-Path $D 'whisper') 'Release\whisper-server.exe'
+    Install-Zips 'whisper' @($Art.whisper_zip) (Join-Path $D 'whisper') 'Release\whisper-server.exe' $keepWhisper
     Save-Pinned $Art.whisper_model (Join-Path $D 'models\ggml-large-v3-turbo-q5_0.bin')
     if ($withLlm) {
         Step '5b/9 llama.cpp b12359 (CUDA) and Qwen3-8B'
-        Install-Zips 'llama' @($Art.llama_zip, $Art.llama_cudart_zip) (Join-Path $D 'llama') 'llama-server.exe'
+        Install-Zips 'llama' @($Art.llama_zip, $Art.llama_cudart_zip) (Join-Path $D 'llama') 'llama-server.exe' $keepLlama
         Save-Pinned $Art.qwen3_8b (Join-Path $D 'models\Qwen3-8B-Q4_K_M.gguf')
     }
 
@@ -636,7 +693,13 @@ function Invoke-Install {
     }
 
     Step '7/9 Check (whisper-server on 127.0.0.1, then worker.py check)'
-    $checked = Invoke-Check $Python $withLlm
+    # the check tries llama-server when worker.toml has llm_url (a kept worker.toml decides, not the answer above)
+    $checkLlm = $withLlm
+    if ($tomlAction -eq 'keep' -and -not $DryRun) { $checkLlm = [bool](Select-String -LiteralPath $Toml -Pattern '^\s*llm_url' -Quiet) }
+    if ($checkLlm -and -not $DryRun -and -not (Test-Path -LiteralPath (Join-Path $D 'llama\llama-server.exe'))) {
+        Warn 'worker.toml has llm_url but llama-server.exe is not installed (run this again and answer y to the local AI model)'
+    }
+    $checked = Invoke-Check $Python $checkLlm
     if ($checked) { Ok 'check passed' }
     else {
         Warn "the check failed: README 'Troubleshooting'. A wrong token or Cloudflare setting can be fixed later (run this again); the task retries by itself."
@@ -672,6 +735,7 @@ function Invoke-Install {
     } else { Ok "keeping the task $TaskName" }
     if ($DryRun) { Would "start the task $TaskName and show its state" }
     else {
+        if ($script:TaskDisabled) { Enable-ScheduledTask -TaskName $TaskName | Out-Null; $script:TaskDisabled = $false }
         Start-ScheduledTask -TaskName $TaskName
         Start-Sleep -Seconds 8
         $t = Get-ScheduledTask -TaskName $TaskName
@@ -710,5 +774,11 @@ try {
     Write-Host ''
     Write-Host "STOPPED: $($_.Exception.Message) (install.ps1 line $($_.InvocationInfo.ScriptLineNumber))" -ForegroundColor Red
     exit 1
+} finally {
+    # a task this run turned off (Stop-Ours) is on again, also when the install stopped early (Fail exits through here)
+    if ($script:TaskDisabled) {
+        try { Enable-ScheduledTask -TaskName $TaskName | Out-Null; Write-Host "  the task $TaskName is on again" } catch { }
+    }
+    foreach ($n in $SecretNames) { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
 }
 exit 0
