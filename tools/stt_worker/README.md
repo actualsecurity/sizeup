@@ -163,8 +163,8 @@ For the first install, `worker.py` is pinned to a commit. Check its hash after t
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/39c4de4b155d1a03db14168c66dcb57954f0ae12/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq 'DF31E5B282749F2AEE67C4C0403672133AE6CBDFF4D8068F27BD04F68C9D01A2'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/2d43243e463390e2a544ced00db3745730965093/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '7D4DCBEA8F6C5CC95C9CEAC0898077FC92618A2C18ED45CE4550B5547F243340'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -449,10 +449,15 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   gets what is left: once a model that needs its room is downloaded and ready to start, the worker stops llama-server
   (the LLM) between its jobs and Health shows `llm: gave its VRAM to the speech models`. On a 12 GB card the primary,
   Qwen3-ASR and the airband model (about 7 GB) leave no room for Qwen3-8B (6 GB).
-- **Only when idle:** downloads wait while gaming or paused (a stopped download resumes). A server starts or stops
-  only while the worker holds no clip, one at a time. A new server must answer a test decode (a second of silence)
-  within 3 minutes; else it is stopped and its hash marked bad for 6 hours (`state\models.json`). A new version of a
-  model that runs is downloaded beside it; the old one runs until the new one is ready.
+- **Only when idle:** downloads wait while gaming or paused (a stopped download resumes from its `.part`). A server
+  starts or stops only while the worker holds no clip, one at a time; a server a clip is being decoded on is never
+  stopped by the models thread. A new server must answer a test decode (a second of silence) within 3 minutes; else
+  it is stopped and its hash marked bad for 6 hours (`state\models.json`). A new version of a model that runs is
+  downloaded beside it; once it is ready it takes the old one's place, and the old files are kept: if the new one
+  doesn't answer, the old version runs again. A ready server that exits is started again later (not marked bad).
+- **Ports:** 8181 on, never `whisper_url`'s or `llm_url`'s; one another program holds is skipped. Each model's server
+  output is in `state\model-<id>.log`. These servers listen on 127.0.0.1 only; whisper-server answers any web page
+  there, as the primary does (each llama-server has its own key).
 - **Gaming:** the same rule as whisper-server: after `gaming_stop_whisper_min` of gaming the worker stops them all and
   starts them again when gaming ends.
 - **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
