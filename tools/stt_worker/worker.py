@@ -2179,9 +2179,14 @@ class AsrCall:
         if r.status != 200:
             raise WhisperError(f"llama-server said {r.status}")
         try:
-            content = json.loads(data)["choices"][0]["message"]["content"]
+            msg = json.loads(data)["choices"][0]["message"]
+            content, said = msg["content"], str(msg.get("reasoning_content") or "")
         except (ValueError, KeyError, IndexError, TypeError):
             raise WhisperError("llama-server sent something that isn't a chat completion") from None
+        # (llama-server moves Qwen3-ASR's "language English" ahead of <asr_text> into reasoning_content; "language
+        # None": no speech, whatever the content says. Without that parsing the tag is in the content: cut off.)
+        if re.match(r"\s*language\s+none\b", said, re.I):
+            return {"text": "", "segments": []}
         text = ASR_TAG.sub("", str(content or ""))
         return {"text": " ".join(text.split()), "segments": []}
 

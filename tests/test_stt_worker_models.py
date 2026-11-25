@@ -431,6 +431,7 @@ class FakeAsr:
     def __init__(self, text="language English<asr_text>Engine 60 responding."):
         self.requests: list = []
         self.text = text
+        self.reasoning = ""
         asr = self
 
         class H(BaseHTTPRequestHandler):
@@ -442,7 +443,10 @@ class FakeAsr:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
                 asr.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
-                data = json.dumps({"choices": [{"message": {"role": "assistant", "content": asr.text}}]}).encode()
+                msg = {"role": "assistant", "content": asr.text}
+                if asr.reasoning:
+                    msg["reasoning_content"] = asr.reasoning
+                data = json.dumps({"choices": [{"message": msg}]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -511,3 +515,16 @@ def _claim_extra(hub: FakeHub) -> None:
                     doc["job"].update(lv["job"].get("extra") or {})
         return send(req, status, doc, headers)
     hub.send = send_
+
+
+def test_an_asr_models_no_speech_is_no_text():
+    asr = FakeAsr(text="um.")
+    try:
+        e = W.check_catalog(two_models())["asr-test"]
+        s = W.ModelServer(e, {}, asr.port, proc=None, timeout_s=10)
+        out = W.AsrCall(s, tone_wav(1.5), ["Engine 60"], 10).run()
+        assert out["text"] == "um."
+        asr.reasoning = "language None"
+        assert W.AsrCall(s, tone_wav(1.5), [], 10).run() == {"text": "", "segments": []}
+    finally:
+        asr.stop()
