@@ -309,7 +309,7 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 // everyone's), and without what moves with the calls and the radio (S_LIVE_KEYS: a list item's "used 12×" and "3 now",
 // a unit's status and its call, the clips and bytes kept per channel, the cameras streaming). Those redraw Lists and
 // Units, which show them on every row (S_LIVE); in System their cards are updated in place (sRefresh).
-const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch",
+const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch", reminders: "dispatch",
   operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
   system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
   premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system", feed_types: "lists" };
@@ -1867,8 +1867,68 @@ function sDispatch(panel) {
     d.eta ? sEta(d.eta) : null,
     sCard(sCardHead("Transmit", "", sHelp(`${d.transmit.note}. Read-only here.`)),
       el("span", "pill tx-off", d.transmit.enabled ? "Transmit on" : "Transmit off"), el("p", "dim small", "No radio interface")),
-    d.weather_speak ? sWeatherSpeak(d.weather_speak) : null);
+    d.weather_speak ? sWeatherSpeak(d.weather_speak) : null,
+    S.data.reminders ? sReminders(S.data.reminders) : null);
   sPreview();
+}
+
+// What flashes when a call or a unit is left too long (sizeup/cad/reminders.py, reminders.js): each rule on or off and its
+// minutes, which units the unit rules watch, how long an OK quiets one. For everyone, by the hub's clock.
+const REM_TIPS = {
+  pending: "An emergency event accepted with no unit on it (or its last unit cleared)",
+  dispatched: "A unit in the dispatched status that has not gone responding or on location",
+  queued: "A page from 60 Control not yet accepted",
+  onscene: "A unit on location with no status change (a welfare check)",
+  until: "An open event past its Until",
+};
+function sReminders(r) {
+  const rows = el("div", "s-eta");
+  const reset = (item, label, shown) => {
+    if (!item.edited) return null;
+    const b = sBtn("Reset", `Default: ${shown}`, () => sPost("reminders", { action: "reset", key: item.key }, `${label} reset`));
+    b.setAttribute("aria-label", `Reset ${label}: ${typeof item.default === "boolean" ? "on" : "minutes"}`);
+    return b;
+  };
+  const line = (label, ctl, items, tip) => {
+    const row = el("div", "row");
+    const l = el("span", "s-eta-l", label);
+    if (tip) l.title = tip;
+    row.append(l, ...ctl, sState(items.some((x) => x.edited) ? "edited" : "default"), el("span", "spacer"),
+      ...items.map((x) => reset(x, label, typeof x.default === "boolean" ? (x.default ? "on" : "off") : `${x.default} min`)).filter(Boolean));
+    return row;
+  };
+  const minutes = (item, label) => {
+    const i = el("input", "s-num");
+    i.type = "number"; i.min = String(item.lo); i.max = String(item.hi); i.step = "1";
+    i.value = String(item.value);
+    i.setAttribute("aria-label", `${label}: minutes`);
+    i.addEventListener("change", () => sPost("reminders", { action: "set", key: item.key, value: Number(i.value) }, `${label}: ${i.value} min`));
+    const w = el("span", "row");
+    w.append(i, el("span", "dim small", "min"));
+    return w;
+  };
+  for (const x of r.rules) {
+    const [lab, cb] = sCheck("On", x.on.value, REM_TIPS[x.rule] || "");
+    cb.setAttribute("aria-label", `${x.label}: on`);
+    cb.addEventListener("change", () => sPost("reminders", { action: "set", key: x.on.key, value: cb.checked },
+      `${x.label}: ${cb.checked ? "on" : "off"}`));
+    rows.append(line(x.label, [lab, minutes(x.min, x.label)], [x.on, x.min], REM_TIPS[x.rule]));
+  }
+  const u = r.units;
+  rows.append(line("Units", [sSelect(u.choices, u.value, (v) => sPost("reminders", { action: "set", key: "units", value: v },
+    `Units: ${(u.choices.find((c) => c[0] === v) || [v, v])[1]}`), "Units")], [u],
+  "Which units the two unit rules watch. Third party: keyholders, utilities, police, with their Dispatch other (DO)"));
+  rows.append(line("OK quiets", [minutes(r.snooze_min, "OK quiets")], [r.snooze_min],
+    "An OK (a click on the reminder) quiets it this long, on every screen"));
+  const on = r.rules.filter((x) => x.on.value).length;
+  const edited = r.rules.some((x) => x.on.edited || x.min.edited) || u.edited || r.snooze_min.edited;
+  return sCard(sCardHead("Reminders", on ? `${on} on` : "off",
+    sHelp("A call or a unit left too long in one state flashes on every console, the Overview map and the wall board, "
+      + "timed by the hub's clock from when the state began. Clicking it (or its chip) is an OK: quiet for everyone for the "
+      + "set minutes, written on the event's timeline. It stops by itself when the state changes."),
+    edited ? sBtn("Reset all", "", () => sAsk("Reset the reminders to their defaults?",
+      () => sPost("reminders", { action: "reset_section" }, "Reminders reset"), "Reset"), "danger-quiet") : null),
+  rows);
 }
 
 // A National Weather Service warning said once by the dispatch voice (weather.js, #132): played where a console is

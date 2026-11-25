@@ -18,10 +18,11 @@ config.toml
 *.sqlite-wal
 tests/
 tools/
-!tools/stt_worker/worker.py
-!tools/stt_worker/models.json
 docs/
 deploy/station/
+deploy/stt-worker/*
+!deploy/stt-worker/worker.py
+!deploy/stt-worker/models.json
 deploy/trunk-recorder/*
 !deploy/trunk-recorder/talkgroups.csv
 !deploy/trunk-recorder/systems

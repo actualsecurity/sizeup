@@ -1,21 +1,17 @@
 """The STT worker routes speak strict JSON (RFC 8259) both ways, as the station's do (#779): a worker's NaN / Infinity /
 1e999 reaches the hub as null and never breaks a claim or a complete; the hub never answers a bare NaN; the worker
-(tools/stt_worker/worker.py) never sends one. The LLM lane keeps reading its answers strictly: a NaN in a model's
+(deploy/stt-worker/worker.py) never sends one. The LLM lane keeps reading its answers strictly: a NaN in a model's
 output still makes the answer invalid. Invented ids and texts only."""
 
 import json
 import math
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 from sizeup.cloud import client, sttworkers
 from tests.test_cloud import HubRun, hub_cfg
 from tests.test_stt_pool import FakeWorker, pending_event, row, send
+from tests.stt_worker_module import W as wk
 from tests.test_app import wait
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "stt_worker"))
-import worker as wk  # noqa: E402
 
 
 def raw_post(url, path, raw: bytes, token):

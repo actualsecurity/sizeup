@@ -1,4 +1,4 @@
-"""The GPU worker's catalog models (tools/stt_worker/worker.py Models, #639 per-channel models): the catalog in
+"""The GPU worker's catalog models (deploy/stt-worker/worker.py Models, #639 per-channel models): the catalog in
 models.json checked whole, downloads only from allowed hosts at pinned revisions with exact sizes and hashes, the VRAM
 plan (the local LLM gives way), servers started only while idle and dropped (marked bad) when they don't answer, the
 silence gate, and a job decoded by the model the hub names. No GPU, no network: downloads go through fake openers,
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 from tests.test_stt_worker import (TOKEN, FakeHub, FakeWhisper, _serve, make_cfg, running, tone_wav,  # noqa: F401
                                    hub, no_secrets_in_logs, wait_for, whisper)
 
@@ -112,6 +112,18 @@ def test_a_bad_entry_refuses_the_whole_catalog(bad, why):
         W.check_catalog(bad)
 
 
+def test_the_catalog_lives_beside_the_worker():
+    """models.json is fetched at CATALOG_PATH (the hub reads the same file in its image): deploy/stt-worker, next to
+    worker.py. No copy at the old path: no worker from before the move fetches a catalog."""
+    root = Path(__file__).resolve().parents[1]
+    assert W.CATALOG_PATH == "deploy/stt-worker/models.json" and PINS == root / W.CATALOG_PATH and PINS.is_file()
+    assert not (root / "tools" / "stt_worker" / "models.json").exists()
+    recipe = json.loads(PINS.read_text())
+    scripts = [f["merge"]["script"] for e in recipe[W.CATALOG_KEY].values() if isinstance(f := e.get("recipe"), dict)
+               and isinstance(f.get("merge"), dict) and isinstance(f["merge"].get("script"), str)]
+    assert scripts and all((root / s).is_file() for s in scripts), scripts
+
+
 def test_the_catalog_comes_only_from_main_with_the_hubs_hash():
     body = json.dumps(catalog(m=entry())).encode()
     commit = "c" * 40
@@ -127,7 +139,7 @@ def test_the_catalog_comes_only_from_main_with_the_hubs_hash():
         return 200, {}, body
 
     assert W.download_catalog(commit, sha(body), fetch, now=0) == body
-    assert calls[-1] == (W.GITHUB_RAW, f"/actualsecurity/sizeup/{commit}/tools/stt_worker/models.json")
+    assert calls[-1] == (W.GITHUB_RAW, f"/actualsecurity/sizeup/{commit}/deploy/stt-worker/models.json")
     with pytest.raises(W.UpdateError, match="hash"):
         W.download_catalog(commit, "0" * 64, fetch, now=0)
 

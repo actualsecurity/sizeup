@@ -14,6 +14,8 @@ Namespaces, each a known shape of booleans only (anything else is refused, not t
     map_layers   {overview: {layer: bool}, incident: {layer: bool}, folds: {group: bool}, hideDown: bool}
                  (static/maplayers.js; a layer key "cameras", "gis:hydrants"; a fold is a Layers box group's heading)
     preplan      {layer: bool} (static/preplan.js: the Pre-plan layer on every map)
+    reminders    {sound: bool, board_sound: bool} (static/reminders.js: a short chime when a reminder starts flashing,
+                 on the console; board_sound: on /monitor, the wall board. Both off unless turned on)
 
 An event's own layer set (incidents.map_layers, POST /api/cad/incident/<id>) is the event's, not here.
 
@@ -102,7 +104,15 @@ def _preplan(v) -> dict:
     return dict(v)
 
 
-NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan}
+def _reminders(v) -> dict:
+    if not isinstance(v, dict) or set(v) - {"sound", "board_sound"}:
+        raise PrefsError("reminders: {sound, board_sound: true | false}")
+    if any(not isinstance(b, bool) for b in v.values()):
+        raise PrefsError("reminders: true or false only")
+    return dict(v)
+
+
+NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders}
 
 
 def validate(ns: str, value) -> str:
