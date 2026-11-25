@@ -76,20 +76,22 @@ NO_VOICE = "this station has no voice (tts_engine \"none\"): text only"
 
 
 def spoken_street(s: str) -> str:
-    """'209 Westchester Ave, Port Chester' -> '209 Westchester Avenue'. Abbreviations are expanded
+    """'209 Westchester Ave, Port Chester' -> '209 Westchester Avenue' ('14-16 N Sample Ave' -> '14-16 North Sample
+    Avenue'). Abbreviations are expanded
     only where a street type goes (after a name), so 'St Marys Pl' stays Saint-able for the voice."""
     parts = [p.strip() for p in s.split(",") if p.strip()]
     if len(parts) > 1 and parts[-1].lower() == HOME_MUNI.lower():
         parts = parts[:-1]
     out = []
+    number = re.compile(r"\d+(?:-\d+[A-Za-z]?)?")        # a house number, or a building's range ("14-16")
     for p in parts:
         words = p.split()
         for i, w in enumerate(words):
             key = w.lower().rstrip(".")
-            named_before = any(not x.isdigit() for x in words[:i])
+            named_before = any(not number.fullmatch(x) for x in words[:i])
             if key in SUFFIXES and named_before:
                 words[i] = SUFFIXES[key]
-            elif key in DIRECTIONS and (i == 0 or words[i - 1].isdigit()) and i + 1 < len(words):
+            elif key in DIRECTIONS and (i == 0 or number.fullmatch(words[i - 1])) and i + 1 < len(words):
                 words[i] = DIRECTIONS[key]
         out.append(" ".join(words))
     return ", ".join(out)

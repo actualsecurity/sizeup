@@ -56,6 +56,7 @@ from sizeup.cad.comms import AUTO_UNSURE, OPCHANNEL
 from sizeup.cad.feed import unit_forms
 from sizeup.cad.sources import (ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, match_address, place_key, same_place,
                                 street_part)
+from sizeup.geo.houserange import same_number
 
 LEAD_S = 120.0
 MAX_PER_TX = 3
@@ -153,7 +154,7 @@ def address_hit(text: str, address: str) -> bool:
     if k[0] != "addr" or not k[1]:
         return False                                     # a street alone: too common to count
     for i, t in enumerate(toks):
-        if t != k[1]:
+        if not same_number(t, k[1]):                     # (a range's address: any of its numbers, "16" for "14-16")
             continue
         for j in range(i + 2, min(i + 7, len(toks) + 1)):
             if same_place(" ".join(toks[i:j]), s):
