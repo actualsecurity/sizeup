@@ -46,21 +46,24 @@ def test_the_hub_reads_the_repo_catalog_and_its_defaults_are_in_it():
     cat, digest = sttmodels.load()
     assert len(digest) == 64 and {QWEN, ATC, Q5} <= set(cat)
     assert cat[QWEN]["context"] == "list" and cat[ATC]["context"] == "prompt" and not cat[ATC]["context_default"]
-    assert set(sttmodels.DEFAULTS.values()) <= set(cat) and sttmodels.FALLBACK in cat
+    assert set(sttmodels.RECOMMENDED.values()) <= set(cat) and sttmodels.FALLBACK in cat
 
 
-def test_defaults_by_service_and_a_channels_choice_over_them():
+def test_todays_model_until_an_admin_chooses_and_a_channels_choice_over_it():
     c = choices()
-    assert c.model_for("tg:307", "fire") == QWEN and c.model_for("p25:mrrs:9211", "police") == QWEN
-    assert c.model_for("HPN Tower", "air") == ATC and c.model_for("tg:999", "transit") == Q5
-    c.set("tg:307", {"model": Q5})
-    assert c.model_for("tg:307", "fire") == Q5
+    # nothing changes the live model by itself (no slowdown, no untested model on fire traffic): today's whisper
+    for key, svc in (("tg:307", "fire"), ("p25:mrrs:9211", "police"), ("HPN Tower", "air"), ("tg:999", "transit")):
+        assert c.model_for(key, svc) == Q5
+    assert c.panel()["recommended"] == {"fire": QWEN, "ems": QWEN, "police": QWEN, "air": ATC}
+    assert c.want() == []                                   # (the primary is every worker's own: nothing to load)
+    c.set("tg:307", {"model": QWEN})
+    assert c.model_for("tg:307", "fire") == QWEN
     with pytest.raises(ValueError, match="model"):
         c.set("tg:307", {"model": "not-in-the-catalog"})
     with pytest.raises(ValueError, match="key"):
         c.set("tg:307; drop", {"model": Q5})
     c.set("tg:307", {"model": None})
-    assert c.model_for("tg:307", "fire") == QWEN and c.settings() == {}
+    assert c.model_for("tg:307", "fire") == Q5 and c.settings() == {}
 
 
 def test_context_is_per_model_by_default_and_per_channel_when_set():
@@ -87,10 +90,11 @@ def test_call_signs_are_checked():
 
 def test_the_workers_load_fire_first_then_police_then_air():
     c = choices()
-    assert c.want() == [QWEN, ATC]
-    c.set("HPN Tower", {"model": Q5})
+    c.set("HPN Tower", {"model": ATC})
     c.set("p25:mrrs:9211", {"model": "large-v3-turbo-q8_0"})
-    assert c.want({"HPN Tower": "air", "p25:mrrs:9211": "police"}) == [QWEN, "large-v3-turbo-q8_0", ATC, Q5]
+    c.set("tg:307", {"model": QWEN})
+    assert c.want({"HPN Tower": "air", "p25:mrrs:9211": "police", "tg:307": "fire"}) == [QWEN, "large-v3-turbo-q8_0",
+                                                                                        ATC]
 
 
 # -- the pool: a worker that has the model first, never a long wait ---------------------------------------------
@@ -289,7 +293,7 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
 
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
-    hub.app.stt_choices.set("FG1", {"callsigns": ["Command"]})
+    hub.app.stt_choices.set("FG1", {"callsigns": ["Command"], "model": QWEN})
     hub.app._pool_class = lambda item, key: LIVE          # (an urgent clip's words are never discarded: a live one's)
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = ModelWorker(hub.url, token, text="Engine 60 Engine 60 Engine 60 Engine 60 Engine 60").start()
