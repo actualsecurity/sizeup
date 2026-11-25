@@ -77,6 +77,16 @@ EXPIRED = "EXPIRED"
 UNTIL_OPERATOR = "Until"
 UNTIL_GRACE_S = 60.0       # an Until this far in the past still taken (the minute typed is the current one)
 UNTIL_OPEN = "until_at IS NOT NULL AND status IN ('pending', 'active')"    # incidents_until_open's WHERE, and the look's
+# An active event with no unit left on it goes back to pending (Store.settle_unstaffed, the incident sources' ticker):
+# SETTLE_S after its last unit cleared, so a unit cleared and put back at once (moved, a mistaken click, automation's
+# clear-then-assign) never flaps it. Its received time and elapsed clock stay (created_at is never touched).
+SETTLE_S = 30.0            # (a person taking the wrong unit off, then putting the right one on, takes this long)
+UNSTAFFED = "Event status: pending (no units)"
+UNSTAFFED_NE = "Event status: open (no units)"   # a non-emergency one: "Open" on the boards
+# A timeline line's label (events.label): recorded while the event was closed, or by a quiet edit (Edit with
+# quiet: true): the record put right, not a live change (muted on the timeline, never "New" in the comments box)
+AFTER_CLOSE, QUIET_EDIT = "after close", "quiet edit"
+LIVE_KINDS = ("closed", "dismissed", "reopened", "alarm")     # never labelled: the close itself, a reopen, an emergency
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
@@ -179,7 +189,8 @@ CREATE TABLE events (
   text TEXT NOT NULL,
   operator TEXT NOT NULL DEFAULT '',
   units TEXT NOT NULL DEFAULT '',       -- a note's unit tags ("E63,L31": who said it), typed with the unit autocomplete
-  places TEXT NOT NULL DEFAULT ''       -- a note's "@" places: JSON [{label, lat, lon, kind, sub, source}] (#67); '' none
+  places TEXT NOT NULL DEFAULT '',      -- a note's "@" places: JSON [{label, lat, lon, kind, sub, source}] (#67); '' none
+  label TEXT NOT NULL DEFAULT ''        -- after close | quiet edit: not a live change (AFTER_CLOSE, QUIET_EDIT); '' live
 );
 CREATE INDEX events_incident ON events(incident_id);
 CREATE TABLE unit_history (           -- every unit status change (the sheet's Unit History)
@@ -556,6 +567,8 @@ class Store:
         ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
         if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
             self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
+        if ecols and "label" not in ecols:               # after close | quiet edit, 2026-11-25: old lines keep '' (live)
+            self.db.execute("ALTER TABLE events ADD COLUMN label TEXT NOT NULL DEFAULT ''")
         rcols = {r["name"] for r in self.db.execute("PRAGMA table_info(run_cards)")}
         if rcols and "remarks" not in rcols:              # a run card's remarks (#87), 2026-10-13: old cards keep ''
             self.db.execute("ALTER TABLE run_cards ADD COLUMN remarks TEXT NOT NULL DEFAULT ''")
@@ -985,10 +998,18 @@ class Store:
         return rows[0] if rows else None
 
     def _event(self, db, iid, kind: str, text: str, operator: str = "", uid=None, at=None, units: str = "",
-               places: str = "") -> None:
-        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units, places) "
-                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                   (iid, uid, self.clock() if at is None else at, kind, text, operator, units, places))
+               places: str = "", label: str | None = None) -> None:
+        """A timeline line. label None: AFTER_CLOSE when the event is closed (or dismissed) as it is written (but the
+        close, a reopen or an emergency: LIVE_KINDS), else live ('')."""
+        if label is None:
+            label = ""
+            if iid is not None and kind not in LIVE_KINDS:
+                r = db.execute("SELECT status FROM incidents WHERE id = ?", (iid,)).fetchone()
+                if r is not None and r[0] in ("closed", "dismissed"):
+                    label = AFTER_CLOSE
+        db.execute("INSERT INTO events (incident_id, unit_id, at, kind, text, operator, units, places, label) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (iid, uid, self.clock() if at is None else at, kind, text, operator, units, places, label))
 
     def _history(self, db, uid: int, old: str, new: str, iid, operator: str, at: float, note: str = "") -> None:
         db.execute("INSERT INTO unit_history (at, unit_id, old_status, new_status, incident_id, operator, note) "
@@ -1355,6 +1376,50 @@ class Store:
             except Exception:  # noqa: BLE001 - the change stands whatever a listener does
                 pass
 
+    def _staffed(self, db, iid: int, operator: str, now: float) -> bool:
+        """In the caller's transaction: a pending event with a unit on it now (dispatched, attached, returned, put back
+        by an undo) is active, "Event status: active" on its timeline. True: it changed."""
+        if db.execute("UPDATE incidents SET status = 'active' WHERE id = ? AND status = 'pending' AND EXISTS "
+                      "(SELECT 1 FROM assignments a WHERE a.incident_id = incidents.id AND a.cleared_at IS NULL)",
+                      (iid,)).rowcount:
+            self._event(db, iid, "status", "Event status: active", operator, at=now)
+            return True
+        return False
+
+    def staffed(self, iid: int, operator: str = "") -> bool:
+        """_staffed in a transaction of its own (automode's undo of a close, which puts units back by itself)."""
+        with self.tx() as db:
+            return self._staffed(db, iid, operator, self.clock())
+
+    def settle_unstaffed(self, now: float | None = None, hold=None) -> list[int]:
+        """An active event with no unit left on it back to PENDING (the admin, 2026-11-25: "an active incident with no
+        units assigned should drop back to pending, even after being reopened, and keep its elapsed time"): whoever
+        cleared the last one (a person, automation, the unit going available or in service elsewhere), once SETTLE_S
+        has passed since (a unit cleared and put back within it: never flapped). "Event status: pending (no units)" on
+        its timeline; created_at (received, the elapsed clock), accepted_at and its number stay. Emergency or not (a
+        non-emergency one is "Open" again). Never a queued, closed or dismissed one. hold(iid) -> True: leave it active
+        for now (60 Control automation still has it: AutoDispatch.holds_active), looked at again on the next sweep.
+        The leader only (may_write). The incident sources' ticker runs it every TICK_S. -> the ids it moved."""
+        now = self.clock() if now is None else now
+        if not self.may_write():
+            return []
+        rows = self.q("SELECT i.id, i.emergency, (SELECT MAX(a.cleared_at) FROM assignments a WHERE a.incident_id = i.id) AS last "
+                      "FROM incidents i WHERE i.status = 'active' AND NOT EXISTS (SELECT 1 FROM assignments a "
+                      "WHERE a.incident_id = i.id AND a.cleared_at IS NULL) ORDER BY i.id")
+        out = []
+        for r in rows:
+            if r["last"] is not None and now - r["last"] < SETTLE_S:
+                continue                                 # just cleared: a unit may be on its way back
+            if hold is not None and hold(r["id"]):
+                continue
+            with self.tx() as db:                        # the same look again, under the write
+                if db.execute("UPDATE incidents SET status = 'pending' WHERE id = ? AND status = 'active' AND NOT EXISTS "
+                              "(SELECT 1 FROM assignments a WHERE a.incident_id = incidents.id AND a.cleared_at IS NULL)",
+                              (r["id"],)).rowcount:
+                    self._event(db, r["id"], "status", UNSTAFFED if r["emergency"] else UNSTAFFED_NE, AUTO, at=now)   # (signed: _worked reads it as no person's)
+                    out.append(r["id"])
+        return out
+
     def return_statuses(self) -> tuple[str, ...]:
         """What a cleared unit can go back to a still-open call as: the responding / on-location statuses."""
         L = self.lists
@@ -1403,6 +1468,7 @@ class Store:
             if status == L.command_status:
                 self._event(db, iid, "status", self._take_command(db, iid, uid, u["name"], operator, now)[0], operator, uid, now)
             freed = self._release_placeholders(db, iid, uid, status, operator, now)
+            self._staffed(db, iid, operator, now)           # back to pending without units: active again with it
         if freed:
             self._unassigned(iid)
         return self.unit(uid)
@@ -1489,12 +1555,16 @@ class Store:
     QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts", "place", "place_address",
              "address_raw", "location_qualifier")
 
-    def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
-        """Edit an open event. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the
-        lists unless the same edit sets emergency itself."""
+    def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True, quiet: bool = False) -> dict:
+        """Edit an event's facts. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the
+        lists unless the same edit sets emergency itself. Never its status (the admin, 2026-11-25: "editing an
+        incident should leave its status alone"): accept, close and reopen are their own actions.
+        quiet: the record put right, not a live change: its line labelled QUIET_EDIT. A closed event is edited only
+        quietly (Quiet edit: it stays closed, its line labelled AFTER_CLOSE); a dismissed page not at all."""
         inc = self.incident(iid)
-        if inc["status"] not in OPEN:
-            raise CadError(f"event is {inc['status']}")
+        closed = inc["status"] == "closed"
+        if inc["status"] not in OPEN and not (closed and quiet):
+            raise CadError(f"event is {inc['status']}" + (": reopen it, or Quiet edit" if closed else ""))
         fields = dict(fields)
         if "emergency" in fields:
             fields["emergency"] = int(bool(fields["emergency"]))
@@ -1523,7 +1593,7 @@ class Store:
         # close it on its next look, so the Until goes, said on the timeline (a new one is set with Edit)
         now, passed = self.clock(), None
         until = changes.get("until_at", inc["until_at"])
-        if changes.get("emergency") == 0 and inc["emergency"] and until is not None and until <= now:
+        if changes.get("emergency") == 0 and inc["emergency"] and until is not None and until <= now and not closed:
             passed, changes["until_at"] = until, None
         if not changes:
             return inc
@@ -1561,8 +1631,12 @@ class Store:
             elif "until_at" in changes:
                 parts.append("until: " + (datetime.fromtimestamp(changes["until_at"], TZ).strftime("%m/%d %H:%M")
                                           if changes["until_at"] else "(none)"))
+            if log and not parts and (closed or quiet):  # a pin, a qualifier alone: still said, it isn't live
+                parts = list(dict.fromkeys("pin" if k in ("lat", "lon", "geo_label") else labels.get(k, k.replace("_", " "))
+                                           for k in changes))
             if log and parts:
-                self._event(db, iid, "edit", "Edited " + "; ".join(parts), operator)
+                self._event(db, iid, "edit", "Edited " + "; ".join(parts), operator,
+                            label=AFTER_CLOSE if closed else QUIET_EDIT if quiet else "")
             elif passed is not None:                      # a quiet edit (a page's type): this one is said anyway
                 self._event(db, iid, "edit", f"Until {_when(passed, now)} (passed) cleared: now a non-emergency event",
                             operator)
@@ -1778,10 +1852,11 @@ class Store:
         return d
 
     def reopen(self, iid: int, operator: str = "") -> dict:
-        """A closed or dismissed event back on the boards, its number kept (#89). Closed: Active if a unit
-        was ever on it, else Pending (a non-emergency one: open again); the disposition is cleared and
-        kept in the chronology ("Reopened by JD; was Complete at 16:46"). Dismissed: back to the 60
-        Control queue, to accept or dismiss. No unit comes back by itself: the dispatcher adds them."""
+        """A closed or dismissed event back on the boards, its number kept (#89). Closed: Pending (a non-emergency
+        one: open again), since no unit comes back by itself (the admin, 2026-11-25: an active one with no units is
+        pending, "even after being reopened"); a unit put on it makes it active as on any call. The disposition is
+        cleared and kept in the chronology ("Reopened by JD; was Complete at 16:46"); its received time and elapsed
+        clock stay. Dismissed: back to the 60 Control queue, to accept or dismiss."""
         inc = self.incident(iid)
         if inc["status"] not in ("closed", "dismissed"):
             raise CadError(f"Event {inc['status']}: not closed")
@@ -1789,8 +1864,7 @@ class Store:
         if inc["status"] == "dismissed":
             status, was = "queued", "dismissed"
         else:
-            had = self.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? LIMIT 1", (iid,)) is not None
-            status = "active" if had and inc["emergency"] else "pending"
+            status = "pending"                           # no unit on it (Close cleared them): pending until one goes
             was = self.lists.name("dispositions", inc["disposition"]) or inc["disposition"] or "closed"
         if inc["closed_at"]:
             then, today = datetime.fromtimestamp(inc["closed_at"], TZ), datetime.fromtimestamp(now, TZ)
@@ -1806,6 +1880,8 @@ class Store:
                        + (", until_at = NULL" if gone else "") + " WHERE id = ?", (status, iid))
             self._event(db, iid, "reopened", f"Reopened{f' by {who}' if who else ''}; was {was} at {at}"
                         + (f"; until {_when(inc['until_at'], now)} (passed) cleared" if gone else ""), operator, at=now)
+            if status == "pending":
+                self._staffed(db, iid, operator, now)    # (a unit somehow still on it: active, as before)
         return self.incident(iid)
 
     def note(self, iid: int, text: str, operator: str = "", kind: str = "note", units: list[str] | tuple = (),
@@ -1877,8 +1953,7 @@ class Store:
                                 operator, uid, now)
                     self._history(db, uid, u["status"], dispatched, iid, operator, now)
                 added.append(u["name"])
-            if db.execute("UPDATE incidents SET status = 'active' WHERE id = ? AND status = 'pending'", (iid,)).rowcount:
-                self._event(db, iid, "status", "Event status: active", operator, at=now)
+            self._staffed(db, iid, operator, now)
             if attach and added and not quiet:
                 self._event(db, iid, "attach", f"Attached {', '.join(added)}", operator, at=now)
         for old in dict.fromkeys(left):

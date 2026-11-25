@@ -15,7 +15,7 @@ const S = {
   section: null, list: store("sizeup.cad.settings.list") || "event_types",
   data: null, sig: "", sigLive: "", loading: false, again: null, deferred: false, pressDeferred: false, deferFresh: false, pressing: 0, msgT: null,
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null, common: null,
-  previewT: null, previewSeq: 0, tsOpen: new Set(),
+  previewT: null, previewSeq: 0, tsOpen: new Set(), ftDraft: null,
   saved: "", pressT: null, refreshDue: false,                            // the section a save of ours just changed; the press's time limit
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
   rtab: store("sizeup.cad.settings.radios") || "receivers",        // Settings > Radios: the tab (#settings/radios/<tab>)
@@ -57,7 +57,7 @@ const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
   ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["location_qualifiers", "Location qualifiers"],
-  ["event_class", "Emergency rules"], ["geo_town_order", "Town order"], ["place_names", "Place names"]];
+  ["event_class", "Emergency rules"], ["feed_types", "Feed types"], ["geo_town_order", "Town order"], ["place_names", "Place names"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
   ["enroute", "Responding (first en route)"], ["onscene", "On location (first on scene)"], ["oos", "Unavailable (out of service)"]];
 const S_RESPONSES = [["fire", "Fire"], ["mutual_aid", "Mutual aid"], ["agency", "Other agency"]];
@@ -312,10 +312,11 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch", reminders: "dispatch",
   operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
   system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
-  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system" };
+  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system", feed_types: "lists" };
 const S_LIVE = new Set(["lists", "units"]);
 const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),
-  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]) };
+  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]),
+  feed_types: new Set(["n", "last_at"]) };
 function sSigs(d, sec) {           // [the section's settings, those and what moves with the calls]
   const quiet = [], live = [];
   for (const k of Object.keys(d).sort()) {
@@ -939,6 +940,7 @@ function sLists(panel) {
   else if (S.list === "geo_town_order") body = sTowns();
   else if (S.list === "place_names") body = sPlaceNames();
   else if (S.list === "type_subtypes") body = sTypeMap();
+  else if (S.list === "feed_types") body = sFeedTypes();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
   const common = S.list === "place_names" ? sCommonPlaces() : null;
@@ -1256,6 +1258,69 @@ function sClassRules() {
     sHelp("Non-emergency events (notifications, closures, hydrants) are logged and tracked, never dispatched. "
       + "The most specific rule wins: type and subtype, then any type with the subtype, then the type. Anything "
       + "not listed is an emergency. The operator can still change it on an event."), reset), ol, f);
+}
+
+// Feed types (sizeup/cad/feedtypes.py): a feed's own code -> our type and subtype, over the automatic mapping; the
+// codes seen lately that nothing maps fully, each with Map... (the form filled in).
+function sFeedTypes() {
+  const d = S.data.feed_types || { rows: [], seen: [], feeds: [] };
+  const feedName = (src) => (d.feeds.find((f) => f.source === src) || {}).label || src;
+  const ol = el("ol", "s-rows");
+  for (const r of d.rows) {
+    const li = el("li", "s-row");
+    const off = r.off ? el("span", "chip s-confirm", "not applied") : null;
+    if (off) off.title = r.off;
+    li.append(el("code", "s-code", r.code), el("span", "dim small", feedName(r.source)), el("b", "s-rule", `→ ${r.label}`),
+      ...(off ? [off] : []), el("span", "spacer"),
+      sBtn("Remove", "Back to automatic", () => sPost("feed_types", { action: "reset", key: r.key }, `${r.code} removed`), "danger-quiet"));
+    ol.append(li);
+  }
+  if (!d.rows.length) ol.append(el("li", "s-row dim small", "None: automatic"));
+  const draft = S.ftDraft || {};
+  const f = el("form", "row s-add");
+  const feeds = d.feeds.length ? d.feeds.map((x) => [x.source, x.label]) : [["", "No feed yet"]];
+  const fd = sSelect(feeds, draft.source || feeds[0][0], null, "Feed");
+  const code = sInput(draft.code || "", 80, "MAIN or MAIN,SUB");
+  const types = (L().event_types || []).filter(live).map((t) => [t.code, t.name]);
+  const t = sSelect(types, draft.type || (types[0] || [""])[0], null, "Type");
+  const sub = sSelect([], "", null, "Subtype");
+  const fillSubs = () => {
+    const allowed = ((L().type_subtypes || {})[t.value]) || [];
+    fillSelect(sub, [["", "No subtype"], ...allowed.map((c) => [c, nameOf("event_subtypes", c)])]);
+  };
+  fillSubs();
+  t.addEventListener("change", fillSubs);
+  const add = el("button", "primary", "Map");
+  add.type = "submit";
+  f.append(fd, code, t, sub, add);
+  f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!code.value.trim()) return sMsg("County code: MAIN or MAIN,SUB");
+    S.ftDraft = null;
+    sPost("feed_types", { action: "set", feed: fd.value, code: code.value.trim(), type: t.value, subtype: sub.value },
+      `${code.value.trim()} → ${typeLabel(t.value, sub.value)}`);
+  });
+  if (draft.code) setTimeout(() => code.focus(), 0);
+  const rows = sCard(sCardHead("Feed types", `${d.rows.length} mapped`,
+    sHelp("A feed's own type code mapped to our type and subtype; a row wins over the automatic mapping. MAIN alone "
+      + "maps every MAIN,SUB: the SUB still picks the one subtype of that type it names.")), ol, f);
+  const seen = el("ol", "s-rows");
+  for (const r of d.seen) {
+    const li = el("li", "s-row");
+    const state = el("span", r.state === "partly" ? "chip s-confirm" : "chip s-state deleted", r.state === "partly" ? "no subtype" : "no type");
+    const n = el("span", "dim small", `${r.n}×`);
+    n.title = `Last seen ${new Date(r.last_at * 1000).toLocaleString()}`;
+    li.append(el("code", "s-code", r.code), el("span", "dim small", feedName(r.source)), state,
+      el("span", "small", r.shown || "—"), n, el("span", "spacer"),
+      sBtn("Map…", "Fill in the form above", () => { S.ftDraft = { source: r.source, code: r.code, type: r.type }; sRender(true); }, "mini"));
+    seen.append(li);
+  }
+  const seenCard = d.seen.length ? sCard(sCardHead("Seen, not mapped", `${d.seen.length}`,
+    sHelp("Codes the feeds sent lately that give no type of ours, or our type with no subtype for the code's SUB. "
+      + "Map one here, or add its SUB as a subtype of the type (Subtypes per type).")), seen) : null;
+  const box = el("div");
+  box.append(rows, ...(seenCard ? [seenCard] : []));
+  return box;
 }
 
 function sTowns() {

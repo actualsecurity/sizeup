@@ -662,7 +662,7 @@ def test_county_town_spellings_and_town_of_forms():
     ("12 EXAMPLE AVE : @SAMPLE DINER RYE_BROOK", {"typed": True}, "12 Example Ave (Sample Diner), Rye Brook"),
     ("12 EXAMPLE AVE APT 3B : @SAMPLE DINER", {"typed": True}, "12 Example Ave Apt 3B (Sample Diner), Rye Brook"),
     ("12 EXAMPLE AVE #2B RYE_BROOK", {"typed": True}, "12 Example Ave #2B, Rye Brook"),
-    ("12-14 EXAMPLE AVE 3RD FL", {"typed": True}, "12 Example Ave 3rd Fl, Rye Brook"),
+    ("12-14 EXAMPLE AVE 3RD FL", {"typed": True}, "12-14 Example Ave 3rd Fl, Rye Brook"),     # a range as given
     ("12 EXAMPLE AVE :REAR", {"typed": True}, "12 Example Ave Rear, Rye Brook"),
     ("12 EXAMPLE AVE APT 3 rye brook", {"typed": True}, "12 Example Ave Apt 3, Rye Brook"),        # the town isn't the unit's
     ("12 Sample Lane apartment 3", {}, "12 Sample Ln Apt 3, Rye Brook"),                           # heard
@@ -708,7 +708,8 @@ def test_a_changed_house_number_is_never_stored():
     assert checked_location("12 1/2 EXAMPLE AVE", "12 Example Ave") == "12 1/2 Example Ave"
     assert checked_location("12A EXAMPLE AVE", "12 Example Ave") == "12A Example Ave"
     assert checked_location("12 EXAMPLE AVE", "12 Example Ave, Rye Brook") == "12 Example Ave, Rye Brook"
-    assert checked_location("12-14 EXAMPLE AVE 3RD FL", "12 Example Ave 3rd Fl, Rye Brook") == "12 Example Ave 3rd Fl, Rye Brook"
+    assert checked_location("12-14 EXAMPLE AVE 3RD FL", "12-14 Example Ave 3rd Fl, Rye Brook") == "12-14 Example Ave 3rd Fl, Rye Brook"
+    assert checked_location("12-14 EXAMPLE AVE 3RD FL", "12 Example Ave 3rd Fl, Rye Brook") == "12-14 Example Ave"   # range lost
     assert checked_location("5 1ST ST", "5 1st St") == "5 1st St" and checked_location("US 1 & SAMPLE CIRCLE", "US 1 & Sample Cir") == "US 1 & Sample Cir"
 
 

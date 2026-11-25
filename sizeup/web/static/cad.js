@@ -529,6 +529,12 @@ function leaveView() {               // an incident or the form opens: out of Ra
   if (cad.radio || cad.search || cad.pinfo || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
+  // #peek/<id>: a past call read-only over whatever is on screen (addr-history.js; History here's ⌘-click), the board too
+  const peek = /^#peek\/(\d{1,9})$/.exec(location.hash);
+  if (peek) {
+    if (window.AddrHistory) AddrHistory.peek(Number(peek[1]));
+    return;
+  }
   // #prealert/<kind>/<id>: a pre-alert's More info (prealert-info.js)
   const pinfo = !BOARD && location.hash.startsWith("#prealert/");
   if (pinfo !== cad.pinfo || pinfo) {
@@ -797,7 +803,7 @@ function mergeRow(inc, cls) {
   row.append(el("span", "", `Same call as ${mo.ref}?`), " ", b);
   return row;
 }
-// A closed event back on the boards (POST reopen): Active if a unit was ever on it, else Pending; a dismissed
+// A closed event back on the boards (POST reopen): Pending, no unit on it (one put on: Active); a dismissed
 // page back to 60 Control. The disposition goes into the chronology; the dispatcher adds units again.
 async function reopenIncident(iid) {
   try {
@@ -867,7 +873,10 @@ function renderDetail() {
   show($("#d-dismiss"), inc.status === "queued");
   show($("#d-close"), inc.status === "pending" || inc.status === "active");
   show($("#d-reopen"), !open);
-  show($("#d-edit"), open);
+  // a closed event's record is edited without reopening it (Quiet edit: status unchanged, "after close" on its lines)
+  show($("#d-edit"), open || inc.status === "closed");
+  setText($("#d-edit"), open ? "Edit" : "Quiet edit");
+  $("#d-edit").title = open ? "" : "Edit the record without reopening: marked “after close”";
   if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
   show($("#d-queued"), inc.status === "queued");
   if (inc.status === "queued") {
@@ -2137,7 +2146,16 @@ const EVENT_KINDS = { note: "comment", status: "status", system: "system", attac
 // The latest entry, one line, for the folded Timeline's header: "19:34:21 status · 2392 on location"
 function eventLine(e) {
   const text = e.kind === "note" && e.units ? noteText(e) : e.text;
-  return `${fmtTime(e.at, true)} ${EVENT_KINDS[e.kind] || e.kind} · ${(text || "").replace(/\s+/g, " ").trim()}`;
+  return `${fmtTime(e.at, true)} ${EVENT_KINDS[e.kind] || e.kind}${e.label ? ` (${e.label})` : ""} · ${(text || "").replace(/\s+/g, " ").trim()}`;
+}
+// A line recorded after the close or by a quiet edit (events.label): a muted chip, who and when in its hover; never
+// read as a live change (the comments box's "New" skips it).
+function labelChip(e) {
+  if (!e.label) return null;
+  const c = el("span", "chip ev-label", e.label);
+  c.title = `${e.label === "after close" ? "Recorded after the event closed" : "Quiet edit: the record put right"}`
+    + ` · ${opParts(e.operator || "")[0] || "?"} ${fmtRecv(e.at)} · not a live change`;
+  return c;
 }
 // The Timeline fold, remembered per browser like Closed 24h (#107): "1" open, else folded.
 function timelineFold(open) {
@@ -2175,7 +2193,7 @@ function renderEvents(inc) {
   show($("#d-events"), open);
   syncList($("#d-events"), events.slice().reverse(), {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}|${playForEvent(inc, e) || ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${e.label || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}|${playForEvent(inc, e) || ""}`,
     make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -2183,6 +2201,9 @@ function renderEvents(inc) {
       if (e.operator) meta.append(opSpan(e.operator));
       const ac = window.DispatchMode && DispatchMode.eventChip(inc, e, autoDeps());    // automatic: its source, undo (#311)
       if (ac) meta.append(ac);
+      const lc = labelChip(e);
+      if (lc) meta.append(lc);
+      li.classList.toggle("ev-late", !!e.label);
       li.replaceChildren(meta, eventTxt(inc, e));
     },
     empty: "None",
@@ -2229,19 +2250,22 @@ function renderComments(inc) {
   setText($("#d-cmts-n"), n ? `· ${n}` : "");
   $("#d-cmts-only").setAttribute("aria-pressed", String(!all));
   $("#d-cmts-all").setAttribute("aria-pressed", String(all));
-  const view = `${inc.id}|${all}`, last = items.length ? String(items[items.length - 1].id) : "";
+  const live = items.filter((e) => !e.label);       // a labelled line (after close, quiet edit) is never "New"
+  const view = `${inc.id}|${all}`, last = live.length ? String(live[live.length - 1].id) : "";
   const fresh = list._view !== view, grew = !fresh && last !== list._last;
   list._view = view;
   list._last = last;
   syncList(list, items, {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}|${playForEvent(inc, e) || ""}`,
-    make: (e) => el("li", `cm${e.kind === "remarks" ? " cm-remarks" : e.kind === "note" ? "" : " cm-sys"}`),
+    sig: (e) => `${e.id}|${e.units || ""}|${e.label || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}|${playForEvent(inc, e) || ""}`,
+    make: (e) => el("li", `cm${e.kind === "remarks" ? " cm-remarks" : e.kind === "note" ? "" : " cm-sys"}${e.label ? " ev-late" : ""}`),
     fill: (li, e) => {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(e.at, true)));
       if (e.kind !== "note") meta.append(el("span", `ek ${e.kind}`, e.kind === "remarks" ? "remarks" : EVENT_KINDS[e.kind] || e.kind));
       if (e.operator) meta.append(opSpan(e.operator));
+      const lc = labelChip(e);
+      if (lc) meta.append(lc);
       li.replaceChildren(meta, e.kind === "remarks" ? el("div", "txt", e.text) : eventTxt(inc, e));
     },
     empty: all ? "Nothing yet" : "No comments yet",
@@ -3587,6 +3611,10 @@ function openEdit() {
   $("#e-until").value = toLocalInput(inc.until_at);
   $("#e-remarks").value = inc.remarks || "";
   airportForm("e", inc);
+  const closed = inc.status === "closed";          // always quiet: it stays closed (the server: quiet only)
+  $("#e-quiet").checked = closed;
+  show($("#e-quiet-w"), !closed);
+  show($("#e-closed"), closed);
   flash($("#e-error"));
   show($("#edit-form"), true);
 }
@@ -3599,6 +3627,7 @@ async function saveEdit(e) {
     caller_name: $("#e-name").value.trim(), caller_address: $("#e-caddr").value.trim(), phone: $("#e-phone").value.trim(),
     received_via: $("#e-via").value, remarks: $("#e-remarks").value.trim(), until_at: fromLocalInput($("#e-until").value),
     operator: operator() };
+  if ($("#e-quiet").checked || inc.status === "closed") body.quiet = true;    // never its status either way
   airportBody("e", body);
   if ($("#e-emergency").checked !== !!inc.emergency) body.emergency = $("#e-emergency").checked;
   if ($("#e-qual").value !== (inc.location_qualifier || "")) body.location_qualifier = $("#e-qual").value;   // never the point
@@ -3611,6 +3640,10 @@ async function saveEdit(e) {
   try {
     await api("POST", `/api/cad/incident/${inc.id}`, body);
     show($("#edit-form"), false);
+    if (inc.status === "closed" && cad.extra.has(inc.id)) {       // a closed one opened from Records: no push carries it
+      cad.extra.set(inc.id, await api("GET", `/api/cad/incident/${inc.id}`));
+      render();
+    }
     if (body.type !== inc.type || body.subtype !== inc.subtype || "emergency" in body) setTimeout(() => recommend(), 300);
   } catch (err) {
     flash($("#e-error"), err.message);

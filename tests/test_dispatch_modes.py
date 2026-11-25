@@ -267,10 +267,10 @@ def test_one_click_undo_and_the_feed_does_not_redo_it(rig):
     assert rig.inc()["status"] == "closed"
     c = rig.step("close")
     rig.cad.auto_undo(rig.iid(), {"step": c["id"], "operator": "Lt. Test"})
-    assert rig.inc()["status"] == "active"
+    assert rig.inc()["status"] == "pending"                                        # reopened, no unit back on it
     rig.feed.comment("A1", T0 + 905, "units clearing")
     rig.change(closed=True)
-    assert rig.inc()["status"] == "active"                                         # a person reopened it: theirs
+    assert rig.inc()["status"] == "pending"                                        # a person reopened it: theirs
     assert sum(1 for e in rig.inc()["events"] if e["text"].startswith("Undone: ")) == 3
     with pytest.raises(Exception, match="already undone"):
         rig.cad.auto_undo(rig.iid(), {"step": c["id"], "operator": "Lt. Test"})

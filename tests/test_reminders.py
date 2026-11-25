@@ -16,7 +16,7 @@ from sizeup.cad import api as api_mod
 from sizeup.cad import prefs as prefs_mod
 from sizeup.cad import reminders as rm
 from sizeup.cad import settings as settings_mod
-from sizeup.cad.store import CadError
+from sizeup.cad.store import SETTLE_S, CadError
 from tests.test_cad import Clock, local, make_cad, uid
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,17 +58,34 @@ def test_a_pending_call_with_no_unit_is_due_after_five_minutes_and_clears_with_a
 
 
 def test_since_is_the_last_unit_cleared_not_the_accept(world):
-    """Active -> Pending when its last unit clears (another branch's transition, or a reopen): counted from then."""
+    """#864: an active call whose last unit cleared goes back to Pending (Store.settle_unstaffed, SETTLE_S later): the
+    reminder counts from the last unit cleared, not from the accept nor from the move back."""
     cad, clock = world
     iid = call(cad)
     clock.t = T0 + 60
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
     clock.t = T0 + 900
     cad.unit_status(uid(cad, "E60"), {"status": "AV", "operator": "JD"})
-    cad.store.db.execute("UPDATE incidents SET status = 'pending' WHERE id = ?", (iid,))   # as the transition leaves it
-    cad.store.rev += 1
+    assert cad.store.incident(iid)["status"] == "active" and f"pending:{iid}" not in items(cad)   # not pending yet
+    clock.t = T0 + 900 + SETTLE_S + 1
+    assert cad.store.settle_unstaffed() == [iid] and cad.store.incident(iid)["status"] == "pending"
     it = items(cad)[f"pending:{iid}"]
     assert it["since"] == T0 + 900 and it["due"] == T0 + 1200
+    clock.t = T0 + 1300
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})               # a unit back on it: active, cleared
+    assert cad.store.incident(iid)["status"] == "active" and f"pending:{iid}" not in items(cad)
+
+
+def test_a_reopened_call_counts_from_the_reopen(world):
+    cad, clock = world
+    iid = call(cad)
+    clock.t = T0 + 60
+    cad.close(iid, {"disposition": "FALSE", "operator": "JD"})
+    clock.t = T0 + 3600
+    cad.reopen(iid, {"operator": "JD"})
+    assert cad.store.incident(iid)["status"] == "pending"
+    it = items(cad)[f"pending:{iid}"]
+    assert it["since"] == T0 + 3600 and it["due"] == T0 + 3900
     assert rm.pending_since({"accepted_at": T0, "created_at": T0, "assignments": [{"cleared_at": T0 + 50}],
                              "events": [{"kind": "reopened", "at": T0 + 70}]}) == T0 + 70
 

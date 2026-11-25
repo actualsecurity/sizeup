@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .houserange import HouseRange, range_of, ranges_in
 from .localaddr import EMPTY as LOCAL_EMPTY, LocalAddresses, fraction_of, fractions_in
 from .normalize import (
     BOUNDARY, DIRECTIONS, TYPE_ABBRS, spaceless, street_aliases, tokenize,
@@ -63,6 +64,7 @@ PLACES_SCHEMA = SCHEMA[SCHEMA.index("CREATE TABLE places"):]
 LAT0, LON0 = 41.0, -73.68
 M_PER_DEG_LAT = 110_574.0
 M_PER_DEG_LON = 111_320.0 * math.cos(math.radians(41.02))
+RANGE_MID_M = 60.0      # a building's range ("14-16"): the point between its ends' own points when this close at most
 
 # Tokens that can never be part of a street name span.
 STREET_STOP = {
@@ -603,11 +605,15 @@ class Gazetteer:
         return list(st.addrs) + [m for m in extra if m not in st.addrs]
 
     def locate_at(self, sid: int, muni: str, num: int, suffix: str = "", frac: str = "",
-                  local: LocalAddresses | None = None) -> tuple[float, float, float, str, str, str] | None:
+                  local: LocalAddresses | None = None, rng: HouseRange | None = None
+                  ) -> tuple[float, float, float, str, str, str] | None:
         """A house number on street sid in muni: a local point first (that number, its letter and fraction), else the
         address points (a fraction's integer part). -> (lat, lon, quality, precision, the number's label, source:
-        "local" | "address-points")."""
+        "local" | "address-points"). rng: the building's range num starts (sizeup/geo/houserange.py, "14-16"):
+        locate_range."""
         local = local if local is not None else self.local_addresses()
+        if rng is not None and rng.lo == num and not frac:
+            return self.locate_range(sid, muni, rng, local)
         p = local.get(sid, muni, num, suffix, frac) if local else None
         if p is not None:
             return p.lat, p.lon, 0.95, "exact", p.number.label, "local"
@@ -623,6 +629,24 @@ class Gazetteer:
         if res is None:
             return None
         return (*res, f"{num}{suffix.upper()}", "address-points")
+
+    def locate_range(self, sid: int, muni: str, rng: HouseRange, local: LocalAddresses | None = None
+                     ) -> tuple[float, float, float, str, str, str] | None:
+        """A building's range ("14-16") on street sid in muni, as locate_at: the point between its two ends' when both
+        have their own (exact) and stand within RANGE_MID_M of each other; else the end that has one (the first
+        first); else the first number's reading (interpolated), else the last's. Never "no point" for the dash alone,
+        never 1416. The label is the range ("14-16")."""
+        ends = [self.locate_at(sid, muni, rng.lo, "", "", local),
+                self.locate_at(sid, muni, rng.hi, rng.letter.lower(), "", local)]
+        exact = [e for e in ends if e is not None and e[3] == "exact"]
+        if len(exact) == 2:
+            (la, oa, qa, *_r, sa), (lb, ob, qb, *_s, sb) = exact
+            if math.hypot((la - lb) * M_PER_DEG_LAT, (oa - ob) * M_PER_DEG_LON) <= RANGE_MID_M:
+                return (la + lb) / 2, (oa + ob) / 2, max(qa, qb), "exact", rng.text, sa
+        pick = (exact or [e for e in ends if e is not None] or [None])[0]
+        if pick is None:
+            return None
+        return (*pick[:4], rng.text, pick[5])
 
     # ------------------------------------------------------------------ candidates
 
@@ -640,7 +664,7 @@ class Gazetteer:
         return MUNI_PRIOR.get(muni, 0.0) + said
 
     def _address_cands(self, tokens, m: _Mention, num: str, verify: list[_Mention],
-                       munis, fracs: dict[int, str] | None = None) -> list[Match]:
+                       munis, fracs: dict[int, str] | None = None, ranges: dict | None = None) -> list[Match]:
         digits = int("".join(c for c in num if c.isdigit()))
         suffix = "".join(c for c in num if c.isalpha())
         local = self.local_addresses()
@@ -649,7 +673,8 @@ class Gazetteer:
             st = self.streets[sid]
             for muni in self.address_towns(sid, local):
                 frac = fraction_of(fracs or {}, digits, sid)    # "189-1/2": the tokens kept 189
-                res = self.locate_at(sid, muni, digits, suffix, frac, local)
+                res = self.locate_at(sid, muni, digits, suffix, frac, local,
+                                     range_of(ranges or {}, digits, sid) if not suffix else None)   # "14-16": a range
                 if res is None:
                     continue
                 lat, lon, q, precision, label_num, _source = res
@@ -763,6 +788,7 @@ class Gazetteer:
     def candidates(self, text: str) -> list[Match]:
         """All location readings of ``text``, best first."""
         text, fracs = fractions_in(text, self.streets_at)
+        text, ranges = ranges_in(text, self.streets_at)     # "14-16 Example St": a building's range, never 1416
         tokens = tokenize(text)
         mentions = self._street_mentions(tokens)
         munis = self._muni_mentions(tokens, mentions)
@@ -805,7 +831,7 @@ class Gazetteer:
                 verify.extend(mentions[q] for q in prev)
             num = self._house_number(tokens, m)
             if num:
-                groups.append(self._address_cands(tokens, m, num, verify, munis, fracs))
+                groups.append(self._address_cands(tokens, m, num, verify, munis, fracs, ranges))
             if p is not None:
                 groups.append(self._intersection_cands(m, mentions[p], munis))
             if crosses.get(k) and not num:
