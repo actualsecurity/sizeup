@@ -1,10 +1,10 @@
 """Per-channel speech-to-text models on the GPU workers (#639): the catalog, each channel's model and context, the models
 the workers are asked to run, and the context each clip carries.
 
-    catalog     tools/stt_worker/pins.json "stt_models" (the worker checks it whole: worker.py check_catalog): each model's
+    catalog     tools/stt_worker/models.json "stt_models" (the worker checks it whole: worker.py check_catalog): each model's
                 kind (whisper-ggml: whisper-server, its context a prompt; llama-asr: llama-server with an audio model,
                 its context a short list), VRAM, services and context_default. The hub tells the workers which catalog
-                (word(): the commit it was built from and pins.json's SHA-256) and which models it wants (want()).
+                (word(): the commit it was built from and models.json's SHA-256) and which models it wants (want()).
     choices     hub.sqlite meta "stt_models" (JSON {channel key: {model?, context?, callsigns?}}): Settings > Radios >
                 <channel> > Speech model, admins, audited. Not set: DEFAULTS by the channel's service (fire, EMS and
                 police: Qwen3-ASR; airband: the ATC whisper), FALLBACK for any other. context "on" | "off" over the
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
-PINS = ROOT / "tools" / "stt_worker" / "pins.json"
+PINS = ROOT / "tools" / "stt_worker" / "models.json"
 META = "stt_models"
 KINDS = ("whisper-ggml", "llama-asr")
 ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -44,7 +44,7 @@ WANT_MAX = 8
 
 
 def load(path: Path | str = PINS) -> tuple[dict, str]:
-    """(the catalog {id: {kind, vram_mb, services, context, context_default, what}}, pins.json's SHA-256); ({}, "") when
+    """(the catalog {id: {kind, vram_mb, services, context, context_default, what}}, models.json's SHA-256); ({}, "") when
     it can't be read (no per-channel models then: every clip as before)."""
     try:
         raw = Path(path).read_bytes()
