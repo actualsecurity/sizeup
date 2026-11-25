@@ -13,7 +13,8 @@ POST /api/cad/settings/intel {action, ...}:
     set       {key: a policy key, value}                     the intel section
     pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
               merge_m?, merge_min?, link_m?, link_min?, promote_min?} (a pack with a "highway": true category;
-              rules.highway_cfg), stt_high?: true | false (its sources transcribed at HIGH: engine.py push sources)}
+              rules.highway_cfg), stt_high?: true | false (its sources transcribed at HIGH: engine.py push sources),
+              agency_towns?: {agency: town} ({}: the file's; a talker's department's town, rules.py)}
     category  {pack, category, mode?, priority?, ttl_min?}
     rule      {rule, mode?, w?, enabled?}
     local     {rule: "local.x", pack, category, any: [...], not?: [...], w?, mode?}   (new rules start in shadow)
@@ -139,7 +140,8 @@ class IntelAdmin:
                       "local": r.id.startswith("local."), **stats.get(r.id, {"hits": 0, "events": 0})} for r in p.rules]
             packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s,
                           "accept": p.accept, "scope": p.scope, "area": list(p.area), "categories": cats, "rules": rules,
-                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area")}})
+                          "agency_towns": dict(p.agency_towns),
+                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area", "agency_towns")}})
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
         try:        # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
             counters = eng.counts(now)
@@ -320,6 +322,15 @@ class IntelAdmin:
                         cur["area"] = towns
                     else:
                         cur.pop("area", None)           # empty: the pack file's own area
+                if "agency_towns" in body:
+                    try:
+                        at = rules_mod.agency_towns(body["agency_towns"], "agency_towns")
+                    except ValueError as e:
+                        raise CadError(str(e)) from None
+                    if at:
+                        cur["agency_towns"] = at
+                    else:
+                        cur.pop("agency_towns", None)   # empty: the pack file's own
                 audit_key = f"intel_packs/{pname}"
             else:
                 cat = str(body.get("category") or "")

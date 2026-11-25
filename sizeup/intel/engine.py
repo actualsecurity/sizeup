@@ -56,6 +56,13 @@ from the hub over whatever hub-to-station channel speech-to-text uses (nothing h
     "air:<label>", any other kind: "fm:<label>"; kind not given: either one, a channel's label being unique here); a
     key already "fm:" / "air:" as it is. A caller that compares itself must normalise the same way (source_key()).
 
+Talkers (sizeup/intel/talkers.py; engine.talkers.radios: the CAD's Settings > Radios > Radio IDs, #844): another
+system's radio ID is looked up once per registry revision (cached, in memory) as its label, agency, role and whether it
+is a dispatch console. A console's transmission is the dispatcher's (never a tie by talker alone) and, beside a
+category's hit, gets the pack's dispatch cue ("<prefix>dispatch_cue", its weight, once) without the cue words; the
+department's town (rules.py "agency_towns", else the source's towns by name or initials) is the town prior of step 4;
+the push says who it was heard from by the label (push.compose "heard"). No registry, or an unlabelled radio: as before.
+
 The sink (no side effect happens in the engine itself):
 
     sink.hit(Hit)                 every hit: shadow, below threshold and suppressed-by-mode too
@@ -74,7 +81,8 @@ How a row becomes an event, per pack whose scope it is in:
      (1 + w) for each damper (negative weight); at or over the threshold (the category's, else the pack's) it is an
      event: the open one of this pack, category and source still within the window, or the open one at the same place
      (subject = pack:category:place), else a new one;
-  4. WHERE: the window's words through locate() (only while not confirmed);
+  4. WHERE: the window's words through locate() (only while not confirmed); on a source shared by several towns, the
+     dispatching department's town first (_town_prior: the talker's label, below), a preference only (place.py);
   5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
      store, never shown or pushed); policy.decide() says whether to push, push.compose() (+ scrub() with push_pii
      off) what. The rules'
@@ -157,6 +165,7 @@ from sizeup.intel import counters as counters_mod
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import push as push_mod
 from sizeup.intel import rules as rules_mod
+from sizeup.intel import talkers as talkers_mod
 from sizeup.intel.model import Decision, Event, Hit, lowest, mode_rank
 from sizeup.intel.policy import Policy, level
 
@@ -229,6 +238,8 @@ class Entry:
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
     place: object = None               # the place in its own words (model.Place), or None
+    label: str = ""                    # its radio as Settings > Radios names it (talkers.py), "" none
+    town: str = ""                     # ... that department's town, one of the source's ("" not known)
 
 
 @dataclass
@@ -297,6 +308,9 @@ class IntelEngine:
         self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
         self.backing = None                   # backing.ModelBacking: the local model behind the police rules (rows they left)
+        # who keyed up (talkers.py): the CAD sets talkers.radios to its radio registry (Settings > Radios > Radio IDs);
+        # unset, no talker is named and every row reads as before
+        self.talkers = talkers_mod.Talkers()
         # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
         # sets it; replay may), for near_incident. None: no incidents, nothing linked.
         self.incidents = None
@@ -698,17 +712,26 @@ class IntelEngine:
                 if not pack.suppressed(alt, aws):
                     hits += [(r, r.w * pack.context_factor) for r in pack.rules
                              if r.id not in got and r.mode != "off" and r.hit(alt, aws)]
+        tk = self.talkers.of(row)             # its radio as Settings > Radios names it (None: as before)
+        if tk is not None and tk.console and any(r.category in pack.categories and w > 0 for r, w in hits):
+            # a labelled dispatch console's call-out is a dispatch cue without the words: the pack's own cue rule, at
+            # its own weight, once (a row that said the words has it already)
+            cue = self._dispatch_cue(pack)
+            if cue is not None and cue.enabled and cue.mode != "off" and all(r.id != cue.id for r, _w in hits):
+                hits.append((cue, cue.w))
         who = tuple(x for x in (str(row.get("talker") or ""), str(row.get("radio_id") or ""),
-                                *str(row.get("rig") or "").split(",")) if x.strip())
+                                *str(row.get("rig") or "").split(","), tk.label if tk else "") if x.strip())
         win = self.windows.setdefault((pack.name, key), Window())
         known = tid in win.entries
         talker = str(row.get("talker") or "").strip()
         units = {f"{m.group(1).lower()} {m.group(2).lower()}" for m in UNIT_MENTION.finditer(text)}
         units |= {u.strip().lower() for u in str(row.get("rig") or "").split(",") if u.strip()}
-        disp = bool(row.get("dispatcher")) or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row)))
+        disp = (bool(row.get("dispatcher")) or bool(tk and tk.console)
+                or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row))))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
-        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp)
+        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp,
+                      label=tk.label if tk else "", town=self._talker_town(pack, key, tk))
         if (self.locate is not None or (pack.hw and self.highway is not None)) and not suppressed and (
                 self._could_reach(pack, win, tid, hits)
                 or any(not e.confirmed or pack.category(e.category).get("moves")
@@ -946,8 +969,37 @@ class IntelEngine:
 
     def _scope(self, pack, row: dict, key: str) -> dict:
         own = pack.towns_for(key)
+        prior = self._town_prior(pack, row, key)
         return {"source_key": key, "system": str(row.get("system") or ""), "service": str(row.get("service") or ""),
-                "towns": own or list(pack.area), "only": bool(pack.area) and not own, "pack": pack.name}
+                "towns": own or list(pack.area), "only": bool(pack.area) and not own, "pack": pack.name,
+                **({"prefer": [prior]} if prior else {})}
+
+    @staticmethod
+    def _dispatch_cue(pack):
+        """The pack's dispatch cue rule ("<prefix>dispatch_cue", a "*" cue), or None."""
+        return next((r for r in pack.rules
+                     if r.category == rules_mod.WILD and r.id.rsplit(".", 1)[-1] == "dispatch_cue"), None)
+
+    def _talker_town(self, pack, key: str, tk) -> str:
+        if tk is None:
+            return ""
+        return talkers_mod.town_of(tk, pack.towns_for(key) or list(pack.area), pack.agency_towns)
+
+    def _town_prior(self, pack, row: dict, key: str) -> str:
+        """The town a source shared by several towns most likely means (place.py's "prefer"): the dispatching
+        department's (this row's talker when it is a labelled console; else the latest labelled console in the window),
+        else this row's talker's department's. "" when no label says one (as before)."""
+        if len(pack.towns_for(key) or pack.area) < 2:
+            return ""
+        tk = self.talkers.of(row)
+        own = self._talker_town(pack, key, tk)
+        if own and tk.console:
+            return own
+        win = self.windows.get((pack.name, key))
+        for _t, e in reversed(win.ordered() if win is not None else []):
+            if e.dispatcher and e.town:
+                return e.town
+        return own
 
     def _outside(self, pack, ev: Event) -> bool:
         """A pack with an area: the event is elsewhere (its place's town isn't one of the area's; or, with no place,
@@ -1604,11 +1656,13 @@ class IntelEngine:
         if d.would_push:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
+            # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
+            pii = self.policy.cfg.get("push_pii", True)
             msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful,
                                    number=self._numbers.get(ev.near_incident or 0, ("", None))[0],
-                                   fd_at=self._numbers.get(ev.near_incident or 0, ("", None))[1])
-            # push_pii (Settings, on by default; admin decision 2026-11-17): no PII scrub, access is limited instead
-            why = "" if self.policy.cfg.get("push_pii", True) else push_mod.scrub(msg, self._who(pack, ev))
+                                   fd_at=self._numbers.get(ev.near_incident or 0, ("", None))[1],
+                                   heard=self._heard(pack, ev) if pii else "")
+            why = "" if pii else push_mod.scrub(msg, self._who(pack, ev))
             if why:
                 self.log(f"intel: push of event {ev.id} withheld by the scrub ({why})")
                 d = Decision(d.mode, False, "scrub", d.priority)
@@ -1629,6 +1683,13 @@ class IntelEngine:
         if ev.suppressed and not was:         # held, once per event (as events.counts() has it)
             self._count(now, "held", [pack.name])
         self.events.save(ev)
+
+    def _heard(self, pack, ev: Event) -> str:
+        """Who the event was heard from, as Settings > Radios labels the radio (talkers.py): its dispatch console's,
+        else its first labelled talker's; "" when none is labelled (never a raw radio ID)."""
+        es = self._event_entries(pack, ev)
+        return (next((e.label for e in es if e.label and e.dispatcher), "")
+                or next((e.label for e in es if e.label), ""))
 
     def _who(self, pack, ev: Event) -> list[str]:
         out = []

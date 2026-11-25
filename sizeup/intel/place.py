@@ -31,6 +31,10 @@ Spoken forms beyond what a page says (radiogeo depth):
     "I-95 northbound exit 21", "287 mile marker 10"   the highway exit or marker (the place search, when given)
 Per-domain thresholds (DOMAIN_PARAMS): police transcripts are noisier than a page, so a reading needs a higher score to
 be confirmed and a sound-alike street must be closer. pagegeo's own values (pages) are unchanged.
+Town prior (scope "prefer", engine.py _town_prior): on a source shared by several towns, the dispatching department's
+town (its talker's label, Settings > Radios; sizeup/intel/talkers.py) is read first, as a callsign's is, and a reading
+there beats one elsewhere within PRIOR_BONUS of its score. A preference only: words that name a town ("... in <Town>")
+drop it, a confirmed or more precise reading elsewhere still wins, and a callsign said (below) comes first.
 HQ narrowing: a headquarters callsign said alone (data/pd_units.json, on its own system and service: police "908" is
 Port Chester PD's, "266" Rye PD's) holds the reading to that department's town first.
 WHERE score: the locator's, + READBACK_BONUS for each further transmission in the window that repeats the street, -
@@ -61,6 +65,7 @@ RANK = {"address": 0, "intersection": 1, "block": 2, "landmark": 3, "street": 4,
 DOMAIN_PARAMS = {"police": {"confirm": 0.8, "rival": 0.1, "rival_m": 200, "sound_min": 0.7, "corner_m": 200}}
 CORNER_M = 200.0               # "N <street> at <cross>": the address confirms only this close to where they meet
 READBACK_BONUS, RIVAL_PENALTY = 0.08, 0.15
+PRIOR_BONUS = 0.1              # the talker's town prior (scope "prefer"): a reading there wins a near tie only
 SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
           r"way|hwy|highway|tpke|turnpike|cir|circle)")
 STREET = rf"((?:[a-z]+\s+){{0,3}}?[a-z]+\s+{SUFFIX})"
@@ -195,6 +200,28 @@ def hq_towns(text: str, system: str, service: str) -> list[str]:
     return out
 
 
+DEPT_AFTER = re.compile(r"\s+(?:pd|police|fd|fire|ems|department|dept)\b", re.I)
+
+
+def prior_towns(text: str, towns, prefer) -> list[str]:
+    """The talker's town prior (scope "prefer": the dispatching department's town, engine.py _town_prior), kept only on
+    a source shared by several towns and only while the words name none of them as a place ("... in <Town>": that
+    town wins, never the prior; "<Town> PD" is who, not where). [] otherwise: read as before."""
+    towns = [t for t in towns or () if t]
+    out = [t for t in prefer or () if t in towns]
+    if len(towns) < 2 or not out:
+        return []
+    seen: list[tuple[int, int]] = []          # longest names first: "<Town> Brook" is never also "<Town>"
+    for t in sorted(towns, key=len, reverse=True):
+        for m in re.finditer(rf"(?<![A-Za-z]){re.escape(t)}(?![A-Za-z])", text or "", re.I):
+            if any(a <= m.start() < b for a, b in seen):
+                continue
+            seen.append(m.span())
+            if not DEPT_AFTER.match(text, m.end()):
+                return []
+    return out
+
+
 def has_cue(text: str) -> bool:
     """Worth the gazetteer: an address-like phrase, an intersection, block or highway cue."""
     from sizeup.cad.radiolog import addresses_in
@@ -237,10 +264,12 @@ class Locator:
             return None
         towns = list(scope.get("towns") or ())
         hq = [t for t in hq_towns(text, system, service) if not towns or t in towns]
+        prefer = prior_towns(text, towns, scope.get("prefer"))
+        pref = hq or prefer                   # a callsign said beats who said it
         # the pack's own, else its service's (a second police pack is read as strictly as the first)
         params = DOMAIN_PARAMS.get(str(scope.get("pack") or service)) or DOMAIN_PARAMS.get(service, {})
         cands: list[Place] = []
-        for home in ([hq] if hq else []) + [towns]:
+        for home in ([pref] if pref else []) + [towns]:
             p = self._page(clean, tuple(home), params, only=bool(scope.get("only")))
             if p is not None:
                 cands.append(p)
@@ -248,7 +277,7 @@ class Locator:
                     break
         for fn in (self._spoken_cross, self._block, self._highway):
             try:
-                p = fn(clean, towns, hq)
+                p = fn(clean, towns, pref)
             except Exception:  # noqa: BLE001 - one form failing never loses the others
                 p = None
             if p is not None:
@@ -278,7 +307,9 @@ class Locator:
                 else:
                     addr.basis = "; ".join(x for x in (addr.basis, f"{int(d)} m from {corner}") if x)
                 break
-        best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9), -p.where_score))
+        lean = prefer if prefer and not hq else []          # the talker's town: a nudge, never a filter
+        best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9),
+                                         -(p.where_score + (PRIOR_BONUS if p.town in lean else 0.0))))
         rel = RELATIVE.search(clean)
         if rel:
             best.radius_m = max(best.radius_m * 2, 100.0)
