@@ -55,13 +55,18 @@ COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "
            "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn",
            "vocab_v")
 ENGINES = ("gpu-worker", "aws", "station-whisper")
-ROLES = ("text", "alt", "late", "rerun", "catchup")
+ROLES = ("text", "alt", "late", "rerun", "catchup", "discarded")   # discarded: a repetition loop, not used
 KEEP_DAYS = 90.0
 # the dispatcher's trailing time (#727): added to a file from before them (Runs._open)
 _TEXT = "TEXT NOT NULL DEFAULT ''"
 CHECK_TYPES = {"time_check": _TEXT, "time_said": _TEXT, "time_off": "INTEGER", "time_conf": "REAL",
                "time_fixed_text": _TEXT, "fix_rule": _TEXT, "label_flag": _TEXT}
 CHECK_COLUMNS = tuple(CHECK_TYPES)
+# the per-channel models (#639, sizeup/sttmodels.py): the context the engine decoded with, never its content: prompt_n its
+# length (prompt_v its hash), ctx its form (prompt | list | none; "" before them), gate "quiet" (the worker's silence
+# gate: not decoded), want the model the channel asked for (model: the one that wrote it)
+MODEL_TYPES = {"prompt_n": "INTEGER", "ctx": _TEXT, "gate": _TEXT, "want": _TEXT}
+MODEL_COLUMNS = tuple(MODEL_TYPES)
 TIME_RATES_S = 60.0          # Health's trailing-time table, worked out at most this often
 TIME_DAYS = 7
 TIME_ROLES = ("text", "alt", "late")    # first passes only: a person's re-run and a catch-up are no live engine's word
@@ -180,9 +185,9 @@ class Runs:
             self._db = db
             try:
                 have = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
-                for c in CHECK_COLUMNS:
+                for c, t in {**CHECK_TYPES, **MODEL_TYPES}.items():
                     if c not in have:
-                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CHECK_TYPES[c]}")
+                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {t}")
                 want, other = (TIME_INDEX_V, TIME_INDEX) if "vocab_v" in have else (TIME_INDEX, TIME_INDEX_V)
                 db.execute(f"DROP INDEX IF EXISTS {other[0]}")
                 db.execute(f"CREATE INDEX IF NOT EXISTS {want[0]} ON stt_runs ({want[1]}) WHERE time_check != ''")
@@ -202,9 +207,9 @@ class Runs:
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
-            vocab_v: str = "") -> bool:
+            vocab_v: str = "", prompt_n: int | None = None, ctx: str = "", gate: str = "", want: str = "") -> bool:
         """One transcript. True when it was written. vocab_v: the term list or vocabulary that biased it
-        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash)."""
+        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash, prompt_n its length); ctx, gate, want: MODEL_TYPES."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], _fin(confidence),
@@ -217,9 +222,13 @@ class Runs:
             return False
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + MODEL_COLUMNS
                 self._open().execute(f"INSERT INTO stt_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                                     row + _check_row(check))
+                                     row + _check_row(check) + (
+                                         int(prompt_n) if isinstance(prompt_n, int) and not isinstance(prompt_n, bool)
+                                         and 0 <= prompt_n < 100000 else None,
+                                         ctx if ctx in ("prompt", "list", "none") else "",
+                                         "quiet" if gate == "quiet" else "", str(want or "")[:48]))
             return True
         except Exception as e:  # noqa: BLE001 - bookkeeping: never in the way of the transcript
             self._say(f"stt runs: not recorded: {type(e).__name__}: {e}")
@@ -231,7 +240,7 @@ class Runs:
             return []
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + MODEL_COLUMNS
                 cur = self._open().execute(f"SELECT {', '.join(cols)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
                                            (clip_id,))
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]

@@ -50,6 +50,9 @@ PROBE_S = 180.0                # a worker found slow on them gets one pre-alert 
                                # slow one or try (a probe: how it recovers; a quick answer opens the gate again)
 STATION_DEFER_S = 1.0          # a job a GPU worker could take now waits this long before a station's whisper may claim it
                                # (the order: a GPU worker, an idle station's whisper, then AWS; #639 phase 2)
+MODEL_DEFER_S = 1.0            # a job for a model (sizeup/sttmodels.py) that an idle worker has loaded waits this long
+                               # for that worker before another GPU worker takes it on its own model (never longer: a
+                               # model is a preference, never a reason to wait)
 KINDS = ("gpu", "station")
 PREALERT_MAX_SERVICE_S = 3.0   # a pre-alert clip goes to the pool only to an idle worker (in a claim now) whose recent
                                # claim -> text on these classes is this quick (AWS answers them in seconds)
@@ -110,6 +113,10 @@ class Job:
     audio_wait: bool = False                    # audio(wait_s): it may wait that long for the station's STT input
     gpu_only: bool = False                      # a GPU worker's only (an AWS channel's clip: a station's whisper is
                                                 # slower than AWS, so it never waits on one)
+    model: str = ""                             # the catalog model its channel uses (sizeup/sttmodels.py): a worker that
+                                                # has it loaded first; any other decodes it on its own
+    context: list = field(default_factory=list)   # a llama-asr model's context (sttmodels.context_list)
+    plain: list = field(default_factory=list)   # the models its context is off for (whichever decodes it)
     extra: dict = field(default_factory=dict)   # the caller's own (catch-up, the page object, ...)
 
     def public(self) -> dict:
@@ -118,7 +125,10 @@ class Job:
                 "class": class_key(self.cls), "prompt": self.prompt, "seconds": round(self.seconds, 2),
                 "lease_s": round(max(0.0, self.expires - (self.claimed_at or 0.0)), 1), "cap_at": self.cap_at,
                 "fast": self.cls in FAST_CLASSES or self.cls == CATCHUP or self.extra.get("kind") == "station",
-                "audio": f"/api/station/stt/jobs/{self.lease}/audio"}
+                "audio": f"/api/station/stt/jobs/{self.lease}/audio",
+                **({"model": self.model} if self.model else {}),
+                **({"context": list(self.context)} if self.context else {}),
+                **({"plain": list(self.plain)} if self.plain else {})}
 
 
 @dataclass
@@ -143,6 +153,9 @@ class Worker:
     lost: int = 0
     last_job: float | None = None
     leases: set = field(default_factory=set)
+    models: list = field(default_factory=list)  # a GPU worker's models loaded now: its whisper_server's, then the
+                                                # catalog's that answer (its claim and heartbeat say)
+    stt_state: dict = field(default_factory=dict)   # each model it was asked for: ready, downloading, no room ...
 
 
 def pct(xs: list[float], p: float) -> float | None:
@@ -251,7 +264,7 @@ class Pool:
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
-             update: dict | None = None) -> Worker:
+             update: dict | None = None, models: list | None = None, stt_state: dict | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
         whose token no longer stands (revoked meanwhile)."""
@@ -281,6 +294,10 @@ class Pool:
                 w.version = str(version)[:40]
             if isinstance(update, dict):
                 w.update = dict(update)
+            if isinstance(models, list):
+                w.models = [str(m)[:48] for m in models[:16] if isinstance(m, str)]
+            if isinstance(stt_state, dict):
+                w.stt_state = {str(k)[:48]: str(v)[:60] for k, v in list(stt_state.items())[:16]}
             if isinstance(gpu, dict):
                 w.gpu = {k: gpu[k] for k in ("util_pct", "mem_used_mb", "mem_total_mb", "others", "name")
                          if isinstance(gpu.get(k), (int, float, str)) and not isinstance(gpu.get(k), bool)}
@@ -368,7 +385,16 @@ class Pool:
             if j.seconds > float(w.load.get("max_s", 1e9)):
                 return False                       # (only what it decodes in a few seconds: its own pages never wait long)
             return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now))
+        if j.model and j.model not in w.models and now - j.queued_at < MODEL_DEFER_S and self._model_idle(j, w, now):
+            return False                           # (a worker with its model takes it in a moment)
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
+
+    def _model_idle(self, j: Job, w: Worker, now: float) -> bool:
+        """Another GPU worker has this job's model loaded and could take the job now (in a claim, room for a lease;
+        for a pre-alert clip: quick and holding nothing)."""
+        return any(o is not w and o.kind == "gpu" and j.model in o.models and o.polling > 0 and self._ready(o, now)
+                   and len(o.leases) < MAX_LEASES and (j.cls not in FAST_CLASSES or self._fast_ok(o, now))
+                   for o in self.workers.values())
 
     def ready(self, cls: float, now: float | None = None, gpu_only: bool = False, origin: str = "",
               seconds: float | None = None) -> tuple[bool, str]:
@@ -442,11 +468,12 @@ class Pool:
                    key=lambda j: (j.cls, j.queued_at), default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
-              kind: str | None = None, load: dict | None = None) -> Job | None:
-        """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one."""
+              kind: str | None = None, load: dict | None = None, models: list | None = None) -> Job | None:
+        """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one.
+        models: the models it has loaded now (a job for one of them goes to it first: _fits)."""
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
-        w = self.seen(wid, state, model, kind=kind, load=load)
+        w = self.seen(wid, state, model, kind=kind, load=load, models=models)
         if w is None:
             return None
         with self._cv:
@@ -467,7 +494,7 @@ class Pool:
                     left = end - time.monotonic()
                     if left <= 0:
                         return None
-                    self._cv.wait(min(left, 1.0))
+                    self._cv.wait(min(left, MODEL_DEFER_S / 4 if any(j.model for j in self._queue) else 1.0))
                 return None
             finally:
                 w.polling -= 1
@@ -627,6 +654,7 @@ class Pool:
                 mine = [x for x in hour if x[5] == w.id]
                 workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
                                 "state": self.state_of(w, now), "model": w.model, "version": w.version,
+                                "models": list(w.models), "stt_state": dict(w.stt_state),
                                 "update": dict(w.update),
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),

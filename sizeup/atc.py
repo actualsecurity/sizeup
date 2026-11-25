@@ -1044,14 +1044,30 @@ def spoken_callsign(flight: str, telephony: dict[str, str]) -> str:
 PROMPT_PHASES = {"arriving": 0, "departing": 1, "near": 2, "ground": 2, "low": 3}   # who talks to the tower first (#257)
 
 
+def _prompt_order(a: dict) -> tuple:
+    return (PROMPT_PHASES.get(a.get("phase") or "", 4), a.get("dist") if a.get("dist") is not None else 1e9)
+
+
+def spoken_callsigns(aircraft: Sequence[dict], telephony: dict[str, str], cap: int = 8) -> list[str]:
+    """The callsigns as said of the aircraft most likely on the frequency, in whisper_prompt's order, each once, at
+    most cap: a speech-to-text model's context list (sizeup/sttmodels.py)."""
+    out: list[str] = []
+    for a in sorted(aircraft, key=_prompt_order):
+        cs = spoken_callsign(a.get("flight") or a.get("reg") or "", telephony)
+        if cs and cs not in out:
+            out.append(cs)
+            if len(out) >= cap:
+                break
+    return out
+
+
 def whisper_prompt(base: str, aircraft: Sequence[dict], telephony: dict[str, str]) -> str:
     """The vocabulary prompt, then the callsigns as said of the aircraft most likely on the frequency, as many as fit
     (shortfinal build_prompt): arriving, departing and on the ground at HPN before low traffic passing (#257:
     shortfinal's plausible.rank; not the nearest overall, so a helicopter low overhead doesn't push out the arrival
     on final), nearest first in each."""
     out = base
-    for a in sorted(aircraft, key=lambda a: (PROMPT_PHASES.get(a.get("phase") or "", 4),
-                                              a.get("dist") if a.get("dist") is not None else 1e9)):
+    for a in sorted(aircraft, key=_prompt_order):
         cs = spoken_callsign(a.get("flight") or a.get("reg") or "", telephony)
         if not cs:
             continue

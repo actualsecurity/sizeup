@@ -221,6 +221,7 @@ CREATE TABLE IF NOT EXISTS radios (
   first_heard REAL, last_heard REAL, heard INTEGER NOT NULL DEFAULT 0,
   last_channel TEXT NOT NULL DEFAULT '', -- where it was last heard: FG1, Fire/EMS 15 (#163)
   updated_at REAL NOT NULL,
+  hint INTEGER,                         -- speech-to-text context: 1 its name goes in, 0 never, NULL the default (radios.py)
   PRIMARY KEY (system, radio_id)
 );
 -- every change made in Settings: who, which section, what key, old -> new (shared with the settings branch: same shape)
@@ -644,6 +645,8 @@ class Store:
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")
+        if radcols and "hint" not in radcols:                # its name as speech-to-text context or not (#639 models)
+            self.db.execute("ALTER TABLE radios ADD COLUMN hint INTEGER")
         # another P25 system's ID ranges, an admin's (MRRS naming): a new table; the radios rows keep their keys
         # ("p25" the county's, "mdc" / "fleetsync" the fireground's), so nothing there moves
         self.db.execute(radios_mod.RANGES_SCHEMA)

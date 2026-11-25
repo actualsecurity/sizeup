@@ -122,7 +122,7 @@ from sizeup.cloud.sttworkers import API as STT_API, STATION_PREFIX, WorkerApi, W
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
-from sizeup import stt_time, sttpool, sttruns
+from sizeup import stt_time, sttmodels, sttpool, sttruns
 from sizeup.cloud import infer as infer_mod
 from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
@@ -1101,6 +1101,11 @@ class HubApp(App):
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
         self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
+        # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's pins.json,
+        # the choices in Settings > Radios; the workers hear which models to run in their hello and state answers
+        self.stt_choices = sttmodels.Choices(self.mdb)
+        self.stt_api.stt_models = self._stt_models_word
+        self.cad.stt_models = self.stt_choices
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
@@ -1750,10 +1755,55 @@ class HubApp(App):
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
                           gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
+        self._pool_models(job, item, key)
         if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
             self._pool_to_aws(job, "the GPU pool couldn't take it")
         self.sync()
         return True
+
+    def _pool_models(self, job: sttpool.Job, item, key: str) -> None:
+        """A pool job's model and context (sizeup/sttmodels.py): the model its channel uses (a worker that has it loaded
+        first), the list a llama-asr model gets (who keyed up by name, the channel's call signs, the aircraft near the
+        field at the clip's time, the channel's top terms), the channel's call signs in whisper's prompt too, and the
+        models its context is off for. Never in the way of the clip: no models named, as before."""
+        ch = getattr(self, "stt_choices", None)
+        if ch is None or not ch.catalog:
+            return
+        try:
+            service = "fire" if job.kind == "page" else str(self._row_source(item).get("service") or "") \
+                if isinstance(item, Traffic) else ""
+            job.model = ch.model_for(key, service)
+            calls = ch.callsigns(key)
+            if calls:
+                job.prompt = " ".join(p for p in (job.prompt, ", ".join(calls) + ".") if p)
+            names = self._talker_names(item) if self.cfg.stt_talker_prompt != "off" else []
+            planes: list[str] = []
+            if self._kind.get(getattr(item, "source", "")) == "airband":
+                from sizeup import atc
+                planes = atc.spoken_callsigns(self._atc_planes(getattr(item, "source", ""), getattr(item, "end", None)),
+                                              atc.telephony_words())
+            ts = self._terms_for_item(item)
+            terms = stt_terms.prompt_terms(ts.terms)[:sttmodels.CONTEXT_MAX] if ts is not None and ts.terms else []
+            job.context = sttmodels.context_list(names, calls, planes, terms)
+            job.plain = ch.plain(key)
+        except Exception as e:  # noqa: BLE001 - the channel's model and context are a help, never a must
+            self.hub.log(f"stt pool: {job.id}: its model and context: {type(e).__name__}: {e}")
+
+    def _stt_models_word(self) -> dict | None:
+        """What a GPU worker hears in its hello and state answers (sizeup/sttmodels.py): the catalog in this build (its
+        commit on main and pins.json's SHA-256: the worker fetches that file from GitHub itself) and the models the
+        channels use, most important first. None without a build commit (a local run): the workers run only their own."""
+        build = (self.stt_api.build or {}).get("commit", "")
+        ch = self.stt_choices
+        if not build or not ch.digest or not ch.catalog:
+            return None
+        services: dict = {}
+        for key in ch.settings():
+            try:
+                services[key] = self._key_service(key)[1]
+            except Exception:  # noqa: BLE001 - a channel the hub can't place: after the rest
+                services[key] = ""
+        return {"catalog": {"commit": build, "sha256": ch.digest}, "want": ch.want(services)}
 
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
@@ -1814,6 +1864,7 @@ class HubApp(App):
                           extra={"pcm": pcm, "page": page, "handed": True,
                                  "origin": str(getattr(item, "origin_station", "") or self.clip_origin),
                                  "vocab_v": vocab_v})
+        self._pool_models(job, item, key)
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "no pool worker could take it now")
         self.sync()
@@ -1868,8 +1919,22 @@ class HubApp(App):
                  if isinstance(w[1], (int, float)) and math.isfinite(w[1]) and 0.0 <= w[1] <= 1.0]
         conf = round(sum(probs) / len(probs), 2) if probs else None
         vocab_v = str(job.extra.get("vocab_v") or "")       # a term list in its prompt: the read-back guard too
-        text, status = judge(raw, job.seconds, prompt=job.prompt, vocab_v=vocab_v)
         kind = str(job.extra.get("kind") or "gpu")
+        # the context it was decoded with (the worker says which form; an older worker's: the prompt it was sent)
+        ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
+        prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
+        if raw and sttmodels.is_loop(raw):        # a model stuck on a phrase: discarded, the next engine takes it
+            self._stt_ran(job.id, "station-whisper" if kind == "station" else "gpu-worker", str(res.get("model") or ""),
+                          raw, "loop", None, key=job.channel, item=job.extra.get("page"), role="discarded",
+                          queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker, cls=job.cls,
+                          clip_end=job.clip_end, prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, want=job.model)
+            job.extra["fell"] = "error"
+            self.hub.log(f"stt pool: {job.kind} {job.id}: a repetition loop from {job.worker}: the next engine")
+            return self._pool_fallback(job, "a repetition loop (discarded)")
+        # (the read-back guard on the context it had: whisper's prompt, or a llama-asr model's list, which it can echo)
+        sent = job.prompt if ctx == "prompt" else ", ".join(job.context) if ctx == "list" else ""
+        text, status = judge(raw, job.seconds, prompt=sent, vocab_v=(vocab_v or "list") if ctx == "list" and sent
+                             else vocab_v if ctx == "prompt" else "")
         model = sttpool.model_label(str(res.get("model") or ""), job.worker, kind)
         catchup = bool(job.extra.get("catchup"))
         done_at = time.time()
@@ -1892,10 +1957,11 @@ class HubApp(App):
                       raw, status, conf, key=job.channel,                                                      # (after
                       item=job.extra.get("page"), role="catchup" if catchup else "text", words=res.get("words"),  # the text)
                       queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker,
-                      prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
+                      prompted=stt_time.prompted(job.prompt, job.clip_end) if ctx == "prompt" else False,   # (#727)
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
-                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v)
+                      prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, gate=str(res.get("gate") or ""), want=job.model,
+                      cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v if ctx != "none" else "")
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
         """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
@@ -1966,6 +2032,8 @@ class HubApp(App):
                           clip_end=self._hub_time(float(end) + float(row.get("seconds") or 0.0))
                           if isinstance(end, (int, float)) else None,
                           extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin, "vocab_v": vocab_v})
+        if item is not None:
+            self._pool_models(job, item, key)
         self._rerun_note[cid] = CATCHUP_NOTE
         if not self.sttpool.submit(job):
             self._rerun_note.pop(cid, None)
@@ -1975,7 +2043,8 @@ class HubApp(App):
     def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
                  prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
-                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None) -> None:
+                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None,
+                 prompt_n: int | None = None, ctx: str = "", gate: str = "", want: str = "") -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
         here) counted for Health when it is the text of record. Never in the way of the transcript."""
         try:
@@ -2001,7 +2070,7 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check)
+                              check=check, prompt_n=prompt_n, ctx=ctx, gate=gate, want=want)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping

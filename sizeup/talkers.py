@@ -37,15 +37,40 @@ def spoken(tag: str) -> str | None:
     return None
 
 
-def talker_prompt(units: list[str] | str, start: float | None = None, with_time: bool = False,
-                  tz: str = "America/New_York") -> str:
+def hint_names(units: list[str] | str = "", rig: str = "", radio_ids: str = "", named=(),
+               blocked=()) -> list[str]:
+    """Who keyed up, as said on the air, for speech-to-text context: the department's exact names of the radios that
+    keyed up (named: a radio ID's own entry in Settings > Radios > Radio IDs with "use as hint" on, e.g. a PD dispatch
+    console's "908"; never a range's label: officers swap radios, so it doesn't say who is talking), the units its
+    radios are on (rig "E63": "Engine 63"), then the talker aliases the system sent ("77A4": "77 Alpha 4", "60 Ctrl OP
+    3": "60 Control"). Never a raw radio ID: a talker that is one of the clip's own radio IDs is left out (an FG1 radio
+    with no alias shows its MDC ID), and so is anything of a radio whose hint is off (blocked: its unit codes and
+    aliases)."""
+    ids = {x.strip().upper() for x in str(radio_ids or "").split(",") if x.strip()}
+    blocked = {str(b).strip().upper() for b in blocked if str(b).strip()}
     if isinstance(units, str):
-        units = [u for u in units.split(",")]
+        units = units.split(",")
     said: list[str] = []
-    for u in units:
-        s = spoken(u)
-        if s and s not in said:
+
+    def add(s: str | None) -> None:
+        if s and s not in said and s.upper() not in ids:
             said.append(s)
+    for n in named:
+        add(" ".join(str(n).split()))
+    for code in str(rig or "").split(","):
+        code = code.strip()
+        if code and code.upper() not in blocked:
+            add(spoken(code))
+    for u in units:
+        u = " ".join(str(u).split())
+        if u and u.upper() not in ids and u.upper() not in blocked:
+            add(spoken(u))
+    return said
+
+
+def talker_prompt(units: list[str] | str, start: float | None = None, with_time: bool = False,
+                  tz: str = "America/New_York", rig: str = "", radio_ids: str = "", named=(), blocked=()) -> str:
+    said = hint_names(units, rig, radio_ids, named, blocked)
     if with_time and start and any(s.endswith(" Control") for s in said):
         said.append(datetime.fromtimestamp(start, ZoneInfo(tz)).strftime("%H%M"))
     return (", ".join(said) + ".") if said else ""

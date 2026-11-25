@@ -99,7 +99,7 @@ from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
-from sizeup.talkers import talker_prompt
+from sizeup.talkers import hint_names, talker_prompt
 from sizeup import channels, stt_terms
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
@@ -125,6 +125,7 @@ MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pend
 HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 STATION_SWITCH_S = 0.001    # ... and a station's: its radio readers (start_app())
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
+ATC_CONTEXT_AGE_S = 120.0  # an airband clip older than this gets no aircraft in its context (a catch-up, a re-run)
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
 TOWN_CONFIDENCE = 0.6
@@ -1184,18 +1185,55 @@ class App:
         police profile's prompt keeps only its towns' busiest streets (stt_terms.PROFILE_STREETS: the addresses that
         matter; its 30 alone filled most of whisper's budget), the list the rest."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
-            return self._atc_prompt(getattr(item, "source", ""))
+            return self._atc_prompt(getattr(item, "source", ""), at=getattr(item, "end", None))
         prof = self._stt_profile(item)
-        if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
-            if not short:
-                return self._profile_prompt(prof)
-            n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
-            return self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
+        if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, and of its talkers
+            if not short:             # only a radio's exact name with its hint on (a dispatch console's: hint_names)
+                base = self._profile_prompt(prof)
+            else:
+                n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
+                base = self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
+            names = self._talker_names(item) if self.cfg.stt_talker_prompt != "off" else []
+            return " ".join(p for p in (base, ", ".join(names) + "." if names else "") if p)
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
+            named, blocked = self._talker_hints(item)
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
-                                       with_time=self.cfg.stt_talker_prompt == "ids+time"))
+                                       with_time=self.cfg.stt_talker_prompt == "ids+time",
+                                       rig=str(getattr(item, "rig", "") or ""),
+                                       radio_ids=str(getattr(item, "radio_id", "") or ""), named=named, blocked=blocked))
         return " ".join(p for p in parts if p)
+
+    def _talker_hints(self, item) -> tuple[list[str], list[str]]:
+        """(named, blocked) of the radios that keyed up (sizeup/cad/radios.py Registry.hints): the exact names that go
+        in as context, and what of a radio whose hint is off stays out."""
+        reg = getattr(self, "radios", None)
+        rids = [r.strip() for r in str(getattr(item, "radio_id", "") or "").split(",") if r.strip()]
+        if reg is None or not rids or isinstance(item, Page):
+            return [], []
+        system = str(getattr(item, "system", "") or "")
+        try:
+            if system in radios_mod.OTHER_P25:
+                return reg.hints(system, rids)
+            if getattr(item, "talkgroup", None) is not None:
+                return reg.hints("p25", rids)
+            named, blocked = [], []
+            for rid in rids:
+                n, b = reg.hints(radios_mod.fm_system(rid), [rid])
+                named += n
+                blocked += b
+            return named, blocked
+        except Exception as e:  # noqa: BLE001 - no names is still a prompt
+            log(f"speech-to-text: talker hints: {type(e).__name__}: {e}")
+            return [], []
+
+    def _talker_names(self, item) -> list[str]:
+        """Who keyed up on this clip, said the way it's said on the air, names only (sizeup/talkers.py hint_names)."""
+        if isinstance(item, Page):
+            return []
+        named, blocked = self._talker_hints(item)
+        return hint_names(getattr(item, "unit", "") or "", str(getattr(item, "rig", "") or ""),
+                          str(getattr(item, "radio_id", "") or ""), named, blocked)
 
     @staticmethod
     def _stt_profile(item) -> dict | None:
@@ -1221,15 +1259,22 @@ class App:
                 cache[name] = str(prof.get("prompt") or "")
         return cache[name]
 
-    def _atc_prompt(self, channel: str = "") -> str:
+    def _atc_prompt(self, channel: str = "", at: float | None = None) -> str:
         """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
         as said on the air (shortfinal stt_prompt.py), from the Aircraft layer when it has a fresh picture here; only the
-        ones that can be on that frequency (#260, sizeup/atc_scope.py: Ground the field, Approach out to 40 NM)."""
+        ones that can be on that frequency (#260, sizeup/atc_scope.py: Ground the field, Approach out to 40 NM). at: the
+        clip's end; a clip older than ATC_CONTEXT_AGE_S gets no callsigns (the aircraft now aren't the ones then)."""
         from sizeup import atc
-        from sizeup.atc_scope import planes_for
         if self._atc_vocab is None:
             self._atc_vocab = atc.vocabulary()
-        return atc.whisper_prompt(self._atc_vocab["prompt"], planes_for(channel, self._atc_aircraft()), atc.telephony_words())
+        return atc.whisper_prompt(self._atc_vocab["prompt"], self._atc_planes(channel, at), atc.telephony_words())
+
+    def _atc_planes(self, channel: str = "", at: float | None = None) -> list[dict]:
+        """The aircraft that can be on this frequency now (#260), none for a clip older than ATC_CONTEXT_AGE_S."""
+        from sizeup.atc_scope import planes_for
+        if isinstance(at, (int, float)) and time.time() - at > ATC_CONTEXT_AGE_S:
+            return []
+        return planes_for(channel, self._atc_aircraft())
 
     def _atc_aircraft(self) -> list[dict]:
         """The aircraft the Aircraft layer has near HPN now (sizeup/aircraft.py: its last picture, read every 15 s while the
@@ -3476,6 +3521,12 @@ class App:
     def _own_for_key(self, key: str) -> str | None:
         """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
         its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        key, service, kind = self._key_service(key)
+        return stt_terms.own_for(key, service, kind)
+
+    def _key_service(self, key: str) -> tuple[str, str, str]:
+        """A channel key's (qualified source key, service, kind): a talkgroup's service from its group where it is known
+        here (a county incident talkgroup: fire), an analog channel's from its kind."""
         key = str(key or "")
         kind = self._kind.get(key, "")
         service = ""
@@ -3493,7 +3544,7 @@ class App:
         elif kind:
             key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
             service = sources.service(kind=kind)
-        return stt_terms.own_for(key, service, kind)
+        return key, service, kind
 
     def _own_vocab(self, channel: str) -> str:
         """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
