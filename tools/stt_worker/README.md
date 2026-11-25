@@ -409,6 +409,59 @@ about 6 GB (Gemma: 8 GB) of VRAM back to the game
 seconds to load, and the hub gets LLM jobs from the worker again once its health check passes. llama-server's own GPU
 memory never counts as "another process" in the gaming check.
 
+## Speech models
+
+Besides the whisper-server in `worker.toml` (the **primary**), the worker can run more speech-to-text models, one server
+each on its own loopback port (8181, 8182, ...), so each radio channel can have its own model (Settings > Radios, on
+the hub). The models are listed in [`pins.json`](pins.json) (`stt_models`): each one's files, their pinned URL, size
+and SHA-256, the VRAM it holds, its services, and whether the channel's context goes with each clip by default.
+
+| model | kind | VRAM | for |
+|---|---|---|---|
+| `large-v3-turbo-q5_0` | whisper-ggml | about 1 GB | today's model: the primary, and the control |
+| `large-v3-turbo-q8_0` | whisper-ggml | about 1.4 GB | the same, less quantised (digits) |
+| `qwen3-asr-1.7b-q8_0` | llama-asr (Qwen3-ASR, GGUF + mmproj) | about 3.8 GB | fire/EMS and police |
+| `large-v3-turbo-us-atc-v3-f16` | whisper-ggml | about 2.3 GB | airband (no prompt by default) |
+
+- **Two runtimes:** a `whisper-ggml` model runs in whisper-server (`whisper_bin`, default `whisper_server`'s
+  program); a `llama-asr` model runs in llama-server (`llama_bin`, default `llm_server`'s program) with its audio
+  projector (`--mmproj`), b12643 or later (the worker asks `llama-server --version` and says so in Health if it is
+  older). Each llama-server gets its own random API key, as the LLM's does.
+- **What the hub names:** every hello and state answer carries `stt_models {catalog: {commit, sha256}, want}`: the
+  commit on main the hub was built from, the SHA-256 of `pins.json` in it, and the models the channels use, most
+  important first (fire/EMS, then police, then airband).
+- **Where the list comes from:** the worker fetches `tools/stt_worker/pins.json` at that commit, only after GitHub's
+  API says it is main's own (the same check as the [self-update](#updating)), and only with exactly that hash. It keeps
+  it in `state\catalog.json`. One entry that breaks a rule (a URL not allowed, a bad hash, a missing file) refuses
+  the whole list.
+- **Where files come from:** `huggingface.co/<org>/<repo>/resolve/<40-digit revision>/...`, a `ggml-org` release
+  on GitHub, or a release asset of this repo; redirects only to their CDNs (`*.hf.co`,
+  `release-assets.githubusercontent.com`, `objects.githubusercontent.com`). These rules are written in `worker.py`:
+  the hub can't send the worker anywhere else. Each file is downloaded to `models\managed\<hash>-<file>.part`
+  (resumed after a stop), must be exactly its pinned size and SHA-256, then is renamed. Files in `models\managed`
+  that no model in the list uses are deleted; nothing else in `models` is touched.
+- **Built once, hosted here:** the airband model is a LoRA merged into whisper large-v3-turbo. Merging needs torch
+  and peft, which the worker doesn't have, so it was built once by the recipe in `pins.json` (pinned inputs and their
+  hashes, [`recipes/merge_lora.py`](recipes/merge_lora.py), whisper.cpp's `convert-h5-to-ggml.py` at a pinned commit,
+  the package versions; two runs from scratch gave the same file) and is a release asset of this repo (`stt-models-1`).
+- **VRAM:** the budget is the GPU's total less `vram_reserve_mb` (1.5 GB for Windows and the desktop), or
+  `vram_budget_mb`. The primary comes first, then the wanted models in the hub's order while each fits. The local LLM
+  gets what is left: once a model that needs its room is downloaded and ready to start, the worker stops llama-server
+  (the LLM) between its jobs and Health shows `llm: gave its VRAM to the speech models`. On a 12 GB card the primary,
+  Qwen3-ASR and the airband model (about 7 GB) leave no room for Qwen3-8B (6 GB).
+- **Only when idle:** downloads wait while gaming or paused (a stopped download resumes). A server starts or stops
+  only while the worker holds no clip, one at a time. A new server must answer a test decode (a second of silence)
+  within 3 minutes; else it is stopped and its hash marked bad for 6 hours (`state\models.json`). A new version of a
+  model that runs is downloaded beside it; the old one runs until the new one is ready.
+- **Gaming:** the same rule as whisper-server: after `gaming_stop_whisper_min` of gaming the worker stops them all and
+  starts them again when gaming ends.
+- **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
+  on the primary, and says which model wrote the text. Context: the clip's `prompt` (whisper) or `context` (a short
+  list: a llama-asr model's system message), unless the hub says it is off for that model (`plain`).
+- **Silence:** a clip whose speech level is under `gate_dbfs` (-55 dBFS) isn't decoded at all (every model makes words
+  up on silence): the hub gets no text, which it reads as no speech.
+- `status` shows the models' states; Health on the hub shows each worker's.
+
 ## Gaming mode
 
 When gaming or paused, the worker takes no new jobs. Its heartbeat goes on and the hub sends the clips elsewhere. If
@@ -493,6 +546,13 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `llm_timeout_s`, `llm_check_s`, `llm_fail_max` | 30, 10, 3 | per answer; health checks; failures in a row before no LLM until healthy |
 | `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
 | `auto_update` | `true` | updates itself to the version the hub names (see [Updating](#updating)); `false`: never |
+| `managed_models` | `true` | runs the hub's [speech models](#speech-models) beside `whisper_server`; `false`: only `whisper_server` |
+| `models_dir` | `models` | the models' files go in `<models_dir>\\managed` |
+| `whisper_bin`, `llama_bin` | `whisper_server`'s, `llm_server`'s program | the programs for whisper-ggml and llama-asr models |
+| `vram_budget_mb`, `vram_reserve_mb` | 0 (auto), 1536 | VRAM for all the servers: `vram_budget_mb`, else the GPU's total less the reserve |
+| `llm_vram_mb`, `primary_vram_mb` | auto, 1000 | the LLM's share (auto: its GGUF's size and a context's worth); `whisper_server`'s when its model isn't in the list |
+| `gate_dbfs` | -55 | clips quieter than this aren't decoded (no speech); -120 never |
+| `catalog_file` | | a local `pins.json` instead of the hub's (testing only) |
 
 ## Troubleshooting
 

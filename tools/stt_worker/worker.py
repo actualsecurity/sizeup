@@ -120,6 +120,18 @@ class Config:
     llm_fail_max: int = 3                  # failed generations in a row: no LLM until its health check passes again
     llm_no_think: bool = True              # chat_template_kwargs enable_thinking false (Qwen3; others ignore it)
     auto_update: bool = True               # self-update to the version the hub names (a commit on main + its hash)
+    # the catalog's models (pins.json stt_models; the hub says which): each on a server of its own beside whisper_server
+    managed_models: bool = True            # false: only whisper_server (and the LLM), as before
+    models_dir: str = "models"             # their files go in <models_dir>/managed (downloaded, checked, pruned)
+    whisper_bin: str = ""                  # whisper-server for whisper-ggml models (default: whisper_server's program)
+    llama_bin: str = ""                    # llama-server for llama-asr models (default: llm_server's program)
+    catalog_file: str = ""                 # a local pins.json instead of the hub's (testing); "" the hub's, from GitHub
+    vram_budget_mb: float = 0.0            # VRAM for all the servers; 0: the GPU's total less vram_reserve_mb
+    vram_reserve_mb: float = 1536.0        # left for Windows, the desktop, a browser
+    llm_vram_mb: float = 0.0               # the LLM's share; 0: its GGUF's size and a context's worth
+    primary_vram_mb: float = 1000.0        # whisper_server's, when its model isn't in the catalog
+    gate_dbfs: float = -55.0               # a clip whose speech level is under this isn't decoded: no speech (every
+                                           # model makes words up on silence); -120 never
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
 
     @property
@@ -194,7 +206,7 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
     for key, var in ENV.items():
         if env.get(var):
             setattr(cfg, key, env[var].strip())
-    for key in ("token_file", "state_dir", "log_file"):
+    for key in ("token_file", "state_dir", "log_file", "models_dir", "catalog_file"):
         if getattr(cfg, key) and getattr(cfg, key) != "-":
             setattr(cfg, key, _path(getattr(cfg, key), base))
     if not cfg.token and cfg.token_file:
@@ -903,9 +915,10 @@ class Children:
         ended = []
         for name, pid in read_json(self.path).items():
             prog = names.get(name)
-            if prog and isinstance(pid, int) and pid > 0:
+            progs = {p.lower().removesuffix(".exe") for p in ((prog,) if isinstance(prog, str) else prog or ()) if p}
+            if progs and isinstance(pid, int) and pid > 0:
                 found = process_name(pid, self.run)
-                if found and found.lower().removesuffix(".exe") == prog.lower().removesuffix(".exe"):
+                if found and found.lower().removesuffix(".exe") in progs:
                     log.warning("%s (pid %s) was left running by a worker that ended: stopping it", name, pid)
                     kill_pid(pid, self.run)
                     ended.append(pid)
@@ -1873,6 +1886,790 @@ class Updater:
         return True
 
 
+# --- speech-to-text models: the catalog (pins.json), managed downloads, a server each ---------------------------------
+
+CATALOG_PATH = "tools/stt_worker/pins.json"   # never the hub's to choose: main of UPDATE_REPO, at the commit it names
+CATALOG_KEY = "stt_models"
+CATALOG_MAX_BYTES = 256_000
+# whisper-ggml: whisper.cpp's whisper-server, one ggml file; context as whisper's initial prompt.
+# llama-asr: llama.cpp's llama-server with an audio model (a GGUF and its mmproj, e.g. Qwen3-ASR); context as a system
+# message (a short comma list), the audio as an input_audio part of /v1/chat/completions.
+MODEL_KINDS = {"whisper-ggml": ("model",), "llama-asr": ("model", "mmproj")}
+CONTEXT_FORMS = {"whisper-ggml": "prompt", "llama-asr": "list"}
+MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
+MODEL_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(?:bin|gguf)")
+MODEL_SERVICES = ("fire", "ems", "police", "air", "transit", "other")
+MODEL_MAX_BYTES = 8_000_000_000
+VRAM_MIN_MB, VRAM_MAX_MB = 100, 48_000
+CONTEXT_MAX_ITEMS = 12                     # a llama-asr model's context list (Qwen3-ASR: short declarative lists help)
+# Where a model file may come from (nothing else, whatever a catalog says): Hugging Face at a pinned revision (a
+# 40-digit commit, never a branch name), a ggml-org release asset, or a release asset of this repo (a model built
+# once by a pinned recipe: its SHA-256 is the pin). Redirects (the CDNs behind them) only to REDIRECT_HOSTS.
+_SEG = r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
+DOWNLOAD_RULES = (
+    ("huggingface.co", re.compile(rf"/{_SEG}/{_SEG}/resolve/[0-9a-f]{{40}}/{_SEG}(?:/{_SEG}){{0,3}}")),
+    ("github.com", re.compile(rf"/(?:ggml-org/{_SEG}|{re.escape(UPDATE_REPO)})/releases/download/{_SEG}/{_SEG}")),
+)
+REDIRECT_HOSTS = {"huggingface.co": (("huggingface.co",), (".hf.co", ".huggingface.co")),
+                  "github.com": (("release-assets.githubusercontent.com", "objects.githubusercontent.com"), ())}
+REDIRECTS_MAX = 5
+MODEL_PORT_FIRST = 8181                    # 8179 the configured whisper-server, 8180 llama-server (the LLM)
+MODEL_PORTS = 8
+MODEL_CHECK_S = 180.0                      # a new server answers a test decode this soon, else it is stopped and that
+                                           # model's hash marked bad (a model it replaced runs again)
+MODEL_BAD_S = 6 * 3600.0                   # a hash marked bad is tried again after this
+MODEL_RETRY_S = 1800.0                     # a download that failed another way (the network): again after this
+CATALOG_CHECK_S = 600.0                    # GitHub at most this often for a new catalog
+DISK_MARGIN = 1_000_000_000                # free space left after a download, at least
+DOWNLOAD_CHUNK = 1 << 20
+MANAGED_DIR = "managed"                    # models_dir/managed/<sha256[:16]>-<file>: the only files ever deleted
+LLAMA_VERSION = re.compile(r"version:\s*(\d+)")
+GATE_BLOCK_S = 0.02
+
+
+class CatalogError(ValueError):
+    pass
+
+
+def model_url_ok(url) -> bool:
+    """An https URL of one of DOWNLOAD_RULES' shapes: no port, query, user, empty or dot segment, escapes."""
+    if not isinstance(url, str) or len(url) > 400:
+        return False
+    u = urlsplit(url)
+    if u.scheme != "https" or u.port not in (None, 443) or u.query or u.fragment or u.username or u.password:
+        return False
+    if "%" in u.path or "\\" in u.path or any(s in ("", ".", "..") for s in u.path.split("/")[1:]):
+        return False
+    return any(u.hostname == host and rx.fullmatch(u.path) for host, rx in DOWNLOAD_RULES)
+
+
+def redirect_ok(origin: str, url: str) -> bool:
+    """A download from `origin` (a DOWNLOAD_RULES host) may follow a redirect to this URL: https, a known CDN."""
+    u = urlsplit(url)
+    exact, suffixes = REDIRECT_HOSTS.get(origin, ((), ()))
+    host = (u.hostname or "").lower()
+    return (u.scheme == "https" and u.port in (None, 443) and not u.username and not u.password
+            and (host in exact or any(host.endswith(s) for s in suffixes)))
+
+
+def _model_file(v, what: str) -> dict:
+    """{file, url, bytes, sha256} of one download, checked."""
+    if not isinstance(v, dict):
+        raise CatalogError(f"{what}: an object")
+    if not isinstance(v.get("file"), str) or not MODEL_FILE.fullmatch(v["file"]):
+        raise CatalogError(f"{what}: file (a .bin or .gguf name)")
+    if not model_url_ok(v.get("url")):
+        raise CatalogError(f"{what}: url not allowed (Hugging Face at a pinned revision, or a release asset of "
+                           f"ggml-org or {UPDATE_REPO})")
+    n = v.get("bytes")
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 < n <= MODEL_MAX_BYTES:
+        raise CatalogError(f"{what}: bytes")
+    if not isinstance(v.get("sha256"), str) or not SHA256.fullmatch(v["sha256"]):
+        raise CatalogError(f"{what}: sha256 (64 lower-case hex digits)")
+    return {"file": v["file"], "url": v["url"], "bytes": n, "sha256": v["sha256"]}
+
+
+def check_catalog(doc) -> dict:
+    """pins.json's stt_models, checked whole: {id: entry}. One entry that breaks a rule refuses the catalog (CI checks
+    the repo's with this same function, so such a catalog never reaches main). An entry's `recipe` (how a file was
+    built: pinned inputs and tools) is the people's record; the worker only ever downloads the pinned file."""
+    if not isinstance(doc, dict) or not isinstance(doc.get(CATALOG_KEY), dict):
+        raise CatalogError(f"no {CATALOG_KEY}")
+    out: dict = {}
+    names: set = set()
+    for mid, e in doc[CATALOG_KEY].items():
+        if mid.startswith("_"):
+            continue                                       # ("_what": a note)
+        if not MODEL_ID.fullmatch(mid):
+            raise CatalogError(f"{mid[:50]!r}: not a model id")
+        if not isinstance(e, dict) or e.get("kind") not in MODEL_KINDS:
+            raise CatalogError(f"{mid}: kind ({', '.join(MODEL_KINDS)})")
+        files = e.get("files")
+        if not isinstance(files, dict) or set(files) != set(MODEL_KINDS[e["kind"]]):
+            raise CatalogError(f"{mid}: files: exactly {', '.join(MODEL_KINDS[e['kind']])}")
+        fs = {role: _model_file(files[role], f"{mid}: files.{role}") for role in MODEL_KINDS[e["kind"]]}
+        for f in fs.values():
+            if f["file"] in names:
+                raise CatalogError(f"{mid}: {f['file']}: another model's file name")
+            names.add(f["file"])
+        vram = e.get("vram_mb")
+        if not isinstance(vram, int) or isinstance(vram, bool) or not VRAM_MIN_MB <= vram <= VRAM_MAX_MB:
+            raise CatalogError(f"{mid}: vram_mb")
+        langs, services = e.get("langs"), e.get("services")
+        if not isinstance(langs, list) or not langs or not all(isinstance(x, str) and re.fullmatch(r"[a-z]{2,5}", x)
+                                                                for x in langs):
+            raise CatalogError(f"{mid}: langs")
+        if not isinstance(services, list) or not set(services) <= set(MODEL_SERVICES):
+            raise CatalogError(f"{mid}: services ({', '.join(MODEL_SERVICES)})")
+        if not isinstance(e.get("context_default", True), bool):
+            raise CatalogError(f"{mid}: context_default: true or false")
+        rmin = e.get("runtime_min", 0)
+        if not isinstance(rmin, int) or isinstance(rmin, bool) or rmin < 0:
+            raise CatalogError(f"{mid}: runtime_min (a llama.cpp build number)")
+        if "recipe" in e and not isinstance(e["recipe"], dict):
+            raise CatalogError(f"{mid}: recipe: an object")
+        out[mid] = {"id": mid, "kind": e["kind"], "files": fs, "vram_mb": vram, "langs": list(langs),
+                    "services": list(services), "context": CONTEXT_FORMS[e["kind"]],
+                    "context_default": e.get("context_default", True), "runtime_min": rmin,
+                    "sha256": hashlib.sha256("".join(f["sha256"] for f in fs.values()).encode()).hexdigest()}
+    return out
+
+
+def download_catalog(commit: str, sha: str, fetch: Callable = https_get, now: float | None = None) -> bytes:
+    """pins.json at a commit on main (check_on_main first), exactly the hash the hub named. UpdateError otherwise."""
+    check_on_main(commit, fetch, now)
+    status, headers, body = fetch(GITHUB_RAW, f"/{UPDATE_REPO}/{commit}/{CATALOG_PATH}", CATALOG_MAX_BYTES)
+    if status == 404:
+        raise UpdateError(f"no {CATALOG_PATH} at {commit[:12]}", final=True)
+    if status != 200:
+        raise UpdateError(f"GitHub said {status}", retry_s=github_wait(status, headers, time.time() if now is None else now))
+    if len(body) > CATALOG_MAX_BYTES:
+        raise UpdateError("the catalog is too large", permanent=True)
+    if hashlib.sha256(body).hexdigest() != sha:
+        raise UpdateError("the catalog's hash isn't the hub's", permanent=True)
+    return body
+
+
+class DownloadError(Exception):
+    def __init__(self, msg: str, final: bool = False):
+        super().__init__(msg)
+        self.final = final                 # the file itself is wrong (its size, its hash, where it went)
+
+
+def open_url(url: str, offset: int = 0, timeout: float = 30.0):
+    """GET an allowed URL from byte `offset`, its redirects followed only to REDIRECT_HOSTS (each hop checked), the
+    system's CA store. (connection, response, resumed: the server answered 206 from offset)."""
+    if not model_url_ok(url):
+        raise DownloadError("url not allowed", final=True)
+    from urllib.parse import urljoin
+    origin = urlsplit(url).hostname
+    for _hop in range(REDIRECTS_MAX + 1):
+        u = urlsplit(url)
+        conn = http.client.HTTPSConnection(u.hostname, 443, timeout=timeout, context=ssl.create_default_context())
+        headers = {"User-Agent": USER_AGENT, "Accept": "*/*", **({"Range": f"bytes={offset}-"} if offset else {})}
+        try:
+            conn.request("GET", u.path + (f"?{u.query}" if u.query else ""), headers=headers)
+            r = conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            conn.close()
+            raise DownloadError(f"{u.hostname}: {type(e).__name__}") from None
+        if r.status in (301, 302, 303, 307, 308):
+            nxt = urljoin(url, r.getheader("Location") or "")
+            conn.close()
+            if not redirect_ok(origin, nxt):
+                raise DownloadError(f"redirected to a host not allowed ({(urlsplit(nxt).hostname or '?')[:40]})",
+                                    final=True)
+            url = nxt
+            continue
+        if r.status not in (200, 206):
+            conn.close()
+            raise DownloadError(f"{u.hostname} said {r.status}")
+        return conn, r, r.status == 206
+    raise DownloadError("too many redirects", final=True)
+
+
+def download_file(url: str, dest: Path, size: int, sha: str, stop: Callable[[], bool] = lambda: False,
+                  opener: Callable = open_url) -> None:
+    """url -> dest: exactly `size` bytes with exactly that SHA-256, written to dest.part (resumed from the part a stopped
+    download left) and then renamed. stop(), between chunks (gaming, the worker stopping): the part is kept.
+    DownloadError otherwise (final: not the pinned file; its part deleted)."""
+    part = dest.with_name(dest.name + ".part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    have = part.stat().st_size if part.exists() else 0
+    if have > size:
+        part.unlink()
+        have = 0
+    h = hashlib.sha256()
+    if have:
+        with open(part, "rb") as f:
+            for chunk in iter(lambda: f.read(DOWNLOAD_CHUNK), b""):
+                h.update(chunk)
+    conn = None
+    try:
+        if have < size:
+            conn, r, resumed = opener(url, have)
+            if have and not resumed:                       # the whole file again: start over
+                h, have = hashlib.sha256(), 0
+            with open(part, "ab" if have else "wb") as f:
+                while have < size:
+                    if stop():
+                        raise DownloadError("stopped: resumed later")
+                    chunk = r.read(min(DOWNLOAD_CHUNK, size - have))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    have += len(chunk)
+                if have == size and r.read(1):
+                    raise DownloadError("larger than pinned", final=True)
+    except (OSError, http.client.HTTPException) as e:
+        raise DownloadError(f"download: {type(e).__name__}") from None
+    except DownloadError as e:
+        if e.final:
+            part.unlink(missing_ok=True)
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+    if have != size:
+        raise DownloadError(f"short ({have} of {size} bytes): resumed later")
+    if h.hexdigest() != sha:
+        part.unlink(missing_ok=True)
+        raise DownloadError(f"hash mismatch (the file is {h.hexdigest()[:12]})", final=True)
+    _replace(part, dest)
+
+
+def speech_dbfs(wav: bytes) -> float | None:
+    """The loudest 10% of a WAV's 20 ms blocks (16-bit mono), dBFS: the speech level, whatever silence pads it. None
+    when it can't be read."""
+    import array
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                return None
+            rate, raw = w.getframerate(), w.readframes(w.getnframes())
+    except (wave.Error, EOFError, OSError):
+        return None
+    a = array.array("h")
+    a.frombytes(raw[: len(raw) // 2 * 2])
+    if sys.byteorder != "little":
+        a.byteswap()
+    n = max(1, int(rate * GATE_BLOCK_S))
+    rms = sorted(math.sqrt(sum(x * x for x in a[i:i + n]) / n) for i in range(0, len(a) - n + 1, n))
+    if not rms:
+        return -120.0
+    top = rms[int(len(rms) * 0.9):] or rms[-1:]
+    level = sum(top) / len(top)
+    return 20 * math.log10(level / 32768.0) if level > 0 else -120.0
+
+
+ASR_TAG = re.compile(r"^\s*language\s+[A-Za-z]+\s*<asr_text>", re.I)
+
+
+class AsrCall:
+    """One transcription by an audio model in llama-server: /v1/chat/completions with the context as a system message
+    (none when it is off) and the WAV as an input_audio part; abort() closes its connection (llama-server stops)."""
+
+    def __init__(self, server: "ModelServer", wav: bytes, context: list, timeout: float):
+        msgs = []
+        if context:
+            msgs.append({"role": "system", "content": ", ".join(context[:CONTEXT_MAX_ITEMS])})
+        msgs.append({"role": "user", "content": [{"type": "input_audio", "input_audio": {
+            "data": __import__("base64").b64encode(wav).decode("ascii"), "format": "wav"}}]})
+        self.body = json.dumps({"messages": msgs, "temperature": 0, "stream": False, "max_tokens": 448}).encode()
+        self.server = server
+        self.conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=timeout)
+        self.aborted = False
+
+    def run(self) -> dict:
+        """whisper-server's verbose_json shape ({text, segments: []}): the hub reads either alike. WhisperError."""
+        try:
+            if self.aborted:
+                raise OSError("aborted")
+            self.conn.request("POST", "/v1/chat/completions", body=self.body,
+                              headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.server.key}"})
+            r = self.conn.getresponse()
+            data = r.read()
+        except (OSError, http.client.HTTPException) as e:
+            if self.aborted:
+                raise WhisperError("aborted") from None
+            raise WhisperError(f"llama-server unreachable ({type(e).__name__})") from None
+        finally:
+            self.conn.close()
+        if r.status != 200:
+            raise WhisperError(f"llama-server said {r.status}")
+        try:
+            content = json.loads(data)["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise WhisperError("llama-server sent something that isn't a chat completion") from None
+        text = ASR_TAG.sub("", str(content or ""))
+        return {"text": " ".join(text.split()), "segments": []}
+
+    def abort(self) -> None:
+        WhisperCall.abort(self)          # (the same: shut the socket, close the connection)
+
+
+def plan_models(want: list, catalog: dict, budget_mb: float, primary: str = "", primary_mb: float = 0.0) -> list:
+    """The models to run beside the configured whisper-server (primary): in the hub's order, each only when its vram_mb
+    fits what the budget has left; at most MODEL_PORTS."""
+    left = budget_mb - primary_mb
+    out: list = []
+    for mid in want:
+        if mid == primary or mid in out or mid not in catalog or len(out) >= MODEL_PORTS:
+            continue
+        if catalog[mid]["vram_mb"] <= left:
+            out.append(mid)
+            left -= catalog[mid]["vram_mb"]
+    return out
+
+
+class ModelServer:
+    """One catalog model's server on its own loopback port (MODEL_PORT_FIRST, ...), started by the worker:
+    whisper-server for a whisper-ggml model, llama-server (its own random API key) for a llama-asr one."""
+
+    def __init__(self, entry: dict, paths: dict, port: int, proc: "WhisperProcess", timeout_s: float):
+        self.id, self.kind, self.sha, self.paths, self.port, self.proc = (entry["id"], entry["kind"], entry["sha256"],
+                                                                          paths, port, proc)
+        self.vram_mb = entry["vram_mb"]
+        self.whisper = Whisper(f"http://127.0.0.1:{port}/inference", timeout_s)
+        self.timeout_s = timeout_s
+        self.key = secrets.token_urlsafe(24) if self.kind == "llama-asr" else ""
+        self.ok = False                    # it answered a test decode
+        self.started = 0.0
+        self.fails = 0
+
+    def call(self, wav: bytes, prompt: str, context: list, fast: bool) -> "WhisperCall | AsrCall":
+        if self.kind == "llama-asr":
+            return AsrCall(self, wav, context, self.timeout_s)
+        return self.whisper.call(wav, prompt, fast=fast)
+
+    def alive(self) -> bool:
+        return self.whisper.alive()
+
+    def test(self) -> None:
+        """A test decode of a second of silence. WhisperError."""
+        if self.kind == "llama-asr":
+            AsrCall(self, silence_wav(1.0), [], max(self.timeout_s, 60.0)).run()
+        else:
+            self.whisper.check()
+
+
+class Models:
+    """The catalog's models on this worker, beside the whisper-server in worker.toml (the primary, never touched here).
+    The hub names the catalog (a commit on main and pins.json's SHA-256) and the models it wants, best first (stt_models
+    {catalog, want} in its hello and state answers). The models thread then, about every second:
+
+    1. the catalog: pins.json at that commit from GitHub (check_on_main, then exactly that hash), checked whole
+       (check_catalog), kept in state_dir/catalog.json;
+    2. the plan (plan_models): the wanted models, in the hub's order, each that fits the VRAM budget (the GPU's total
+       less vram_reserve_mb and the primary's); the local LLM gets what is left, and gives way (llm_room() false: the
+       worker stops llama-server) when an ASR model that is ready to start needs its room;
+    3. each planned model's files in models_dir/managed, downloaded only from an allowed host (download_file: exact
+       size and SHA-256), never while gaming or paused;
+    4. its server started on its own port, only while the worker is idle (no clip, not gaming); it must answer a test
+       decode within MODEL_CHECK_S, else it is stopped and its hash marked bad for MODEL_BAD_S (a new version of a model
+       that ran: the old files run again). A model no longer planned is stopped while idle.
+
+    The hub hears only ids and states (models.stt_* in the heartbeat)."""
+
+    def __init__(self, cfg: Config, popen: Callable = subprocess.Popen, clock: Callable[[], float] = time.monotonic,
+                 wall: Callable[[], float] = time.time, fetch: Callable = https_get, download: Callable = download_file,
+                 run: Callable[[list], str] | None = None, job=None, children=None):
+        self.cfg, self.popen, self.clock, self.wall, self.fetch, self.download = cfg, popen, clock, wall, fetch, download
+        self.run = run or run_cmd
+        self.job, self.children = job, children
+        self.dir = Path(cfg.models_dir) / MANAGED_DIR
+        self.state_path = Path(cfg.state_dir) / "models.json"
+        self.cat_path = Path(cfg.state_dir) / "catalog.json"
+        self._lock = threading.Lock()
+        self.catalog: dict = {}
+        self.catalog_sig = ("", "")        # (commit, sha256) of the catalog in use
+        self.offered: tuple[str, str] | None = None
+        self.want: list = []
+        self.plan: list = []
+        self.servers: dict[str, ModelServer] = {}
+        self.status: dict[str, str] = {}
+        self.cat_status = "none"
+        self.llm_room_ok = True            # the local LLM may run (no ASR model ready to start needs its VRAM)
+        self._cat_next = 0.0
+        self._cat_refused: dict[tuple[str, str], float] = {}
+        self._retry: dict[str, float] = {}       # model id -> not before (a download that may pass later)
+        self._llama_build: int | None = None
+        self.enabled = bool(cfg.managed_models)
+        if cfg.catalog_file:
+            self._load_local(cfg.catalog_file)
+        else:
+            self._load_cached()
+
+    # -- the catalog
+
+    def _load_local(self, path: str) -> None:
+        try:
+            self.catalog = check_catalog(json.loads(Path(path).read_text(encoding="utf-8")))
+            self.catalog_sig, self.cat_status = ("local", "local"), "catalog_file"
+        except (OSError, ValueError) as e:
+            self.cat_status = f"catalog_file: {str(e)[:80]}"
+            log.error("models: %s", self.cat_status)
+
+    def _load_cached(self) -> None:
+        doc = read_json(self.cat_path)
+        raw = doc.get("doc")
+        if isinstance(raw, str) and isinstance(doc.get("sha256"), str) and \
+                hashlib.sha256(raw.encode("utf-8")).hexdigest() == doc["sha256"]:
+            try:
+                self.catalog = check_catalog(json.loads(raw))
+                self.catalog_sig = (str(doc.get("commit") or ""), doc["sha256"])
+                self.cat_status = f"{doc['sha256'][:12]} (kept)"
+            except ValueError:
+                self.catalog = {}
+
+    def offer(self, ans) -> None:
+        """A hello or state answer: stt_models {catalog: {commit, sha256}, want: [ids]}; none (an older hub): nothing."""
+        sm = ans.get("stt_models") if isinstance(ans, dict) else None
+        if not isinstance(sm, dict):
+            return
+        cat = sm.get("catalog") if isinstance(sm.get("catalog"), dict) else {}
+        commit, sha = cat.get("commit"), cat.get("sha256")
+        if isinstance(commit, str) and isinstance(sha, str) and COMMIT.fullmatch(commit) and SHA256.fullmatch(sha):
+            self.offered = (commit, sha)
+        want = sm.get("want") if isinstance(sm.get("want"), list) else []
+        self.want = list(dict.fromkeys(w for w in want[:16] if isinstance(w, str) and MODEL_ID.fullmatch(w)))
+
+    def refresh_catalog(self, held: bool) -> None:
+        """The hub's catalog fetched when it isn't ours (not while gaming; GitHub at most every CATALOG_CHECK_S)."""
+        if self.cfg.catalog_file or self.offered is None or self.offered[1] == self.catalog_sig[1] or held:
+            return
+        commit, sha = self.offered
+        if self.clock() < self._cat_next or self.clock() < self._cat_refused.get((commit, sha), 0.0):
+            return
+        self._cat_next = self.clock() + CATALOG_CHECK_S
+        try:
+            body = download_catalog(commit, sha, self.fetch, self.wall())
+            cat = check_catalog(json.loads(body))
+        except UpdateError as e:
+            self.cat_status = f"{sha[:12]}: {str(e)[:60]}"
+            if e.final:
+                self._cat_refused[(commit, sha)] = self.clock() + (MODEL_BAD_S if e.permanent else UPDATE_RETRY_S)
+            log.warning("models: catalog %s", self.cat_status)
+            return
+        except ValueError as e:                            # (CatalogError, or not JSON)
+            self.cat_status = f"{sha[:12]} refused: {str(e)[:60]}"
+            self._cat_refused[(commit, sha)] = self.clock() + MODEL_BAD_S
+            log.error("models: catalog %s", self.cat_status)
+            return
+        with self._lock:
+            self.catalog, self.catalog_sig = cat, (commit, sha)
+        self.cat_status = f"{sha[:12]} (commit {commit[:12]})"
+        try:
+            write_json(self.cat_path, {"commit": commit, "sha256": sha, "doc": body.decode("utf-8")})
+        except OSError as e:
+            log.warning("models: can't keep the catalog: %s", e.strerror or e)
+        log.info("models: catalog %s from commit %s: %d model(s)", sha[:12], commit[:12], len(cat))
+
+    # -- models.json: the hashes marked bad
+
+    def _doc(self) -> dict:
+        return read_json(self.state_path)
+
+    def _change(self, fn: Callable[[dict], None]) -> None:
+        with self._lock:
+            doc = read_json(self.state_path)
+            fn(doc)
+            try:
+                write_json(self.state_path, doc)
+            except OSError as e:
+                log.warning("models: can't write models.json: %s", e.strerror or e)
+
+    def bad(self, sha: str) -> str:
+        """Why this model hash is marked bad, "" when it isn't (or no longer: MODEL_BAD_S on)."""
+        bad = self._doc().get("bad")
+        b = bad.get(sha) if isinstance(bad, dict) else None
+        if isinstance(b, dict) and isinstance(b.get("at"), (int, float)) and self.wall() - b["at"] < MODEL_BAD_S:
+            return str(b.get("why") or "bad")
+        return ""
+
+    def mark_bad(self, mid: str, sha: str, why: str) -> None:
+        def f(doc):
+            bad = doc.get("bad") if isinstance(doc.get("bad"), dict) else {}
+            bad.pop(sha, None)
+            bad[sha] = {"model": mid, "why": why[:120], "at": self.wall()}
+            doc["bad"] = dict(list(bad.items())[-20:])
+        self._change(f)
+        log.error("models: %s (%s) marked bad for %.0f h: %s", mid, sha[:12], MODEL_BAD_S / 3600, why)
+
+    # -- files
+
+    def path_of(self, f: dict) -> Path:
+        return self.dir / f"{f['sha256'][:16]}-{f['file']}"
+
+    def paths(self, e: dict) -> dict:
+        return {role: self.path_of(f) for role, f in e["files"].items()}
+
+    def verified(self, f: dict) -> bool:
+        """The file is there with its pinned size and hash (hashed again only when it changed: file_sha256's cache)."""
+        p = self.path_of(f)
+        try:
+            if p.stat().st_size != f["bytes"]:
+                return False
+            return file_sha256(p, Path(self.cfg.state_dir) / f"model-{f['sha256'][:16]}.json") == f["sha256"]
+        except OSError:
+            return False
+
+    def ready_files(self, e: dict) -> bool:
+        return all(self.verified(f) for f in e["files"].values())
+
+    def fetch_files(self, e: dict, stop: Callable[[], bool]) -> bool:
+        """Its files downloaded and checked. True when all are ready; status says why not."""
+        mid = e["id"]
+        if self.ready_files(e):
+            return True
+        if self.clock() < self._retry.get(mid, 0.0):
+            return False
+        for role, f in e["files"].items():
+            if self.verified(f):
+                continue
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                if shutil.disk_usage(self.dir).free < f["bytes"] + DISK_MARGIN:
+                    self.status[mid] = "no disk space"
+                    self._retry[mid] = self.clock() + MODEL_RETRY_S
+                    return False
+                self.status[mid] = f"downloading {role}"
+                log.info("models: %s: downloading %s (%.0f MB)", mid, f["file"], f["bytes"] / 1e6)
+                self.download(f["url"], self.path_of(f), f["bytes"], f["sha256"], stop)
+            except DownloadError as x:
+                if str(x).startswith("stopped"):
+                    self.status[mid] = "waiting (gaming)"
+                    return False
+                self.status[mid] = f"failed: {str(x)[:60]}"
+                if x.final:
+                    self.mark_bad(mid, e["sha256"], f"{role}: {x}")
+                else:
+                    self._retry[mid] = self.clock() + MODEL_RETRY_S
+                log.warning("models: %s: %s: %s", mid, role, x)
+                return False
+            except OSError as x:
+                self.status[mid] = f"failed: {type(x).__name__}"
+                self._retry[mid] = self.clock() + MODEL_RETRY_S
+                log.warning("models: %s: %s", mid, x)
+                return False
+        return self.ready_files(e)
+
+    def prune(self) -> None:
+        """Files in models_dir/managed that no catalog model nor running server uses: deleted (that folder only, and only
+        names of the worker's own pattern)."""
+        keep = {p.name for e in self.catalog.values() for p in self.paths(e).values()}
+        keep |= {p.name for s in list(self.servers.values()) for p in s.paths.values()}
+        try:
+            for p in self.dir.iterdir():
+                if p.is_file() and p.name not in keep and \
+                        re.fullmatch(r"[0-9a-f]{16}-[A-Za-z0-9._-]+\.(bin|gguf)(\.part)?", p.name):
+                    p.unlink()
+                    log.info("models: deleted %s (no longer in the catalog)", p.name)
+        except OSError:
+            pass
+
+    # -- the plan and the VRAM
+
+    def total_mb(self, gpu: dict | None) -> float:
+        """VRAM the worker's servers may use together: vram_budget_mb, else the GPU's total less vram_reserve_mb; 0
+        with no GPU reading (no catalog model runs then)."""
+        if self.cfg.vram_budget_mb > 0:
+            return float(self.cfg.vram_budget_mb)
+        total = float((gpu or {}).get("mem_total_mb") or 0.0)
+        return max(0.0, total - self.cfg.vram_reserve_mb) if total > 0 else 0.0
+
+    def primary_mb(self) -> float:
+        if not self.cfg.whisper_server:
+            return 0.0
+        e = self.catalog.get(self.cfg.model)
+        return float(e["vram_mb"]) if e is not None else float(self.cfg.primary_vram_mb)
+
+    def llm_mb(self) -> float:
+        """The local LLM's share (llm_vram_mb, else its GGUF's size and a context's worth); 0 with no LLM."""
+        if not self.cfg.llm_server:
+            return 0.0
+        if self.cfg.llm_vram_mb > 0:
+            return float(self.cfg.llm_vram_mb)
+        m = os.path.expandvars(_arg(self.cfg.llm_server, ("-m", "--model")) or "")
+        try:
+            p = Path(m) if Path(m).is_absolute() else Path(self.cfg.base_dir) / m
+            return p.stat().st_size / 1e6 * 1.05 + 900 if m else 6500.0
+        except OSError:
+            return 6500.0
+
+    def make_plan(self, gpu: dict | None) -> list:
+        """The wanted models (not marked bad, not the primary) that fit, in the hub's order; and whether the local LLM
+        still fits beside the ones ready to run (llm_room_ok)."""
+        total = self.total_mb(gpu)
+        want = []
+        for mid in self.want:
+            e = self.catalog.get(mid)
+            if e is not None and self.bad(e["sha256"]):
+                self.status[mid] = f"marked bad: {self.bad(e['sha256'])[:50]}"
+            elif e is not None:
+                want.append(mid)
+        plan = plan_models(want, self.catalog, total, self.cfg.model, self.primary_mb())
+        for mid in want:
+            if mid not in plan and mid != self.cfg.model:
+                self.status[mid] = "no room (VRAM)"
+        # the LLM: what the planned models that run (or are ready to) leave
+        used = self.primary_mb() + sum(self.catalog[m]["vram_mb"] for m in plan
+                                       if m in self.servers or self.ready_files(self.catalog[m]))
+        self.llm_room_ok = total <= 0 or self.llm_mb() <= 0 or used + self.llm_mb() <= total
+        self.plan = plan
+        return plan
+
+    # -- servers
+
+    def llama_build(self) -> int:
+        """llama-server's build number (`--version`: "version: 12728 (ea722948)"), 0 when it can't be told."""
+        if self._llama_build is None:
+            prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
+            try:
+                out = self.run([_resolve(prog, self.cfg.base_dir), "--version"]) if prog else ""
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            m = LLAMA_VERSION.search(out or "")
+            self._llama_build = int(m.group(1)) if m else 0
+        return self._llama_build
+
+    def argv(self, e: dict, port: int) -> list | None:
+        p = self.paths(e)
+        if e["kind"] == "whisper-ggml":
+            prog = self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
+            t = _arg(self.cfg.whisper_server, ("-t", "--threads")) or "4"
+            return [prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t", str(t)] if prog \
+                else None
+        prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
+        return [prog, "-m", str(p["model"]), "--mmproj", str(p["mmproj"]), "--host", "127.0.0.1", "--port", str(port),
+                "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui", "--no-slots"] if prog else None
+
+    def start(self, e: dict) -> ModelServer | None:
+        mid = e["id"]
+        if e["kind"] == "llama-asr" and e["runtime_min"] and self.llama_build() < e["runtime_min"]:
+            self.status[mid] = f"needs llama-server b{e['runtime_min']}+ (b{self.llama_build() or '?'} here)"
+            self._retry[mid] = self.clock() + MODEL_RETRY_S
+            return None
+        port = next((p for p in range(MODEL_PORT_FIRST, MODEL_PORT_FIRST + MODEL_PORTS)
+                     if p not in {s.port for s in self.servers.values()}), None)
+        argv = self.argv(e, port) if port else None
+        if argv is None:
+            self.status[mid] = "no port" if port is None else ("no whisper-server program (whisper_bin)"
+                                                              if e["kind"] == "whisper-ggml" else
+                                                              "no llama-server program (llama_bin)")
+            return None
+        holder: dict = {}
+        env = (lambda: llm_env(holder["s"].key)) if e["kind"] == "llama-asr" else None
+        proc = WhisperProcess(argv, Path(self.cfg.state_dir) / "models.log", self.popen, self.clock, self.cfg.base_dir,
+                              name=f"model-{mid}", env=env, job=self.job, children=self.children)
+        s = holder["s"] = ModelServer(e, self.paths(e), port, proc, self.cfg.whisper_timeout_s)
+        if s.alive():
+            self.status[mid] = f"port {port} taken by another program"
+            return None
+        s.started = self.clock()
+        proc.ensure(False)
+        if not proc.running():
+            self.status[mid] = "can't start its server"
+            self._retry[mid] = self.clock() + MODEL_RETRY_S
+            return None
+        with self._lock:
+            self.servers[mid] = s
+        self.status[mid] = "loading"
+        log.info("models: %s: %s on port %d", mid, "llama-server" if e["kind"] == "llama-asr" else "whisper-server",
+                 port)
+        return s
+
+    def stop(self, mid: str, why: str) -> None:
+        with self._lock:
+            s = self.servers.pop(mid, None)
+        if s is not None:
+            if s.proc is not None:
+                s.proc.stop()
+            log.info("models: %s stopped (%s)", mid, why)
+
+    def stop_all(self, why: str) -> None:
+        for mid in list(self.servers):
+            self.stop(mid, why)
+
+    def check(self, s: ModelServer) -> bool:
+        """A new server's test decode: ok, or (exited, or past MODEL_CHECK_S) stopped and its hash marked bad."""
+        if s.ok:
+            return True
+        exited = not s.proc.running()
+        if exited or self.clock() - s.started > MODEL_CHECK_S:
+            self.stop(s.id, "no answer")
+            self.mark_bad(s.id, s.sha, "its server exited" if exited else "its server didn't answer a test decode")
+            self.status[s.id] = "failed: its server (marked bad)"
+            return False
+        if not s.alive():
+            return False
+        try:
+            s.test()
+        except WhisperError:
+            return False
+        s.ok, s.fails = True, 0
+        self.status[s.id] = "ready"
+        log.info("models: %s: ready on port %d", s.id, s.port)
+        return True
+
+    def ready(self) -> list:
+        with self._lock:
+            return [m for m, s in self.servers.items() if s.ok]
+
+    def server(self, mid: str) -> ModelServer | None:
+        with self._lock:
+            s = self.servers.get(mid)
+            return s if s is not None and s.ok else None
+
+    def job_failed(self, mid: str) -> None:
+        """A clip on it failed: whisper_fail_max in a row and it is stopped (started again after MODEL_RETRY_S)."""
+        s = self.server(mid)
+        if s is None:
+            return
+        s.fails += 1
+        if s.fails >= self.cfg.whisper_fail_max:
+            self.stop(mid, f"{s.fails} failures in a row")
+            self.status[mid] = "failed: decodes (again later)"
+            self._retry[mid] = self.clock() + MODEL_RETRY_S
+
+    def job_ok(self, mid: str) -> None:
+        s = self.server(mid)
+        if s is not None:
+            s.fails = 0
+
+    def step(self, idle: bool, held: bool, gpu: dict | None, llm_running: bool, stop: Callable[[], bool]) -> None:
+        """One pass of the models thread. idle: no clip in hand (a server may start or stop); held: gaming or paused
+        (nothing downloaded or started); llm_running: llama-server (the LLM) holds its VRAM now."""
+        if not self.enabled:
+            return
+        self.refresh_catalog(held)
+        if not self.catalog:
+            return
+        for s in list(self.servers.values()):
+            self.check(s)
+        if held:
+            return
+        plan = self.make_plan(gpu)
+        if idle:
+            for mid, s in list(self.servers.items()):
+                e = self.catalog.get(mid)
+                if mid in plan and e is not None and e["sha256"] != s.sha and not self.ready_files(e):
+                    continue                    # a new version not downloaded yet: the old one runs meanwhile
+                if mid not in plan or e is None or e["sha256"] != s.sha:
+                    self.stop(mid, "not wanted" if mid not in plan else "a new version")
+                    if mid not in plan:
+                        self.status.pop(mid, None)
+        for mid in plan:
+            e = self.catalog[mid]
+            s = self.servers.get(mid)
+            if s is not None and s.sha == e["sha256"]:
+                continue
+            if not self.fetch_files(e, stop) or s is not None or not idle or stop():
+                continue
+            if self.clock() < self._retry.get(mid, 0.0):
+                continue
+            if llm_running and not self.llm_room_ok:
+                self.status[mid] = "waiting for the LLM to give way"
+                return                          # the worker stops llama-server first (llm_room_ok false)
+            self.start(e)
+            return                              # one start a pass: its test decode before the next
+        self.prune()
+
+    def report(self) -> dict:
+        """What the hub hears in each heartbeat's models: the ids ready, each wanted model's state, the catalog in use
+        ({} until the hub has named a catalog or one is there: an older hub hears what it always did)."""
+        if not self.catalog and self.offered is None:
+            return {}
+        return {"stt_loaded": self.ready(), "stt_state": {k: str(v)[:60] for k, v in list(self.status.items())[:16]},
+                "stt_catalog": self.catalog_sig[1][:12]}
+
+
+def _resolve(prog: str, base: str) -> str:
+    prog = os.path.expandvars(prog)
+    return str(Path(base) / prog) if base and not Path(prog).is_absolute() and (Path(base) / prog).exists() else prog
+
+
 # --- the worker ----------------------------------------------------------------------------------------------------
 
 class Worker:
@@ -1901,6 +2698,8 @@ class Worker:
         self.children = Children(Path(cfg.state_dir) / "children.json", run)
         if self.proc is not None:
             self.proc.job, self.proc.children = self.kill_job, self.children
+        # the catalog's models (Models): their files and servers, beside whisper_server
+        self.stt_models = Models(cfg, popen, clock, run=run, job=self.kill_job, children=self.children)
         self.llm_proc = WhisperProcess(cfg.llm_server, Path(cfg.state_dir) / "llama-server.log", popen, clock,
                                        cfg.base_dir, name="llama-server", env=self._llm_start_env, job=self.kill_job,
                                        children=self.children, command=llm_command) \
@@ -1977,13 +2776,13 @@ class Worker:
     def _our_pids(self) -> set:
         """whisper-server's and llama-server's pids: their GPU memory is ours, never another process's (a game)."""
         pids = {self.cfg.whisper_pid} if self.cfg.whisper_pid else set()
-        for proc in (self.proc, self.llm_proc):
+        for proc in (self.proc, self.llm_proc, *(s.proc for s in list(self.stt_models.servers.values()))):
             if proc is not None and proc.pid:
                 pids.add(proc.pid)
         at, found = self._pids
         if self.clock() - at > 30:
             found = find_pids(self.cfg.whisper_process, self.run_cmd)
-            if self.llm is not None:
+            if self.llm is not None or any(s.kind == "llama-asr" for s in list(self.stt_models.servers.values())):
                 found = found | find_pids(self.cfg.llm_process, self.run_cmd)
             self._pids = (self.clock(), found)
         return pids | found
@@ -2020,10 +2819,15 @@ class Worker:
         return body
 
     def models(self) -> dict:
-        """What the hub's infer lane is told: the STT model and the LLM while llama-server answers ("" otherwise)."""
+        """What the hub is told: the STT model (whisper_server's), the LLM while llama-server answers ("" otherwise),
+        and the catalog's models (stt_loaded: the ones that answer now; stt_state: each wanted one's state)."""
         ready = self.llm is not None and self.llm_ok
         return {"stt": self.cfg.model, "llm": self.cfg.llm_model if ready else "",
-                "llm_version": self.cfg.llm_model_sha256[:12].lower() if ready else ""}
+                "llm_version": self.cfg.llm_model_sha256[:12].lower() if ready else "", **self.stt_models.report()}
+
+    def loaded(self) -> list:
+        """The models this worker can decode a clip with now: whisper_server's, then the catalog's that answer."""
+        return ([self.cfg.model] if self.whisper_ok else []) + [m for m in self.stt_models.ready() if m != self.cfg.model]
 
     def hello(self) -> None:
         body = self._state_body()
@@ -2038,6 +2842,7 @@ class Worker:
             self.pool_on = bool(ans["pool_on"])
         self.updater.offer(ans)
         self.updater.confirm()
+        self.stt_models.offer(ans)
         if not self.connected:
             classes = ans.get("classes") if isinstance(ans.get("classes"), list) else []
             log.info("hub: connected as %s (%s); classes %s", self.cfg.worker_id, body["state"],
@@ -2048,6 +2853,7 @@ class Worker:
         ans = self.hb_hub.request("POST", f"{API}/state", self._state_body(), timeout=HEARTBEAT_TIMEOUT_S)
         self.updater.offer(ans)
         self.updater.confirm()
+        self.stt_models.offer(ans)
         if "pool_on" in ans:
             if self.pool_on is not None and bool(ans["pool_on"]) != self.pool_on:
                 log.info("hub: the pool is %s", "on" if ans["pool_on"] else "off")
@@ -2128,6 +2934,9 @@ class Worker:
                              self.cfg.gaming_stop_whisper_min)
                     self._whisper_down("stopped while gaming")     # (said first: no check in between sees it gone)
                     self.proc.stop()
+                if (self.stt_models.servers and self._gaming_since is not None and self.cfg.gaming_stop_whisper_min > 0
+                        and now - self._gaming_since >= self.cfg.gaming_stop_whisper_min * 60):
+                    self.stt_models.stop_all("gaming")     # (their VRAM back to the game; started again when it ends)
                 if self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
                     last_proc = now
                     self.proc.ensure(self.whisper.alive())
@@ -2205,7 +3014,14 @@ class Worker:
             log.info("gaming for %.0f s: stopping llama-server (its VRAM back to the game)", now - self._gaming_since)
             self._llm_down("stopped while gaming")         # (said first: no job goes to it meanwhile)
             self.llm_proc.stop()
-        if held or not self.llm_verified:
+        if (self.llm_proc is not None and self.llm_proc.running() and not self.stt_models.llm_room_ok
+                and self.llm_job is None and self._llm_call is None):
+            log.info("llama-server: stopped: the speech-to-text models need its VRAM (they come first)")
+            self._llm_down("gave its VRAM to the speech models")
+            self.llm_proc.stop()
+        if held or not self.llm_verified or not self.stt_models.llm_room_ok:
+            if not self.stt_models.llm_room_ok and self.llm_ok is False:
+                self.llm_err = "gave its VRAM to the speech models"
             return
         if self.llm_proc is not None and not self.llm_proc.running() and now - self._llm_started_at >= 5:
             if self.cfg.llm_model_sha256 and self._llm_changed():
@@ -2286,7 +3102,9 @@ class Worker:
         doc = {"pid": os.getpid(), "worker": self.cfg.worker_id, "state": state, "reason": reason, "hub": self.link,
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
-               "version": VERSION, "update": self.updater.report()}
+               "version": VERSION, "update": self.updater.report(),
+               "models": {**self.stt_models.report(), "catalog": self.stt_models.cat_status,
+                          "llm_room": self.stt_models.llm_room_ok}}
         if self.llm is not None:
             doc["llm"] = {"model": self.cfg.llm_model, "state": "ok" if self.llm_ok else self.llm_err,
                           "jobs": dict(self.llm_counts)}
@@ -2310,6 +3128,19 @@ class Worker:
             except Exception:  # noqa: BLE001 - the self-update never takes the worker down
                 log.exception("self-update: unexpected error (carrying on)")
                 self._stop.wait(60)
+            self._stop.wait(1.0)
+
+    def _models_loop(self) -> None:
+        """The catalog's models (Models.step): their catalog, files and servers, about every second."""
+        while not self.stopped:
+            try:
+                held = self.held() is not None or self.draining
+                self.stt_models.step(idle=self.job is None and not self._inferring, held=held, gpu=self.gpu.info,
+                                 llm_running=self.llm_proc is not None and self.llm_proc.running(),
+                                 stop=lambda: self.stopped or self.held() is not None or self.draining)
+            except Exception:  # noqa: BLE001 - the models never take the worker down
+                log.exception("models: unexpected error (carrying on)")
+                self._stop.wait(30)
             self._stop.wait(1.0)
 
     def update_busy(self) -> str:
@@ -2359,8 +3190,13 @@ class Worker:
                 log.warning("llm_model_sha256 isn't set: llama-server's model isn't checked against its pin")
         progs = {"whisper-server": Path(str(self.cfg.whisper_server[0])).name if self.cfg.whisper_server else "",
                  "llama-server": Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else ""}
+        for name in read_json(Path(self.cfg.state_dir) / "children.json"):     # the catalog's models' servers
+            if name.startswith("model-"):
+                progs[name] = tuple(p for p in (self.cfg.whisper_process, self.cfg.llm_process,
+                                                Path(self.cfg.whisper_bin).name, Path(self.cfg.llama_bin).name) if p)
         self.children.reap_leftovers(progs)        # what a worker that died left running (no job object elsewhere)
-        loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update")]
+        loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update"),
+                 (self._models_loop, "models")]
         if self.llm_verified is None:
             loops.append((self.verify_llm, "llm-verify"))
         if self.llm is not None:
@@ -2417,7 +3253,7 @@ class Worker:
             if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
-                                                            "model": self.cfg.model},
+                                                            "model": self.cfg.model, "models": self.loaded()},
                                    timeout=self.claim_wait + 15)
         finally:
             self._claiming = False
@@ -2473,7 +3309,25 @@ class Worker:
             return
         fetch_ms = (self.clock() - t0) * 1000
         fast = job.get("fast") is True     # an older hub sends none: the full decode
-        call = self.whisper.call(wav, str(job.get("prompt") or ""), fast=fast)
+        # the model: the one the hub names when it answers here, else whisper_server's (the hub records which wrote it)
+        want = str(job.get("model") or "")
+        server = self.stt_models.server(want) if want and want != self.cfg.model else None
+        used = server.id if server is not None else self.cfg.model
+        plain = job.get("plain") if isinstance(job.get("plain"), list) else []   # models its context is off for
+        ctx_on = used not in plain
+        prompt = str(job.get("prompt") or "") if ctx_on else ""
+        context = [str(c)[:80] for c in (job.get("context") if isinstance(job.get("context"), list) else [])
+                   if isinstance(c, str) and c.strip()][:CONTEXT_MAX_ITEMS] if ctx_on else []
+        extra = {"context": ("list" if context else "none") if server is not None and server.kind == "llama-asr"
+                 else ("prompt" if prompt else "none")}
+        level = speech_dbfs(wav) if self.cfg.gate_dbfs > -120 else None
+        if level is not None and level < self.cfg.gate_dbfs:
+            # (near silence: every model makes words up on it; the hub reads no text as no speech)
+            body = dict(result_body({}, used, round(fetch_ms), 0), gate="quiet", level_db=round(level, 1), **extra)
+            self._complete(job, lease, body, expires, fetch_ms, 0.0)
+            return
+        call = server.call(wav, prompt, context, fast) if server is not None else self.whisper.call(wav, prompt,
+                                                                                                    fast=fast)
         self._call = call
         box: dict = {}
 
@@ -2547,15 +3401,23 @@ class Worker:
             return
         if "err" in box:
             err = box["err"]
-            self.whisper_fails += 1
             self.counts["failed"] += 1
+            if server is not None:
+                log.warning("job %s: %s: %s: handed back", jid, used, err)
+                self._release(lease, f"{used}: {str(err)[:100]}")
+                self.stt_models.job_failed(used)
+                return
+            self.whisper_fails += 1
             log.warning("job %s: %s (%d in a row): handed back", jid, err, self.whisper_fails)
             self._release(lease, str(err)[:120])
             if self.whisper_fails >= self.cfg.whisper_fail_max:
                 self._whisper_down(f"{self.whisper_fails} failures in a row")
             return
-        self.whisper_fails = 0
-        body = result_body(box.get("out") or {}, self.cfg.model, round(fetch_ms), round(infer_ms))
+        if server is not None:
+            self.stt_models.job_ok(used)
+        else:
+            self.whisper_fails = 0
+        body = dict(result_body(box.get("out") or {}, used, round(fetch_ms), round(infer_ms)), **extra)
         self._complete(job, lease, body, expires, fetch_ms, infer_ms)
 
     def _complete(self, job: dict, lease: str, body: dict, expires: float, fetch_ms: float, infer_ms: float) -> None:
@@ -2767,6 +3629,7 @@ class Worker:
             self.proc.stop()
         if self.llm_proc is not None:
             self.llm_proc.stop()
+        self.stt_models.stop_all("the worker stopped")
         self._write_status(("stopped", ""))
         self.hub.close()
         self.hb_hub.close()
