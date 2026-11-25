@@ -271,7 +271,8 @@ window.RadioView = (() => {
     for (const g of groups) {
       g.last = g.calls[0].start;
       const said = g.calls.find((t) => t.text);
-      g.snippet = said ? said.text : g.calls[0].status === "no_speech" ? "Key-up, no speech" : "—";
+      g.snippet = said ? said.text : g.calls[0].status === "no_speech" ? "Key-up, no speech"
+        : g.calls[0].status === "unclear" ? sttSaid(g.calls[0]) : "—";
       g.muted = !said;
       const em = g.calls.filter(isEm);
       g.emergency = !em.length ? "" : em.some((t) => t.alarm_level === "alarm") ? "ours" : "other";

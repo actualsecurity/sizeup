@@ -61,7 +61,9 @@ phrases are context ("a bat in her bedroom", "a contractor has a hammer"), and i
 ("pointed a gun at", "swinging it at the clerk").
 
 "describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
-rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone.
+rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone. "model_cues":
+phrases (the grammar above) one of which the trigger transmission (or two of its context transmissions) must say before
+that model's answer of the category raises anything (water_rescue: "water", "boat", "drowning" ...).
 
 A category with "fire_related": true (the police pack's fire_report, fire_call, hazmat, alarm) is checked for the FD
 already being there before it pushes (engine.py _fire): one of our fire incidents at its place (dispatched: held at
@@ -510,6 +512,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "escalate": [p.src for p in _phrases(cd.get("escalate") or [], f"{name}.{c}.escalate")],
                    "escalate_not": [p.src for p in _phrases(cd.get("escalate_not") or [], f"{name}.{c}.escalate_not")],
                    "escalate_always": [p.src for p in _phrases(cd.get("escalate_always") or [], f"{name}.{c}.escalate_always")],
+                   "model_cues": [p.src for p in _phrases(cd.get("model_cues") or [], f"{name}.{c}.model_cues")],
                    "cancel_ttl_min": (_num(cd["cancel_ttl_min"], 1, 24 * 60, f"{name}.{c}.cancel_ttl_min")
                                       if cd.get("cancel_ttl_min") is not None else None),
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}

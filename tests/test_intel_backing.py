@@ -114,12 +114,13 @@ def test_the_model_mode_caps_its_events_and_a_category_off_is_nothing():
 def test_scored_on_its_own_rule_and_the_trigger_only_never_another_rows_evidence():
     def ans(msgs):
         trig = msgs[-1]["content"]
-        return answer("mva_injury", 0.75) if "glass everywhere" in trig.split("Same talkgroup")[0] else answer("none", 0.1)
-    e, sink, b = setup(B.FakeBackend(ans), packs=full())
+        return answer("mva_injury", 0.5) if "glass everywhere" in trig.split("Same talkgroup")[0] else answer("none", 0.1)
+    # (under the model-alone cap, ALONE_MAX: t1's hit added in would show over 0.5)
+    e, sink, b = setup(B.FakeBackend(ans), packs=full(), cfg={"infer_pd_threshold": 0.4})
     assert e.feed(row("t1", "report of an MVA on Sample St near the gas station", 1000)) == []    # under its threshold
     [ev] = e.feed(row("t2", "a passerby says the driver is not moving and there is glass everywhere", 1020))
     assert ev.category == "mva_injury" and ev.traffic_ids == ["t2"]
-    assert [r[0] for r in ev.rules] == ["model.fake"] and ev.what_score == 0.75
+    assert [r[0] for r in ev.rules] == ["model.fake"] and ev.what_score == 0.5
 
 
 # -- the model's confidence alone never pushes -------------------------------------------------------------------------
@@ -736,3 +737,59 @@ def test_the_real_hub_module_with_a_worker_answers_through_its_lane():
     finally:
         hub_infer.uninstall(ln)
         ln._results.shutdown(wait=False)
+
+
+# -- an unclear transcript, a category's cues, the model alone (the 60 Control column's "Water rescue · high 95%" from
+# one looped transcript, 2026-11-25: invented shapes of it) ------------------------------------------------------------
+
+LOOPED = "So then we were" + " out of the" * 60      # whisper's decoder loop on a 2 s clip
+WATERY = "Water. 10-6, copy."                         # a short row of another radio that says the word, nothing more
+NO_CUE = "she says he went out past the rocks a while ago and has not come back yet to the house"
+CUED = "a kayak flipped over out past the rocks and she cannot see him anymore from where she is"
+
+
+def water(confidence=0.95, **kw) -> dict:
+    return answer("water_rescue", confidence, **{"weapon": "none", "in_progress": False, "reason": "says water", **kw})
+
+
+def test_a_looped_transcript_is_never_read_nor_asked_and_raises_nothing():
+    e, sink, b = setup(B.FakeBackend(water()))
+    assert e.feed(row("t1", WATERY, 1000, end=1002.5)) == []
+    assert e.feed(row("t2", LOOPED, 1006, end=1008)) == []                  # (the words alone say it: a loop)
+    assert e.feed(row("t3", "", 1010, end=1012, status="unclear")) == []    # (as the CAD of record stores it)
+    assert b.asked == [] and e.events.all() == [] and sink.pushes == [] and e.unclear == 2
+
+
+def test_a_category_with_cues_is_raised_only_when_the_trigger_says_one_or_two_context_rows_do():
+    e, sink, b = setup(B.FakeBackend(water()))
+    e.feed(row("t1", WATERY, 1000, end=1002.5))                              # one row of context says "water"
+    assert e.feed(row("t2", NO_CUE, 1006)) == [] and len(b.asked) == 1
+    assert e.events.all() == [] and e.backing.today["uncued"] == 1
+    e, sink, b = setup(B.FakeBackend(water()))                               # two rows say it: a sequence
+    e.feed(row("t1", WATERY, 1000, end=1002.5))
+    e.feed(row("t2", "Water up past the dock.", 1003, end=1005))          # (each short: never asked itself)
+    [ev] = e.feed(row("t3", NO_CUE, 1010))
+    assert ev.category == "water_rescue" and ev.traffic_ids == ["t3"]
+    e, sink, b = setup(B.FakeBackend(water()))                               # the trigger says it
+    [ev] = e.feed(row("t1", CUED, 1000))
+    assert ev.category == "water_rescue"
+
+
+def test_the_model_alone_is_never_high_nor_pushed_and_one_short_row_is_low():
+    e, sink, b = setup(B.FakeBackend(water(0.95)))
+    [ev] = e.feed(row("t1", CUED, 1000))                                     # no rule word, no place: the model alone
+    assert (ev.what_score, ev.level, ev.mode) == (0.6, "medium", "map") and not sink.pushes[-1][1].would_push
+    e, sink, b = setup(B.FakeBackend(water(0.95)))
+    [ev] = e.feed(row("t1", "a kayak flipped near the rocks, he went under", 1000, end=1002))   # 2 s, 9 words
+    assert (ev.what_score, ev.level) == (0.45, "low")
+    e, sink, b = setup(B.FakeBackend(water(0.95)), cfg={"infer_pd_corroborate": False})
+    [ev] = e.feed(row("t1", CUED, 1000))                                     # pushes allowed: still never "high"
+    assert ev.level == "medium"
+
+
+def test_a_garbled_answer_is_invalid_never_a_category():
+    for bad in ({"category": "water_rescue"}, water(confidence="high"), water(confidence=float("nan")),
+                dict(water(), category="Water rescue"), dict(water(), extra=1), "water_rescue", None, []):
+        e, sink, b = setup(B.FakeBackend(bad))
+        assert e.feed(row("t1", CUED, 1000)) == [] and e.events.all() == [], bad
+        assert e.backing.today["invalid"] == 1 and e.backing.today["events"] == 0
