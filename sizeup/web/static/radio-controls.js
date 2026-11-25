@@ -1667,6 +1667,8 @@ window.RadioControls = (() => {
     const ch = (m.channels || {})[k] || {};
     sel.title = c ? `Speech model: ${c.id}${chosen ? "" : " (auto)"}\n${c.kind} · ${(c.vram_mb / 1024).toFixed(1)} GB VRAM`
       + `\nLoaded on: ${(loaded[c.id] || []).join(", ") || "no worker online"}`
+      + ((m.recommended || {})[chosenService(r) || autoService(r)] && !chosen
+        ? `\nRecommended: ${(m.recommended || {})[chosenService(r) || autoService(r)]} (switch once its scores say so)` : "")
       + `\nContext: ${ch.context || (c.context_default ? "on" : "off")}${ch.context ? "" : " (default)"}`
       + (ch.callsigns && ch.callsigns.length ? `\nCall signs: ${ch.callsigns.join(", ")}` : "")
       : "Speech model";
