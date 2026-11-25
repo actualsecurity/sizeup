@@ -797,7 +797,8 @@
                 "x-known": [
                   "local",
                   "aws",
-                  "both"
+                  "both",
+                  "gpu"
                 ]
               }
             }

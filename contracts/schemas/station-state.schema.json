@@ -452,6 +452,7 @@
             "deny_ok": {"const": true, "description": "This station takes `aws.deny` from the hub. An implicit capability flag, like `squelch_ok`."},
             "promote_ok": {"const": true, "description": "This station takes `aws.promote` from the hub (the county talkgroups an incident is worked on now, transcribed like ours: sizeup/cad/opchannel.py). An implicit capability flag, like `deny_ok`; a station from before it sends none."},
             "promote_p25_ok": {"const": true, "description": "This station takes another P25 system's keys (`p25:<system>:<tg>`) in `aws.promote` too (a highway-crash pre-alert's channel, sizeup/intel/engine.py promoted_since). An implicit capability flag, like `promote_ok`; a station from before it sends none and is sent county keys only."},
+            "engine_gpu_ok": {"const": true, "description": "This station takes the engine `gpu` in its channel choices (sizeup/channels.py: the hub's GPU workers first, then AWS, then the station's whisper; the station skips whisper and forwards the clip). A station from before it sends none and is sent `aws` instead."},
             "sig": {"type": "string", "description": "A short hex digest of everything above (sizeup/channels.py sig), compared for equality only."}
           }
         },

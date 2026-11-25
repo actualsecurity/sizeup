@@ -9,6 +9,7 @@
     "deny_ok": true,
     "promote_ok": true,
     "promote_p25_ok": true,
+    "engine_gpu_ok": true,
     "sig": "d26d8cf926e1"
   }
 }
