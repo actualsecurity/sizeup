@@ -121,7 +121,8 @@ def event_log_csv(store: Store) -> bytes:
     for r in rows:
         kind = LOG_TYPES.get(r["kind"]) or ("UNIT STATUS" if r["kind"] == "status" and r["unit_id"] else "EVENT")
         unit = ", ".join(x for x in (r["units"] or "").split(",") if x) or r["name"] or ""   # a note's unit tags
-        out.append([ts(r["at"]), r["number"] or "", unit, kind, r["text"], r["operator"]])
+        text = f"{r['text']} ({r['label']})" if r.get("label") else r["text"]      # after close | quiet edit
+        out.append([ts(r["at"]), r["number"] or "", unit, kind, text, r["operator"]])
     return _csv(EVENT_LOG_COLUMNS, out)
 
 

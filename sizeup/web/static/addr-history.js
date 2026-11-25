@@ -10,6 +10,10 @@
 //                last 12 months by type, the repeat false alarms. Folded or open as last left (localStorage, try/catch).
 //   Note form    noteForm(host, {note | incident_id | where, text}, done): add or edit a note; also the comment box's
 //                "Save as address note" (what is typed there) and the Search page's Address notes.
+//   Peek         a History here entry opens that past call read-only over the current view (#peek-overlay): its
+//                summary, location, units, comments and timeline; Close / Esc / the scrim back to the same entry, the
+//                main view's call never changes ("Open" switches to it, by choice). ⌘ / Ctrl / middle click: a new
+//                tab at <page>#peek/<id> (the entry is a link; cad.js route() opens it, on the console and the board).
 // Uses cad.js's helpers (el, setText, show, api, operator, typeLabel, nameOf, openFromRecords, UI): loaded after it.
 "use strict";
 
@@ -176,10 +180,15 @@ window.AddrHistory = (() => {
     const list = el("ol", "here-list");
     for (const r of h.recent) {
       const li = el("li");
-      const b = el("button", "here-call", day(r.created_at));
-      b.type = "button";
-      b.title = `${r.number}: open`;
-      b.addEventListener("click", () => openFromRecords(r.id));
+      const b = el("a", "btn here-call", day(r.created_at));     // a link: ⌘ / Ctrl / middle click, a new tab
+      b.href = peekHref(r.id);
+      b.dataset.iid = String(r.id);
+      b.title = `${r.number}: view (⌘-click: new tab)`;
+      b.addEventListener("click", (e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;     // the browser's: a new tab / window
+        e.preventDefault();
+        peek(r.id, b);
+      });
       li.append(b, el("span", "", typeLabel(r.type, r.subtype) || "—"),
         el("span", r.disposition ? "" : "dim", r.disposition ? nameOf("dispositions", r.disposition) : (r.status === "closed" ? "—" : "Open")),
         el("span", "dim", (r.units || []).join(", ")));
@@ -262,6 +271,122 @@ window.AddrHistory = (() => {
     (where && !where.value ? where : text).focus();
   }
 
+  // ---- peek: a past call, read-only, over whatever is on screen ------------------------------------------------------
+  const pk = { id: null, seq: 0, open: false, wait: 0 };
+  function peekHref(id) { return `${location.pathname}${location.search}#peek/${id}`; }
+  async function peek(id, opener) {
+    const ov = $("#peek-overlay");
+    pk.id = id;
+    pk.open = false;
+    const seq = ++pk.seq;
+    renderPeek({ loading: true, id });
+    if (ov.hidden) UI.dialog.open(ov, { opener: opener || document.activeElement, focus: $("#peek-close"), onClose: () => peekClosed(id) });
+    let inc;
+    try { inc = await api("GET", `/api/cad/incident/${id}`); } catch (e) { inc = { error: e.message, id }; }
+    if (seq !== pk.seq) return;
+    renderPeek(inc);
+    clearInterval(pk.wait);                      // a deep link opens before the lists come: drawn again once they do
+    if (!inc.error && !cad.state) {
+      let n = 0;
+      pk.wait = setInterval(() => {
+        if (seq !== pk.seq || ++n > 40) clearInterval(pk.wait);
+        else if (cad.state) { clearInterval(pk.wait); renderPeek(inc); }
+      }, 250);
+    }
+  }
+  function peekClose() { UI.dialog.close($("#peek-overlay")); }
+  function peekClosed(id) {
+    pk.seq++;
+    clearInterval(pk.wait);
+    if (location.hash.startsWith("#peek/")) history.replaceState(null, "", location.pathname + location.search);
+    if (pk.open) return;                         // "Open": the main view goes to it
+    // back to the same History entry (the list may have been drawn again while it was open)
+    const n = document.querySelector(`#d-here-body .here-call[data-iid="${id}"]`);
+    if (n && document.activeElement !== n) n.focus({ preventScroll: true });
+  }
+  function peekOpen() {
+    const id = pk.id;
+    if (id == null) return;
+    pk.open = true;
+    peekClose();
+    openFromRecords(id);
+  }
+  const hms = (unix) => (unix ? fmtRecv(unix) : "");
+  function renderPeek(inc) {
+    const body = $("#peek-body"), st_ = $("#peek-status");
+    $("#peek-new").href = peekHref(inc.id);
+    show($("#peek-open"), !BOARD && !inc.loading && !inc.error);     // (the wall board only shows)
+    if (inc.loading || inc.error) {
+      setText($("#peek-title"), inc.error ? "Not loaded" : "Loading");
+      show(st_, false);
+      body.replaceChildren(el("div", inc.error ? "error" : "dim", inc.error || "…"));
+      return;
+    }
+    setText($("#peek-title"), [incTitle(inc), typeLabel(inc.type, inc.subtype)].filter(Boolean).join(" · "));
+    const es = eventStatus(inc);
+    stBadge(st_, es.name, es.bg);
+    show(st_, true);
+    const facts = el("div", "pk-facts small");
+    const fact = (k, v) => {
+      if (!v) return;
+      const g = el("span");
+      g.append(el("span", "dim", `${k} `), el("b", "", v));
+      facts.append(g);
+    };
+    fact("Received", hms(inc.created_at));
+    if (inc.closed_at) {
+      fact("Closed", hms(inc.closed_at));
+      fact("Duration", fmtDur(inc.closed_at - inc.created_at));
+    }
+    fact("Disposition", inc.disposition ? nameOf("dispositions", inc.disposition) : "");
+    const where = el("div", "pk-where");
+    where.append(el("b", "", locText(inc) || "No location"));
+    if (inc.cross_street) where.append(el("span", "dim", ` · ${inc.cross_street}`));
+    const parts = [where, facts];
+    const units = inc.assignments || [];
+    if (units.length) {
+      const t = el("table", "pk-units small");
+      const hr = el("tr");
+      for (const h of ["Unit", "Disp", "Enrt", "OnSc", "Clr"]) hr.append(el("th", "", h));
+      t.append(hr);
+      for (const a of units) {
+        const tr = el("tr");
+        tr.append(el("td", "", a.name));
+        for (const k of ["dispatched_at", "enroute_at", "onscene_at", "cleared_at"]) tr.append(el("td", "t", a[k] ? fmtTime(a[k], true) : "—"));
+        t.append(tr);
+      }
+      parts.push(sec("Units", t));
+    }
+    const notes = (inc.events || []).filter((e) => e.kind === "note");
+    if (inc.remarks || notes.length) {
+      const ol = el("ol", "pk-lines");
+      if (inc.remarks) ol.append(line({ at: inc.created_at, kind: "remarks", text: inc.remarks, operator: "" }));
+      for (const e of notes) ol.append(line(e));
+      parts.push(sec("Comments", ol));
+    }
+    const ev = el("ol", "pk-lines");
+    for (const e of inc.events || []) ev.append(line(e));
+    parts.push(sec(`Timeline · ${(inc.events || []).length}`, ev));
+    body.replaceChildren(...parts);
+  }
+  function sec(title, node) {
+    const s = el("section", "pk-sec");
+    s.append(el("div", "h2", title), node);
+    return s;
+  }
+  function line(e) {
+    const li = el("li", e.label ? "ev-late" : "");
+    const meta = el("div", "meta");
+    meta.append(el("span", "t", fmtTime(e.at, true)), el("span", `ek ${e.kind}`, e.kind === "remarks" ? "remarks" : EVENT_KINDS[e.kind] || e.kind));
+    if (e.operator) meta.append(opSpan(e.operator));
+    const lc = labelChip(e);
+    if (lc) meta.append(lc);
+    li.append(meta, el("div", "txt", e.kind === "note" && e.units ? noteText(e) : e.text));
+    return li;
+  }
+  $("#peek-close").addEventListener("click", peekClose);
+  $("#peek-open").addEventListener("click", peekOpen);
+
   function forIncident(text) {
     const inc = st.inc;
     if (!inc) return;
@@ -279,5 +404,5 @@ window.AddrHistory = (() => {
   $("#d-here-note").addEventListener("click", () => forIncident(""));
   $("#note-premise").addEventListener("click", () => forIncident($("#note-text").value.trim()));
 
-  return { card, noteForm, expire, CATS, PRIO, day, isoDay };
+  return { card, noteForm, expire, CATS, PRIO, day, isoDay, peek, peekClose, peekHref };
 })();

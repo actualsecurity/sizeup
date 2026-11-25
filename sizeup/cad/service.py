@@ -1077,6 +1077,9 @@ class Cad:
         return inc
 
     def update(self, iid: int, body: dict) -> dict:
+        """POST /api/cad/incident/<id>: an edit of its facts, never its status (Store.update_incident). quiet: true:
+        the record put right, labelled "quiet edit" (a closed event: only so, "after close", and it stays closed)."""
+        quiet = bool(_bool(body, "quiet"))
         f = self._fields(body, partial=True)
         if f.get("until_at") is not None:          # a past Until would close it within seconds: a wrong day, or Close
             old = self.store.incident(iid)           # (the console sends the Until with every edit: an unchanged one stays)
@@ -1103,7 +1106,7 @@ class Cad:
                     f.update(address=g["address"], lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
         op = _text(body, "operator", OPERATOR_MAX)
         before = self.store.incident(iid)
-        after = self.store.update_incident(iid, f, op)
+        after = self.store.update_incident(iid, f, op, quiet=quiet)
         # a person set these (#297): a CAD feed only notes its own type / location / pin from now on
         hand = [g for g, ks in (("type", ("type", "subtype")), ("location", ("address", "cross_street", "place")),
                                 ("pin", ("lat", "lon"))) if any(k in f and before[k] != after[k] for k in ks)]
@@ -1149,6 +1152,16 @@ class Cad:
 
     def close(self, iid: int, body: dict) -> dict:
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
+
+    def settle_unstaffed(self, now: float | None = None) -> list[int]:
+        """Active events with no unit left on them back to pending (Store.settle_unstaffed; Sources' ticker calls this
+        every TICK_S), unless 60 Control automation still has one (AutoDispatch.holds_active): under automation's lock,
+        so its clear-then-assign never interleaves with the look. Each one a line in the hub log."""
+        with self.auto._lock:
+            done = self.store.settle_unstaffed(now, hold=self.auto.holds_active)
+        for iid in done:
+            self.log(f"CAD: {self.store.incident(iid)['number'] or iid}: no units on it: pending")
+        return done
 
     def expire_until(self, now: float | None = None) -> list[dict]:
         """Non-emergency events whose Until has passed closed (Store.expire_until; Sources' ticker calls this at its

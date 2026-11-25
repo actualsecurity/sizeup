@@ -334,6 +334,9 @@
   .cm .txt { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
   .cm.cm-remarks .txt { color: var(--text-2); font-weight: 600; }
   .cm.cm-sys .txt { color: var(--text-2); }
+  /* a line recorded after the close or by a quiet edit (events.label): muted, a dashed chip; never a live change */
+  .chip.ev-label { color: var(--dim); background: transparent; border-color: var(--line-strong); border-style: dashed; cursor: help; }
+  :is(.ev, .cm).ev-late .txt { color: var(--dim); }
   .ek.remarks { color: var(--text-2); }
   .cmts-new { position: absolute; inset-block-end: var(--s-2); inset-inline-end: var(--s-3); z-index: var(--z-raised); background: var(--raised); box-shadow: var(--elev-1); }
   .cmts-new[hidden] { display: none; }
@@ -932,6 +935,16 @@
   .here-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
   .here-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-0) var(--s-2); }
   .here-call { min-block-size: var(--ctl-sm); padding-inline: var(--s-1); font-variant-numeric: tabular-nums; }
+  /* a past call peeked from History here (addr-history.js peek): read-only, over the current view */
+  .peek-panel { inline-size: min(52rem, 100%); }
+  .peek-body .pk-facts { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); }
+  .peek-body .pk-sec { display: flex; flex-direction: column; gap: var(--s-1); }
+  .peek-body .pk-units { border-collapse: collapse; }
+  .peek-body .pk-units :is(th, td) { padding: var(--s-0) var(--s-2); text-align: start; border-block-end: var(--bw) solid var(--line); }
+  .peek-body .pk-units td.t { font-variant-numeric: tabular-nums; }
+  .peek-body .pk-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
+  .peek-body .pk-lines .meta { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: baseline; }
+  .peek-body .pk-lines .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
   .here-false.warn { color: var(--warn); }
 
   /* ---- the talk alerts popover (radio.js) ----------------------------------------------------------- */
