@@ -2698,7 +2698,8 @@ class Sources:
         L = self.cad.lists
         rows = self.cad._feed_type_rows()
         mark = self.store.one("SELECT COUNT(*) AS n, MAX(last_at) AS at, TOTAL(n) AS events FROM feed_types_seen")
-        key = (tuple(mark.values()) if mark else (), json.dumps(rows, sort_keys=True), id(L),
+        ed = getattr(self.cad, "settings", None)
+        key = (tuple(mark.values()) if mark else (), ed.settings_rev() if ed is not None else id(L),
                int(self.clock() // 3600))
         if self._seen_cache[0] == key:
             return [dict(r) for r in self._seen_cache[1]]

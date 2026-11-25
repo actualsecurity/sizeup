@@ -6,9 +6,9 @@ the same way. Synthetic only: invented codes ("SERVICE,SAMPLE"), places, units a
 
 from __future__ import annotations
 
-import pytest
-
 import json
+
+import pytest
 
 from sizeup.cad import feedtypes
 from sizeup.cad.store import CadError
