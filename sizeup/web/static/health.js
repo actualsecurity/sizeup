@@ -351,7 +351,16 @@ const StationHealth = (() => {
         ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
           + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
       ]));
-      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Load", "Jobs/h", "Lost", "Last seen"],
+      // a GPU worker's self-update (tools/stt_worker/worker.py): the worker.py it runs, against the one the hub wants
+      const ver = (w) => {
+        const u = w.update;
+        if (!u || !u.sha256) return "—";
+        const bad = /^(refused|rolled back)/.test(u.state || "");
+        return [u.sha256.slice(0, 12), w.update_current ? "mono hl-ok" : bad || w.update_current === false ? "mono hl-warn" : "mono",
+          [u.commit ? `Commit ${u.commit.slice(0, 12)}` : "", u.state || "", w.update_wanted && !w.update_current
+            ? `Hub: ${w.update_wanted.slice(0, 12)}` : "", u.auto === false ? "auto_update off" : ""].filter(Boolean).join("\n")];
+      };
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen"],
         sp.workers.map((w) => {
           const g = w.gpu || {}, l = w.load || {};
           // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
@@ -359,7 +368,7 @@ const StationHealth = (() => {
             ? [`${l.own ?? 0} own`, l.cpu_pct !== undefined ? `CPU ${Math.round(l.cpu_pct)}%` : "", l.service_s ? `${l.service_s} s/clip` : ""].filter(Boolean).join(" · ")
             : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
           const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
-          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, load,
+          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w), load,
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
         }), ""));
       const inf = sp.infer;

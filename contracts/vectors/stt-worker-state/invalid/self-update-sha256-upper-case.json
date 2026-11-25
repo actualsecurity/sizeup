@@ -1,0 +1,5 @@
+{
+  "state": "online",
+  "model": "large-v3-turbo-q5_0",
+  "self_update": {"sha256": "C4D1E8A07B2F9E3D6A5C1B0F8E7D2A9C3B6F5E4D1A0C9B8E7F6D5C4B3A2E1F0D", "commit": "", "auto": true, "state": "current", "bad": []}
+}

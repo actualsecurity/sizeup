@@ -37,9 +37,9 @@ new key, or a new schema, behind a capability string.
 | `station-hello-answer` | as built | 1 | the hub's 200 answer to `GET /api/station/hello` |
 | `station-error` | as built | 2 | the body of a 4xx / 5xx for a station's token: `error`, `reason` (and the events post's `max_bytes`) |
 | `stt-worker-hello` | as built | 1 | the body of `POST /api/station/stt/hello` (a pool worker connects) |
-| `stt-worker-hello-answer` | as built | 1 | the hub's 200 answer: `ok`, `worker`, `poll_s`, `pool_on`, `classes` |
+| `stt-worker-hello-answer` | as built | 1 | the hub's 200 answer: `ok`, `worker`, `poll_s`, `pool_on`, `classes`, and `worker_update` to a worker that sent `self_update` |
 | `stt-worker-state` | as built | 1 | the body of `POST /api/station/stt/state` (a pool worker's heartbeat) |
-| `stt-worker-state-answer` | as built | 1 | the hub's 200 answer: `ok`, `pool_on` |
+| `stt-worker-state-answer` | as built | 1 | the hub's 200 answer: `ok`, `pool_on`, and `worker_update` to a worker that sent `self_update` |
 | `node` | designed | 1 | a node of the registry: `id`, `name`, `kind`, roles, capabilities |
 | `roles` | designed | 1 | a node's roles, `{role: options}`, with each role's options |
 | `capabilities` | designed | 1 | what a node reports about its hardware and programs |

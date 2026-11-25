@@ -8,8 +8,9 @@ Optionally it also serves a **local LLM** (llama.cpp's `llama-server`, on the sa
 short JSON classifications for the intel engine, never a cloud model. Clips always come first, and a game gets the
 GPU back at once (see [The local LLM](#the-local-llm-optional)).
 
-- **Connections:** the worker only connects out, to the hub over HTTPS through Cloudflare Access and to
-  `whisper-server` (and `llama-server`) on 127.0.0.1. Nothing on the PC listens on the network.
+- **Connections:** the worker only connects out, to the hub over HTTPS through Cloudflare Access, to
+  `whisper-server` (and `llama-server`) on 127.0.0.1, and, for its [self-update](#updating), to GitHub
+  (`api.github.com`, `raw.githubusercontent.com`; no token). Nothing on the PC listens on the network.
 - **Python:** standard library only, Python 3.10 or newer. `worker.toml` needs 3.11+. On 3.10, use `worker.json`
   with the same keys.
 - **Logs:** they hold job ids, timings and token counts. They never hold transcripts, prompts, the LLM's answers or
@@ -157,7 +158,8 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-`worker.py` is pinned to a commit. Check its hash after the download:
+For the first install, `worker.py` is pinned to a commit. Check its hash after the download. From then on it
+[updates itself](#updating).
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/0d243f8770971808569cdb2e09347bbf94598f94/tools/stt_worker/worker.py -OutFile "$d\worker.py"
@@ -256,6 +258,9 @@ How the task behaves:
 - **One copy at a time:** the worker holds a lock on `state\worker.lock` and refuses to run a second copy. Windows
   lets go of the lock when the process ends, even when `schtasks /End` kills it, so the next start isn't blocked.
 - **No time limit:** `ExecutionTimeLimit` zero turns off Task Scheduler's 72-hour default.
+- **Self-update:** after it swaps in a new `worker.py` the worker exits with code 75 (Last Run Result `0x4B`). The
+  5-minute trigger starts the new file. The worker doesn't start a copy of itself, because `schtasks /End` couldn't
+  stop a process outside the task.
 - **No schtasks:** `schtasks /Create` can't set any of this, so use the PowerShell commands above to create the task.
 
 To manage it:
@@ -279,8 +284,45 @@ Register-ScheduledTask -TaskName 'sizeup-whisper-server' -Action $wact -Trigger 
 
 ### Updating
 
-1. Download `worker.py` from the commit this README names, and check its hash (step 5).
-2. `schtasks /End` and `schtasks /Run` the task.
+After the first install the worker updates itself. The hub tells it which `worker.py` to run. By default that is the
+file in the hub's own build, so a change merged into `worker.py` reaches the PC once the hub has deployed it.
+
+1. **The hub names a version:** a commit and the file's SHA-256, in every hello and heartbeat answer. In
+   **Settings > Station > STT workers**, each worker has **Auto** (the hub's build, the default), **Hold** (no
+   updates) or **Pin** (a commit on main and its `worker.py` SHA-256).
+2. **Only main, only that hash:** GitHub's API must say the commit is on `main` of `actualsecurity/sizeup`. Then the
+   worker downloads `tools/stt_worker/worker.py` at that commit from `raw.githubusercontent.com` (2 MB at most). It
+   refuses the file unless its SHA-256 is exactly the hub's. The repo, branch, path and hosts are written in
+   `worker.py`, so the hub can't send the worker anywhere else, and the hub's `url` is never used.
+3. **Self-check:** the file is saved as `worker.py.new`, and `worker.py.new selftest` must pass. The self-check
+   imports the file, reads `worker.toml` and builds a worker, with no network.
+4. **Only when idle:** the swap waits until the worker has no clip or LLM job, isn't gaming and hasn't gamed for 2
+   minutes. Then the worker takes no new jobs, copies `worker.py` to `worker.py.prev`, renames `worker.py.new` to
+   `worker.py` and exits with code 75. Task Scheduler's 5-minute trigger (step 8) starts the new file, so the worker
+   can be gone for up to 5 minutes. The hub sends its clips elsewhere meanwhile.
+5. **Rollback:** the new file must reach the hub within 10 minutes of a start, and within 3 starts. Otherwise
+   `worker.py.prev` is copied back, the new hash is marked bad and never tried again, and Health shows
+   `rolled back`.
+
+The worker asks GitHub at most every 10 minutes, and less often after errors or when GitHub's rate limit says so
+(GitHub allows 60 requests an hour without a token). `worker.py update` prints the state.
+
+```powershell
+py -3 "$d\worker.py" update               # what runs, what is staged, the last update or rollback, hashes marked bad
+py -3 "$d\worker.py" update rollback      # worker.py.prev back; the version you left is marked bad
+py -3 "$d\worker.py" update retry         # the hashes marked bad may be tried again
+```
+
+- **Turn it off:** set `auto_update = false` in `worker.toml` and restart the task, or choose **Hold** in Settings.
+- **Roll back by hand:** run `update rollback`, then `schtasks /End` and `schtasks /Run` the task. The version you
+  left is marked bad, so the worker doesn't fetch it again. **Hold** keeps it from taking a newer one.
+- **Update by hand** (with `auto_update = false`): download `worker.py` from the commit this README names and check its
+  hash (step 5), then `schtasks /End` and `schtasks /Run` the task.
+
+**Linux (`systemd --user`):** the same `worker.py` updates itself the same way. Run it as a user service with
+`Restart=always` (for example `RestartSec=5`): systemd starts the new file right after the exit with code 75. Keep
+`worker.py` and `worker.toml` in a folder the user owns, such as `~/.local/share/sizeup-stt`. The swap is a rename in
+that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup-stt-worker`.
 
 ## How it works with the hub
 
@@ -293,6 +335,10 @@ Register-ScheduledTask -TaskName 'sizeup-whisper-server' -Action $wact -Trigger 
   12 s.
 - **Gaming or pause:** the hub takes back the worker's pre-alert jobs itself when the state changes. A later complete,
   extend or release on them gets 409, which the worker treats as a lost lease.
+- **Version:** every hello and heartbeat carries `self_update` (the `worker.py` SHA-256, its commit when known,
+  `auto_update`, the update's state, the hashes marked bad). The answer carries `worker_update` (`mode`, `commit`,
+  `sha256`): the version the hub wants it on ([Updating](#updating)). Health shows each worker's version, green when it
+  is the hub's.
 - **LLM jobs** (with `llm_url`): claimed on a thread and hub connection of their own (`/api/station/stt/infer/*`,
   the same tokens), one at a time, never while a pre-alert clip is held. The worker tells the hub its models with every
   heartbeat (`models: {stt, llm, llm_version}`); `llm` is empty while llama-server isn't answering, and the hub sends
@@ -400,6 +446,10 @@ These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
 | `llm-model.json` | the GGUF's checked SHA-256, by path, size and time (so a restart doesn't hash 5 GB again) |
 | `llm-key` | the API key llama-server was last started with (only you can read it; `check` uses it) |
 | `children.json` | the pids of the servers the worker started: the next start ends one a worker that died left running |
+| `update.json` | the self-update: hashes marked bad, the swap not confirmed yet, the last update or rollback |
+
+Next to `worker.py`: `worker.py.prev` (the version before the last self-update, for a rollback) and, for a moment,
+`worker.py.new` (the version being checked).
 
 ## Config
 
@@ -432,6 +482,7 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `llm_stop_gaming_s` | auto | seconds of gaming before the worker stops its llama-server (its VRAM back to the game); 0 at once; unset: 60 for a model up to 6 GB (Qwen3-8B), 20 for a bigger one (Gemma-3-12B) |
 | `llm_timeout_s`, `llm_check_s`, `llm_fail_max` | 30, 10, 3 | per answer; health checks; failures in a row before no LLM until healthy |
 | `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
+| `auto_update` | `true` | updates itself to the version the hub names (see [Updating](#updating)); `false`: never |
 
 ## Troubleshooting
 
@@ -452,6 +503,12 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `infer ... not valid under its schema` often, with Qwen3 | Check `--reasoning off` is in `llm_server` (thinking eats the answer). |
 | `infer ... not valid under its schema` | The model's answer didn't match the job's schema; the hub drops it (None). Many: tell the admin. |
 | Health: LLM `none` while online | `status` on the PC: `llm:` says why (loading, gaming stopped it, hash mismatch). |
+| `update: refused ...: not on main` | The hub names a commit that isn't on main (a pin of a branch). Pin a commit on main. |
+| `update: refused ...: hash mismatch` | The pinned SHA-256 isn't that commit's `worker.py`. Check the pin. |
+| `update: refused ...: its self-check failed: exit 2: config: ...` | The new version refuses this `worker.toml`. Fix the key it names; the worker tries again after its next start. |
+| `update: refused ...: rolled back before` | That version never reached the hub (`update` says why). After fixing the cause: `update retry`. |
+| `update: GitHub: ...; again in N min` | GitHub is unreachable or limited this address. The worker waits; nothing else changes. |
+| `update: staged ..., waiting: gaming` | Expected. The swap waits until gaming has been over for 2 minutes. |
 
 ## Mac (Metal) later
 

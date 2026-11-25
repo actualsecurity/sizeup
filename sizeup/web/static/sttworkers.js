@@ -1,6 +1,6 @@
 // Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): the GPU speech-to-text workers' tokens and the
 // pool's switches; admins, the hub only. GET /api/cad/stt-workers: each worker (id, name, last used, revoked, its live
-// state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | pool}: add
+// state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
 // and rotate answer the new token, shown here ONCE (this page's memory until Done, never stored) with a copy button.
 "use strict";
 const SttWorkersCard = (() => {
@@ -10,6 +10,7 @@ const SttWorkersCard = (() => {
     catchup: "Shed clips (catch-up)" };
   let card = null, status = null, form = null, reveal = null, timer = null, busy = false, last = null, said = "";
   let idIn = null, nameIn = null, fresh = null;
+  let pinForm = null, pinHead = null, pinCommit = null, pinSha = null, pinning = "";
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const isOpen = () => !!card && card.isConnected && !(card.parentNode && card.parentNode.closest("[hidden]")) && !document.hidden;
@@ -60,6 +61,28 @@ const SttWorkersCard = (() => {
       idIn.value = ""; nameIn.value = "";
     });
     form.append(l1, l2, add);
+    // a worker's self-update pinned: a commit on main and worker.py's SHA-256 at it (the worker checks both)
+    pinForm = el("div", "row");
+    pinForm.hidden = true;
+    pinHead = el("span", "mono");
+    const l3 = el("label", "field");
+    pinCommit = el("input");
+    pinCommit.maxLength = 40;
+    pinCommit.spellcheck = false;
+    pinCommit.title = "The full commit on main";
+    l3.append("Commit", pinCommit);
+    const l4 = el("label", "field");
+    pinSha = el("input");
+    pinSha.maxLength = 64;
+    pinSha.spellcheck = false;
+    pinSha.title = "SHA-256 of tools/stt_worker/worker.py at that commit";
+    l4.append("SHA-256", pinSha);
+    const pin = btn("Pin", "primary", () => {
+      const id = pinning;
+      act({ action: "update", id, mode: "pin", commit: pinCommit.value.trim(), sha256: pinSha.value.trim() }, `${id}: pinned`);
+      pinning = ""; pinCommit.value = ""; pinSha.value = "";
+    });
+    pinForm.append(pinHead, l3, l4, pin, btn("Cancel", "", () => { pinning = ""; render(); }));
   }
 
   function renderReveal() {
@@ -119,6 +142,34 @@ const SttWorkersCard = (() => {
     return td;
   }
 
+  // a GPU worker's self-update (tools/stt_worker/worker.py): the worker.py it runs (green: the hub's), auto / hold / pin
+  function versionCell(w) {
+    const td = el("td", "");
+    if (w.revoked) { td.append("—"); return td; }
+    const u = w.update || {}, m = w.update_mode || { mode: "auto" };
+    const bad = /^(refused|rolled back)/.test(u.state || "");
+    const run = el("span", w.update_current ? "mono hl-ok" : bad || w.update_current === false ? "mono hl-warn" : "mono",
+      u.sha256 ? u.sha256.slice(0, 12) : "—");
+    run.title = [u.commit ? `Commit ${u.commit.slice(0, 12)}` : "", u.state || "",
+      w.update_wanted && !w.update_current ? `Hub: ${w.update_wanted.slice(0, 12)}` : "",
+      u.auto === false ? "auto_update off (worker.toml)" : ""].filter(Boolean).join("\n");
+    const sel = el("select", "sm");
+    for (const [v, label] of [["auto", "Auto"], ["hold", "Hold"], ["pin", m.mode === "pin" ? `Pin ${m.commit.slice(0, 7)}` : "Pin…"]]) {
+      const o = el("option", "", label);
+      o.value = v;
+      sel.append(o);
+    }
+    sel.value = m.mode;
+    sel.title = "Auto: the hub's build · Hold: no updates · Pin: a commit on main and its SHA-256";
+    sel.addEventListener("change", () => {
+      if (sel.value === "pin") { pinning = w.id; render(); return; }
+      pinning = "";
+      act({ action: "update", id: w.id, mode: sel.value }, `${w.id}: update ${sel.value}`);
+    });
+    td.append(run, " ", sel);
+    return td;
+  }
+
   function render() {
     if (!card) return;
     const d = last;
@@ -133,7 +184,7 @@ const SttWorkersCard = (() => {
     }
     const t = el("table", "evtable");
     const hr = el("tr");
-    for (const h of ["Name", "Id", "State", "Model", "LLM jobs", "Last seen", ""]) hr.append(el("th", "", h));
+    for (const h of ["Name", "Id", "State", "Model", "Version", "LLM jobs", "Last seen", ""]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
     for (const w of d.workers || []) {
@@ -155,15 +206,17 @@ const SttWorkersCard = (() => {
       const st = w.revoked ? `revoked ${when(w.revoked)}` : (w.state || "offline");
       tr.append(el("td", "", w.name || "—"), el("td", "mono", w.id),
         el("td", w.revoked || st === "offline" ? "hl-bad" : st === "online" ? "hl-ok" : "dim", st),
-        el("td", "", w.model || "—"), llmCell(w), el("td", "t", when(w.seen || w.last_used)), acts);
+        el("td", "", w.model || "—"), versionCell(w), llmCell(w), el("td", "t", when(w.seen || w.last_used)), acts);
       t.tBodies[0].append(tr);
     }
     if (!(d.workers || []).length) {
       const tr = el("tr");
-      tr.append(Object.assign(el("td", "empty", "None"), { colSpan: 7 }));
+      tr.append(Object.assign(el("td", "empty", "None"), { colSpan: 8 }));
       t.tBodies[0].append(tr);
     }
-    const kids = [head, t, poolRow(d)];
+    pinForm.hidden = !pinning;
+    pinHead.textContent = pinning ? `${pinning}:` : "";
+    const kids = [head, t, pinForm, poolRow(d)];
     if (said) kids.push(el("p", "dim small", said));
     kids.push(el("p", "dim small", `hub.sqlite · ${when(d.at)}`));
     status.replaceChildren(...kids);
