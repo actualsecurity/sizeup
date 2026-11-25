@@ -268,7 +268,7 @@ class PreplanDocs:
         """A building's active documents; with no building key on the call or the document, those whose building is the
         footprint the call's pin is in (both with a footprint), else within addrkey.GROUP_M of it ("nearby"). Two keyed
         buildings never share."""
-        rows = self.db.q("SELECT * FROM preplan_docs WHERE bldg_key = ? AND active = 1", (bldg_key,)) if bldg_key else []
+        rows = addrkey.building_rows(self.db.q, "preplan_docs", bldg_key)     # (a range and each of its numbers)
         for r in rows:
             r["nearby"] = False
         if lat is not None and lon is not None:

@@ -63,8 +63,10 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                with "County in service: close?" on the timeline (one click closes it); it closes by itself once those
                clear. Undoing the close puts back the units it and the in service released. Only a source whose report
                was seen OPEN here at least once (open_srcs: not closed, no in-service time, not first seen over
-               ASSIGN_WINDOW_S after its dispatch) releases units or closes; a report first seen closed or late records
-               its times and asks "close?" (one click), never closing by itself
+               ASSIGN_WINDOW_S after its dispatch: by when the station first had it, never when the hub applied it)
+               releases units or closes; a report first seen closed or late records its times and asks "close?" (one
+               click), never closing by itself. An open report the feed stops listing (its close lost: Sources.on_seen)
+               asks "<feed> no longer lists it: close?" once no live run of the call is still listed (on_gone)
       source   every automatic step is an auto_steps row with its source (county | radio) and its timeline entry; each
                (but accept) is undone with one click (POST /api/cad/incident/<id>/auto-undo {step}), which marks the
                unit (or the close) as a person's
@@ -384,8 +386,13 @@ class AutoDispatch:
             srcs = set()
         times = data.get("times") or {}
         disp = times.get("dispatched") or (min(times.values()) if times else None)
+        # late: by when the station first had the report (source_reports.first_seen), never by when the hub applied it
+        # (an outbox backlog, a hub restart or a takeover made an on-time report "late" and its close a question)
+        rep = self.store.one("SELECT first_seen FROM source_reports WHERE source = ? AND ref = ?",
+                             (src.partition("#")[0], str(data.get("event_id") or "")))
+        seen = min(self.clock(), float(rep["first_seen"])) if rep and rep["first_seen"] is not None else self.clock()
         if (src not in srcs and not data.get("closed") and times.get("in_service") is None
-                and (disp is None or self.clock() - disp <= ASSIGN_WINDOW_S)):
+                and (disp is None or seen - disp <= ASSIGN_WINDOW_S)):
             srcs.add(src)
             with self.store.tx() as db:
                 db.execute("UPDATE auto_incidents SET open_srcs = ? WHERE incident_id = ?", (json.dumps(sorted(srcs)), iid))
@@ -614,6 +621,24 @@ class AutoDispatch:
         if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?", (iid, ref)):
             self._step(iid, "close?", "county", f"{label} in service {_hm(t)}: close?", t, ref=ref, own_event=True,
                        operator=op)
+
+    def on_gone(self, iid: int, at: float, label: str) -> None:
+        """The feed stopped listing a report still open here (Sources.on_seen): its close may never come (the feed's
+        own close lost), so a tracked call left pending or active asks "close?" (one click), never closing by itself.
+        Never raises."""
+        try:
+            with self._lock:
+                if self.mode() != "60control" or not self.tracked(iid) or self._manual(iid, "close"):
+                    return
+                if self.store.incident(iid)["status"] not in ("pending", "active") or self.close_pending(iid) is not None:
+                    return                           # (a close already waiting for its units: it goes ahead as it was)
+                ref = f"ask:gone:{at}"
+                if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
+                                      (iid, ref)):
+                    self._step(iid, "close?", "county", f"{label} no longer lists it: close?", at, ref=ref, own_event=True,
+                               operator=f"{label} · auto")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
 
     def _dispatch_listed(self, iid: int) -> None:
         data, label = self._feed(iid)
@@ -853,6 +878,41 @@ class AutoDispatch:
             return None
         return self.store.one("SELECT * FROM auto_steps WHERE incident_id = ? AND kind = 'close?' ORDER BY id DESC LIMIT 1", (iid,))
 
+    def holds_active(self, iid: int) -> bool:
+        """An active event with no unit left on it that automation still has (Store.settle_unstaffed leaves it active
+        for now): 60 Control mode, a tracked incident, and either its close is waiting ("close?": the feed's in service
+        came and automation closes it; never an "ask:" one, a person's), or the feed's report is still live (listed
+        by the county: no gone_at, not over) and lists one of our units
+        that was on this call, no in-service time for it, and no person took it off (manual_edits): the county still
+        has it there, and its in service (or the radio) settles the call. Never raises (False on a fault)."""
+        try:
+            if self.mode() != "60control" or not self.tracked(iid):
+                return False
+            s = self.close_pending(iid)
+            if s is not None:                            # automation's close comes; an "ask:" one is a person's, any time
+                return not str(s["ref"]).startswith("ask:")
+            r = self.store.one("SELECT gone_at FROM source_reports WHERE incident_id = ? AND source != ? "
+                               "AND merged_into = '' ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
+            if r is not None and r["gone_at"] is not None:
+                return False                             # the county stopped listing it: nothing will settle it
+            data, _ = self._feed(iid)
+            if not data or self._over(data):
+                return False
+            ours, uts = self._ours(), data.get("unit_times") or {}
+            for name in data.get("units") or []:
+                u = ours.get(_key(name))
+                if u is None or (uts.get(name) or {}).get("in_service") is not None:
+                    continue
+                if self._manual(iid, f"unit:{u['name']}"):
+                    continue
+                if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ? LIMIT 1",
+                                  (iid, u["id"])):
+                    return True
+            return False
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch mode: {type(e).__name__}")
+            return False
+
     def recheck_close(self, iids) -> None:
         """A unit cleared off these incidents (the radio, the board, by hand): a pending close goes ahead once no unit is
         left on it (60 Control mode, a tracked incident). Never raises."""
@@ -967,6 +1027,7 @@ class AutoDispatch:
                 self.store.reopen(iid, operator)
                 self.mark(iid, ["close"], operator)
                 self._restore(iid, s, operator)
+                self.store.staffed(iid, operator)        # reopened pending; its units back on it: active
             elif s["kind"] == "paged":
                 with self.store.tx() as db:
                     db.execute("UPDATE auto_incidents SET paged_at = NULL WHERE incident_id = ?", (iid,))

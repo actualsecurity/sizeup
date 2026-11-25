@@ -630,6 +630,7 @@ class App:
             self.cad.cross_source = lambda: IntersectionSearch(self.gaz, towns=cfg.geo_search_towns, hq=cfg.geo_hq)
             self.cad.place_source = lambda: PlaceIndex(self.gaz, crossings=self.cad.crossings())
             self.cad.street_source = self.gaz.streets_by_town     # a page's misheard street: the one it snaps to
+            self.cad.footprints.gaz = self.gaz                    # a call's building: its address points' footprints
             # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
@@ -5740,6 +5741,8 @@ class App:
             with self._layers_lock:
                 self.layers_ready.set()
                 on = self._layers_on
+            if getattr(self, "cad", None) is not None:   # a call's building: its footprints indexed ahead, on their own
+                threading.Thread(target=self.cad.footprints.warm, name="footprints-warm", daemon=True).start()
             log(f"layers: map caches read in {time.monotonic() - t0:.1f} s"
                 + (f" ({restored} restored from S3)" if restored else "") + ("" if on else "; layers stopped meanwhile"))
             if on:

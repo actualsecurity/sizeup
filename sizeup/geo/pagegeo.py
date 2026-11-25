@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .houserange import range_of, ranges_in
 from .localaddr import fraction_of, fractions_in
 from .gazetteer import (CROSS_MARKERS, MUNI_PHRASES, MUNI_PRIOR, NOT_HOUSE_NUMBER_AFTER, STREET_STOP, Gazetteer,
                         Match, _latlon, _xy)
@@ -613,6 +614,7 @@ class PageLocator:
         prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
         plain, fracs = fractions_in(text or "", gaz.streets_at)       # "189-1/2": the local point (sizeup/geo/localaddr.py)
+        plain, ranges = ranges_in(plain, gaz.streets_at)              # "14 to 16 ...": a building's range (houserange.py)
         local = gaz.local_addresses()
         tokens = tokenize(plain)
         mentions = gaz._street_mentions(tokens)
@@ -712,7 +714,8 @@ class PageLocator:
                 st = gaz.streets[sid]
                 placed_all = False
                 for muni in gaz.address_towns(sid, local):
-                    res = gaz.locate_at(sid, muni, digits, suffix, fraction_of(fracs, digits, sid), local)
+                    res = gaz.locate_at(sid, muni, digits, suffix, fraction_of(fracs, digits, sid), local,
+                                        range_of(ranges, digits, sid) if not suffix else None)
                     if res is None:
                         continue
                     lat, lon, q, precision, label_num, _source = res

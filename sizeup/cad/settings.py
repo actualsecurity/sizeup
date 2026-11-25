@@ -83,6 +83,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     hydrant_display                key "assume_c" -> true | false (default true): an untested hydrant drawn as Class C,
                                    always marked assumed ("C*"; #840, sizeup/cad/hydrants.py; Settings > Hydrants, admins)
+    feed_types                     key "<feed>|<code>" (a feed's source id, its own code "MAIN" or "MAIN,SUB") -> {"type",
+                                   "subtype"}: the department's mapping, over the automatic one (sizeup/cad/feedtypes.py;
+                                   Settings > Lists > Feed types, admins, audited as Lists)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -112,7 +115,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import commonplaces, dispatcher, eta, mapview, radiofolders, runcards, tonelist
+from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -154,6 +157,10 @@ PAGE_SECTION[HYD_SECTION] = "system"
 # hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch. Never a board unit's code.
 DEPT_SECTION = "department_units"
 PAGE_SECTION[DEPT_SECTION] = "dispatch"
+# A feed's own type codes mapped to ours by the department (sizeup/cad/feedtypes.py): Settings > Lists > Feed types,
+# admins, audited as Lists. key "<feed>|<code>" -> {"type", "subtype"}.
+FT_SECTION = feedtypes.SECTION
+PAGE_SECTION[FT_SECTION] = "lists"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
@@ -778,6 +785,7 @@ class Editor:
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
         out["type_subtypes"] = self._map_page(L, ov)
+        out["feed_types"] = self.feed_types_page(ov)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["operators"] = self.operators()
         out["system"] = self._system(ov, places=len(self._places_cached()[2]))      # (ov is without them)
@@ -1309,6 +1317,52 @@ class Editor:
             return {"ok": True}
         return self._commit([(DEPT_SECTION, key, v)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur.get(key, "unset"), v)])
 
+    def feed_types_page(self, ov: dict | None = None) -> dict:
+        """Settings > Lists > Feed types: the department's rows (each with whether the lists still allow it), the codes
+        seen lately that nothing maps fully (Sources.feed_types_seen), and the feeds to pick from."""
+        L = self.cad.lists
+        rows = []
+        for k, v in sorted(((ov.get(FT_SECTION) if ov is not None else self.section(FT_SECTION)) or {}).items()):
+            source, code = feedtypes.parse_key(k)
+            v = v if isinstance(v, dict) else {}
+            try:
+                L.check_type(str(v.get("type") or ""), str(v.get("subtype") or ""), required=True)
+                why = ""
+            except ValueError as e:
+                why = str(e)
+            rows.append({"key": k, "source": source, "code": code, "type": v.get("type") or "",
+                         "subtype": v.get("subtype") or "",
+                         "label": L.type_label(str(v.get("type") or ""), str(v.get("subtype") or "")), "off": why})
+        src = getattr(self.cad, "sources", None)
+        seen = src.feed_types_seen() if src is not None else []
+        for r in seen:
+            r["shown"] = L.type_label(r["type"], r["subtype"])
+        feeds = {r["source"]: r["label"] for r in self.store.q("SELECT source, label FROM source_health ORDER BY rank")}
+        for r in seen:
+            feeds.setdefault(r["source"], r["label"])
+        return {"rows": rows, "seen": seen, "feeds": [{"source": k, "label": v or k} for k, v in feeds.items()]}
+
+    def _feed_types_op(self, action: str, body: dict, op: str) -> dict:
+        """set {feed, code: "MAIN" | "MAIN,SUB", type, subtype?} | reset {key: "<feed>|<code>"}: admins, audited as Lists."""
+        cur = self.section(FT_SECTION)
+        if action == "reset":
+            key = str(body.get("key") or "")
+            if key not in cur:
+                raise CadError("no such feed type row")
+            out = self._commit([(FT_SECTION, key, REMOVE)], op, [("lists", f"{FT_SECTION}/{key}", cur[key], "unset")])
+            return {**out, FT_SECTION: self.feed_types_page()}
+        if action != "set":
+            raise CadError("action: set or reset")
+        try:
+            key, v = feedtypes.clean(body.get("feed"), body.get("code"), body.get("type"), body.get("subtype"),
+                                     self.cad.lists)
+        except ValueError as e:
+            raise CadError(str(e)) from None
+        if cur.get(key) == v:
+            return {"ok": True, FT_SECTION: self.feed_types_page()}
+        out = self._commit([(FT_SECTION, key, v)], op, [("lists", f"{FT_SECTION}/{key}", cur.get(key, "unset"), v)])
+        return {**out, FT_SECTION: self.feed_types_page()}
+
     def _unit_rows(self, L, ov: dict, units: list[dict] | None = None) -> dict:
         o, used = ov.get("units", {}), self._page_usage("units")
         base_on = {c for c, _, _ in self.base.board_units()}
@@ -1422,7 +1476,7 @@ class Editor:
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
         if fn is None:
@@ -3537,6 +3591,12 @@ class Editor:
                 del ov[MUTE_SECTION][k]                   # over already: not brought back
             else:
                 ov[MUTE_SECTION][k] = m
+        for k, v in (ov.get(FT_SECTION) or {}).items():       # the department's feed types (sizeup/cad/feedtypes.py)
+            source, code = feedtypes.parse_key(k)
+            if (not feedtypes.SOURCE.fullmatch(source) or not code or feedtypes.row_key(source, code) != k
+                    or not isinstance(v, dict) or set(v) - {"type", "subtype"}
+                    or not all(isinstance(v.get(x, ""), str) for x in ("type", "subtype")) or not v.get("type")):
+                raise CadError(f"overrides.{FT_SECTION}: {str(k)[:60]!r} -> {{type, subtype}} (key <feed>|<code>)")
         for k, v in (ov.get(DEPT_SECTION) or {}).items():     # a feed's department entries (#370)
             try:
                 self._dept_value(k, v)

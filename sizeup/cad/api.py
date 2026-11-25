@@ -157,13 +157,15 @@ POST /api/cad/incident                    Accept event: {type, subtype?, emergen
                                           acft_type?, acft_nature?, acft_eta? (minutes), acft_runway? (16|34|11|29),
                                           acft_souls?, acft_level? (1-5, from the souls unless given), acft_fuel?, acft_cargo?}
 POST /api/cad/incident/<id>               edit: any of the fields above, and map_layers?: {layer: true|false} | null, the
-                                          map's layer set for this event (#111; "cameras", "gis:hydrants" ...; null: the default)
+                                          map's layer set for this event (#111; "cameras", "gis:hydrants" ...; null: the default);
+                                          never its status. quiet?: true: the record put right, its timeline line labelled
+                                          "quiet edit"; a closed event only so (Quiet edit: it stays closed, "after close")
 POST /api/cad/incident/<id>/accept        {type?, subtype?, operator?}  a 60 Control page -> pending (numbered)
 POST /api/cad/incident/<id>/dismiss       {operator?, reason?}   a 60 Control page nobody takes
 POST /api/cad/incident/<id>/close         {disposition, operator?}  units cleared
 POST /api/cad/incident/<id>/reopen        {operator?}  a closed or dismissed event back on the boards, its number kept
-                                          (#89): closed -> active if a unit was ever on it, else pending (a
-                                          non-emergency one: open again), the disposition cleared into the chronology;
+                                          (#89): closed -> pending, no unit on it (a non-emergency one: open again;
+                                          a unit put on it: active), the disposition cleared into the chronology;
                                           dismissed -> queued (60 Control, to accept or dismiss); no unit comes back
                                           by itself. 400 for an open event; dispatchers and admins
 POST /api/cad/incident/<id>/note          {text, units?: ["E63"], places?: [{label, lat, lon, kind?, sub?, source?}],
@@ -342,6 +344,9 @@ POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature 
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
                                           accepts?: true} | reset {key}}: a whole department paged, never a unit
                                           (#370; accepts: it accepts a call alone in 60 Control mode); admins
+POST /api/cad/settings/feed_types        {action: set {feed, code: MAIN | MAIN,SUB, type, subtype?} | reset {key:
+                                          "<feed>|<code>"}}: a feed's own type code mapped to ours, over the automatic
+                                          mapping (sizeup/cad/feedtypes.py; Settings > Lists > Feed types); admins
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
@@ -558,8 +563,9 @@ def _on_incident(m, b, o, c):
     iid, act = int(m.group(1)), m.group(2)
     n = _number(c, iid)
     ev = n or ("a 60 Control page" if act in ("dismiss", "accept", "reopen", "merge") else f"event {iid}")
-    if act is None:
-        return f"Edited {ev}: {', '.join(k for k in b if k != 'operator') or 'nothing'}", n
+    if act is None:                      # a quiet edit / one after close: said so, not read as a live change
+        how = "Quiet edit (after close)" if o.get("status") == "closed" else "Quiet edit" if b.get("quiet") is True else "Edited"
+        return f"{how} {ev}: {', '.join(k for k in b if k not in ('operator', 'quiet')) or 'nothing'}", n
     if act in ("recommend", "preview") or (act == "upgrade" and b.get("preview")):
         return None
     if act == "accept":
