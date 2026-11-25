@@ -2085,7 +2085,7 @@ class HubApp(App):
             return None
         stats = self.sttpool.stats()
         for w in stats["workers"]:
-            w.update(self._update_view(w["id"], w.get("update") or {}))
+            w |= self._update_view(w["id"], w.get("update") or {})
         return {"active": active, "settings": self.hub.workers.pool_settings(), **stats,
                 "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},

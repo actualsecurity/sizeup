@@ -159,7 +159,8 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 ### 5. The worker
 
 For the first install, `worker.py` is pinned to a commit. Check its hash after the download. From then on it
-[updates itself](#updating).
+[updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
+more to get it.
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/0d243f8770971808569cdb2e09347bbf94598f94/tools/stt_worker/worker.py -OutFile "$d\worker.py"
@@ -289,23 +290,32 @@ file in the hub's own build, so a change merged into `worker.py` reaches the PC 
 
 1. **The hub names a version:** a commit and the file's SHA-256, in every hello and heartbeat answer. In
    **Settings > Station > STT workers**, each worker has **Auto** (the hub's build, the default), **Hold** (no
-   updates) or **Pin** (a commit on main and its `worker.py` SHA-256).
-2. **Only main, only that hash:** GitHub's API must say the commit is on `main` of `actualsecurity/sizeup`. Then the
-   worker downloads `tools/stt_worker/worker.py` at that commit from `raw.githubusercontent.com` (2 MB at most). It
-   refuses the file unless its SHA-256 is exactly the hub's. The repo, branch, path and hosts are written in
-   `worker.py`, so the hub can't send the worker anywhere else, and the hub's `url` is never used.
+   updates) or **Pin** (a merge commit on main and its `worker.py` SHA-256).
+2. **Only main, only that hash:** GitHub's API must say the commit is on `main` of `actualsecurity/sizeup` and is
+   the merge commit of a pull request merged into `main`, as the hub's builds are. A commit from inside a merged
+   branch, or from a fork, is refused. Then the worker downloads `tools/stt_worker/worker.py` at that commit from
+   `raw.githubusercontent.com` (2 MB at most). It refuses the file unless its SHA-256 is exactly the hub's. The repo,
+   branch, path and hosts are written in `worker.py`, so the hub can't send the worker anywhere else, and the hub's
+   `url` is never used.
 3. **Self-check:** the file is saved as `worker.py.new`, and `worker.py.new selftest` must pass. The self-check
    imports the file, reads `worker.toml` and builds a worker, with no network.
 4. **Only when idle:** the swap waits until the worker has no clip or LLM job, isn't gaming and hasn't gamed for 2
    minutes. Then the worker takes no new jobs, copies `worker.py` to `worker.py.prev`, renames `worker.py.new` to
    `worker.py` and exits with code 75. Task Scheduler's 5-minute trigger (step 8) starts the new file, so the worker
    can be gone for up to 5 minutes. The hub sends its clips elsewhere meanwhile.
-5. **Rollback:** the new file must reach the hub within 10 minutes of a start, and within 3 starts. Otherwise
-   `worker.py.prev` is copied back, the new hash is marked bad and never tried again, and Health shows
-   `rolled back`.
+5. **Rollback:** the new file must reach the hub within 10 minutes of running (time asleep doesn't count), and within 3
+   starts. Otherwise `worker.py.prev` is copied back, the new hash is marked bad, and Health shows `rolled back`. A
+   network outage looks the same as a broken file, so a hash marked bad this way is tried again after 6 hours. A hash
+   you roll back by hand is never tried again until `update retry`.
 
 The worker asks GitHub at most every 10 minutes, and less often after errors or when GitHub's rate limit says so
-(GitHub allows 60 requests an hour without a token). `worker.py update` prints the state.
+(GitHub allows 60 requests an hour without a token). A file with the wrong hash or over 2 MB is never tried again; any
+other refusal (not on main yet, a self-check that timed out) is tried again after an hour. `worker.py update` prints
+the state.
+
+The rollback runs in the new file, so it protects against a new version that fails at run time, not against one
+whose own start-up or rollback code is broken. The self-check runs that start-up (logging, the lock, the update
+record) in a scratch folder before the swap.
 
 ```powershell
 py -3 "$d\worker.py" update               # what runs, what is staged, the last update or rollback, hashes marked bad
@@ -503,10 +513,10 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `infer ... not valid under its schema` often, with Qwen3 | Check `--reasoning off` is in `llm_server` (thinking eats the answer). |
 | `infer ... not valid under its schema` | The model's answer didn't match the job's schema; the hub drops it (None). Many: tell the admin. |
 | Health: LLM `none` while online | `status` on the PC: `llm:` says why (loading, gaming stopped it, hash mismatch). |
-| `update: refused ...: not on main` | The hub names a commit that isn't on main (a pin of a branch). Pin a commit on main. |
+| `update: refused ...: not on main` / `not a pull request's merge into main` | The hub names a commit that isn't main's own (a pin of a branch commit). Pin a merge commit on main. |
 | `update: refused ...: hash mismatch` | The pinned SHA-256 isn't that commit's `worker.py`. Check the pin. |
-| `update: refused ...: its self-check failed: exit 2: config: ...` | The new version refuses this `worker.toml`. Fix the key it names; the worker tries again after its next start. |
-| `update: refused ...: rolled back before` | That version never reached the hub (`update` says why). After fixing the cause: `update retry`. |
+| `update: refused ...: its self-check failed: exit 2` | The new version refuses this `worker.toml`: `worker.log` names the key. Fix it; the worker tries again within an hour. |
+| `update: refused ...: rolled back before` | That version never reached the hub (`update` says why). It is tried again after 6 hours, or at once after `update retry`. |
 | `update: GitHub: ...; again in N min` | GitHub is unreachable or limited this address. The worker waits; nothing else changes. |
 | `update: staged ..., waiting: gaming` | Expected. The swap waits until gaming has been over for 2 minutes. |
 

@@ -32,12 +32,15 @@ const SttWorkersCard = (() => {
 
   async function act(body, done) {
     said = "";
+    let ok = false;
     try {
       const d = await post(body);
       if (d.token) fresh = { id: d.id, token: d.token, rotated: body.action === "rotate", grace: d.grace_s };
       if (done) said = done;
+      ok = true;
     } catch (e) { said = e.message; }
     poll(true);
+    return ok;
   }
 
   function build() {
@@ -69,7 +72,7 @@ const SttWorkersCard = (() => {
     pinCommit = el("input");
     pinCommit.maxLength = 40;
     pinCommit.spellcheck = false;
-    pinCommit.title = "The full commit on main";
+    pinCommit.title = "The full merge commit on main (as the hub's builds are)";
     l3.append("Commit", pinCommit);
     const l4 = el("label", "field");
     pinSha = el("input");
@@ -77,10 +80,10 @@ const SttWorkersCard = (() => {
     pinSha.spellcheck = false;
     pinSha.title = "SHA-256 of tools/stt_worker/worker.py at that commit";
     l4.append("SHA-256", pinSha);
-    const pin = btn("Pin", "primary", () => {
+    const pin = btn("Pin", "primary", async () => {
       const id = pinning;
-      act({ action: "update", id, mode: "pin", commit: pinCommit.value.trim(), sha256: pinSha.value.trim() }, `${id}: pinned`);
-      pinning = ""; pinCommit.value = ""; pinSha.value = "";
+      if (await act({ action: "update", id, mode: "pin", commit: pinCommit.value.trim(), sha256: pinSha.value.trim() },
+        `${id}: pinned`)) { pinning = ""; pinCommit.value = ""; pinSha.value = ""; render(); }
     });
     pinForm.append(pinHead, l3, l4, pin, btn("Cancel", "", () => { pinning = ""; render(); }));
   }

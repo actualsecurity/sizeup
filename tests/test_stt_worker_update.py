@@ -1,8 +1,10 @@
 """The GPU STT worker's self-update (tools/stt_worker/worker.py Updater) and the hub's side of it
 (sizeup/cloud/sttworkers.py worker_build, WorkerApi.wanted, the per-worker setting). GitHub is a fake that answers
 with the shapes of its REST API's compare endpoint (docs.github.com, "Compare two commits": status ahead / behind /
-identical / diverged, merge_base_commit, ahead_by, behind_by, commits, files) and of raw.githubusercontent.com (the
-file's bytes; 404 "404: Not Found"). No network: every fetch goes to the fake, and https_get itself is checked against
+identical / diverged, merge_base_commit, ahead_by, behind_by, commits, files), of "List pull requests associated with a
+commit" (as it answered for this repo: a merge commit on main gives its pull request, merge_commit_sha that commit; a
+commit inside a merged branch gives the same kind of pull request with another merge_commit_sha) and of
+raw.githubusercontent.com (the file's bytes; 404 "404: Not Found"). No network: every fetch goes to the fake, and https_get itself is checked against
 a fake connection. Commits and hashes are made up; the worker.py bytes are this repo's."""
 
 from __future__ import annotations
@@ -52,12 +54,23 @@ def compare_answer(status: str, base: str, head: str) -> bytes:
         "behind_by": behind, "total_commits": ahead, "commits": [commit(head)] if ahead else [], "files": []}).encode()
 
 
+def pull(merge_sha: str, number: int = 8123, base: str = "main", merged: bool = True) -> dict:
+    """A pull request as GitHub lists it for a commit, trimmed (made-up number, branch and title)."""
+    return {"url": f"https://api.github.com/repos/actualsecurity/sizeup/pulls/{number}", "number": number,
+            "state": "closed", "title": "Made-up change", "user": {"login": "someone"}, "body": "Made up.",
+            "created_at": "2026-11-20T14:00:00Z", "closed_at": "2026-11-20T15:00:00Z",
+            "merged_at": "2026-11-20T15:00:00Z" if merged else None, "merge_commit_sha": merge_sha,
+            "head": {"ref": "feat/made-up", "sha": "1" * 40}, "base": {"ref": base, "sha": "2" * 40},
+            "author_association": "OWNER", "draft": False}
+
+
 class FakeGitHub:
     """api.github.com's compare and raw.githubusercontent.com's files, for actualsecurity/sizeup only. compare:
     {commit: (status, merge base)}; files: {commit: bytes}. api_status / raw_status with headers: an error answer."""
 
     def __init__(self):
         self.compare = {COMMIT: ("behind", COMMIT)}
+        self.pulls = {COMMIT: [pull(COMMIT)]}
         self.files = {COMMIT: NEW}
         self.calls: list[tuple[str, str]] = []
         self.api_status, self.raw_status, self.headers = 200, 200, {}
@@ -65,10 +78,14 @@ class FakeGitHub:
     def __call__(self, host: str, path: str, max_bytes: int):
         self.calls.append((host, path))
         if host == W.GITHUB_API:
-            m = re.fullmatch(r"/repos/actualsecurity/sizeup/compare/main\.\.\.([0-9a-f]{40})\?per_page=1", path)
-            assert m, path
             if self.api_status != 200:
                 return self.api_status, self.headers, b'{"message":"API rate limit exceeded"}'
+            m = re.fullmatch(r"/repos/actualsecurity/sizeup/commits/([0-9a-f]{40})/pulls\?per_page=5", path)
+            if m:
+                return 200, {"content-type": "application/json; charset=utf-8"}, json.dumps(
+                    self.pulls.get(m.group(1), [])).encode()
+            m = re.fullmatch(r"/repos/actualsecurity/sizeup/compare/main\.\.\.([0-9a-f]{40})\?per_page=1", path)
+            assert m, path
             if m.group(1) not in self.compare:
                 return 404, {}, b'{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
             st, base = self.compare[m.group(1)]
@@ -209,8 +226,8 @@ def test_only_a_different_hash_with_auto_update_on_starts_an_update(tmp_path):
     gh = FakeGitHub()
     up, cur = updater(tmp_path, gh)
     assert up.step(IDLE) is False and up.status == "waiting for the hub" and not gh.calls
-    up.offer({"ok": True})                                           # an older hub: no word
-    assert up.offered is None
+    up.offer({"ok": True})                                           # an older hub: no word, no update
+    assert up.offered == ("none", "", "") and up.step(IDLE) is False and not gh.calls
     up.offer(offer(sha=OLD_SHA))                                     # the hash it runs: nothing to do
     assert up.step(IDLE) is False and up.status == "current" and not gh.calls
     up.offer(offer(mode="hold", commit=""))
@@ -230,6 +247,7 @@ def test_only_a_different_hash_with_auto_update_on_starts_an_update(tmp_path):
     up.offer(offer())
     assert up.step(IDLE) is True and up.status == f"updating to {NEW_SHA[:12]}"
     assert gh.calls == [(W.GITHUB_API, f"/repos/actualsecurity/sizeup/compare/main...{COMMIT}?per_page=1"),
+                        (W.GITHUB_API, f"/repos/actualsecurity/sizeup/commits/{COMMIT}/pulls?per_page=5"),
                         (W.GITHUB_RAW, f"/actualsecurity/sizeup/{COMMIT}/tools/stt_worker/worker.py")]
     assert up.new_path.read_bytes() == NEW and cur.read_bytes() == OLD
     if os.name != "nt":
@@ -262,9 +280,11 @@ def test_a_commit_not_on_main_is_refused_and_never_downloaded(tmp_path, compare,
         assert up.step(IDLE) is False
     assert why in up.status and up.status.startswith(f"refused {NEW_SHA[:12]}")
     assert [h for h, _ in gh.calls] == [W.GITHUB_API] and not up.new_path.exists() and cur.read_bytes() == OLD
-    clock.t += 10 * W.UPDATE_CHECK_S                                 # refused: not asked again by this process
+    clock.t += W.UPDATE_RETRY_S - 1                                 # refused: not asked again for an hour
     assert up.step(IDLE) is False and len(gh.calls) == 1
     assert len([r for r in caplog.records if "refused" in r.getMessage()]) == 1     # said once
+    clock.t += 1                                                     # (it may be merged by then)
+    assert up.step(IDLE) is False and len(gh.calls) == 2
 
 
 def test_the_hubs_url_and_hosts_are_never_used(tmp_path):
@@ -463,8 +483,9 @@ def test_a_new_file_that_runs_but_never_reaches_the_hub_is_rolled_back(tmp_path)
     clock = Clock()
     new, cur = swapped(tmp_path, clock)
     assert new.boot() is False and not new.overdue()
-    clock.t += W.UPDATE_CONFIRM_S - 1
-    assert not new.overdue()
+    for _ in range(int(W.UPDATE_CONFIRM_S) - 1):                     # the update thread's ticks, a second each
+        clock.t += 1
+        assert not new.overdue()
     clock.t += 1
     assert new.overdue()
     w = make_worker(tmp_path, new)
@@ -505,7 +526,7 @@ def test_github_at_most_every_10_min_and_longer_after_errors(tmp_path):
     assert up.step(IDLE) is False and len(gh.calls) == 2
     clock.t += 1
     gh.api_status = 200
-    assert up.step(IDLE) is True and len(gh.calls) == 4
+    assert up.step(IDLE) is True and len(gh.calls) == 5
 
 
 def test_githubs_rate_limit_is_respected(tmp_path):
@@ -545,3 +566,145 @@ def test_update_cli_retry_and_rollback_by_hand(tmp_path):
                          capture_output=True, text=True, env=env, timeout=60)
     assert out.returncode == 0 and out.stdout.startswith("1 hash(es) marked bad cleared")
     assert "bad" not in json.loads(new.state_path.read_text())
+
+
+# --- review fixes -----------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("pulls, why", [
+    ([pull("8" * 40)], "a commit inside a merged branch"),           # reachable from main, never reviewed as it stood
+    ([], "a commit pushed to main without a pull request"),
+    ([pull(COMMIT, base="release")], "merged into another branch"),
+    ([pull(COMMIT, merged=False)], "not merged"),
+])
+def test_only_a_pull_requests_merge_commit_on_main_is_taken(tmp_path, pulls, why):
+    gh = FakeGitHub()
+    gh.pulls[COMMIT] = pulls
+    up, cur = updater(tmp_path, gh)
+    up.offer(offer())
+    assert up.step(IDLE) is False, why
+    assert up.status == f"refused {NEW_SHA[:12]}: not a pull request's merge into main", why
+    assert [h for h, _ in gh.calls] == [W.GITHUB_API, W.GITHUB_API] and cur.read_bytes() == OLD
+
+
+def test_a_bad_file_is_never_tried_again_a_passing_refusal_in_an_hour(tmp_path):
+    gh = FakeGitHub()
+    gh.files[COMMIT] = NEW + b"\n# something else\n"
+    clock = Clock()
+    up, _ = updater(tmp_path, gh, clock)
+    up.offer(offer())
+    assert up.step(IDLE) is False and "hash mismatch" in up.status
+    clock.t += 100 * W.UPDATE_RETRY_S
+    n = len(gh.calls)
+    assert up.step(IDLE) is False and len(gh.calls) == n             # its hash: never, in this process
+    tries = iter(["no answer in 60 s", ""])                          # a self-check that timed out on a busy PC
+    up2, cur = updater(tmp_path / "2", FakeGitHub(), clock, selftest=lambda new, sha: next(tries))
+    up2.offer(offer())
+    assert up2.step(IDLE) is False and "no answer in 60 s" in up2.status
+    clock.t += W.UPDATE_RETRY_S
+    assert up2.step(IDLE) is True
+
+
+def test_the_hub_hears_only_the_self_checks_exit_code(tmp_path, caplog):
+    up, _ = updater(tmp_path, selftest=lambda new, sha: r"exit 1: FileNotFoundError: C:\Users\someone\x.json")
+    up.offer(offer())
+    with caplog.at_level(logging.ERROR, logger="sizeup.stt_worker"):
+        assert up.step(IDLE) is False
+    assert up.status == f"refused {NEW_SHA[:12]}: its self-check failed: exit 1"
+    assert "someone" not in json.dumps(up.report()) and "someone" in caplog.text     # (the local log has it)
+
+
+def test_a_rollback_by_itself_is_tried_again_after_6_hours_one_by_hand_never(tmp_path):
+    new, cur = swapped(tmp_path)
+    assert new.rollback("no hub answer in 10 min") is True
+    gh = FakeGitHub()
+    old = W.Updater(new.cfg, path=cur, fetch=gh, clock=Clock(), selftest=lambda n, s: "")
+    old.offer(offer())
+    assert old.step(IDLE) is False and "rolled back before" in old.status        # (an outage looks the same)
+    old.wall = lambda: __import__("time").time() + W.UPDATE_BAD_S + 1
+    assert old.bad() == {} and old.step(IDLE) is True                            # tried again
+    old.swap()
+    by_hand = W.Updater(new.cfg, path=cur)
+    assert by_hand.rollback("rolled back by hand", manual=True) is True
+    by_hand.wall = lambda: __import__("time").time() + 100 * W.UPDATE_BAD_S
+    assert NEW_SHA in by_hand.bad()
+
+
+def test_time_asleep_doesnt_count_towards_the_rollback(tmp_path):
+    clock = Clock()
+    new, _ = swapped(tmp_path, clock)
+    assert new.boot() is False and new.overdue() is False
+    clock.t += 3 * W.UPDATE_CONFIRM_S                                # the PC slept (Windows' monotonic clock goes on)
+    assert new.overdue() is False and new.waited <= 5.0
+    for _ in range(int(W.UPDATE_CONFIRM_S)):                         # awake, the update thread ticking each second
+        clock.t += 1
+        if new.overdue():
+            break
+    assert new.overdue() and new.waited >= W.UPDATE_CONFIRM_S
+
+
+def test_a_confirmed_file_is_never_rolled_back_by_itself(tmp_path):
+    clock = Clock()
+    new, cur = swapped(tmp_path, clock)
+    new.boot()
+    new.confirm()
+    clock.t += 10 * W.UPDATE_CONFIRM_S
+    assert new.overdue() is False and new.rollback("late") is False and cur.read_bytes() == NEW
+
+
+def test_confirm_writing_nothing_still_stops_the_rollback(tmp_path, monkeypatch):
+    clock = Clock()
+    new, cur = swapped(tmp_path, clock)
+    new.boot()
+    monkeypatch.setattr(W, "write_json", lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "Access is denied")))
+    new.confirm()                                                    # (update.json held by an antivirus)
+    for _ in range(int(W.UPDATE_CONFIRM_S) + 10):
+        clock.t += 1
+        assert new.overdue() is False
+    assert cur.read_bytes() == NEW
+
+
+def test_a_prev_that_isnt_the_file_swapped_out_is_never_restored(tmp_path):
+    new, cur = swapped(tmp_path)
+    new.prev_path.write_bytes(b"print('something else')\n")
+    assert new.rollback("made up") is False and cur.read_bytes() == NEW
+
+
+def test_a_start_that_cant_be_counted_rolls_back(tmp_path, monkeypatch):
+    new, cur = swapped(tmp_path)
+    real = W.write_json
+    calls = []
+
+    def flaky(path, doc):                                            # the count can't be written; the rest can
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        real(path, doc)
+    monkeypatch.setattr(W, "write_json", flaky)
+    assert new.boot() is True and cur.read_bytes() == OLD
+
+
+def test_never_in_a_git_checkout(tmp_path):
+    gh = FakeGitHub()
+    up, cur = updater(tmp_path, gh)
+    (cur.parent / ".git").mkdir()
+    up.offer(offer())
+    assert up.step(IDLE) is False and up.status == "off (a git checkout)" and not gh.calls
+    link = tmp_path / "linked.py"
+    link.symlink_to(cur)
+    (cur.parent / ".git").rmdir()
+    assert W.Updater(up.cfg, path=link, fetch=gh).linked is True
+
+
+def test_no_claim_once_the_drain_began(tmp_path):
+    """The race: the jobs thread read the state online, then the drain began: no claim goes out."""
+    up, _ = updater(tmp_path)
+    w = make_worker(tmp_path, up)
+    w.whisper_ok = True
+    sent = []
+    w.hub.request = lambda *a, **k: sent.append(a) or {}
+    w.llm_hub.request = w.hub.request
+    w.state = lambda: ("online", "")
+    w.draining = True
+    w.step()
+    w.llm_step()
+    assert sent == []

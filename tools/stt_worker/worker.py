@@ -1341,6 +1341,10 @@ UPDATE_CONFIRM_S = 600.0                   # a new version must reach the hub th
 UPDATE_MAX_STARTS = 3                      # ... and within this many starts, else worker.py.prev comes back
 UPDATE_QUIET_S = 120.0                     # no swap this soon after gaming (or the worker's start)
 UPDATE_DRAIN_S = 90.0                      # the jobs in hand handed back or done, at most this long
+UPDATE_PULLS_MAX_BYTES = 768_000           # GitHub's pull requests of a commit (~20 KB each, 5 at most asked)
+UPDATE_RETRY_S = 3600.0                    # a refusal that may pass later (GitHub lag, a busy PC): tried again after this
+UPDATE_BAD_S = 6 * 3600.0                  # a hash rolled back by itself is tried again after this (an outage looks the
+                                           # same as a broken file); one rolled back by hand: never, until `update retry`
 SELFTEST_PROTOCOL = 1
 SELFTEST_TIMEOUT_S = 60.0
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -1351,9 +1355,11 @@ class UpdateError(Exception):
     """final: refused for this commit and hash (said once; this process doesn't try that pair again). Otherwise GitHub
     was out of reach or limited us: tried again later (retry_s: when GitHub said)."""
 
-    def __init__(self, msg: str, final: bool = False, retry_s: float | None = None):
+    def __init__(self, msg: str, final: bool = False, retry_s: float | None = None, permanent: bool = False,
+                 detail: str = ""):
         super().__init__(msg)
-        self.final, self.retry_s = final, retry_s
+        self.final, self.retry_s, self.permanent = final or permanent, retry_s, permanent
+        self.detail = detail                       # for the local log only (never the hub's)
 
 
 def https_get(host: str, path: str, max_bytes: int, timeout: float = 20.0) -> tuple[int, dict, bytes]:
@@ -1389,9 +1395,11 @@ def github_wait(status: int, headers: dict, now: float) -> float | None:
 
 
 def check_on_main(commit: str, fetch: Callable = https_get, now: float | None = None) -> None:
-    """The commit is on UPDATE_BRANCH of UPDATE_REPO: GitHub's comparison main...<commit> says it is behind main or
-    the same, with the commit itself as the merge base. A commit of a fork (GitHub serves those under the parent's
-    name too), of a branch not merged, or unknown: UpdateError(final)."""
+    """The commit is on UPDATE_BRANCH of UPDATE_REPO, as main's own commit: GitHub's comparison main...<commit> says it
+    is behind main or the same, with the commit itself as the merge base; and it is the merge commit of a pull request
+    merged into main (what the hub's builds are). So not a commit of a fork (GitHub serves those under the parent's
+    name too), of a branch not merged, nor one inside a merged branch (reachable from main, but never reviewed as it
+    stood). UpdateError(final) otherwise."""
     if not COMMIT.fullmatch(commit):
         raise UpdateError("not a commit", final=True)
     status, headers, body = fetch(GITHUB_API, f"/repos/{UPDATE_REPO}/compare/{UPDATE_BRANCH}...{commit}?per_page=1",
@@ -1412,6 +1420,20 @@ def check_on_main(commit: str, fetch: Callable = https_get, now: float | None = 
     base = doc.get("merge_base_commit") if isinstance(doc.get("merge_base_commit"), dict) else {}
     if doc.get("status") not in ("behind", "identical") or base.get("sha") != commit:
         raise UpdateError(f"not on {UPDATE_BRANCH} ({str(doc.get('status') or '?')[:20]})", final=True)
+    status, headers, body = fetch(GITHUB_API, f"/repos/{UPDATE_REPO}/commits/{commit}/pulls?per_page=5",
+                                  UPDATE_PULLS_MAX_BYTES)
+    if status != 200:
+        raise UpdateError(f"GitHub's API said {status}", retry_s=github_wait(status, headers,
+                                                                              time.time() if now is None else now))
+    try:
+        pulls = json.loads(body) if len(body) <= UPDATE_PULLS_MAX_BYTES else None
+    except ValueError:
+        pulls = None
+    if not isinstance(pulls, list):
+        raise UpdateError("GitHub's API sent something that isn't a list of pull requests")
+    if not any(isinstance(p, dict) and p.get("merge_commit_sha") == commit and p.get("merged_at")
+               and isinstance(p.get("base"), dict) and p["base"].get("ref") == UPDATE_BRANCH for p in pulls):
+        raise UpdateError(f"not a pull request's merge into {UPDATE_BRANCH}", final=True)
 
 
 def download_worker(commit: str, sha: str, fetch: Callable = https_get, now: float | None = None) -> bytes:
@@ -1423,10 +1445,10 @@ def download_worker(commit: str, sha: str, fetch: Callable = https_get, now: flo
     if status != 200:
         raise UpdateError(f"GitHub said {status}", retry_s=github_wait(status, headers, time.time() if now is None else now))
     if len(body) > UPDATE_MAX_BYTES:
-        raise UpdateError(f"larger than {UPDATE_MAX_BYTES // 1_000_000} MB", final=True)
+        raise UpdateError(f"larger than {UPDATE_MAX_BYTES // 1_000_000} MB", permanent=True)
     got = hashlib.sha256(body).hexdigest()
     if got != sha:
-        raise UpdateError(f"hash mismatch (the file is {got[:12]})", final=True)
+        raise UpdateError(f"hash mismatch (the file is {got[:12]})", permanent=True)
     return body
 
 
@@ -1483,6 +1505,7 @@ class Updater:
                  wall: Callable[[], float] = time.time, selftest: Callable[[Path, str], str] | None = None,
                  python: str = ""):
         self.cfg = cfg
+        self.linked = Path(path or __file__).is_symlink()  # run through a link (into a checkout?): never rewritten
         self.path = Path(path or __file__).resolve()
         self.config_path = str(config_path) if config_path else ""
         self.fetch, self.clock, self.wall = fetch, clock, wall
@@ -1498,10 +1521,13 @@ class Updater:
         self._sig: tuple | None = None
         self._doc: dict = {}
         self.offered: tuple[str, str, str] | None = None     # (mode, commit, sha256): the hub's latest word
-        self._refused: dict[tuple[str, str], str] = {}       # (commit, sha256) -> why: not tried again by this process
+        self._refused: dict[tuple[str, str], tuple[str, float]] = {}   # (commit, sha256) -> (why, again at; inf: never)
         self.staged: tuple[str, str] | None = None
         self.next_at = 0.0
         self.fails = 0
+        self.confirmed = False             # this file reached the hub since its start (no rollback from here on)
+        self.waited = 0.0                  # seconds this start has waited for the hub (a sleep's jump not counted)
+        self._ticked: float | None = None
         last = self.doc().get("last") if isinstance(self.doc().get("last"), dict) else {}
         self.status = (f"rolled back from {str(last.get('from'))[:12]}" if last.get("event") == "rolled back"
                        and last.get("to") == self.own else "starting")
@@ -1541,8 +1567,12 @@ class Updater:
             return out
 
     def bad(self) -> dict:
+        """The hashes not to take: rolled back by hand (until `update retry`), or by itself within UPDATE_BAD_S."""
         bad = self.doc().get("bad")
-        return bad if isinstance(bad, dict) else {}
+        now = self.wall()
+        return {k: v for k, v in bad.items() if isinstance(v, dict)
+                and (v.get("manual") or not isinstance(v.get("at"), (int, float)) or now - v["at"] < UPDATE_BAD_S)} \
+            if isinstance(bad, dict) else {}
 
     def pending(self) -> dict | None:
         """The swap to this file, not confirmed yet (it hasn't reached the hub since)."""
@@ -1554,19 +1584,28 @@ class Updater:
         c = commits.get(sha, "") if isinstance(commits, dict) else ""
         return c if isinstance(c, str) and COMMIT.fullmatch(c) else ""
 
-    @staticmethod
-    def _mark_bad(doc: dict, sha: str, commit: str, why: str) -> None:
+    def _mark_bad(self, doc: dict, sha: str, commit: str, why: str, manual: bool = False) -> None:
         bad = doc.get("bad") if isinstance(doc.get("bad"), dict) else {}
-        bad[sha] = {"commit": commit, "why": why[:120], "at": time.time()}
+        bad.pop(sha, None)
+        bad[sha] = {"commit": commit, "why": why[:120], "at": self.wall(), **({"manual": True} if manual else {})}
         doc["bad"] = dict(list(bad.items())[-20:])
+
+    def _refuse(self, commit: str, sha: str, why: str, final: bool) -> None:
+        """Not taken again by this process: never (final: the file itself is wrong), or not for UPDATE_RETRY_S."""
+        self._refused.pop((commit, sha), None)
+        self._refused[(commit, sha)] = (why[:100], math.inf if final else self.clock() + UPDATE_RETRY_S)
+        while len(self._refused) > 20:
+            self._refused.pop(next(iter(self._refused)))
 
     # -- the hub's word and ours
 
     def offer(self, ans) -> None:
-        """A hello or state answer: its worker_update, when it has one (an older hub: none, nothing changes). Its url
-        is never used."""
-        wu = ans.get("worker_update") if isinstance(ans, dict) else None
-        if not isinstance(wu, dict):
+        """A hello or state answer: its worker_update (none: nothing to update to). Its url is never used."""
+        if not isinstance(ans, dict):
+            return
+        wu = ans.get("worker_update")
+        if not isinstance(wu, dict):               # a hub that names none (one from before the self-update): no update
+            self.offered = ("none", "", "")
             return
         mode = wu.get("mode") if wu.get("mode") in ("auto", "pin", "hold") else "hold"
         commit, sha = wu.get("commit"), wu.get("sha256")
@@ -1590,6 +1629,9 @@ class Updater:
         if not self.cfg.auto_update:
             self.status = "off (auto_update)"
             return False
+        if (self.path.parent / ".git").exists() or self.linked:
+            self.status = "off (a git checkout)"           # never rewrite a tracked file
+            return False
         if self.offered is None:
             self.status = "waiting for the hub"
             return False
@@ -1604,8 +1646,8 @@ class Updater:
         if sha in self.bad():
             self.status = f"refused {sha[:12]}: rolled back before"
             return False
-        why = self._refused.get((commit, sha))
-        if why:
+        why, until = self._refused.get((commit, sha), ("", 0.0))
+        if why and self.clock() < until:
             self.status = f"refused {sha[:12]}: {why}"
             return False
         if self.pending():
@@ -1621,9 +1663,11 @@ class Updater:
                 self.prepare(commit, sha)
             except UpdateError as e:
                 if e.final:
-                    self._refused[(commit, sha)] = str(e)[:100]
+                    # the file itself is wrong (its hash, its size): never; else (not on main yet, GitHub lag, a
+                    # self-check that timed out on a busy PC) tried again in an hour
+                    self._refuse(commit, sha, str(e), final=e.permanent)
                     self.status = f"refused {sha[:12]}: {str(e)[:64]}"
-                    log.error("self-update: %s (commit %s): refused: %s", sha[:12], commit[:12], e)
+                    log.error("self-update: %s (commit %s): refused: %s", sha[:12], commit[:12], e.detail or e)
                 else:
                     self.fails += 1
                     wait = e.retry_s if e.retry_s is not None else UPDATE_CHECK_S * 2 ** min(self.fails - 1, 6)
@@ -1658,7 +1702,10 @@ class Updater:
                 self.new_path.unlink()
             except OSError:
                 pass
-            raise UpdateError(f"its self-check failed: {why}", final=True)
+            # the hub hears "exit N" only; the last line of its stderr (a path, a message) stays in the local log
+            short, _, rest = why.partition(": ")
+            raise UpdateError(f"its self-check failed: {short}", final=True,
+                              detail=f"its self-check failed: {why}" if rest else "")
 
     def run_selftest(self, new: Path, sha: str) -> str:
         """`python worker.py.new selftest --result <file> [-c <this config>]`: "" when it exits 0 and reports ok for
@@ -1714,7 +1761,7 @@ class Updater:
         except (OSError, UpdateError) as e:
             why = str(e) if isinstance(e, UpdateError) else f"can't swap the files: {e.strerror or e}"
             self.change(lambda doc: doc.pop("pending", None))
-            self._refused[(commit, sha)] = why[:100]
+            self._refuse(commit, sha, why, final=False)
             self.staged = None
             self.status = f"refused {sha[:12]}: {why[:60]}"
             log.error("self-update: %s: %s: staying on %s", sha[:12], why, self.own[:12])
@@ -1738,7 +1785,10 @@ class Updater:
             p["starts"] = (p["starts"] if isinstance(p.get("starts"), int) else 0) + 1
             doc["pending"] = p
             return p["starts"]
-        starts = self.change(count)
+        try:
+            starts = self.change(count, strict=True)
+        except OSError as e:                               # no count, no rollback later: not run unconfirmed
+            return self.rollback(f"can't count its start ({e.strerror or e})")
         if starts > UPDATE_MAX_STARTS:
             return self.rollback(f"{starts - 1} starts without reaching the hub")
         log.info("self-update: running %s, not confirmed yet (start %d of %d)", self.own[:12], starts, UPDATE_MAX_STARTS)
@@ -1746,12 +1796,22 @@ class Updater:
         return False
 
     def overdue(self) -> bool:
-        """The new file hasn't reached the hub within UPDATE_CONFIRM_S of this start."""
-        return self.pending() is not None and self.clock() - self.started >= UPDATE_CONFIRM_S
+        """The new file hasn't reached the hub in UPDATE_CONFIRM_S of this start, counted in the update thread's ticks
+        (5 s at most each: a PC asleep meanwhile doesn't count, as Windows' monotonic clock would)."""
+        now = self.clock()
+        dt = 0.0 if self._ticked is None else min(max(now - self._ticked, 0.0), 5.0)
+        self._ticked = now
+        if self.confirmed or self.pending() is None:
+            return False
+        self.waited += dt
+        return self.waited >= UPDATE_CONFIRM_S
 
     def confirm(self) -> None:
         """The hub answered: a pending swap to this file is kept."""
+        if self.confirmed:
+            return
         p = self.pending()
+        self.confirmed = True
         if p is None:
             return
 
@@ -1768,17 +1828,36 @@ class Updater:
         self.status = f"updated from {str(p.get('from'))[:12]}"
         log.info("self-update: %s reached the hub: kept (worker.py.prev is %s)", self.own[:12], str(p.get("from"))[:12])
 
-    def rollback(self, why: str) -> bool:
-        """worker.py.prev copied back over worker.py; this file's hash marked bad. True when it was."""
-        def mark(doc):
-            q = doc.pop("pending", None)
-            self._mark_bad(doc, self.own, str((q or {}).get("commit") or ""), why)
-            return q if isinstance(q, dict) else {}
-        p = self.change(mark)
+    def rollback(self, why: str, manual: bool = False) -> bool:
+        """worker.py.prev copied back over worker.py; this file's hash marked bad. True when it was. Not after this
+        file reached the hub (manual: by hand, whatever happened); never a .prev that isn't the file swapped out."""
+        if self.confirmed and not manual:
+            return False
         try:
             data = self.prev_path.read_bytes()
             if not data:
                 raise OSError("empty")
+            p = self.doc().get("pending") if isinstance(self.doc().get("pending"), dict) else {}
+            if not manual and SHA256.fullmatch(str(p.get("from") or "")) \
+                    and hashlib.sha256(data).hexdigest() != p["from"]:
+                raise OSError(f"it isn't {str(p['from'])[:12]}, the file swapped out")
+        except OSError as e:
+            self.change(lambda doc: doc.__setitem__("last", {"event": "rollback failed", "why": why, "at": self.wall()}))
+            log.error("self-update: %s: can't roll back (worker.py.prev: %s): carrying on with %s", why,
+                      getattr(e, "strerror", None) or e, self.own[:12])
+            return False
+
+        def mark(doc):
+            q = doc.get("pending") if isinstance(doc.get("pending"), dict) else None
+            if q is None and not manual:
+                return None                                # confirmed meanwhile (another thread): nothing to undo
+            doc.pop("pending", None)
+            self._mark_bad(doc, self.own, str((q or {}).get("commit") or ""), why, manual=manual)
+            return q or {}
+        p = self.change(mark)
+        if p is None or (self.confirmed and not manual):
+            return False
+        try:
             write_file(self.path, data, like=self.path)
         except OSError as e:
             self.change(lambda doc: doc.__setitem__("last", {"event": "rollback failed", "why": why, "at": self.wall()}))
@@ -2335,7 +2414,7 @@ class Worker:
         self.hub.interrupted = False
         self._claiming = True
         try:
-            if self.stopped:
+            if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
                                                             "model": self.cfg.model},
@@ -2551,7 +2630,7 @@ class Worker:
         self.llm_hub.interrupted = False
         self._llm_claiming = True
         try:
-            if self.stopped:
+            if self.stopped or self.draining:
                 return
             ans = self.llm_hub.request("POST", f"{API}/infer/claim",
                                        {"wait": self.claim_wait, "state": self.state()[0], "models": self.models()},
@@ -2745,7 +2824,7 @@ def _update_cli(cfg: Config, what: str, config_path) -> int:
         if not up.prev_path.exists():
             print(f"no {up.prev_path.name}: nothing to roll back to")
             return 1
-        if not up.rollback("rolled back by hand"):
+        if not up.rollback("rolled back by hand", manual=True):
             return 1
         print(f"{up.path.name} is {up.prev_path.name} again ({up.own[:12]} marked bad). Restart the worker: "
               + ("schtasks /End /TN sizeup-stt-worker, then schtasks /Run /TN sizeup-stt-worker" if os.name == "nt"
@@ -2862,8 +2941,22 @@ def main(argv: list | None = None) -> int:
     elif args.cmd == "selftest":
         # what the self-update asks of a new file before it switches to it: it imports, takes this config and builds
         # a Worker (nothing started, no network); the result names this file's hash
+        import tempfile
         own = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-        Worker(cfg, updater=Updater(cfg))._state_body()
+        with tempfile.TemporaryDirectory(prefix="sizeup-stt-selftest-") as scratch:
+            # what `run` does before its own rollback check runs, in a scratch state_dir (the running worker's lock
+            # and logs untouched): the logging, the lock, the update record; then a Worker, nothing started
+            test = dataclasses.replace(cfg, state_dir=scratch, log_file=str(Path(scratch) / "worker.log"))
+            setup_logging(test)
+            lock = InstanceLock(test.state_dir)
+            if not lock.acquire():
+                raise RuntimeError("the lock in a scratch folder")
+            Updater(test).boot()
+            Worker(test, updater=Updater(test))._state_body()
+            lock.release()
+            for h in list(log.handlers):
+                log.removeHandler(h)
+                h.close()
         doc = {"ok": True, "protocol": SELFTEST_PROTOCOL, "sha256": own, "version": VERSION}
         if args.result:
             write_json(Path(args.result), doc)
