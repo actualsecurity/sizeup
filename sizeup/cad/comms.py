@@ -1137,12 +1137,13 @@ class Comms:
         if until is not None:
             where.append("e.at <= ?")
             args.append(until)
-        rows = self.store.q("SELECT e.id, e.at, e.text, e.operator, e.units, i.id AS iid, i.number, i.type, i.subtype, i.address "
+        rows = self.store.q("SELECT e.id, e.at, e.text, e.operator, e.units, e.label, i.id AS iid, i.number, i.type, i.subtype, i.address "
                             "FROM events e JOIN incidents i ON i.id = e.incident_id WHERE " + " AND ".join(where)
                             + " ORDER BY e.at DESC LIMIT ?", (*args, limit))
         return [{"kind": "note", "id": f"note-{r['id']}", "start": r["at"], "end": r["at"], "channel": NOTES,
                  "talkgroup": None, "talker": r["operator"], "radio_id": "", "rig": r["units"].replace(",", ", "),
                  "dispatcher": 0, "text": r["text"], "status": "done", "operator": r["operator"],
+                 "label": r["label"] or "",                          # after close: not a live note (store.AFTER_CLOSE)
                  "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
                              "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
 

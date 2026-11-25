@@ -1,5 +1,5 @@
 """The GPU worker's catalog models (tools/stt_worker/worker.py Models, #639 per-channel models): the catalog in
-pins.json checked whole, downloads only from allowed hosts at pinned revisions with exact sizes and hashes, the VRAM
+models.json checked whole, downloads only from allowed hosts at pinned revisions with exact sizes and hashes, the VRAM
 plan (the local LLM gives way), servers started only while idle and dropped (marked bad) when they don't answer, the
 silence gate, and a job decoded by the model the hub names. No GPU, no network: downloads go through fake openers,
 servers are fake HTTP servers on 127.0.0.1, model files are a few made-up bytes."""
@@ -25,7 +25,7 @@ import tools.stt_worker.worker as W
 from tests.test_stt_worker import (TOKEN, FakeHub, FakeWhisper, _serve, make_cfg, running, tone_wav,  # noqa: F401
                                    hub, no_secrets_in_logs, wait_for, whisper)
 
-PINS = Path(W.__file__).with_name("pins.json")
+PINS = Path(W.__file__).with_name("models.json")
 HF = "https://huggingface.co/some-org/some-model/resolve/" + "a" * 40
 
 

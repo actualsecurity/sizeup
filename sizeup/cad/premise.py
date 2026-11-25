@@ -123,8 +123,8 @@ class Premise:
         return may_see(n["category"], may, self.visible())
 
     def _at(self, bldg_key: str, lat, lon) -> list[dict]:
-        """The active notes at a building (cached until the next write): its key's; and, when the call or the note has
-        no building key (known only by its point, or a place), the notes whose point is within GROUP_M of the call's.
+        """The active notes at a building (cached until the next write): its key's (a range's and each of its numbers':
+        addrkey.building_rows); and, when the call or the note has no building key (known only by its point, or a place), the notes whose point is within GROUP_M of the call's.
         Two keyed buildings never share notes, however close."""
         if not bldg_key and lat is None:
             return []
@@ -134,7 +134,7 @@ class Premise:
             if hit is not None and hit[0] == self.gen:
                 return hit[1]
             gen = self.gen
-        rows = self.store.q("SELECT * FROM premise_notes WHERE bldg_key = ? AND active = 1", (bldg_key,)) if bldg_key else []
+        rows = addrkey.building_rows(self.store.q, "premise_notes", bldg_key)
         if lat is not None and lon is not None:
             a, b, c, d = addrkey.bbox(lat, lon)
             seen = {r["id"] for r in rows}
@@ -173,7 +173,7 @@ class Premise:
             a = acks.get(n["id"])
             s["ack"] = {"at": a["at"], "by": who(a["operator"])} if a and a["at"] >= n["updated_at"] else None
             # shown by its point, not its building: the card says whose it is ("nearby" and the note's own address)
-            s["nearby"] = not (inc.get("bldg_key") and n["bldg_key"] == inc.get("bldg_key"))
+            s["nearby"] = not (inc.get("bldg_key") and addrkey.same_building(n["bldg_key"], inc.get("bldg_key")))
             out.append(s)
         return out
 
@@ -198,8 +198,10 @@ class Premise:
         if where:
             k = self._key_text(where)
             like = "%" + where.lower().replace("%", "") + "%"
-            conds.append("(lower(label) LIKE ?" + (" OR bldg_key = ?" if k.bldg_key else "") + ")")
-            args += [like] + ([k.bldg_key] if k.bldg_key else [])
+            ids = ([r["id"] for r in addrkey.building_rows(self.store.q, "premise_notes", k.bldg_key, False)]
+                   if k.bldg_key else [])
+            conds.append("(lower(label) LIKE ?" + (f" OR id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
+            args += [like] + ids                          # (the building's: a range and each of its numbers)
         rows = self.store.q("SELECT * FROM premise_notes" + (f" WHERE {' AND '.join(conds)}" if conds else "")
                             + " ORDER BY updated_at DESC, id DESC LIMIT 500", args)
         now = self.cad.clock()
@@ -348,7 +350,8 @@ class Premise:
         if point is None and self.cad.geocoder is not None:      # the building's point: notes match within GROUP_M too
             p = addrkey.parse(text, L.geo_town_aliases)
             try:
-                ms = self.cad.geocoder(f"{p.first} {p.street}" + (f", {p.town}" if p.town else "")) or [] if p else []
+                num = (p.number if p.ends() else p.first) if p else ""      # a range: the gazetteer places either end
+                ms = self.cad.geocoder(f"{num} {p.street}" + (f", {p.town}" if p.town else "")) or [] if p else []
             except Exception:  # noqa: BLE001 - the note keeps its key, without a point
                 ms = []
             m = next((m for m in ms if m.get("kind") == "address" and float(m.get("confidence") or 0) >= addrkey.SNAP_CONFIDENCE), None)

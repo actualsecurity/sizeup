@@ -236,7 +236,7 @@ class Preplan:
             if hit is not None and hit[0] == self.gen:
                 return hit[1]
             gen = self.gen
-        rows = self.store.q("SELECT * FROM preplan_points WHERE bldg_key = ? AND active = 1", (bldg_key,)) if bldg_key else []
+        rows = addrkey.building_rows(self.store.q, "preplan_points", bldg_key)     # (a range and each of its numbers)
         if lat is not None and lon is not None:
             a, b, c, d = addrkey.bbox(lat, lon)
             cs = cells(c, a, d, b)
@@ -262,7 +262,7 @@ class Preplan:
         out = []
         for p in self.order([p for p in self._at(inc.get("bldg_key") or "", inc.get("lat"), inc.get("lon")) if self.can_see(p, may)]):
             s = self.shown(p, now)
-            s["nearby"] = not (inc.get("bldg_key") and p["bldg_key"] == inc.get("bldg_key"))
+            s["nearby"] = not (inc.get("bldg_key") and addrkey.same_building(p["bldg_key"], inc.get("bldg_key")))
             out.append(s)
         return out
 
@@ -320,7 +320,7 @@ class Preplan:
             k = self.cad.premise._key_text(one("where"))
             if not k.bldg_key:
                 raise CadError("Not an address the map knows")
-            rows = self.store.q("SELECT * FROM preplan_points WHERE bldg_key = ? AND active = 1", (k.bldg_key,))
+            rows = addrkey.building_rows(self.store.q, "preplan_points", k.bldg_key)     # (a range and its numbers)
             return {"points": [self.shown(r, now) for r in self.order(rows) if self.can_see(r, may)], "gen": self.gen,
                     "key": {"bldg_key": k.bldg_key, "label": k.label}, "point": self._point_of(one("where"))}
         if may != "admin":
@@ -391,7 +391,7 @@ class Preplan:
         ck = ctx.get("bldg_key") or ""
         same = elsewhere = False          # in the call's own footprint | in another one the call's pin is known to be in
         if fp and ctx and (ck or ctx.get("lat") is not None):
-            if k is not None and ck and k.bldg_key == ck:
+            if k is not None and ck and addrkey.same_building(k.bldg_key, ck):
                 same = True
             elif ctx.get("lat") is not None:
                 cf = footprint(gis, ctx["lat"], ctx["lon"])

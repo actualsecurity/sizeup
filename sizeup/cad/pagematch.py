@@ -95,15 +95,21 @@ def number_fit(heard: str, typed: str, halved: str = "") -> str:
     """A page's house number (heard) against a feed's (typed): "exact"; "doubled" (said twice, run together: halved is
     the page's number halved, sources.halved); "misread" (a digit in or out, fuzzy.misread: only a misheard street's);
     "near" (the same length, one digit another: neither for nor against); "other" (another number); "" when either
-    side has none."""
+    side has none. A building's range ("14-16", sizeup/geo/houserange.py) is each of its numbers: "16" for "14-16" is
+    exact; "18" (the house past it) is not; "17" or "15" (across the street) is not."""
     from sizeup.cad.fuzzy import misread
+    from sizeup.geo import houserange
     a, b = str(heard or "").lower(), str(typed or "").lower()
     if not a or not b:
         return ""
-    if a == b:
+    if a == b or houserange.same_number(a, b):
         return "exact"
-    if halved and halved.lower() == b:
+    if halved and houserange.same_number(halved.lower(), b):
         return "doubled"
+    ra, rb = houserange.parse_number(a), houserange.parse_number(b)
+    if ra is not None or rb is not None:             # a range: the best fit of its numbers
+        fits = {number_fit(x, y) for x in (sorted(ra.labels()) if ra else [a]) for y in (sorted(rb.labels()) if rb else [b])}
+        return next((f for f in ("misread", "near") if f in fits), "other")
     if misread(a, b):
         return "misread"
     da, db = re.sub(r"\D", "", a), re.sub(r"\D", "", b)
