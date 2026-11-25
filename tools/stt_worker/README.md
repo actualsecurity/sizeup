@@ -185,13 +185,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (147,764 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (201,621 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/2d43243e463390e2a544ced00db3745730965093/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '7D4DCBEA8F6C5CC95C9CEAC0898077FC92618A2C18ED45CE4550B5547F243340'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/d6456282285af2485473ca8a7ff8806498aabf12/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '3D34FC01CCE69B8E4F65BDA7469365F9B9C408460DF254D9B5D8F96E835E40D2'   # True
 notepad "$d\worker.toml"
 ```
 
