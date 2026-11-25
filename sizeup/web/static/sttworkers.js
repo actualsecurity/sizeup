@@ -78,7 +78,7 @@ const SttWorkersCard = (() => {
     pinSha = el("input");
     pinSha.maxLength = 64;
     pinSha.spellcheck = false;
-    pinSha.title = "SHA-256 of tools/stt_worker/worker.py at that commit";
+    pinSha.title = "SHA-256 of deploy/stt-worker/worker.py at that commit";
     l4.append("SHA-256", pinSha);
     const pin = btn("Pin", "primary", async () => {
       const id = pinning;
@@ -145,7 +145,7 @@ const SttWorkersCard = (() => {
     return td;
   }
 
-  // a GPU worker's self-update (tools/stt_worker/worker.py): the worker.py it runs (green: the hub's), auto / hold / pin
+  // a GPU worker's self-update (deploy/stt-worker/worker.py): the worker.py it runs (green: the hub's), auto / hold / pin
   function versionCell(w) {
     const td = el("td", "");
     if (w.revoked) { td.append("—"); return td; }

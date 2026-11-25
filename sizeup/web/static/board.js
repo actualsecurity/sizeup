@@ -135,6 +135,7 @@
         const inc = u.incident_id && incidents().find((i) => i.id === u.incident_id);
         const c = statusChip(u.status, u.name);
         node.className = c.className + " b-unit" + (Radio.talkingFor(u.name) ? " talking" : "");
+        node.dataset.remUnit = u.name;                 // flashes with its reminder (reminders.js)
         node.style.cssText = c.style.cssText;
         node.textContent = u.name;
         node.title = `${u.name}: ${unitStatus(u.status).name}` + (inc ? `, ${incTitle(inc)} ${(typeof locText === "function" ? locText(inc) : inc.address) || ""}` : "");

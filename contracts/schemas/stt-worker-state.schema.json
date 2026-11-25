@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-state.schema.json",
   "title": "Worker state post",
-  "description": "The body of POST /api/station/stt/state: a worker's heartbeat, as the GPU worker client (tools/stt_worker/worker.py heartbeat) and a station's whisper (sizeup/cloud/stationworker.py) send it today. JSON with a Content-Length, at most 1 MiB. The hub resolves the bearer token first: a GPU worker's own (sw1.<id>.<secret>), or a station's token for its whisper, which the hub knows as `station:<id>` and takes only while that station's whisper is in the pool. A GPU worker sends it every few seconds while connected; a worker unheard for 12 s loses its leases. A station's whisper sends it only to say `paused`, with `load.why`.",
+  "description": "The body of POST /api/station/stt/state: a worker's heartbeat, as the GPU worker client (deploy/stt-worker/worker.py heartbeat) and a station's whisper (sizeup/cloud/stationworker.py) send it today. JSON with a Content-Length, at most 1 MiB. The hub resolves the bearer token first: a GPU worker's own (sw1.<id>.<secret>), or a station's token for its whisper, which the hub knows as `station:<id>` and takes only while that station's whisper is in the pool. A GPU worker sends it every few seconds while connected; a worker unheard for 12 s loses its leases. A station's whisper sends it only to say `paused`, with `load.why`.",
   "x-status": "as-built",
   "x-version": 1,
   "x-complete": true,
@@ -62,7 +62,7 @@
     "reason": {"type": "string", "description": "A GPU worker that is not online: why, in words. The hub does not read it."},
     "self_update": {
       "title": "Self-update",
-      "description": "A GPU worker's self-update (tools/stt_worker/worker.py Updater): the worker.py it runs and what its updater is doing. Sending it is the capability: the hub answers `worker_update` only to a worker that sent it. A station's whisper never sends it.",
+      "description": "A GPU worker's self-update (deploy/stt-worker/worker.py Updater): the worker.py it runs and what its updater is doing. Sending it is the capability: the hub answers `worker_update` only to a worker that sent it. A station's whisper never sends it.",
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
