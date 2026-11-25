@@ -112,6 +112,45 @@ def test_a_bad_entry_refuses_the_whole_catalog(bad, why):
         W.check_catalog(bad)
 
 
+def test_every_catalog_model_is_told_english(tmp_path):
+    """Never a detected language: whisper-server runs with -l en and every /inference request says language=en;
+    Qwen3-ASR's answer is begun "language English<asr_text>" (its own way to force a language)."""
+    cat = W.check_catalog(json.loads(PINS.read_text()))
+    cfg = W.Config(state_dir=str(tmp_path / "state"), models_dir=str(tmp_path / "models"),
+                   whisper_server=["whisper-server", "-m", "x.bin", "--host", "127.0.0.1", "--port", "8179"],
+                   llama_bin="llama-server")
+    m = W.Models(cfg, popen=None, clock=lambda: 0.0, run=lambda argv: "")
+    assert W.STT_LANGUAGE == "en"
+    for mid, e in cat.items():
+        assert "en" in e["langs"], mid
+        argv = m.argv(e, 18181)
+        s = W.ModelServer(e, {}, 18181, proc=None, timeout_s=10)
+        call = s.call(tone_wav(0.2), "Engine 60", ["Engine 60"], False)
+        if e["kind"] == "whisper-ggml":
+            assert argv[argv.index("-l") + 1] == "en", mid
+            assert b'name="language"\r\n\r\nen\r\n' in call.body, mid
+        else:
+            assert e["kind"] == "llama-asr" and "-l" not in argv
+            body = json.loads(call.body)
+            assert body["messages"][-1] == {"role": "assistant", "content": "language English<asr_text>"}, mid
+        call.conn.close()
+
+
+def test_a_model_without_english_is_refused():
+    with pytest.raises(W.CatalogError, match="langs: no 'en'"):
+        W.check_catalog(catalog(x=entry(langs=["de"])))
+
+
+def test_an_asr_answer_after_the_prefill_is_its_text():
+    asr = FakeAsr(text="<asr_text>Engine 60 responding")
+    try:
+        e = W.check_catalog(two_models())["asr-test"]
+        s = W.ModelServer(e, {}, asr.port, proc=None, timeout_s=10)
+        assert W.AsrCall(s, tone_wav(1.5), [], 10).run()["text"] == "Engine 60 responding"
+    finally:
+        asr.stop()
+
+
 def test_the_catalog_lives_beside_the_worker():
     """models.json is fetched at CATALOG_PATH (the hub reads the same file in its image): deploy/stt-worker, next to
     worker.py. No copy at the old path: no worker from before the move fetches a catalog."""

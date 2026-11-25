@@ -185,13 +185,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (219,298 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (220,801 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/ba21b4b14c3458e6ce3ee737153904b83aa86aec/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '4B056B689C7EB829E2E128795DB337B1693F823865677741B5D193227C780B87'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/5970779576db905750b4549be28087a2ab9f206a/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '6E4A16025F5FD70C6170A5A5232EAA388BFAFEFA8A92AE6CA7E934447F44F5DF'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -461,6 +461,9 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   program); a `llama-asr` model runs in llama-server (`llama_bin`, default `llm_server`'s program) with its audio
   projector (`--mmproj`), b12643 or later (the worker asks `llama-server --version` and says so in Health if it is
   older). Each llama-server gets its own random API key, as the LLM's does.
+- **English, always:** every model is told the language, never left to detect one: whisper-server runs with `-l en`
+  and each request says `language=en`; Qwen3-ASR's answer is begun `language English<asr_text>` (its own way to force
+  a language). A catalog entry without `en` in `langs` is refused.
 - **What the hub names:** every hello and state answer carries `stt_models {catalog: {commit, sha256}, want}`: the
   commit on main the hub was built from, the SHA-256 of `models.json` in it, and the models the channels use, most
   important first (fire/EMS, then police, then airband).
@@ -575,30 +578,15 @@ the worker token and its Cloudflare service token, the same Access application (
 - **Off:** `log_ship = false` in `worker.toml`. A `worker.py` from before this key refuses a `worker.toml` that has
   it: take the line out before an `update rollback` to such a version or a **Pin** to one.
 
-**Admin, once (AWS):** the hub's task role needs to write the group. Until it may, Health shows
-`not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as always), and nothing else is
-affected. The role's IAM is in sizeup-aws, not this repo. Add this inline policy to the task role (`$NAME-task`, as
-in `25-station-logs.sh`):
+**Admin, once (AWS):** run `bash 31-stt-worker-logs.sh` in sizeup-aws (step 31). It makes `/sizeup/stt-worker`
+(Infrequent Access, 30 days) and gives the hub's task role an inline policy `stt-worker-logs`: `logs:CreateLogGroup`,
+`PutRetentionPolicy`, `CreateLogStream` and `PutLogEvents` on that group only (`logs:DescribeLogGroups` comes from step
+25). `bash 31-stt-worker-logs.sh undo` takes the policy away again.
 
-```sh
-cd sizeup-aws && source ./env.sh            # NAME, AWS_REGION, ACCT
-G="arn:aws:logs:$AWS_REGION:$ACCT:log-group"
-work=$(mktemp -d)
-cat > "$work/policy.json" <<POLICY
-{"Version":"2012-10-17","Statement":[
- {"Sid":"WorkerLogs","Effect":"Allow",
-  "Action":["logs:CreateLogGroup","logs:PutRetentionPolicy","logs:CreateLogStream","logs:PutLogEvents"],
-  "Resource":["$G:/sizeup/stt-worker","$G:/sizeup/stt-worker:*"]}]}
-POLICY
-aws iam put-role-policy --role-name "$NAME-task" --policy-name stt-worker-logs \
-  --policy-document "file://$work/policy.json"
-rm -rf "$work"
-```
-
-`logs:DescribeLogGroups` comes from step 25's `station-logs` policy. All four actions are needed: without any one
-of them (the retention too) nothing is written and Health says `not shipped: permission`. The hub notices within 10
-minutes; the workers send what they kept. (`SIZEUP_STT_WORKER_LOG_GROUP` names another group: the policy must name
-that one.)
+Until it has run, Health shows `not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as
+always), and nothing else is affected. All four actions are needed: without any one of them (the retention too)
+nothing is written. The hub notices within 10 minutes; the workers send what they kept. (`SIZEUP_STT_WORKER_LOG_GROUP`
+names another group: the policy must name that one.)
 
 ## Config
 
