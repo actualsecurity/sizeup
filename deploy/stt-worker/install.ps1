@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/39c4de4b155d1a03db14168c66dcb57954f0ae12/tools/stt_worker/worker.py",
-      "bytes": 147764,
-      "sha256": "DF31E5B282749F2AEE67C4C0403672133AE6CBDFF4D8068F27BD04F68C9D01A2"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/0ba6408888f2558fbef3a83b8a12a47810456c7e/deploy/stt-worker/worker.py",
+      "bytes": 165440,
+      "sha256": "609C8422F2C8762AAEB9A9F2601D3715A1225017A2573DC821E9C675EADC38FF"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
