@@ -628,6 +628,7 @@ class App:
             self.cad.cross_source = lambda: IntersectionSearch(self.gaz, towns=cfg.geo_search_towns, hq=cfg.geo_hq)
             self.cad.place_source = lambda: PlaceIndex(self.gaz, crossings=self.cad.crossings())
             self.cad.street_source = self.gaz.streets_by_town     # a page's misheard street: the one it snaps to
+            self.cad.footprints.gaz = self.gaz                    # a call's building: its address points' footprints
             # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
@@ -5668,6 +5669,8 @@ class App:
                 self.roadgraph.cache_loaded = False        # (cachesync may have just put it back)
             self.roadgraph.load_cache()
             self.gis.load_cache()
+            if getattr(self, "cad", None) is not None:  # a call's building: the footprints indexed before a push needs them
+                self.cad.footprints.warm()
         except Exception as e:  # never in the way of the layers starting: they fetch from their sources
             log(f"layers: map caches not all read ({type(e).__name__}: {e}); fetched from their sources")
         finally:

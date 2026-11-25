@@ -195,6 +195,7 @@ Two engines, chosen per channel in Settings > Radios (`sizeup/channels.py`): `lo
 | Tone book | Agencies, places, services and their tone pairs | `tonelist.py` |
 | History and search | Address and building keys, "History here", premise notes, the Search page | `addrkey.py`, `history.py`, `premise.py` |
 | Pre-plans | Points on a building (Knox box, FDC, shutoffs) and site documents (floor plans overlaid on the map, PDFs, photos) | `preplan.py`, `preplan_docs.py`, `docfiles.py`, `docstore.py`, `pdfcheck.py` |
+| A call's building | The county footprint(s) of the call's address, range or named place, lit whole on its maps (address points, the parcel's campus, a place's polygon; never a guess) | `footprints.py` |
 | Attachments | Camera clips and radio transmissions kept with an incident for a year, every view audited | `sizeup/attachments.py` |
 | Settings and audit | Edits are overrides over `data/cad_lists.json`, validated like the file, every change audited | `settings.py`, `lists.py` |
 | People | Roles `admin` / `dispatcher` / `viewer`, keyed by the Cloudflare Access email; a per-person activity log | `settings.py`, `activity.py`, `cloud/access.py` |

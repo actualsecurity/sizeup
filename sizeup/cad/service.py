@@ -36,6 +36,7 @@ from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
 from sizeup.cad.hydrants import KEY_RE as HYDRANT_KEY
 from sizeup.cad.hydrants import Hydrants
+from sizeup.cad.footprints import Footprints
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
@@ -447,6 +448,9 @@ class Cad:
         # Hydrants (#799, sizeup/cad/hydrants.py): the department's overlay on the county's hydrant layer (status, flow,
         # class ...): the gis serves the layer through it (the app sets gis.overlays), each open call gets its nearest
         self.hydrants = Hydrants(self)
+        # A call's building (sizeup/cad/footprints.py): the county footprint(s) its address, range or place name is, lit
+        # whole on its maps; .gaz the gazetteer's address points (the app sets it)
+        self.footprints = Footprints(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -480,6 +484,7 @@ class Cad:
             self.premise.decorate(incs)
             self.preplan.decorate(incs)                   # its building's pre-plan points (#456)
             self.hydrants.decorate(incs)                  # its nearest hydrants, the out-of-service ones (#799)
+            self.footprints.decorate(incs)                # its building's footprint(s), lit on its maps
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
@@ -1247,7 +1252,9 @@ class Cad:
                               for u in r["units"]])
 
     def full(self, iid: int) -> dict:
-        return self._decorate_auto(self._with_radio([self.store.full(iid)], limit=1000))[0]
+        inc = self._decorate_auto(self._with_radio([self.store.full(iid)], limit=1000))[0]
+        self.footprints.decorate([inc])                   # a closed call's building too
+        return inc
 
     def history(self) -> dict:
         return {"incidents": self.store.history()}
