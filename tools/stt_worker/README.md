@@ -118,20 +118,20 @@ Leave it running for step 7, then stop it with Ctrl+C.
 
 Skip this step for speech-to-text only. What it is for: [The local LLM](#the-local-llm-optional).
 
-llama.cpp release **b12359** (the build of v1.0.0, commit `b1b770d9`), two assets for CUDA 12.4. Both unpack into
+llama.cpp release **b12728** (commit `ea722948`; Qwen3-ASR's audio needs b12643 or later), two assets for CUDA 12.4. Both unpack into
 the same folder (they are flat), and together they hold `llama-server.exe` with its DLLs and the CUDA runtime, so you
 don't need the CUDA Toolkit. The build covers the RTX 30 series (sm_86).
 
 | asset | bytes | SHA256 |
 |---|---|---|
-| `llama-b12359-bin-win-cuda-12.4-x64.zip` | 318,976,332 | `E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914` |
+| `llama-b12728-bin-win-cuda-12.4-x64.zip` | 358,626,875 | `85B6E332ED7B40FD7A240AC7F32C4F1A29E9DDF6B52853925A215FDA23EF24B3` |
 | `cudart-llama-bin-win-cuda-12.4-x64.zip` | 391,443,627 | `8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6` |
 
 ```powershell
-$r = 'https://github.com/ggml-org/llama.cpp/releases/download/b12359'
-Invoke-WebRequest "$r/llama-b12359-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cuda.zip"
+$r = 'https://github.com/ggml-org/llama.cpp/releases/download/b12728'
+Invoke-WebRequest "$r/llama-b12728-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cuda.zip"
 Invoke-WebRequest "$r/cudart-llama-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cudart.zip"
-(Get-FileHash "$d\llama-cuda.zip").Hash -eq 'E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914'     # True
+(Get-FileHash "$d\llama-cuda.zip").Hash -eq '85B6E332ED7B40FD7A240AC7F32C4F1A29E9DDF6B52853925A215FDA23EF24B3'     # True
 (Get-FileHash "$d\llama-cudart.zip").Hash -eq '8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6'   # True
 Expand-Archive "$d\llama-cuda.zip" "$d\llama"
 Expand-Archive "$d\llama-cudart.zip" "$d\llama" -Force     # -> $d\llama\llama-server.exe and its DLLs
